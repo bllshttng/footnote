@@ -287,6 +287,40 @@ def bounce_reason(recipient: str) -> Optional[str]:
     )
 
 
+def _addresses(entry) -> tuple:
+    """Every token that addresses ``entry``. One matching rule, used twice."""
+    return tuple(
+        token
+        for token in (
+            getattr(entry, "name", None),
+            getattr(entry, "short_id", None),
+            getattr(entry, "harness_session_id", None),
+        )
+        if token
+    )
+
+
+def resolve_entry(handle: str):
+    """The registry row ``handle`` addresses, freshly loaded, or None.
+
+    Load it AFTER the policy is cleared, never before. ``_deliver_live`` and
+    every lane under it consult ``_delivery_policy_refusal``, and that gate
+    reads ``delivery_policy`` straight off the object it is handed. A row
+    captured while the flag was still set carries a stale ``bus-only`` and the
+    release is refused by the very gate that held the mail.
+    """
+    from fno.agents.registry import load_registry
+
+    try:
+        entries = load_registry()
+    except Exception:  # noqa: BLE001 - a registry hiccup is a missed lane, not a crash
+        return None
+    for entry in entries:
+        if handle in _addresses(entry):
+            return entry
+    return None
+
+
 def set_policy(handle: str, policy: Optional[str]) -> bool:
     """Stamp ``delivery_policy`` on the registry row named ``handle``.
 
@@ -301,7 +335,7 @@ def set_policy(handle: str, policy: Optional[str]) -> bool:
 
     def _updater(entries):
         for entry in entries:
-            if handle in (entry.name, entry.short_id, entry.harness_session_id):
+            if _addresses(entry) and handle in _addresses(entry):
                 entry.delivery_policy = policy
                 found[0] = True
                 break
@@ -375,10 +409,17 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     operator to type. A hold with only those two triggers converts an
     interruption into a stall, which is worse than the interruption.
 
-    Order is load-bearing. The flag is cleared FIRST, because step 3 goes
-    through the injector, and the injector refuses a ``bus-only`` recipient
-    before any transport call - release with the flag still set and the
-    delivery is refused by the very gate that held it.
+    Order is load-bearing. The flag is cleared FIRST, and the registry row is
+    re-read only after that, because every lane consults
+    ``_delivery_policy_refusal`` on the object it is handed. Release with the
+    flag still set, or with a row captured before it was cleared, and the
+    delivery is refused by the very gate that held the mail.
+
+    Delivery goes through ``_deliver_live``, the lane DISPATCHER, so a codex,
+    gemini or mux-hosted operator gets the same drain trigger a claude one
+    does. Wiring it to the claude injector alone made this a producer on one of
+    N lanes: the hold lifted on time and delivered nothing, which is the stall
+    this feature exists to prevent wearing the costume of a working one.
 
     A missed inject does NOT advance the cursor. The mail stays on the bus and
     the recipient's next turn boundary surfaces it, so a dead daemon degrades
@@ -404,15 +445,33 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     deduped_count = held_count - len(survivors)
 
     outcome = "empty"
+    miss_reason: list = []
     if survivors:
-        from fno.agents.dispatch import _mail_inject_claude
+        from fno.agents.dispatch import _deliver_live
 
         digest = render_digest(handle, survivors, held_for_s)
+        # Route through the LANE DISPATCHER, not the claude injector. Delivering
+        # via `_mail_inject_claude` alone made the release a producer on one of
+        # N lanes: a codex or gemini operator, or a mux-hosted pane, armed a
+        # hold that lifted on time and then delivered nothing, so their mail
+        # waited for them to type. That is the stall busy mode exists to
+        # prevent, wearing the costume of a working feature.
+        #
+        # The entry is resolved HERE, after the flag was cleared above, because
+        # every lane under this call re-checks the delivery policy on the object
+        # it is handed.
+        entry = resolve_entry(handle)
         delivered = False
-        try:
-            delivered = _mail_inject_claude(handle, digest, sender="fno-mail-hold")
-        except Exception:  # noqa: BLE001 - report the miss, never crash the timer
-            delivered = False
+        if entry is None:
+            miss_reason.append("no-registry-row")
+        else:
+            try:
+                delivered = _deliver_live(
+                    entry, digest, "fno-mail-hold", reason_out=miss_reason
+                )
+            except Exception:  # noqa: BLE001 - report the miss, never crash the timer
+                delivered = False
+                miss_reason.append("deliver-raised")
         if delivered:
             outcome = "delivered"
             for message in messages:
@@ -420,6 +479,9 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
         else:
             outcome = "inject-missed"
 
+    # Carry the lane's OWN reason for a miss. "inject-missed" alone cannot
+    # separate a dead daemon from a recipient with no row from a lane that
+    # never ran, and those need different repairs.
     events.emit(
         "mail_hold_released",
         handle=handle,
@@ -427,6 +489,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
         deduped_count=deduped_count,
         held_for_s=held_for_s,
         outcome=outcome,
+        miss_reason=(miss_reason[0] if miss_reason else None),
     )
     return {
         "handle": handle,
@@ -434,4 +497,5 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
         "deduped_count": deduped_count,
         "held_for_s": held_for_s,
         "outcome": outcome,
+        "miss_reason": (miss_reason[0] if miss_reason else None),
     }

@@ -219,8 +219,9 @@ def _capture_release(monkeypatch, messages, delivered=True):
     monkeypatch.setattr(
         "fno.bus.cursor.advance_cursor", lambda name, mid: advanced.append(mid)
     )
+    monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: _entry())
     monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude", lambda *a, **k: delivered
+        "fno.agents.dispatch._deliver_live", lambda *a, **k: delivered
     )
     monkeypatch.setattr(
         "fno.agents.events.emit",
@@ -248,6 +249,7 @@ def test_release_delivers_the_digest_and_consumes_every_held_id(monkeypatch):
                 "deduped_count": 2,
                 "held_for_s": 300,
                 "outcome": "delivered",
+                "miss_reason": None,
             },
         )
     ]
@@ -264,6 +266,55 @@ def test_release_fires_its_marker_even_when_nothing_was_held(monkeypatch):
     assert emitted[0][0] == "mail_hold_released"
     assert emitted[0][1]["held_count"] == 0
     assert advanced == []
+
+
+def test_the_release_delivers_through_the_lane_dispatcher(monkeypatch):
+    """Not through the claude injector, which is one lane of several.
+
+    Wired to `_mail_inject_claude` this was a producer on one of N paths: a
+    codex, gemini or mux-hosted operator armed a hold that lifted on time and
+    delivered nothing, so their mail still waited for them to type. Pin the
+    dispatcher, because the failure is invisible on a claude box.
+    """
+    seen = {}
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
+    monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: _entry())
+    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: [_msg("m", "w", "b")])
+    monkeypatch.setattr("fno.bus.cursor.advance_cursor", lambda *a, **k: True)
+    monkeypatch.setattr("fno.agents.events.emit", lambda *a, **k: None)
+
+    def _fake_deliver(entry, body, from_name, **kwargs):
+        seen["entry"] = entry
+        seen["from_name"] = from_name
+        return True
+
+    monkeypatch.setattr("fno.agents.dispatch._deliver_live", _fake_deliver)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda *a, **k: pytest.fail("the release must not bypass the lane dispatcher"),
+    )
+
+    assert hold_mod.release(HANDLE)["outcome"] == "delivered"
+    assert seen["entry"] is not None, "the dispatcher needs the resolved row"
+    assert seen["from_name"] == "fno-mail-hold"
+
+
+def test_a_release_with_no_registry_row_names_that_as_the_miss(monkeypatch):
+    """`inject-missed` alone cannot separate a dead lane from an absent row."""
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
+    monkeypatch.setattr(hold_mod, "resolve_entry", lambda handle: None)
+    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: [_msg("m", "w", "b")])
+    advanced = []
+    monkeypatch.setattr(
+        "fno.bus.cursor.advance_cursor", lambda name, mid: advanced.append(mid)
+    )
+    monkeypatch.setattr("fno.agents.events.emit", lambda *a, **k: None)
+
+    result = hold_mod.release(HANDLE)
+
+    assert result["outcome"] == "inject-missed"
+    assert result["miss_reason"] == "no-registry-row"
+    assert advanced == [], "a missed delivery must never consume the cursor"
 
 
 def test_a_missed_inject_leaves_the_mail_on_the_bus(monkeypatch):
