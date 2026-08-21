@@ -20582,6 +20582,55 @@ mod tests {
         assert!(buf.is_empty(), "and no command rides the released press");
     }
 
+    #[test]
+    fn the_reaper_opens_a_qualifying_hold_and_refuses_a_moved_one() {
+        // A motionless hold emits no events, so for a workspace row the dead-
+        // gesture reaper is the only thing that can fire before the release.
+        // Both of its outcomes are asserted here: the untested half of a branch
+        // is how the vacuous mission-row test got through.
+        let mut v = view_with_agents(vec![
+            agent_row("alpha", 10, Some(AgentBadge::Working), false),
+            agent_row("beta", 11, Some(AgentBadge::Working), false),
+        ]);
+        let held = agent_row_at(&v, |a| a.name == "alpha");
+        let id = v.row_identity(held).expect("an agent row has an identity");
+
+        // Still the same row: the reaper opens its menu rather than dropping it.
+        v.press_hold = Some((
+            held,
+            id.clone(),
+            Instant::now() - Duration::from_millis(600),
+        ));
+        assert!(
+            v.open_drag_menu(),
+            "a qualifying hold opens from the reaper"
+        );
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Agent(ident)) if ident.name == "alpha"
+            ),
+            "and on the row that was actually held"
+        );
+        assert!(v.press_hold.is_none(), "the reaper consumed the latch");
+
+        // Row replaced under the index: refuse, and say why.
+        v.row_menu = None;
+        v.notice = None;
+        v.press_hold = Some((held, id, Instant::now() - Duration::from_millis(600)));
+        v.layout.agents.retain(|a| a.name != "alpha");
+        assert!(!v.open_drag_menu(), "a moved row opens nothing");
+        assert!(
+            v.row_menu.is_none(),
+            "least of all the row that replaced it"
+        );
+        assert_eq!(
+            v.notice.as_ref().map(|(t, _)| t.as_str()),
+            Some("the held row moved"),
+            "and the refusal is stated, not silent"
+        );
+    }
+
     #[tokio::test]
     async fn a_press_on_a_sideline_row_defers_its_click_to_the_release() {
         // The press arm end to end, through handle_stdin: it now defers EVERY
