@@ -3346,6 +3346,41 @@ def cmd_watchdog(
         for warning in payload.get("warnings") or []:
             print(f"  {warning}", file=sys.stderr)
         raise typer.Exit(code=3)
+    from fno.agents.stale_escalate import StaleRow, escalate_stale
+    from fno.carveout.core import resolve_carveout_root, resolve_session_id
+    from fno.paths import resolve_repo_root
+
+    stale_rows = [
+        StaleRow(
+            row_id=verdict.row_id,
+            name=verdict.name,
+            state=verdict.state,
+            node=row.node,
+            basis=verdict.basis,
+        )
+        for data, row in zip(payload["verdicts"], rows)
+        if (verdict := wd.Verdict(**data)).verdict == wd.STALE
+    ]
+    try:
+        try:
+            session_id = resolve_session_id(resolve_repo_root())
+        except Exception:  # noqa: BLE001 - an unbound sweep still records the ask
+            session_id = None
+        outcome, qid = escalate_stale(
+            stale_rows,
+            root=resolve_carveout_root(),
+            session_id=session_id,
+            cwd=Path.cwd(),
+        )
+        if outcome == "none":
+            print("watchdog escalation: no stale rows", file=sys.stderr)
+        else:
+            print(
+                f"watchdog escalation: {outcome} {qid} ({len(stale_rows)} stale row(s))",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001 - named, never fatal to the sweep
+        print(f"watchdog escalation failed: {exc}", file=sys.stderr)
     pairs = [
         (wd.Verdict(**d), r) for d, r in zip(payload["verdicts"], rows)
     ]

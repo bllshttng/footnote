@@ -536,11 +536,71 @@ def test_stale_questions_render_under_visible_heading_with_age(
     assert "records the decision but reaches nobody" in output
 
 
+def test_askerless_questions_have_their_own_human_header():
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[
+            Question("q-unaddressed", "2026-08-19T00:00:00Z", "triage fleet", live=False),
+            Question(
+                "q-stale",
+                "2026-08-19T00:00:01Z",
+                "choose lane",
+                asker="gone-ask",
+                live=False,
+            ),
+        ],
+        captures=[],
+    )
+
+    output = render(report)
+
+    assert "Questions for you (no agent is waiting):" in output
+    assert output.index("q-unaddressed") < output.index("Stale questions:")
+    assert output.count("records the decision but reaches nobody") == 1
+
+
+def test_only_askerless_questions_never_claim_an_agent_is_stale():
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[Question("q-unaddressed", "2026-08-19T00:00:00Z", "triage fleet", live=False)],
+        captures=[],
+    )
+
+    output = render(report)
+
+    assert "Questions for you (no agent is waiting):" in output
+    assert "Stale questions:" not in output
+    assert "records the decision but reaches nobody" not in output
+
+
+def test_interleaved_askerless_questions_share_one_header():
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[
+            Question("q-first", "2026-08-19T00:00:00Z", "first", live=False),
+            Question("q-stale", "2026-08-19T00:00:01Z", "stale", asker="gone", live=False),
+            Question("q-second", "2026-08-19T00:00:02Z", "second", live=False),
+        ],
+        captures=[],
+    )
+
+    output = render(report)
+
+    assert output.count("Questions for you (no agent is waiting):") == 1
+    assert output.count("Stale questions:") == 1
+
+
 def test_manual_question_liveness_tristate_renders_and_serializes_explicitly():
     questions = [
-        Question("q-live", "2026-08-19T00:00:00Z", "live?", live=True),
-        Question("q-stale", "2026-08-19T00:00:01Z", "stale?", live=False),
-        Question("q-unknown", "2026-08-19T00:00:02Z", "unknown?", live=None),
+        Question("q-live", "2026-08-19T00:00:00Z", "live?", asker="live", live=True),
+        Question("q-stale", "2026-08-19T00:00:01Z", "stale?", asker="stale", live=False),
+        Question("q-unknown", "2026-08-19T00:00:02Z", "unknown?", asker="unknown", live=None),
     ]
     report = Outstanding(0, {}, None, questions, [])
 

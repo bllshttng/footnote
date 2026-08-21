@@ -961,6 +961,65 @@ def test_cli_prints_the_terminal_harness_row_count(monkeypatch, capsys):
     assert "terminal harness rows: 3" in capsys.readouterr().out
 
 
+def test_cli_escalates_stale_rows_before_only_filter(monkeypatch):
+    from fno.agents import cli as agents_cli
+    from fno.agents import stale_escalate
+
+    rows = [
+        Row("stale-row", "stale-worker", "blocked", None, "/tmp/stale"),
+        Row("wake-row", "wake-worker", "blocked", "x-1234", "/tmp/wake"),
+    ]
+    verdicts = [
+        Verdict("stale-row", "stale-worker", "blocked", STALE, "blocked 14h", "human"),
+        Verdict("wake-row", "wake-worker", "blocked", WAKE, "blocked 30m", "resume"),
+    ]
+    payload = {
+        "generated_at": "x",
+        "verdicts": [verdict._asdict() for verdict in verdicts],
+        "counts": {STALE: 1, WAKE: 1},
+        "warnings": [],
+    }
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, rows))
+    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
+    monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
+    monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
+    monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    captured = []
+    monkeypatch.setattr(
+        stale_escalate,
+        "escalate_stale",
+        lambda rows, **kwargs: captured.extend(rows) or ("recorded", "q-stale"),
+    )
+
+    agents_cli.cmd_watchdog(
+        json_out=False, apply=False, apply_all=False, only=WAKE, mail_to=""
+    )
+
+    assert [(row.row_id, row.node, row.basis) for row in captured] == [
+        ("stale-row", None, "blocked 14h")
+    ]
+
+
+def test_cli_refused_sweep_never_escalates(monkeypatch):
+    from fno.agents import cli as agents_cli
+    from fno.agents import stale_escalate
+
+    refused = _refused_payload()
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (refused, []))
+    monkeypatch.setattr(
+        stale_escalate,
+        "escalate_stale",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not escalate")),
+    )
+
+    with pytest.raises(typer.Exit) as exc:
+        agents_cli.cmd_watchdog(
+            json_out=False, apply=False, apply_all=False, only=None, mail_to=""
+        )
+
+    assert exc.value.exit_code == 3
+
+
 # ---------------------------------------------------------------------------
 # The mail lane (push, not pull) and its change gate
 # ---------------------------------------------------------------------------

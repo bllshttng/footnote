@@ -552,6 +552,34 @@ def tick() -> None:
                         events_signature=_wd.verdict_signature(payload),
                         terminal_harness_rows=payload.get("terminal_harness_rows", 0),
                     )
+                    try:
+                        from fno.agents.stale_escalate import StaleRow, escalate_stale
+                        from fno.carveout.core import resolve_carveout_root, resolve_session_id
+                        from fno.paths import resolve_repo_root
+
+                        stale_rows = [
+                            StaleRow(
+                                row_id=verdict.row_id,
+                                name=verdict.name,
+                                state=verdict.state,
+                                node=row.node,
+                                basis=verdict.basis,
+                            )
+                            for data, row in zip(payload["verdicts"], rows)
+                            if (verdict := _wd.Verdict(**data)).verdict == _wd.STALE
+                        ]
+                        try:
+                            session_id = resolve_session_id(resolve_repo_root())
+                        except Exception:  # noqa: BLE001 - launchd normally has no target
+                            session_id = None
+                        escalate_stale(
+                            stale_rows,
+                            root=resolve_carveout_root(),
+                            session_id=session_id,
+                            cwd=Path.cwd(),
+                        )
+                    except Exception:  # noqa: BLE001 - named, never fatal to the tick
+                        log.warning("pr-watch: watchdog escalation failed", exc_info=True)
                 fresh_ids = _wd.fresh_non_leave(payload, prev_events_sig)
                 acted = 0
                 for d, row in zip(payload["verdicts"], rows):
