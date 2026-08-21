@@ -3248,6 +3248,18 @@ def cmd_register(
             f"{entry.origin!r}.\n"
         )
 
+    # x-481e: record a clock saying "no expiry" beside a hand-stamped policy.
+    # Not for enforcement - an absent clock already never lapses. This is what
+    # lets the DND column on `fno agents list` say "held" for this row instead
+    # of leaving the operator to guess from a blank cell.
+    if delivery_policy is not None:
+        from fno.mail import hold as _hold
+
+        if delivery_policy == "bus-only":
+            _hold.arm_permanent(entry.name)
+        else:
+            _hold.clear(entry.name)
+
     events.emit(
         "session_registered",
         provider=entry.harness,

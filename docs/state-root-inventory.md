@@ -80,6 +80,7 @@ One file per session, per day, or per throttle window.
 | `.path-migration-done` | `setup/migrate_paths.py` | one-shot sentinel |
 | `.eval-sweep-stamp` | `scripts/lib/eval-sweep-throttle.sh` | throttle window |
 | `.preflight-receipt-locks/` | `scripts/ci/preflight.sh` | live lock dirs |
+| `mail-hold/<handle>.json` | `fno/mail/hold.py` via `paths.state_dir()` | one file per held session; deleted by the release timer, by `fno mail hold --off`, and by the turn-boundary tidy in `fno mail notify-self` |
 | `locks/github-graphql-quota.lock` | `pr/_quota.py` via `paths.graphql_quota_lock()` | permanent empty sidecar; flock lives only for the probe-plus-command critical section |
 | `bin/github-cli/gh`, `gh.pre-fno` | `setup/github_cli.py` via `paths.github_cli_proxy_dir()` | permanent proxy; one backup is retained only when an unrelated wrapper was present |
 

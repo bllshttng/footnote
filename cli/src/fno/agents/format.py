@@ -90,6 +90,37 @@ def row_address(
     return None
 
 
+def _dnd_label(entry: AgentEntry) -> Optional[str]:
+    """This row's do-not-disturb state for the DND column, or None (x-481e).
+
+    None whenever mail flows right now, so a row whose hold already lapsed
+    reads the same as a row that never had one. Both are states in which a
+    message lands, and the column exists to answer that question, not to
+    report a flag nobody cleaned up.
+
+    A bus-only row with no clock reads ``held``, not blank. Mail to it really
+    is being held, indefinitely, and a blank cell there would be the column
+    lying about the one row it exists to describe. ``dnd_label`` derives that
+    from the same ``lapsed`` the delivery gate uses, so the two agree by
+    construction rather than by matching edits.
+    """
+    if getattr(entry, "delivery_policy", None) != "bus-only":
+        return None
+    try:
+        from fno.mail import hold as _hold
+
+        # The ENTRY, not `entry.name`. A codex row's name is a spawn label and
+        # its clock sits under the canonical handle, so keying by the name read
+        # a blank cell for a held codex session.
+        return _hold.dnd_label(entry)
+    except Exception:  # noqa: BLE001 - a render helper never breaks the listing
+        # "?" and not None. None renders as "-", which is the cell a row with
+        # no hold gets, so a failed read would tell the operator mail is
+        # flowing to a session whose flag says it is held. An instrument that
+        # declines to answer must not answer anyway.
+        return "?"
+
+
 def serialize_entry(
     entry: AgentEntry,
     live_status: Optional[str],
@@ -161,6 +192,18 @@ def serialize_entry(
         # spawn-recorded route would report the INTENDED model in exactly the
         # case an operator suspects a silent fallback; this cannot.
         "observed_model": observed_model or {"kind": "no-transcript"},
+        # x-481e: a field fno already modelled, consumed internally, and never
+        # showed. `delivery_policy` (registry.py, schema v14) decides whether
+        # mail to this row may ever paste into its prompt line - readable by
+        # twelve call sites and invisible to the human deciding.
+        # `dnd` is the derived half, so a do-not-disturb row shows when it ends
+        # rather than a bare yes. Four values, all of which a consumer must
+        # handle: a duration, `held` for no recorded expiry, `?` for a clock
+        # that could not be read, and null when mail is flowing despite the
+        # flag. The clock is read only for a row carrying the flag, so the
+        # common case pays no file read at all.
+        "delivery_policy": entry.delivery_policy,
+        "dnd": _dnd_label(entry),
         "log_path": entry.log_path,
         # Crown (US9): a compact "L1 epic-x" descriptor + the raw fields, so a
         # minion can resolve who to escalate to and a second live crown over the
@@ -256,6 +299,7 @@ _COLUMNS = (
     ("address", "ADDRESS"),
     ("harness", "HARNESS"),
     ("status", "STATUS"),
+    ("dnd", "DND"),
     ("live", "LIVE"),
     ("event_age", "EVENT AGE"),
     ("last_message", "LAST MESSAGE"),
@@ -413,6 +457,7 @@ def render_table(
                 "address": row.get("address") or "-",
                 "harness": row.get("harness") or "-",
                 "status": row.get("status") or "-",
+                "dnd": row.get("dnd") or "-",
                 "live": live,
                 "event_age": event_age,
                 "last_message": last_msg,

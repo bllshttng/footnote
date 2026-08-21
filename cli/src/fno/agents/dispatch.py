@@ -6045,6 +6045,36 @@ def mail_inject_probe(recipient: str) -> tuple[bool, str]:
 BUS_ONLY_POLICY = "bus-only"
 
 
+def _hold_lapsed_for(entry) -> bool:
+    """True when ``entry``'s ``bus-only`` flag no longer holds mail (x-481e).
+
+    Busy mode arms the flag with a clock (``fno.mail.hold``). A row with no
+    clock under any of its addresses is not a busy-mode hold at all - it is a
+    policy stamped by ``fno agents register --delivery-policy bus-only``, which
+    has no clock by construction - so it never lapses and the refusal stands
+    exactly as it did before this function existed. Only a timed hold expires.
+
+    The address list comes from ``hold.addresses``, the same rule the writers
+    use, rather than a second copy here. A copy that omitted the canonical
+    handle looked correct on claude, where the handle IS the ``short_id``, and
+    made this check unable to find a codex hold at all: every writer keys by the
+    first-eight, and none of that row's other addresses is the first-eight.
+
+    Pure read. It never mutates the registry, so it cannot deadlock a caller
+    already holding the registry lock; the stale flag is tidied by the release
+    path and by ``fno mail notify-self``.
+    """
+    try:
+        from fno.mail import hold as _hold
+
+        if _hold.read_any(entry) is None:
+            return False
+        return _hold.lapsed(entry)
+    except Exception:  # noqa: BLE001 - the gate never raises, and never lifts a hold it could not read
+        return False
+    return False
+
+
 def _delivery_policy_refusal(target) -> Optional[str]:
     """:data:`BUS_ONLY_POLICY` when ``target``'s registry row says its mail
     belongs on the durable bus; ``None`` otherwise (no row, no policy, or an
@@ -6063,9 +6093,13 @@ def _delivery_policy_refusal(target) -> Optional[str]:
     try:
         if target is None:
             return None
+        # Two branches, and the expiry check belongs on BOTH. A caller holding
+        # an AgentEntry never reaches the registry loop below, so a self-heal
+        # on one branch is decorative on the other (dispatch.py:576, :5741 and
+        # :6773 all pass an entry).
         if hasattr(target, "delivery_policy"):
             if getattr(target, "delivery_policy", None) == BUS_ONLY_POLICY:
-                return BUS_ONLY_POLICY
+                return None if _hold_lapsed_for(target) else BUS_ONLY_POLICY
             return None
         entries = load_registry()
     except Exception:  # noqa: BLE001 - a registry read failure never blocks delivery
@@ -6075,7 +6109,7 @@ def _delivery_policy_refusal(target) -> Optional[str]:
             getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY
             and target in (entry.harness_session_id, entry.short_id, entry.name)
         ):
-            return BUS_ONLY_POLICY
+            return None if _hold_lapsed_for(entry) else BUS_ONLY_POLICY
     return None
 
 

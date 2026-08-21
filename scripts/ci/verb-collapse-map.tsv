@@ -199,6 +199,8 @@ loops status	T1	loops status	3
 mail ack	T1	mail ack	10
 mail drain	T1	mail drain	10
 mail drain-self	T1	mail drain-self	6
+mail hold	T1	mail hold	0
+mail hold-release	T1	mail hold-release	1
 mail lint	T1	mail lint	1
 mail list	T1	mail list	15
 mail migrate-bus	T1	mail migrate-bus	0

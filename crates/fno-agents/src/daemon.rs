@@ -5193,6 +5193,15 @@ where
                     // installed binary is present, so a Python-only key would be
                     // missing from the path nearly every reader takes (x-944f).
                     "origin": e.origin,
+                    // x-481e: the row's mail delivery policy ("bus-only" holds
+                    // mail on the durable bus, null is the injectable default).
+                    // Stored since v14, read by every injector gate, and until
+                    // now never rendered anywhere a human or a king could see
+                    // it. The remaining time on a timed hold is Python-only
+                    // (`dnd` in schemas/agents-list-row.json): its clock lives
+                    // under fno's config-resolved state dir, which the daemon
+                    // does not load.
+                    "delivery_policy": e.delivery_policy,
                     // Superset of Python's serialize_entry: project_root is retained
                     // as the daemon's native grouping key (existing daemon_e2e
                     // contract) alongside the shared parity fields. Python list

@@ -1682,11 +1682,21 @@ def _name_lane_send(
     # live-miss that reads as a dead recipient. A bus-only queue is neither: it
     # is the recipient's declared delivery policy, and its receipt says the
     # message WILL surface at the recipient's turn boundary.
+    # x-481e: a busy-mode hold is a bus-only flag with a clock on it, and the
+    # generic receipt above would promise a turn boundary that is not coming.
+    # Say what is actually true: it is held, here is when it lands.
+    hold_note = None
     if bus_only:
-        reason = "bus-only: recipient polls the bus at each turn boundary"
+        from fno.mail import hold as _hold
+
+        hold_note = _hold.bounce_reason(recipient)
+    if bus_only:
+        reason = hold_note or "bus-only: recipient polls the bus at each turn boundary"
     else:
         reason = "self-send" if self_send else (live_reason or "live-miss")
     hint = ""
+    if hold_note:
+        hint = f" `fno mail withdraw {msg_id}` retracts it."
     if not self_send and not bus_only and provider == "codex" and _codex_daemon_socket_absent():
         hint = (
             " codex app-server daemon not running: run "
@@ -2947,10 +2957,14 @@ def cmd_send(
             from fno.agents.dispatch import BUS_ONLY_POLICY
 
             if result.reason == BUS_ONLY_POLICY:
+                from fno.mail import hold as _hold
+
+                _note = _hold.bounce_reason(result.recipient)
                 print(
                     f"{result.msg_id} queued (durable) for {result.recipient} "
                     f"[project {to_project}] "
-                    f"[bus-only: recipient polls the bus at each turn boundary]"
+                    f"[{_note or 'bus-only: recipient polls the bus at each turn boundary'}]"
+                    + (f" `fno mail withdraw {result.msg_id}` retracts it." if _note else "")
                 )
             else:
                 # The anycast lane reaches the SAME dispatch_send as the by-name
@@ -3107,9 +3121,13 @@ def cmd_send(
         # x-e21e: the registered-agent lane's gate refused by policy; the
         # durable write already happened inside dispatch_send. Designed, not
         # stranded -- no recovery ladder.
+        from fno.mail import hold as _hold
+
+        _note = _hold.bounce_reason(name)
         print(
             f"{result.msg_id} queued (durable) "
-            f"[bus-only: recipient polls the bus at each turn boundary]"
+            f"[{_note or 'bus-only: recipient polls the bus at each turn boundary'}]"
+            + (f" `fno mail withdraw {result.msg_id}` retracts it." if _note else "")
         )
     else:
         reason_tok = result.reason or "live-miss"
@@ -3460,6 +3478,213 @@ def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
     return key, scan_unread(key)
 
 
+def _self_handle_or_exit() -> "tuple[str, object]":
+    """This session's canonical mail handle AND the identity it came from.
+
+    Returns both so the caller never re-resolves. A second
+    ``resolve_harness_identity()`` call can answer differently from the one
+    this function validated, and then the row written is not the row checked.
+
+    Fails closed on a contaminated env, for the same reason `--to-self` does
+    and with worse consequences. `resolve_harness_identity` is precedence-only,
+    so an inherited marker from a parent harness makes it answer with the
+    PARENT session. A misaddressed `--to-self` sends one message to the wrong
+    place, which is visible and recoverable. A misaddressed hold stamps a
+    DELIVERY POLICY on another agent's row and arms a timer against their
+    handle, silently holding their mail. Same resolver, same ambiguity, so the
+    same refusal.
+    """
+    from fno.harness_identity import (
+        canonical_handle,
+        present_harness_markers,
+        resolve_harness_identity,
+    )
+
+    ident = resolve_harness_identity()
+    if not ident.harness or not ident.session_id:
+        sys.stderr.write(
+            "no ambient harness identity - there is no session to hold mail for\n"
+        )
+        raise typer.Exit(code=3)
+    families = {harness for _, harness, _ in present_harness_markers()}
+    if len(families) > 1:
+        sys.stderr.write(
+            "multiple harness markers present (inherited env?) - cannot decide "
+            "which session is 'self', and a hold stamped on the wrong row holds "
+            f"another agent's mail. Families seen: {', '.join(sorted(families))}\n"
+        )
+        raise typer.Exit(code=3)
+    return canonical_handle(ident.session_id), ident
+
+
+@mail_app.command("hold")
+def cmd_hold(
+    minutes: int = typer.Option(
+        None,
+        "--minutes",
+        "-m",
+        help="Idle minutes before the hold lifts by itself (default 5). The "
+        "window restarts every time you submit a prompt.",
+    ),
+    off: bool = typer.Option(
+        False, "--off", help="Lift the hold now and deliver what it held."
+    ),
+    status: bool = typer.Option(
+        False, "--status", help="Report the current hold without changing it."
+    ),
+) -> None:
+    """Busy mode: hold this session's incoming mail, and drain it on a timer.
+
+    While the hold is on, mail addressed to this session never pastes into the
+    prompt line. It queues durable and the sender gets a receipt saying so.
+    The hold lifts by itself after ``--minutes`` of no prompt from you, and the
+    lift DELIVERS - it does not wait for you to type. That is the whole point:
+    a hold whose only drain trigger is the operator converts an interruption
+    into a stall.
+
+    The hold reuses the ``delivery_policy = "bus-only"`` flag that already
+    exists on the agent row, so every injector lane refuses it before any
+    transport call. This verb owns the clock, not the enforcement.
+    """
+    import shutil
+    import subprocess
+
+    from fno.mail import hold as hold_mod
+
+    handle, ident = _self_handle_or_exit()
+
+    if status:
+        # Ask the delivery gate, not the clock. A flag stamped by
+        # `fno agents register --delivery-policy bus-only` has no clock, and
+        # reading the clock alone reported "mail delivers normally" for a
+        # session whose mail was in fact being held indefinitely.
+        from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
+
+        if _delivery_policy_refusal(handle) != BUS_ONLY_POLICY:
+            print(f"{handle}: no hold - mail delivers normally")
+            return
+        label = hold_mod.dnd_label(handle)
+        if label == "held":
+            print(f"{handle}: holding mail, no expiry (hand-stamped bus-only)")
+        elif label is None:
+            # The gate says held and the clock says otherwise. Unreachable while
+            # both derive from `lapsed`, and mypy is right that nothing across
+            # the module boundary enforces that. Report the disagreement rather
+            # than crash on it or pick a side: two readings differing is the
+            # thing worth telling the operator.
+            print(
+                f"{handle}: holding mail, but the clock disagrees with the "
+                "delivery gate - run `fno mail hold --off` to clear it"
+            )
+        else:
+            print(f"{handle}: holding mail, lifts in {label.lstrip('~')}")
+        return
+
+    if off:
+        result = hold_mod.release(handle, held_for_s=0)
+        # Report the FLAG first. Both lines below describe delivery, and an
+        # operator who asked for the hold to stop is asking about the flag. A
+        # registry this could not write leaves mail held while the receipt says
+        # "hold off", which is a lie about their own session.
+        if not result["policy_cleared"]:
+            sys.stderr.write(
+                f"hold NOT off: the registry write failed, so {handle} still "
+                "reads bus-only and mail is still held. Retry, or check "
+                "`fno agents list` for the row.\n"
+            )
+            raise typer.Exit(code=1)
+        if result["held_count"]:
+            print(
+                f"hold off: delivered {result['held_count']} held message(s) "
+                f"({result['deduped_count']} deduped) - {result['outcome']}"
+            )
+        else:
+            print("hold off: nothing was held")
+        return
+
+    window = hold_mod.DEFAULT_MINUTES if minutes is None else minutes
+    if window < 1:
+        sys.stderr.write("error: --minutes must be at least 1\n")
+        raise typer.Exit(code=2)
+
+    from fno.agents.registry import register_existing_session
+
+    register_existing_session(
+        provider=str(getattr(ident, "harness", "") or ""),
+        session_id=str(getattr(ident, "session_id", "") or ""),
+        cwd=os.getcwd(),
+        delivery_policy="bus-only",
+    )
+    clock = hold_mod.arm(handle, window)
+
+    # The third drain trigger. Detached on purpose: it must outlive this CLI
+    # invocation, because the whole contract is that the drain happens with no
+    # further input from the operator.
+    #
+    # Re-invoke THIS executable, not whatever `fno` is on PATH. A deployed
+    # binary can be several merges behind the code that just armed the hold,
+    # and one that predates this verb dies instantly on an unknown command -
+    # the timer never runs, and the only symptom is a hold that never lifts.
+    binary = sys.argv[0] if os.path.isfile(sys.argv[0]) else shutil.which("fno")
+    armed = False
+    if binary:
+        try:
+            subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                [binary, "mail", "hold-release", "--handle", handle],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            armed = True
+        except OSError:
+            armed = False
+
+    until = clock.until or datetime.now(timezone.utc)
+    print(
+        f"busy mode on for {handle}: mail holds until "
+        f"{until.strftime('%H:%M:%S')} UTC ({window}m idle), then delivers itself."
+    )
+    if not armed:
+        print(
+            "note: the release timer did not start, so the hold lifts on the "
+            "next send attempt or at your next prompt instead of on the clock."
+        )
+
+
+@mail_app.command("hold-release", hidden=True)
+def cmd_hold_release(
+    handle: str = typer.Option(..., "--handle", help="The held session's handle."),
+    poll_s: int = typer.Option(
+        15, "--poll-s", hidden=True, help="Seconds between clock re-reads."
+    ),
+) -> None:
+    """Sleep until ``handle``'s hold expires, then release it.
+
+    Re-reads the clock on every wake rather than sleeping once to the original
+    deadline, so an idle re-arm (the operator typed again) extends the hold
+    instead of being overrun by a timer that already committed to a time.
+
+    Exits quietly when the clock disappears or turns permanent: both mean
+    someone else took the hold off, and a second release would be a no-op that
+    still emitted a release event.
+    """
+    from fno.mail import hold as hold_mod
+
+    started = time.monotonic()
+    while True:
+        clock = hold_mod.read(handle)
+        if clock is None or clock.until is None:
+            return
+        remaining = (clock.until - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            break
+        time.sleep(min(remaining, max(1, poll_s)))
+
+    result = hold_mod.release(handle, held_for_s=int(time.monotonic() - started))
+    print(json.dumps(result))
+
+
 @mail_app.command("drain-self", hidden=True)
 def cmd_drain_self(
     json_out: bool = typer.Option(
@@ -3807,6 +4032,26 @@ def cmd_notify_self() -> None:
         return
 
     handle = canonical_handle(ident.session_id)
+
+    # Busy mode (x-481e). This hook fires on every UserPromptSubmit, which is
+    # precisely the "the operator is not idle" signal the hold window resets
+    # on - so one hook is both the suppressor and the idle re-arm, and no new
+    # wiring is needed. A live timed hold renders nothing and pushes its own
+    # deadline out. A lapsed one is tidied here rather than on the send path,
+    # where the gate stays a pure read to avoid a re-entrant registry lock.
+    # Both calls WRITE, so both are wrapped: a hold that cannot be extended or
+    # tidied must degrade to rendering the mail, never to swallowing this
+    # turn's delivery. Busy mode is a convenience layered over the bus, and it
+    # does not get to break the bus.
+    try:
+        from fno.mail import hold as hold_mod
+
+        if hold_mod.extend(handle) is not None:
+            return
+        hold_mod.tidy_lapsed(handle)
+    except Exception:  # noqa: BLE001 - a hold failure never costs a delivery
+        pass
+
     lines: list[str] = []
 
     unread = scan_unread(handle)

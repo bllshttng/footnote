@@ -345,11 +345,21 @@ def test_serialize_entry_carries_the_last_event_pair() -> None:
 # ---------------------------------------------------------------------------
 # Shared key-set contract
 #
-# `serialize_entry` is NOT what serves `fno agents list` — the Rust daemon's
-# `agent.list` projection is — so the two serializers drifted and the stale one
-# was the reachable one. These tests pin the Python side to
-# schemas/agents-list-row.json; crates/fno-agents/src/daemon.rs pins the Rust
-# side to the same file, so a key added to one and not the other fails CI.
+# Two serializers answer one question and they have drifted before, so both are
+# pinned to schemas/agents-list-row.json: this file pins the Python side,
+# crates/fno-agents/src/daemon.rs pins the Rust side, and a key added to one and
+# not the other fails CI.
+#
+# Which one is reachable, measured 2026-08-20 rather than assumed: `serialize_entry`
+# IS what serves `fno agents list`. The Rust `fno` binary forwards every
+# non-mux subcommand to the Python CLI (`decide_role` in crates/fno/src/main.rs),
+# and the JSON it prints carries `render_json`'s own `agents`/`count`/
+# `filters_applied` wrapper. The daemon's `agent.list` projection answers the
+# RPC its own consumers make - the mux table, fleetview - and crates/fno/src/
+# server.rs:1205 reaches even that by shelling out to `agents list --json`.
+# This comment used to claim the reverse. It sent a reader building the DND
+# column toward the wrong serializer, which is how a fix lands on a path nobody
+# takes.
 # ---------------------------------------------------------------------------
 
 _SCHEMA_PATH = (
