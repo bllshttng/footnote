@@ -288,10 +288,21 @@ def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
         or _has_terminal_marker(epic, "superseded_by")
         or _has_terminal_marker(epic, "deferred_at")
     )
-    if explicitly_terminal or (
-        isinstance(status, str)
-        and status in _TERMINAL_EPIC_STATUSES - {"done"}
-    ):
+    child_progress = any(
+        isinstance(child, dict)
+        and child.get("parent") == epic.get("id")
+        and (
+            child.get("completed_at")
+            or child.get("status") in ("done", "in_progress")
+            or child.get("session_id")
+        )
+        for child in id_to_entry.values()
+    )
+    status_terminal = isinstance(status, str) and (
+        status in _TERMINAL_EPIC_STATUSES - {"done"}
+        or (status == "done" and not child_progress)
+    )
+    if explicitly_terminal or status_terminal:
         return None
     return epic
 
