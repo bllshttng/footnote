@@ -140,6 +140,47 @@ def test_ac1_hp_recompute_stale_lock_cleared():
     assert e["claimed_at"] is None
 
 
+def test_stale_lock_on_in_progress_node_is_named_and_preserved():
+    """A dead recorded owner on active work is a defect, not cleanup permission."""
+    old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+    entry = _entry(
+        "ab-livework1",
+        status="in_progress",
+        locked_by="dead-worker",
+        session_id="dead-worker",
+        claimed_at=old,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="ownership defect.*ab-livework1.*dead-worker",
+    ):
+        recompute_statuses([entry])
+
+    assert entry["locked_by"] == "dead-worker"
+    assert entry["session_id"] == "dead-worker"
+    assert entry["claimed_at"] == old
+
+
+def test_stale_lock_on_legacy_claimed_node_is_named_and_preserved():
+    old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+    entry = _entry(
+        "ab-livework2",
+        status="claimed",
+        locked_by="dead-legacy-worker",
+        session_id="dead-legacy-worker",
+        claimed_at=old,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="ownership defect.*ab-livework2.*dead-legacy-worker",
+    ):
+        recompute_statuses([entry])
+
+    assert entry["locked_by"] == "dead-legacy-worker"
+
+
 def test_ac1_hp_recompute_cascade_unblock_ignores_blocked_by_at_write_time():
     """AC1-HP: chain A->B->C at write time - only A's completion matters here.
 

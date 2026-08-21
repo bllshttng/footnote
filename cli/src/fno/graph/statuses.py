@@ -190,6 +190,19 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["status"] = "deferred"
             continue
 
+        # An already-active node whose recorded owner went stale is an ownership
+        # transition defect, not evidence that the work stopped. Preserve the
+        # only pointer recovery has and fail the mutation with both identities.
+        if (
+            e.get("status") == "in_progress"
+            and e.get("locked_by")
+            and is_stale_lock(e)
+        ):
+            raise RuntimeError(
+                "ownership defect: node "
+                f"{e['id']} is in_progress but locked_by {e['locked_by']} is stale"
+            )
+
         # Reap a stale lock BEFORE the in_review branch: a PR-bearing node with
         # an expired claim (the stampede case) must still shed the dead owner,
         # else `_normalize_lock_fields` later mirrors the stale `locked_by` back
