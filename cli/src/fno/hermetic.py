@@ -83,6 +83,18 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "CLAUDE_CLI",
     "CLI",  # legacy harness selector; CLI=codex flips harness resolution
     "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",
+    # Colour suppression, scrubbed rather than kept, which splits it from its
+    # siblings TERM and COLORTERM in _ENVIRONMENT below. Those two DESCRIBE a
+    # terminal's capability; this one SUPPRESSES output, so its mere presence
+    # changes behaviour under test. This harness exports `NO_COLOR=1` into
+    # agent shells, so a suite run by an agent sees a value a suite run by a
+    # human does not, which is the definition of non-hermetic.
+    #
+    # Measured while adding it: the Rust sibling test for this exact variable
+    # passed with its fix DELETED, because it read the developer's inherited
+    # value instead of the one the code under test states. Keeping NO_COLOR
+    # visible here reproduces that false positive on the Python side.
+    "NO_COLOR",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
     "STATE_FILE",
