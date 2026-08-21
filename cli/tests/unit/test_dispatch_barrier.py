@@ -855,3 +855,46 @@ def test_a_pane_spawn_still_holds_the_reservation_for_its_worker(
     )
     assert result.exit_code == 0, result.output
     assert claim_status("dispatch:x-abcd", root=tmp_path)["state"] == "live"
+
+
+def test_a_failed_release_names_the_key_it_could_not_free(monkeypatch, capsys):
+    """A release that no-ops must not report the same nothing as one that worked.
+
+    Swallowing the exception is correct: this runs on the way out of a failure
+    and raising would mask the error being handled. Saying nothing is not. A
+    silently-failed release leaves the key held for its whole TTL under a holder
+    that is gone, which is the same wedge the rest of this file deletes.
+    """
+    from fno.agents import cli as agents_cli
+
+    def boom(key, holder, **kw):
+        raise OSError("claims dir is read-only")
+
+    monkeypatch.setattr("fno.claims.core.release_claim", boom)
+    agents_cli._release_dispatch_claims(
+        ("dispatch:x-abcd", "spawn-cli:1"), ("node:x-abcd", "spawn-handover:w1")
+    )
+    err = capsys.readouterr().err
+    # Both keys named, and the way out named with them.
+    assert "dispatch:x-abcd" in err
+    assert "node:x-abcd" in err
+    assert "stays held until its TTL expires" in err
+    assert "fno claim release" in err
+
+
+def test_a_successful_release_stays_quiet(monkeypatch, capsys):
+    """The other direction, so the warning is proven to discriminate.
+
+    Without this, a warning printed unconditionally would pass the test above
+    while telling an operator that every clean release had failed.
+    """
+    from fno.agents import cli as agents_cli
+
+    released = []
+    monkeypatch.setattr(
+        "fno.claims.core.release_claim",
+        lambda key, holder, **kw: released.append(key),
+    )
+    agents_cli._release_dispatch_claims(("dispatch:x-abcd", "spawn-cli:1"))
+    assert released == ["dispatch:x-abcd"]
+    assert capsys.readouterr().err == ""

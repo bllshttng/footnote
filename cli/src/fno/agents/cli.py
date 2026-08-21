@@ -625,6 +625,13 @@ def _release_dispatch_claims(*claims) -> None:
     One helper for both failure paths. They used to release only the
     reservation, in two copies, and adding the node claim to one of them is how
     a guard ends up on one of N paths.
+
+    A failed release is SWALLOWED but never SILENT. Swallowing is right: this
+    runs on the way out of a failure, and raising here would mask the error
+    being handled. Saying nothing is not. A release that quietly no-ops leaves
+    the key held for its whole TTL under a holder that is gone, which is the
+    exact wedge this file exists to delete - so the no-op path names the key it
+    failed to free instead of reporting the same nothing as success.
     """
     from fno.claims.core import release_claim
     from fno.claims.io import claims_root_for
@@ -635,8 +642,13 @@ def _release_dispatch_claims(*claims) -> None:
         key, holder = pair
         try:
             release_claim(key, holder, root=claims_root_for(key))
-        except Exception:  # noqa: BLE001 - a stuck release must not mask the real error
-            pass
+        except Exception as exc:  # noqa: BLE001 - must not mask the real error
+            print(
+                f"WARNING: could not release {key} held by {holder} ({exc}); "
+                f"it stays held until its TTL expires. Free it with: "
+                f"fno claim release {key} --holder {holder}",
+                file=sys.stderr,
+            )
 
 
 def _emit_reaped_abandoned(node_id: str, prior_holder: str, truth_status: str) -> None:
