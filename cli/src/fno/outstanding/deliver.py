@@ -47,7 +47,10 @@ def _mail_send(argv: "list[str]") -> "tuple[int, str]":
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return (proc.returncode, detail[0] if detail else "no detail")
-    return (0, "")
+    # The verb's own evidence line ("delivered (hosted)", "queued (durable)")
+    # is the delivery truth; exit 0 alone cannot tell landed from parked.
+    out = (proc.stdout or "").strip().splitlines()
+    return (0, out[-1] if out else "")
 
 
 def _fno_argv() -> "list[str]":
@@ -112,4 +115,8 @@ def deliver_answer(
             f'Retry: fno mail send {full_id} "<the answer>" '
             f'--style-exception "operator answer verbatim"'
         )
-    return f"outstanding: {qid} answered; delivered to {asker} by mail (decision {did})"
+    evidence = f": {detail}" if detail else ""
+    return (
+        f"outstanding: {qid} answered; delivered to {asker} by mail{evidence} "
+        f"(decision {did})"
+    )

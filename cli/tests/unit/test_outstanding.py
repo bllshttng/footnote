@@ -1598,7 +1598,14 @@ def test_delivered_answer_carries_the_verbatim_text(monkeypatch: pytest.MonkeyPa
 
     sent: list[list[str]] = []
     monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
-    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+    monkeypatch.setattr(
+        deliver_mod,
+        "_mail_send",
+        lambda argv: (
+            sent.append(argv),
+            (0, "msg-1 delivered (hosted) to 89abcdef"),
+        )[1],
+    )
 
     q = Question(id="q-ab12cd34", ts="2026-08-21T00:00:00Z", question="which lane?", asker="89abcdef")
     line = deliver_mod.deliver_answer(q, "coordination lane", "d-1a2b")
@@ -1614,6 +1621,7 @@ def test_delivered_answer_carries_the_verbatim_text(monkeypatch: pytest.MonkeyPa
     assert "q-ab12cd34" in flat, "the asker must learn WHICH question was answered"
     assert "--style-exception" in flat, "operator prose is data, not authored relay"
     assert "delivered to 89abcdef" in line
+    assert "delivered (hosted)" in line, "quote the bus's own evidence, never just exit 0"
     assert "d-1a2b" in line
 
 
