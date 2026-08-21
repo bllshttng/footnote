@@ -2091,6 +2091,13 @@ def cmd_spawn(
             }
             if pane_result.seed_source is not None:
                 receipt_obj["seed_source"] = pane_result.seed_source
+            if pane_result.claim_store_writable is False:
+                from fno.claims.io import claims_dir, global_claims_root
+
+                receipt_obj["claim_store_writable"] = False
+                receipt_obj["claim_store_path"] = str(
+                    claims_dir(global_claims_root())
+                )
             if pane_result.fno_id is not None:
                 receipt_obj["fno_id"] = pane_result.fno_id
             if pane_result.bound is False:
