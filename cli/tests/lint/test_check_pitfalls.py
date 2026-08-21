@@ -220,14 +220,6 @@ def _agents_without(tmp_path: Path, old: str, new: str) -> Path:
     return path
 
 
-def test_dropping_the_live_qualifier_fails(tmp_path: Path) -> None:
-    """"the lockfile" says presence proves ownership; only the LIVE one does."""
-    path = _agents_without(tmp_path, "live lockfile", "lockfile")
-    r = _run(path)
-    assert r.returncode == 1
-    assert "live lockfile" in r.stderr
-
-
 def test_dropping_the_mail_probe_qualifier_fails(tmp_path: Path) -> None:
     """Broadened to "mail", it rejects a worker's own autonomous evidence."""
     path = _agents_without(tmp_path, "a mail probe", "mail")

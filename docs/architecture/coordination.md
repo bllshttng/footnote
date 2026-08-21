@@ -251,10 +251,13 @@ No producer can reach a prose payload or a hand-started session, so `fno claim s
 UNCLAIMED but a live worker is on this node: <rows>
 free, no live worker found (roster scanned: N rows)
 free, no live worker found (...); M finished session(s) resolved to it: ...
+free, no row resolved to this node (N scanned, M unresolved); ... Confirm with: fno agents peek <name>
 free, roster not consulted (<reason>)
 ```
 
 The scanned count is the point. A scan of forty rows finding nobody is a different answer from a read that failed. Printing `free` for both is how the defect survives its own fix. Assert one of these strings. Never grep for the absence of the word `free`.
+
+`roster_rows_unresolved` is the count of scanned rows whose worktree manifest or ledger did not resolve a node. If a worktree basename matches, the reader reports a candidate with `fno agents peek <name>`. It never acquires or infers a claim. `state: free` remains the claim answer.
 
 The join resolves a row's node from the worktree manifest and then the session-keyed ledger, both machine-written. **Never a name regex.** Eight auto-named workers read as nobody-on-this-node on 2026-08-15 and were nearly double-dispatched. Worker names carry their node only by convention, and a convention is not a guard.
 

@@ -174,9 +174,10 @@ def _resolve_decider(
     State 3 exists because state 2 used to be everything that was not state 1,
     which made it an absence. Scrubbing the environment was enough to reach it.
     """
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    from fno.agents.self_stamp import resolve_self_identity
+    from fno.harness_identity import canonical_handle
 
-    ident = resolve_harness_identity()
+    ident = resolve_self_identity()
     agent = (
         canonical_handle(ident.session_id)
         if ident.session_id and ident.harness

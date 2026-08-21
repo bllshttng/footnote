@@ -101,9 +101,12 @@ def _read_own_transcript_text() -> Optional[str]:
     in the same process; monkeypatch's teardown only reverts the attribute on
     ``fno.harness_identity``, not this module's separate name binding.
     """
-    from fno.harness_identity import resolve_harness_identity
+    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
 
-    ident = resolve_harness_identity()
+    try:
+        ident = require_self_identity()
+    except IdentityAmbiguousError:
+        return None
     if not ident.session_id or not ident.harness:
         return None
     path = _transcript_path(ident.harness, ident.session_id)

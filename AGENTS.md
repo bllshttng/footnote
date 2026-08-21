@@ -42,10 +42,10 @@ Before trusting a guard, enumerate every path a caller can reach: in-process tes
 
 ### Orienter output, claim snapshots, and liveness probes have all lied
 
-Receipts, manifest snapshots, process argv and liveness probes have each lied about a live session. Only the live lockfile and the transcript stayed truthful. `fno do target start` can print `plan: none` with a plan bound, or `base=origin/main` on a stale branch. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base; skip the fetch and a stale ref answers 0).
+Receipts, manifest snapshots, and process argv can lie about a live session. `fno do target start` can print `plan: none` with a plan bound, or `base=origin/main` on a stale branch. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base; skip the fetch and a stale ref answers 0).
 
 - specimens: `skills/target/SKILL.md` "Gotchas" (the receipt-can-lie cluster; manifest claim fields are an init-time snapshot, not ownership truth).
-- graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live holder, verifies the base) and transcript-keyed liveness.
+- graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live holder, verifies the base).
 - added: 2026-07-23
 
 ### Assert a positive marker, never an absence

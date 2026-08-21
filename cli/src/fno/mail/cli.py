@@ -294,14 +294,14 @@ def _emit_style_refusal(violations: list) -> None:
     """
     try:
         from fno.events import _build, append_event
-        from fno.harness_identity import resolve_harness_identity
+        from fno.agents.self_stamp import resolve_self_identity
 
         data: dict = {
             "surface": "mail",
             "rule_ids": sorted({v.rule for v in violations}),
             "violation_count": len(violations),
         }
-        ident = resolve_harness_identity()
+        ident = resolve_self_identity()
         if ident.session_id:
             data["session_id"] = ident.session_id
             source = "target"
@@ -476,10 +476,11 @@ def _sent_unclaimed_count() -> int:
     honestly reports 0 rather than a project-wide figure. Shares the notify-self
     predicate; never raises (a broken read degrades to 0).
     """
+    from fno.agents.self_stamp import resolve_self_identity
     from fno.config import load_settings
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    from fno.harness_identity import canonical_handle
 
-    ident = resolve_harness_identity()
+    ident = resolve_self_identity()
     if not ident.harness or not ident.session_id:
         return 0
     try:
@@ -2645,29 +2646,20 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        from fno.harness_identity import (
-            canonical_handle,
-            present_harness_markers,
-            resolve_harness_identity,
+        from fno.agents.self_stamp import (
+            IdentityAmbiguousError,
+            require_self_identity,
         )
+        from fno.harness_identity import canonical_handle
 
-        ident = resolve_harness_identity()
+        try:
+            ident = require_self_identity()
+        except IdentityAmbiguousError as exc:
+            print(f"error: --to-self: {exc}", file=sys.stderr)
+            raise typer.Exit(code=2) from exc
         if not (ident.session_id and ident.harness):
             print(
                 "error: --to-self: no ambient harness identity - cannot self-address",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        # Refuse a contaminated env: an inherited marker from a parent harness
-        # (e.g. a claude worker carrying CODEX_THREAD_ID from a codex spawner)
-        # makes the precedence-only resolver pick the PARENT session, so --to-self
-        # would target the parent rather than this caller. Fail closed on >1
-        # family present; a clean single-harness session sails through.
-        families = {h for _, h, _ in present_harness_markers()}
-        if len(families) > 1:
-            print(
-                "error: --to-self: multiple harness markers present (inherited "
-                "env?) - cannot decide which session is 'self'",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -2708,9 +2700,14 @@ def cmd_send(
         if from_name is not None:
             print("error: --from-self and --from-name are mutually exclusive", file=sys.stderr)
             raise typer.Exit(code=2)
-        from fno.harness_identity import canonical_handle, resolve_harness_identity
+        from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
+        from fno.harness_identity import canonical_handle
 
-        ident = resolve_harness_identity()
+        try:
+            ident = require_self_identity()
+        except IdentityAmbiguousError as exc:
+            print(f"error: --from-self: {exc}", file=sys.stderr)
+            raise typer.Exit(code=2) from exc
         if not (ident.session_id and ident.harness):
             print(
                 "error: --from-self: no ambient harness identity - cannot self-stamp",
@@ -3722,15 +3719,15 @@ def cmd_drain_self(
     hook is safe on any surface.
     """
     from fno.bus.cursor import advance_cursor, scan_unread
-    from fno.harness_identity import (
-        canonical_handle,
-        legacy_suffix_handle,
-        resolve_harness_identity,
-        session_identity_key,
-    )
+    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
+    from fno.harness_identity import canonical_handle, legacy_suffix_handle, session_identity_key
     from fno.mail.envelope import FNO_MAIL_TRAILER
 
-    ident = resolve_harness_identity()
+    try:
+        ident = require_self_identity()
+    except IdentityAmbiguousError as exc:
+        print(f"error: drain-self: {exc}", file=sys.stderr)
+        return
     if not ident.harness or not ident.session_id:
         if json_out:
             print(json.dumps([]))
@@ -4038,11 +4035,16 @@ def cmd_notify_self() -> None:
     cursor before the JSON is ready. A write or flush failure leaves the cursor
     unchanged; the next SessionStart or active-turn boundary can retry.
     """
+    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
     from fno.bus.cursor import advance_cursor, scan_unread
     from fno.config import load_settings
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    from fno.harness_identity import canonical_handle
 
-    ident = resolve_harness_identity()
+    try:
+        ident = require_self_identity()
+    except IdentityAmbiguousError as exc:
+        print(f"error: notify-self: {exc}", file=sys.stderr)
+        return
     if not ident.harness or not ident.session_id:
         return
 

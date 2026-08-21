@@ -24,6 +24,7 @@ import contextlib
 import io
 import json
 import os
+import sys
 from dataclasses import asdict, is_dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
@@ -38,7 +39,7 @@ from fno.agent.state import (
     MissingStateFileOverrideError,
     load_agent_context,
 )
-from fno.harness_identity import canonical_handle, resolve_harness_identity
+from fno.harness_identity import canonical_handle
 
 
 def _mail_handle() -> tuple[Optional[str], Optional[str]]:
@@ -46,7 +47,9 @@ def _mail_handle() -> tuple[Optional[str], Optional[str]]:
     (None, None). Same derivation `stamp_from(None)` uses, so whoami advertises
     the exact string a name-lane send self-stamps. Read-only: env + a string
     slice, no discovery scan (whoami's md5-invariance contract)."""
-    ident = resolve_harness_identity()
+    from fno.agents.self_stamp import require_self_identity
+
+    ident = require_self_identity()
     if ident.session_id and ident.harness:
         return canonical_handle(ident.session_id), ident.session_id
     return None, None
@@ -255,7 +258,13 @@ def whoami_command(
         no_fleet=no_fleet,
     )
     state = _drop_layers(_load_or_exit(opts), opts)
-    mail, harness_sid = _mail_handle()
+    from fno.agents.self_stamp import IdentityAmbiguousError
+
+    try:
+        mail, harness_sid = _mail_handle()
+    except IdentityAmbiguousError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=4) from exc
     agent_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
     mail_unread = _mail_unread_count(mail, agent_self, harness_sid, state.project_root)
     # Context pressure from the same transcript the model line resolves. Probed

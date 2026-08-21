@@ -140,6 +140,7 @@ fi
 # that already has unrelated status fields.
 # ---------------------------------------------------------------------------
 echo "--- Rust: no plan-status reader ---"
+# The row-emitter contradiction guard owns two non-plan status fields.
 EXPECTED_RUST_STATUS_IDENTIFIERS="crates/fno-agents/build.rs:2
 crates/fno-agents/src/active_backlog.rs:20
 crates/fno-agents/src/agents_config.rs:1
@@ -152,7 +153,7 @@ crates/fno-agents/src/client.rs:30
 crates/fno-agents/src/client_verbs.rs:78
 crates/fno-agents/src/codex_ask.rs:3
 crates/fno-agents/src/codex_inject.rs:3
-crates/fno-agents/src/daemon.rs:168
+crates/fno-agents/src/daemon.rs:170
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4
 crates/fno-agents/src/finalize.rs:48

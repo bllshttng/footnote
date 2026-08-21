@@ -63,8 +63,9 @@ def _drain_setup(monkeypatch, msg):
     class _Ident:
         harness = "claude"
         session_id = "abcd1234"
+        disposition = "single"
 
-    monkeypatch.setattr(harness_identity, "resolve_harness_identity", lambda: _Ident())
+    monkeypatch.setattr("fno.agents.self_stamp.resolve_self_identity", lambda: _Ident())
     monkeypatch.setattr(harness_identity, "canonical_handle", lambda sid: "cl-abcd1234")
     monkeypatch.setattr(
         cursor_mod, "scan_unread", lambda h: [msg] if h == "cl-abcd1234" else []
@@ -290,4 +291,3 @@ def test_live_recipient_live_miss_writes_durable(runner, tmp_path, monkeypatch):
     unread = scan_unread(recipient)
     assert unread, "the live-first durable fallback did not write"
     assert all(m.kind != "withdraw" for m in unread)
-

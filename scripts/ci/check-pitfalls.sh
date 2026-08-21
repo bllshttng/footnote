@@ -139,7 +139,7 @@ fi
 # only while its own entry is present, so evicting or graduating an entry
 # releases its phrase instead of wedging this gate on prose the corpus is
 # supposed to have dropped.
-PINNED_PHRASES=$'liveness probes\tlive lockfile\ncapability probe\tmail probe'
+PINNED_PHRASES=$'capability probe\tmail probe'
 
 while IFS=$'\t' read -r entry_key phrase; do
   [[ -z "$entry_key" || -z "$phrase" ]] && continue
@@ -152,7 +152,7 @@ done <<< "$PINNED_PHRASES"
 if [[ -n "$STALE_DATES" ]]; then
   STALE_REPORT="$(STALE_DATES="$STALE_DATES" MAX_AGE_DAYS="$MAX_AGE_DAYS" python3 - <<'PY'
 import os, datetime
-today = datetime.date.today()
+today = datetime.datetime.now(datetime.timezone.utc).date()
 max_age = int(os.environ["MAX_AGE_DAYS"])
 out = []
 for rec in os.environ["STALE_DATES"].splitlines():

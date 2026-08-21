@@ -22,7 +22,6 @@ from typing import Any, List, Literal, Optional, Union
 
 import typer
 
-from fno.harness_identity import resolve_harness_identity
 from fno.tombstones import tombstone_group_cls
 
 cli = typer.Typer(
@@ -669,7 +668,9 @@ def _stamp_ship_on_pr_link(node_id: str) -> None:
 
     from fno.graph.store import append_session_record
 
-    ident = resolve_harness_identity()
+    from fno.claims.self_identity import resolve_self_identity
+
+    ident = resolve_self_identity()
     harness = (ident.harness or "").strip()
     session_id = (ident.session_id or "").strip()
     if not harness or not session_id:
@@ -717,7 +718,9 @@ def _stamp_blueprint_on_plan_link(node_id: str) -> None:
 
     from fno.graph.store import append_session_record
 
-    ident = resolve_harness_identity()
+    from fno.claims.self_identity import resolve_self_identity
+
+    ident = resolve_self_identity()
     harness = (ident.harness or "").strip()
     session_id = (ident.session_id or "").strip()
     if not harness or not session_id:
@@ -815,7 +818,9 @@ def _session_provenance(
     """
     cwd = running_cwd if running_cwd is not None else os.getcwd()
 
-    identity = resolve_harness_identity()
+    from fno.claims.self_identity import resolve_self_identity
+
+    identity = resolve_self_identity()
     session = identity.session_id
     harness = identity.harness
 
@@ -5538,7 +5543,9 @@ def cmd_session_add(
                 "added": False,
             }))
 
-    ident = resolve_harness_identity()
+    from fno.claims.self_identity import resolve_self_identity
+
+    ident = resolve_self_identity()
     eff_harness = (harness or ident.harness or "").strip()
     eff_session = (session_id or ident.session_id or "").strip()
     if not eff_harness or not eff_session:

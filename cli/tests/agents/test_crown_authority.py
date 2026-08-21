@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from fno.agents.crown import (
     AGENT_UNREGISTERED,
     REGISTRY_UNREADABLE,
@@ -28,10 +26,14 @@ def _agent_identity():
     return SimpleNamespace(session_id="ses-deadbeef", harness="claude")
 
 
+def _owned_agent_identity():
+    return SimpleNamespace(session_id="ses-deadbeef", harness="claude", disposition="single")
+
+
 def test_registry_read_failure_refuses_grant(monkeypatch):
     """An agent whose registry cannot be read is NOT promoted to human authority."""
     monkeypatch.setattr(
-        "fno.harness_identity.resolve_harness_identity", _agent_identity
+        "fno.agents.self_stamp.resolve_self_identity", _owned_agent_identity
     )
 
     def boom(*args, **kwargs):
@@ -53,8 +55,8 @@ def test_attended_human_still_authorized(monkeypatch):
     """The fail-closed fix must not break the legitimate attended-human path:
     no agent identity at all -> any grant authorized."""
     monkeypatch.setattr(
-        "fno.harness_identity.resolve_harness_identity",
-        lambda: SimpleNamespace(session_id=None, harness=None),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
     )
     assert calling_agent_row() is None
     assert grant_error("any-scope", None) is None
@@ -67,7 +69,7 @@ def test_known_agent_passes_through_to_crown_check(monkeypatch):
         crown_scope=None, crown_level=None, crown_grantor=None
     )
     monkeypatch.setattr(
-        "fno.harness_identity.resolve_harness_identity", _agent_identity
+        "fno.agents.self_stamp.resolve_self_identity", _owned_agent_identity
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
     monkeypatch.setattr(
@@ -89,7 +91,7 @@ def test_unregistered_agent_refuses_grant(monkeypatch):
     returns None without raising, so this never reached the REGISTRY_UNREADABLE
     except branch - it is the third fail-open path, one branch over."""
     monkeypatch.setattr(
-        "fno.harness_identity.resolve_harness_identity", _agent_identity
+        "fno.agents.self_stamp.resolve_self_identity", _owned_agent_identity
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
     monkeypatch.setattr(

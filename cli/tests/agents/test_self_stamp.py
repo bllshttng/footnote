@@ -72,6 +72,36 @@ def test_stamp_from_auto_canonical_handle(monkeypatch):
     assert self_stamp.stamp_from(None) == "9a063cd3"
 
 
+def test_resolve_self_identity_prefers_proven_harness(monkeypatch):
+    env = {
+        "CODEX_THREAD_ID": "01a02125-aaaa-bbbb-cccc-dddddddddddd",
+        "CLAUDE_CODE_SESSION_ID": "2782a6e1-aaaa-bbbb-cccc-dddddddddddd",
+    }
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: "claude",
+    )
+    identity = self_stamp.resolve_self_identity(env)
+    assert identity.disposition == "proven"
+    assert identity.harness == "claude"
+    assert identity.session_id == env["CLAUDE_CODE_SESSION_ID"]
+
+
+def test_resolve_self_identity_refuses_unproven_mixed_harnesses(monkeypatch):
+    env = {
+        "CODEX_THREAD_ID": "01a02125-aaaa-bbbb-cccc-dddddddddddd",
+        "CLAUDE_CODE_SESSION_ID": "2782a6e1-aaaa-bbbb-cccc-dddddddddddd",
+    }
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: None,
+    )
+    identity = self_stamp.resolve_self_identity(env)
+    assert identity.disposition == "ambiguous"
+    assert identity.session_id is None
+    assert "CODEX_THREAD_ID" in self_stamp.identity_ambiguity_message(identity)
+
+
 def test_ac2_edge_no_ambient_identity_floors(monkeypatch):
     for var in ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
                 "GEMINI_SESSION_ID"):

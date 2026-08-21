@@ -394,20 +394,24 @@ def test_ambient_codex_degrades_to_session_no_manifest_read(tmp_path, monkeypatc
     assert prov["source_plan_path"] is None
 
 
-def test_ambient_codex_thread_precedes_claude_and_skips_manifest(tmp_path, monkeypatch):
+def test_proven_harness_wins_over_inherited_marker_and_reads_manifest(tmp_path, monkeypatch):
     from fno.graph.cli import _session_provenance
 
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-abc")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-abc")
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: "claude",
+    )
     _write_manifest(tmp_path, transcript_id="claude-abc",
                     node_id="ab-claudenode", plan_path="p.md")
 
     prov = _session_provenance(str(tmp_path))
-    assert prov["source_session_id"] == "thread-abc"
-    assert prov["source_harness"] == "codex"
-    assert prov["source_node_id"] is None
-    assert prov["source_plan_path"] is None
+    assert prov["source_session_id"] == "claude-abc"
+    assert prov["source_harness"] == "claude"
+    assert prov["source_node_id"] == "ab-claudenode"
+    assert prov["source_plan_path"] == "p.md"
 
 
 # ---------------------------------------------------------------------------

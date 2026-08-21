@@ -3129,9 +3129,12 @@ def cmd_whoami(
     # Resolve THIS process's session id from whichever harness marker is set
     # (x-ec59): a codex/gemini worker resolves its own row via harness_session_id,
     # not just CLAUDE_CODE_SESSION_ID.
-    from fno.harness_identity import resolve_harness_identity
+    from fno.agents.self_stamp import identity_ambiguity_message, resolve_self_identity
 
-    _ident = resolve_harness_identity()
+    _ident = resolve_self_identity(os.environ)
+    if not (os.environ.get("FNO_AGENT_SELF") or "").strip() and _ident.disposition == "ambiguous":
+        print(f"error: {identity_ambiguity_message(_ident)}", file=sys.stderr)
+        raise typer.Exit(code=4)
     session_uuid = _ident.session_id
     # Scope registry matching to this process's harness so a provider-local session
     # id can't match a same-id row of another harness (x-ec59).
@@ -3205,7 +3208,7 @@ def cmd_register(
     """
     from fno.agents import events
     from fno.agents.registry import register_existing_session
-    from fno.harness_identity import resolve_harness_identity
+    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
 
     if delivery_policy is not None and delivery_policy not in ("bus-only", "off"):
         sys.stderr.write(
@@ -3214,7 +3217,11 @@ def cmd_register(
         )
         raise typer.Exit(code=2)
 
-    ident = resolve_harness_identity()
+    try:
+        ident = require_self_identity()
+    except IdentityAmbiguousError as exc:
+        sys.stderr.write(f"cannot register: {exc}\n")
+        raise typer.Exit(code=4) from exc
     session_id = ident.session_id
     harness = ident.harness or ("claude" if session_id else None)
     if not session_id or not harness:

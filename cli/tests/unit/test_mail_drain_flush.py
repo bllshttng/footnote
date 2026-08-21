@@ -67,9 +67,10 @@ def _drained(monkeypatch):
     class _Ident:
         harness = "claude"
         session_id = "abcd1234"
+        disposition = "single"
 
     monkeypatch.setattr(
-        harness_identity, "resolve_harness_identity", lambda: _Ident()
+        "fno.agents.self_stamp.resolve_self_identity", lambda: _Ident()
     )
     monkeypatch.setattr(
         harness_identity, "canonical_handle", lambda sid: "cl-abcd1234"
@@ -139,9 +140,10 @@ def test_ac3_err_hook_serialization_failure_leaves_cursor_for_retry(monkeypatch)
     class _Ident:
         harness = "claude"
         session_id = "abcd1234"
+        disposition = "single"
 
     monkeypatch.setattr(
-        harness_identity, "resolve_harness_identity", lambda: _Ident()
+        "fno.agents.self_stamp.resolve_self_identity", lambda: _Ident()
     )
     monkeypatch.setattr(
         harness_identity, "canonical_handle", lambda sid: "cl-abcd1234"
@@ -187,6 +189,7 @@ def test_ac3_err_hook_output_failure_retries_then_acks_once(
     class _Ident:
         harness = "claude"
         session_id = "abcd1234"
+        disposition = "single"
 
     class _FailingStdout(_CountingStdout):
         def write(self, s: str) -> int:
@@ -200,7 +203,7 @@ def test_ac3_err_hook_output_failure_retries_then_acks_once(
             super().flush()
 
     monkeypatch.setattr(
-        harness_identity, "resolve_harness_identity", lambda: _Ident()
+        "fno.agents.self_stamp.resolve_self_identity", lambda: _Ident()
     )
     monkeypatch.setattr(
         harness_identity, "canonical_handle", lambda sid: "cl-abcd1234"
@@ -250,11 +253,12 @@ def test_ac2_hp_hook_json_is_flushed_before_cursor_advances(monkeypatch) -> None
     class _Ident:
         harness = "claude"
         session_id = "abcd1234"
+        disposition = "single"
 
     fake_out = _CountingStdout()
     observed: dict[str, object] = {}
     monkeypatch.setattr(
-        harness_identity, "resolve_harness_identity", lambda: _Ident()
+        "fno.agents.self_stamp.resolve_self_identity", lambda: _Ident()
     )
     monkeypatch.setattr(
         harness_identity, "canonical_handle", lambda sid: "cl-abcd1234"

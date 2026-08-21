@@ -499,9 +499,9 @@ def _owned_do_identity(claim, holder: str) -> "tuple[str, str]":
     fallback when the owned values are absent. Shared by the acquire and
     release stamps so they always agree on the row key - release must fill the
     row acquire opened, not open a second one."""
-    from fno.harness_identity import resolve_harness_identity
+    from fno.claims.self_identity import resolve_self_identity
 
-    ident = resolve_harness_identity()
+    ident = resolve_self_identity()
     harness = (getattr(claim, "harness", None) or ident.harness or "").strip()
     session_id = ""
     if holder and holder.startswith("target-session:"):
@@ -768,6 +768,8 @@ class RosterReading(NamedTuple):
     # once and shared by every instance that omits it, so a plain dict here is
     # one caller's `setdefault` away from leaking rows between readings.
     rows_by_session: Mapping = MappingProxyType({})
+    rows_unresolved: int = 0
+    unresolved_rows: tuple = ()
 
     def workers_on(self, node_id: str) -> list:
         return self.workers_by_node.get(node_id, [])
@@ -823,6 +825,7 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
         return RosterReading(False, 0, {}, blocking[0])
     index: dict = {}
     by_session: dict = {}
+    unresolved: list[dict] = []
     for r in rows:
         entry = {
             "name": r.name,
@@ -834,9 +837,13 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
         }
         if r.node:
             index.setdefault(r.node, []).append(entry)
+        else:
+            unresolved.append(entry)
         if r.row_id:
             by_session[str(r.row_id)] = entry
-    return RosterReading(True, len(rows), index, "", by_session)
+    return RosterReading(
+        True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved)
+    )
 
 
 def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) -> dict:
@@ -851,12 +858,20 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
         return {
             "roster_consulted": False,
             "roster_rows_scanned": 0,
+            "roster_rows_unresolved": 0,
             "roster_workers": [],
             "roster_skip_reason": reading.reason,
         }
+    candidates = [
+        row["name"]
+        for row in reading.unresolved_rows
+        if Path(row.get("cwd") or "").name == node_id
+    ]
     return {
         "roster_consulted": True,
         "roster_rows_scanned": reading.rows_scanned,
+        "roster_rows_unresolved": reading.rows_unresolved,
+        "roster_unresolved_candidates": candidates,
         "roster_workers": reading.workers_on(node_id),
     }
 
@@ -927,6 +942,20 @@ def _roster_verdict_line(info: dict) -> str:
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
         return f"UNCLAIMED but a live worker is on this node: {rendered}"
+    unresolved = info.get("roster_rows_unresolved", 0)
+    if unresolved:
+        scanned = (
+            f"{state}, no row resolved to this node "
+            f"({info['roster_rows_scanned']} scanned, {unresolved} unresolved)"
+        )
+        candidates = info.get("roster_unresolved_candidates") or []
+        if candidates:
+            names = ", ".join(candidates)
+            return (
+                f"{scanned}; {len(candidates)} unresolved row's worktree names this node: "
+                f"{names}. Confirm with: fno agents peek {candidates[0]}"
+            )
+        return scanned
     scanned = (
         f"{state}, no live worker found "
         f"(roster scanned: {info['roster_rows_scanned']} rows)"
