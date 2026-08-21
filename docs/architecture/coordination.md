@@ -107,28 +107,9 @@ manifest fields are an init-time snapshot and graph `status: claimed` names no
 holder, so all guidance compares `fno claim status` against the session's own
 id, never a snapshot.
 
-**A held claim proves a holder, never a worker.** `fno backlog next --claim
-<holder> --external` acquires `node:<id>` directly with nothing launched, a
-hand `fno claim acquire` does the same, and a `spawn-handover:` claim covers a
-launch window whose worker may never boot. So the guard reports three reasons,
-not two. `live-claim` means a holder AND a `fno target init` behind it.
-`unproven-claim` means a holder and nothing more, and it is what `spawn.sh` and
-`dispatch-node.sh` render as "no worker has reached target init" instead of the
-old "live worker holds node". `suspect-claim` is unchanged. The discriminator is
-`_init_reached` in `cli/src/fno/agents/cli.py`, which reads two positive markers
-- the `target-session:` holder prefix that only init writes, and a manifest
-under the dispatcher's cwd binding `target_claim_key: node:<id>`. A read fault
-answers unproven: an unreadable manifest must never manufacture a worker.
+**A held claim proves a holder, never a worker.** `fno backlog next --claim <holder> --external` acquires `node:<id>` directly with nothing launched, a hand `fno claim acquire` does the same, and a `spawn-handover:` claim covers a launch window whose worker may never boot. So the guard reports three reasons, not two. `live-claim` means a holder AND a `fno target init` behind it. `unproven-claim` means a holder and nothing more. That is what `spawn.sh` and `dispatch-node.sh` render as "no worker has reached target init" instead of the old "live worker holds node". `suspect-claim` is unchanged. The discriminator is `_init_reached` in `cli/src/fno/agents/cli.py`. It reads two positive markers: the `target-session:` holder prefix that only init writes, and a manifest under the dispatcher's cwd binding `target_claim_key: node:<id>`. A read fault answers unproven, because an unreadable manifest must never manufacture a worker. The external acquire above routes through `claims_root_for` for the same reason: a `node:` lock written to the cwd-default tree reads free to every dispatch surface.
 
-**The reservation is taken after the launch is proven, and released on an
-observation every substrate reaches.** `cmd_spawn` runs its node guard below
-the resume-provider resolution, so an exit on that stretch strands neither
-`dispatch:<id>` nor the handover `node:<id>`. Below it the only exit is
-`run_gate`, whose `except BaseException` releases both. On the way out, the
-reservation is released whenever the substrate is a one-shot (`--once` or
-`--substrate headless`) as well as on a failed spawn: a one-shot's worker has
-already exited when the call returns, so nobody is left to inherit it. `pane`
-and `bg` keep it, because their worker outlives the caller.
+**The reservation is taken after the launch is proven, and released on an observation every substrate reaches.** `cmd_spawn` runs its node guard below the resume-provider resolution, so an exit on that stretch strands neither `dispatch:<id>` nor the handover `node:<id>`. Below it the only exit is `run_gate`, whose `except BaseException` releases both. On the way out, the reservation is released whenever the substrate is a one-shot (`--once` or `--substrate headless`), as well as on a failed spawn. A one-shot's worker has already exited when the call returns, so nobody is left to inherit it. `pane` and `bg` keep it, because their worker outlives the caller.
 
 `is_live` returns False for cross-machine claims. The design explicitly does
 not support multi-host coordination - operators running two hosts on the same
