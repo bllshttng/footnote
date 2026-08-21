@@ -8855,7 +8855,7 @@ fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
 /// rows may not move, but this line always changes, so no press is inert.
 fn table_head_text(cols: TableCols, sort: AgentSort) -> String {
     let (long, short) = match sort {
-        AgentSort::Squad => ("sort: squad", "·squad"),
+        AgentSort::Squad => ("sort: workspace", "·wksp"),
         AgentSort::Attention => ("sort: attention", "·attn"),
     };
     // With the tail column dropped the label has no column of its own, so it
@@ -25997,7 +25997,7 @@ mod tests {
             ["fresh-live", "gone", "stale-live"],
             "by-squad keeps the tree's own order"
         );
-        assert!(frame_text(&v.compose()).contains("sort: squad"));
+        assert!(frame_text(&v.compose()).contains("sort: workspace"));
 
         v.toggle_agent_sort();
         assert_eq!(
@@ -26294,7 +26294,8 @@ mod tests {
                 TableCols { time: true, .. } => COL_STATUS + COL_NAME + COL_PR + COL_TIME - 1,
                 _ => MIN_EXTENDED_PANEL_W - 1,
             };
-            for (label, head) in [("squad", &by_squad), ("att", &by_attention)] {
+            let squad_label = if cols.tail { "workspace" } else { "·wksp" };
+            for (label, head) in [(squad_label, &by_squad), ("att", &by_attention)] {
                 assert!(
                     head.chars().count() <= panel_text_w as usize,
                     "{cols:?}: header overflows {panel_text_w} cols: {head:?}"
@@ -26305,6 +26306,9 @@ mod tests {
                     visible.contains(label),
                     "{cols:?}: {label:?} not visible in {visible:?}"
                 );
+            }
+            if !cols.tail {
+                assert!(by_squad.contains("agent ·wksp"), "{cols:?}: {by_squad:?}");
             }
         }
     }
