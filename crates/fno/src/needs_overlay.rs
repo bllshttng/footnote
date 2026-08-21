@@ -36,6 +36,29 @@ pub struct FoldItem {
     pub live: bool,
 }
 
+/// One operator-owned priority, as emitted by `fno inbox outstanding mine
+/// --json`. `n` is the stable file index used by later mutation tasks; this
+/// task only folds and renders it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MineItem {
+    pub n: usize,
+    pub text: String,
+    pub done: bool,
+    pub node: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MineResponse {
+    mine: Vec<MineItem>,
+}
+
+/// Both independent overlay reads. Each leg carries its own failure so one
+/// unavailable command never hides the other lane.
+pub struct FoldOutcome {
+    pub needs: Option<Vec<FoldItem>>,
+    pub mine: Option<Vec<MineItem>>,
+}
+
 /// Fold the needs-me events leg over the `since_epoch` window. `None` on any
 /// failure (timeout, nonzero exit, unparseable JSON) - the caller shows the
 /// degraded notice; `Some(vec)` (possibly empty) is a clean fold.
@@ -58,10 +81,41 @@ pub async fn fold_now(since_epoch: &str) -> Option<Vec<FoldItem>> {
     parse(&output.stdout)
 }
 
+/// Fold the operator-owned lane through the installed/current `fno` binary.
+/// It has the same timeout and kill-on-drop discipline as the needs fold.
+pub async fn mine_now() -> Option<Vec<MineItem>> {
+    let fut = tokio::process::Command::new(crate::server::fno_bin())
+        .args(["inbox", "outstanding", "mine", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_mine(&output.stdout)
+}
+
+/// Run both bounded reads concurrently under the client's one single-flight.
+pub async fn fold_both(since_epoch: &str) -> FoldOutcome {
+    let (needs, mine) = tokio::join!(fold_now(since_epoch), mine_now());
+    FoldOutcome { needs, mine }
+}
+
 /// Parse the verb's JSON array. Fails quiet (returns `None`) on unparseable
 /// output so a torn stdout degrades the overlay rather than crashing it.
 fn parse(stdout: &[u8]) -> Option<Vec<FoldItem>> {
     serde_json::from_slice(stdout).ok()
+}
+
+fn parse_mine(stdout: &[u8]) -> Option<Vec<MineItem>> {
+    serde_json::from_slice::<MineResponse>(stdout)
+        .ok()
+        .map(|response| response.mine)
 }
 
 #[cfg(test)]
@@ -95,5 +149,21 @@ mod tests {
     #[test]
     fn torn_json_fails_quiet() {
         assert!(parse(b"[{not json").is_none());
+    }
+
+    #[test]
+    fn parses_required_mine_json() {
+        let json = br#"{"mine":[{"n":1,"text":"ship tonight","done":false,"node":null},{"n":2,"text":"cut verbs","done":true,"node":"x-c1b9"}]}"#;
+        let items = parse_mine(json).expect("valid mine response parses");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].n, 1);
+        assert_eq!(items[0].text, "ship tonight");
+        assert!(!items[0].done);
+        assert_eq!(items[1].node.as_deref(), Some("x-c1b9"));
+    }
+
+    #[test]
+    fn torn_mine_json_fails_quiet() {
+        assert!(parse_mine(br#"{"mine":[{"n":1"#).is_none());
     }
 }

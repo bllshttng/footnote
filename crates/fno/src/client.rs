@@ -837,11 +837,16 @@ struct View {
     /// result while the overlay is open (`None` = live-only, not yet fetched
     /// this open). Merged with the live badge leg by [`View::needs_view`].
     needs_fold: Option<Vec<crate::needs_overlay::FoldItem>>,
+    /// Operator-owned priorities folded independently from the event lane.
+    mine_fold: Option<Vec<crate::needs_overlay::MineItem>>,
     /// (x-feec) When `needs_fold` was last fetched, for the short re-open cache.
     needs_fold_at: Option<Instant>,
     /// (x-feec) The last fold shell-out failed/timed out: render the loud
     /// degraded notice (AC2-ERR) instead of a silent partial queue.
     needs_degraded: bool,
+    /// The MINE command failed/timed out; the operator lane degrades visibly
+    /// without hiding THEY NEED YOU.
+    mine_degraded: bool,
     /// (x-feec) Set by OpenAnswers when a fresh fold is wanted; the run loop
     /// spawns the shell-out and clears it, keeping the channel sender out of the
     /// deep stdin handler.
@@ -2159,8 +2164,10 @@ impl View {
             answers: None,
             ans_esc: Vec::new(),
             needs_fold: None,
+            mine_fold: None,
             needs_fold_at: None,
             needs_degraded: false,
+            mine_degraded: false,
             needs_want: false,
             needs_inflight: false,
             needs_gen: 0,
@@ -2389,6 +2396,18 @@ impl View {
         rows
     }
 
+    /// `needs_queue()` filtered for the operator panel: a `MailQuestion` row is
+    /// agent-to-agent mail traffic (`acme-web -> fno-peer: ...`), real signal
+    /// for a live badge/sprite but not a question addressed to the operator.
+    /// The panel drops it here; `needs_queue()` itself is untouched so badges
+    /// and `fno-agents needs --json` still see it.
+    fn needs_operator_queue(&self) -> Vec<NeedRow> {
+        self.needs_queue()
+            .into_iter()
+            .filter(|r| r.kind != NeedKind::MailQuestion)
+            .collect()
+    }
+
     /// The roster row a fold item joins to: a name / node / session-id match
     /// against a layout row's name or its cwd basename (`cwd_base`, now carried
     /// on every row since x-6851 US3, not only orphans).
@@ -2407,15 +2426,35 @@ impl View {
         })
     }
 
-    /// The capped, sorted queue actually rendered and indexed, plus the count of
-    /// rows the worst-first cap dropped (for the footer). Both the overlay draw
-    /// and the key handler read this, so cursor index and rendered rows never
-    /// diverge.
-    fn needs_view(&self) -> (Vec<NeedRow>, usize) {
-        let mut rows = self.needs_queue();
-        let dropped = rows.len().saturating_sub(NEEDS_CAP);
-        rows.truncate(NEEDS_CAP);
-        (rows, dropped)
+    /// The two-lane overlay projection: MINE first (open before done, file
+    /// order preserved within each group - the operator wrote that order),
+    /// then the operator-filtered needs queue (already worst-first). Each
+    /// lane is capped independently at ten so a noisy lane never crowds the
+    /// other out; `*_total` carries the true count for the footer.
+    fn needs_projection(&self) -> NeedsProjection {
+        let mut mine: Vec<crate::needs_overlay::MineItem> =
+            self.mine_fold.clone().unwrap_or_default();
+        mine.sort_by_key(|m| m.done);
+        let mine_total = mine.len();
+        let mine_shown = mine.len().min(MINE_CAP);
+        let mut rows: Vec<NeedsOverlayRow> = mine
+            .into_iter()
+            .take(MINE_CAP)
+            .map(NeedsOverlayRow::Mine)
+            .collect();
+
+        let need = self.needs_operator_queue();
+        let need_total = need.len();
+        let need_shown = need.len().min(NEEDS_CAP);
+        rows.extend(need.into_iter().take(NEEDS_CAP).map(NeedsOverlayRow::Need));
+
+        NeedsProjection {
+            rows,
+            mine_shown,
+            mine_total,
+            need_shown,
+            need_total,
+        }
     }
 
     /// The overlay footer state: a failed fold degrades loudly (AC2-ERR), an
@@ -2424,6 +2463,17 @@ impl View {
         if self.needs_degraded {
             NeedsFooter::Degraded
         } else if self.needs_fold.is_none() {
+            NeedsFooter::Folding
+        } else {
+            NeedsFooter::AsOf
+        }
+    }
+
+    /// Same as [`Self::needs_footer`] for the MINE leg.
+    fn mine_footer(&self) -> NeedsFooter {
+        if self.mine_degraded {
+            NeedsFooter::Degraded
+        } else if self.mine_fold.is_none() {
             NeedsFooter::Folding
         } else {
             NeedsFooter::AsOf
@@ -2489,32 +2539,33 @@ impl View {
         }
     }
 
-    /// The identity of the currently-selected needs row, for re-anchoring the
-    /// cursor across a layout push or fold merge (AC3-UI).
-    fn answers_selected_id(&self) -> Option<(NeedKind, String)> {
+    /// The identity of the currently-selected overlay row (MINE or needs), for
+    /// re-anchoring the cursor across a layout push or fold merge (AC3-UI).
+    fn answers_selected_id(&self) -> Option<NeedsOverlayId> {
         let cur = self.answers?;
-        let (rows, _) = self.needs_view();
-        rows.get(cur).map(NeedRow::id)
+        let projection = self.needs_projection();
+        projection.rows.get(cur).map(NeedsOverlayRow::id)
     }
 
-    /// Re-anchor the answer cursor to `prev` (its item identity) after the queue
-    /// recomputed: keep it on the same item if still present, else clamp. The
-    /// overlay stays open on an empty queue (the "nothing needs you" state,
-    /// AC4-EDGE) with the cursor clamped to 0 so a later merge lands cleanly.
-    fn reanchor_answers(&mut self, prev: Option<(NeedKind, String)>) {
+    /// Re-anchor the answer cursor to `prev` (its item identity) after the
+    /// projection recomputed: keep it on the same item if still present, else
+    /// clamp. The overlay stays open on an empty projection (the "nothing
+    /// needs you" state, AC4-EDGE) with the cursor clamped to 0 so a later
+    /// merge lands cleanly.
+    fn reanchor_answers(&mut self, prev: Option<NeedsOverlayId>) {
         if self.answers.is_none() {
             return;
         }
-        let (rows, _) = self.needs_view();
-        if rows.is_empty() {
+        let projection = self.needs_projection();
+        if projection.rows.is_empty() {
             self.answers = Some(0);
             return;
         }
         let idx = prev
-            .and_then(|(k, n)| rows.iter().position(|r| r.kind == k && r.name == n))
+            .and_then(|id| projection.rows.iter().position(|r| r.id() == id))
             .or(self.answers)
             .unwrap_or(0)
-            .min(rows.len() - 1);
+            .min(projection.rows.len() - 1);
         self.answers = Some(idx);
     }
 
@@ -5663,14 +5714,17 @@ impl View {
                 &self.theme,
             );
         } else if let Some(sel) = self.answers {
-            // x-feec needs-me queue (grown from the x-c929 answer overlay): the
-            // severity-ranked union + the selected row's answer options, on the
-            // shared inverse-video chrome. Always drawn while open - an empty
-            // union renders "nothing needs you", a pending/failed fold renders
-            // its footer notice (never a blank overlay).
-            let (queue, dropped) = self.needs_view();
-            let sel = sel.min(queue.len().saturating_sub(1));
-            let lines = needs_overlay_lines(&queue, sel, dropped, self.needs_footer());
+            // x-feec needs-me queue (grown from the x-c929 answer overlay,
+            // x-f730 folded MINE in as the first lane): MINE then the
+            // severity-ranked THEY NEED YOU union, on the shared inverse-video
+            // chrome. Always drawn while open - an empty union renders
+            // "nothing needs you", a pending/failed fold renders its footer
+            // notice (never a blank overlay).
+            let projection = self.needs_projection();
+            let total = projection.mine_shown + projection.need_shown;
+            let sel = sel.min(total.saturating_sub(1));
+            let lines =
+                needs_overlay_lines(&projection, sel, self.mine_footer(), self.needs_footer());
             let chrome = chrome::Chrome::new("needs me", Anchor::Center).footer("q close");
             draw_lines_overlay(
                 &mut cells,
@@ -5681,11 +5735,13 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
-                // +1 for the header line. This queue is cursored (`n`/`N`) and
-                // unbounded, so it needs the same follow the pickers do: on a
-                // short terminal the selected row would otherwise sit below the
-                // fold while still being the row Enter acts on.
-                Some(sel + 1),
+                // This queue is cursored (`n`/`N`) and unbounded, so it needs
+                // the same follow the pickers do: on a short terminal the
+                // selected row would otherwise sit below the fold while still
+                // being the row Enter acts on. selected_line() accounts for
+                // the MINE/THEY NEED YOU heading + footer lines between the
+                // two lanes, which a flat `sel + 1` no longer can.
+                Some(projection.selected_line(sel)),
             );
         } else if let Some(yv) = &self.yard {
             // (x-b2bf) The yard: the fleet as f[no]nimals. The
@@ -8042,9 +8098,68 @@ impl NeedRow {
     }
 }
 
+#[derive(Clone)]
+enum NeedsOverlayRow {
+    Mine(crate::needs_overlay::MineItem),
+    Need(NeedRow),
+}
+
+impl NeedsOverlayRow {
+    fn label(&self) -> &str {
+        match self {
+            Self::Mine(item) => &item.text,
+            Self::Need(row) => &row.name,
+        }
+    }
+
+    fn id(&self) -> NeedsOverlayId {
+        match self {
+            Self::Mine(item) => NeedsOverlayId::Mine(item.n),
+            Self::Need(row) => {
+                let (kind, key) = row.id();
+                NeedsOverlayId::Need(kind, key)
+            }
+        }
+    }
+
+    fn need(&self) -> Option<&NeedRow> {
+        match self {
+            Self::Need(row) => Some(row),
+            Self::Mine(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum NeedsOverlayId {
+    Mine(usize),
+    Need(NeedKind, String),
+}
+
+struct NeedsProjection {
+    rows: Vec<NeedsOverlayRow>,
+    mine_shown: usize,
+    mine_total: usize,
+    need_shown: usize,
+    need_total: usize,
+}
+
+impl NeedsProjection {
+    fn selected_line(&self, sel: usize) -> usize {
+        if sel < self.mine_shown {
+            // instruction + MINE heading
+            2 + sel
+        } else {
+            // instruction + MINE heading/rows/footer + THEY NEED YOU heading
+            4 + self.mine_shown + sel.saturating_sub(self.mine_shown)
+        }
+    }
+}
+
 /// Cap on rendered rows (worst-first, so the cap drops only the least severe);
 /// the footer states the drop count. Matches the sideline card cap.
-const NEEDS_CAP: usize = 40;
+const NEEDS_CAP: usize = 10;
+const MINE_CAP: usize = 10;
 /// Re-open cache: a fold younger than this is reused instantly (mashing
 /// `prefix+a` never re-shells - Perspective B).
 const NEEDS_CACHE_TTL: Duration = Duration::from_secs(5);
@@ -8315,27 +8430,65 @@ enum NeedsFooter {
     AsOf,
 }
 
-/// Build the needs-me overlay lines (x-feec): the severity-ranked union + the
-/// selected row's answer options + a state footer, on the shared inverse-video
-/// chrome. `sel` is pre-clamped by the caller. A `▸` marks the selected row; an
-/// answerable row lists its numbered options, a focus-only row is tagged.
-/// Always renders something - an empty union shows "nothing needs you", so the
-/// overlay never opens blank.
+/// Build the needs-me overlay lines (x-feec, two-laned by x-f730): MINE (the
+/// operator's own priorities) above THEY NEED YOU (the severity-ranked union
+/// + the selected row's answer options), each with its own state footer, on
+/// the shared inverse-video chrome. `sel` is pre-clamped by the caller and
+/// indexes `projection.rows` (MINE rows first, then need rows) - a `▸` marks
+/// the selected row wherever it falls. An answerable row lists its numbered
+/// options only when it is the selected NEED row; a focus-only row is tagged.
+/// Always renders both headings - an empty NEED lane shows "nothing needs
+/// you", so the overlay never opens blank. Layout is pinned 1:1 with
+/// [`NeedsProjection::selected_line`]: MINE rows occupy exactly
+/// `mine_shown` lines and need rows exactly `need_shown` (or one "nothing
+/// needs you" line), with no extra divider row between them.
 fn needs_overlay_lines(
-    queue: &[NeedRow],
+    projection: &NeedsProjection,
     sel: usize,
-    dropped: usize,
-    footer: NeedsFooter,
+    mine_footer: NeedsFooter,
+    need_footer: NeedsFooter,
 ) -> Vec<String> {
+    let mine_rows = &projection.rows[..projection.mine_shown];
+    let need_rows = &projection.rows[projection.mine_shown..];
+
     let mut lines = vec![pad_to(
         " needs me · digit answers · n/N cycle · ⏎ goto · q close",
         ANSWER_OVERLAY_W,
     )];
-    if queue.is_empty() {
+
+    lines.push(pad_to(" MINE", ANSWER_OVERLAY_W));
+    for (i, row) in mine_rows.iter().enumerate() {
+        let NeedsOverlayRow::Mine(item) = row else {
+            continue;
+        };
+        let marker = if i == sel { '▸' } else { ' ' };
+        let check = if item.done { '✓' } else { ' ' };
+        lines.push(pad_to(
+            &format!(" {marker} [{check}] {}", item.text),
+            ANSWER_OVERLAY_W,
+        ));
+    }
+    let mine_footer_line = match mine_footer {
+        NeedsFooter::Folding => "   folding...".to_string(),
+        NeedsFooter::Degraded => "   MINE unavailable".to_string(),
+        NeedsFooter::AsOf if projection.mine_total > projection.mine_shown => format!(
+            "   {} of {} shown",
+            projection.mine_shown, projection.mine_total
+        ),
+        NeedsFooter::AsOf => String::new(),
+    };
+    lines.push(pad_to(&mine_footer_line, ANSWER_OVERLAY_W));
+
+    lines.push(pad_to(" THEY NEED YOU", ANSWER_OVERLAY_W));
+    if need_rows.is_empty() {
         lines.push(pad_to("   nothing needs you", ANSWER_OVERLAY_W));
     } else {
-        for (i, r) in queue.iter().enumerate() {
-            let marker = if i == sel { '▸' } else { ' ' };
+        for (i, row) in need_rows.iter().enumerate() {
+            let NeedsOverlayRow::Need(r) = row else {
+                continue;
+            };
+            let idx = projection.mine_shown + i;
+            let marker = if idx == sel { '▸' } else { ' ' };
             let tag = match r.kind {
                 NeedKind::BlockedFocusOnly => "  ⚠ focus",
                 _ => "",
@@ -8350,31 +8503,36 @@ fn needs_overlay_lines(
                 ANSWER_OVERLAY_W,
             ));
         }
-        lines.push(pad_to("", ANSWER_OVERLAY_W)); // divider row
-        if let Some(ans) = queue.get(sel).and_then(|r| r.answerable.as_ref()) {
-            if !ans.prompt.is_empty() {
-                lines.push(pad_to(
-                    &format!("   {}", ans.prompt.replace('\n', " ")),
-                    ANSWER_OVERLAY_W,
-                ));
-            }
-            for o in &ans.options {
-                lines.push(pad_to(
-                    &format!("     {}. {}", o.idx, o.label),
-                    ANSWER_OVERLAY_W,
-                ));
+        let selected_need = sel
+            .checked_sub(projection.mine_shown)
+            .and_then(|i| need_rows.get(i));
+        if let Some(NeedsOverlayRow::Need(r)) = selected_need {
+            if let Some(ans) = r.answerable.as_ref() {
+                if !ans.prompt.is_empty() {
+                    lines.push(pad_to(
+                        &format!("   {}", ans.prompt.replace('\n', " ")),
+                        ANSWER_OVERLAY_W,
+                    ));
+                }
+                for o in &ans.options {
+                    lines.push(pad_to(
+                        &format!("     {}. {}", o.idx, o.label),
+                        ANSWER_OVERLAY_W,
+                    ));
+                }
             }
         }
     }
-    let footer_line = match footer {
+    let need_footer_line = match need_footer {
         NeedsFooter::Folding => "   folding events...".to_string(),
         NeedsFooter::Degraded => "   events fold unavailable - live badges only".to_string(),
-        NeedsFooter::AsOf if dropped > 0 => {
-            format!("   {dropped} more hidden (worst shown first)")
-        }
+        NeedsFooter::AsOf if projection.need_total > projection.need_shown => format!(
+            "   {} of {} shown",
+            projection.need_shown, projection.need_total
+        ),
         NeedsFooter::AsOf => "   as of now".to_string(),
     };
-    lines.push(pad_to(&footer_line, ANSWER_OVERLAY_W));
+    lines.push(pad_to(&need_footer_line, ANSWER_OVERLAY_W));
     lines
 }
 
@@ -9307,10 +9465,11 @@ async fn attach_and_run(
     // x-feec: the needs-me event-fold leg runs off the UI loop and reports back
     // here, tagged with the generation token it was kicked under, so a slow
     // `fno-agents needs` never blocks the overlay and a result landing after the
-    // overlay closed/re-opened is discarded (AC6-FR). `None` = the fold failed.
+    // overlay closed/re-opened is discarded (AC6-FR). x-f730 widened the
+    // payload to `FoldOutcome`, the two independent legs (events, MINE) run
+    // under `fold_both` so one unavailable command never hides the other.
     let (needs_tx, mut needs_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::needs_overlay::FoldItem>>)>(
-        );
+        tokio::sync::mpsc::unbounded_channel::<(u64, crate::needs_overlay::FoldOutcome)>();
 
     // x-b2bf: the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
@@ -9387,7 +9546,7 @@ async fn attach_and_run(
                 .saturating_sub(NEEDS_WINDOW_SECS)
                 .to_string();
             tokio::spawn(async move {
-                let result = crate::needs_overlay::fold_now(&since).await;
+                let result = crate::needs_overlay::fold_both(&since).await;
                 let _ = tx.send((gen, result));
             });
         }
@@ -9734,9 +9893,12 @@ async fn attach_and_run(
                     }
                 }
             }
-            Some((gen, result)) = needs_rx.recv() => {
+            Some((gen, outcome)) = needs_rx.recv() => {
                 // x-feec: an event-fold landed; the in-flight fold is done, so a
-                // later open may spawn a fresh one (P2-5 bound).
+                // later open may spawn a fresh one (P2-5 bound). x-f730: the
+                // outcome now carries both legs (events + MINE), applied
+                // independently so one unavailable command never hides the
+                // other lane's render.
                 view.needs_inflight = false;
                 // Merge only if the overlay is still open under the same
                 // generation it was kicked for; a result for a closed/superseded
@@ -9744,7 +9906,7 @@ async fn attach_and_run(
                 // moved on (re-opened, still live-only), re-arm a fresh fold.
                 if gen == view.needs_gen && view.answers.is_some() {
                     let prev = view.answers_selected_id();
-                    match result {
+                    match outcome.needs {
                         Some(items) => {
                             view.needs_fold = Some(items);
                             view.needs_degraded = false;
@@ -9760,6 +9922,16 @@ async fn attach_and_run(
                         None => {
                             view.needs_fold = Some(Vec::new());
                             view.needs_degraded = true;
+                        }
+                    }
+                    match outcome.mine {
+                        Some(items) => {
+                            view.mine_fold = Some(items);
+                            view.mine_degraded = false;
+                        }
+                        None => {
+                            view.mine_fold = Some(Vec::new());
+                            view.mine_degraded = true;
                         }
                     }
                     view.reanchor_answers(prev);
@@ -10693,12 +10865,16 @@ async fn dispatch_event(
                 .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
             if fresh {
                 // Re-open within the cache TTL: reuse the last fold instantly
-                // (Perspective B - mashing prefix+a never re-shells).
+                // (Perspective B - mashing prefix+a never re-shells). MINE
+                // shares the same cache window - both legs fold together.
                 view.needs_degraded = false;
+                view.mine_degraded = false;
             } else {
                 // Stale/first open: live-only until the refresh lands.
                 view.needs_fold = None;
                 view.needs_degraded = false;
+                view.mine_fold = None;
+                view.mine_degraded = false;
                 view.needs_want = true;
             }
         }
@@ -13949,15 +14125,18 @@ async fn rename_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Needs-me overlay keys (x-feec, grown from x-c929): a digit answers the
-/// selected answerable row (unchanged [`ClientMsg::PaneAnswer`] - daemon-pinned
+/// Needs-me overlay keys (x-feec, grown from x-c929; x-f730 folded MINE in as
+/// a first, still-inert-to-digits lane): a digit answers the selected
+/// answerable NEED row (unchanged [`ClientMsg::PaneAnswer`] - daemon-pinned
 /// keystroke, fingerprint fail-closed, focus unchanged), `n`/`N` (and j/k/
-/// arrows) cycle the queue, Enter routes per kind (goto its pane/attach, else a
-/// focus-manually notice for a squadless live row), q/Esc closes. The queue is
-/// read once per chunk from the same [`View::needs_view`] the overlay draws, so
-/// the cursor and the rendered rows never diverge. An empty overlay (the
-/// "nothing needs you" state) closes on ANY key (AC4-EDGE). Closing bumps the
-/// generation token so an in-flight fold result is discarded (AC6-FR).
+/// arrows) cycle across BOTH lanes, Enter routes per kind (goto its
+/// pane/attach, else a focus-manually notice for a squadless live row or a
+/// MINE row - editing MINE in place is a later task), q/Esc closes. The
+/// projection is read once per chunk from the same [`View::needs_projection`]
+/// the overlay draws, so the cursor and the rendered rows never diverge. An
+/// empty overlay (the "nothing needs you" state) closes on ANY key
+/// (AC4-EDGE). Closing bumps the generation token so an in-flight fold result
+/// is discarded (AC6-FR).
 async fn answer_keys(
     view: &mut View,
     bytes: &[u8],
@@ -13966,7 +14145,7 @@ async fn answer_keys(
     let mut esc = std::mem::take(&mut view.ans_esc);
     let keys = fold_selector_keys(&mut esc, bytes); // arrows -> hjkl twins
     view.ans_esc = esc;
-    let (queue, _) = view.needs_view();
+    let projection = view.needs_projection();
     // Active squad/tab, captured once (the layout is stable within a key chunk):
     // an Enter goto sends SelectSquad/SelectTab only when they would change the
     // view, mirroring the x-653d nav goto so a same-context row emits just
@@ -13981,7 +14160,7 @@ async fn answer_keys(
         .map(|t| t.id);
     for &k in &keys {
         // The empty "nothing needs you" state: any key dismisses it (AC4-EDGE).
-        if queue.is_empty() {
+        if projection.rows.is_empty() {
             view.answers = None;
             view.needs_gen = view.needs_gen.wrapping_add(1);
             break;
@@ -13989,24 +14168,28 @@ async fn answer_keys(
         let Some(cur0) = view.answers else {
             break; // closed mid-chunk
         };
-        let cur = cur0.min(queue.len() - 1);
+        let cur = cur0.min(projection.rows.len() - 1);
         view.answers = Some(cur);
         match k {
             // Cycle: n/N are the documented keys; j/k and folded arrows too.
-            b'n' | b'j' => view.answers = Some((cur + 1) % queue.len()),
-            b'N' | b'k' => view.answers = Some((cur + queue.len() - 1) % queue.len()),
+            b'n' | b'j' => view.answers = Some((cur + 1) % projection.rows.len()),
+            b'N' | b'k' => {
+                view.answers = Some((cur + projection.rows.len() - 1) % projection.rows.len())
+            }
             b'0'..=b'9' => {
-                let sel = &queue[cur];
-                let picked = sel
-                    .answerable
-                    .as_ref()
-                    .and_then(|a| {
-                        a.options
-                            .iter()
-                            .find(|o| o.idx.as_bytes().first() == Some(&k))
-                            .map(|o| (a, o))
-                    })
-                    .zip(sel.pane_id);
+                // A MINE row has no `NeedRow` to answer - `.need()` is None and
+                // this always beeps, same as a non-answerable NEED row.
+                let picked = projection.rows[cur].need().and_then(|sel| {
+                    sel.answerable
+                        .as_ref()
+                        .and_then(|a| {
+                            a.options
+                                .iter()
+                                .find(|o| o.idx.as_bytes().first() == Some(&k))
+                                .map(|o| (a, o))
+                        })
+                        .zip(sel.pane_id)
+                });
                 match picked {
                     Some(((ans, o), pane)) => {
                         // Only ever the daemon-pinned keystroke; focus unchanged.
@@ -14024,9 +14207,10 @@ async fn answer_keys(
                         .await
                         .map_err(|e| format!("answer send failed: {e}"))?;
                     }
-                    // A digit with no matching option (or a non-answerable row,
-                    // e.g. review-wedged / budget / focus-only) is a local BEL,
-                    // never a stray key sent to any pane (x-c929 invariant).
+                    // A digit with no matching option (a MINE row, or a
+                    // non-answerable NEED row, e.g. review-wedged / budget /
+                    // focus-only) is a local BEL, never a stray key sent to
+                    // any pane (x-c929 invariant).
                     None => {
                         let _ = raw_out(b"\x07");
                     }
@@ -14035,30 +14219,36 @@ async fn answer_keys(
             b'\r' | b'\n' => {
                 // Goto the row's target (x-653d): SelectSquad/SelectTab only when
                 // they change the view, then FocusPane; a paneless watch-only row
-                // attaches; a squadless live fold row has no reachable pane here,
-                // so it degrades to a notice (Invariant: every item actionable).
-                let row = &queue[cur];
-                if let Some(pane) = row.pane_id {
-                    let switching = row.squad.is_some_and(|s| s != active_squad);
-                    if let Some(sq) = row.squad.filter(|_| switching) {
-                        write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(sq)))
+                // attaches; a squadless live fold row - or a MINE row, which
+                // owns no pane at all - has no reachable pane here, so it
+                // degrades to a notice (Invariant: every item actionable).
+                match projection.rows[cur].need() {
+                    Some(row) if row.pane_id.is_some() => {
+                        let pane = row.pane_id.expect("checked Some above");
+                        let switching = row.squad.is_some_and(|s| s != active_squad);
+                        if let Some(sq) = row.squad.filter(|_| switching) {
+                            write_msg(sock_w, &ClientMsg::Command(Command::SelectSquad(sq)))
+                                .await
+                                .map_err(|e| format!("command send failed: {e}"))?;
+                        }
+                        if let Some(tid) = row.tab.filter(|&t| switching || active_tab != Some(t)) {
+                            write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(tid)))
+                                .await
+                                .map_err(|e| format!("command send failed: {e}"))?;
+                        }
+                        write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pane)))
                             .await
                             .map_err(|e| format!("command send failed: {e}"))?;
                     }
-                    if let Some(tid) = row.tab.filter(|&t| switching || active_tab != Some(t)) {
-                        write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(tid)))
+                    Some(row) if row.attach_id.is_some() => {
+                        let id = row.attach_id.as_ref().expect("checked Some above");
+                        write_msg(sock_w, &ClientMsg::Command(Command::attach_agent(id)))
                             .await
                             .map_err(|e| format!("command send failed: {e}"))?;
                     }
-                    write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pane)))
-                        .await
-                        .map_err(|e| format!("command send failed: {e}"))?;
-                } else if let Some(id) = &row.attach_id {
-                    write_msg(sock_w, &ClientMsg::Command(Command::attach_agent(id)))
-                        .await
-                        .map_err(|e| format!("command send failed: {e}"))?;
-                } else {
-                    view.set_notice("no pane here - focus it manually".into());
+                    _ => {
+                        view.set_notice("no pane here - focus it manually".into());
+                    }
                 }
                 view.answers = None;
                 view.needs_gen = view.needs_gen.wrapping_add(1);
@@ -26760,6 +26950,15 @@ mod tests {
         }
     }
 
+    fn mine_item(n: usize, text: &str, done: bool) -> crate::needs_overlay::MineItem {
+        crate::needs_overlay::MineItem {
+            n,
+            text: text.into(),
+            done,
+            node: None,
+        }
+    }
+
     // (x-6851 US3) AC3-HP: a squad-matched agent whose cwd is FOREIGN to the
     // squad's project gets a dim, inert Sub row carrying the foreign cwd_base
     // alone (no branch); the selector skips it; and line 1 carries no
@@ -26902,32 +27101,39 @@ mod tests {
     // kind sorts ahead of focus-only (severity order).
     #[test]
     fn needs_overlay_lines_mark_selection_and_tag_focus_only() {
-        let v = view_with_agents(vec![
+        let mut v = view_with_agents(vec![
             blocked_row("peer", 4, Some(answerable(&[("1", "Yes"), ("2", "No")], 7))),
             blocked_row("other", 5, None),
         ]);
-        let (queue, dropped) = v.needs_view();
-        let lines = needs_overlay_lines(&queue, 0, dropped, NeedsFooter::AsOf);
-        assert!(
-            lines[1].contains('▸') && lines[1].contains("peer"),
-            "{:?}",
-            lines[1]
-        );
-        assert!(lines[2].contains("other") && lines[2].contains("⚠ focus"));
+        v.mine_fold = Some(Vec::new());
+        let projection = v.needs_projection();
+        let lines = needs_overlay_lines(&projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
+        let selected = lines.iter().find(|l| l.contains('▸')).unwrap();
+        assert!(selected.contains("peer"), "{selected:?}");
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("other") && l.contains("⚠ focus")));
         assert!(lines.iter().any(|l| l.contains("1. Yes")));
         assert!(lines.iter().any(|l| l.contains("2. No")));
         // Selecting the focus-only row shows no answer options.
-        let lines = needs_overlay_lines(&queue, 1, dropped, NeedsFooter::AsOf);
+        let lines = needs_overlay_lines(&projection, 1, NeedsFooter::AsOf, NeedsFooter::AsOf);
         assert!(!lines.iter().any(|l| l.contains("1. Yes")));
     }
 
     // The empty union renders the "nothing needs you" state, never a blank
-    // overlay (AC4-EDGE), and states the drop count when the cap trims (footer).
+    // overlay (AC4-EDGE), and states the true total when the cap trims (footer).
     #[test]
     fn needs_overlay_lines_empty_and_capped_footers() {
-        let empty = needs_overlay_lines(&[], 0, 0, NeedsFooter::AsOf);
+        let empty_projection = NeedsProjection {
+            rows: Vec::new(),
+            mine_shown: 0,
+            mine_total: 0,
+            need_shown: 0,
+            need_total: 0,
+        };
+        let empty = needs_overlay_lines(&empty_projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
         assert!(empty.iter().any(|l| l.contains("nothing needs you")));
-        let one = vec![NeedRow {
+        let one_row = NeedRow {
             kind: NeedKind::BudgetStop,
             name: "x".into(),
             reason: "stopped".into(),
@@ -26938,13 +27144,112 @@ mod tests {
             attach_id: None,
             squad: Some(1),
             tab: None,
-        }];
-        let degraded = needs_overlay_lines(&one, 0, 0, NeedsFooter::Degraded);
+        };
+        let one_projection = NeedsProjection {
+            rows: vec![NeedsOverlayRow::Need(one_row.clone())],
+            mine_shown: 0,
+            mine_total: 0,
+            need_shown: 1,
+            need_total: 1,
+        };
+        let degraded =
+            needs_overlay_lines(&one_projection, 0, NeedsFooter::AsOf, NeedsFooter::Degraded);
         assert!(degraded
             .iter()
             .any(|l| l.contains("events fold unavailable")));
-        let capped = needs_overlay_lines(&one, 0, 7, NeedsFooter::AsOf);
-        assert!(capped.iter().any(|l| l.contains("7 more hidden")));
+        let capped_projection = NeedsProjection {
+            rows: vec![NeedsOverlayRow::Need(one_row)],
+            mine_shown: 0,
+            mine_total: 0,
+            need_shown: 1,
+            need_total: 8,
+        };
+        let capped =
+            needs_overlay_lines(&capped_projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
+        assert!(capped.iter().any(|l| l.contains("1 of 8 shown")));
+    }
+
+    #[test]
+    fn mine_renders_before_they_need_you_and_preserves_grouped_file_order() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(vec![
+            mine_item(1, "first done", true),
+            mine_item(2, "first open", false),
+            mine_item(3, "second open", false),
+        ]);
+        v.needs_fold = Some(vec![fold_item("operator_question", "question", true)]);
+
+        let projection = v.needs_projection();
+        assert_eq!(projection.rows.len(), 4);
+        assert_eq!(projection.rows[0].label(), "first open");
+        assert_eq!(projection.rows[1].label(), "second open");
+        assert_eq!(projection.rows[2].label(), "first done");
+        assert_eq!(projection.rows[3].label(), "question");
+        let lines = needs_overlay_lines(&projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
+        let mine = lines.iter().position(|l| l.contains("MINE")).unwrap();
+        let they = lines
+            .iter()
+            .position(|l| l.contains("THEY NEED YOU"))
+            .unwrap();
+        assert!(mine < they);
+        assert!(lines[mine + 1].contains("first open"));
+    }
+
+    #[test]
+    fn needs_lane_caps_at_ten_and_footer_names_true_total() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(
+            (0..11)
+                .map(|i| fold_item("operator_question", &format!("question-{i:02}"), true))
+                .collect(),
+        );
+        let projection = v.needs_projection();
+        assert_eq!(projection.need_total, 11);
+        assert_eq!(projection.need_shown, 10);
+        let lines = needs_overlay_lines(&projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
+        assert!(lines.iter().any(|l| l.contains("10 of 11 shown")));
+    }
+
+    #[test]
+    fn mine_failure_is_visible_while_operator_question_remains() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.mine_degraded = true;
+        v.needs_fold = Some(vec![fold_item("operator_question", "question", true)]);
+        let projection = v.needs_projection();
+        let lines = needs_overlay_lines(&projection, 0, NeedsFooter::Degraded, NeedsFooter::AsOf);
+        assert!(lines.iter().any(|l| l.contains("MINE unavailable")));
+        assert!(lines.iter().any(|l| l.contains("question")));
+    }
+
+    #[test]
+    fn operator_overlay_filters_mail_traffic_but_keeps_operator_question() {
+        let mut v = view_with_agents(vec![]);
+        v.needs_fold = Some(vec![
+            fold_item("mail_question", "mail-q", true),
+            fold_item("mail_delivery_miss", "mail-miss", true),
+            fold_item("operator_question", "operator-q", true),
+        ]);
+        // needs_queue() itself still carries mail_question (a live badge still
+        // needs it - see mail_question_fold_item_renders_squadless_not_dropped);
+        // the operator PANEL's own accessor is what filters it.
+        let q = v.needs_operator_queue();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].name, "operator-q");
+    }
+
+    #[test]
+    fn rendered_cursor_indexes_the_same_projection_row() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(vec![mine_item(1, "mine-one", false)]);
+        v.needs_fold = Some(vec![fold_item("operator_question", "operator-q", true)]);
+        let projection = v.needs_projection();
+        let selected = 1;
+        let lines =
+            needs_overlay_lines(&projection, selected, NeedsFooter::AsOf, NeedsFooter::AsOf);
+        let selected_line = lines.iter().find(|line| line.contains('▸')).unwrap();
+        assert!(selected_line.contains(projection.rows[selected].label()));
     }
 
     // ---- x-b2bf: the yard ----
@@ -27336,13 +27641,13 @@ mod tests {
         // Squadless first: no roster row, item is live -> name is the session id.
         let mut v = view_with_agents(vec![]);
         v.needs_fold = Some(vec![fold_item("budget_stop", "wkr", true)]);
-        let squadless_id = v.needs_view().0[0].id();
+        let squadless_id = v.needs_queue()[0].id();
         // Now the roster row appears: the item joins and its name flips to "wkr"
         // (already the same here, so use a distinct roster name to prove it).
         let mut joined_row = agent_row("wkr-pane", 5, Some(AgentBadge::Working), false);
         joined_row.cwd_base = Some("wkr".into()); // join by cwd_base, name differs
         v.layout.agents = vec![joined_row];
-        let joined = &v.needs_view().0[0];
+        let joined = &v.needs_queue()[0];
         assert_eq!(
             joined.name, "wkr-pane",
             "display name flips to the roster row"
