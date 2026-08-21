@@ -160,8 +160,9 @@ def _drain_setup(monkeypatch, msg):
     class _Ident:
         harness = "claude"
         session_id = "abcd1234"
+        disposition = "single"
 
-    monkeypatch.setattr(harness_identity, "resolve_harness_identity", lambda: _Ident())
+    monkeypatch.setattr("fno.agents.self_stamp.resolve_self_identity", lambda: _Ident())
     monkeypatch.setattr(harness_identity, "canonical_handle", lambda sid: "cl-abcd1234")
     monkeypatch.setattr(
         cursor_mod, "scan_unread", lambda h: [msg] if h == "cl-abcd1234" else []
@@ -346,8 +347,9 @@ def _notify_setup(monkeypatch, msgs):
     class _Ident:
         harness = "claude"
         session_id = "abcd1234"
+        disposition = "single"
 
-    monkeypatch.setattr(harness_identity, "resolve_harness_identity", lambda: _Ident())
+    monkeypatch.setattr("fno.agents.self_stamp.resolve_self_identity", lambda: _Ident())
     monkeypatch.setattr(harness_identity, "canonical_handle", lambda sid: "cl-abcd1234")
     monkeypatch.setattr(cursor_mod, "scan_unread", lambda h: msgs if h == "cl-abcd1234" else [])
     monkeypatch.setattr(mail_cli, "_sent_unclaimed", lambda *a, **k: [])

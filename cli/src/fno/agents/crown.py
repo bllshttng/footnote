@@ -106,9 +106,11 @@ def calling_agent_row():
     """
     from fno.agents.registry import load_registry
     from fno.agents.whoami import _find_by_session
-    from fno.harness_identity import resolve_harness_identity
+    from fno.agents.self_stamp import resolve_self_identity
 
-    ident = resolve_harness_identity()
+    ident = resolve_self_identity()
+    if ident.disposition == "ambiguous":
+        return REGISTRY_UNREADABLE
     if not ident.session_id or not ident.harness:
         return None
     try:

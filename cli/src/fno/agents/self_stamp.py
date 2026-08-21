@@ -20,6 +20,10 @@ _TAIL_BYTES = 256 * 1024
 _EXPANDED_TAIL_BYTES = 2 * 1024 * 1024
 
 
+class IdentityAmbiguousError(RuntimeError):
+    """The ambient markers disagree and no process-tree proof is available."""
+
+
 def _owned_ident(env: Optional[Mapping[str, str]] = None):
     """Owned identity with the process-tree prover wired, so a foreign marker
     this process inherited is contradicted (not stamped) even from a stamper
@@ -30,6 +34,34 @@ def _owned_ident(env: Optional[Mapping[str, str]] = None):
     true_harness = resolve_session_harness()
     prove = None if true_harness is None else (lambda harness, sid: harness == true_harness)
     return resolve_owned_identity(env, prove=prove)
+
+
+def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
+    """Resolve the identity this process can prove it owns."""
+    return _owned_ident(env)
+
+
+def identity_ambiguity_message(identity) -> str:
+    """Render the single refusal sentence for an unproven mixed environment."""
+    markers = ", ".join(marker for marker, _harness, _value in identity.markers_present)
+    lookup_id = next(
+        (value for _marker, _harness, value in identity.markers_present), "<session-id>"
+    )
+    return (
+        "cannot decide which session is 'self': multiple harness markers present "
+        "(inherited env?)\n"
+        f"markers: {markers}\n"
+        "resolve with: find ~/.codex/sessions ~/.claude/projects -name "
+        f"'*{lookup_id}*'"
+    )
+
+
+def require_self_identity(env: Optional[Mapping[str, str]] = None):
+    """Return owned identity or refuse to let a mixed environment guess."""
+    identity = resolve_self_identity() if env is None else resolve_self_identity(env)
+    if identity.disposition == "ambiguous":
+        raise IdentityAmbiguousError(identity_ambiguity_message(identity))
+    return identity
 
 
 def stamp_from(from_name: Optional[str]) -> str:
@@ -53,7 +85,7 @@ def resolve_self_handle(
     env: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
     """Return this process's proven harness handle, or omit it when ambiguous."""
-    ident = _owned_ident(env)
+    ident = resolve_self_identity(env)
     if ident.session_id and ident.harness:
         return canonical_handle(ident.session_id)
     return None
@@ -66,7 +98,7 @@ def resolve_self_model(env: Optional[Mapping[str, str]] = None) -> str:
     ``turn_context``. Any miss (no ambient identity, unreadable store, no match)
     floors to ``"unknown"`` so a send is never blocked on model resolution.
     """
-    ident = _owned_ident(env)
+    ident = resolve_self_identity(env)
     if not ident.session_id or not ident.harness:
         return "unknown"
     try:

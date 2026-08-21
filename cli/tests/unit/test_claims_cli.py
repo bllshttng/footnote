@@ -787,10 +787,10 @@ def test_non_node_key_uses_cwd_not_global(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _row(name, state, node):
+def _row(name, state, node, cwd="/tmp/wt"):
     from fno.agents.watchdog import Row
 
-    return Row(row_id=name, name=name, state=state, node=node, cwd="/tmp/wt")
+    return Row(row_id=name, name=name, state=state, node=node, cwd=cwd)
 
 
 @pytest.fixture
@@ -825,6 +825,25 @@ def test_free_node_with_nobody_names_the_scan_it_consulted(cwd_tmp, fake_roster)
     fake_roster(rows=[_row("t-other", "working", "x-other")])
     r = runner.invoke(cli, ["status", "node:x-76d1"])
     assert "free, no live worker found (roster scanned: 1 rows)" in r.output
+
+
+def test_free_node_reports_unresolved_roster_rows(cwd_tmp, fake_roster):
+    fake_roster(rows=[_row("t-x76d1-near-miss", "working", None, "/tmp/x-76d1")])
+    r = runner.invoke(cli, ["status", "node:x-76d1", "--json"])
+    assert r.exit_code == 0
+    info = json.loads(r.output)
+    assert info["state"] == "free"
+    assert info["roster_rows_scanned"] == 1
+    assert info["roster_rows_unresolved"] == 1
+    assert info["roster_unresolved_candidates"] == ["t-x76d1-near-miss"]
+
+
+def test_free_node_names_worktree_near_miss_in_human_line(cwd_tmp, fake_roster):
+    fake_roster(rows=[_row("t-x76d1-near-miss", "working", None, "/tmp/x-76d1")])
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert "no row resolved to this node" in r.output
+    assert "t-x76d1-near-miss" in r.output
+    assert "fno agents peek t-x76d1-near-miss" in r.output
 
 
 def test_the_crosscheck_leaves_stdout_parseable_as_json(cwd_tmp, fake_roster):

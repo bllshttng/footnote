@@ -202,6 +202,40 @@ class TestWhoamiCLI:
         payload = json.loads(result.stdout)
         assert payload["registered"] is False
 
+    def test_ambiguous_harness_markers_refuse_with_distinct_exit(self, tmp_path, runner, monkeypatch):
+        use_tmpdir(monkeypatch, tmp_path)
+        monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
+        monkeypatch.setenv("CODEX_THREAD_ID", "01a02125-aaaa-bbbb-cccc-dddddddddddd")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "2782a6e1-aaaa-bbbb-cccc-dddddddddddd")
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_harness",
+            lambda from_pid=None: None,
+        )
+        result = runner.invoke(agents_app, ["whoami", "--json"])
+        assert result.exit_code == 4
+        assert "cannot decide which session is 'self'" in result.stderr
+        assert "CODEX_THREAD_ID" in result.stderr
+        assert "resolve with: find ~/.codex/sessions ~/.claude/projects" in result.stderr
+
+    def test_proven_claude_identity_beats_inherited_codex_marker(self, tmp_path, runner, monkeypatch):
+        use_tmpdir(monkeypatch, tmp_path)
+        claude_sid = "2782a6e1-aaaa-bbbb-cccc-dddddddddddd"
+        write_registry([_claude(harness_session_id=claude_sid)])
+        monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
+        monkeypatch.setenv("CODEX_THREAD_ID", "01a02125-aaaa-bbbb-cccc-dddddddddddd")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", claude_sid)
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_harness",
+            lambda from_pid=None: "claude",
+        )
+        result = runner.invoke(agents_app, ["whoami", "--json"])
+        assert result.exit_code == 0, result.stdout + result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["name"] == "spawn-x-301a-whoami"
+        assert payload["provider"] == "claude"
+        assert payload["resolved_via"] == "session-fallback"
+        assert "01a02125" not in result.stdout
+
     def test_live_status_shellout_warning_surfaced(self, tmp_path, runner, monkeypatch):
         # codex finding 2: claude_agents_json returns ({}, [warns]) WITHOUT
         # raising on a shellout failure, so the warning must be forwarded to

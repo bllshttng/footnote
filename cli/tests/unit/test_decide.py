@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -20,6 +21,24 @@ from typer.testing import CliRunner
 from fno.decide.cli import decide_app
 
 runner = CliRunner()
+
+
+def test_operator_lane_refusal_uses_proven_identity(monkeypatch):
+    from types import SimpleNamespace
+
+    from fno.decide import RefusedAuthorityError
+    from fno.decide import _resolve_decider
+
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id="2782a6e1-aaaa-bbbb-cccc-dddddddddddd",
+            harness="claude",
+            disposition="proven",
+        ),
+    )
+    with pytest.raises(RefusedAuthorityError, match="2782a6e1"):
+        _resolve_decider(None, "operator")
 
 
 def test_backlog_decide_records_with_positional_subject_and_decision(
@@ -1170,9 +1189,8 @@ def test_resolve_agent_identity_defaults_decider_and_authority(
 
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=session_id, harness="codex", disposition="single"),
     )
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
@@ -1199,9 +1217,8 @@ def test_no_identity_at_a_terminal_names_the_operator_but_claims_no_authority(
     from fno import harness_identity
 
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(None, None),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
     )
     monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
 
@@ -1229,9 +1246,8 @@ def test_no_identity_and_no_terminal_refuses_operator_authority(
     from fno import harness_identity
 
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(None, None),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
     )
     monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: False)
 
@@ -1278,9 +1294,8 @@ def test_an_agent_cannot_type_a_name_into_decided_by(
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     handle = harness_identity.canonical_handle(session_id)
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=session_id, harness="codex", disposition="single"),
     )
 
     runner.invoke(
@@ -1324,9 +1339,8 @@ def test_record_decision_refuses_agent_operator_authority_before_either_write(
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     handle = harness_identity.canonical_handle(session_id)
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=session_id, harness="codex", disposition="single"),
     )
 
     with pytest.raises(RefusedAuthorityError, match=handle):
@@ -1369,9 +1383,8 @@ def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     handle = harness_identity.canonical_handle(session_id)
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=session_id, harness="codex", disposition="single"),
     )
 
     refused = runner.invoke(
@@ -1425,9 +1438,8 @@ def test_no_identity_explicit_operator_authority_records(
     from fno import harness_identity
 
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(None, None),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
     )
     monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
 
@@ -1908,9 +1920,8 @@ def test_only_an_attended_caller_writes_attested_by(
     from fno import harness_identity
 
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(None, None),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
     )
     monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
     runner.invoke(
@@ -1929,10 +1940,11 @@ def test_only_an_attended_caller_writes_attested_by(
     )
 
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(
-            "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", "codex"
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
+            harness="codex",
+            disposition="single",
         ),
     )
     runner.invoke(decide_app, ["--subject", "pr-921", "--decision", "held"])
@@ -1955,9 +1967,8 @@ def test_relaying_nothing_records_no_relayed_by(
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     handle = harness_identity.canonical_handle(session_id)
     monkeypatch.setattr(
-        harness_identity,
-        "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=session_id, harness="codex", disposition="single"),
     )
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])

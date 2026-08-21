@@ -152,7 +152,7 @@ done <<< "$PINNED_PHRASES"
 if [[ -n "$STALE_DATES" ]]; then
   STALE_REPORT="$(STALE_DATES="$STALE_DATES" MAX_AGE_DAYS="$MAX_AGE_DAYS" python3 - <<'PY'
 import os, datetime
-today = datetime.date.today()
+today = datetime.datetime.now(datetime.timezone.utc).date()
 max_age = int(os.environ["MAX_AGE_DAYS"])
 out = []
 for rec in os.environ["STALE_DATES"].splitlines():
