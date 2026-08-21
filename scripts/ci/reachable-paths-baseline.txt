@@ -1,0 +1,91 @@
+# scripts/ci/reachable-paths-baseline.txt - the reachable-paths ratchet.
+#
+# Held by scripts/ci/check-reachable-paths.sh. A line here is a KNOWN twin,
+# duplication, or registry offender, with a reason. The gate fails on:
+#   - a NEW finding not listed here (single-source it, or add a line + reason),
+#   - a STALE line (one side changed alone, or an offender was fixed - update
+#     the sibling or delete the line in the same PR that changed it).
+#
+# Engine A classes:
+#   protocol  cross-process contract (event kind, config key, envelope tag,
+#             argv flag). Twin BY DESIGN: both sides must agree forever, and
+#             the stale check is what now guards that agreement.
+#   msg-twin  the same user-facing message maintained in .py and .rs. Sync
+#             guarded until single-sourced (campaign node owns the collapse).
+#   data      inert constant (path, filename, URL).
+A	(`fno agents spawn --provider <vendor> --model <m>`).	# msg-twin: py=cli/src/fno/_flag_aliases.py rs=crates/fno-agents/src/mail_inject.rs
+A	(not yet implemented; planned for a future story)	# msg-twin: py=cli/src/fno/agents/cli.py rs=crates/fno-agents/src/client_verbs.rs
+A	--dangerously-bypass-approvals-and-sandbox	# protocol: py=cli/src/fno/agents/harnesses/codex.py rs=crates/fno-agents/src/codex_ask.rs
+A	--dangerously-skip-permissions	# protocol: py=cli/src/fno/agents/harnesses/claude.py rs=crates/fno-agents/src/agy_ask.rs
+A	--permission-mode and --yolo are mutually exclusive; pass one	# msg-twin: py=cli/src/fno/agents/cli.py rs=crates/fno-agents/src/bin/client.rs
+A	--provider was split at the axis rename: the cli binary is --harness/-h;	# msg-twin: py=cli/src/fno/_flag_aliases.py rs=crates/fno-agents/src/mail_inject.rs
+A	--tail must be >= 0 (got {tail})	# msg-twin: py=cli/src/fno/agents/cli.py rs=crates/fno-agents/src/client_verbs.rs
+A	--workspace/-s needs a nonblank workspace name	# msg-twin: py=cli/src/fno/agents/cli.py rs=crates/fno-agents/src/bin/client.rs
+A	/code-review <level> --comment	# protocol: py=cli/src/fno/config/__init__.py rs=crates/fno-agents/src/loopcheck.rs
+A	/scripts/ci/preflight.sh	# data: py=cli/src/fno/pr/_preflight.py rs=crates/fno-agents/src/verify_evidence.rs
+A	/var/lib/dbus/machine-id	# data: py=cli/src/fno/claims/hostid.py rs=crates/fno-agents/src/claims.rs
+A	</cross-session-message>	# protocol: py=cli/src/fno/agents/harnesses/claude.py rs=crates/fno-agents/src/claude_ask.rs
+A	[self-cert: asserts no review evidence]	# msg-twin: py=cli/src/fno/target/orient.py rs=crates/fno-agents/src/loopcheck.rs
+A	^backgrounded · ([0-9a-f]{8}) ·	# protocol: py=cli/src/fno/agents/harnesses/claude.py rs=crates/fno-agents/src/claude_ask.rs
+A	a model vendor is only routable at spawn	# msg-twin: py=cli/src/fno/_flag_aliases.py rs=crates/fno-agents/src/mail_inject.rs
+A	accepted forms: name, canonical handle, transport short id, or full session id	# msg-twin: py=cli/src/fno/agents/registry.py rs=crates/fno-agents/src/client_verbs.rs
+A	agent name must not be empty	# msg-twin: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/claude_ask.rs
+A	agent_status_stamp_failed	# protocol: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/claude_ask.rs
+A	an unsupported submit contract cannot carry a nonzero delay	# msg-twin: py=cli/src/fno/agents/harness_map.py rs=crates/fno-agents/src/harness_capabilities.rs
+A	anthropic_default_haiku_model	# protocol: py=cli/src/fno/agents/model_routing.py rs=crates/fno-agents/src/model_env_scrub.rs
+A	claim_idempotent_reacquired	# protocol: py=cli/src/fno/claims/events.py rs=crates/fno-agents/src/claims.rs
+A	claude attach failed: {exc}	# msg-twin: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/client_verbs.rs
+A	claude logs: claude binary not found on path; install claude or check $path	# msg-twin: py=cli/src/fno/agents/harnesses/claude.py rs=crates/fno-agents/src/client_verbs.rs
+A	claude_code_stop_hook_block_cap	# protocol: py=cli/src/fno/agents/harnesses/claude.py rs=crates/fno-agents/src/loopcheck.rs
+A	context={coverage_status_context}	# protocol: py=cli/src/fno/pr/_reviews.py rs=crates/fno-agents/src/loopcheck.rs
+A	delivery-evaluate-response.v1	# protocol: py=cli/src/fno/delivery/contracts.py rs=crates/fno-agents/src/delivery_completion.rs
+A	delivery_verdict_evaluated	# protocol: py=cli/src/fno/delivery/contracts.py rs=crates/fno-agents/src/delivery_completion.rs
+A	description={description}	# protocol: py=cli/src/fno/pr/_reviews.py rs=crates/fno-agents/src/loopcheck.rs
+A	empty supported {action}	# msg-twin: py=cli/src/fno/agents/harness_map.py rs=crates/fno-agents/src/harness_capabilities.rs
+A	failed to read {log_path}: {exc}	# msg-twin: py=cli/src/fno/agents/read.py rs=crates/fno-agents/src/client_verbs.rs
+A	fno agents resume: registry read failed: {exc}	# msg-twin: py=cli/src/fno/agents/resume_cli.py rs=crates/fno-agents/src/client_verbs.rs
+A	fno agents trace: agent name is required unless --all is set	# msg-twin: py=cli/src/fno/agents/trace_cli.py rs=crates/fno-agents/src/client_verbs.rs
+A	fno mux ls --json failed	# msg-twin: py=cli/src/fno/update.py rs=crates/fno/src/client.rs
+A	fno_global_settings_path	# protocol: py=cli/src/fno/adapters/providers/loader.py rs=crates/fno-agents/src/agents_config.rs
+A	fno_mux_shell_integration	# protocol: py=cli/src/fno/agents/mux_spawn.py rs=crates/fno/src/client.rs
+A	fno_spawn_gate=0 operator bypass	# msg-twin: py=cli/src/fno/agents/spawn_gate.py rs=crates/fno-agents/src/spawn_gate.rs
+A	from-name must not be empty	# msg-twin: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/claude_ask.rs
+A	harness_capabilities.toml	# data: py=cli/src/fno/agents/harness_map.py rs=crates/fno-agents/src/harness_capabilities.rs
+A	holder must be non-empty	# msg-twin: py=cli/src/fno/claims/core.py rs=crates/fno-agents/src/claims.rs
+A	https://api.z.ai/api/anthropic	# data: py=cli/src/fno/agents/model_routing.py rs=crates/fno-agents/src/model_env_scrub.rs
+A	interactive resume single-writer	# msg-twin: py=cli/src/fno/agents/resume_cli.py rs=crates/fno-agents/src/client_verbs.rs
+A	key and holder must be non-empty	# msg-twin: py=cli/src/fno/claims/core.py rs=crates/fno-agents/src/claims.rs
+A	live but not currently routable	# msg-twin: py=cli/src/fno/agents/mux_spawn.py rs=crates/fno-agents/src/gc.rs
+A	message must be non-empty	# msg-twin: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/claude_ask.rs
+A	mine: failed: item text must be one non-empty line	# msg-twin: py=cli/src/fno/outstanding/mine.py rs=crates/fno/src/client.rs
+A	needs every session lane	# msg-twin: py=cli/src/fno/agents/harness_map.py rs=crates/fno-agents/src/harness_capabilities.rs
+A	no active drive authority	# msg-twin: py=cli/src/fno/agents/cli.py rs=crates/fno-agents/src/client_verbs.rs
+A	once: {name} ({provider}/{session_or_short_id}) torn down	# msg-twin: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/codex_ask.rs
+A	one-shot-provider-no-persistent-session	# protocol: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/client_verbs.rs
+A	operator_question_closed	# protocol: py=cli/src/fno/events/__init__.py rs=crates/fno-agents/src/loopcheck.rs
+A	postmortem_corrections_log	# protocol: py=cli/src/fno/hermetic.py rs=crates/fno-agents/src/finalize.rs
+A	preassigned-or-session-start	# protocol: py=cli/src/fno/agents/harness_map.py rs=crates/fno-agents/src/harness_capabilities.rs
+A	refused-newer-than-transcript	# protocol: py=cli/src/fno/agents/row_contradiction.py rs=crates/fno-agents/src/daemon.rs
+A	registry read failed: {exc}	# msg-twin: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/client_verbs.rs
+A	repos/:owner/:repo/statuses/{head}	# protocol: py=cli/src/fno/pr/_reviews.py rs=crates/fno-agents/src/loopcheck.rs
+A	resume-attach:{short_id}	# protocol: py=cli/src/fno/agents/resume_cli.py rs=crates/fno-agents/src/client_verbs.rs
+A	roster-live-inject-failed	# protocol: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/claude_ask.rs
+A	route_provider,route_model	# protocol: py=cli/src/fno/config/__init__.py rs=crates/fno-agents/src/loopcheck.rs
+A	run the review verb at head	# msg-twin: py=cli/src/fno/pr/_merge.py rs=crates/fno-agents/src/loopcheck.rs
+A	sandbox_mode=workspace-write	# protocol: py=cli/src/fno/agents/harnesses/codex.py rs=crates/fno-agents/src/provider.rs
+A	send_keys_enter_delay_ms	# protocol: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/harness_capabilities.rs
+A	spawn-gate: corrupted slot claim {key} ignored	# msg-twin: py=cli/src/fno/agents/spawn_gate.py rs=crates/fno-agents/src/spawn_gate.rs
+A	spawn-gate: could not read available ram; skipping the floor check	# msg-twin: py=cli/src/fno/agents/spawn_gate.py rs=crates/fno-agents/src/spawn_gate.rs
+A	spawn-gate: forced past cap and ram floor (--force)	# msg-twin: py=cli/src/fno/agents/spawn_gate.py rs=crates/fno-agents/src/spawn_gate.rs
+A	spawn-gate: qos demotion of pid {pid} failed (non-fatal)	# msg-twin: py=cli/src/fno/agents/spawn_gate.py rs=crates/fno-agents/src/spawn_gate.rs
+A	spawn-gate: worker slot claim {key} unavailable; proceeding uncounted	# msg-twin: py=cli/src/fno/agents/spawn_gate.py rs=crates/fno-agents/src/spawn_gate.rs
+A	stale-verdict-fresher-event	# protocol: py=cli/src/fno/agents/row_contradiction.py rs=crates/fno-agents/src/daemon.rs
+A	stopped: {name} ({short_id})	# msg-twin: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/bin/client.rs
+A	the child falls back to its account's own default.	# msg-twin: py=cli/src/fno/agents/model_routing.py rs=crates/fno-agents/src/model_env_scrub.rs
+A	the child receives that route's own model instead.	# msg-twin: py=cli/src/fno/agents/model_routing.py rs=crates/fno-agents/src/model_env_scrub.rs
+A	truth-live-inject-failed	# msg-twin: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/claude_ask.rs
+A	{fno_mail_trailer}</fno_mail>	# protocol: py=cli/src/fno/mail/cli.py rs=crates/fno-agents/src/mail_inject.rs
+A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	# msg-twin: py=cli/src/fno/agents/trace_cli.py rs=crates/fno-agents/src/client_verbs.rs
+R	harness-env-scrub:cli/src/fno/agents/harnesses/codex.py::_run_codex	# x-b57a lands the scrub on the codex env-build path; until then this is the known uncovered path
+R	provider-resolution:cli/src/fno/agents/spawn_gate.py::provider_live_count	# both raw row.provider reads live here; the resolver lands with x-f273
+R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# the epic surface reads stored status; x-d2c1 routes it through the read-time overlay
