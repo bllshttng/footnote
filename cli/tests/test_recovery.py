@@ -1692,7 +1692,18 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, spawn_rc=1)
         assert recovery._redispatch(self._cand()) is False
-        assert self._index_of(calls, ["backlog", "update", "--locked-by"]) is None
+        owner_updates = [c for c in calls if "backlog" in c and "--locked-by" in c]
+        assert [c[-1] for c in owner_updates] == ["null"]
+        spawn = self._index_of(calls, ["agents", "spawn"])
+        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
+        assert spawn is not None and clear is not None and spawn < clear
+
+    def test_spawn_failure_surfaces_corpse_clear_failure(self, monkeypatch, caplog):
+        self._patch_resolve(monkeypatch)
+        self._patch_run(monkeypatch, spawn_rc=1, clear_rc=1)
+
+        assert recovery._redispatch(self._cand()) is False
+        assert "could not clear dead owner for x-370f" in caplog.text
 
     def test_successful_spawn_repoints_node_to_replacement(self, monkeypatch):
         self._patch_resolve(monkeypatch)

@@ -930,6 +930,30 @@ def _release_lane_slot(node: str, cwd: str) -> None:
         log.warning("recovery: lane-release failed for %s: %s", node, exc)
 
 
+def _clear_dead_owner(node: str, cwd: str) -> bool:
+    """Clear a stopped worker's graph pointer, surfacing any failed cleanup."""
+    import logging
+    import subprocess
+
+    try:
+        cleared = subprocess.run(
+            [*_subprocess_util.fno_py_cmd(), "backlog", "update", node,
+             "--locked-by", "null"],
+            cwd=cwd, capture_output=True, timeout=30, check=False,
+        )
+        if cleared.returncode == 0:
+            return True
+        logging.getLogger(__name__).warning(
+            "recovery: could not clear dead owner for %s (exit %s)",
+            node, cleared.returncode,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logging.getLogger(__name__).warning(
+            "recovery: could not clear dead owner for %s: %s", node, exc,
+        )
+    return False
+
+
 def _redispatch(
     candidate: "Candidate",
     *,
@@ -1050,8 +1074,10 @@ def _redispatch(
         )
         if proc.returncode != 0:
             # No replacement worker started: the node claim is already freed
-            # (above), so also free any dispatch-time lane slot or lane-fill
-            # keeps skipping the node as peer-owned until the slot TTL (G4).
+            # (above), so clear the stopped worker's graph pointer and free any
+            # dispatch-time lane slot or lane-fill keeps skipping the node as
+            # peer-owned until the slot TTL (G4).
+            _clear_dead_owner(node, cwd)
             _release_lane_slot(node, cwd)
             return False
         try:
@@ -1067,14 +1093,7 @@ def _redispatch(
             # A worker exists, so this is not a spawn miss. Clear the corpse
             # pointer when possible and return a distinct outcome; False would
             # invite another failover spawn onto the same branch.
-            try:
-                subprocess.run(
-                    [*_subprocess_util.fno_py_cmd(), "backlog", "update", node,
-                     "--locked-by", "null"],
-                    cwd=cwd, capture_output=True, timeout=30, check=False,
-                )
-            except (OSError, subprocess.SubprocessError):
-                pass
+            _clear_dead_owner(node, cwd)
             return REDISPATCH_PARTIAL
         return True
     except (OSError, subprocess.SubprocessError):
