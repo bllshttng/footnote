@@ -458,7 +458,11 @@ def test_hold_refuses_a_contaminated_env_rather_than_stamping_a_guessed_row(monk
         "fno.harness_identity.present_harness_markers",
         lambda: [("CODEX_THREAD_ID", "codex", "y")],
     )
-    assert mail_cli._self_handle_or_exit() == HANDLE
+    resolved_handle, resolved_ident = mail_cli._self_handle_or_exit()
+    assert resolved_handle == HANDLE
+    # The identity travels back with the handle, so the caller writes the row
+    # this function validated rather than re-resolving and getting another.
+    assert resolved_ident.session_id == f"{HANDLE}-full"
 
 
 def test_an_unreadable_clock_renders_a_question_mark_not_an_empty_cell(monkeypatch):

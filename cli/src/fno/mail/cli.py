@@ -3478,8 +3478,12 @@ def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
     return key, scan_unread(key)
 
 
-def _self_handle_or_exit() -> str:
-    """This session's canonical mail handle, or exit 3 with the reason.
+def _self_handle_or_exit() -> "tuple[str, object]":
+    """This session's canonical mail handle AND the identity it came from.
+
+    Returns both so the caller never re-resolves. A second
+    ``resolve_harness_identity()`` call can answer differently from the one
+    this function validated, and then the row written is not the row checked.
 
     Fails closed on a contaminated env, for the same reason `--to-self` does
     and with worse consequences. `resolve_harness_identity` is precedence-only,
@@ -3510,7 +3514,7 @@ def _self_handle_or_exit() -> str:
             f"another agent's mail. Families seen: {', '.join(sorted(families))}\n"
         )
         raise typer.Exit(code=3)
-    return canonical_handle(ident.session_id)
+    return canonical_handle(ident.session_id), ident
 
 
 @mail_app.command("hold")
@@ -3547,7 +3551,7 @@ def cmd_hold(
 
     from fno.mail import hold as hold_mod
 
-    handle = _self_handle_or_exit()
+    handle, ident = _self_handle_or_exit()
 
     if status:
         # Ask the delivery gate, not the clock. A flag stamped by
@@ -3562,6 +3566,16 @@ def cmd_hold(
         label = hold_mod.dnd_label(handle)
         if label == "held":
             print(f"{handle}: holding mail, no expiry (hand-stamped bus-only)")
+        elif label is None:
+            # The gate says held and the clock says otherwise. Unreachable while
+            # both derive from `lapsed`, and mypy is right that nothing across
+            # the module boundary enforces that. Report the disagreement rather
+            # than crash on it or pick a side: two readings differing is the
+            # thing worth telling the operator.
+            print(
+                f"{handle}: holding mail, but the clock disagrees with the "
+                "delivery gate - run `fno mail hold --off` to clear it"
+            )
         else:
             print(f"{handle}: holding mail, lifts in {label.lstrip('~')}")
         return
@@ -3583,12 +3597,10 @@ def cmd_hold(
         raise typer.Exit(code=2)
 
     from fno.agents.registry import register_existing_session
-    from fno.harness_identity import resolve_harness_identity
 
-    ident = resolve_harness_identity()
     register_existing_session(
-        provider=ident.harness,
-        session_id=ident.session_id,
+        provider=str(getattr(ident, "harness", "") or ""),
+        session_id=str(getattr(ident, "session_id", "") or ""),
         cwd=os.getcwd(),
         delivery_policy="bus-only",
     )

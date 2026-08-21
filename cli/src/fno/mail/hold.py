@@ -348,8 +348,11 @@ def addresses(entry) -> tuple:
             tokens.append(canonical_handle(session_id))
         except Exception:  # noqa: BLE001 - a malformed id contributes no address
             pass
-    seen: set = set()
-    return tuple(t for t in tokens if t and not (t in seen or seen.add(t)))
+    ordered: list = []
+    for token in tokens:
+        if token and token not in ordered:
+            ordered.append(token)
+    return tuple(ordered)
 
 
 def resolve_entry(handle: str):
