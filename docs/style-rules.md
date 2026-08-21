@@ -45,6 +45,12 @@ The cap counts words after the same masking pass as rules 1 to 6. Code, paths, f
 
 Rule 7 inherits the existing escapes. Add a `style-exception:` line with a reason, or pass `--style-exception`. The refusal is written to stderr, so it is not charged the mail cap.
 
+## Relay concision starts before refusal
+
+Footnote injects a relay compression contract at SessionStart and after context compaction. It covers agent-authored mail, replies, and mux pane sends. Agents think fully, then transmit only outcome, reason, and next action. Findings move to a node or doc and the relay carries its link.
+
+The mechanism adapts [Caveman](https://github.com/JuliusBrussee/caveman)'s MIT-licensed system-prompt pattern. Caveman's own measurements identify prompt programming as the output-shrinking mechanism. It does not compress model reasoning. Footnote keeps the portable core small because every user pays SessionStart context cost.
+
 ## Rule 6 reverses the sentence-per-line convention
 
 This repo used to mandate one full sentence per physical line. The operator ruling reverses that. The author inserts no newline inside a paragraph. The terminal or the renderer wraps it.

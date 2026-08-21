@@ -512,11 +512,15 @@ def test_format_names_the_local_dry_run():
 def test_format_adds_word_cap_recipe_only_for_rule_7():
     body = " ".join("word" for _ in range(81)) + "."
     wordcap_msg = style.format_violations(style.check(body, surface="mail"))
+    assert "Cut articles, filler, pleasantries, hedges" in wordcap_msg
+    assert "Fragments work" in wordcap_msg
+    assert "Keep technical terms exact" in wordcap_msg
     assert "Status:" in wordcap_msg
     assert "Approval:" in wordcap_msg
     assert "Put findings on the node" in wordcap_msg
 
     other_msg = style.format_violations(style.check("you should run it."))
+    assert "Cut articles" not in other_msg
     assert "Status:" not in other_msg
     assert "Approval:" not in other_msg
     assert "Put findings on the node" not in other_msg
@@ -558,9 +562,14 @@ def test_the_refusal_message_survives_a_rule_6_violation():
 
 
 def test_rule_7_refusal_with_recipe_passes_rules_1_to_6():
-    body = " ".join("word" for _ in range(81)) + "."
+    sentences = [
+        " ".join("word" for _ in range(count)) + "."
+        for count in (20, 20, 20, 21)
+    ]
+    body = " ".join(sentences)
     msg = style.format_violations(style.check(body, surface="mail"))
     assert style.check(msg, surface="pr-body") == [], msg
+    assert len(style._mask(msg).split()) <= style.MESSAGE_WORD_CAP
 
 
 def test_enforce_style_refuses_81_words_with_positive_marker(capsys, monkeypatch):

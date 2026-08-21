@@ -314,8 +314,9 @@ def format_violations(violations: list[Violation]) -> str:
     if 7 in by_rule:
         lines.extend(
             [
-                "use one of these two shapes.",
-                "Status: Doing X. Here is why. Done at Y.",
+                "Cut articles, filler, pleasantries, hedges. "
+                "Fragments work. Keep technical terms exact.",
+                "Status: X. Why Y. Done at Z.",
                 "Approval: Problem X. Options Y or Z. I recommend Z because A. Your call?",
                 "Put findings on the node and link it.",
             ]
