@@ -358,9 +358,9 @@ class TestRefresh:
 
         monkeypatch.setattr(claims_core, "acquire_dir_mutex", acquire_then_expire)
 
-        refreshed = refresh_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+        with pytest.raises(ClaimValidationError, match="expired"):
+            refresh_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
 
-        assert refreshed is None
         assert read_claim_file(path).expires_at == expired_deadline
 
 
