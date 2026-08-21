@@ -51,7 +51,8 @@ jobs:
           # the toolchain stays exercised for the Phase 7+ deferral.
           - { name: windows-x64, runs-on: windows-latest, rust-target: x86_64-pc-windows-msvc, wheel-platform: "", release: false }
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -224,7 +225,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Bump tap formula to the published version
         env:
           # A fine-grained PAT (or deploy key) with write to the SEPARATE tap

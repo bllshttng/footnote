@@ -39,6 +39,7 @@ def test_all_pass_is_green():
         "fail": 0,
         "pending": 0,
         "unsettled": 0,
+        "unsettled_fail": 0,
     }
 
 
@@ -203,6 +204,8 @@ def test_ac1_cancelled_latest_is_red_and_unsettled(monkeypatch, capsys):
     assert out["verdict"] == "red"
     assert out["settled"] is False
     assert out["checks"]["unsettled"] == 1
+    assert "ci_cancelled_retrigger" in out["ready_blockers"]
+    assert "ci_red" not in out["ready_blockers"]
     # The instruction travels with the number: which check, and what to do.
     assert "ci" in err
     assert "do not read this pr as decided" in err.lower()
@@ -550,6 +553,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
             "fail": 0,
             "pending": 0,
             "unsettled": 0,
+            "unsettled_fail": 0,
         },
         "optional_reviews": [],
         "optional_reviews_unresolved": 0,

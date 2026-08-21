@@ -50,8 +50,10 @@ jobs:
           - crate: fno
             dir: crates/fno
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: Dry-run package + verify
         # Explicit --manifest-path (never a cwd/glob resolution) so the stale
         # untracked pre-rename crate dir can never be packaged by mistake (AC5-FR).
@@ -76,8 +78,10 @@ jobs:
           - crate: fno
             dir: crates/fno
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: Publish ${{ matrix.crate }} to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
