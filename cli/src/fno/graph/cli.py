@@ -12091,7 +12091,7 @@ cli.add_typer(collisions_app, name="collisions", hidden=True)
 
 
 # ---------------------------------------------------------------------------
-# supersede: mark old node as replaced by a new node; auto-defer the old one
+# supersede: record a proposed replacement until its merged PR proves coverage
 # ---------------------------------------------------------------------------
 
 
@@ -12106,14 +12106,14 @@ def cmd_supersede(
         False, "--force", "-F", help="Supersede even if the target still has live children (orphaning them)"
     ),
 ) -> None:
-    """Mark ``replaces`` as superseded by ``new_id``; defer ``replaces`` automatically.
+    """Record that ``new_id`` proposes to replace ``replaces``.
 
-    Sets ``superseded_by`` on the old node and appends to ``supersedes`` on
-    the new node. Also sets ``deferred_at`` + ``deferred_reason`` on the old
-    node so it stops appearing in active lists. Refuses if ``replaces`` still
-    has live children unless ``--force`` is given; under ``--force`` the live
-    children's ``parent`` is cleared so they stay dispatchable instead of
-    stranding under a dead unit. Reverse with ``unsupersede``.
+    Sets the compatibility edge plus a pending structured evidence record on
+    the old node. The old row stays active until a merged PR covers every
+    declared surface. Refuses if ``replaces`` still has live children unless
+    ``--force`` is given; under ``--force`` the live children's ``parent`` is
+    cleared so they stay dispatchable instead of stranding under a dead unit.
+    Reverse with ``unsupersede``.
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph

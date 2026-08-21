@@ -208,7 +208,11 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
     from fno.graph.store import _normalize_lock_fields
     rung_to_status = _rung_to_graph_status()
     _normalize_lock_fields(entries)
-    valid_ids = {e.get("id") for e in entries if isinstance(e, dict)}
+    valid_ids = {
+        e.get("id")
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
     children_by_parent: dict[str, list[dict]] = {}
     for entry in entries:
         parent = entry.get("parent") if isinstance(entry, dict) else None

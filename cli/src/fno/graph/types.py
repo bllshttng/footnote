@@ -339,7 +339,8 @@ class Entry(BaseModel):
 
         Precedence (mirrors recompute_statuses single-entry portion):
           completed_at set    -> "done"
-          superseded_by set   -> "superseded"
+          verified superseded_by set -> "superseded"
+          pending supersession      -> "in_progress"
           deferred_at set     -> "deferred"
           pr_number set       -> "in_review"
           non-empty blocked_by -> "blocked"
