@@ -67,10 +67,12 @@ BASELINE_PATH = os.environ.get("CHECK_BASELINE", "")
 A_MIN = 24   # normalized chars for a twin literal
 B_MIN = 60   # normalized chars for a duplicated prose line
 
-# The auto-loaded set is the SAME set check-preamble-budget.sh budgets.
-# If that set changes, this must change in the same PR; two definitions of
-# "auto-loaded" would be one more N-implementations instance.
-AUTO_LOADED = ["AGENTS.md", "skills/using-fno/SKILL.md"]
+# The auto-loaded set mirrors what check-preamble-budget.sh budgets:
+# AGENTS.md, CLAUDE.md, using-fno, plus every .claude/rules/*.md (its
+# nullglob loop). If that set changes, this must change in the same PR;
+# two definitions of "auto-loaded" would be one more N-implementations
+# instance.
+AUTO_LOADED = ["AGENTS.md", "CLAUDE.md", "skills/using-fno/SKILL.md"]
 
 # Engine R registry. Each entry: a site pattern that identifies ONE reachable
 # path of an operation, and a required pattern the ENCLOSING FUNCTION must
@@ -86,8 +88,8 @@ REGISTRY = [
         "name": "harness-env-scrub",
         "glob": "cli/src/fno/agents/harnesses/*.py",
         "site": r"dict\(os\.environ\)",
-        "required": r"scrub_ambient_identity",
-        "why": "every child-env build on a spawn path scrubs ambient identity; the unscrubbed codex env build is the known offender",
+        "required": r"worker_environment|scrub_ambient_identity",
+        "why": "every child-env build on a spawn path crosses the worker_environment identity-scrub floor (or scrubs directly)",
     },
     {
         "name": "status-derivation-helper",
@@ -166,7 +168,8 @@ def norm_prose(line):
 
 def engine_b():
     auto_lines = {}
-    for rel in AUTO_LOADED:
+    auto_files = AUTO_LOADED + tracked(".claude/rules/*.md")
+    for rel in auto_files:
         path = os.path.join(ROOT, rel)
         if not os.path.isfile(path):
             continue
@@ -179,7 +182,7 @@ def engine_b():
                 auto_lines.setdefault(norm, rel)
     dups = {}
     for rel in tracked("*.md"):
-        if rel in AUTO_LOADED:
+        if rel in auto_files:
             continue
         for line in open(os.path.join(ROOT, rel), encoding="utf-8", errors="replace"):
             stripped = line.strip()

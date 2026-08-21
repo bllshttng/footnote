@@ -86,6 +86,5 @@ A	the child receives that route's own model instead.	# msg-twin: py=cli/src/fno/
 A	truth-live-inject-failed	# msg-twin: py=cli/src/fno/agents/dispatch.py rs=crates/fno-agents/src/claude_ask.rs
 A	{fno_mail_trailer}</fno_mail>	# protocol: py=cli/src/fno/mail/cli.py rs=crates/fno-agents/src/mail_inject.rs
 A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	# msg-twin: py=cli/src/fno/agents/trace_cli.py rs=crates/fno-agents/src/client_verbs.rs
-R	harness-env-scrub:cli/src/fno/agents/harnesses/codex.py::_run_codex	# known uncovered env-build path; the scrub lands with its fix
 R	provider-resolution:cli/src/fno/agents/spawn_gate.py::provider_live_count	# both raw row.provider reads live here; no resolver exists yet
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# the epic surface reads stored status; the overlay routing lands with its fix
