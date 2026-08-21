@@ -189,12 +189,29 @@ fi
 MANIFEST_CTID=$(grep -E '^(claude_session_id|claude_transcript_id):' "$STATE_FILE" 2>/dev/null \
     | head -1 | sed -E 's/^(claude_session_id|claude_transcript_id):[[:space:]]*//' | tr -d '[:space:]')
 
+# A non-claude harness writes this manifest too, and leaves claude_session_id
+# empty while recording its own id in harness_session_id. Read that second, or
+# the guard is inert for every manifest claude did not author and a claude
+# session stopping in a codex session's worktree is judged against a run it does
+# not own. Both harnesses wire THIS hook (hooks/hooks.json and
+# hooks/codex-hooks.json), so the guard has to answer for both.
+if [[ -z "$MANIFEST_CTID" || "$MANIFEST_CTID" == "null" ]]; then
+    MANIFEST_CTID=$(grep -E '^harness_session_id:' "$STATE_FILE" 2>/dev/null \
+        | head -1 | sed -E 's/^harness_session_id:[[:space:]]*//' | tr -d '[:space:]')
+fi
+
 # "null" = init ran without transcript-id env vars (diagnostic/non-Claude
 # starts); treat it like empty so the guard never disables the hook (codex
 # P2 on #447).
 if [[ -n "$MANIFEST_CTID" && "$MANIFEST_CTID" != "null" ]]; then
     TRANSCRIPT_BASENAME=$(basename "$TRANSCRIPT_PATH" .jsonl)
-    if [[ "$TRANSCRIPT_BASENAME" != "$MANIFEST_CTID" ]]; then
+    # Claude names a transcript for its session id, so the basename IS the id.
+    # Codex names one rollout-<utc>-<thread-uuid>, so the id is a SUFFIX. A
+    # plain equality test therefore reads a codex owner's own stop as foreign
+    # and exits 0, which does not wedge it - it silently turns the ship gate off
+    # for every codex target run. Accept either shape.
+    if [[ "$TRANSCRIPT_BASENAME" != "$MANIFEST_CTID" \
+        && "$TRANSCRIPT_BASENAME" != *"-$MANIFEST_CTID" ]]; then
         # Another session's manifest; genuinely not ours to judge.
         exit 0
     fi
