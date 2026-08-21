@@ -1,9 +1,9 @@
-"""Unit tests for `fno target init` and the `fno state init` redirect.
+"""Unit tests for `fno do target init` and the `fno do state init` redirect.
 
 Change 3 of the worktree-binding plan (backlog ab-02e44aa6): a discoverable
 bootstrap verb that records input/plan_path + the owner_cwd binding and
 refuses to write a stub, plus a redirect on the substitution-prone
-`fno state init` bare bootstrap.
+`fno do state init` bare bootstrap.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _clear_root_cache():
 
 
 def test_target_init_help_documents_inputs():
-    result = runner.invoke(app, ["target", "init", "--help"])
+    result = runner.invoke(app, ["do", "target", "init", "--help"])
     assert result.exit_code == 0
     assert "--input" in result.stdout
     assert "--plan-path" in result.stdout
@@ -47,7 +47,7 @@ def test_target_init_refuses_stub(monkeypatch, tmp_path):
         raise AssertionError("init script must not run when args are missing")
 
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
-    result = runner.invoke(app, ["target", "init"])
+    result = runner.invoke(app, ["do", "target", "init"])
     assert result.exit_code == 2
     assert not called["ran"]
     assert "stub" in result.output.lower()
@@ -86,7 +86,7 @@ def test_target_init_shells_through_with_env(monkeypatch, tmp_path):
 
     result = runner.invoke(
         app,
-        ["target", "init", "--input", "fix-login", "--plan-path", str(plan)],
+        ["do", "target", "init", "--input", "fix-login", "--plan-path", str(plan)],
     )
     assert result.exit_code == 0, result.output
     assert captured["cmd"][0] == "bash"
@@ -260,7 +260,7 @@ def test_target_init_size_sets_target_size_env(monkeypatch, tmp_path):
     _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--size", "m"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--size", "m"])
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_SIZE") == "M"  # normalized to upper
     _clear_root_cache()
@@ -285,7 +285,7 @@ def test_target_init_model_provider_set_dispatch_env(monkeypatch, tmp_path):
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
     result = runner.invoke(
-        app, ["target", "init", "--input", "x", "--model", "glm-4.7", "--harness", "codex"]
+        app, ["do", "target", "init", "--input", "x", "--model", "glm-4.7", "--harness", "codex"]
     )
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_DISPATCH_MODEL") == "glm-4.7"
@@ -311,7 +311,7 @@ def test_target_init_beastmode_sets_authority_env(monkeypatch, tmp_path):
     _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--beastmode"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_BEASTMODE") == "1"
     _clear_root_cache()
@@ -340,7 +340,7 @@ def test_target_init_beast_alias_grants_too(monkeypatch, tmp_path):
     _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--beast"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--beast"])
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_BEASTMODE") == "1"
     _clear_root_cache()
@@ -370,7 +370,7 @@ def test_target_init_clears_ambient_beastmode_without_flag(monkeypatch, tmp_path
     _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x"])
     assert result.exit_code == 0, result.output
     assert captured["env"].get("TARGET_BEASTMODE") == "", (
         "ambient TARGET_BEASTMODE must be cleared, not forwarded: "
@@ -397,7 +397,7 @@ def test_target_init_no_pins_no_dispatch_env(monkeypatch, tmp_path):
     _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x"])
     assert result.exit_code == 0, result.output
     assert "TARGET_DISPATCH_MODEL" not in captured["env"]
     assert "TARGET_DISPATCH_PROVIDER" not in captured["env"]
@@ -415,7 +415,7 @@ def test_target_init_empty_model_rejected(monkeypatch, tmp_path):
         raise AssertionError("must not shell out on an empty --model")
 
     monkeypatch.setattr(target_cli.subprocess, "run", _no_run)
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--model", "  "])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--model", "  "])
     assert result.exit_code == 2
     assert "--model must not be empty" in result.output
     _clear_root_cache()
@@ -432,14 +432,14 @@ def test_target_init_rejects_invalid_size(monkeypatch, tmp_path):
         raise AssertionError("must not shell out on invalid --size")
 
     monkeypatch.setattr(target_cli.subprocess, "run", _no_run)
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--size", "XL"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--size", "XL"])
     assert result.exit_code == 2
     assert "invalid --size" in result.output
     _clear_root_cache()
 
 
 def test_target_init_help_documents_size():
-    result = runner.invoke(app, ["target", "init", "--help"])
+    result = runner.invoke(app, ["do", "target", "init", "--help"])
     assert result.exit_code == 0
     assert "--size" in result.stdout
 
@@ -452,7 +452,7 @@ def test_target_init_missing_script_exits_2(monkeypatch, tmp_path):
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
     _clear_root_cache()
-    result = runner.invoke(app, ["target", "init", "--input", "x"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x"])
     assert result.exit_code == 2
     # Capability-accurate (not "is the plugin installed correctly?"): the
     # message names the footnote plugin and the bare-install gap + install path.
@@ -465,7 +465,7 @@ def test_target_init_missing_script_exits_2(monkeypatch, tmp_path):
 def test_target_init_degrade_writes_no_state(monkeypatch, tmp_path):
     """AC3-FR / AC3-EDGE: when the init script is unresolvable (bare install or
     binary-present-but-skills-absent), the degrade writes no partial
-    target-state.md / .fno state and never shells out."""
+    target-state.md / .fno do state and never shells out."""
     fake_root = tmp_path / "empty"
     fake_root.mkdir()
     proj = tmp_path / "proj"
@@ -479,7 +479,7 @@ def test_target_init_degrade_writes_no_state(monkeypatch, tmp_path):
         raise AssertionError("must not shell out when the init script is missing")
 
     monkeypatch.setattr(target_cli.subprocess, "run", _no_run)
-    result = runner.invoke(app, ["target", "init", "--input", "x"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x"])
     assert result.exit_code == 2
     assert "footnote plugin" in result.output
     assert not (proj / ".fno").exists()
@@ -489,7 +489,7 @@ def test_target_init_degrade_writes_no_state(monkeypatch, tmp_path):
 def test_target_init_resolves_from_plugin_root(monkeypatch, tmp_path):
     """Codex P1: init script resolves from CLAUDE_PLUGIN_ROOT, not the cwd repo.
 
-    Simulates running `fno target init` inside a user project (cwd repo has no
+    Simulates running `fno do target init` inside a user project (cwd repo has no
     hooks/) with CLAUDE_PLUGIN_ROOT pointing at the plugin install.
     """
     captured = {}
@@ -516,7 +516,7 @@ def test_target_init_resolves_from_plugin_root(monkeypatch, tmp_path):
     _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x"])
     assert result.exit_code == 0, result.output
     assert str(plugin_root) in captured["cmd"][1]
     _clear_root_cache()
@@ -524,15 +524,15 @@ def test_target_init_resolves_from_plugin_root(monkeypatch, tmp_path):
 
 def test_state_init_redirects_target_bootstrap():
     """AC (redirect): bare `state init` (default type=target) -> non-zero redirect."""
-    result = runner.invoke(app, ["state", "init"])
+    result = runner.invoke(app, ["do", "state", "init"])
     assert result.exit_code == 2
-    assert "fno target init" in result.output
+    assert "fno do target init" in result.output
 
 
 def test_state_init_explicit_output_is_spared(tmp_path):
     """A deliberate --output is NOT a bootstrap; it must still create a file."""
     out = tmp_path / "explicit-state.md"
-    result = runner.invoke(app, ["state", "init", "--type", "target", "--output", str(out)])
+    result = runner.invoke(app, ["do", "state", "init", "--type", "target", "--output", str(out)])
     assert result.exit_code == 0, result.output
     assert out.exists()
 
@@ -540,7 +540,7 @@ def test_state_init_explicit_output_is_spared(tmp_path):
 def test_state_init_allow_stub_escape(tmp_path, monkeypatch):
     """--allow-stub bypasses the redirect for internal/test use."""
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["state", "init", "--allow-stub"])
+    result = runner.invoke(app, ["do", "state", "init", "--allow-stub"])
     assert result.exit_code == 0, result.output
     assert (tmp_path / ".fno" / "target-state.md").exists()
 
@@ -603,7 +603,7 @@ def test_work_start_dispatch_reads_claimed_node(tmp_path, monkeypatch):
 
 def test_work_start_dispatch_overlays_dispatch_pins(tmp_path, monkeypatch):
     """AC1-HP wiring: manifest dispatch_model/provider ride onto the node so the
-    work-start /think spawn carries `fno target start --model X`'s choice."""
+    work-start /think spawn carries `fno do target start --model X`'s choice."""
     _arm_work_start(monkeypatch)
     fno_dir = tmp_path / ".fno"
     fno_dir.mkdir(parents=True, exist_ok=True)
@@ -655,7 +655,7 @@ def test_work_start_dispatch_non_fatal_on_missing_manifest(tmp_path, monkeypatch
 
 
 def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, monkeypatch):
-    """A `never` project: ensure returns the repo root, so `fno target start`
+    """A `never` project: ensure returns the repo root, so `fno do target start`
     launches in place, forwards --harness claude, and does NOT run the setup hook
     on the canonical checkout (Locked Decision 4: no worktree-only side effect on
     path == repo root, which would corrupt canonical .fno)."""
@@ -698,7 +698,7 @@ def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, mon
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
 
-    result = runner.invoke(app, ["target", "start", "x-nev"])
+    result = runner.invoke(app, ["do", "target", "start", "x-nev"])
     assert result.exit_code == 0, result.output
     assert seen["ensure"] is not None
     assert "--harness" in seen["ensure"] and "claude" in seen["ensure"]
@@ -744,12 +744,12 @@ def test_target_start_forwards_beastmode_to_init(tmp_path, monkeypatch):
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
 
-    result = runner.invoke(app, ["target", "start", "x-yol", "--beastmode"])
+    result = runner.invoke(app, ["do", "target", "start", "x-yol", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert "--beastmode" in (seen["init_cmd"] or []), f"start did not forward --beastmode: {seen['init_cmd']}"
 
     seen["init_cmd"] = None
-    result = runner.invoke(app, ["target", "start", "x-yol"])
+    result = runner.invoke(app, ["do", "target", "start", "x-yol"])
     assert result.exit_code == 0, result.output
     assert "--beastmode" not in (seen["init_cmd"] or []), "start forwarded --beastmode without the flag"
 
@@ -771,12 +771,12 @@ def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, mo
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda _n: None)
 
-    result = runner.invoke(app, ["target", "start", "x-yol", "--beastmode"])
+    result = runner.invoke(app, ["do", "target", "start", "x-yol", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert "already isolated" in result.output
     assert "did NOT take" in result.output, result.output
 
-    result = runner.invoke(app, ["target", "start", "x-yol"])
+    result = runner.invoke(app, ["do", "target", "start", "x-yol"])
     assert result.exit_code == 0, result.output
     assert "did NOT take" not in result.output, "warned without the flag"
     _clear_root_cache()
@@ -802,7 +802,7 @@ def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monk
 
     # A pre-existing manifest with no grant: the flag was dropped -> warn.
     manifest.write_text("---\nattended: true\n---\n")
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--beastmode"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert "did NOT take" in result.output, result.output
 
@@ -815,7 +815,7 @@ def test_target_init_beastmode_noop_on_existing_manifest_is_named(tmp_path, monk
     monkeypatch.setattr(
         "fno.target.orient._claim_state", lambda _k: "live", raising=False
     )
-    result = runner.invoke(app, ["target", "init", "--input", "x", "--beastmode"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert "did NOT take" not in result.output, result.output
     assert "ANCHOR IT" not in result.output, result.output
@@ -847,7 +847,7 @@ def test_target_init_beastmode_unanchored_grant_is_named(tmp_path, monkeypatch):
         f"---\nattended: true\nauthority: full\nowner_pid: {os.getpid()}\n---\n"
     )
 
-    result = runner.invoke(app, ["target", "init", "--input", "some idea", "--beastmode"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "some idea", "--beastmode"])
     assert result.exit_code == 0, result.output
     assert "NOTHING LIVE TO ANCHOR IT" in result.output, result.output
 
@@ -905,7 +905,7 @@ def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkey
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda n: None)
 
-    result = runner.invoke(app, ["target", "start", "x-nev"])
+    result = runner.invoke(app, ["do", "target", "start", "x-nev"])
     assert result.exit_code == 1                    # refused, not already-claimed
     assert seen["init"] is False                    # never ran init under x-other
     combined = result.output + (getattr(result, "stderr", "") or "")
@@ -994,7 +994,7 @@ def test_target_init_refuses_held_node_before_bootstrap(tmp_path, monkeypatch):
     _held_graph(tmp_path, monkeypatch)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x-5a5c"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-5a5c"])
     assert result.exit_code == 2, result.output
     assert "Blocking review finding is unresolved" in result.output
     assert "king:119e3c52" in result.output
@@ -1007,7 +1007,7 @@ def test_target_init_refuses_child_held_by_delivery_owner(tmp_path, monkeypatch)
     _held_graph(tmp_path, monkeypatch)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x-1a2b"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-1a2b"])
     assert result.exit_code == 2, result.output
     assert "held by plan x-5a5c" in result.output
     assert ran == []
@@ -1017,7 +1017,7 @@ def test_target_init_refuses_child_held_by_delivery_owner(tmp_path, monkeypatch)
 def test_check_dispatch_hold_is_wired_for_direct_shell_bootstrap(tmp_path, monkeypatch):
     _held_graph(tmp_path, monkeypatch)
     monkeypatch.setenv("TARGET_INPUT", "x-5a5c")
-    result = runner.invoke(app, ["target", "check-dispatch-hold"])
+    result = runner.invoke(app, ["do", "target", "check-dispatch-hold"])
     assert result.exit_code == 9, result.output
     assert "king:119e3c52" in result.output
 
@@ -1025,7 +1025,7 @@ def test_check_dispatch_hold_is_wired_for_direct_shell_bootstrap(tmp_path, monke
     from fno.paths import resolve_plugin_script
 
     text = _P(resolve_plugin_script("hooks/helpers/init-target-state.sh")).read_text()
-    assert "fno target check-dispatch-hold" in text
+    assert "fno do target check-dispatch-hold" in text
     assert '"$_DH_RC" -eq 9' in text
 
 
@@ -1039,7 +1039,7 @@ def test_target_init_redirects_a_named_contained_node(tmp_path, monkeypatch):
     _contained_graph(tmp_path, monkeypatch)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-261c"])
     assert result.exit_code == 2, result.output
     # Nothing was claimed: the bash bootstrap - which acquires the node claim
     # and writes the immutable manifest - never ran.
@@ -1057,7 +1057,7 @@ def test_target_init_redirect_names_the_delivery_unit_it_routes_to(tmp_path, mon
     _contained_graph(tmp_path, monkeypatch, owner="x-8a4f")
     _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-261c"])
     assert result.exit_code == 2
     assert "x-8a4f" in result.output
     assert "/fno:target x-8a4f" in result.output
@@ -1069,7 +1069,7 @@ def test_target_init_still_dispatches_the_delivery_unit_itself(tmp_path, monkeyp
     _contained_graph(tmp_path, monkeypatch)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x-6320"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-6320"])
     assert result.exit_code == 0, result.output
     assert len(ran) == 1
     assert ran[0].get("TARGET_INPUT") == "x-6320"
@@ -1081,7 +1081,7 @@ def test_target_init_free_text_is_untouched_by_the_containment_read(tmp_path, mo
     _contained_graph(tmp_path, monkeypatch)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--input", "fix the login redirect"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "fix the login redirect"])
     assert result.exit_code == 0, result.output
     assert len(ran) == 1
     _clear_root_cache()
@@ -1148,7 +1148,7 @@ def test_plan_path_naming_only_contained_nodes_is_redirected(tmp_path, monkeypat
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--plan-path", str(plan)])
+    result = runner.invoke(app, ["do", "target", "init", "--plan-path", str(plan)])
     assert result.exit_code == 2, result.output
     assert ran == []
     _clear_root_cache()
@@ -1163,7 +1163,7 @@ def test_check_contained_refuses_with_the_shell_gates_own_code(tmp_path, monkeyp
     """
     _contained_graph(tmp_path, monkeypatch)
     monkeypatch.setenv("TARGET_INPUT", "x-261c")
-    result = runner.invoke(app, ["target", "check-contained"])
+    result = runner.invoke(app, ["do", "target", "check-contained"])
     assert result.exit_code == 9, result.output
     assert "x-6320" in result.output
 
@@ -1173,13 +1173,13 @@ def test_check_contained_passes_a_delivery_unit_and_a_bare_idea(tmp_path, monkey
     _contained_graph(tmp_path, monkeypatch)
 
     monkeypatch.setenv("TARGET_INPUT", "x-6320")
-    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 0
+    assert runner.invoke(app, ["do", "target", "check-contained"]).exit_code == 0
 
     monkeypatch.setenv("TARGET_INPUT", "fix the login redirect")
-    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 0
+    assert runner.invoke(app, ["do", "target", "check-contained"]).exit_code == 0
 
     monkeypatch.delenv("TARGET_INPUT", raising=False)
-    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 0
+    assert runner.invoke(app, ["do", "target", "check-contained"]).exit_code == 0
 
 
 def test_init_script_wires_the_containment_gate():
@@ -1194,7 +1194,7 @@ def test_init_script_wires_the_containment_gate():
 
     script = _P(resolve_plugin_script("hooks/helpers/init-target-state.sh"))
     text = script.read_text(encoding="utf-8")
-    assert "fno target check-contained" in text
+    assert "fno do target check-contained" in text
     # rc 9 refuses; anything else must fall through rather than brick bootstrap.
     assert '"$_CT_RC" -eq 9' in text
 
@@ -1219,7 +1219,7 @@ def test_plan_held_only_by_contained_nodes_still_redirects(tmp_path, monkeypatch
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--plan-path", str(plan)])
+    result = runner.invoke(app, ["do", "target", "init", "--plan-path", str(plan)])
     assert result.exit_code == 2, result.output
     assert "x-6320" in result.output
     assert ran == []
@@ -1258,7 +1258,7 @@ def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-261c"])
     assert result.exit_code == 2
     assert "already shipped" in result.output
     assert "700" in result.output
@@ -1291,7 +1291,7 @@ def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(target_cli, "_codex_desktop_handoff_policy", lambda r: None)
 
-    result = runner.invoke(app, ["target", "start", "x-261c"])
+    result = runner.invoke(app, ["do", "target", "start", "x-261c"])
     assert result.exit_code == 2, result.output
     assert ensured == [], "worktree was allocated before the redirect fired"
     _clear_root_cache()
@@ -1337,7 +1337,7 @@ def test_check_contained_reads_under_the_graph_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(target_cli, "_resolve_dispatch_node", resolve)
     monkeypatch.setenv("TARGET_INPUT", "x-261c")
 
-    result = runner.invoke(app, ["target", "check-contained"])
+    result = runner.invoke(app, ["do", "target", "check-contained"])
     assert result.exit_code == 9, result.output
     assert held["acquired"] == 1, "the graph lock was never taken"
     assert held["during_resolve"], "the lock was not held across the graph read"
@@ -1361,7 +1361,7 @@ def test_check_contained_proceeds_when_the_graph_lock_is_unavailable(tmp_path,
     monkeypatch.setattr(gs, "_acquire_flock", boom)
     monkeypatch.setenv("TARGET_INPUT", "x-261c")
     # Still resolves and still refuses - the read just was not serialized.
-    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 9
+    assert runner.invoke(app, ["do", "target", "check-contained"]).exit_code == 9
 
 
 def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypatch):
@@ -1385,7 +1385,7 @@ def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypa
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-261c"])
     assert result.exit_code == 2, result.output
     assert "superseded" in result.output
     assert "--parent null" in result.output
@@ -1412,7 +1412,7 @@ def test_check_contained_says_so_when_the_graph_lock_is_unavailable(tmp_path,
 
     monkeypatch.setattr(gs, "_acquire_flock", boom)
     monkeypatch.setenv("TARGET_INPUT", "x-261c")
-    result = runner.invoke(app, ["target", "check-contained"])
+    result = runner.invoke(app, ["do", "target", "check-contained"])
     assert result.exit_code == 9, result.output
     assert "UNSERIALIZED" in result.output
     assert "no lock for you" in result.output
@@ -1447,7 +1447,7 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     monkeypatch.setenv("CODEX_THREAD_ID", foreign)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "aaaa1111-mine")
 
-    result = runner.invoke(app, ["target", "resolve-owned-identity"])
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
     assert result.exit_code == 0, result.output
     fields = {
         line.split("=", 1)[0]: line.split("=", 1)[1]

@@ -31,7 +31,7 @@ def _run_script(script_relpath: str, args: List[str]) -> int:
     script = resolve_repo_root() / script_relpath
     if not script.is_file():
         typer.echo(
-            f"fno pr: canonical script not found: {script}\n"
+            f"fno do pr: canonical script not found: {script}\n"
             "Is the footnote plugin installed correctly? "
             "Set FNO_REPO_ROOT to the plugin root if running outside the repo.",
             err=True,
@@ -52,7 +52,7 @@ Three invariants:
 
 One non-trivial shape deviates slightly:
 
-- **`fno pr verify --kind merged|reviews`** uses a Python `enum.Enum` so Typer rejects unknown values at parse time. Dispatch on the enum picks the right script (`verify-pr-merged.sh` vs `verify-review-replies.sh`).
+- **`fno do pr verify --kind merged|reviews`** uses a Python `enum.Enum` so Typer rejects unknown values at parse time. Dispatch on the enum picks the right script (`verify-pr-merged.sh` vs `verify-review-replies.sh`).
 
 Sourceable bash libraries (e.g., `notify.sh`, `phase-verifier.sh`) are called via:
 
@@ -73,10 +73,10 @@ The wrapper validates `script_path.is_file()` before the subprocess so a missing
 | Verb | Wraps | Notes |
 |------|-------|-------|
 | `fno gate set` | `scripts/lib/set-gate.sh` | atomically flip gate bool + emit phase_transition event |
-| `fno pr verify --kind merged\|reviews` | `verify-pr-merged.sh` OR `verify-review-replies.sh` | enum dispatches to the right script |
-| `fno pr rebase` | `scripts/lib/rebase-resolve.sh` | conflict-delegation rebase protocol |
-| `fno phase verify PHASE_NAME [--session-id]` | `phase-verifier.sh::pv_run` (sourceable) | per-phase postcondition verifier |
-| `fno phase kill-check [PLAN_PATH]` | `fno-agents kill-check` (binary; logic folded out of the deleted `kill-criteria.sh` in US1) | plan kill-criteria evaluator |
+| `fno do pr verify --kind merged\|reviews` | `verify-pr-merged.sh` OR `verify-review-replies.sh` | enum dispatches to the right script |
+| `fno do pr rebase` | `scripts/lib/rebase-resolve.sh` | conflict-delegation rebase protocol |
+| `fno do phase verify PHASE_NAME [--session-id]` | `phase-verifier.sh::pv_run` (sourceable) | per-phase postcondition verifier |
+| `fno do phase kill-check [PLAN_PATH]` | `fno-agents kill-check` (binary; logic folded out of the deleted `kill-criteria.sh` in US1) | plan kill-criteria evaluator |
 | `fno notify TITLE MESSAGE` | `notify.sh::notify` (sourceable) | OS notification helper |
 
 Every wrapper verb exposes the same return-code contract as the underlying bash. rc=0 is success, rc=1 logical failure, and rc=2 substrate failure or invalid args via Typer. Other codes pass through with `propagate_returncode` applied, so negative signal-derived values land on their shell conventions.
@@ -97,7 +97,7 @@ When you add a new helper to `scripts/lib/`, the lint will warn until you either
 The wrapper pattern documented here is the migration target for PR 2's sweep. A few constraints that follow from this PR's design:
 
 - **No path re-resolution in wrappers.** Each wrapper resolves the canonical via `resolve_repo_root() / "scripts/lib/X.sh"`. Callers do not pass the script path - they call `fno <verb>` and Typer dispatch handles the resolution.
-- **No argument re-validation.** When the bash script has its own enum check (e.g., `--invoked-by canonical-skill|inline-equivalent|substituted-executor`), the wrapper forwards the value verbatim and lets bash reject it. The exception is the dispatch case (`fno pr verify --kind`) where the enum picks the script; there the wrapper validates because the dispatch depends on it.
+- **No argument re-validation.** When the bash script has its own enum check (e.g., `--invoked-by canonical-skill|inline-equivalent|substituted-executor`), the wrapper forwards the value verbatim and lets bash reject it. The exception is the dispatch case (`fno do pr verify --kind`) where the enum picks the script; there the wrapper validates because the dispatch depends on it.
 - **No state changes outside the canonical.** Wrappers do not flip target-state.md booleans, write artifacts, or emit events. Those side effects live in the bash scripts (with their `mkdir`-mutex locks and atomic-rename writes); the wrapper is a transport layer.
 - **No buffering.** Wrappers pass `stdout`/`stderr` through to the parent process by default. A wrapper that consumes its child's output (a single-token answer, say) captures it with `capture_output=True`. It surfaces stderr explicitly on rc!=0.
 

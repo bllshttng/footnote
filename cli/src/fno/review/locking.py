@@ -1,4 +1,4 @@
-"""Mutual exclusion for concurrent ``fno review`` invocations.
+"""Mutual exclusion for concurrent ``fno do review`` invocations.
 
 Uses ``fcntl.flock(LOCK_EX | LOCK_NB)`` - cheap, POSIX-only, automatically
 released by the kernel when the holding process dies (no stale-lock problem).

@@ -59,7 +59,7 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
 
     # resolve_canonical_worktree(cwd) - NOT a plain `git rev-parse
     # --show-toplevel` - is load-bearing: hold_for_pr is called with an
-    # explicit `cwd` that is not always the process's own (`fno pr
+    # explicit `cwd` that is not always the process's own (`fno do pr
     # hold-check --repo <path>` passes an arbitrary directory), and a plain
     # toplevel resolution run FROM A LINKED WORKTREE returns that worktree's
     # own path, not the canonical/main root every node's `cwd` field
@@ -73,7 +73,7 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         # resolve_canonical_worktree's own docstring: a bare repo or a
         # separate-git-dir checkout returns None, "the caller's
         # --show-toplevel fallback yields the real checkout" - never the
-        # RAW, unresolved cwd. A relative or unnormalized cwd (e.g. `fno pr
+        # RAW, unresolved cwd. A relative or unnormalized cwd (e.g. `fno do pr
         # hold-check 42 --repo .`) can never equal or prefix an entry's
         # absolute stored cwd, which would silently fail the project-scope
         # gate open for a repo that genuinely has held nodes (review fix).

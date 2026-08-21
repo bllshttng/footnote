@@ -1,4 +1,4 @@
-"""Tests for `fno target start` - the one-verb cold-start (x-d91b).
+"""Tests for `fno do target start` - the one-verb cold-start (x-d91b).
 
 Covers the pure name sanitizer plus the four command branches with the
 subprocess + setup-hook stubbed so no real worktree/state is created:
@@ -203,7 +203,7 @@ def test_desktop_canonical_start_requests_native_handoff_without_side_effects(
     assert "native-handoff=required" in result.output
     assert "project=footnote" in result.output
     assert "/worktree" in result.output
-    assert "fno target start x-0b3f" in result.output
+    assert "fno do target start x-0b3f" in result.output
     # "No side effects" means nothing MUTATING ran, not "no subprocess ran".
     # Counting every call made this order-dependent: `fno.paths.resolve_repo_root`
     # is @cache'd and shells `git worktree list` on its first use in a process,
@@ -934,7 +934,7 @@ def test_happy_path_claims_and_prints_receipt(monkeypatch, tmp_path):
 
 
 def test_start_forwards_model_provider_to_init(monkeypatch, tmp_path):
-    """--model/--harness ride through to the composed `fno target init` call."""
+    """--model/--harness ride through to the composed `fno do target init` call."""
     wt = tmp_path / "wt"
     wt.mkdir()
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
@@ -1004,7 +1004,7 @@ def test_ensure_failure_is_loud_and_skips_init(monkeypatch, tmp_path):
 def _wire_start(monkeypatch, wt: Path):
     """Stub the four seams `start` shells so only model threading is exercised.
 
-    Returns the list `start` builds as the `fno target init` argv (captured).
+    Returns the list `start` builds as the `fno do target init` argv (captured).
     """
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
@@ -1166,7 +1166,7 @@ def test_resolve_node_model_scopes_by_provider(monkeypatch):
 
 
 def test_resolve_model_command_prints_model(monkeypatch):
-    """`fno target resolve-model` prints the resolved model for bash dispatchers."""
+    """`fno do target resolve-model` prints the resolved model for bash dispatchers."""
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(
         target_cli,
@@ -1693,7 +1693,7 @@ def test_no_merge_reaches_init_argv_on_codex_native_path(monkeypatch, tmp_path):
     """--no-merge must reach init on EVERY path start can exit through.
 
     The codex-native branch builds its own `target init` argv. It carried
-    --beastmode but not --no-merge, so `fno target start --no-merge <node>`
+    --beastmode but not --no-merge, so `fno do target start --no-merge <node>`
     inside an app-owned worktree exited 0 and wrote auto_merge_approved: true
     whenever config enabled it - a silent grant against an explicit refusal.
     """

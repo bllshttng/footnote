@@ -1,4 +1,4 @@
-"""Unit tests for the `fno plan sync` whole-vault converger sweep (x-5d84).
+"""Unit tests for the `fno do plan sync` whole-vault converger sweep (x-5d84).
 
 Covers AC2-HP (sweep converges the vault), AC1-EDGE (no plan_path skipped),
 AC2-EDGE (idempotent no-op), AC3-EDGE (--all bypasses the watermark), AC1-FR
@@ -65,7 +65,7 @@ def test_sweep_converges_vault(env):
                         "priority": "p1", "status": "ready"})  # graph says p1
     _seed(g, entries)
 
-    res = runner.invoke(app, ["plan", "sync"])
+    res = runner.invoke(app, ["do", "plan", "sync"])
     assert res.exit_code == 0, res.output
     assert "3 docs repainted" in res.output
     for d in docs:
@@ -78,7 +78,7 @@ def test_no_plan_path_skipped(env):
     tmp_path, g = env
     _seed(g, [{"id": "x-0001", "slug": "s", "plan_path": None, "priority": "p0"}])
 
-    res = runner.invoke(app, ["plan", "sync"])
+    res = runner.invoke(app, ["do", "plan", "sync"])
     assert res.exit_code == 0, res.output
     assert "0 docs repainted" in res.output
     assert not (tmp_path / "p0.md").exists()
@@ -91,9 +91,9 @@ def test_idempotent_second_run(env):
     _seed(g, [{"id": "x-0001", "slug": "s", "plan_path": str(d),
                "priority": "p1", "status": "ready"}])
 
-    first = runner.invoke(app, ["plan", "sync", "--all"])  # --all: no gate
+    first = runner.invoke(app, ["do", "plan", "sync", "--all"])  # --all: no gate
     assert "1 docs repainted" in first.output
-    second = runner.invoke(app, ["plan", "sync", "--all"])
+    second = runner.invoke(app, ["do", "plan", "sync", "--all"])
     assert "0 docs repainted" in second.output
 
 
@@ -104,12 +104,12 @@ def test_watermark_short_circuits_unchanged_graph(env):
     _seed(g, [{"id": "x-0001", "slug": "s", "plan_path": str(d),
                "priority": "p1", "status": "ready"}])
 
-    first = runner.invoke(app, ["plan", "sync"])
+    first = runner.invoke(app, ["do", "plan", "sync"])
     assert "1 docs repainted" in first.output
 
     # Drift the doc AGAIN but do NOT touch the graph; the gate must skip it.
     d.write_text(_PLAN.format(node="x-0001", prio="p3"), encoding="utf-8")
-    second = runner.invoke(app, ["plan", "sync"])
+    second = runner.invoke(app, ["do", "plan", "sync"])
     assert "graph unchanged" in second.output
     _, fields, _ = read_plan_file(d)
     assert fields["priority"] == "p3"  # untouched: gate skipped the sweep
@@ -122,10 +122,10 @@ def test_all_bypasses_watermark(env):
     _seed(g, [{"id": "x-0001", "slug": "s", "plan_path": str(d),
                "priority": "p1", "status": "ready"}])
 
-    runner.invoke(app, ["plan", "sync"])  # sets watermark to current graph mtime
+    runner.invoke(app, ["do", "plan", "sync"])  # sets watermark to current graph mtime
     d.write_text(_PLAN.format(node="x-0001", prio="p3"), encoding="utf-8")  # re-drift doc only
 
-    res = runner.invoke(app, ["plan", "sync", "--all"])  # graph unchanged, but --all
+    res = runner.invoke(app, ["do", "plan", "sync", "--all"])  # graph unchanged, but --all
     assert res.exit_code == 0, res.output
     assert "1 docs repainted" in res.output
     _, fields, _ = read_plan_file(d)
@@ -143,7 +143,7 @@ def test_graph_unreadable_degrades(env, monkeypatch):
         raise OSError("transient")
 
     monkeypatch.setattr(gs, "read_graph", _boom)
-    res = runner.invoke(app, ["plan", "sync"])
+    res = runner.invoke(app, ["do", "plan", "sync"])
     assert res.exit_code == 0, res.output
     assert "unreadable" in res.output
     # Watermark NOT advanced -> next sweep re-converges.

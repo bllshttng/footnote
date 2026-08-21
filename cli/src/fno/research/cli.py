@@ -1,4 +1,4 @@
-"""`fno research "X"` - retrieve + store + ship the doc deliverable.
+"""`fno do research "X"` - retrieve + store + ship the doc deliverable.
 
 Group 1 (US1+US2) made this the `scout` backbone: ddgs -> self-fetch ->
 cache `sources.jsonl`. Group 2 (US3) adds the *ship* step: turn the cache into

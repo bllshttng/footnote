@@ -4,7 +4,7 @@ The verb is the single source of truth for the bg-dispatch mutex shared by
 `/target bg` (dispatch-node.sh) and `/agent spawn` (spawn.sh): Guard 1 (the
 node:<id> claim probe, fail-closed) + Guard 2 (the create-only dispatch:<id>
 reservation). These tests root all claims under a tmp dir so they never touch
-real ~/.fno state.
+real ~/.fno do state.
 
 Acceptance criteria mapped:
   AC1-HP   dispatchable verdict acquires the reservation

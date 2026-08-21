@@ -63,7 +63,7 @@ HELPER="$HOOK_DIR/helpers/check-impl-location.sh"
 source "$HOOK_DIR/helpers/plans-dir.sh" 2>/dev/null || true
 
 _deny_canonical() {
-    _block "Canonical ${1:-checkout} is shared; edit blocked before it lands. For a footnote target, run \`fno target start <node>\`, then continue in a relocated or new Codex session from the \`worktree=\` path in its receipt. Or use Codex Worktree mode or Handoff before retrying."
+    _block "Canonical ${1:-checkout} is shared; edit blocked before it lands. For a footnote target, run \`fno do target start <node>\`, then continue in a relocated or new Codex session from the \`worktree=\` path in its receipt. Or use Codex Worktree mode or Handoff before retrying."
 }
 
 _location_of() { (cd "$1" && bash "$HELPER" 2>/dev/null); }

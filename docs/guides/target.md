@@ -91,7 +91,7 @@ Target will not mark a run complete until ALL of these pass:
 | Gate | Required | Can skip with | Notes |
 |------|----------|---------------|-------|
 | `quality_check_passed` | Always | - | Deferred: set only after all sigma-review agents return results and critical/high findings are addressed |
-| `output_validated` | Always | - | External truth: CI green on the PR (`fno pr status <n>`, whose rollup dedupes to the latest run per check name so a superseded run never reads as current - a bare `gh pr checks` does not); degraded fallback to the state boolean when gh/PR are unavailable |
+| `output_validated` | Always | - | External truth: CI green on the PR (`fno do pr status <n>`, whose rollup dedupes to the latest run per check name so a superseded run never reads as current - a bare `gh pr checks` does not); degraded fallback to the state boolean when gh/PR are unavailable |
 | PR created | Always | - | |
 | External review | Default yes | `--no-external` | Cron-based: two one-shot checks at +5 and +10 minutes |
 | Goal verification | Opt-in | `--no-goals` (default) | |

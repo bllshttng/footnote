@@ -85,7 +85,7 @@ def _events(tmp_path: Path) -> tuple[Path, str]:
 def _invoke(plan: Path, events: Path) -> tuple[object, dict]:
     result = runner.invoke(
         app,
-        ["delivery", "evaluate", "--json", "--plan-path", str(plan), "--events", str(events)],
+        ["do", "delivery", "evaluate", "--json", "--plan-path", str(plan), "--events", str(events)],
     )
     return result, json.loads(result.stdout)
 
@@ -884,7 +884,7 @@ def test_cli_human_output_leads_with_aggregate_and_names_nonpassing_rows(tmp_pat
 
     result = runner.invoke(
         app,
-        ["delivery", "evaluate", "--plan-path", str(plan), "--events", str(events)],
+        ["do", "delivery", "evaluate", "--plan-path", str(plan), "--events", str(events)],
     )
 
     assert result.exit_code == 0

@@ -151,7 +151,7 @@ def known_node_ids() -> frozenset[str]:
 
         if active_backend_name() != "graph":
             # graph.json is not the delivery record of truth under an external
-            # tracker, which is the same posture `fno pr closure-trailer` takes
+            # tracker, which is the same posture `fno do pr closure-trailer` takes
             # there. Nothing to verify against, so nothing is claimed.
             return frozenset()
         return frozenset(

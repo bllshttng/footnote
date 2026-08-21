@@ -1,4 +1,4 @@
-"""fno plan subcommands - thin wrappers over the in-package fno.plan._stamp module."""
+"""fno do plan subcommands - thin wrappers over the in-package fno.plan._stamp module."""
 
 __all__ = ["plan_app"]
 

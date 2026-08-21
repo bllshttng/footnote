@@ -2,7 +2,7 @@
 # plan-location-guard.sh - PreToolUse hook: a NEW plan/design doc must be saved
 # under the configured plans dir (x-5349, unified-dispatch PRD G10).
 #
-# `config.plans_dir` became settable (plus `fno plan path`) without ever being
+# `config.plans_dir` became settable (plus `fno do plan path`) without ever being
 # enforced, so a plan still lands in whatever directory the agent picked. This
 # is the positive half of that gate; the negative half - the write guards
 # denying the CORRECT save through the internal/ symlink - is the carve-out in
@@ -32,7 +32,7 @@
 # apply_patch adds). A plan written by shelling a heredoc (`cat > x.md <<EOF`)
 # is not parsed and is not caught; extending it there means the shell-clause
 # grammar graph-write-protect.sh carries, and no observed plan write takes that
-# route. `fno plan reconcile-status` remains the backstop for a drifted save.
+# route. `fno do plan reconcile-status` remains the backstop for a drifted save.
 #
 # Exit 0 always; the decision travels in the stdout JSON.
 
@@ -179,7 +179,7 @@ _has_plan_frontmatter() {
 
 # ── 5. Verdict ────────────────────────────────────────────────────────────────
 # Resolve from the SESSION cwd, exactly as the sibling carve-out does.
-# `fno plan path` is repo-anchored, so resolving from whatever cwd the
+# `fno do plan path` is repo-anchored, so resolving from whatever cwd the
 # harness spawned this hook in names a DIFFERENT project's plans dir on a
 # worktree or multi-repo dispatch - which would deny a correct save while
 # naming the wrong directory as the right one. Sharing a resolver is not
@@ -208,7 +208,7 @@ for t in "${TARGETS[@]}"; do
     fi
     [[ -n "$reason" ]] || continue
 
-    _block "$reason Resolve the save path with \`fno plan path --slug \"<slug>\" [--node \"<node-id>\"]\` and write there - it joins the configured plans dir with the plans_filename template. Change the destination with \`fno config\` (plans_dir) or the plansDirectory setting, not by writing elsewhere."
+    _block "$reason Resolve the save path with \`fno do plan path --slug \"<slug>\" [--node \"<node-id>\"]\` and write there - it joins the configured plans dir with the plans_filename template. Change the destination with \`fno config\` (plans_dir) or the plansDirectory setting, not by writing elsewhere."
 done
 
 _approve

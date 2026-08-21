@@ -1,4 +1,4 @@
-"""`fno pr status <n>` - one authoritative CI verdict for a PR (x-8b64 G).
+"""`fno do pr status <n>` - one authoritative CI verdict for a PR (x-8b64 G).
 
 Agents kept re-deriving CI-green from `statusCheckRollup` by hand (or trusting
 `gh pr checks`, which disagrees with the rollup). This computes a single
@@ -271,7 +271,7 @@ def coverage_recompute_note(coverage: dict) -> None:
 def _review_lane(pr: str, cwd: Optional[str]) -> bool:
     """Whether the merge gate's coverage guard engages for this PR.
 
-    The SAME lane predicate ``fno pr merge`` reads (``_review_lane_configured``
+    The SAME lane predicate ``fno do pr merge`` reads (``_review_lane_configured``
     in ``_merge``): a stock install with no lane opts out of review there, so
     ``ready`` must opt out with it or the two verbs answer opposite ways - the
     exact divergence this conjunction exists to remove, just inverted onto the
@@ -325,7 +325,7 @@ def _ready_blockers(
 
     The coverage conjuncts themselves are the merge gate's own, read through
     ``_coverage_gate.covered_conjuncts`` - one copy, never a restatement - so
-    ``ready`` cannot pass a row ``fno pr merge`` refuses (missing local pass,
+    ``ready`` cannot pass a row ``fno do pr merge`` refuses (missing local pass,
     stale head pin).
 
     A TERMINAL PR (merged or closed) is exempt from the coverage conjunct: the
@@ -467,7 +467,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # wrong-head row both gates then disagree on. The lane answer comes
         # BEFORE the coverage read, not beside it: on a no-lane repo the
         # read's recompute is a 120s subprocess that appends coverage rows
-        # nobody acts on - the exact cost `fno pr merge` skips on this same
+        # nobody acts on - the exact cost `fno do pr merge` skips on this same
         # boundary - so a conjunct ready ignores must not fire it either.
         #
         # ONE probe chain where two ran: required implies lane (a configured
@@ -675,7 +675,7 @@ def main(argv: Sequence[str]) -> int:
     if len(args) != 1 or not flags <= known:
         import sys
 
-        sys.stderr.write("usage: fno pr status <pr-number> [--refresh|--no-cache]\n")
+        sys.stderr.write("usage: fno do pr status <pr-number> [--refresh|--no-cache]\n")
         return 2
     try:
         from fno.pr._cache import cached_status
@@ -688,5 +688,5 @@ def main(argv: Sequence[str]) -> int:
     except ToolMissing:
         import sys
 
-        sys.stderr.write("fno pr status: gh not found on PATH\n")
+        sys.stderr.write("fno do pr status: gh not found on PATH\n")
         return 127

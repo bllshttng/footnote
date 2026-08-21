@@ -1,12 +1,12 @@
-"""fno target CLI - discoverable bootstrap for /fno:target sessions.
+"""fno do target CLI - discoverable bootstrap for /fno:target sessions.
 
 Exposes:
-    fno target init --input <text|ab-id> [--plan-path <path>]
+    fno do target init --input <text|ab-id> [--plan-path <path>]
 
 Why this exists (Change 3 of the worktree-binding plan): the canonical
 bootstrap lives at ``hooks/helpers/init-target-state.sh`` - outside the
 skill dir and named without a path in SKILL.md. Agents looking in the skill
-dir fail to find it and substitute the discoverable-but-wrong ``fno state
+dir fail to find it and substitute the discoverable-but-wrong ``fno do state
 init``, which writes a stub the stop hook then archives (often in a loop).
 A discoverable verb that REFUSES to write a stub closes that substitution at
 the source for every CLI (Claude / Codex / Gemini), since ``fno`` is the
@@ -52,7 +52,7 @@ def _resolve_init_script() -> Path:
 
     The init script ships with the fno plugin, not with arbitrary user
     projects. Resolving it via ``resolve_repo_root()`` (the active project)
-    means ``fno target init`` would fail in normal plugin usage - running
+    means ``fno do target init`` would fail in normal plugin usage - running
     ``fno`` inside a target project where ``hooks/helpers/`` does not exist
     (Codex P1 on #337). Since this verb is the mandatory bootstrap path, it
     resolves from the plugin install first.
@@ -69,7 +69,7 @@ def _resolve_init_script() -> Path:
       4. ``resolve_repo_root()`` - last resort (running inside fno repo).
     """
     # Delegates to the shared resolver (env hint -> package-relative ->
-    # persisted ~/.fno/plugin-root pointer -> repo) so `fno target init`
+    # persisted ~/.fno/plugin-root pointer -> repo) so `fno do target init`
     # finds the script from any project without a hand-set FNO_REPO_ROOT.
     return resolve_plugin_script(_INIT_RELPATH)
 
@@ -257,7 +257,7 @@ def _resolve_plan_for_blast(plan_path: Optional[str], input_: Optional[str]) -> 
     is matched (exact, case-insensitive, format-agnostic) against a graph entry
     id. This covers modifier-prefixed node inputs - the auto-continue path
     builds ``/target --no-merge <id>`` and passes the original arg to
-    ``fno target init`` - while a free-text feature description (no token equals
+    ``fno do target init`` - while a free-text feature description (no token equals
     an id) simply skips. Exactly one distinct node match is required; zero or
     ambiguous (>=2) -> skip. No fuzzy title guessing, so a description never
     mis-resolves. Fail-safe to None on any error.
@@ -457,7 +457,7 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
         # the reconcile heal deliberately skips a missing owner - so say what
         # to do instead of naming a node the graph does not have.
         typer.echo(
-            f"fno target init: {nid} is marked as shipping inside {owner}, but "
+            f"fno do target init: {nid} is marked as shipping inside {owner}, but "
             f"no node {owner} exists.\n"
             f"That containment is stale and nothing will clear it automatically. "
             f"Clear it with `fno backlog update {nid} --parent null`, then "
@@ -474,7 +474,7 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
     ) and not owner_node.get("completed_at"):
         _state = "superseded" if owner_node.get("superseded_by") else "deferred"
         typer.echo(
-            f"fno target init: {nid} is marked as shipping inside {owner}, but "
+            f"fno do target init: {nid} is marked as shipping inside {owner}, but "
             f"{owner} is {_state} and will never ship it.\n"
             f"That containment is stale. Clear it with `fno backlog update {nid} "
             "--parent null`, then dispatch this node on its own. Nothing was claimed.",
@@ -485,7 +485,7 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
         shipped = owner_node.get("pr_number")
         where = f" in PR #{shipped}" if shipped else ""
         typer.echo(
-            f"fno target init: {nid} already shipped inside {owner}{where}, "
+            f"fno do target init: {nid} already shipped inside {owner}{where}, "
             f"which is done - there is nothing left to build here.\n"
             f"{nid} was folded into {owner} as a contained node, so it has no "
             "PR of its own and is not separately costed. Nothing was claimed.",
@@ -493,7 +493,7 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
         )
         raise typer.Exit(code=2)
     typer.echo(
-        f"fno target init: {nid} ships inside {owner}'s PR; "
+        f"fno do target init: {nid} ships inside {owner}'s PR; "
         f"run `/fno:target {owner}`.\n"
         f"{nid} was folded into {owner} as a contained node, so it has no PR of "
         "its own and is not separately costed. Nothing was claimed.",
@@ -521,7 +521,7 @@ def _refuse_dispatch_hold(node: Optional[dict]) -> None:
         entries = read_graph(graph_json())
     except Exception as exc:  # noqa: BLE001 - an unreadable hold world refuses
         typer.echo(
-            f"fno target: dispatch-hold-invalid:{node.get('id', 'unknown')}: "
+            f"fno do target: dispatch-hold-invalid:{node.get('id', 'unknown')}: "
             f"backlog graph is unreadable ({exc}); refusing to assume unheld.",
             err=True,
         )
@@ -537,14 +537,14 @@ def _refuse_dispatch_hold(node: Optional[dict]) -> None:
     hold = verdict.hold
     if hold.state is DispatchHoldState.INVALID:
         typer.echo(
-            f"fno target: {verdict.guard_reason}: {hold.detail}. "
+            f"fno do target: {verdict.guard_reason}: {hold.detail}. "
             "The plan cannot prove that dispatch is unheld; fix or remove the "
             "declaration, then retry. Nothing was claimed.",
             err=True,
         )
         raise typer.Exit(code=2)
     typer.echo(
-        f"fno target: dispatch held by plan {verdict.owner_id}\n"
+        f"fno do target: dispatch held by plan {verdict.owner_id}\n"
         f"  reason: {hold.reason}\n"
         f"  set_by: {hold.set_by}\n"
         f"  release_when: {hold.release_when}\n"
@@ -1055,7 +1055,7 @@ def check_contained() -> None:
         # must not block every bootstrap, and the pre-claim check plus
         # decompose's own live-claim refusal both still stand.
         typer.echo(
-            f"fno target check-contained: could not take the graph lock "
+            f"fno do target check-contained: could not take the graph lock "
             f"({_lock_exc}); the containment read is UNSERIALIZED, so a "
             "decompose committing right now could be missed. Proceeding.",
             err=True,
@@ -1245,7 +1245,7 @@ def init(
         "--no-merge",
         help="Revoke auto-merge for this run (writes `auto_merge_approved: "
         "false`). The sole carrier for the refusal posture: it survives "
-        "`fno target start`, which forwards only the resolved node id, and the "
+        "`fno do target start`, which forwards only the resolved node id, and the "
         "init fold reads no free text (x-9d11). There is deliberately no "
         "--auto-merge twin; granting stays on config/TARGET_AUTO_MERGE.",
     ),
@@ -1268,10 +1268,10 @@ def init(
     """
     if not input_ and not plan_path:
         typer.echo(
-            "fno target init: requires --input <text|ab-id> or --plan-path <path>.\n"
+            "fno do target init: requires --input <text|ab-id> or --plan-path <path>.\n"
             "Refusing to write a stub state file (empty input + plan); the stop "
             "hook would archive it, and a re-running bootstrap loops.\n"
-            'Example: fno target init --input "fix the login redirect bug"',
+            'Example: fno do target init --input "fix the login redirect bug"',
             err=True,
         )
         raise typer.Exit(code=2)
@@ -1285,7 +1285,7 @@ def init(
     # not as a later missing-plugin or unsatisfiable-reviewer message.
     if deliverables is not None and deliverables <= 0:
         typer.echo(
-            f"fno target init: --deliverables must be a positive integer (got "
+            f"fno do target init: --deliverables must be a positive integer (got "
             f"{deliverables}). Omit it for plan-backed runs; the plan's task "
             f"count is the denominator.",
             err=True,
@@ -1306,7 +1306,7 @@ def init(
         # check runs before any subprocess, so no partial state is written
         # (AC3-FR / AC3-EDGE).
         typer.echo(
-            "fno target init: needs the footnote plugin (skills + hooks), which "
+            "fno do target init: needs the footnote plugin (skills + hooks), which "
             "a bare `pip install fno` does not ship - the bundled CLI has no "
             "pipeline to bootstrap.\n"
             "Install the plugin and run from its checkout:\n"
@@ -1323,7 +1323,7 @@ def init(
         normalized_size = size.strip().upper()
         if normalized_size not in {"S", "M", "L"}:
             typer.echo(
-                f"fno target init: invalid --size {size!r}; expected S, M, or L.",
+                f"fno do target init: invalid --size {size!r}; expected S, M, or L.",
                 err=True,
             )
             raise typer.Exit(code=2)
@@ -1347,7 +1347,7 @@ def init(
             resolve_dispatch_provider(harness)[0] if harness is not None else None
         )
     except DispatchFlagError as exc:
-        typer.echo(f"fno target init: {exc}", err=True)
+        typer.echo(f"fno do target init: {exc}", err=True)
         raise typer.Exit(code=2)
 
     # Resolved once and shared: both gates below want the same exact-match node,
@@ -1431,7 +1431,7 @@ def init(
     #
     # Gated on the plan resolving to a readable plan, because the manifest is
     # WRITE-ONCE
-    # and `fno state set --field plan_path` accepts a first-fill only while the
+    # and `fno do state set --field plan_path` accepts a first-fill only while the
     # field is EMPTY (else exit 5). Back-filling a dangling pointer would
     # therefore not just record a bad path, it would close the only legal repair
     # route. Continuing empty would instead run a planned node without its plan,
@@ -1446,7 +1446,7 @@ def init(
         bound = _resolve_plan_pointer(explicit_plan)
         if not bound:
             typer.echo(
-                f"fno target init: REFUSING because the explicit --plan-path "
+                f"fno do target init: REFUSING because the explicit --plan-path "
                 f"does not resolve to a readable plan ({explicit_plan}). "
                 f"Correct --plan-path and retry.",
                 err=True,
@@ -1461,7 +1461,7 @@ def init(
                 plan_path = bound
             else:
                 typer.echo(
-                    f"fno target init: REFUSING because the node's bound plan_path "
+                    f"fno do target init: REFUSING because the node's bound plan_path "
                     f"does not resolve to a readable plan ({resolved_plan}). "
                     f"Repair the node with: fno backlog update <id> --plan-path <path>",
                     err=True,
@@ -1575,7 +1575,7 @@ def _warn_no_merge_dropped() -> None:
 
     start's idempotent early returns create no manifest, and the manifest is
     write-once, so the refusal has nowhere to land. Silence here reads as
-    "revoked" while `fno pr merge` still sees the old value.
+    "revoked" while `fno do pr merge` still sees the old value.
     """
     typer.echo(
         "WARNING: --no-merge did NOT take - this session wrote no manifest, and "
@@ -1616,7 +1616,7 @@ def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
             "free-text run claims no node, and a stale claim proves nothing, so "
             "an abandoned session would be indistinguishable from a live one. The "
             "grant is refused rather than left to outlive its session.\nRe-run "
-            "against a backlog node (`fno target start --beastmode <node>`), or "
+            "against a backlog node (`fno do target start --beastmode <node>`), or "
             "continue without authority.",
             err=True,
         )
@@ -1627,7 +1627,7 @@ def _warn_if_authority_not_granted(project_root: Optional[Path] = None) -> None:
         "(`/fno:cancel-target`), then start a fresh one."
         if raw
         else "No manifest was written, so nothing consumed the flag. Run "
-        "`fno target init --beastmode --input <node>` to claim this session with a grant."
+        "`fno do target init --beastmode --input <node>` to claim this session with a grant."
     )
     typer.echo(f"--beastmode did NOT take - this session has no authority grant.\n{fix}", err=True)
 
@@ -1736,7 +1736,7 @@ def _maybe_check_resume_receipt() -> None:
         else:
             typer.echo(
                 f"target: resume receipt for {node} FAIL-CLOSED ({res.reason}) - "
-                "revalidate before proceeding; see `fno resume receipt validate`",
+                "revalidate before proceeding; see `fno do resume receipt validate`",
                 err=True,
             )
     except Exception:  # noqa: BLE001 - additive; never affect the init exit code
@@ -1814,7 +1814,7 @@ def _maybe_dispatch_work_start() -> None:
             # Carry the session's persisted dispatch pins into the work-start
             # /think spawn. maybe_spawn_think reads node["model"]/node["provider"]
             # at the spawn seam, so overlaying the manifest fields here is all it
-            # takes for `fno target start --model X` to reach the spawned worker.
+            # takes for `fno do target start --model X` to reach the spawned worker.
             dm = re.search(r"^dispatch_model\s*:\s*(.*)$", text, re.MULTILINE)
             dp = re.search(r"^dispatch_provider\s*:\s*(.*)$", text, re.MULTILINE)
             model_pin = dm.group(1).strip().strip("\"'") if dm else ""
@@ -1829,7 +1829,7 @@ def _maybe_dispatch_work_start() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# `fno target start` - one-verb cold-start (x-d91b).
+# `fno do target start` - one-verb cold-start (x-d91b).
 # --------------------------------------------------------------------------- #
 def _wt_name(node: str) -> str:
     """Filesystem-safe worktree name from a node id/slug or feature text.
@@ -1848,7 +1848,7 @@ def _wt_name(node: str) -> str:
 def _resolve_node_id(node: str) -> str:
     """Resolve a slug / bare-hex input to its canonical backlog node id.
 
-    ``fno target init`` only derives the node id (and thus the node claim) from
+    ``fno do target init`` only derives the node id (and thus the node claim) from
     an exact graph id or ``--plan-path``; a documented slug forwarded raw would
     write ``graph_node_id: null`` and skip the claim, so another worker could
     grab the same card (codex PR #114). Resolving here means a slug input still
@@ -2114,7 +2114,7 @@ def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
         identity.session_id, repo_root, repo_root
     ):
         typer.echo(
-            "fno target start: Codex Desktop origin is confirmed, but this "
+            "fno do target start: Codex Desktop origin is confirmed, but this "
             "thread has no verified assignment to the canonical project; "
             "refusing external fallback because it would split Remote roll-up.",
             err=True,
@@ -2133,7 +2133,7 @@ def _remote_base_ref(cwd: Path, *, fetch: bool = False) -> str:
         )
         if refreshed.returncode != 0:
             typer.echo(
-                "fno target start: could not refresh remote base: "
+                "fno do target start: could not refresh remote base: "
                 f"{refreshed.stderr.strip() or 'git fetch origin failed'}",
                 err=True,
             )
@@ -2142,7 +2142,7 @@ def _remote_base_ref(cwd: Path, *, fetch: bool = False) -> str:
         if _git_out(cwd, "rev-parse", "--verify", f"{candidate}^{{commit}}"):
             return candidate
     typer.echo(
-        "fno target start: neither origin/main nor origin/master resolves.", err=True
+        "fno do target start: neither origin/main nor origin/master resolves.", err=True
     )
     raise typer.Exit(code=1)
 
@@ -2152,7 +2152,7 @@ def _base_receipt(cwd: Path, base: str, *, head: str = "HEAD") -> str:
     fork = _git_out(cwd, "merge-base", head, base)
     if not fork:
         typer.echo(
-            f"fno target start: {head} has no merge base with {base}; refusing "
+            f"fno do target start: {head} has no merge base with {base}; refusing "
             "to report false base provenance.",
             err=True,
         )
@@ -2169,7 +2169,7 @@ def _request_codex_native_handoff(
         f"project={policy.project} canonical={repo_root} base={base} node={node}\n"
         "Use `/worktree` or **Hand off -> Worktree** in Codex Desktop, select "
         "the remote main branch, then rerun:\n"
-        f"  fno target start {node}\n"
+        f"  fno do target start {node}\n"
         "No worktree, branch, manifest, or claim was created by Footnote."
     )
     raise typer.Exit(code=_CODEX_NATIVE_HANDOFF_EXIT)
@@ -2257,7 +2257,7 @@ def _prepare_codex_native_branch(cwd: Path, node: str) -> str:
             base_sha = _git_out(cwd, "rev-parse", base)
             if not head_sha or not base_sha or head_sha != base_sha:
                 typer.echo(
-                    f"fno target start: {branch} has no target manifest and HEAD "
+                    f"fno do target start: {branch} has no target manifest and HEAD "
                     f"does not equal refreshed {base}; refusing an unproven resume.",
                     err=True,
                 )
@@ -2265,7 +2265,7 @@ def _prepare_codex_native_branch(cwd: Path, node: str) -> str:
         return _base_receipt(cwd, base)
     if current:
         typer.echo(
-            f"fno target start: Codex worktree is already on branch {current}; "
+            f"fno do target start: Codex worktree is already on branch {current}; "
             f"expected detached HEAD or {branch}.",
             err=True,
         )
@@ -2277,7 +2277,7 @@ def _prepare_codex_native_branch(cwd: Path, node: str) -> str:
     )
     if dirty.returncode != 0 or dirty.stdout.strip():
         typer.echo(
-            "fno target start: refusing to attach a dirty detached Codex worktree; "
+            "fno do target start: refusing to attach a dirty detached Codex worktree; "
             "stash or discard its changes first.",
             err=True,
         )
@@ -2285,7 +2285,7 @@ def _prepare_codex_native_branch(cwd: Path, node: str) -> str:
     exists = _git_out(cwd, "show-ref", "--verify", f"refs/heads/{branch}")
     if exists:
         typer.echo(
-            f"fno target start: branch {branch} already exists but this detached "
+            f"fno do target start: branch {branch} already exists but this detached "
             "Codex worktree has no target manifest proving it is a resume; refusing "
             "to claim an arbitrary branch.",
             err=True,
@@ -2295,7 +2295,7 @@ def _prepare_codex_native_branch(cwd: Path, node: str) -> str:
     switched = subprocess.run(args, capture_output=True, text=True)
     if switched.returncode != 0:
         typer.echo(
-            "fno target start: could not attach Codex worktree to "
+            "fno do target start: could not attach Codex worktree to "
             f"{branch}: {switched.stderr.strip()}",
             err=True,
         )
@@ -2322,7 +2322,7 @@ def _start_codex_native(
     rc, tail = _run_setup_worktree_hook(canonical, cwd)
     if rc not in (0, -1):
         typer.echo(
-            f"fno target start: setup-worktree.sh exited {rc}: {tail}; refusing "
+            f"fno do target start: setup-worktree.sh exited {rc}: {tail}; refusing "
             "to initialize against unverified shared state.",
             err=True,
         )
@@ -2339,7 +2339,7 @@ def _start_codex_native(
             explicitly_unclaimed = _manifest_is_explicitly_unclaimed(manifest_text)
             if manifest_node is not None or not explicitly_unclaimed:
                 typer.echo(
-                    f"fno target start: {manifest} does not contain a valid "
+                    f"fno do target start: {manifest} does not contain a valid "
                     "unclaimed free-text target manifest; refusing native resume.",
                     err=True,
                 )
@@ -2353,7 +2353,7 @@ def _start_codex_native(
             return
         if requested_graph_node is not None and manifest_node != node:
             typer.echo(
-                f"fno target start: {manifest} does not record the requested node "
+                f"fno do target start: {manifest} does not record the requested node "
                 f"{node} (found {manifest_node or 'null'}); refusing native resume.",
                 err=True,
             )
@@ -2364,7 +2364,7 @@ def _start_codex_native(
             raise typer.Exit(code=1)
         if manifest_node is not None and _find_node(manifest_node) is None:
             typer.echo(
-                f"fno target start: node {manifest_node} is not in the backlog graph; "
+                f"fno do target start: node {manifest_node} is not in the backlog graph; "
                 "refusing to restore a ghost claim.",
                 err=True,
             )
@@ -2386,7 +2386,7 @@ def _start_codex_native(
     resolved_model, source = _resolve_node_model(
         node, explicit=model, provider=harness
     )
-    cmd = _resolve_fno_cmd() + ["target", "init", "--input", node]
+    cmd = _resolve_fno_cmd() + ["do", "target", "init", "--input", node]
     if plan_path:
         cmd += ["--plan-path", plan_path]
     if size:
@@ -2402,7 +2402,7 @@ def _start_codex_native(
     init = subprocess.run(cmd, cwd=str(cwd))
     if init.returncode != 0:
         typer.echo(
-            f"fno target start: target init failed in app-owned worktree "
+            f"fno do target start: target init failed in app-owned worktree "
             f"(exit {init.returncode}); no replacement worktree was allocated.",
             err=True,
         )
@@ -2415,7 +2415,7 @@ def _start_codex_native(
             manifest_text = ""
         if not _manifest_is_explicitly_unclaimed(manifest_text):
             typer.echo(
-                f"fno target start: target init exited successfully but {manifest} "
+                f"fno do target start: target init exited successfully but {manifest} "
                 "does not contain valid claim provenance; refusing success receipt.",
                 err=True,
             )
@@ -2424,7 +2424,7 @@ def _start_codex_native(
     else:
         if created_node != node:
             typer.echo(
-                f"fno target start: target init recorded node {created_node}, not "
+                f"fno do target start: target init recorded node {created_node}, not "
                 f"{node}; refusing success receipt.",
                 err=True,
             )
@@ -2432,7 +2432,7 @@ def _start_codex_native(
         verdict, info = _classify_node_claim(created_node)
         if verdict != "ours":
             typer.echo(
-                f"fno target start: target init did not leave this thread owning "
+                f"fno do target start: target init did not leave this thread owning "
                 f"node:{created_node} (claim={verdict}); refusing success receipt.",
                 err=True,
             )
@@ -2552,7 +2552,7 @@ def _print_foreign_holder_park(node_id: str, info: dict, wt_path: Path) -> None:
     pid = info.get("pid", "?")
     host = info.get("host", "?")
     typer.echo(
-        f"fno target start: node {node_id} is held by a live session\n"
+        f"fno do target start: node {node_id} is held by a live session\n"
         f"  {holder} (pid={pid}, host={host}).\n"
         f"  Refusing to share its worktree at {wt_path} "
         f"(would corrupt a shared git index).\n"
@@ -2654,7 +2654,7 @@ def _reacquire_node_claim(
         # rather than a traceback - the classifier's "never wedges start" promise
         # held only for the read; the write can still fail. Mirrors the fence.
         typer.echo(
-            f"fno target start: cannot re-acquire {key}: "
+            f"fno do target start: cannot re-acquire {key}: "
             f"{type(exc).__name__}: {exc}. The claim state is unreadable or "
             f"corrupt; refusing to risk a duplicate claim. Clear it "
             f"(fno claim release {key} --force -R <why>) and retry.",
@@ -2666,7 +2666,7 @@ def _reacquire_node_claim(
         # concurrent reap sweep on the same node:<id> key): same clean-refusal
         # posture as the other guards above, not an uncaught traceback.
         typer.echo(
-            f"fno target start: cannot re-acquire {key}: {exc}. "
+            f"fno do target start: cannot re-acquire {key}: {exc}. "
             f"Contended by another process; retry shortly.",
             err=True,
         )
@@ -2725,7 +2725,7 @@ def start(
     idempotent verb with a printed receipt, so a memory-less agent succeeds.
 
     Composes: ``fno worktree ensure`` (create/reuse off origin/main, never local
-    HEAD) -> heal ``.fno`` + link shared state -> ``fno target init`` (writes the
+    HEAD) -> heal ``.fno`` + link shared state -> ``fno do target init`` (writes the
     manifest, claims the node exactly once) -> receipt. Run from INSIDE a valid
     worktree it is a no-op.
     """
@@ -2760,7 +2760,7 @@ def start(
             return
         if _under_codex_worktrees(cwd):
             typer.echo(
-                "fno target start: this linked worktree is under CODEX_HOME, but "
+                "fno do target start: this linked worktree is under CODEX_HOME, but "
                 "native ownership could not be verified for the current Desktop "
                 "thread and canonical repository; refusing to no-op or claim it.",
                 err=True,
@@ -2776,7 +2776,7 @@ def start(
     repo_root_s = _git_out(cwd, "rev-parse", "--show-toplevel")
     if not repo_root_s:
         typer.echo(
-            f"fno target start: {cwd} is not a git repository.", err=True
+            f"fno do target start: {cwd} is not a git repository.", err=True
         )
         raise typer.Exit(code=1)
     repo_root = Path(repo_root_s)
@@ -2831,7 +2831,7 @@ def start(
     wt = ens.stdout.strip()
     if ens.returncode != 0 or not wt:
         typer.echo(
-            f"fno target start: worktree ensure failed (step: ensure): "
+            f"fno do target start: worktree ensure failed (step: ensure): "
             f"{ens.stderr.strip() or 'no path on stdout'}",
             err=True,
         )
@@ -2859,7 +2859,7 @@ def start(
         if rc not in (0, -1):
             # Non-fatal: the worktree is still usable; name it but do not abort.
             typer.echo(
-                f"fno target start: setup-worktree.sh exited {rc} (non-fatal): {tail}",
+                f"fno do target start: setup-worktree.sh exited {rc} (non-fatal): {tail}",
                 err=True,
             )
 
@@ -2896,9 +2896,9 @@ def start(
             mnode = _manifest_node_id(manifest)
             if mnode is not None and mnode != node:
                 typer.echo(
-                    f"fno target start: {manifest} belongs to node {mnode}, not "
+                    f"fno do target start: {manifest} belongs to node {mnode}, not "
                     f"{node}; refusing to run in place under another node's session. "
-                    f"Cancel it (fno target cancel) or isolate a worktree.",
+                    f"Cancel it (fno do target cancel) or isolate a worktree.",
                     err=True,
                 )
                 raise typer.Exit(code=1)
@@ -2909,9 +2909,9 @@ def start(
         _manifest_node = _manifest_node_id(manifest)
         if _manifest_node is not None and _find_node(_manifest_node) is None:
             typer.echo(
-                f"fno target start: node {_manifest_node} is not in the backlog "
+                f"fno do target start: node {_manifest_node} is not in the backlog "
                 f"graph (superseded or removed); refusing to re-acquire its claim. "
-                f"Cancel the stale session (fno target cancel) or pick a live node.",
+                f"Cancel the stale session (fno do target cancel) or pick a live node.",
                 err=True,
             )
             raise typer.Exit(code=1)
@@ -2956,7 +2956,7 @@ def start(
 
     # 3. Init the session FROM the worktree (binds owner_cwd, claims the node
     #    exactly once - preserve the existing one-call claim).
-    init_cmd = fno + ["target", "init", "--input", node]
+    init_cmd = fno + ["do", "target", "init", "--input", node]
     if no_merge:
         init_cmd += ["--no-merge"]
     if plan_path:
@@ -2972,7 +2972,7 @@ def start(
     init = subprocess.run(init_cmd, cwd=str(wt_path))
     if init.returncode != 0:
         typer.echo(
-            f"fno target start: target init failed (step: init, exit "
+            f"fno do target start: target init failed (step: init, exit "
             f"{init.returncode}); worktree at {wt_path} is created but unclaimed.",
             err=True,
         )

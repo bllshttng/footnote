@@ -5,7 +5,7 @@ Read this at a pipeline boundary (blueprint->do, or a wave boundary during do/re
 
 Session succession hands the rest of the pipeline to a fresh-context worker via `bash "${SKILL_DIR}/scripts/handoff.sh"`. The helper performs all state mutations atomically; the LLM invokes it and obeys the decision line.
 
-**Claim-wait BLOCKED:** If `fno target init` (or `init-target-state.sh`) output contains `RESULT: BLOCKED`, the session MUST stop immediately. Relay the block contract as your final output (`REASON: ...` / `UNBLOCKS_AFTER: ...`). Do NOT run any pipeline phases without a live claim.
+**Claim-wait BLOCKED:** If `fno do target init` (or `init-target-state.sh`) output contains `RESULT: BLOCKED`, the session MUST stop immediately. Relay the block contract as your final output (`REASON: ...` / `UNBLOCKS_AFTER: ...`). Do NOT run any pipeline phases without a live claim.
 
 **blueprint->do boundary (structural)**
 

@@ -31,9 +31,9 @@ mkdir -p "$PLANS" "$TMP/repo/docs" "$TMP/repo/cli/tests/fixtures/plans"
 ln -s "$TMP/vault" "$TMP/repo/internal"
 PLANS_PHYS="$(cd -P "$PLANS" && pwd -P)"
 
-# Fake `fno`: only `plan path --slug X` is used by the resolver.
+# Fake `fno`: only `do plan path --slug X` is used by the resolver.
 #
-# The stub ASSERTS --slug because the real CLI requires it (`fno plan path` exits
+# The stub ASSERTS --slug because the real CLI requires it (`fno do plan path` exits
 # on `Missing option '--slug'`). A stub that ignored argv would let a caller drop
 # the flag and still go green here, while in production the resolver would fail
 # forever and both guards would degrade to fail-open with no test noticing.
@@ -42,6 +42,8 @@ mkdir -p "$FAKEBIN"
 write_fake_fno() {
     cat > "$FAKEBIN/fno" <<EOF
 #!/usr/bin/env bash
+[[ "\$1" == "do" ]] || exit 1
+shift
 if [[ "\$1" == "plan" && "\$2" == "path" ]]; then
   case " \$* " in
     *" --slug "*) ;;
@@ -344,6 +346,8 @@ else
     # same class of hole as an argv-blind stub. This one answers by $PWD.
     cat > "$FAKEBIN/fno" <<'STUBEOF'
 #!/usr/bin/env bash
+[[ "$1" == "do" ]] || exit 1
+shift
 if [[ "$1" == "plan" && "$2" == "path" ]]; then
   case " $* " in
     *" --slug "*) ;;

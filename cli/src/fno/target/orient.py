@@ -1,4 +1,4 @@
-"""``fno target status`` -- resolved orientation report (x-a7be, change A).
+"""``fno do target status`` -- resolved orientation report (x-a7be, change A).
 
 A cold or compacted agent reconstructs its situation -- node lifecycle,
 attended state, worktree path, repo test command, plan delta, done-condition --
@@ -107,7 +107,7 @@ def _node_line(
     if pr:
         return f"half-done (PR #{pr})"
     # In-progress: the current manifest itself holds this node's claim. (A
-    # foreign worker's claim is not reliably a file on disk -- `fno target init`
+    # foreign worker's claim is not reliably a file on disk -- `fno do target init`
     # already refused the loser, so graph status orients them; this surfaces the
     # holder we DO know.)
     raw = manifest_raw or {}
@@ -123,7 +123,7 @@ def _node_line(
 #
 # ONE liveness truth, two consumers: `_attended_line` (so a DEAD manifest reads
 # attended, restoring /think's question flow) and the session-start GC hook
-# (which shells `fno target status --json` and archives a DEAD manifest). The
+# (which shells `fno do target status --json` and archives a DEAD manifest). The
 # hook must NOT re-implement pid/claim logic in bash -- it reads `manifest-live`.
 
 
@@ -174,7 +174,7 @@ def _manifest_liveness(manifest_raw: Optional[Dict[str, Any]]) -> tuple[str, str
     """``(state, reason)`` where state is ``live`` | ``dead`` | ``none``.
 
     The node claim is the ONLY durable liveness signal (x-ba4b: session-pid
-    anchored + TTL-protected). ``owner_pid`` is the TRANSIENT ``fno target init``
+    anchored + TTL-protected). ``owner_pid`` is the TRANSIENT ``fno do target init``
     wrapper pid (init-target-state.sh:525) that dies seconds after init, so it can
     only ever PROVE life (a live pid), never death. DEAD is asserted solely from a
     claim confirmed absent/expired:
@@ -266,7 +266,7 @@ def _manifest_live_line(manifest_raw: Optional[Dict[str, Any]]) -> str:
     if state == "dead":
         return (
             f"dead ({reason}) | archive: "
-            "fno state archive --path .fno/target-state.md --type target"
+            "fno do state archive --path .fno/target-state.md --type target"
         )
     if state == "none":
         return "none (no manifest)"
@@ -280,7 +280,7 @@ def _worktree_line(project_root: Path, node_id: Optional[str]) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"unknown (git error: {exc}) | resolve: git rev-parse --git-dir"
     hint = node_id or "<node>"
-    return f"on canonical main -- create with: fno target start {hint}"
+    return f"on canonical main -- create with: fno do target start {hint}"
 
 
 def _tests_line(project_root: Path) -> str:
@@ -312,7 +312,7 @@ def _peer_entry_identity(peer: object, shared: Optional[str]) -> Optional[str]:
     `peer_identity = ""` is an UNSET carrier over there and the identity-free
     local `peer` gate is live. Reading it as configured here would announce
     `none (PR + CI only)` for an armed gate -- the exact wedge this file closes.
-    `resolve_local_peers` and `fno pr`'s reviewer read already agree.
+    `resolve_local_peers` and `fno do pr`'s reviewer read already agree.
     """
     if isinstance(peer, dict):
         own = peer.get("identity")
@@ -356,7 +356,7 @@ def _required_bots(review: Any) -> List[str]:
     The `cross-model only` clause is the honest form of a claim this file cannot
     verify. When the peer's model family matches the author's, loop-check swaps
     the login for an unmatchable sentinel (`apply_same_model_guard`), so a review
-    posted under it can never clear the gate - and `fno target init` does not
+    posted under it can never clear the gate - and `fno do target init` does not
     refuse that case, because `resolve_local_peers` skips identity-backed
     entries. Deciding WHICH login is affected needs the author harness, the
     session dependency this file declines. So the line narrows its claim to what
@@ -476,7 +476,7 @@ def _local_review_gates(review: Any) -> List[str]:
     Deliberately config-only, with no `detect_session()` call: the one case
     where the printed producer would not clear the gate -- every identity-free
     peer sharing the author's model family -- is already refused up front by
-    `fno target init` (`local_peers_refusal_message`), so buying it here would
+    `fno do target init` (`local_peers_refusal_message`), so buying it here would
     cost env-dependent output for a state a real run cannot be in.
 
     That argument covers the identity-FREE half only. The identity-BACKED
@@ -609,7 +609,7 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
     try:
         # ONE settings load for all three readers. `load_settings_for_repo` is
         # documented uncached and calls `_ensure_migrated`, which can WRITE, and
-        # this line runs on `fno target start`, `fno target status`, and init -
+        # this line runs on `fno do target start`, `fno do target status`, and init -
         # so a per-reader load paid three full parse+validate passes, and three
         # chances to migrate, every time the orienter rendered.
         from fno.config import load_settings_for_repo
@@ -761,7 +761,7 @@ def load_orientation(
     Resolves node_id / plan_path / manifest_raw from ``target-state.md`` when it
     exists; degrades to a manifest-less report (substrate-resolved attended, no
     node) otherwise. Explicit ``node_id`` / ``plan_path`` override the manifest
-    values (for ``fno target status <node>``). Never raises.
+    values (for ``fno do target status <node>``). Never raises.
     """
     manifest_raw = _read_manifest(project_root)
     if node_id is None:
@@ -814,7 +814,7 @@ def _self_check() -> None:
         assert by["node"].startswith("fresh"), by
         assert by["attended"].startswith("true"), by
         assert by["manifest-live"].startswith("none"), by
-        assert "fno target start" in by["worktree"], by
+        assert "fno do target start" in by["worktree"], by
         out = render(lines)
         assert "node:" in out and "done-when:" in out, out
     print("orient self-check OK")

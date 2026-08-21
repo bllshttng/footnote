@@ -1,4 +1,4 @@
-"""Schema loader for fno state types.
+"""Schema loader for fno do state types.
 
 Usage:
     from fno.schemas import load_schema

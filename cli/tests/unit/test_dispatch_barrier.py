@@ -614,7 +614,7 @@ def test_the_bare_guard_verb_never_clears_a_barrier_it_cannot_replace(
 
 
 def test_a_held_node_refuses_and_hands_back_its_own_reservation(monkeypatch, tmp_path):
-    """A session that claimed the node through its own `fno target init` is
+    """A session that claimed the node through its own `fno do target init` is
     invisible to the reservation, which only dedups other DISPATCHERS. Swallowing
     that as a best-effort hiccup put a second worker on a live session's node.
 

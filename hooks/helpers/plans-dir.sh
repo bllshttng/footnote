@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # plans-dir.sh - shared plans-dir resolution for the PreToolUse write guards.
 #
-# `fno plan path` IS the save-location convention: it walks the config
+# `fno do plan path` IS the save-location convention: it walks the config
 # precedence (Claude Code settings.local.json plansDirectory -> settings.json ->
 # config.plans_dir in .fno/config.toml -> ~/.fno/config.toml) and joins the
 # plans_filename template. Taking `dirname` of a probe path reuses that chain
@@ -22,7 +22,7 @@ fno_plans_dir() {
     command -v fno >/dev/null 2>&1 || return 1
     # --slug is required; the probe slug never touches disk. Config-parse notices
     # go to stderr, but tail -1 also protects against a stray stdout preamble.
-    probe="$(fno plan path --slug _plans_dir_probe 2>/dev/null | tail -1)" || return 1
+    probe="$(fno do plan path --slug _plans_dir_probe 2>/dev/null | tail -1)" || return 1
     [[ "$probe" == /* ]] || return 1
     dir="$(dirname "$probe")"
     # Physical form, via the same resolver the containment test uses, so both

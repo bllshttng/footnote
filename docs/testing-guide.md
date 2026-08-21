@@ -156,9 +156,9 @@ The same rule covers watchers and monitors, where it matters more because they a
 
 ```bash
 # WRONG: fails OPEN
-until ! grep -q pending out; do sleep 45; fno pr status "$PR" --json > out; done
+until ! grep -q pending out; do sleep 45; fno do pr status "$PR" --json > out; done
 # fails safe
-until grep -q '"settled": true' out; do sleep 45; fno pr status "$PR" --json > out; done
+until grep -q '"settled": true' out; do sleep 45; fno do pr status "$PR" --json > out; done
 ```
 
 Both wait on a file the loop keeps rewriting, and they are one condition apart.

@@ -72,6 +72,7 @@ decide list
 decide reindex
 delivery
 dispatch
+do
 doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host
 done
 evals

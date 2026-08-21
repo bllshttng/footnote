@@ -2,7 +2,7 @@
 
 The ``node:<id>`` claim is acquired with ``--ttl`` AND ``--pid <durable>``. The
 durable pid must be the process that lives as long as the *session*, not the
-transient ``fno`` python subprocess that runs ``fno target init`` (that pid is
+transient ``fno`` python subprocess that runs ``fno do target init`` (that pid is
 dead ~1s after init returns - the original bug). Every agent harness runs its
 session under a long-lived binary (``claude``, ``codex``, ``gemini``,
 ``opencode``, ``agy``), so the uniform mechanism is a process-tree walk from

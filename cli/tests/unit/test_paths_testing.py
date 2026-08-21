@@ -4,7 +4,7 @@ Task 4.6 (Phase 4): use_tmpdir isolates paths correctly.
 
 AC4-HP: paths.X() resolves under tmp_path after use_tmpdir
 AC4-EDGE: calling use_tmpdir twice clears the cache between calls
-AC4-EDGE: no real ~/.fno state is read after use_tmpdir
+AC4-EDGE: no real ~/.fno do state is read after use_tmpdir
 
 Autouse fixture pins FNO_REPO_ROOT per feedback_fno_repo_root_leaks_between_tests.
 """

@@ -592,7 +592,7 @@ def _stacked_base_refusal(command=""):
     """Refusal text when the PR's base no longer leads to the default branch.
 
     A PR merged into a base that already landed reports MERGED and ships
-    nothing. `fno pr merge`, `fno pr verify` and the Rust auto-merge arm all
+    nothing. `fno do pr merge`, `fno do pr verify` and the Rust auto-merge arm all
     call the same predicate; this hook is the fourth caller, and it is the only
     one that sees a BARE `gh pr merge`. Both harness wirings route through here
     (`hooks/hooks.json`, `hooks/codex-hooks.json`), which is most of the merge
@@ -688,26 +688,26 @@ def _coverage_refusal(command=""):
     """Refusal text when the merge guard's coverage predicate says no.
 
     The hook's own two-factor check asks a different question than
-    `fno pr merge` does: a manifest flag and a session-scoped external-review
+    `fno do pr merge` does: a manifest flag and a session-scoped external-review
     artifact, neither of which reads review coverage at the PR's head. Passing
     it was never evidence that the sanctioned merge primitive would agree. This
     consults the guard's predicate itself rather than carrying a third copy of
     it, so both paths refuse for the same reason and print the same sentence.
 
-    Absence is a refusal here, not a shrug. `fno pr merge` refuses a missing
+    Absence is a refusal here, not a shrug. `fno do pr merge` refuses a missing
     or head-mismatched row, so a veto that waved those through would recreate
     the divergence it exists to close, on the precise input where nothing has
-    reviewed the PR. A wrong deny costs one command: `fno pr merge` is the
+    reviewed the PR. A wrong deny costs one command: `fno do pr merge` is the
     sanctioned primitive, this hook does not gate it, and it recomputes. A
     wrong allow lands an unreviewed merge. Deny is the cheap direction.
 
-    Runs WITHOUT the recompute. `fno pr merge` fires the Rust producer once
+    Runs WITHOUT the recompute. `fno do pr merge` fires the Rust producer once
     when no row describes the head, and that subprocess is budgeted in
     minutes. This veto runs inside a PreToolUse hook whose harness budget is
     60s, and a hook that gets killed emits no verdict at all, so a probe
     allowed to eat the budget would let an unauthorized merge through - the
     same reasoning the lineage veto's timeout carries. The cases only a
-    recompute can answer are refused here and answered by `fno pr merge`,
+    recompute can answer are refused here and answered by `fno do pr merge`,
     which is where the time is affordable.
 
     Fails OPEN only on a named instrument failure: exit 4, a missing `fno`, a
@@ -752,12 +752,12 @@ def _dispatch_hold_refusal(command=""):
     try:
         try:
             proc = subprocess.run(
-                ["fno", "pr", "hold-check", pr_number],
+                ["fno", "do", "pr", "hold-check", pr_number],
                 **kwargs,
             )
         except FileNotFoundError:
             proc = subprocess.run(
-                [sys.executable, "-m", "fno.cli", "pr", "hold-check", pr_number],
+                [sys.executable, "-m", "fno.cli", "do", "pr", "hold-check", pr_number],
                 **kwargs,
             )
     except Exception as exc:  # noqa: BLE001 - unreadable means held
@@ -1495,7 +1495,7 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
 
     Measured 2026-08-19: five PRs in one evening red on
     scripts/ci/check-pr-node-closure.sh for one reason - the generator
-    (`fno pr closure-trailer`) already existed and nothing ran it. The Python
+    (`fno do pr closure-trailer`) already existed and nothing ran it. The Python
     creation paths now call fno.pr.closure.ensure_closure_trailer themselves;
     this covers the prose path, where an agent types the command.
 
@@ -1552,7 +1552,7 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
         f"{', '.join(ids)}. check-pr-node-closure reds this PR unless the body "
         f"claims at least one REAL node.\n"
         f"Generate the line (graph-checked, with contained_in descendants) via "
-        f"`fno pr closure-trailer <node-id>` and paste its output.\n"
+        f"`fno do pr closure-trailer <node-id>` and paste its output.\n"
         f"Do NOT paste a candidate from this message: a segment can match the "
         f"grammar without being a node, and one unknown id voids the whole "
         f"binding at merge.\n"
@@ -1848,7 +1848,7 @@ def _merge_deny_message(command):
 Command: """ + command + f"""
 
 Raw `gh pr merge` is gated at the shipping boundary. The sanctioned merge
-primitive is `fno pr merge`, which runs its own footnote-canonical guards
+primitive is `fno do pr merge`, which runs its own footnote-canonical guards
 and is not blocked by this hook.
 
 Auto-merge directly from Claude Code requires ALL of:
@@ -1868,7 +1868,7 @@ Ahead of the two factors above sits a third veto: review coverage. A bare
 `gh pr merge` also requires a `covered` review_coverage row pinned to the
 PR's current head. A missing or stale row is refused here even when both
 factors pass, because nothing reviewed the head that would merge. The
-sanctioned primitive `fno pr merge` recomputes that row itself.
+sanctioned primitive `fno do pr merge` recomputes that row itself.
 
 If /pr check was skipped or failed, the correct recovery is to run it
 again or explicitly configure --no-external. Do not forge the artifact.
@@ -1996,23 +1996,23 @@ def main():
         kind, pr = graphql_reads[0]
         if kind == "info":
             reason = (
-                f"[fno GraphQL reserve] use `fno pr info {pr}` for state/head/mergeability. "
+                f"[fno GraphQL reserve] use `fno do pr info {pr}` for state/head/mergeability. "
                 "This refusal is unconditional: the read is ROUTED, never rationed."
             )
         elif kind == "list":
             reason = (
-                "[fno GraphQL reserve] use `fno pr list` for a REST-backed listing. "
+                "[fno GraphQL reserve] use `fno do pr list` for a REST-backed listing. "
                 "This refusal is unconditional: the read is ROUTED, never rationed."
             )
         elif kind == "status":
             reason = (
-                f"[fno GraphQL reserve] use `fno pr status {pr}` for CI. Its CI read is REST; "
+                f"[fno GraphQL reserve] use `fno do pr status {pr}` for CI. Its CI read is REST; "
                 "optional review-thread and coverage reads inside it remain GraphQL."
             )
         else:
             reason = (
                 "[fno GraphQL reserve] direct `gh api graphql` is discretionary; route it "
-                "through `fno pr graphql-exec --purpose discretionary -- ...`. This "
+                "through `fno do pr graphql-exec --purpose discretionary -- ...`. This "
                 "refusal is unconditional, so waiting for a quota reset changes nothing."
             )
         _emit("deny", reason)
@@ -2197,12 +2197,12 @@ def main():
         # same reason: the override marker buys out review ceremony, and a PR
         # nothing reviewed at the head that would merge is not ceremony. The
         # recovery line wraps the guard's own sentence verbatim - never edits
-        # it - so the hook's reason and `fno pr merge`'s receipt carry one
+        # it - so the hook's reason and `fno do pr merge`'s receipt carry one
         # recognizable sentence between them.
         covref = _coverage_refusal(merge_seg)
         if covref:
-            _emit("deny", f"[fno review-coverage] {covref}\n"
-                          "Recovery: run `fno pr merge`, which recomputes coverage "
+            _emit("deny", f"[fno do review-coverage] {covref}\n"
+                          "Recovery: run `fno do pr merge`, which recomputes coverage "
                           "and is not gated by this hook.")
             sys.exit(0)
         allow_reason = _check_pr_merge_allowed(merge_seg)

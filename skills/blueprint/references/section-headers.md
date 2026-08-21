@@ -89,7 +89,7 @@ When splitting a previously-monolithic plan into per-wave nodes, point each sibl
 | File | Role |
 |------|------|
 | [`../scripts/mutate_doc.py`](../scripts/mutate_doc.py) | Appends the authoritative `## Execution Strategy` YAML to the single plan doc |
-| [`../scripts/validate-plan.sh`](../scripts/validate-plan.sh) | Routes semantic plans to `fno plan validate --execution` and preserves legacy heading checks |
+| [`../scripts/validate-plan.sh`](../scripts/validate-plan.sh) | Routes semantic plans to `fno do plan validate --execution` and preserves legacy heading checks |
 | This file | Reference doc — slug rules, examples, backlog usage |
 
 Adding a new machine-consumed field belongs in the Execution Strategy schema and semantic validator.

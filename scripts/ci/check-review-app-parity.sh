@@ -9,7 +9,7 @@
 #   - Rust  : BOT_PROFILES              in crates/fno-agents/src/loopcheck.rs
 #             (the gate's review classifier, refusal detection, nudging)
 #   - Python: _OPTIONAL_BOTS            in cli/src/fno/pr/_reviews.py
-#             (the optional-review signal on `fno pr status`)
+#             (the optional-review signal on `fno do pr status`)
 #   - Python: _KNOWN_REVIEW_APP_LOGINS  in cli/src/fno/review_capability.py
 #             (the init capability refusal: an unknown configured app is a typo)
 #
@@ -205,7 +205,7 @@ if problems:
         f"  Python: _OPTIONAL_BOTS in {optional_path}\n"
         f"  Python: _KNOWN_REVIEW_APP_LOGINS in {capability_path}\n"
         "  A login on only one side is an App one path honors and another cannot "
-        "explain (a bot the gate sees but `fno pr status` does not, or vice versa).",
+        "explain (a bot the gate sees but `fno do pr status` does not, or vice versa).",
         file=sys.stderr,
     )
     sys.exit(1)

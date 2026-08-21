@@ -1,6 +1,6 @@
 """The coverage predicate's two surfaces refuse with ONE sentence.
 
-`fno pr merge` (through run_merge, recompute=True) and `fno pr
+`fno do pr merge` (through run_merge, recompute=True) and `fno do pr
 coverage-check` (through the verb, recompute=False) must print the same
 refusal for the same row. Two denials for different reasons is precisely the
 defect the shared predicate exists to remove, so these assert the TEXT
@@ -8,7 +8,7 @@ character for character, not merely that both refused.
 
 The absence pins are the temptation these tests exist to outlive: a future
 author will want to soften a missing or head-mismatched row into a fail-open.
-Exit 3 on absence is load-bearing - `fno pr merge` refuses those rows, so a
+Exit 3 on absence is load-bearing - `fno do pr merge` refuses those rows, so a
 hook that waved them through would recreate the divergence on the exact
 input where nothing reviewed the PR. Exit 4 stays reserved for a named
 instrument failure, reachable here only by forcing the head fetch to fail or
@@ -276,7 +276,7 @@ def test_merge_blocks_when_the_head_fetch_fails(
 # ---- the 3am release valve on the verb the docs name ----
 #
 # `docs/best-practices.md` and `docs/troubleshooting.md` both route merges
-# through `fno pr merge` and name the `coverage-override` label as the only
+# through `fno do pr merge` and name the `coverage-override` label as the only
 # way past an uncovered head. A valve read anywhere but the shared predicate
 # is a valve on one of N reachable paths: the gate refuses first and the
 # publisher's override branch is never reached, leaving the raw `gh` path the
@@ -307,7 +307,7 @@ def test_the_override_label_opens_the_gate_on_an_uncovered_pr(
 def test_the_override_reaches_the_merge_verb_and_says_so(
     enabled, monkeypatch, capsys, tmp_path  # noqa: F811
 ):
-    """`fno pr merge` proceeds under the label, and the receipt names the waiver.
+    """`fno do pr merge` proceeds under the label, and the receipt names the waiver.
 
     Exit 2 here would mean the documented valve does not open on the verb the
     docs tell the operator to use. A silent exit 0 would mean a waived merge
@@ -326,7 +326,7 @@ def test_the_override_reaches_the_merge_verb_and_says_so(
     monkeypatch.setattr(_merge, "run", fake)
     rc = _merge.run_merge(["42"], cwd=str(tmp_path))
     err = capsys.readouterr().err
-    assert rc != 2, "the documented valve did not open on `fno pr merge`"
+    assert rc != 2, "the documented valve did not open on `fno do pr merge`"
     assert "coverage waived: coverage-override label applied by jane" in err
 
 

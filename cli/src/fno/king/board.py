@@ -495,7 +495,7 @@ def _resolve_holder_activity(holders: set[str]) -> dict[str, dict]:
 
     out: dict[str, dict] = {}
     for holder in holders:
-        # `target-session:<harness session id>` is the shape fno target init
+        # `target-session:<harness session id>` is the shape fno do target init
         # writes; the id after the colon is what resolves.
         token = holder.split(":", 1)[1] if ":" in holder else holder
         try:

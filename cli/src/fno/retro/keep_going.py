@@ -6,7 +6,7 @@ The load-bearing safety property is the ceiling. An autonomous loop that spawns
 its own follow-up work is unbounded without a hard daily cap - each merge
 harvesting N carve-outs, each spawning a think/target, each of those merging and
 harvesting again. So the ceiling reuses the SAME per-install per-day counter
-``fno think dispatch`` bumps (:mod:`fno.provenance.spawn_think`): think + target
+``fno do think dispatch`` bumps (:mod:`fno.provenance.spawn_think`): think + target
 dispatches share ONE budget - a single ceiling on total autonomous fan-out per
 day, governed by ``config.think_spawn.daily_cap`` (0 = off).
 
@@ -139,7 +139,7 @@ def classify_followup(candidate: Candidate) -> str:
 
 
 def _dispatch_think(node_id: str, cwd: Optional[str]) -> bool:
-    """``fno think dispatch <node> --json`` - a bg /think carrying the ritual's
+    """``fno do think dispatch <node> --json`` - a bg /think carrying the ritual's
     live context. Self-bumps the shared daily counter ONLY on a real spawn, so
     this arm must NOT bump again.
 
@@ -151,7 +151,7 @@ def _dispatch_think(node_id: str, cwd: Optional[str]) -> bool:
     forces the gate on + attended=spawn, so offered/noop shouldn't arise via this
     path - but keying off the decision is contract-correct, not exit-code-lucky.)
     """
-    cmd = [*_subprocess_util.fno_py_cmd(), "think", "dispatch", node_id, "--json"]
+    cmd = [*_subprocess_util.fno_py_cmd(), "do", "think", "dispatch", node_id, "--json"]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=600,
@@ -238,7 +238,7 @@ def dispatch_followups(
     ``landed`` are the LandResults from the harvest (already filed nodes). Only
     carve-out nodes with a real ``node_id`` are considered. One shared daily
     counter is read before each dispatch and bumped after: the think arm's
-    ``fno think dispatch`` self-bumps, so it is NOT double-bumped here; the build
+    ``fno do think dispatch`` self-bumps, so it is NOT double-bumped here; the build
     arm bumps once itself. When the ceiling is reached, remaining think/build
     items are left filed (never dropped) and ONE cap line is printed.
 

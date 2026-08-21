@@ -32,7 +32,7 @@ def test_dotted_non_paths_excluded(tmp_path: Path) -> None:
     # `config.target.blast` is a config key, not a file path (no slash) -> ignored.
     plan = _write(
         tmp_path / "plan.md",
-        "Gate on `config.target.blast` and the `fno target status` verb.\n",
+        "Gate on `config.target.blast` and the `fno do target status` verb.\n",
     )
     delta = reconcile_plan(plan, tmp_path)
     assert delta.present == 0 and delta.stale == 0

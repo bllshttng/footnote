@@ -148,7 +148,7 @@ is known):
    before. Three readers inherit the fact, so an adopted node from here on:
 
    - never dispatches. Autonomous selection skips it (`contained:<owner-id>`),
-     and `fno target init` REDIRECTS a named one to its delivery unit rather
+     and `fno do target init` REDIRECTS a named one to its delivery unit rather
      than claiming it. Naming stays consent; you are routed, not refused.
    - never claims the plan's cost. The delivery unit carries the whole
      `cost_usd`, `points`, and `session_id`; contained nodes contributing zero
@@ -183,7 +183,7 @@ is known):
    (this epic's or another epic's) can never be adopted - demoting a group into
    a task reshapes the epic.
    The verb creates one child node per group (`parent=$EPIC_ID`, its own
-   self-contained quick-plan scaffold at the canonical `fno plan path` name in
+   self-contained quick-plan scaffold at the canonical `fno do plan path` name in
    the child's own project plans dir - the path it prints as `scaffolded plan:`
    / reports in the `--json` `scaffolded[]`), `blocked_by` resolved from
    `blocked_by_groups`, prints the epic id and each child id with its wave
@@ -217,7 +217,7 @@ is known):
      slice), and a `kill_criteria`.
    - Flip the frontmatter `status: idea` -> `status: ready`. The `idea` rung is
      undispatchable on every surface, so an unfilled scaffold can never be picked
-     up; the validator also refuses to pass one (`fno plan rung` reports it).
+     up; the validator also refuses to pass one (`fno do plan rung` reports it).
    - Validate, THEN link (link LAST, after the content is real):
      ```bash
      bash "${SKILL_DIR}/scripts/validate-plan.sh" <child-plan> \
@@ -261,7 +261,7 @@ holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
 **Packaging: `separate` only.** Every child gets its own self-contained
 quick-plan file - `plan == PR == node` for children too. Decompose scaffolds a
 stub per child (`## Why (from epic)` + Context / Changes / Files to Modify /
-Verification, born `status: idea`) at the canonical `fno plan path` name in the
+Verification, born `status: idea`) at the canonical `fno do plan path` name in the
 child's own project plans dir (reported as `scaffolded plan:`; existing legacy
 `<stem>.group-<slug>.md` stubs are grandfathered in place), and births the
 child WITHOUT a `plan_path` - identity is the durable `group_slug` field, so the

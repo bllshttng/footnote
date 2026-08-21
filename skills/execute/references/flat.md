@@ -50,13 +50,13 @@ NOT make further changes:
 ```bash
 PLAN_PATH="$1"   # the .md file path passed to /execute
 # kill-criteria.sh was folded into the fno-agents binary (US1, ab-58645f63).
-# `fno phase kill-check` prints `KILL_CRITERIA_FIRED <name>|<reason>` and exits
+# `fno do phase kill-check` prints `KILL_CRITERIA_FIRED <name>|<reason>` and exits
 # 1 when a predicate fires, exits 0 (empty) when none fire, and exits 2 when the
 # fno-agents binary is unavailable. Branch on the exit code: only rc 1 WITH the
 # marker aborts; rc 2 (or any other non-zero) is an infra failure that warns and
 # skips, never aborting /execute with an empty kill reason (codex PR #515 P2).
 if [[ -n "$PLAN_PATH" ]] && command -v fno >/dev/null 2>&1; then
-    KC_OUT=$(fno phase kill-check "$PLAN_PATH" 2>/dev/null); KC_RC=$?
+    KC_OUT=$(fno do phase kill-check "$PLAN_PATH" 2>/dev/null); KC_RC=$?
     if [[ $KC_RC -eq 1 && "$KC_OUT" == KILL_CRITERIA_FIRED* ]]; then
         KC_NAME="${KC_OUT#KILL_CRITERIA_FIRED }"; KC_NAME="${KC_NAME%%|*}"
         KC_REASON="${KC_OUT##*|}"

@@ -1,7 +1,7 @@
 # Ship Phase: Rebase + Conflict Resolution
 
 Reference for the target ship phase. Describes when and how to invoke
-`fno pr rebase` and dispatch the conflict-resolver agent on exit 42.
+`fno do pr rebase` and dispatch the conflict-resolver agent on exit 42.
 
 ## Preconditions (before entering the ship phase)
 
@@ -30,7 +30,7 @@ checks): this is the deterministic **test-parity** runner that reproduces CI's
 smoke + rust legs locally so a green here means a green PR, killing the
 push-wait-red-fix loop where each ~10-minute CI round surfaces one new failure.
 
-It is an OPT-IN rehearsal, never the authority. CI on the PR head is the merge gate. `fno pr evidence-required` is the single decision point: it reads `config.preflight.required` (default false) and the `FNO_SKIP_PREFLIGHT=1` escape. This bash path and the Python lanes cannot disagree. A project that wants the mandatory rehearsal back sets `preflight.required = true`.
+It is an OPT-IN rehearsal, never the authority. CI on the PR head is the merge gate. `fno do pr evidence-required` is the single decision point: it reads `config.preflight.required` (default false) and the `FNO_SKIP_PREFLIGHT=1` escape. This bash path and the Python lanes cannot disagree. A project that wants the mandatory rehearsal back sets `preflight.required = true`.
 
 ```bash
 # Before the first PR push, and again before the push you expect to settle
@@ -39,7 +39,7 @@ It is an OPT-IN rehearsal, never the authority. CI on the PR head is the merge g
 # adds no second decider on top of it. A failed or unparsable fno call yields
 # an empty string, which is not "true", so this fails open in the same
 # direction as the Python policy (CI still verifies the PR head).
-pf_required="$(fno pr evidence-required --base "${BASE:-origin/main}" 2>/dev/null | jq -r '.required // false')"
+pf_required="$(fno do pr evidence-required --base "${BASE:-origin/main}" 2>/dev/null | jq -r '.required // false')"
 if [[ "$pf_required" == "true" && -x scripts/ci/preflight.sh ]]; then
   scripts/ci/preflight.sh; pf_rc=$?
   # Branch on the code. Collapsing every non-zero into "RED" is what sends a
@@ -67,9 +67,9 @@ fi
 
 - Stock config: no local preflight runs before a push. The focused checks are fmt for Rust changes and the blast-radius tests. `fno lint style` remains a voluntary hand-run verb. CI is the gate. Six concurrent full preflights at load 415 with zero completions set this default.
 - **A project that set `preflight.required = true`:** run `scripts/ci/preflight.sh` (full) before the first push and the settle-green push. Between fix-loop commits (external-review fixes, iteration pushes) run `scripts/ci/preflight.sh --retry-failed`. It re-checks only the legs that failed last time. The legs are smoke, fmt, cargo test, and the leak guard, recorded per leg in `.fno/preflight-last-failed-legs.txt`. Then run one **full** pass before the push you expect to go green. A subset green is not a full green. The runner labels it, and a retry with no usable record runs every leg and earns FULL.
-- The receipt preflight mints is **review-entry evidence, not merge eligibility**. `fno pr evidence-check` needs it to open the PR only on a project that opted in. Hosted CI on the PR head plus the configured reviewers decide the merge. Nothing local gates the merge. It survives a rebase (`fno pr evidence-check --allow-rebase-equivalent`, matching verbatim patch ids) but not a code change. It never rescues a failed or pending receipt for HEAD itself.
+- The receipt preflight mints is **review-entry evidence, not merge eligibility**. `fno do pr evidence-check` needs it to open the PR only on a project that opted in. Hosted CI on the PR head plus the configured reviewers decide the merge. Nothing local gates the merge. It survives a rebase (`fno do pr evidence-check --allow-rebase-equivalent`, matching verbatim patch ids) but not a code change. It never rescues a failed or pending receipt for HEAD itself.
 - The guard is `-x scripts/ci/preflight.sh`, a relative existence check. It no-ops in any repo that does not ship the script. The self-containment lint forbids repo-root-anchored script refs, and the relative form is portable.
-- Escape hatches stay explicit and auditable. `fno pr evidence-required` is the ONE decision source: it reads `FNO_SKIP_PREFLIGHT=1` and the docs-only rule itself. A docs-only diff (only `docs/`, `internal/`, and the root `README.md`) skips by policy inside that call. The script itself never self-skips, and this file never second-guesses the policy.
+- Escape hatches stay explicit and auditable. `fno do pr evidence-required` is the ONE decision source: it reads `FNO_SKIP_PREFLIGHT=1` and the docs-only rule itself. A docs-only diff (only `docs/`, `internal/`, and the root `README.md`) skips by policy inside that call. The script itself never self-skips, and this file never second-guesses the policy.
 
 See the repo-root `docs/preflight.md` for the full convention.
 
@@ -141,12 +141,12 @@ not persist (graph-lock contention, a partial write) is caught by re-reading
 `pr_number` - the verified retry never fights it (the different-value branch
 above defers to it), and the same-value race converges benignly.
 
-## When to Invoke fno pr rebase
+## When to Invoke fno do pr rebase
 
-Before every `fno pr merge` call, run:
+Before every `fno do pr merge` call, run:
 
 ```bash
-fno pr rebase --base=origin/main
+fno do pr rebase --base=origin/main
 ```
 
 This ensures the feature branch is rebased onto fresh `origin/main` before
@@ -157,8 +157,8 @@ already merged to main.
 
 | Exit | JSON status | Meaning | Action |
 |------|-------------|---------|--------|
-| 0 | `clean` | Rebase succeeded, no conflicts | Proceed to `fno pr merge` |
-| 0 | `resolved` | Rebase complete after conflict resolution | Proceed to `fno pr merge` |
+| 0 | `clean` | Rebase succeeded, no conflicts | Proceed to `fno do pr merge` |
+| 0 | `resolved` | Rebase complete after conflict resolution | Proceed to `fno do pr merge` |
 | 1 | `failed` | Conflict with `conflict_resolution: fail` | Abort; report to user |
 | 1 | `refused` | Guardrail blocked auto-resolve | Abort; report files to user |
 | 2 | `dirty` | Working tree has uncommitted changes | Abort; stash or commit first |
@@ -170,7 +170,7 @@ All human-readable messages from git go to stderr.
 
 ## Exit 42 Protocol: Dispatch conflict-resolver Agent
 
-When `fno pr rebase` exits 42, the rebase is paused mid-flight with
+When `fno do pr rebase` exits 42, the rebase is paused mid-flight with
 conflict markers in the working tree. The caller must:
 
 1. Parse stdout JSON to get `files` (list of conflicting paths) and `diff_preview`
@@ -200,7 +200,7 @@ Instructions:
 3. After the agent completes, call back:
 
 ```bash
-fno pr rebase --continue
+fno do pr rebase --continue
 ```
 
 4. Repeat from step 1 if exit is 42 again (multi-patch rebase can surface
@@ -209,7 +209,7 @@ fno pr rebase --continue
 ## Full Loop (Skill Pseudocode)
 
 ```bash
-fno pr rebase --base=origin/main
+fno do pr rebase --base=origin/main
 exit_code=$?
 stdout=$(...)  # capture stdout
 
@@ -220,7 +220,7 @@ while [[ $exit_code -eq 42 ]]; do
     # Dispatch via Task tool - wait for agent to complete
     dispatch_conflict_resolver "$files" "$diff_preview"
 
-    fno pr rebase --continue
+    fno do pr rebase --continue
     exit_code=$?
     stdout=$(...)
 done
@@ -232,12 +232,12 @@ if [[ $exit_code -ne 0 ]]; then
 fi
 
 # exit 0 - proceed to merge
-fno pr merge --invoker=target "$PR_NUMBER"
+fno do pr merge --invoker=target "$PR_NUMBER"
 ```
 
 ## Guardrails (refuse list)
 
-`fno pr rebase` refuses auto-resolution for these file types:
+`fno do pr rebase` refuses auto-resolution for these file types:
 
 - Migration files: `**/migrations/**`, `schema.prisma`, `supabase/migrations/**`
 - Secret / env files: `.env`, `*.env.*`, `**/secrets/**`
@@ -254,5 +254,5 @@ Report these to the user; do not retry.
 The `conflict-resolver` agent is defined in `agents/conflict-resolver.md` and
 is only invokable via the Claude Code Task tool from within a running skill
 context. There is no standalone shell wrapper (`run-conflict-resolver.sh`).
-`fno pr rebase` is intentionally mechanical - it detects the conflict state
+`fno do pr rebase` is intentionally mechanical - it detects the conflict state
 and hands off via exit 42. The skill layer owns the Task dispatch.

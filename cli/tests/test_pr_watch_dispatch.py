@@ -22,7 +22,7 @@ import pytest
 def _hermetic_post_merge(monkeypatch):
     """Keep tick tests hermetic after the verb-first cutover.
 
-    The default ``_default_dispatch_ritual`` now shells ``fno pr ritual`` and
+    The default ``_default_dispatch_ritual`` now shells ``fno do pr ritual`` and
     appends receipts to the global events log. Tests that exercise the real
     default dispatch (those that do NOT inject ``dispatch_ritual_fn``) would
     otherwise spawn a subprocess and pollute ~/.fno/events.jsonl. Redirect both

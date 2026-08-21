@@ -110,14 +110,14 @@ It posts the verbatim review and blocking inline findings under that identity, i
 
 Do not mix carriers for one entry: `--attest` satisfies the local composite reviewer key, while `--post` satisfies an explicit GitHub login.
 
-## Step 0c: Assurance gate (`fno review --assess-assurance`)
+## Step 0c: Assurance gate (`fno do review --assess-assurance`)
 
 Before waiting on review, classify what assurance this change needs and check we
 can actually deliver it. Pass the bound node's size and any named risk surfaces:
 
 ```bash
 # --policy-size from the backlog node (S/M/L); --risk-surface repeatable.
-fno review --assess-assurance --policy-size "$NODE_SIZE" ${RISK_SURFACES}
+fno do review --assess-assurance --policy-size "$NODE_SIZE" ${RISK_SURFACES}
 ```
 
 The verdict is JSON (`policy`, `satisfied`, `effective`, `reason`). Exit `3`
@@ -143,20 +143,20 @@ is a preference, never a paywall.
 
 ```bash
 # If PR number is not provided, resolve the current branch over REST
-fno pr info
+fno do pr info
 ```
 
 Resolve the current head and live node, then inspect the sigma artifact as a second source before any zero-reviewer return or polling decision:
 
 ```bash
-PR_INFO=$(fno pr info)
+PR_INFO=$(fno do pr info)
 PR_NUMBER=$(printf '%s' "$PR_INFO" | jq -er .pr)
 PR_HEAD=$(printf '%s' "$PR_INFO" | jq -er .head_sha)
 REPO_SLUG=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\.git$##')
 OWNER=${REPO_SLUG%%/*}
 REPO=${REPO_SLUG#*/}
 NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | xargs)
-SIGMA_JSON=$(fno review --inspect-sigma --sigma-node "$NODE_ID" \
+SIGMA_JSON=$(fno do review --inspect-sigma --sigma-node "$NODE_ID" \
   --sigma-pr "$PR_NUMBER" --sigma-head "$PR_HEAD" --json)
 SIGMA_STATUS=$(printf '%s' "$SIGMA_JSON" | jq -r .status)
 ```

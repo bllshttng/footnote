@@ -40,9 +40,9 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 | 4.5 Docs | **Default: YES** (skip only with `--no-docs` or config) | `domain_phases.docs` (default: `fno:ship-docs`); docs MUST land BEFORE ship so they ride in the same PR |
 | 5. Browser | If `has_ui` (skip with `--no-browser`) | `fno:tdd` (browser-testing reference); advisory run-and-log, never gates completion and is not a loop-check input; run BEFORE ship so any findings ride in the same PR |
 | 6. Ship | Default YES (skip with `--no-ship`) | `domain_phases.ship` (default: `fno:pr create`); run AFTER docs + browser |
-| 6a. Pre-ship rebase | Only if `auto_merge_approved: true` | `fno pr rebase` |
+| 6a. Pre-ship rebase | Only if `auto_merge_approved: true` | `fno do pr rebase` |
 | 7. External | **Default: YES** (skip only with `--no-external` or config) | `domain_phases.external` (default: `fno:pr check {pr_number}`) |
-| 7a. Post-review merge | Only if `auto_merge_approved: true` AND external review done | `fno pr merge --invoker=target "$PR_NUMBER"` |
+| 7a. Post-review merge | Only if `auto_merge_approved: true` AND external review done | `fno do pr merge --invoker=target "$PR_NUMBER"` |
 
 See [auto-merge-mechanics.md](auto-merge-mechanics.md) for the full pre-ship rebase + post-review merge protocol.
 

@@ -8,11 +8,11 @@ This feature adds a deterministic blast read at `/target` init that modulates th
 
 ## Where it fires
 
-Inside `fno target init` (`cli/src/fno/target_cli.py`), after size resolution and before the bash writer (`hooks/helpers/init-target-state.sh`) renders `target-state.md`. The manifest is immutable, so the modulation lands in the `TARGET_SIZE` value handed to the writer, never after. Gated entirely on `config.target.blast.enabled`; disabled is byte-for-byte the pre-feature behavior.
+Inside `fno do target init` (`cli/src/fno/target_cli.py`), after size resolution and before the bash writer (`hooks/helpers/init-target-state.sh`) renders `target-state.md`. The manifest is immutable, so the modulation lands in the `TARGET_SIZE` value handed to the writer, never after. Gated entirely on `config.target.blast.enabled`; disabled is byte-for-byte the pre-feature behavior.
 
 ## The classifier (deterministic)
 
-`fno target blast-check <plan>` (classifier in `cli/src/fno/target/blast.py`, off the LOC-ratchet path) prints `{verdict, matched_paths, reason}` (`--quiet` -> bare token). It reads the plan's `## File Ownership Map` and classifies the touched surface against a blast map with two glob dialects:
+`fno do target blast-check <plan>` (classifier in `cli/src/fno/target/blast.py`, off the LOC-ratchet path) prints `{verdict, matched_paths, reason}` (`--quiet` -> bare token). It reads the plan's `## File Ownership Map` and classifies the touched surface against a blast map with two glob dialects:
 
 | Map part | Source | Dialect |
 |---|---|---|
@@ -35,7 +35,7 @@ The decision is always surfaced (a one-line `blast: ...` announce on stderr), ne
 
 ## Scope
 
-Plan **and** node inputs (a File Ownership Map exists). `fno target init` resolves a node-id `--input` to its `plan_path` via an exact, format-agnostic graph id match (no fuzzy title guessing; a modifier-laden free-text input never mis-resolves and simply skips), so `/megawalk` and `/megatron` node walks inherit the modulation. Free-text `/target "feature"` keeps its operator/default ceremony until a surface is known. Folder plans read `00-INDEX.md`.
+Plan **and** node inputs (a File Ownership Map exists). `fno do target init` resolves a node-id `--input` to its `plan_path` via an exact, format-agnostic graph id match (no fuzzy title guessing; a modifier-laden free-text input never mis-resolves and simply skips), so `/megawalk` and `/megatron` node walks inherit the modulation. Free-text `/target "feature"` keeps its operator/default ceremony until a surface is known. Folder plans read `00-INDEX.md`.
 
 ## Config (`config.target.blast.*`, default OFF)
 

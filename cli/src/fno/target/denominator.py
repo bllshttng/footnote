@@ -162,7 +162,7 @@ def absent_denominator_refusal(
     if deliverables is not None and not enumerated:
         return None
     lines = [
-        "fno target init: this code node has no scope denominator.",
+        "fno do target init: this code node has no scope denominator.",
         "A plan-less code dispatch makes 'shipped M of N' inexpressible - the",
         "shortfall surfaces only when a human counts by hand. Give it a denominator:",
         '  - /fno:blueprint quick "<feature>"   (a plan enumerating the tasks;',

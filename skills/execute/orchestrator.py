@@ -1068,7 +1068,7 @@ except ValidationError as e:
     # Block only on STRUCTURAL corruption (a bad size, a garbage timestamp).
     # A missing required field is tolerated (a plan binds its node later), and
     # a drifted-but-recognizable `status` (planned/designed/superseded/...) is
-    # NOT a /execute concern: `fno plan reconcile-status` normalizes it, and /execute
+    # NOT a /execute concern: `fno do plan reconcile-status` normalizes it, and /execute
     # executes the Execution Strategy section, which does not depend on the
     # frontmatter status. Blocking /execute on status drift would refuse ~5% of real
     # plans that run fine today.

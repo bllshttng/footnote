@@ -66,7 +66,7 @@ WORKTREE="${WORKTREE:-$(pwd)}"
 # invocation cannot slip past it the way a string equality test would.
 #
 # Exit 0, not non-zero: "already canonical, nothing to link" is a successful
-# no-op, and `fno target start` treats any non-zero from this script as fatal
+# no-op, and `fno do target start` treats any non-zero from this script as fatal
 # ("refusing to initialize against unverified shared state", target_cli.py).
 if [[ "$CANONICAL" -ef "$WORKTREE" ]]; then
   echo "setup-worktree: refusing to symlink canonical -> canonical (no-op): $CANONICAL" >&2
@@ -1227,7 +1227,7 @@ link_events_journal() {
 # Shared content (Obsidian vault link)
 link_dir "internal"
 
-# Shared fno state (project-level, propagates across worktrees)
+# Shared fno do state (project-level, propagates across worktrees)
 link_file ".fno/config.toml"
 # One journal per repository makes exact-HEAD gate evidence visible across
 # isolated reviewer worktrees. Real worktree journals take the migration path

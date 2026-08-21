@@ -618,8 +618,8 @@ This is Spec 1 of 4. Specs 2-4 extend the substrate with automation:
 - **Per-agent sigma-review routing (Spec 3):** sigma-review subagents can be
   routed to a different coding model (`codex` / `gemini`). The shipped path is
   `config.review.cross_model` / `config.review.agent_harnesses`, resolved by the
-  same `provider_resolution` code both `fno review` and `/review sigma`
-  (via `fno review --print-providers`) dispatch through. The Spec-3 design below
+  same `provider_resolution` code both `fno do review` and `/review sigma`
+  (via `fno do review --print-providers`) dispatch through. The Spec-3 design below
   named a `config.agents.<name>.provider` key that was never wired - use the
   `config.review.*` keys instead.
 - **Per-phase pinning + proactive round-robin (Spec 4, planned):** no automatic
@@ -840,7 +840,7 @@ The sidecar feeds:
 ## Per-agent routing (Spec 3)
 
 > **Shipped path:** the wired cross-model routing for `/review sigma` and
-> `fno review` uses `config.review.cross_model` / `config.review.agent_harnesses`
+> `fno do review` uses `config.review.cross_model` / `config.review.agent_harnesses`
 > (see `skills/review/references/sigma.md` -> "Cross-Model Review Routing"), resolved by
 > `cli/src/fno/review/provider_resolution.py`. The `config.agents.<name>.provider`
 > schema described in the rest of this section is the original Spec-3 design and
@@ -1606,7 +1606,7 @@ asymmetry:
   `effective: unresolved` when the implementer family is unknown or no
   different-family capacity exists - the review cannot silently pass.
 
-`fno review --assess-assurance --policy-size <S|M|L> [--risk-surface ...]` prints
+`fno do review --assess-assurance --policy-size <S|M|L> [--risk-surface ...]` prints
 the verdict JSON and exits `3` when unsatisfied, so a direct CLI caller is
 blocked the same way the `/pr check` skill is (no skill-only guard). See
 `skills/pr/references/check.md` Step 0c.

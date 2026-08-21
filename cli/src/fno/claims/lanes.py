@@ -174,7 +174,7 @@ def reconcile_lane_slot(
     TTL-anchored slot over-counts a lane that finishes early (the slot lingers to
     TTL) and under-counts one that runs past the TTL (the slot expires while the
     lane is live) - the cap is wrong in both directions. The worker calls this
-    from ``fno target init``, once it owns the node, to re-take its OWN slot
+    from ``fno do target init``, once it owns the node, to re-take its OWN slot
     anchored to the durable session ``pid`` (the nearest ``claude`` ancestor -
     the same anchor ``node:<id>`` uses).
 

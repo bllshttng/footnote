@@ -1,4 +1,4 @@
-"""CLI tests for `fno think dispatch` (x-0a9c, Wave C).
+"""CLI tests for `fno do think dispatch` (x-0a9c, Wave C).
 
 The verb is thin glue over dispatch_conversational; these cover the glue's real
 logic: live-session-id resolution, node resolution, exit codes, and that the

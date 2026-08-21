@@ -158,7 +158,7 @@ budget-display.sh
 check-artifact-body.sh
 
 # Per-PR artifact consolidator. Invoked best-effort by fno/pr/_merge.py
-# (the internalized `fno pr merge`, ab-d4c98550) after a successful merge to
+# (the internalized `fno do pr merge`, ab-d4c98550) after a successful merge to
 # collect every phase artifact for the session into one
 # {YYYYMMDD}{SS}-{pr#}-artifact.md file. Internal helper, not a user-facing
 # entry point; degrades to a silent no-op when absent (bare pip install).

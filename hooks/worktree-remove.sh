@@ -55,7 +55,7 @@ fi
 # descending order of trustworthiness: a legacy `status: IN_PROGRESS`, a LIVE
 # NODE CLAIM (session-pid anchored + TTL - the only durable one), and a live
 # owner_pid. owner_pid is kept last and only as a positive signal: it is the
-# transient `fno target init` wrapper pid, dead about a second after init
+# transient `fno do target init` wrapper pid, dead about a second after init
 # returns, so before the claim check this guard preserved essentially nothing.
 ST="$WORKTREE_PATH/.fno/target-state.md"
 if [[ -f "$ST" ]]; then

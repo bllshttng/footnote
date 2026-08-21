@@ -184,9 +184,9 @@ def resolve_panel_providers(
 ) -> dict[str, ResolvedProvider]:
     """Resolve every panel ``agent`` to a provider. The single resolution path.
 
-    A thin map over :func:`resolve_agent_provider` so the ``fno review`` panel
+    A thin map over :func:`resolve_agent_provider` so the ``fno do review`` panel
     (``build_review_runner``) and the ``/review sigma`` skill (via
-    ``fno review --print-providers``) resolve through ONE code path - the
+    ``fno do review --print-providers``) resolve through ONE code path - the
     "one resolution path, no drift" invariant. Never raises.
     """
     return {

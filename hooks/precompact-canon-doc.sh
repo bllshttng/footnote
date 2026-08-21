@@ -123,7 +123,7 @@ PR_RAW=""
 if command -v fno >/dev/null 2>&1; then
   # Omit the section entirely if fno is missing, there is no remote, or REST fails
   # - never a failed hook (the vertical-generalization epic takes fno past code).
-  PR_RAW="$(fno pr list --state open 2>/dev/null || true)"
+  PR_RAW="$(fno do pr list --state open 2>/dev/null || true)"
 fi
 
 # ---------------------------------------------------------------------------

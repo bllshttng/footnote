@@ -1,6 +1,6 @@
 """Deterministic CLI utilities used by the conversational /think workflow.
 
-``fno think dispatch <node>`` - the operator, mid-conversation about an
+``fno do think dispatch <node>`` - the operator, mid-conversation about an
 fno-touched node, hands it to a bg /think that picks it up with full LIVE
 context. The ``/think`` skill's ``dispatch`` mode is the front door; this verb is
 the deterministic mechanism (Locked Decision 6: route through
@@ -28,8 +28,8 @@ def _callback() -> None:
     """Keep ``dispatch`` a real subcommand.
 
     A Typer app with a single command auto-collapses it into the main callback,
-    which would make ``fno think dispatch <node>`` parse ``dispatch`` as NODE.
-    An explicit (no-op) callback preserves the ``fno think dispatch`` shape.
+    which would make ``fno do think dispatch <node>`` parse ``dispatch`` as NODE.
+    An explicit (no-op) callback preserves the ``fno do think dispatch`` shape.
     """
 
 
@@ -51,7 +51,7 @@ def inspect(
 
     target = Path(repo).expanduser().resolve() if repo else Path(resolve_repo_root())
     if not target.is_dir():
-        typer.echo(f"fno think inspect: repository directory not found: {target}", err=True)
+        typer.echo(f"fno do think inspect: repository directory not found: {target}", err=True)
         raise typer.Exit(code=2)
     receipt = build_receipt(seed, target)
     typer.echo(json.dumps(receipt, indent=2) if json_output else render_receipt(receipt))
@@ -114,7 +114,7 @@ def dispatch(
             resolve_dispatch_provider(provider)[0] if provider is not None else None
         )
     except DispatchFlagError as exc:
-        typer.echo(f"fno think dispatch: {exc}", err=True)
+        typer.echo(f"fno do think dispatch: {exc}", err=True)
         raise typer.Exit(code=2)
 
     # Resolve the LIVE session pointer ambiently across all three harnesses (the
@@ -130,7 +130,7 @@ def dispatch(
                 err=True,
             )
         typer.echo(
-            "fno think dispatch: detached /think uses Claude bg; omit --provider "
+            "fno do think dispatch: detached /think uses Claude bg; omit --provider "
             "to use the Claude fallback; non-Claude headless is a one-shot with "
             "no live think-session receipt and is not supported by this verb.",
             err=True,
@@ -138,7 +138,7 @@ def dispatch(
         raise typer.Exit(code=2)
     if not sid:
         typer.echo(
-            "fno think dispatch: no live session id - set --session-id or run "
+            "fno do think dispatch: no live session id - set --session-id or run "
             "inside a claude/codex/gemini session ($CODEX_THREAD_ID / "
             "$CLAUDE_CODE_SESSION_ID / $CODEX_SESSION_ID / $GEMINI_SESSION_ID). "
             "There is nothing to carry "
@@ -159,11 +159,11 @@ def dispatch(
     try:
         match = resolve_node(node, read_entries("provenance.think_dispatch"))
     except ExternalMetadataUnavailable as exc:
-        typer.echo(f"fno think dispatch: {exc}", err=True)
+        typer.echo(f"fno do think dispatch: {exc}", err=True)
         raise typer.Exit(code=2)
     if match.kind != "exact":
         typer.echo(
-            f"fno think dispatch: no node matches {node!r} (id/slug/bare-hex).",
+            f"fno do think dispatch: no node matches {node!r} (id/slug/bare-hex).",
             err=True,
         )
         raise typer.Exit(code=2)

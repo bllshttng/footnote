@@ -1,4 +1,4 @@
-"""fno plan CLI - plan management verbs.
+"""fno do plan CLI - plan management verbs.
 
 Verbs:
     stamp             - mark a plan's frontmatter with ship metadata (status:in_review)
@@ -109,7 +109,7 @@ def path(
 
 
 # ---------------------------------------------------------------------------
-# fno plan brief
+# fno do plan brief
 # ---------------------------------------------------------------------------
 
 class _FilterMode(str, Enum):
@@ -172,7 +172,7 @@ def brief(
     # Exit 1 if plan not found
     if not resolved.exists():
         typer.echo(
-            f"fno plan brief: plan file not found: {plan_path}",
+            f"fno do plan brief: plan file not found: {plan_path}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -182,19 +182,19 @@ def brief(
         doc = load_plan(resolved)
     except FrontmatterError as exc:
         typer.echo(
-            f"fno plan brief: malformed frontmatter in {resolved}: {exc}",
+            f"fno do plan brief: malformed frontmatter in {resolved}: {exc}",
             err=True,
         )
         raise typer.Exit(code=3)
     except (OSError, PermissionError) as exc:
         typer.echo(
-            f"fno plan brief: cannot read {resolved}: {exc}",
+            f"fno do plan brief: cannot read {resolved}: {exc}",
             err=True,
         )
         raise typer.Exit(code=1)
     except Exception as exc:
         typer.echo(
-            f"fno plan brief: unexpected error reading {resolved}: {exc}",
+            f"fno do plan brief: unexpected error reading {resolved}: {exc}",
             err=True,
         )
         raise typer.Exit(code=3)
@@ -209,13 +209,13 @@ def brief(
         )
     except BriefParseError as exc:
         typer.echo(
-            f"fno plan brief: malformed Execution Strategy YAML: {exc}",
+            f"fno do plan brief: malformed Execution Strategy YAML: {exc}",
             err=True,
         )
         raise typer.Exit(code=3)
     except BriefError as exc:
         typer.echo(
-            f"fno plan brief: {exc}",
+            f"fno do plan brief: {exc}",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -419,7 +419,7 @@ def folder_audit(
         entries = recompute_statuses(_apply_graph_defaults(_read_json(GRAPH_JSON)))
     except (GraphCorruptError, OSError) as exc:
         typer.echo(
-            f"fno plan folder-audit: graph.json unreadable ({exc}) - failing toward defer",
+            f"fno do plan folder-audit: graph.json unreadable ({exc}) - failing toward defer",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -427,7 +427,7 @@ def folder_audit(
     owners = scan(plans_root, entries)
     if owners is None:
         typer.echo(
-            f"fno plan folder-audit: cannot scan plans dir {plans_root} - failing toward defer",
+            f"fno do plan folder-audit: cannot scan plans dir {plans_root} - failing toward defer",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -454,7 +454,7 @@ def rung(
 ) -> None:
     """The shell-facing face of ``fno.graph.ladder``.
 
-    Born hidden: `fno plan` sits at its 12-subcommand menu-caps ceiling and
+    Born hidden: `fno do plan` sits at its 12-subcommand menu-caps ceiling and
     AGENTS.md defaults new verbs to hidden. Its audience is three shell scripts,
     not the `--help` reader.
 
@@ -469,7 +469,7 @@ def rung(
     from fno.graph.ladder import Rung, is_dispatchable, plan_rung
 
     if not plan_path:
-        typer.echo("fno plan rung: a plan path is required", err=True)
+        typer.echo("fno do plan rung: a plan path is required", err=True)
         raise typer.Exit(code=2)
 
     # `plan_rung` resolves a relative path against the ENTRY's cwd, not the
@@ -483,7 +483,7 @@ def rung(
     typer.echo(f"dispatchable={'true' if is_dispatchable(entry) else 'false'}")
     if r is Rung.UNREADABLE:
         typer.echo(
-            f"fno plan rung: cannot classify {plan_path} (missing, undecodable, "
+            f"fno do plan rung: cannot classify {plan_path} (missing, undecodable, "
             "malformed frontmatter, or a status this binary does not know)",
             err=True,
         )

@@ -1,4 +1,4 @@
-"""Frontmatter IO and atomic write helpers for fno state files.
+"""Frontmatter IO and atomic write helpers for fno do state files.
 
 State files use a simple YAML frontmatter format:
 

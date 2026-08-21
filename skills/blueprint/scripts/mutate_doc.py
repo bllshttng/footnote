@@ -85,7 +85,7 @@ _BLUEPRINT_INPUT_STATUSES = frozenset({"design", "ready"})
 # Statuses where the plan is past blueprint phase (cannot mutate even with --rewrite)
 _PAST_BLUEPRINT_STATUSES = frozenset({"in_progress", "in_review", "reviewing", "shipping", "shipped"})
 
-# `in_progress` is LOCK-derived, not PR-derived: `fno target init` acquiring a node
+# `in_progress` is LOCK-derived, not PR-derived: `fno do target init` acquiring a node
 # claim projects it onto the plan doc (cli/src/fno/plan/_project.py) along the
 # forward-only axis in cli/src/fno/plan/_status.py. So it is the one past-blueprint
 # status that is not evidence blueprint ran - the `## Execution Strategy` section is.
@@ -789,7 +789,7 @@ def mutate(
     if not _looks_like_path(arg_str):
         msg = (
             f"Blueprint owns the whole plan, but needs a save path. "
-            f"Resolve one with `fno plan path --slug \"<slug>\"` (add `--node <id>` "
+            f"Resolve one with `fno do plan path --slug \"<slug>\"` (add `--node <id>` "
             f"for a node-seeded plan), then pass that path. Or pass a node id directly."
         )
         return 1, msg
@@ -798,7 +798,7 @@ def mutate(
     resolved = doc_path.expanduser().resolve() if not doc_path.is_absolute() else doc_path
     if not resolved.exists():
         msg = (
-            f"No doc at {resolved}. Blueprint creates plans via `fno plan path`; "
+            f"No doc at {resolved}. Blueprint creates plans via `fno do plan path`; "
             f"pass a resolved path, or pass a node id and let the skill seed the doc."
         )
         return 1, msg

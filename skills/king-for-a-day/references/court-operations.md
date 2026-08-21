@@ -52,7 +52,7 @@ Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king t
 | Close a teammate pane | `fno mux pane kill` (a mux row's short_id is empty, so `fno agents stop` refuses it) |
 | End a bg/daemon worker | `fno agents stop <name>` |
 | Encode a ruling | `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..." --add-blocker <up>` |
-| Land a green child | `fno pr merge <n>` (only when config permits) |
+| Land a green child | `fno do pr merge <n>` (only when config permits) |
 
 **Anointing on the bg substrate.**
 `--crown` is not pane-only: it rides `--substrate bg` too (claude-only there), and only `headless` is refused, since a one-shot exits before it can reign.

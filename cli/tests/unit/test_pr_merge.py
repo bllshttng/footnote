@@ -412,7 +412,7 @@ def test_manifest_approved_true_still_merges(enabled, monkeypatch, capsys, tmp_p
 
 
 def test_manifest_without_the_field_merges(enabled, monkeypatch, capsys, tmp_path):
-    """Absent field -> proceed. A manual `fno pr merge` outside a target session,
+    """Absent field -> proceed. A manual `fno do pr merge` outside a target session,
     or against a pre-field manifest, must not start refusing."""
     _write_manifest(tmp_path, "session_id: s1\n")
     fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
@@ -749,7 +749,7 @@ def test_stale_base_with_live_lanes_holds_exit_2(enabled, monkeypatch, capsys, t
     obj = _last_json(capsys)
     assert obj["outcome"] == "held"
     assert shared in obj["reason"]
-    assert "fno pr rebase" in obj["reason"]
+    assert "fno do pr rebase" in obj["reason"]
     assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
 
 
@@ -804,7 +804,7 @@ def test_stale_base_probe_miss_holds(enabled, monkeypatch, capsys, tmp_path):
     obj = _last_json(capsys)
     assert obj["outcome"] == "held"
     assert "overlap probe unavailable" in obj["reason"]
-    assert "fno pr rebase" in obj["reason"]
+    assert "fno do pr rebase" in obj["reason"]
     assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
 
 
@@ -875,7 +875,7 @@ def test_review_lane_configured_resolves_toplevel_from_a_subdirectory(
     """A lane declared at the project root is still seen from a subdirectory.
 
     load_settings_for_repo reads ``<arg>/.fno/`` with NO upward walk, so passing
-    the raw invocation directory made ``fno pr merge`` run from ``cli/`` report
+    the raw invocation directory made ``fno do pr merge`` run from ``cli/`` report
     "no lane" - which short-circuits ``covered`` to True and lets an unreviewed
     PR merge. The guard was decorative on that path.
 

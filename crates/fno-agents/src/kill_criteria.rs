@@ -4,7 +4,7 @@
 //! Provable byte-parity with the bash `check_kill_criteria <plan_path>`:
 //! the bash script stays in-tree as the parity oracle (differential tests in
 //! `tests/kill_criteria_parity.rs`) until a separate agent re-points the
-//! Python `fno phase kill-check` caller at this binary.
+//! Python `fno do phase kill-check` caller at this binary.
 //!
 //! Contract (matched exactly):
 //!   - exit 0 + empty stdout when nothing fired (no criteria, none fired, or a

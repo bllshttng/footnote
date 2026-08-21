@@ -6125,7 +6125,7 @@ fn coverage_receipt_zero_names_refused_and_absent() {
     // reviewer, which is the only other name on the line.
     assert!(line.contains("waiting on gemini-code-assist"), "{line}");
     // Never prescribes the local verb while someone is outstanding. This line
-    // cannot tell required from optional, and `fno pr merge` reads coverage
+    // cannot tell required from optional, and `fno do pr merge` reads coverage
     // alone, so a worker that self-attests past a required bot lands the PR
     // before its blocking finding posts.
     assert!(!line.contains("review verb"), "{line}");
@@ -6937,7 +6937,7 @@ fn exhaustion_named_on_read_failure() {
         d.message
     );
     assert!(d.message.contains("resets in ~"), "got: {}", d.message);
-    assert!(d.message.contains("fno pr status"), "got: {}", d.message);
+    assert!(d.message.contains("fno do pr status"), "got: {}", d.message);
     assert!(
         !d.message.contains("retrying next fire"),
         "exhaustion must not be advised to retry: {}",

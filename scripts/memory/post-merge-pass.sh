@@ -49,11 +49,11 @@ REPO=$(gh repo view --json name --jq '.name' 2>/dev/null) || REPO=""
 
 # Single REST call for state + merged_at so we can decide whether to keep the
 # sentinel for retry (queued auto-merge) or clean it up (closed-without-merge).
-PR_META=$(fno pr info "$PR_NUMBER" 2>/dev/null) || PR_META=""
+PR_META=$(fno do pr info "$PR_NUMBER" 2>/dev/null) || PR_META=""
 if [[ -z "$PR_META" ]]; then
     # REST API failed transiently. Preserve sentinel so the next invocation
     # can retry. Exit 2 so the caller can log a soft failure.
-    echo "post-merge-pass: fno pr info failed for PR $PR_NUMBER; sentinel preserved" >&2
+    echo "post-merge-pass: fno do pr info failed for PR $PR_NUMBER; sentinel preserved" >&2
     exit 2
 fi
 PR_STATE=$(printf '%s' "$PR_META" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("state",""))' 2>/dev/null) || PR_STATE=""

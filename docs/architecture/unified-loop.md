@@ -286,12 +286,12 @@ The reachable merge paths it governs:
 | Path | Coverage gate |
 |---|---|
 | Target spine (loop-check terminal) | coverage 0/Unknown -> `DoneUnreviewed`, never arms auto-merge |
-| `fno pr merge` (direct CLI) | reads `review_coverage`; zero/unknown/stale refuses (only when `auto_merge.enabled`) |
+| `fno do pr merge` (direct CLI) | reads `review_coverage`; zero/unknown/stale refuses (only when `auto_merge.enabled`) |
 | reconcile (telemetry) | a zero-coverage out-of-band merge emits `gate_escape{zero-coverage}` even with no bots configured |
-| `fno pr status` | reports the `review_coverage` field (advisory) |
+| `fno do pr status` | reports the `review_coverage` field (advisory) |
 | `gh pr merge`, the web button, raw REST, the auto-merge queue | the server refuses an uncovered head once the merge ruleset is applied; the verdict is published as the `fno/review-coverage` status from the same source |
 
-The verdict is also published where GitHub can see it. The stop hook, the standalone review-coverage verb, and a covered `fno pr merge` all publish it. Each posts the `fno/review-coverage` commit status on the PR head. The status carries the same predicate the merge gate enforces.
+The verdict is also published where GitHub can see it. The stop hook, the standalone review-coverage verb, and a covered `fno do pr merge` all publish it. Each posts the `fno/review-coverage` commit status on the PR head. The status carries the same predicate the merge gate enforces.
 
 `review-coverage-gate.yml` refreshes the status on the events only GitHub sees. A push invalidates the head. The `coverage-override` label arms or withdraws the release valve, naming its actor.
 
@@ -330,8 +330,8 @@ Coverage of the eight reachable merge paths, stated honestly rather than implied
 
 | Merge path | Stacked-base guard |
 |---|---|
-| `fno pr merge` (`_merge.py`), and its worktree API fallback | checked, refuses with `outcome=blocked` |
-| `fno pr verify --kind merged` bounded remediation (`_verify.py`) | checked, refuses the remediation |
+| `fno do pr merge` (`_merge.py`), and its worktree API fallback | checked, refuses with `outcome=blocked` |
+| `fno do pr verify --kind merged` bounded remediation (`_verify.py`) | checked, refuses the remediation |
 | `finalize.rs` autonomous `--auto` arm | checked, refuses to arm |
 | a PR update, via `.github/workflows/stacked-base-guard.yml` | checked for same-repo PRs; blocks only once marked a required status check. Fork PRs are skipped: their `GITHUB_TOKEN` cannot post the status |
 | GitHub's `--auto` queue firing later, server-side | covered by the workflow's push-to-`main` sweep, which re-stamps the same status context |

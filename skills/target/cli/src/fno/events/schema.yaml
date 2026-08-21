@@ -200,7 +200,7 @@ event_types:
           type: integer
         detail:
           type: string
-    consumers: [scripts/ci/preflight.sh, fno pr, fno worker ship, fno-agents verify-evidence]
+    consumers: [scripts/ci/preflight.sh, fno do pr, fno worker ship, fno-agents verify-evidence]
 
   - name: review_attestation
     retention: gate
@@ -300,7 +300,7 @@ event_types:
         repo:
           type: string
           description: "Full repository identity `host/owner/repo`, lowercased, from the git remote (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. It is the FULL identity, never the last path segment: `org-a/widget` and `org-b/widget` would otherwise share a key, and since this gates auto-merge one repo's coverage could clear the other's guard (a fork shares head SHAs, so the staleness check would not catch it). Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the event in the global log rather than guess. Stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree. Producer: crates/fno-agents/src/finalize.rs `repo_identity_from_remote_url`; reader: fno/paths.py `repo_identity_from_remote_url`. The two must agree."
-    consumers: [fno-agents loop-check, fno pr, fno backlog reconcile]
+    consumers: [fno-agents loop-check, fno do pr, fno backlog reconcile]
 
   - name: review_gate_bot_usage_limited
     description: "A required/optional review bot posted a usage-limit comment (quota exhausted) and was dropped from missing_bots so the gate proceeds on remaining evidence rather than wedging until budget death (PR #214). Registered (x-0eaf) so the standard audit tooling sees a drop that was previously written to an unregistered stream. Distinct from review_coverage: this names bots that refused; coverage is the count that reviewed."
@@ -315,7 +315,7 @@ event_types:
           items:
             type: string
           description: "Bot logins that posted a usage-limit refusal and were dropped from missing_bots."
-    consumers: [fno-agents loop-check, fno pr]
+    consumers: [fno-agents loop-check, fno do pr]
 
   - name: review_finding
     description: "An operator annotated a node's work (via `fno annotate add` / `fno mux block annotate`). loop-check treats an open finding as a blocking review-gate input: terminal-allow is denied while any review_finding for the node has no matching review_finding_resolved. Node-scoped and NOT head-pinned - only an explicit resolve clears it, a new commit does not. The recorded text is the original; only the mail live-inject frame is x-9ed6-defanged."
@@ -529,7 +529,7 @@ event_types:
     consumers: [hooks/target-stop-hook.sh]
 
   - name: target_denominator
-    description: "The scope denominator chosen at `fno target init` (x-cbab): a plan-backed run (plan_path set), a declared deliverable count (--deliverables N), or none. Feeds the deliverables-1 ratio measurement that detects when the cheap --deliverables exit is used as a bypass rather than an honest single-task declaration."
+    description: "The scope denominator chosen at `fno do target init` (x-cbab): a plan-backed run (plan_path set), a declared deliverable count (--deliverables N), or none. Feeds the deliverables-1 ratio measurement that detects when the cheap --deliverables exit is used as a bypass rather than an honest single-task declaration."
     sources: [target]
     data:
       required: [denominator]
@@ -3026,7 +3026,7 @@ event_types:
     consumers: [operator]
 
   - name: pr_watch_dispatched
-    description: "PR-state watcher handed one PR off successfully: 'review' fires the headless /fno:pr check skill; 'merge' routes the post-merge ritual (warm inject or a direct `fno pr ritual` run -- NOT a headless claude skill). Per-merge attribution lives in post_merge_dispatch_receipt."
+    description: "PR-state watcher handed one PR off successfully: 'review' fires the headless /fno:pr check skill; 'merge' routes the post-merge ritual (warm inject or a direct `fno do pr ritual` run -- NOT a headless claude skill). Per-merge attribution lives in post_merge_dispatch_receipt."
     sources: [daemon]
     data:
       required: [kind, pr]
@@ -3504,7 +3504,7 @@ event_types:
 
   - name: human_touch
     retention: ephemeral
-    description: "A human steered an agent-managed node (W4 touch telemetry). Emitted at exactly three choke points: mux keystroke injection into an agent pane (source=inject, coalesced per pane), answer-queue submission (source=answer), and a manual merge (source=merge: tty `fno pr merge` or reconcile closing an out-of-band merge). Observing never counts; steering always counts. Emit is fire-and-forget non-fatal: a failed emit must never touch the steering path."
+    description: "A human steered an agent-managed node (W4 touch telemetry). Emitted at exactly three choke points: mux keystroke injection into an agent pane (source=inject, coalesced per pane), answer-queue submission (source=answer), and a manual merge (source=merge: tty `fno do pr merge` or reconcile closing an out-of-band merge). Observing never counts; steering always counts. Emit is fire-and-forget non-fatal: a failed emit must never touch the steering path."
     sources: [daemon, target, backlog, test]
     data:
       required: [graph_node_id, source, resolution]
@@ -3625,7 +3625,7 @@ event_types:
           description: "Git ref under test; absent/null for a retrospective sweep against HEAD, present for a replay batch."
 
   - name: loop_tick
-    description: "A standing loop (x-ce71 substrate) ran one tick. The proposer (x-0ca7) is the first live loop to emit this; fno loops ls reads it for the last-tick column. Emitted whether or not the tick did anything (paused / no-work ticks still record)."
+    description: "A standing loop (x-ce71 substrate) ran one tick. The proposer (x-0ca7) is the first live loop to emit this; fno do loops ls reads it for the last-tick column. Emitted whether or not the tick did anything (paused / no-work ticks still record)."
     sources: [skill_diff, test]
     data:
       required: [name]

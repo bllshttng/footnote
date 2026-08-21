@@ -1,6 +1,6 @@
 """Plugin-script resolution + the self-healing persisted pointer (#2).
 
-The bug: `fno target init` / `fno gate set` could not find their plugin scripts
+The bug: `fno do target init` / `fno gate set` could not find their plugin scripts
 when run from a foreign project with no env hint. `fno` is a uv-tool install
 whose wheel does not carry hooks/, and CLAUDE_PLUGIN_ROOT is not propagated to
 arbitrary `fno` subprocesses, so env + package-relative both miss and the agent

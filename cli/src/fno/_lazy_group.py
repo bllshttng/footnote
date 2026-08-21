@@ -422,16 +422,27 @@ class LazyTypeGroup(typer.core.TyperGroup):
         # leaf path, and would raise the tombstone refusal should a
         # destination name ever be removed.
         if args:
-            from fno.verb_moves import deprecation_line, destination_is_registered, move_for
+            from fno.verb_moves import (
+                deprecation_line,
+                destination_is_registered,
+                forwarding_args,
+                move_for,
+            )
 
             move = move_for(args[0])
             roots = {*self.commands, *self._lazy}
-            if move is not None and destination_is_registered(move, roots):
-                line = deprecation_line(args[0], args[1:], move)
-                if line is not None:
-                    print(line, file=sys.stderr)
-                dest = move.to.split()
-                args = [*dest, *args[1:]]
+            if move is not None:
+                forwarded = forwarding_args(args[1:], move)
+                if forwarded is None:
+                    leaf = f" {args[1]}" if len(args) > 1 else ""
+                    raise click.UsageError(
+                        f"fno {args[0]}{leaf} was removed; use fno {move.to}{leaf}"
+                    )
+                if destination_is_registered(move, roots):
+                    line = deprecation_line(args[0], args[1:], move)
+                    if line is not None:
+                        print(line, file=sys.stderr)
+                    args = forwarded
         try:
             return super().resolve_command(ctx, args)
         except click.UsageError as exc:

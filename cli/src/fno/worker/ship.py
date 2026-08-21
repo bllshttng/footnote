@@ -6,7 +6,7 @@
 - Does NOT arm auto-merge: that moved to `fno-agents finalize` (x-1951).
 - Writes .fno/artifacts/ship-{session_id}.md.
 - Emits fno event emit --type pr_created/pr_exists.
-- Sets state field artifact_shipped=true (via fno state set).
+- Sets state field artifact_shipped=true (via fno do state set).
 """
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ def ship(
 
     # Incarnation fence (x-eea5 followup): a losing incarnation - one whose
     # session:<uuid> single-writer claim another incarnation holds - must not
-    # create a PR. Same read-only, fail-closed semantics as fno pr merge. Runs
+    # create a PR. Same read-only, fail-closed semantics as fno do pr merge. Runs
     # before any gh/git call so a fenced incarnation publishes nothing.
     from fno.claims.incarnation import incarnation_fence_blocks, resolve_fence_session_uuid
 

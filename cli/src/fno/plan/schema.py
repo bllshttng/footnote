@@ -119,7 +119,7 @@ class PlanFrontmatter(BaseModel):
 
     # Canonical keys (x-f34f US7): `node`, `created`, `blocked_by`, `type` are
     # the single authority per axis. Their legacy synonyms (`graph_node_id`,
-    # `created_at`, `depends_on`, `kind`) are collapsed by `fno plan
+    # `created_at`, `depends_on`, `kind`) are collapsed by `fno do plan
     # migrate-keys`; readers keep a one-release fallback (e.g. reconcile's
     # _plan_link_id reads node -> claims -> graph_node_id). `deliverable_type`
     # stays distinct from `type` (different axes, both read). `claims` is an

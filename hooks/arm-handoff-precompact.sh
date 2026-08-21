@@ -22,7 +22,7 @@ GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
 source "$GUARD_LIB" 2>/dev/null || exit 0
 
 # Owner liveness, from the shared claim-based helper. This used to gate on
-# `kill -0 owner_pid`, which is the transient `fno target init` wrapper pid,
+# `kill -0 owner_pid`, which is the transient `fno do target init` wrapper pid,
 # dead within about a second of init returning - so the hook exited HERE on
 # 100% of real fires and never once reached the probe or armed. owner_pid can
 # only ever prove life, never death; the node claim (session-pid anchored +

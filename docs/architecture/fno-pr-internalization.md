@@ -1,6 +1,6 @@
-# `fno pr` internalization
+# `fno do pr` internalization
 
-The `fno pr {merge,verify,rebase}` verbs used to be thin Typer wrappers that
+The `fno do pr {merge,verify,rebase}` verbs used to be thin Typer wrappers that
 resolved `resolve_repo_root() / "scripts/lib/pr-*.sh"` and `subprocess.run`'d
 the bash. That worked in a clone but degraded on a bare `pip install fno` (the
 scripts are not on disk). This change ports the four scripts to in-package

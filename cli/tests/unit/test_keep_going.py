@@ -79,7 +79,7 @@ class _Ceiling:
         self.build_calls = []
         self.lines = []
 
-    # think_fn self-bumps (mirrors `fno think dispatch`); build_fn does not.
+    # think_fn self-bumps (mirrors `fno do think dispatch`); build_fn does not.
     def think(self, node_id, cwd):
         self.think_calls.append(node_id)
         self.count += 1
@@ -177,7 +177,7 @@ def test_landed_without_node_id_skipped():
 
 
 def test_dispatch_think_requires_spawned_decision(monkeypatch):
-    """The think arm reports dispatched ONLY when fno think dispatch actually
+    """The think arm reports dispatched ONLY when fno do think dispatch actually
     spawned (decision=='spawned'); exit-0 offered/noop or a skip is NOT a bump."""
     from types import SimpleNamespace
 

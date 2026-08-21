@@ -834,7 +834,7 @@ def test_canonical_child_plan_path_shape_and_routing():
     p = canonical_child_plan_path(
         "etl-search", "x-abcd", "/repos/web", "2026-03-04T00:00:00+00:00"
     )
-    # Filename is the `fno plan path` shape with the child's created_at date...
+    # Filename is the `fno do plan path` shape with the child's created_at date...
     assert Path(p).name == "20260304-etl-search-x-abcd.md"
     # ...routed under the CHILD root's plans dir, not the epic's.
     assert p.startswith("/repos/web/")
@@ -1360,7 +1360,7 @@ def test_plans_separate_scaffolds_files_and_repoints(tmp_path, monkeypatch):
         # x-edf7 US2: the scaffold FILE is still written, but the node is born
         # UNLINKED - plan_path stays None until inline-fill links the filled plan.
         assert c["plan_path"] is None
-        # x-d6a6: born at the canonical `fno plan path` name, not the legacy
+        # x-d6a6: born at the canonical `fno do plan path` name, not the legacy
         # `.group-<slug>.md`. The legacy path is no longer written.
         f = _canonical(c)
         assert f.exists(), f"scaffold not written: {f}"
@@ -1472,7 +1472,7 @@ def test_plans_invalid_value_rejected_atomically(graph_env):
 
 
 def test_ac1_hp_child_born_at_canonical_name_in_child_project_dir(tmp_path, monkeypatch):
-    """AC1-HP: a routed child's stub lands at the canonical `fno plan path` name in
+    """AC1-HP: a routed child's stub lands at the canonical `fno do plan path` name in
     the CHILD project's plans dir, and the node stays born-unlinked."""
     read_entries, doc = _separate_env(tmp_path, monkeypatch)
     web_root = tmp_path / "web"
@@ -2616,7 +2616,7 @@ def test_adopt_proceeds_when_no_worker_holds_the_node(graph_env, monkeypatch):
 def test_remove_clears_containment_on_its_children(graph_env, monkeypatch):
     """codex P2: a child left naming a deleted unit is a permanent trap.
 
-    Selection and `fno target init` both refuse it, while the reconcile heal
+    Selection and `fno do target init` both refuse it, while the reconcile heal
     deliberately skips a missing owner - so it is unbuildable, uncloseable, and
     invisible to every sweep. Un-contained rather than closed: deleting the unit
     is not a claim that its children shipped.

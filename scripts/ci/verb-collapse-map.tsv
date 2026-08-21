@@ -345,3 +345,73 @@ worktree reapable	T1	worktree reapable	4
 worktree status	T1	worktree status	1
 worktree stranded	T1	worktree stranded	1
 agents watchdog	T1	agents watchdog	4
+do delivery evaluate	T1	do delivery evaluate	7
+do loops ls	T1	do loops ls	1
+do loops pause-all	T1	do loops pause-all	1
+do loops resume-all	T1	do loops resume-all	0
+do loops status	T1	do loops status	3
+do phase kill-check	T1	do phase kill-check	16
+do plan brief	T1	do plan brief	4
+do plan fidelity	T1	do plan fidelity	5
+do plan folder-audit	T1	do plan folder-audit	0
+do plan graduate	T1	do plan graduate	2
+do plan migrate-keys	T1	do plan migrate-keys	1
+do plan path	T1	do plan path	28
+do plan reconcile-status	T1	do plan reconcile-status	5
+do plan rung	T1	do plan rung	26
+do plan set-expected	T1	do plan set-expected	1
+do plan stamp	T1	do plan stamp	5
+do plan sync	T1	do plan sync	3
+do plan validate	T1	do plan validate	14
+do pr base-check	T1	do pr base-check	0
+do pr base-lineage-check	T1	do pr base-lineage-check	6
+do pr bind-created	T1	do pr bind-created	0
+do pr closure-trailer	T1	do pr closure-trailer	0
+do pr coverage-check	T1	do pr coverage-check	1
+do pr coverage-publish	T1	do pr coverage-publish	0
+do pr evidence-check	T1	do pr evidence-check	1
+do pr evidence-required	T1	do pr evidence-required	1
+do pr global-receipt-events-path	T1	do pr global-receipt-events-path	0
+do pr graphql-exec	T1	do pr graphql-exec	1
+do pr hold-check	T1	do pr hold-check	0
+do pr info	T1	do pr info	10
+do pr list	T1	do pr list	3
+do pr logs	T1	do pr logs	1
+do pr merge	T1	do pr merge	55
+do pr next-receipt-generation	T1	do pr next-receipt-generation	0
+do pr rebase	T1	do pr rebase	21
+do pr ritual	T1	do pr ritual	24
+do pr status	T1	do pr status	19
+do pr stub-manifest reconcile-finalize	T1	do pr stub-manifest reconcile-finalize	1
+do pr stub-manifest reconcile-validate	T1	do pr stub-manifest reconcile-validate	2
+do pr stub-manifest write	T1	do pr stub-manifest write	2
+do pr sync-canonical	T1	do pr sync-canonical	2
+do pr verify	T1	do pr verify	13
+do pr watch heal	T1	do pr watch heal	3
+do pr watch install	T1	do pr watch install	3
+do pr watch refresh	T1	do pr watch refresh	1
+do pr watch status	T1	do pr watch status	3
+do pr watch tick	T1	do pr watch tick	2
+do pr watch uninstall	T1	do pr watch uninstall	1
+do research	T1	do research	18
+do resume receipt show	T1	do resume receipt show	1
+do resume receipt validate	T1	do resume receipt validate	3
+do resume receipt write	T1	do resume receipt write	2
+do review	T1	do review	27
+do state archive	T1	do state archive	1
+do state init	T1	do state init	3
+do state set	T1	do state set	20
+do state show	T1	do state show	7
+do target blast-check	T1	do target blast-check	3
+do target check-contained	T1	do target check-contained	4
+do target check-dispatch-hold	T1	do target check-dispatch-hold	2
+do target check-review-gate	T1	do target check-review-gate	4
+do target denominator-ratio	T1	do target denominator-ratio	2
+do target init	T1	do target init	90
+do target resolve-model	T1	do target resolve-model	2
+do target resolve-owned-identity	T1	do target resolve-owned-identity	3
+do target review-invocation	T1	do target review-invocation	4
+do target start	T1	do target start	31
+do target status	T1	do target status	8
+do think dispatch	T1	do think dispatch	4
+do think inspect	T1	do think inspect	7

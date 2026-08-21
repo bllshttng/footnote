@@ -1,10 +1,10 @@
-"""TTL coalescing cache for `fno pr status` (load-bearing).
+"""TTL coalescing cache for `fno do pr status` (load-bearing).
 
 The GraphQL quota is per-USER, and the REST SECONDARY limit counts request
 rate, so N sessions polling one PR trip it no matter which transport they
 use. Only collapsing those N reads into one helps. This module is that
 collapse: one shared row per (repo, PR, HEAD) in a flock-protected file under
-the fno state dir, refreshed at most once per TTL by whichever session missed.
+the fno do state dir, refreshed at most once per TTL by whichever session missed.
 The head is part of the key because a verdict is a fact about one commit: a
 row cached for head A must never answer for head B, whose check set may not
 exist yet (the operator's court zero-checks fail-open).
@@ -217,9 +217,9 @@ def _serve(row: dict, *, stale: bool) -> int:
 
 
 def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) -> int:
-    """`fno pr status` through the coalescing cache: the CLI chokepoint.
+    """`fno do pr status` through the coalescing cache: the CLI chokepoint.
 
-    `refresh=True` (`fno pr status --refresh`) is the sanctioned escape: no row
+    `refresh=True` (`fno do pr status --refresh`) is the sanctioned escape: no row
     is served, the live read runs, and the fresh row replaces whatever was
     there - WHEN the head is readable. With no readable head there is no head
     to key a row on, so the live read still runs and no row is written at all;

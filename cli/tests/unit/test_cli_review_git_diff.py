@@ -1,4 +1,4 @@
-"""Regression tests for the `fno review` git-diff failure path.
+"""Regression tests for the `fno do review` git-diff failure path.
 
 Tracks AC5-HP / AC5-ERR / AC5-EDGE from the events + test hygiene cleanup
 spec (ab-a1118224). The previous review command body silently substituted
@@ -48,7 +48,7 @@ def test_ac5_err_git_diff_failure_exits_2(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """AC5-ERR: on first-commit branch (HEAD~1 absent), fno review exits 2."""
+    """AC5-ERR: on first-commit branch (HEAD~1 absent), fno do review exits 2."""
     import subprocess as _subprocess
     from fno import cli as cli_module
 

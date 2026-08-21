@@ -149,7 +149,7 @@ def _branch_candidate(branch: Optional[str]) -> Optional[str]:
 def _read_state_graph_node_id(path: str) -> Optional[str]:
     """The ``graph_node_id: <id>`` line appended to the manifest BODY by
     ``hooks/helpers/init-target-state.sh`` - outside the YAML frontmatter,
-    so ``fno state show --field`` cannot return it."""
+    so ``fno do state show --field`` cannot return it."""
     state_file = Path(path) / ".fno" / "target-state.md"
     try:
         text = state_file.read_text(encoding="utf-8")

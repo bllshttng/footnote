@@ -257,7 +257,7 @@ def test_normalize_command_opencode_renders_any_verb():
 #
 # x-4391 shipped the key to 2 of 3 dispatch paths. The builtin here was the
 # deaf one, so an operator who set the key still got `/target --no-merge <id>`,
-# a manifest frozen at auto_merge_approved: false, and a refused `fno pr merge`.
+# a manifest frozen at auto_merge_approved: false, and a refused `fno do pr merge`.
 # The two callers that honored it did so by passing an explicit command around
 # the builtin rather than fixing it.
 # ---------------------------------------------------------------------------

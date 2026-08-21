@@ -231,7 +231,7 @@ _DEFAULT_MODEL = "claude-haiku-4-5"
 # overlaps, so an unbounded child call wedges every future tick forever (x-97d8);
 # this bound turns a hung fire into a normal failed dispatch the retry/park
 # machinery already handles. The post-merge ritual no longer fires here: pr-watch
-# runs ``fno pr ritual`` directly, and that verb owns its own judgment leg.
+# runs ``fno do pr ritual`` directly, and that verb owns its own judgment leg.
 _TIMEOUT_FOR_VERB: dict[str, float] = {"check": 180.0}
 _DEFAULT_FIRE_TIMEOUT = 300.0
 _SPAWN_TIMEOUT_GRACE = 30.0
@@ -256,7 +256,7 @@ def fire_skill(
     built as ``["<seam>"]`` and the runner receives it like any other call.
 
     This is the review (``check``) fire only. The post-merge ritual no longer
-    fires here: pr-watch runs ``fno pr ritual <n> --autonomous`` directly, and
+    fires here: pr-watch runs ``fno do pr ritual <n> --autonomous`` directly, and
     that verb owns its own conditional headless judgment leg - so fire_skill
     carries no merged branch, no post-merge model role, and no whole-ritual
     prompt (AC1-HP, AC10-EDGE).
@@ -1056,7 +1056,7 @@ def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> An
 
     The dispatcher decides warm/cold/defer in one place, reserves an attributable
     receipt, then either live-injects the ritual verb or runs
-    ``fno pr ritual <n> --autonomous`` directly (no bg thread), deduped on the
+    ``fno do pr ritual <n> --autonomous`` directly (no bg thread), deduped on the
     same per-merge-SHA marker reconcile used. ``fire_skill_fn`` is unused here -
     the cold path is the direct verb, and the review check fire is a separate
     tick branch - but it stays on the signature so the tick's

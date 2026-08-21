@@ -221,7 +221,7 @@ def project_graph_nodes(
     """Project each named node's mirror fields onto its linked plan.
 
     The shared converger primitive behind both the instrumented mutating verbs
-    and the `fno plan sync` sweep: for each id, find the node in ``entries``,
+    and the `fno do plan sync` sweep: for each id, find the node in ``entries``,
     resolve+absolutize its ``plan_path`` (against ``root``), skip absent files,
     inject the parent's slug, and call ``project_node_to_plan``. Best-effort and
     per-node isolated - one unreadable doc never aborts the batch. Returns the

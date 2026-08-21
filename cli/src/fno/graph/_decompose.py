@@ -164,7 +164,7 @@ def separate_plan_path(base: str, slug: str) -> str:
 def canonical_child_plan_path(
     slug: str, child_id: str, child_root: str, created_at: Optional[str]
 ) -> str:
-    """The canonical `fno plan path` for a group child's scaffold stub.
+    """The canonical `fno do plan path` for a group child's scaffold stub.
 
     Returns the `plan_doc_path` shape (`<child-project plans dir>/YYYYMMDD-<slug>-<id>.md`)
     routed into `child_root`'s plans dir. Pure recompute from durable node
@@ -416,7 +416,7 @@ def is_group_child(node: dict) -> bool:
     match ``<anything>.group-<x>.md`` is classified as a group child, so it is
     both refused for adoption and left out of the un-adopted warning. That name
     belongs to the legacy group convention and no shipped path produces it for a
-    non-group plan (``fno plan path`` mints ``<date>-<slug>-<id>.md``), and the
+    non-group plan (``fno do plan path`` mints ``<date>-<slug>-<id>.md``), and the
     failure direction is the safe one: refusing to move an ambiguous node rather
     than moving it. The un-adopted warning MUST keep using this same predicate -
     keying it on the base-scoped ``group_child_slug`` instead makes the warning

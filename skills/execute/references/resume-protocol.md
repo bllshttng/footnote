@@ -12,7 +12,7 @@ A receipt is durable **evidence** of where a session left off, never write
 revalidated against the receipt before any successor write.
 
 - Schema + writer + validator: `cli/src/fno/resume/receipt.py`.
-- CLI: `fno resume receipt write|validate|show`.
+- CLI: `fno do resume receipt write|validate|show`.
 - Producer call site: `skills/target/scripts/handoff.sh` writes one at every
   handoff boundary, alongside the human-readable brief.
 - No resume database. Canonicalization reuses the scoreboard reducers
@@ -35,7 +35,7 @@ NOT abort succession (the brief + `delegated` event remain the primary path).
 
 ### Consumer behavior (revalidate before any write)
 
-A successor session runs `fno resume receipt validate --node <id>` before its
+A successor session runs `fno do resume receipt validate --node <id>` before its
 first write. The validator gathers live HEAD/branch, worktree existence, the
 node-claim holder, and the node's journal events, then runs the read-only
 `revalidate` gate. It **never acquires or releases claims** - on failure the
@@ -72,7 +72,7 @@ already recorded, so a publish, PR create, comment, or merge cannot replay.
 Resume re-injection after compaction differs by harness and must not be assumed
 to one shape: Codex `PostCompact` accepts `systemMessage`; Claude uses
 `hookSpecificOutput.additionalContext`. Any cross-harness resume carrier reads
-both shapes and never hardcodes one. `fno resume receipt validate` is
+both shapes and never hardcodes one. `fno do resume receipt validate` is
 harness-agnostic (it reads git + claim + journal, not harness-specific carrier
 fields), so a successor on either harness revalidates identically.
 

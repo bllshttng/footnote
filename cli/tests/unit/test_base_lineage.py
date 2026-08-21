@@ -350,7 +350,7 @@ def test_missing_git_degrades_to_unknown_not_a_traceback(patch_run):
 
     The in-process callers promise that an unevaluated probe degrades to a
     breadcrumb, so an uncaught raise here would surface as a traceback out of
-    `fno pr verify` instead - the opposite of the stated contract.
+    `fno do pr verify` instead - the opposite of the stated contract.
     """
     patch_run(FakeRun(git_missing=True))
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
@@ -371,7 +371,7 @@ def test_cli_exit_codes(patch_run, monkeypatch):
 
 
 def test_bypass_escape_survives_a_string_pr_number(monkeypatch):
-    """`fno pr verify` carries its PR as a free-form str, and `emit_gate_escape`
+    """`fno do pr verify` carries its PR as a free-form str, and `emit_gate_escape`
     types `pr` as an int (`pr <= 0`). Passing the str through raised TypeError
     into this function's fail-open swallow, so the bypass recorded nothing."""
     import fno.events.gate_escape as ge

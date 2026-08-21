@@ -2,7 +2,7 @@
 
 Covers the schema (validate/write/load), the path convention, and the
 merge-hold lookup (`unreconciled_manifest_for_pr`) that backs the
-`fno pr merge` draft-held guard. The graph is a tmp JSON passed explicitly so
+`fno do pr merge` draft-held guard. The graph is a tmp JSON passed explicitly so
 no global state is touched.
 """
 from __future__ import annotations

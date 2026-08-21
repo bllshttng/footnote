@@ -1,9 +1,9 @@
-"""Phase 07: `fno state show --v2` honors v2 layout.
+"""Phase 07: `fno do state show --v2` honors v2 layout.
 
 Covers:
-- `fno state show --v2` reads `.fno/v2/target-state.md` when present
-- `fno state show --v2` falls back to v1 with a stderr note when v2 absent
-- `fno state show` without --v2 is unchanged
+- `fno do state show --v2` reads `.fno/v2/target-state.md` when present
+- `fno do state show --v2` falls back to v1 with a stderr note when v2 absent
+- `fno do state show` without --v2 is unchanged
 
 Note: gate artifact tests (artifact_path, check_gate_safe) removed in
 Task 3.2 (control-plane collapse ab-d0337fbc) along with fno.gates.
@@ -43,7 +43,7 @@ def _run_fno(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-# ---- AC1-V2: fno state show --v2 reads v2 path ------------------------
+# ---- AC1-V2: fno do state show --v2 reads v2 path ------------------------
 
 def test_state_show_v2_reads_v2_when_present(tmp_path):
     _write_state(tmp_path / ".fno" / "v2", session_id="v2-session")

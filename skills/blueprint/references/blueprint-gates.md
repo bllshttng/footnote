@@ -484,7 +484,7 @@ was compared - that is NOT a clean result. Fill in the plan's
 adopting.
 
 If any entry in `collisions` has `severity: "high"`, present
-them via AskUserQuestion before adopting - unless `fno target status` shows
+them via AskUserQuestion before adopting - unless `fno do target status` shows
 `authority: full` on the `attended` line (a live `/target beastmode` session), in
 which case take the `recommended_action` for each entry, append one
 `## Autonomous Decisions` entry naming the collision and the action, and

@@ -357,7 +357,7 @@ def test_cli_sigma_last_head_prints_bare_sha(tmp_path: Path) -> None:
     published = CliRunner().invoke(
         app,
         [
-            "review",
+            "do", "review",
             "--publish-sigma",
             str(report),
             "--sigma-node",
@@ -385,7 +385,7 @@ def test_cli_sigma_last_head_prints_bare_sha(tmp_path: Path) -> None:
     found = CliRunner().invoke(
         app,
         [
-            "review",
+            "do", "review",
             "--sigma-last-head",
             "--sigma-node",
             "x-bfbb",
@@ -403,7 +403,7 @@ def test_cli_sigma_last_head_prints_bare_sha(tmp_path: Path) -> None:
     absent = CliRunner().invoke(
         app,
         [
-            "review",
+            "do", "review",
             "--sigma-last-head",
             "--sigma-node",
             "x-nope",
@@ -478,7 +478,7 @@ def test_cli_publish_and_inspect_share_the_artifact_writer(tmp_path: Path) -> No
     published = CliRunner().invoke(
         app,
         [
-            "review",
+            "do", "review",
             "--publish-sigma",
             str(report),
             "--sigma-node",
@@ -505,7 +505,7 @@ def test_cli_publish_and_inspect_share_the_artifact_writer(tmp_path: Path) -> No
     inspected = CliRunner().invoke(
         app,
         [
-            "review",
+            "do", "review",
             "--inspect-sigma",
             "--sigma-node",
             "x-bfbb",

@@ -307,7 +307,7 @@ stateDiagram-v2
 
 **target-state.md** (session manifest):
 
-Inputs-only and immutable after `fno target init` (control-plane collapse). No `status`, no `current_phase`, no gate booleans, no `iteration`.
+Inputs-only and immutable after `fno do target init` (control-plane collapse). No `status`, no `current_phase`, no gate booleans, no `iteration`.
 ```yaml
 ---
 session_id: "..."

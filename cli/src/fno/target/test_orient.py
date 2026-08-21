@@ -238,7 +238,7 @@ def test_attended_line_live_manifest_keeps_stamp(monkeypatch) -> None:
 def test_manifest_live_line_shapes(monkeypatch) -> None:
     monkeypatch.setattr(orient, "_manifest_liveness", lambda _r: ("dead", "why"))
     dead = orient._manifest_live_line({"attended": False})
-    assert dead.startswith("dead") and "fno state archive" in dead
+    assert dead.startswith("dead") and "fno do state archive" in dead
     monkeypatch.setattr(orient, "_manifest_liveness", lambda _r: ("none", "no manifest"))
     assert orient._manifest_live_line(None).startswith("none")
 
@@ -246,7 +246,7 @@ def test_manifest_live_line_shapes(monkeypatch) -> None:
 def test_worktree_line(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(orient, "_is_linked_worktree", lambda _: False)
     line = orient._worktree_line(tmp_path, "x-9")
-    assert "fno target start x-9" in line
+    assert "fno do target start x-9" in line
     monkeypatch.setattr(orient, "_is_linked_worktree", lambda _: True)
     assert orient._worktree_line(tmp_path, "x-9") == str(tmp_path)
 

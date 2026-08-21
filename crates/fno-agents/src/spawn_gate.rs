@@ -759,6 +759,8 @@ MemAvailable:    8000000 kB\n";
         let root = dir.join("claims-root");
         std::fs::create_dir_all(&root).unwrap();
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
         // A high cap so the ONLY thing that can refuse here is the mutex.
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
@@ -801,7 +803,6 @@ MemAvailable:    8000000 kB\n";
             matches!(contended, claims::AcquireOutcome::HeldByOther { .. }),
             "test premise broken: a dead-holder claim must still read as held, got {contended:?}"
         );
-
         let started = Instant::now();
         let got = run_gate(
             &dir,
@@ -816,6 +817,10 @@ MemAvailable:    8000000 kB\n";
         let elapsed = started.elapsed();
         let _ = claims::release("spawn-gate", "spawn-gate:999999:ghost", Some(&root), None);
         std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
 
         assert_eq!(
             got.err(),

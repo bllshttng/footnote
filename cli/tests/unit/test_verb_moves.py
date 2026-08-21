@@ -4,14 +4,13 @@ A move is not a break: the old spelling stays registered for one release,
 forwards in-process once the destination root exists, and prints one stderr
 line naming the new spelling. Until the destination is minted the OLD
 registration serves the call, announced rather than silent - except a hot
-leaf in ``silent_leaves``, which stays quiet forever. The four deleted verbs
+leaf in ``permanent_leaves``, which stays quiet forever. The four deleted verbs
 (executor, posture, tokens, upgrade) are tombstones, not moves: the
 capability is gone, so the refusal names where it went instead of forwarding.
 
 The synthetic-app tests pin the forwarding mechanism end to end through the
 real ``LazyTypeGroup.resolve_command``; the real-app tests pin the wiring on
-the actual registry (destinations for ``outstanding`` and ``pr`` mint in
-later waves, so on this table the old registrations serve, announced).
+the actual registry.
 """
 from __future__ import annotations
 
@@ -23,7 +22,7 @@ import typer
 from typer.testing import CliRunner
 
 from fno._lazy_group import make_lazy_group_cls
-from fno.verb_moves import VERB_MOVES, deprecation_line, move_for
+from fno.verb_moves import Move, VERB_MOVES, deprecation_line, forwarding_args, move_for
 
 runner = CliRunner()
 
@@ -53,6 +52,22 @@ def test_silent_leaf_prints_nothing():
         assert deprecation_line("pr", [leaf, "993"], move) is None
 
 
+def test_pr_permanent_leaves_are_explicit_lifetime_policy():
+    move = VERB_MOVES["pr"]
+    assert move.permanent_leaves == frozenset({"status", "merge", "rebase"})
+
+
+def test_post_expiry_mode_forwards_only_permanent_leaves():
+    expired = Move(
+        kind="leaf-alias",
+        to="do pr",
+        permanent_leaves=frozenset({"status", "merge", "rebase"}),
+    )
+    assert forwarding_args(["status", "993"], expired) == ["do", "pr", "status", "993"]
+    assert forwarding_args(["create"], expired) is None
+    assert forwarding_args([], expired) is None
+
+
 def test_cold_leaf_announces_the_leaf_qualified_destination():
     move = VERB_MOVES["pr"]
     assert (
@@ -69,8 +84,6 @@ def test_flag_first_argument_announces_the_bare_destination():
 
 
 def test_alias_kind_never_prints():
-    from fno.verb_moves import Move
-
     move = Move(kind="alias", to="do pr")
     assert deprecation_line("pr", [], move) is None
     assert deprecation_line("pr", ["create"], move) is None
@@ -176,6 +189,74 @@ def test_hot_leaf_forwards_silently_through_the_destination():
     assert "fno pr create is now fno do pr create" in err
 
 
+def test_post_expiry_dispatch_forwards_hot_leaf_and_rejects_cold_leaf(monkeypatch):
+    import fno.verb_moves as moves
+
+    app = typer.Typer(cls=make_lazy_group_cls({}))
+
+    @app.callback()
+    def _cb() -> None: ...
+
+    old_pr = typer.Typer()
+
+    @old_pr.command("status")
+    def _old_status() -> None:
+        typer.echo("OLD")
+
+    @old_pr.command("create")
+    def _old_create() -> None:
+        typer.echo("OLD")
+
+    app.add_typer(old_pr, name="pr", hidden=True)
+    do = typer.Typer()
+    new_pr = typer.Typer()
+
+    @new_pr.command("status")
+    def _new_status() -> None:
+        typer.echo("NEW")
+
+    do.add_typer(new_pr, name="pr")
+    app.add_typer(do, name="do", hidden=True)
+    monkeypatch.setitem(
+        moves.VERB_MOVES,
+        "pr",
+        Move(kind="leaf-alias", to="do pr", permanent_leaves=frozenset({"status"})),
+    )
+
+    hot = runner.invoke(app, ["pr", "status"])
+    assert hot.exit_code == 0 and hot.stdout == "NEW\n"
+    cold = runner.invoke(app, ["pr", "create"])
+    assert cold.exit_code != 0
+    assert "was removed; use fno do pr create" in cold.output
+
+
+def test_post_expiry_rejects_cold_leaf_when_destination_is_missing(monkeypatch):
+    import fno.verb_moves as moves
+
+    app = typer.Typer(cls=make_lazy_group_cls({}))
+
+    @app.callback()
+    def _cb() -> None: ...
+
+    old_pr = typer.Typer()
+
+    @old_pr.command("create")
+    def _old_create() -> None:
+        typer.echo("OLD-CREATE-RAN")
+
+    app.add_typer(old_pr, name="pr", hidden=True)
+    monkeypatch.setitem(
+        moves.VERB_MOVES,
+        "pr",
+        Move(kind="leaf-alias", to="do pr", permanent_leaves=frozenset({"status"})),
+    )
+
+    result = runner.invoke(app, ["pr", "create"])
+    assert result.exit_code != 0
+    assert "OLD-CREATE-RAN" not in result.output
+    assert "was removed; use fno do pr create" in result.output
+
+
 # ---------------------------------------------------------------------------
 # The wiring on the real registry
 # ---------------------------------------------------------------------------
@@ -199,14 +280,12 @@ def test_real_pr_hot_leaf_help_stays_silent():
     assert "is now" not in (result.stderr or "")
 
 
-def test_real_pr_cold_leaf_help_does_not_name_unregistered_destination():
+def test_real_pr_cold_leaf_help_names_registered_destination():
     from fno.cli import app
 
-    # `do` is not registered yet, so the old root must serve without teaching
-    # a destination that exits with "No such command".
     result = runner.invoke(app, ["pr", "verify", "--help"])
     assert result.exit_code == 0, result.output
-    assert "fno do pr" not in (result.stderr or "")
+    assert "fno pr verify is now fno do pr verify" in (result.stderr or "")
 
 
 def test_every_moved_spelling_is_hidden():
@@ -225,6 +304,25 @@ def test_every_moved_spelling_is_hidden():
         )
 
 
+def test_do_fold_move_table_matches_the_approved_work_order():
+    expected = {
+        "delivery": "do delivery",
+        "loops": "do loops",
+        "phase": "do phase",
+        "plan": "do plan",
+        "pr": "do pr",
+        "pr-watch": "do pr watch",
+        "research": "do research",
+        "resume": "do resume",
+        "review": "do review",
+        "state": "do state",
+        "stub-manifest": "do pr stub-manifest",
+        "target": "do target",
+        "think": "do think",
+    }
+    assert {name: VERB_MOVES[name].to for name in expected} == expected
+
+
 def test_help_all_lists_moved_spellings_under_their_own_heading():
     from fno.cli import app
 
@@ -233,10 +331,9 @@ def test_help_all_lists_moved_spellings_under_their_own_heading():
     out = result.output
     assert "Moved spellings" in out
     assert "now fno inbox outstanding" in out
-    assert "now fno do pr" not in out
+    assert "now fno do pr" in out
     commands_part = out.split("Moved spellings")[0]
-    assert re.search(r"^  pr\s", commands_part, re.MULTILINE)
-    for name in VERB_MOVES.keys() - {"pr"}:
+    for name in VERB_MOVES:
         assert not re.search(rf"^  {re.escape(name)}\s", commands_part, re.MULTILINE), (
             f"moved spelling {name!r} must not render among the roots"
         )

@@ -100,7 +100,7 @@ assert_block "canonical main blocks" "$(payload "$CANONICAL")"
 
 MAIN_OUTPUT="$(run_guard "$(payload "$CANONICAL")")"
 MAIN_REASON="$(printf '%s' "$MAIN_OUTPUT" | jq -r '.reason')"
-if [[ "$MAIN_REASON" == *'fno target start <node>'* \
+if [[ "$MAIN_REASON" == *'fno do target start <node>'* \
     && "$MAIN_REASON" == *'worktree='* \
     && "$MAIN_REASON" == *'Codex Worktree mode'* \
     && "$MAIN_REASON" == *'Handoff'* ]]; then

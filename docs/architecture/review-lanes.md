@@ -13,7 +13,7 @@ wrote the diff" is too strong.
 Self-invocation has worked for several workers, so it is the first lane
 to try - but it has also been refused, so it is not a guarantee.
 
-The obligation to use one of these lanes on a code payload is enforced at the stop gate (`crates/fno-agents/src/loopcheck.rs`) and `fno pr merge`, not only in this prose: a code PR that reaches the gate with no head-pinned `review_attestation` is held, and the held reason names this harness's verb.
+The obligation to use one of these lanes on a code payload is enforced at the stop gate (`crates/fno-agents/src/loopcheck.rs`) and `fno do pr merge`, not only in this prose: a code PR that reaches the gate with no head-pinned `review_attestation` is held, and the held reason names this harness's verb.
 This doc is the lane menu; the gate is the authority.
 Opt out with `config.review.self_review_required = false`.
 
@@ -83,13 +83,13 @@ fno mail send <peer> '/code-review <level> --comment' --raw
 fno mail send '/code-review <level> --comment' --to-self --raw
 ```
 
-`<level>` is sized from the diff by `level_for_diff` in `cli/src/fno/review_capability.py` (never `ultra`: billed separately, and the builder rejects it). No surface needs to spell the invocation. `fno target review-invocation` prints it rendered and sized for this session, and the coverage refusals (stop gate, merge guard, the `fno/review-coverage` status) embed that render.
+`<level>` is sized from the diff by `level_for_diff` in `cli/src/fno/review_capability.py` (never `ultra`: billed separately, and the builder rejects it). No surface needs to spell the invocation. `fno do target review-invocation` prints it rendered and sized for this session, and the coverage refusals (stop gate, merge guard, the `fno/review-coverage` status) embed that render.
 
 No lane above carries `--fix`. A fix pass writes, which moves HEAD. An attestation is head-pinned, so the round that wrote it also voids it. This matches the spawned-reviewer contract further down. `--fix` stays legal for a caller who asks for it directly, and only the machinery advice drops it.
 
 ## A reply does not resolve a thread
 
-`fno pr status` reports `optional_reviews_unresolved`, and `ready` is `green && unresolved == 0`.
+`fno do pr status` reports `optional_reviews_unresolved`, and `ready` is `green && unresolved == 0`.
 Answering a finding in-thread does not decrement that counter: a GitHub review thread stays unresolved until it is resolved EXPLICITLY.
 So a PR whose every finding has been fixed and answered can sit at `ready: false` indefinitely while reading, to a human and to the loop, as fully handled.
 
@@ -100,7 +100,7 @@ gh api graphql -f query='mutation($t: ID!){resolveReviewThread(input:{threadId: 
 ```
 
 Thread ids come from `reviewThreads` on the `pullRequest`.
-`fno pr status` prints this instruction on stderr whenever the counter is non-zero, so the fix travels with the number rather than living only here.
+`fno do pr status` prints this instruction on stderr whenever the counter is non-zero, so the fix travels with the number rather than living only here.
 
 Before you tell anyone else to run one of those, ask whether they can: `fno mail send '<payload>' --to-self --raw --check` (or `fno mail send <peer> '<payload>' --raw --check`) injects nothing and reports one of THREE answers, never two: `injectable: <lane>` (exit 0), `not-injectable: <reason>` (exit 1), or `unmeasurable: <reason>` (exit 3) when the evidence needed to decide could not be read at all.
 Branch on all three. Collapsing `unmeasurable` into `not-injectable` states a verdict about a session the run never measured, and a deployed `fno-agents` too old to carry `--probe` answers `unmeasurable: probe-unavailable`.
@@ -295,7 +295,7 @@ That is a different fact from `absent`, and it calls for a different response: a
 **Two identity implementations now exist, and that is deliberate, not drift.** `pr_code_diff_identity` decides whether a local verdict counts toward the event row. `coverage-carry.sh`'s patch-id decides whether the CI status carries. They can disagree, and both disagreements fail closed:
 
 - Local carries but CI does not: the status stays red until a session re-greens it. That is today's behavior, unchanged.
-- CI carries but local does not: `fno pr merge` still enforces `covered_conjuncts` (`cli/src/fno/pr/_coverage_gate.py`) on its own. A CI-only carry is refused at merge time.
+- CI carries but local does not: `fno do pr merge` still enforces `covered_conjuncts` (`cli/src/fno/pr/_coverage_gate.py`) on its own. A CI-only carry is refused at merge time.
 
 The two gates are an AND, never an OR. Neither implementation can launder the other's refusal into a merge.
 
@@ -410,7 +410,7 @@ That refusal landed separately.
 
 A local attestation records `attester_session_id`, the harness session of the
 process that emitted it, read from the live environment on the same marker
-precedence `fno target init` resolves.
+precedence `fno do target init` resolves.
 loop-check compares it against the authoring session's manifest
 `harness_session_id` and labels each local verdict with a tri-state
 `attestation_origin`:
@@ -420,7 +420,7 @@ loop-check compares it against the authoring session's manifest
 - `unknown` - no attester was recorded, or the author session is unknown.
 
 `other_session` is not `independent`.
-The manifest names the session that ran `fno target init` in the worktree, so a
+The manifest names the session that ran `fno do target init` in the worktree, so a
 self-handoff successor or a second agent in a shared worktree is a different
 session and is still not independent.
 A match is strong evidence of self-attestation; a mismatch is weak evidence of
@@ -477,16 +477,16 @@ worker; a role table cannot enforce it.
 
 ## Producer reachability: every path that reaches the gate
 
-`fno pr merge` refuses a PR whose `review_coverage` event says uncovered, unknown, stale, or missing. For most of the gate's life exactly one writer existed: `read_pr_info` under `run_done`, which `decide()` reaches only past a streak counter. A session with no `.fno/target-state.md` runs no stop hook at all, so no row will ever exist. The gate was unsatisfiable for that session shape, not strict. This is the decorative-guard pitfalls entry inverted: a PRODUCER on one of N paths.
+`fno do pr merge` refuses a PR whose `review_coverage` event says uncovered, unknown, stale, or missing. For most of the gate's life exactly one writer existed: `read_pr_info` under `run_done`, which `decide()` reaches only past a streak counter. A session with no `.fno/target-state.md` runs no stop hook at all, so no row will ever exist. The gate was unsatisfiable for that session shape, not strict. This is the decorative-guard pitfalls entry inverted: a PRODUCER on one of N paths.
 
 The producer is now reachable from every path that can reach the gate.
 
 | Path | Producer reachable | How |
 |---|---|---|
 | target stop hook `decide()` -> `run_done` | yes, unchanged | streak-gated |
-| `fno pr merge <n>` | yes | with no usable row it recomputes once, before the staleness comparison, pinned to the PR head |
-| `fno pr status <n>` | yes | reads through the same recompute-then-read helper |
-| `fno pr coverage-check <n>` without `--recompute` (and the git-protection hook through it) | no by default; `--recompute` yes | the hook path must not recompute: a PreToolUse hook has a 60s budget and the Rust producer takes minutes. `--recompute` shells the producer, same as `fno pr merge`. One-directional: on a missing or stale row this denies where `fno pr merge` may yet allow |
+| `fno do pr merge <n>` | yes | with no usable row it recomputes once, before the staleness comparison, pinned to the PR head |
+| `fno do pr status <n>` | yes | reads through the same recompute-then-read helper |
+| `fno do pr coverage-check <n>` without `--recompute` (and the git-protection hook through it) | no by default; `--recompute` yes | the hook path must not recompute: a PreToolUse hook has a 60s budget and the Rust producer takes minutes. `--recompute` shells the producer, same as `fno do pr merge`. One-directional: on a missing or stale row this denies where `fno do pr merge` may yet allow |
 | `finalize`'s auto-merge arm | not added, by decision | reached only from a terminal-allow, which implies `run_done` already ran this fire, and a failed arm leaves a green reviewed PR for a human |
 | a human running the verb by hand | yes | `fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>]` |
 
@@ -496,7 +496,7 @@ The verb cannot assert coverage without performing the reads. There is no `--for
 
 That pre-empts the aggregate-that-overstates-its-inputs shape at the field that becomes a bypass on the day anything enforces it.
 
-A bare `gh pr merge` from an agent tool call is a fourth reader of the same predicate. The merge hook in `hooks/git-protection.py` shells the hidden `fno pr coverage-check` verb. That verb evaluates the guard's coverage check in `cli/src/fno/pr/_coverage_gate.py` without the recompute. A PreToolUse hook has a 60s harness budget and the Rust producer is budgeted in minutes. The invariant between the two surfaces is one-directional by design. The hook never allows what the guard refuses. When the row is missing or stale the hook denies where `fno pr merge` can still allow after recomputing. Absence denies. A named instrument failure (exit 4) fails open. Both surfaces refuse with one sentence, pinned character for character in `cli/tests/unit/test_pr_coverage_check.py`.
+A bare `gh pr merge` from an agent tool call is a fourth reader of the same predicate. The merge hook in `hooks/git-protection.py` shells the hidden `fno do pr coverage-check` verb. That verb evaluates the guard's coverage check in `cli/src/fno/pr/_coverage_gate.py` without the recompute. A PreToolUse hook has a 60s harness budget and the Rust producer is budgeted in minutes. The invariant between the two surfaces is one-directional by design. The hook never allows what the guard refuses. When the row is missing or stale the hook denies where `fno do pr merge` can still allow after recomputing. Absence denies. A named instrument failure (exit 4) fails open. Both surfaces refuse with one sentence, pinned character for character in `cli/tests/unit/test_pr_coverage_check.py`.
 
 ### The GitHub status is a projection, not a latch
 

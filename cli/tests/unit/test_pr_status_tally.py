@@ -1,4 +1,4 @@
-"""The tally-conflation contract for `fno pr status` (x-d7be).
+"""The tally-conflation contract for `fno do pr status` (x-d7be).
 
 `statusCheckRollup` carries two different kinds of row: GitHub check-runs (the
 `name` key, produced by Actions and Checks-API apps) and commit StatusContexts
@@ -31,7 +31,7 @@ def _no_dispatch_hold(monkeypatch):
 def test_tally_splits_check_runs_from_statuses():
     """The PR 994 specimen, restated: 13 check-runs + 2 statuses read as 15.
 
-    Measured 2026-08-20. `fno pr status` said 15 checks; GitHub's check-runs
+    Measured 2026-08-20. `fno do pr status` said 15 checks; GitHub's check-runs
     endpoint named 13 (12 success, 1 skipped); the two extra rows were fno's
     own statuses, stacked-base-guard and fno/review-coverage. Both numbers
     were right about different questions, and nothing in the payload said so.

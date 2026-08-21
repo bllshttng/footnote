@@ -33,3 +33,19 @@ target init !--provider
 target start !--provider
 worker external !--pr
 worker review !--session
+do resume receipt validate !--session
+do resume receipt write !--session
+do review !--session
+do review !--sigma-current-head
+do review !--sigma-head
+do review !--sigma-node
+do review !--sigma-pr
+do review !--sigma-project
+do review !--sigma-reviews-root
+do review !--sigma-round
+do review !--sigma-scope-base
+do review !--sigma-scope-reason
+do state init !--allow-stub
+do target init !--provider
+do target resolve-model !--provider
+do target start !--provider

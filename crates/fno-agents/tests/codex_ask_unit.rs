@@ -203,7 +203,7 @@ fn build_argv_create_grants_git_metadata_write_in_a_repo() {
 #[test]
 fn build_argv_create_internal_grants_compose_with_user_add_dir() {
     // --add-dir is repeatable, so the git and plan grants never clobber a
-    // caller's own root. The plan grant shells to `fno plan path`, which is
+    // caller's own root. The plan grant shells to `fno do plan path`, which is
     // not on PATH in every test environment (e.g. this crate's own CI leg,
     // which never installs the `fno` console script) - stub it, matching
     // provider.rs's `codex_create_and_resume_argv_grant_the_resolved_plan_directory`.

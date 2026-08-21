@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const EVALUATOR_COMMAND_ID: &str = "fno delivery evaluate --json";
+const EVALUATOR_COMMAND_ID: &str = "fno do delivery evaluate --json";
 
 #[derive(Debug)]
 pub enum DeliveryCompletion {
@@ -114,7 +114,7 @@ pub fn evaluate(fno_bin: &str, cwd: &Path, plan_path: &Path, events: &Path) -> D
         Activation::Active => {}
     }
     let output = match Command::new(fno_bin)
-        .args(["delivery", "evaluate", "--json", "--plan-path"])
+        .args(["do", "delivery", "evaluate", "--json", "--plan-path"])
         .arg(plan_path)
         .arg("--events")
         .arg(events)

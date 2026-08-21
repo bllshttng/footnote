@@ -95,6 +95,25 @@ def test_repo_root_finds_checkout():
     assert (root / "cli" / "src" / "fno" / "__init__.py").exists()
 
 
+def test_child_env_drops_outer_xdist_transport(monkeypatch):
+    for name in (
+        "PYTEST_XDIST_WORKER",
+        "PYTEST_XDIST_WORKER_COUNT",
+        "PYTEST_XDIST_TESTRUNUID",
+    ):
+        monkeypatch.setenv(name, "outer-worker")
+
+    env = test_cmd._child_env(Path.cwd())
+
+    assert not set(env).intersection(
+        {
+            "PYTEST_XDIST_WORKER",
+            "PYTEST_XDIST_WORKER_COUNT",
+            "PYTEST_XDIST_TESTRUNUID",
+        }
+    )
+
+
 def test_quiet_contract_failure_tails_log(tmp_path, monkeypatch, capsys):
     """Default mode captures output to .fno/last-test.log and prints only the
     TAIL on failure (errors live at the end; expand upward via the log)."""

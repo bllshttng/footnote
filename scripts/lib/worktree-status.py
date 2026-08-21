@@ -4,7 +4,7 @@
 Cross-references each worktree path against ~/.fno/agents/registry.json's
 `cwd` field - the live agents registry the daemon already reconciles - rather
 than reading `.fno/target-state.md`'s `owner_pid`, which names the short-lived
-`fno target init` CLI invocation and reads as dead within seconds of session
+`fno do target init` CLI invocation and reads as dead within seconds of session
 start (verified live 2026-08-15: a worktree with an active session showed
 owner_pid already exited). The registry's `status` field (spawning/ready/
 idle/busy/live/restarting/orphaned/failed/exited/permanent_dead) is itself

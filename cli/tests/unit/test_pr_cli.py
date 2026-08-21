@@ -1,4 +1,4 @@
-"""CLI-layer tests for `fno pr merge` after the in-package port (ab-d4c98550).
+"""CLI-layer tests for `fno do pr merge` after the in-package port (ab-d4c98550).
 
 The merge logic itself is characterized in test_pr_merge.py; here we only
 assert the Typer verb dispatches into the in-package _merge module and
@@ -37,7 +37,7 @@ def test_pr_info_prints_rest_metadata(monkeypatch):
             "",
         ),
     )
-    result = runner.invoke(app, ["pr", "info", "930", "--repo", "Owner/Repo"])
+    result = runner.invoke(app, ["do", "pr", "info", "930", "--repo", "Owner/Repo"])
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {
         "pr": 930,
@@ -70,7 +70,7 @@ def test_pr_list_prints_rest_summaries(monkeypatch):
             "",
         ),
     )
-    result = runner.invoke(app, ["pr", "list", "--repo", "o/r"])
+    result = runner.invoke(app, ["do", "pr", "list", "--repo", "o/r"])
     assert result.exit_code == 0
     assert json.loads(result.stdout)[0]["headRefName"] == "feature/x"
 
@@ -78,7 +78,7 @@ def test_pr_list_prints_rest_summaries(monkeypatch):
 def test_graphql_exec_rejects_public_coverage_purpose():
     result = runner.invoke(
         app,
-        ["pr", "graphql-exec", "--purpose", "coverage", "--", "pr", "view", "930"],
+        ["do", "pr", "graphql-exec", "--purpose", "coverage", "--", "pr", "view", "930"],
     )
     assert result.exit_code == 2
 
@@ -95,19 +95,19 @@ def test_fno_process_routes_subprocesses_through_proxy(monkeypatch):
         return 2
 
     monkeypatch.setattr(_merge, "run_merge", _fake)
-    result = runner.invoke(app, ["pr", "merge", "930"])
+    result = runner.invoke(app, ["do", "pr", "merge", "930"])
     assert result.exit_code == 2
     assert __import__("os").environ["PATH"] == "/real/bin"
 
 
 def test_pr_help_renders():
-    result = runner.invoke(app, ["pr", "--help"])
+    result = runner.invoke(app, ["do", "pr", "--help"])
     assert result.exit_code == 0
     assert "merge" in result.stdout
 
 
 def test_pr_merge_help_renders():
-    result = runner.invoke(app, ["pr", "merge", "--help"])
+    result = runner.invoke(app, ["do", "pr", "merge", "--help"])
     assert result.exit_code == 0
 
 
@@ -120,7 +120,7 @@ def test_pr_merge_dispatches_in_package(monkeypatch):
         return 2
 
     monkeypatch.setattr(_merge, "run_merge", _fake)
-    result = runner.invoke(app, ["pr", "merge", "999999"])
+    result = runner.invoke(app, ["do", "pr", "merge", "999999"])
     assert result.exit_code == 2
     assert captured["argv"] == ["999999"]
 
@@ -134,7 +134,7 @@ def test_pr_merge_forwards_legacy_invoker_flag(monkeypatch):
         return 2
 
     monkeypatch.setattr(_merge, "run_merge", _fake)
-    result = runner.invoke(app, ["pr", "merge", "--invoker=target", "42"])
+    result = runner.invoke(app, ["do", "pr", "merge", "--invoker=target", "42"])
     assert result.exit_code == 2
     assert captured["argv"] == ["--invoker=target", "42"]
 
@@ -150,7 +150,7 @@ def test_closure_trailer_warns_on_a_dropped_malformed_extra_id(monkeypatch, tmp_
     monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
 
     result = runner.invoke(
-        app, ["pr", "closure-trailer", "x-1111", "--extra", "not-an-id"],
+        app, ["do", "pr", "closure-trailer", "x-1111", "--extra", "not-an-id"],
     )
     assert result.exit_code == 0
     assert "warning: dropping malformed --extra id(s)" in result.output
@@ -164,7 +164,7 @@ def test_global_receipt_path_uses_pinned_accessor(monkeypatch, tmp_path):
     expected = tmp_path / "events.jsonl"
     monkeypatch.setattr(paths, "global_events_json", lambda: expected)
 
-    result = runner.invoke(app, ["pr", "global-receipt-events-path"])
+    result = runner.invoke(app, ["do", "pr", "global-receipt-events-path"])
 
     assert result.exit_code == 0
     assert result.stdout.strip() == str(expected)

@@ -6,7 +6,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 
 | Key | Type | Default | Wizard | Description |
 |-----|------|---------|--------|-------------|
-| `state_dir` | str | `~/.fno/` | advanced | Root dir for global fno state. |
+| `state_dir` | str | `~/.fno/` | advanced | Root dir for global fno do state. |
 | `plans_dir` | str | `.fno/plans/` | advanced | Where folder plans are written. |
 | `plans_filename` | str | `%Y%m%d-{slug}-{node}.md` | advanced | Plan/design-doc filename template: strftime codes plus {slug} and {node} placeholders; must render to a bare *.md name. |
 | `branch.prefix` | str | `fno` | advanced | Prefix for dispatched worktree branches: <prefix>/<slug>-<node>. |
@@ -50,11 +50,11 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `post_merge.self_reap` | bool | `false` | never | Whether a post-merge watcher self-reaps. |
 | `post_merge.sync_command` | str (optional) | _(none)_ | advanced | Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno update && fno restart`). Unset = off. |
 | `post_merge.sync_paths` | list[str] | `[]` | advanced | Repo-relative fnmatch globs gating the canonical sync (empty = always run; e.g. `["cli/**", "crates/**"]` skips a docs-only merge). |
-| `post_merge.auto_run` | bool | `false` | advanced | Let the pr-watch daemon (the sole merge detector) run `fno pr ritual <pr> --autonomous` for a newly-merged PR (opt-in; default off). Reconcile no longer dispatches a ritual. |
+| `post_merge.auto_run` | bool | `false` | advanced | Let the pr-watch daemon (the sole merge detector) run `fno do pr ritual <pr> --autonomous` for a newly-merged PR (opt-in; default off). Reconcile no longer dispatches a ritual. |
 | `post_merge.catchup_window_days` | int | `3` | advanced | How far back the canonical-sync catch-up sweep looks for merges with no sync marker (default 3 days). Bounds the sweep so a fresh clone never re-syncs all history. |
 | `post_merge.sync_stale_hours` | int | `24` | advanced | How long the newest merge may sit unsynced before `fno doctor` reports the canonical checkout stale (default 24h). |
 | `post_merge.model` | str | `claude-opus-5` | advanced | Model for post-merge ritual workers (default claude-opus-5). Routing wins when a secondary provider is keyed. |
-| `research.output_dir` | str (optional) | _(none)_ | advanced | Landing dir for the `fno research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses). |
+| `research.output_dir` | str (optional) | _(none)_ | advanced | Landing dir for the `fno do research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses). |
 | `review.github_apps` | list[str] (optional) | _(none)_ | advanced | GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots. |
 | `review.required_bots` | list[str] (optional) | _(none)_ | never | Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set. |
 | `review.peers` | list[Any] | `[]` | advanced | Harness peers run locally and gate on a head-pinned clean verdict. Scalar or {provider, model} entries need no second GitHub account; adding identity opts into legacy posted-review mode. |
@@ -137,9 +137,9 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `active_backlog.mission` | str (optional) | _(none)_ | never | Scope the drain daemon to a single mission's nodes. |
 | `parallel.max_lanes` | int | `1` | advanced | Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in). |
 | `auto_merge.enabled` | bool | `false` | always | Auto-merge a PR once external review passes. |
-| `auto_merge.grant` | str | `none` | advanced | WHO may merge once enabled passes (actor scope): 'none' = humans only via `fno pr merge`; 'dispatch' = autonomously dispatched /target workers may merge too. Replaces the deprecated dispatch.auto_merge bool. Any unknown value degrades to 'none'. |
+| `auto_merge.grant` | str | `none` | advanced | WHO may merge once enabled passes (actor scope): 'none' = humans only via `fno do pr merge`; 'dispatch' = autonomously dispatched /target workers may merge too. Replaces the deprecated dispatch.auto_merge bool. Any unknown value degrades to 'none'. |
 | `auto_merge.merge_strategy` | str | `merge` | advanced | Merge strategy: merge \| squash \| rebase. |
-| `auto_merge.delete_branch_on_merge` | bool | `true` | advanced | Delete the remote branch after a merge. Executor paths only (`fno pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook. |
+| `auto_merge.delete_branch_on_merge` | bool | `true` | advanced | Delete the remote branch after a merge. Executor paths only (`fno do pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook. |
 | `auto_merge.require_checks_pass` | bool | `true` | advanced | Require CI green before auto-merge. |
 | `auto_merge.conflict_resolution` | str | `opus` | never | Conflict-resolution agent for auto-merge rebases. |
 | `auto_merge.remediation` | str | `attempt` | never | Post-failure remediation policy for auto-merge. |

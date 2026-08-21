@@ -2,7 +2,7 @@
 
 `/target <design-rung node>` is a documented branch: skills/target/SKILL.md routes
 a node whose plan reads `status: design` through `/blueprint` first. But the same
-skill makes `fno target init` mandatory, and init acquires the node claim. That
+skill makes `fno do target init` mandatory, and init acquires the node claim. That
 claim is projected onto the plan doc as `in_progress`
 (cli/src/fno/plan/_project.py), along the forward-only axis in
 cli/src/fno/plan/_status.py, so it re-advances on every run.

@@ -60,7 +60,7 @@ target_state_field() {
 # Returns non-zero if: no state file, empty-input stub, or the node claim is dead.
 #
 # Liveness truth is the node CLAIM, not the manifest `status:` field (the writer
-# no longer emits it) and NOT `owner_pid` (that is the transient `fno target init`
+# no longer emits it) and NOT `owner_pid` (that is the transient `fno do target init`
 # wrapper pid, dead ~1s after init returns per claims/session_pid.py — it reads a
 # live session as inactive). The claim is acquired with the DURABLE session pid
 # (nearest claude ancestor) + TTL, so its liveness is the real signal. We delegate
@@ -116,7 +116,7 @@ target_is_active() {
 # target_is_active where a false "dead" would be worse.
 #
 # owner_pid is not a substitute and never was. It is the transient
-# `fno target init` wrapper pid, dead within about a second of init returning,
+# `fno do target init` wrapper pid, dead within about a second of init returning,
 # so `kill -0 owner_pid` is false for EVERY live session; a guard resting on it
 # alone reads as protection and never once fires.
 target_claim_is_live() {

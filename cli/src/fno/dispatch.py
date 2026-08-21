@@ -10,7 +10,7 @@ machinery:
 - spawn: ``dispatch_spawn_pane`` (pane substrate, into THIS session)
 
 Never double-claims: the lane slot is the concurrency authority, and the spawned
-worker's own ``fno target start`` claims ``node:<id>`` and re-anchors the slot to
+worker's own ``fno do target start`` claims ``node:<id>`` and re-anchors the slot to
 its lifecycle (target_cli._maybe_reconcile_lane_slot) - identical to the daemon
 ``dispatch-lanes`` path, so the slot frees when the worker ends.
 """

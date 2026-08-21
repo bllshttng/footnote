@@ -6,7 +6,7 @@
 # "Is this plan ready?" used to be answered in seven places across three
 # languages over four vocabularies, with two of the answers using opposite
 # failure policies and no file referencing another. `fno.graph.ladder.plan_rung`
-# is now the sole classifier; Bash reaches it through `fno plan rung` and Rust
+# is now the sole classifier; Bash reaches it through `fno do plan rung` and Rust
 # reaches it by shelling out or by reading Python-derived JSON.
 #
 # This check exists because that consolidation is only worth anything while it
@@ -19,7 +19,7 @@
 # frontmatter status and specified a fixture-corpus parity harness against it.
 # Reading the source says otherwise: loopcheck.rs and loop_target.rs parse
 # `.fno/target-state.md` (a DIFFERENT vocabulary - COMPLETE|BLOCKED|ABORTED),
-# finalize.rs shells out to `fno plan validate`/`stamp`. The registered Rust
+# finalize.rs shells out to `fno do plan validate`/`stamp`. The registered Rust
 # plan readers consume activation-specific keys, never `status:`.
 #
 # So there is nothing on the far side to pin, and a parity harness would freeze
@@ -72,7 +72,7 @@ echo "--- Bash: no plan-status re-parsing ---"
 # A guard a two-line reformat defeats is the decorative guard this check exists
 # to remove. So: flag EVERY shell `^status:` extraction, then subtract the files
 # known to read a different artifact. Adding a new reader now forces a choice -
-# route through `fno plan rung`, or add the file here with a reason - instead of
+# route through `fno do plan rung`, or add the file here with a reason - instead of
 # passing silently.
 #
 # `sed -i` is excluded: an in-place substitution WRITES a status (test fixtures
@@ -123,7 +123,7 @@ $(
 EOF
 offenders="$(printf '%s' "$offenders" | grep -v '^$' || true)"
 if [ -n "$offenders" ]; then
-    violation "a shell script reads \`status:\` itself; call \`fno plan rung\` instead" \
+    violation "a shell script reads \`status:\` itself; call \`fno do plan rung\` instead" \
         "$offenders" \
         "If this file reads a DIFFERENT status axis (the target-state manifest or" \
         "the Plan-Mode sidecar), add it to ALLOWED_STATUS_READERS with its reason."
@@ -229,7 +229,7 @@ if [ "$actual_status_identifiers" != "$EXPECTED_RUST_STATUS_IDENTIFIERS" ]; then
         "expected: $EXPECTED_RUST_STATUS_IDENTIFIERS" \
         "actual:   ${actual_status_identifiers:-(none)}" \
         "Do not classify plan frontmatter in Rust; route readiness through" \
-        "\`fno plan rung\`. Update this ratchet only for a reviewed, unrelated" \
+        "\`fno do plan rung\`. Update this ratchet only for a reviewed, unrelated" \
         "status field."
 else
     note "OK: the production Rust status-identifier inventory is unchanged"
@@ -249,7 +249,7 @@ if [ "$actual" != "$EXPECTED_RUST_PLAN_READERS" ]; then
         "expected: $EXPECTED_RUST_PLAN_READERS" \
         "actual:   ${actual:-(none)}" \
         "A new Rust plan reader must NOT classify \`status:\` itself - shell out to" \
-        "\`fno plan rung\` (exit 0 = dispatchable). If the new reader genuinely needs" \
+        "\`fno do plan rung\` (exit 0 = dispatchable). If the new reader genuinely needs" \
         "no status, add it to EXPECTED_RUST_PLAN_READERS with a one-line reason."
 else
     note "OK: the registered Rust plan-reader set is unchanged"

@@ -217,7 +217,7 @@ candidate_python() {
     fi
 }
 
-GLOBAL_EVENTS_PATH="$(candidate_fno pr global-receipt-events-path)" || {
+GLOBAL_EVENTS_PATH="$(candidate_fno do pr global-receipt-events-path)" || {
     echo "preflight: canonical receipt journal path unavailable" >&2
     exit 1
 }
@@ -296,7 +296,7 @@ emit_setup_unavailable() {
 }
 
 next_receipt_generation() {
-    candidate_fno pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
+    candidate_fno do pr next-receipt-generation --candidate-sha "$CANDIDATE_SHA"
 }
 
 # --- attestation: reuse a prior FULL run's GREEN verdict --------------------
@@ -335,7 +335,7 @@ reuse_attestation() {
     # The text file is only a fast cache carrier. Authority stays in the typed
     # event journal, so a matching carrier with missing, malformed, subset,
     # void, stale, or otherwise non-passing evidence cannot bless this SHA.
-    if ! candidate_fno pr evidence-check >/dev/null 2>&1; then
+    if ! candidate_fno do pr evidence-check >/dev/null 2>&1; then
         echo "preflight: matching attestation has no exact full/passed event evidence - running full suite"
         return 1
     fi
@@ -492,7 +492,7 @@ holder_status_line() {
 }
 
 skip_hint() {
-    echo "preflight: to skip local verification and rely on CI instead of waiting, set FNO_SKIP_PREFLIGHT=1 before 'fno pr create'/'fno pr check' (does not apply to this script directly)" >&2
+    echo "preflight: to skip local verification and rely on CI instead of waiting, set FNO_SKIP_PREFLIGHT=1 before 'fno do pr create'/'fno do pr check' (does not apply to this script directly)" >&2
 }
 
 # --- stalled-holder liveness (progress, not existence) ------------------------

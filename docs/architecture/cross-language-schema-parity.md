@@ -77,7 +77,7 @@ A hand-maintained list with a comment asking the next person to remember is the 
 A node's plan sits on a rung (`idea` -> `design` -> `ready` -> `in_progress` -> `in_review`, plus the `done`/`superseded` terminals).
 One Python function classifies it: `plan_rung` in `cli/src/fno/graph/ladder.py`.
 Autonomous selection reads that classification through `selection_guards`, while `is_dispatchable` and `is_cold_dispatchable` own the plan-bearing and plan-less dispatch policies.
-Bash asks the classifier through `fno plan rung`.
+Bash asks the classifier through `fno do plan rung`.
 **Rust never parses it.**
 
 That last sentence is the finding. It reads as though `crates/fno-agents/src/loopcheck.rs` parses plan-frontmatter status, and it does parse a `status:` key - but out of `.fno/target-state.md`, whose vocabulary is `COMPLETE | BLOCKED | ABORTED`, a different axis entirely. Reading the rest of the Rust surface:
@@ -85,7 +85,7 @@ That last sentence is the finding. It reads as though `crates/fno-agents/src/loo
 | Rust site | What it actually does |
 |---|---|
 | `loopcheck.rs`, `loop_target.rs` | parse `.fno/target-state.md` (session manifest vocabulary) |
-| `finalize.rs` | shells out to `fno plan validate` / `fno plan stamp` |
+| `finalize.rs` | shells out to `fno do plan validate` / `fno do plan stamp` |
 | `loop_megawalk.rs` | takes `plan_path` from `fno backlog next` JSON, whose status Python already derived |
 | `kill_criteria.rs` | opens the plan document, extracts the `kill_criteria:` block only |
 | `backlog_view.rs` | renders the derived graph status; consumes, never re-derives |

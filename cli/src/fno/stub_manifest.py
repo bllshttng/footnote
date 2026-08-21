@@ -6,7 +6,7 @@ A `contract` dependent (see `fno backlog decompose`, G2) builds *now* against a
 pinned interface contract, stubbing the parts that need its blocker landed, and
 opens its PR as draft. It records each stub here. Two consumers read it:
 
-  - `fno pr merge` refuses to merge while a node carries an UNreconciled manifest
+  - `fno do pr merge` refuses to merge while a node carries an UNreconciled manifest
     (the "a stubbed PR never merges with mocks" invariant; Locked Decision 4).
   - the G4 reconciliation pass (not built here) reads the manifest to know which
     stubs to swap for the real implementation, then flips `reconciled: true`.
@@ -317,7 +317,7 @@ def mark_reconciled(node_id: str, root: Path | str) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# CLI surface (`fno stub-manifest ...`)
+# CLI surface (`fno do pr stub-manifest ...`)
 # --------------------------------------------------------------------------- #
 
 stub_manifest_app = typer.Typer(
@@ -330,7 +330,7 @@ stub_manifest_app = typer.Typer(
 
 @stub_manifest_app.callback()
 def _root() -> None:
-    """Group callback. Keeps `fno stub-manifest <verb>` routing intact even at a
+    """Group callback. Keeps `fno do pr stub-manifest <verb>` routing intact even at a
     single subcommand (a lone @command would collapse into the group)."""
 
 
@@ -422,7 +422,7 @@ def cmd_reconcile_finalize(
 ) -> None:
     """Mark the manifest reconciled (call AFTER de-stub + tests pass).
 
-    Flips the single hold signal off so `fno pr merge` stops refusing the
+    Flips the single hold signal off so `fno do pr merge` stops refusing the
     dependent's PR. Does NOT flip the draft PR ready -- that gh action is the
     reconcile skill's, kept out of this pure state write for testability.
     """

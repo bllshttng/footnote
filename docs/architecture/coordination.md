@@ -92,7 +92,7 @@ is that contested or ambiguous liveness degrades to **skip**, never to
   claim TTL, so a respawned worker keeps its claim alive under any pid with no
   separate heartbeat. Renewal is best-effort; a missed renewal only shortens
   the lease, never blocks the loop.
-- **`fno target init`** may archive-and-reclaim a prior manifest only when the
+- **`fno do target init`** may archive-and-reclaim a prior manifest only when the
   lockfile is `free`/`stale`/`corrupted` AND the worktree shows no fresh activity
   within `config.claims.activity_window` (default 15m, env override
   `TARGET_CLAIM_ACTIVITY_WINDOW`). Freshness is the newest mtime among
@@ -199,7 +199,7 @@ differ from the per-walker `walker:` claim:
   `walker:` singleton keeps its per-root (cwd) location by passing an explicit
   root, so it is unaffected.
 - **TTL with a durable-pid hybrid arm.** A `/target` node claim is acquired by
-  the one-shot `fno target init` subprocess, which exits immediately - so a pure
+  the one-shot `fno do target init` subprocess, which exits immediately - so a pure
   PID-liveness claim would be stale on birth and the next session would reclaim
   it. Node claims are therefore TTL claims (`--ttl ${TARGET_CLAIM_TTL:-2h}`),
   acquired in `init-target-state.sh` and released by the stop hook. To stop a
@@ -229,11 +229,11 @@ Two enforcement points:
 
 Measured 2026-08-19: nine nodes each named by a live roster worker, and seven read `free`. Two live claimants landed on one node and a third nearly did. The claim is documented as THE work-claim primitive, so four kings read `free` and staffed duplicates onto nodes that already had someone on them.
 
-The cause was a guard on one of many paths. `node:<id>` had exactly one producer, a shell script that tokenized a prompt string, and it only ran under `fno target init`. Every other route to a node bypassed it: a verb buried mid-sentence, a payload naming two ids, a run that went through `/blueprint` instead. This section records the rules that replaced it, because each one is a trap somebody will otherwise re-derive.
+The cause was a guard on one of many paths. `node:<id>` had exactly one producer, a shell script that tokenized a prompt string, and it only ran under `fno do target init`. Every other route to a node bypassed it: a verb buried mid-sentence, a payload naming two ids, a run that went through `/blueprint` instead. This section records the rules that replaced it, because each one is a trap somebody will otherwise re-derive.
 
 ### Exactly two producers, and that ceiling is load-bearing
 
-`fno target init` and `fno agents spawn --node`. Those two callers hold the node id as a TYPED argument, not as prose to be re-derived. Adding a third is a design change, not a fix. Some paths have no node id at all, such as a prose payload or a hand-started session. Adding producers leaves those permanently unclaimed. That is the same decorative-guard shape wearing a new coat.
+`fno do target init` and `fno agents spawn --node`. Those two callers hold the node id as a TYPED argument, not as prose to be re-derived. Adding a third is a design change, not a fix. Some paths have no node id at all, such as a prose payload or a hand-started session. Adding producers leaves those permanently unclaimed. That is the same decorative-guard shape wearing a new coat.
 
 `/blueprint` deliberately does NOT claim. It writes a plan and does not build. A claim taken there is held across the plan-then-target gap and blocks the target run that follows it. Its frontmatter `claims:` field is plan adoption, an unrelated concept that shares the word.
 
@@ -274,9 +274,9 @@ The asymmetry is the whole safety argument. An earlier version asked whether any
 
 The roster's coverage gap now costs a missed reap instead of a wrongly archived claim. That is the correct direction to fail. An unreaped claim expires on its own, and a wrongly reaped one hands a live worker's node to a second worker.
 
-A `dispatch:` reservation looks like it never needed SUSPECT's protection, since nothing respawns under `spawn-cli:<pid>`. But its TTL is the BOOT WINDOW. It outlives its spawner on purpose, so a second dispatcher does not launch onto a node whose worker has not reached `fno target init`. A sweep must not reap it, and only expiry frees it there. The spawn guard clears it instead, re-probing its own reservation key at the moment it is about to launch. That is safe because the node claim now covers the same window.
+A `dispatch:` reservation looks like it never needed SUSPECT's protection, since nothing respawns under `spawn-cli:<pid>`. But its TTL is the BOOT WINDOW. It outlives its spawner on purpose, so a second dispatcher does not launch onto a node whose worker has not reached `fno do target init`. A sweep must not reap it, and only expiry frees it there. The spawn guard clears it instead, re-probing its own reservation key at the moment it is about to launch. That is safe because the node claim now covers the same window.
 
-The one exception is a **launch window**. A claim held under `spawn-handover:<worker>` is exempt from the probe. Between the spawn and the worker's first `fno target init` there is no worktree manifest and no ledger row. So the roster cannot see that worker BY CONSTRUCTION. Nothing is stranded by the exemption: that claim is TTL-bound, and an expired claim is provably dead on its own.
+The one exception is a **launch window**. A claim held under `spawn-handover:<worker>` is exempt from the probe. Between the spawn and the worker's first `fno do target init` there is no worktree manifest and no ledger row. So the roster cannot see that worker BY CONSTRUCTION. Nothing is stranded by the exemption: that claim is TTL-bound, and an expired claim is provably dead on its own.
 
 ### Renewal re-anchors, and PID-reuse detection survives
 

@@ -54,7 +54,7 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 # config.auto_merge.grant rather than baked in. It was the free-text
 # `no-merge` token until x-8e59 (config-deaf) and x-9d11 (free text stopped
 # being a control input): the flag is the deterministic carrier that survives
-# `fno target start` resolving its argument to a bare node id, and unlike the
+# `fno do target start` resolving its argument to a bare node id, and unlike the
 # token it cannot be manufactured by prose an LLM wrote into a brief.
 _AUTONOMOUS_COMMAND = "/target --no-merge {id}"
 _AUTONOMOUS_COMMAND_MERGE = "/target {id}"

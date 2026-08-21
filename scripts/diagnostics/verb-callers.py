@@ -123,7 +123,7 @@ _STRIP = "".join(c for c in string.punctuation if c not in "-|")
 PREFIXES = {"fno", "fno-py", "fno-agents"}
 
 # Positive controls: a sweep where these do not fire is broken, not changed.
-CONTROLS = {"agents spawn": 100, "mail send": 100, "target init": 25, "backlog next": 25}
+CONTROLS = {"agents spawn": 100, "mail send": 100, "do": 25, "backlog next": 25}
 
 # One control set per SIGNAL, not one per tool. The AST walk and the cli/src
 # text sweep answer the same question by different means, so a single shared
@@ -135,21 +135,21 @@ CONTROLS = {"agents spawn": 100, "mail send": 100, "target init": 25, "backlog n
 #   mail send     cli/src/fno/events/cli.py
 #   backlog done  cli/src/fno/graph/cli.py
 AST_CONTROLS = {"agents spawn": 2, "mail send": 1, "backlog done": 1}
-INTERNAL_TEXT_CONTROLS = {"agents spawn": 20, "target init": 20, "backlog update": 10}
+INTERNAL_TEXT_CONTROLS = {"agents spawn": 20, "do": 20, "backlog update": 10}
 
 # Verbs reachable ONLY through shell command substitution, where the binary
 # name is glued to a variable assignment and is not a bare token:
-#   hooks/helpers/init-target-state.sh   _OWNED_OUT="$(fno target resolve-owned-identity
-#   skills/pr/SKILL.md                   policy_json="$(candidate_fno pr evidence-required
+#   hooks/helpers/init-target-state.sh   _OWNED_OUT="$(fno do target resolve-owned-identity
+#   skills/pr/SKILL.md                   policy_json="$(candidate_fno do pr evidence-required
 # Both scored zero and sat in the dead set until an independent whole-repo walk
 # contradicted it. They are controls now: a tokenizer change that loses this
 # shape emits no candidate list instead of a wrong one.
-#   scripts/lib/eval-sweep-throttle.sh   status="$("$fno_cmd" loops status
+#   scripts/lib/eval-sweep-throttle.sh   status="$("$fno_cmd" do loops status
 # is the third shape: the binary lives in a VARIABLE, resolved at runtime.
 SUBSTITUTION_CONTROLS = {
-    "target": 1,
-    "pr": 1,
-    "loops": 1,
+    "glued-binary": {"agents": 1},
+    "glued-wrapper": {"do": 1},
+    "variable-binary": {"do": 1},
 }
 
 # The FOURTH shape: a Rust argv ARRAY. `Command::new(fno_bin()).args(["claim",
@@ -157,7 +157,7 @@ SUBSTITUTION_CONTROLS = {
 # above credits nothing and a live verb scores zero.
 #
 #   crates/fno/src/needs_overlay.rs      .args(["needs", ...])   -> `agents needs`
-#   crates/fno-agents/src/finalize.rs    .args(["pr", "base-lineage-check", ...])
+#   crates/fno-agents/src/finalize.rs    .args(["do", "pr", "base-lineage-check", ...])
 #
 # Key on the ARRAY, never on the Command expression. A first attempt keyed on
 # `Command::new(<ident>_bin())` and missed needs_overlay.rs outright, because the
@@ -185,15 +185,13 @@ FOREIGN_BINARIES = {
 #                          `.args(["update", "--check"])`; `notify` held this
 #                          slot until x-afa6 nested it under `inbox`, so every
 #                          live Rust call site became a two-token array)
-#   plan                   collapsed dispatcher credited from `plan fidelity`
-#   pr                     collapsed dispatcher credited from the hyphenated
-#                          `pr base-lineage-check` action, separately from the
-#                          `gh pr view` arrays next to it
+#   do                    collapsed dispatcher credited from the delivery,
+#                         plan, and PR arrays; five independent sites keep the
+#                         control positive without treating actions as leaves
 RUST_ARGV_CONTROLS = {
     "agents needs": 1,
     "update": 1,
-    "plan": 1,
-    "pr": 1,
+    "do": 5,
 }
 
 # A Rust integration-test reference must prove the test sweep ran, never keep a
@@ -325,8 +323,8 @@ def _clean(tok: str) -> str:
 # are letters. Both were read as "not a binary", so every verb reached only
 # through command substitution scored zero.
 #
-# Two live verbs were in that hole - `fno target resolve-owned-identity` (a
-# hook) and `fno pr evidence-required` (a skill) - and both sat in the dead set
+# Two live verbs were in that hole - `fno do target resolve-owned-identity` (a
+# hook) and `fno do pr evidence-required` (a skill) - and both sat in the dead set
 # until an independent whole-repo walk contradicted it. Splitting on shell
 # punctuation and keeping the last segment recovers them.
 _SHELL_GLUE = re.compile(r"[^\w./-]+")
@@ -401,6 +399,39 @@ def sweep(
             combos = _fan(path_tokens) if pipe_fan else [tuple(path_tokens)]
             for combo in combos:
                 _credit_longest(combo, leaves, counts)
+    return counts
+
+
+def sweep_substitutions(
+    root: Path, leaves: set[str], *, paths=None, extra_prefixes=(),
+) -> dict[str, Counter]:
+    """Count each shell-substitution binary shape independently."""
+    counts = {name: Counter() for name in SUBSTITUTION_CONTROLS}
+    prefixes = set(PREFIXES) | set(extra_prefixes)
+    for path in (iter_corpus(root) if paths is None else paths):
+        try:
+            tokens = path.read_text(encoding="utf-8", errors="ignore").split()
+        except OSError:
+            continue
+        for i, tok in enumerate(tokens):
+            direct = _clean(tok)
+            key = _binary_key(tok)
+            if direct in prefixes or key not in prefixes:
+                continue
+            if "$" in tok and any("fno" in name.lower() for name in _SHELL_VAR_RE.findall(tok)):
+                signal = "variable-binary"
+            elif key in extra_prefixes:
+                signal = "glued-wrapper"
+            else:
+                signal = "glued-binary"
+            path_tokens: list[str] = ["agents"] if key == "fno-agents" else []
+            for raw in tokens[i + 1:i + 4]:
+                verb = _verb_token(raw)
+                if verb is None:
+                    break
+                path_tokens.append(verb)
+            for combo in _fan(path_tokens):
+                _credit_longest(combo, leaves, counts[signal])
     return counts
 
 
@@ -780,15 +811,20 @@ def dead_set(root: Path, leaves_list: list[str]):
         root, leaves, binary_form=True, pipe_fan=True,
         paths=iter_crates_paths(root, tests=True), extra_prefixes=wrappers,
     )
+    substitution_counts = sweep_substitutions(
+        root, leaves, extra_prefixes=wrappers,
+    )
 
     failures: list[str] = []
     ext_total: Counter = Counter()
     for name in ("user", "runtime", "tests"):
         ext_total.update(buckets[name])
     failures += [f"external/{f}" for f in check_controls(ext_total)]
-    failures += [
-        f"substitution/{f}" for f in check_controls(ext_total, SUBSTITUTION_CONTROLS)
-    ]
+    for signal, controls in SUBSTITUTION_CONTROLS.items():
+        failures += [
+            f"substitution-{signal}/{f}"
+            for f in check_controls(substitution_counts[signal], controls)
+        ]
     failures += [f"rust-argv/{f}" for f in check_controls(rust_counts, RUST_ARGV_CONTROLS)]
     failures += [
         f"crates-tests/{f}"

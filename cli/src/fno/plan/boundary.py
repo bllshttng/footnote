@@ -16,7 +16,7 @@ report:
   stale       -- neither: the /target spine's Step 0 must read the blocker's
                  landed diff and append a section before the first code commit.
   unknown     -- detection failed for this entry (bad graph/stat/pr). Rendered,
-                 never raised -- ``fno target init`` must not crash on it.
+                 never raised -- ``fno do target init`` must not crash on it.
 
 Detection is advisory here (guidelines-not-gates, matching ``reconcile.py``);
 the ``/target`` spine step is what makes acting on a STALE verdict mandatory.

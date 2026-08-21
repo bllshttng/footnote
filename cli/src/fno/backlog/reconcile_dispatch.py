@@ -346,7 +346,7 @@ def dispatch_reconcile_for_blocker(
 def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceResult]:
     """Fire a pending ``reconcile:<node>`` sentinel after the manifest is written.
 
-    Called by ``fno stub-manifest write`` (the dependent's first pass). If a
+    Called by ``fno do pr stub-manifest write`` (the dependent's first pass). If a
     sentinel is live (the blocker merged before this manifest existed, AC8), the
     manifest now exists, so dispatch the reconcile pass exactly once and release
     the sentinel. Returns the dispatch result, or None when no sentinel is

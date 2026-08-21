@@ -1,4 +1,4 @@
-"""Unit tests for `fno plan stamp` and `fno plan graduate`.
+"""Unit tests for `fno do plan stamp` and `fno do plan graduate`.
 
 The wrappers are forwarders over the in-package ``fno.plan._stamp`` module
 (run via ``python3 -m fno.plan._stamp``). Tests verify:
@@ -19,19 +19,19 @@ runner = CliRunner()
 
 
 def test_plan_help_renders():
-    result = runner.invoke(app, ["plan", "--help"])
+    result = runner.invoke(app, ["do", "plan", "--help"])
     assert result.exit_code == 0
     assert "stamp" in result.stdout
     assert "graduate" in result.stdout
 
 
 def test_plan_stamp_help_renders():
-    result = runner.invoke(app, ["plan", "stamp", "--help"])
+    result = runner.invoke(app, ["do", "plan", "stamp", "--help"])
     assert result.exit_code == 0
 
 
 def test_plan_graduate_help_renders():
-    result = runner.invoke(app, ["plan", "graduate", "--help"])
+    result = runner.invoke(app, ["do", "plan", "graduate", "--help"])
     assert result.exit_code == 0
 
 
@@ -43,7 +43,7 @@ def test_plan_stamp_forwards_args_and_propagates_error(tmp_path):
     """
     result = runner.invoke(
         app,
-        ["plan", "stamp", "--plan-path", str(tmp_path / "no-such-plan.md"),
+        ["do", "plan", "stamp", "--plan-path", str(tmp_path / "no-such-plan.md"),
          "--session-id", "test-sid", "--url", "https://example.com/pr/1"],
     )
     # Module's exit code (non-zero) propagates.
@@ -54,7 +54,7 @@ def test_plan_graduate_forwards_args(tmp_path):
     """Same as stamp but for graduate."""
     result = runner.invoke(
         app,
-        ["plan", "graduate", "--plan-path", str(tmp_path / "no-such-plan.md")],
+        ["do", "plan", "graduate", "--plan-path", str(tmp_path / "no-such-plan.md")],
     )
     # Either the module exits non-zero (no plan) or zero with a no-op message.
     # Either way: no Python exception should bubble up.
@@ -82,7 +82,7 @@ def test_plan_stamp_forwards_args_verbatim(tmp_path, monkeypatch):
     result = runner.invoke(
         app,
         [
-            "plan", "stamp",
+            "do", "plan", "stamp",
             "--plan-path", "/tmp/some-plan.md",
             "--session-id", "abc-123",
             "--url", "https://example.com/pr/42",
@@ -118,7 +118,7 @@ def test_plan_graduate_forwards_args_verbatim(tmp_path, monkeypatch):
     monkeypatch.setattr(plan_cli_module.subprocess, "run", _stub_run)
 
     result = runner.invoke(
-        app, ["plan", "graduate", "--plan-path", "/tmp/some-plan.md"],
+        app, ["do", "plan", "graduate", "--plan-path", "/tmp/some-plan.md"],
     )
     assert result.exit_code == 0
     cmd = captured["cmd"]
@@ -128,7 +128,7 @@ def test_plan_graduate_forwards_args_verbatim(tmp_path, monkeypatch):
 
 
 def test_plan_set_expected_forwards_args_verbatim(tmp_path, monkeypatch):
-    """`fno plan set-expected` forwards to fno.plan._stamp set-expected verbatim."""
+    """`fno do plan set-expected` forwards to fno.plan._stamp set-expected verbatim."""
     captured = {}
 
     class _StubResult:
@@ -142,7 +142,7 @@ def test_plan_set_expected_forwards_args_verbatim(tmp_path, monkeypatch):
 
     result = runner.invoke(
         app,
-        ["plan", "set-expected", "--plan-path", "/tmp/some-plan.md", "--count", "3"],
+        ["do", "plan", "set-expected", "--plan-path", "/tmp/some-plan.md", "--count", "3"],
     )
     assert result.exit_code == 0
     cmd = captured["cmd"]
@@ -152,7 +152,7 @@ def test_plan_set_expected_forwards_args_verbatim(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# fno plan path (config.plans_filename renderer)
+# fno do plan path (config.plans_filename renderer)
 # ---------------------------------------------------------------------------
 
 
@@ -217,7 +217,7 @@ def test_plans_filename_config_rejects_bad_template():
 
 
 def test_plan_path_verb_prints_rendered_path():
-    result = runner.invoke(app, ["plan", "path", "--slug", "dark-mode", "--node", "x-8af8", "--name-only"])
+    result = runner.invoke(app, ["do", "plan", "path", "--slug", "dark-mode", "--node", "x-8af8", "--name-only"])
     assert result.exit_code == 0
     out = result.stdout.strip()
     assert out.endswith("-dark-mode-x-8af8.md")
@@ -225,19 +225,19 @@ def test_plan_path_verb_prints_rendered_path():
 
 
 # ---------------------------------------------------------------------------
-# `fno plan rung` - the shell-facing readiness authority (x-3571)
+# `fno do plan rung` - the shell-facing readiness authority (x-3571)
 # ---------------------------------------------------------------------------
 
 
 def _rung(tmp_path, body: str, name: str = "p.md"):
     p = tmp_path / name
     p.write_text(body)
-    return CliRunner().invoke(app, ["plan", "rung", str(p)])
+    return CliRunner().invoke(app, ["do", "plan", "rung", str(p)])
 
 
 def test_rung_is_hidden_from_the_plan_menu():
-    """`fno plan` sits at its menu-caps ceiling; new verbs default hidden."""
-    out = CliRunner().invoke(app, ["plan", "--help"]).output
+    """`fno do plan` sits at its menu-caps ceiling; new verbs default hidden."""
+    out = CliRunner().invoke(app, ["do", "plan", "--help"]).output
     assert "rung" not in out
 
 
@@ -249,7 +249,7 @@ def test_AC1_HP_cli_verdict_matches_the_python_verdict(tmp_path):
         p = tmp_path / f"{status}.md"
         p.write_text(f"---\nstatus: {status}\n---\n")
         entry = {"id": "-", "plan_path": str(p)}
-        res = CliRunner().invoke(app, ["plan", "rung", str(p)])
+        res = CliRunner().invoke(app, ["do", "plan", "rung", str(p)])
 
         assert f"rung={plan_rung(entry).value}" in res.output
         assert "selectable=" not in res.output
@@ -262,13 +262,13 @@ def test_AC1_HP_absent_and_unreadable_plans_agree_too(tmp_path):
 
     missing = tmp_path / "gone.md"
     assert plan_rung({"id": "-", "plan_path": str(missing)}).value == "unreadable"
-    res = CliRunner().invoke(app, ["plan", "rung", str(missing)])
+    res = CliRunner().invoke(app, ["do", "plan", "rung", str(missing)])
     assert "rung=unreadable" in res.output
     assert res.exit_code == 1
 
     binary = tmp_path / "b.md"
     binary.write_bytes(b"\xff\xfe\x00\x80")
-    res = CliRunner().invoke(app, ["plan", "rung", str(binary)])
+    res = CliRunner().invoke(app, ["do", "plan", "rung", str(binary)])
     assert "rung=unreadable" in res.output
     assert res.exit_code == 1
 
@@ -287,6 +287,6 @@ def test_a_relative_path_resolves_against_the_shell_cwd(tmp_path, monkeypatch):
     """
     (tmp_path / "p.md").write_text("---\nstatus: ready\n---\n")
     monkeypatch.chdir(tmp_path)
-    res = CliRunner().invoke(app, ["plan", "rung", "p.md"])
+    res = CliRunner().invoke(app, ["do", "plan", "rung", "p.md"])
     assert "rung=ready" in res.output
     assert res.exit_code == 0

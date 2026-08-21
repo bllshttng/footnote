@@ -1687,7 +1687,7 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
 /// The durable session pid: the nearest harness ancestor of THIS process.
 ///
 /// Delegates to `fno claim session-pid`, the one implementation of the walk
-/// (`cli/src/fno/claims/session_pid.py`). `fno target init` already shells the
+/// (`cli/src/fno/claims/session_pid.py`). `fno do target init` already shells the
 /// same verb to acquire, so re-implementing the ancestry scan here would put two
 /// producers on one answer and let them drift.
 ///
@@ -1738,7 +1738,7 @@ fn durable_session_pid() -> Option<i32> {
 /// UNDER the python side's own wait for this same mutex. `compare_and_rebind`
 /// gives up after `_RECOVERY_LOCK_MAX_WAIT_S` (5.0s) and `reap`'s targeted
 /// recovery waits zero, so a bound above that let a cold python start here hold
-/// the lock long enough to make a successor's `fno target init --handover-from`
+/// the lock long enough to make a successor's `fno do target init --handover-from`
 /// refuse as mutex-busy, fall through to a plain acquire, and cancel the
 /// session on ClaimHeldByOther. Three seconds leaves headroom under 5 and is
 /// still ample for a warm resolve; a slower one degrades to None, which leaves
@@ -1774,7 +1774,7 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
         // `fno-agents loop-check` is a stop hook that exits in about a second,
         // so anchoring to it would re-file the corpse under a fresh number and
         // fix nothing. `resolve_session_pid` walks up to the nearest harness
-        // ancestor and is the single resolver `fno target init` already uses to
+        // ancestor and is the single resolver `fno do target init` already uses to
         // acquire (`hooks/helpers/init-target-state.sh` shells the same verb);
         // a second walk implemented here would be two producers of one answer.
         // ONLY when the move actually repairs the claim. acquired_at is held

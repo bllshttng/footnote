@@ -1,4 +1,4 @@
-"""Read-only discovery receipt for ``fno think inspect``.
+"""Read-only discovery receipt for ``fno do think inspect``.
 
 The model still judges relevance and chooses a design. This module only gathers
 facts whose truth should not depend on prompt compliance: repository state,

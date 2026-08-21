@@ -1,6 +1,6 @@
 # Authority: the `beastmode` grant
 
-Read this when the run carries `authority: full` (invoked as `/target beastmode`, surfaced on the `attended` line of `fno target status --json`). It governs judgment calls that would otherwise emit `<help>` and stall.
+Read this when the run carries `authority: full` (invoked as `/target beastmode`, surfaced on the `attended` line of `fno do target status --json`). It governs judgment calls that would otherwise emit `<help>` and stall.
 
 `/target beastmode "..."` grants **walk-away authority** for the session.
 It composes with every other modifier, so `/target beastmode auto-merge "..."` is true overnight mode.
@@ -18,18 +18,18 @@ A beastmode session still asks the harness for permission exactly as before, and
 
 **Spellings.** `beastmode`, `beast`, and `beast mode` all mean the same modifier, case-insensitively.
 The two-word form exists because mobile autocorrect splits `beastmode`, and it is the dangerous one: the stray `mode` token must be stripped along with the modifier.
-Whatever the spelling, pass ONLY the bare node id to `fno target start --beastmode <node>` - init's node guard is anchored, so any leftover token means no node, therefore no claim, therefore a refused grant.
+Whatever the spelling, pass ONLY the bare node id to `fno do target start --beastmode <node>` - init's node guard is anchored, so any leftover token means no node, therefore no claim, therefore a refused grant.
 The CLI accepts `--beastmode` and `--beast`.
 
 **The grant needs a BACKLOG NODE; free text cannot hold it, and neither can an unlinked plan.**
 Authority is anchored to the session's claim, and init claims only `node:<id>` - resolved from a node input, or from a plan that resolves to a node in the graph.
 A free-text run claims nothing; so does a standalone plan file that no node points at.
 In both cases there is no anchor at all: `owner_pid` does not count (it is a transient init subprocess, and its liveness says nothing about whether the grant will outlive this moment), so nothing could distinguish that session from one that crashed and left its manifest behind.
-Rather than let a grant outlive its session, an unanchored one is refused and `fno target init` says so at the point it happens.
+Rather than let a grant outlive its session, an unanchored one is refused and `fno do target init` says so at the point it happens.
 Bind a node first (`/think` then `/blueprint` files one), then run `/target beastmode <node>`.
 
-**How to read the grant.** Pass `--beastmode` to `fno target start` / `fno target init`; init stamps `authority: full` into the manifest (the field is absent otherwise).
-Read it back from `fno target status --json` - the `attended` line carries `; authority: full (beastmode)` when the grant is live.
+**How to read the grant.** Pass `--beastmode` to `fno do target start` / `fno do target init`; init stamps `authority: full` into the manifest (the field is absent otherwise).
+Read it back from `fno do target status --json` - the `attended` line carries `; authority: full (beastmode)` when the grant is live.
 Read that line, NOT the raw manifest, and never the bare `authority:` field: authority **fails closed**, requiring a live claim where the `attended` verdict merely biases toward live.
 A live `owner_pid` is deliberately NOT enough - it is alive for every session at init time, so it cannot tell a durable grant from one about to lapse.
 That asymmetry is deliberate - a wrongly-live `attended` costs you one unnecessary prompt, while a wrongly-live authority grant silently un-prompts every future session that reads it (x-4af4: a defunct manifest once auto-locked an attended `/think` for ten days).

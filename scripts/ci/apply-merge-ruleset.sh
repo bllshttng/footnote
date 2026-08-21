@@ -4,7 +4,7 @@
 # The ruleset is the server-side half of the merge coverage guard: GitHub
 # itself refuses a merge whose head carries no passing `fno/review-coverage`
 # status (and no passing `stacked-base-guard`), for every client path - `gh
-# pr merge`, the web button, raw REST, the auto-merge queue, and `fno pr
+# pr merge`, the web button, raw REST, the auto-merge queue, and `fno do pr
 # merge` alike. The ruleset lives as committed data (merge-ruleset.json,
 # reviewable in the diff) because branch rules are repository settings no
 # code push can carry; this applier is the one bridge between them.

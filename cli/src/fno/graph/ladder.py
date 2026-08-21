@@ -4,7 +4,7 @@ may each caller do about it?
 Readiness used to be answered in seven places across three languages over four
 vocabularies, with two of the answers using opposite failure policies and no
 file referencing another. This module is the single Python answer; the shell
-callers reach it through ``fno plan rung`` rather than re-parsing ``^status:``.
+callers reach it through ``fno do plan rung`` rather than re-parsing ``^status:``.
 
 Three policies, one read:
 

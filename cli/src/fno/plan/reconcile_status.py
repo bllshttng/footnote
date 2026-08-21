@@ -1,4 +1,4 @@
-"""fno plan reconcile-status - normalize drifted plan frontmatter status in place.
+"""fno do plan reconcile-status - normalize drifted plan frontmatter status in place.
 
 Plans stay FLAT in the plans dir; an Obsidian Base filters by frontmatter
 ``status``. Drifted or blank statuses lie to that Base, so this one-shot-then-

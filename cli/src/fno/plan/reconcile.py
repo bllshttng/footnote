@@ -22,7 +22,7 @@ from typing import Optional, Union
 
 # Backticked token that looks like a repo path: contains a slash and ends in a
 # dotted extension, no whitespace. The slash requirement excludes dotted config
-# keys (`config.target.blast`) and bare verbs (`fno target status`), which are
+# keys (`config.target.blast`) and bare verbs (`fno do target status`), which are
 # the common false positives in a plan's prose.
 _PATH_RE = re.compile(r"`([^`\s]+/[^`\s]+\.[A-Za-z0-9_]+)`")
 

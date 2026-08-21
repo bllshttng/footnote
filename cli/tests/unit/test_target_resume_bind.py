@@ -153,7 +153,7 @@ def test_advice_names_provenance_and_target_start(tmp_path, monkeypatch):
     )
     assert result["result"] == "refused"
     assert "fno backlog provenance" in result["advice"]
-    assert "fno target start" in result["advice"]
+    assert "fno do target start" in result["advice"]
 
 
 # --- manifest_identity (pure) -------------------------------------------

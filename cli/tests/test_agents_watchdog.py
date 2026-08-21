@@ -1944,7 +1944,7 @@ def test_a_claimed_node_reads_leave_exactly_as_before():
 
 def test_an_unresolved_node_is_never_flagged():
     """The stated blind spot, pinned. Row.node comes from the worktree manifest
-    then the ledger, both written downstream of `fno target init`, so a worker
+    then the ledger, both written downstream of `fno do target init`, so a worker
     that never ran init carries node=None and is invisible here. Claiming
     otherwise would make this the decorative guard it exists to remove."""
     rows = [Row("cccc3333-0003", "t-worker", "working", None, "/tmp/w")]

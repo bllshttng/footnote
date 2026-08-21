@@ -1,7 +1,7 @@
 """W4 human_touch merge emitters (x-aff6).
 
 The mux inject/answer emitters are Rust-side (crates/fno server unit tests);
-these cover the two Python merge choke points: the tty-gated `fno pr merge`
+these cover the two Python merge choke points: the tty-gated `fno do pr merge`
 followup and the reconcile out-of-band close.
 """
 from __future__ import annotations

@@ -4,12 +4,12 @@ Ship a research **doc** deliverable to its finish line: a cited brief written to
 
 The green for a doc is the three model-free assertions `fno evals grade` makes: (a) zero uncited claims, (b) zero dead source URLs, (c) at least one golden checklist item satisfied per section. No model sits in this gate; the research-verify panel is advisory and never changes the verdict.
 
-**Delivery is mandatory.** "Ship" means the brief lands in `config.research.output_dir`. This mode always delivers there before it reports anything - it never grades or reports GREEN against a brief that was not shipped to `output_dir`. `--no-deliver` (a `fno research` flag that writes only the local research cache) is therefore rejected here: it would let `/ship doc` report a finish line that does not exist.
+**Delivery is mandatory.** "Ship" means the brief lands in `config.research.output_dir`. This mode always delivers there before it reports anything - it never grades or reports GREEN against a brief that was not shipped to `output_dir`. `--no-deliver` (a `fno do research` flag that writes only the local research cache) is therefore rejected here: it would let `/ship doc` report a finish line that does not exist.
 
 ## Arguments
 
 ```
-/ship doc <topic> [--golden <discovery-*.md>] [extra fno research flags except --no-deliver]
+/ship doc <topic> [--golden <discovery-*.md>] [extra fno do research flags except --no-deliver]
 ```
 
 - **`<topic>`** (required, a plain string) -> the subject to research and ship.
@@ -17,7 +17,7 @@ The green for a doc is the three model-free assertions `fno evals grade` makes: 
 
 ## Step 0: argument guard
 
-If no non-flag topic argument is given (only flags, or nothing), do NOT call `fno research` with an empty topic. Print and stop with a non-zero result:
+If no non-flag topic argument is given (only flags, or nothing), do NOT call `fno do research` with an empty topic. Print and stop with a non-zero result:
 
 ```
 /ship doc needs a topic. usage:
@@ -28,7 +28,7 @@ If `--no-deliver` is among the arguments, reject and stop with a non-zero result
 
 ```
 /ship doc always delivers to config.research.output_dir; --no-deliver is not allowed.
-to retrieve sources without shipping, use `fno research <topic> --no-deliver` directly.
+to retrieve sources without shipping, use `fno do research <topic> --no-deliver` directly.
 ```
 
 ## Step 1: deliver the brief
@@ -36,11 +36,11 @@ to retrieve sources without shipping, use `fno research <topic> --no-deliver` di
 Run, with delivery on (the default; never pass `--no-deliver`):
 
 ```bash
-fno research "<topic>" [other allowed flags]
+fno do research "<topic>" [other allowed flags]
 ```
 
-- On success, `fno research` writes `<slug>.md` + `<slug>.sources.jsonl` to `config.research.output_dir` and reports `DoneAdvisory`. Read the printed output path; set `BRIEF` to `<output_dir>/<slug>.md` and `SIDECAR` to the sibling `<slug>.sources.jsonl`.
-- If `config.research.output_dir` is unset, `fno research` exits 5 (`OutputDirUnset`) and never guesses a path. Surface that verbatim and stop - the operator must set `config.research.output_dir` first. Do NOT fabricate a landing path.
+- On success, `fno do research` writes `<slug>.md` + `<slug>.sources.jsonl` to `config.research.output_dir` and reports `DoneAdvisory`. Read the printed output path; set `BRIEF` to `<output_dir>/<slug>.md` and `SIDECAR` to the sibling `<slug>.sources.jsonl`.
+- If `config.research.output_dir` is unset, `fno do research` exits 5 (`OutputDirUnset`) and never guesses a path. Surface that verbatim and stop - the operator must set `config.research.output_dir` first. Do NOT fabricate a landing path.
 - On any other non-zero exit (network failure, invalid flag, retrieval error), STOP immediately and surface the error verbatim. Do NOT proceed to Step 2 against a brief that was not written - there is nothing shipped to grade.
 
 ## Step 2: grade (the green)

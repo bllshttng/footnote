@@ -16,10 +16,10 @@ def test_think_is_research_not_planning() -> None:
 def test_think_runs_a_fixed_three_step_process() -> None:
     """The process is identical every run; only the brief varies."""
     text = SKILL.read_text(encoding="utf-8")
-    assert "fno think inspect" in text
+    assert "fno do think inspect" in text
     assert "Investigate primary sources" in text
     assert "Write one Markdown file" in text
-    assert "fno plan path" in text
+    assert "fno do plan path" in text
 
 
 def test_think_offers_substrate_tokens_and_briefs() -> None:

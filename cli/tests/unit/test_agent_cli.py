@@ -138,7 +138,7 @@ class TestWhoami:
     def test_global_json_flag_honored(self, tmp_path, runner, monkeypatch, global_flag):
         """Regression (codex P2 on PR #500): the root callback's global -J/--json
         (passed BEFORE the verb: `fno -J whoami`) must also produce JSON, not
-        just the command-local `fno whoami --json`. Mirrors the `fno review`
+        just the command-local `fno whoami --json`. Mirrors the `fno do review`
         merge convention."""
         project = _make_workspace(tmp_path, target=True, walker=True)
         result = _invoke(runner, project, monkeypatch, global_flag, "whoami")

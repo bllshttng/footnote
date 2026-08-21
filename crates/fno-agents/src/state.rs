@@ -551,7 +551,7 @@ pub struct RegistryEntry {
     /// live `ANTHROPIC_AUTH_TOKEN`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_settings_path: Option<String>,
-    /// fno target run id (x-0358, v13): the `fno_id` of the /target session an
+    /// fno do target run id (x-0358, v13): the `fno_id` of the /target session an
     /// adopted orphan was working, so the revived session is linked to its node.
     /// Set by the adopt verb from the matched `.fno/target-state.md`; `None` for
     /// every row that did not come from a target manifest. Identity-adjacent

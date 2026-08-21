@@ -134,7 +134,7 @@ def test_body_may_cite_a_shipped_verb(tmp_path: Path) -> None:
     path = _one_entry(
         tmp_path,
         "Receipt lines have lied",
-        body="`fno target start` can print `plan: none` while a plan is bound.",
+        body="`fno do target start` can print `plan: none` while a plan is bound.",
     )
     r = _run(path)
     assert r.returncode == 0, r.stderr

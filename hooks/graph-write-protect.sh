@@ -16,7 +16,7 @@
 #        Bash       -> block only when a write-op is bound to a protected path
 #
 # target-state.md is immutable to Edit/Write UNCONDITIONALLY (finding c): its
-# only legitimate writers are Bash verbs (`fno target init`, `fno state set
+# only legitimate writers are Bash verbs (`fno do target init`, `fno do state set
 # --field plan_path`) that carry no path+redirect, so a flat block has zero
 # legitimate collateral. This removes the forgeable trust root the user-global
 # merge gate (git-protection.py) reads (auto_merge_approved). The drive-window
@@ -152,7 +152,7 @@ if [[ -z "$TOOL" ]]; then
 fi
 
 _GRAPH_REASON="graph.json must be mutated via \`fno backlog\` commands; direct write blocked. See \`fno backlog --help\` (add, idea, intake, update, done, defer, reconcile)."
-_MANIFEST_REASON="target-state.md is an immutable session manifest; direct Edit/Write is blocked. The only legal post-init write is first-fill of an empty plan_path via \`fno state set --field plan_path\`. Use \`fno state\` / \`fno target\` verbs, not a hand edit."
+_MANIFEST_REASON="target-state.md is an immutable session manifest; direct Edit/Write is blocked. The only legal post-init write is first-fill of an empty plan_path via \`fno do state set --field plan_path\`. Use \`fno do state\` / \`fno do target\` verbs, not a hand edit."
 
 # ── 3. Tool-specific decision (keyed on the write TARGET) ──────────────────────
 case "$TOOL" in
@@ -195,7 +195,7 @@ case "$TOOL" in
     # file for write) is not caught; the merge gate's external-review artifact
     # factor is the backstop. This removes the cheap one-liner forge.
     if _bash_targets_protected "$COMMAND"; then
-        _block "$_MANIFEST_REASON (this Bash write to a protected state file is blocked; use \`fno backlog\` / \`fno state\`)."
+        _block "$_MANIFEST_REASON (this Bash write to a protected state file is blocked; use \`fno backlog\` / \`fno do state\`)."
     fi
     _approve
     ;;

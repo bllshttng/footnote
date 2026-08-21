@@ -495,7 +495,7 @@ fn valid_receipt(event: &Value) -> bool {
 
 // The SAME receipt-scope rule as `_PREFLIGHT_BASE_SCOPE` / `_PREFLIGHT_OPTIONAL_SCOPE`
 // in `cli/src/fno/pr/_preflight.py`. Two implementations of one operation are
-// reachable here - the Python one through `fno pr` and this one through
+// reachable here - the Python one through `fno do pr` and this one through
 // `fno-agents verify-evidence receipt` - so widening only the Python side left
 // this path rejecting a green preflight, which is the silent-discard failure the
 // widening existed to close. Keep the two lists in step; a leg added to

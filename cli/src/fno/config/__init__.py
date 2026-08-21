@@ -376,7 +376,7 @@ class PostMergeBlock(BaseModel):
     # fresh install does nothing. sync_command is the project's whole sync
     # incantation (run via `bash -lc` from the canonical checkout); sync_paths
     # gates it on the merged file list (empty = always run); auto_run arms the
-    # pr-watch daemon (the sole detector) to run `fno pr ritual` on a merge.
+    # pr-watch daemon (the sole detector) to run `fno do pr ritual` on a merge.
     # Footnote's own values are a documented example, never engine defaults.
     sync_command: Optional[str] = None
     sync_paths: list[str] = Field(default_factory=list)
@@ -468,7 +468,7 @@ class PostMergeBlock(BaseModel):
         """Fail-safe to false on any non-boolean value.
 
         auto_run arms the pr-watch daemon (the sole detector) to run
-        `fno pr ritual` on a merge. Default off, and a scalar typo coerces to
+        `fno do pr ritual` on a merge. Default off, and a scalar typo coerces to
         False rather than raising - false is the safe direction (never run the
         ritual behind the maintainer's back on a malformed value).
         """
@@ -495,7 +495,7 @@ class PostMergeBlock(BaseModel):
 
 
 class ResearchBlock(BaseModel):
-    """`fno research` doc-deliverable settings (nested under 'config.research').
+    """`fno do research` doc-deliverable settings (nested under 'config.research').
 
     `output_dir` is the landing area for the research `doc` deliverable: the
     brief (`<slug>.md`) and its evidence sidecar (`<slug>.sources.jsonl`) are
@@ -640,7 +640,7 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
         # stays bare - prose after the verb flips it to a no-merge-base review
         # target. opencode stays bare for the same reason: its flag grammar is
         # unverified against its docs, and an appended guess is the codex trap
-        # in a new coat. agy has no native verb, so it takes the fno review.
+        # in a new coat. agy has no native verb, so it takes the fno do review.
         invocations={
             "claude": "/code-review <level> --comment",
             "codex": "/review",
@@ -1940,7 +1940,7 @@ class KeepGoingBlock(BaseModel):
 
     The firehose ceiling is NOT a knob here: it deliberately reuses
     ``config.think_spawn.daily_cap`` (the same per-install per-day counter
-    ``fno think dispatch`` bumps) so think + target dispatches share ONE budget -
+    ``fno do think dispatch`` bumps) so think + target dispatches share ONE budget -
     a single ceiling on total autonomous fan-out per day. The classify + dispatch
     logic lives in :mod:`fno.retro.keep_going`.
     """
@@ -2143,7 +2143,7 @@ class AutoMergeBlock(BaseModel):
 
     The typed reader for what the bash ``scripts/lib/config.sh`` auto_merge
     helpers used to parse (``is_auto_merge_allowed_for`` / ``get_auto_merge_*``).
-    The ``fno pr`` port (ab-d4c98550) reads these via :func:`load_settings`
+    The ``fno do pr`` port (ab-d4c98550) reads these via :func:`load_settings`
     instead of re-parsing settings.yaml in a subprocess, so the 4-tier
     precedence + caching live in one place.
 
@@ -2154,12 +2154,12 @@ class AutoMergeBlock(BaseModel):
     rather than failing the whole settings load - false-enabled is the dangerous
     direction for a merge opt-in.
 
-    Scope-ordered to read like the AND chain ``fno pr merge`` enforces
+    Scope-ordered to read like the AND chain ``fno do pr merge`` enforces
     (``pr/_merge.py`` step 1/1b): ``enabled`` is PROJECT scope (the master
     switch, checked first); ``grant`` is ACTOR scope (who may merge once
     ``enabled`` passes); the policy keys below only matter once both do.
 
-    RUN scope is deliberately not a key here. ``fno target init`` folds
+    RUN scope is deliberately not a key here. ``fno do target init`` folds
     ``enabled`` plus ``grant`` plus ``--allow-merge`` / ``--no-merge`` plus the
     ``/target bg`` injected default into ``auto_merge_approved`` in
     ``.fno/target-state.md``, with ``auto_merge_source`` naming the decider.
@@ -2174,7 +2174,7 @@ class AutoMergeBlock(BaseModel):
     enabled: bool = False
     # ACTOR scope (x-4be1): who may merge once `enabled` passes. Replaces
     # `dispatch.auto_merge`, which spelled the same decision in another table.
-    #   none     - humans only, via `fno pr merge`
+    #   none     - humans only, via `fno do pr merge`
     #   dispatch - autonomously dispatched /target workers may merge too
     grant: str = "none"
     merge_strategy: str = "merge"

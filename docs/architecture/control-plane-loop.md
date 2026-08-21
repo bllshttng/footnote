@@ -62,7 +62,7 @@ Exit 0 for both allow AND block. Exit 2 for CLI misuse only.
 ### Decision algorithm
 
 1. `<aborted reason="...">` in transcript -> `Aborted` (terminate).
-2. An explicitly activated generic-delivery plan evaluates its coherent evidence journal through `fno delivery evaluate --json`; a complete pass is durably selected as `DoneDelivery` after the operator-finding gate.
+2. An explicitly activated generic-delivery plan evaluates its coherent evidence journal through `fno do delivery evaluate --json`; a complete pass is durably selected as `DoneDelivery` after the operator-finding gate.
 3. `<promise>MISSION COMPLETE: ...</promise>` in transcript -> run `done()`:
    - If all reads pass: terminate with `DonePRGreen` (or `DoneAdvisory` in advisory mode).
    - If a read fails: block, name the failing read in `message`. Loop continues.
@@ -200,7 +200,7 @@ Sessions with `no_ship: true` OR `advisory: true` in the manifest:
 
 ## The immutable manifest
 
-`target-state.md` is written once by `fno target init`. Fields:
+`target-state.md` is written once by `fno do target init`. Fields:
 
 **Core inputs:** `session_id`, `created_at`, `input`, `plan_path`, `target_size`
 
@@ -222,7 +222,7 @@ Sessions with `no_ship: true` OR `advisory: true` in the manifest:
 
 **Write-once enforcement:**
 - Detection: manifest is immutable iff frontmatter has no `status:` key.
-- Allowed post-init: `fno state set --field plan_path` when current value is empty (first-fill only).
+- Allowed post-init: `fno do state set --field plan_path` when current value is empty (first-fill only).
 - Refused: any other field on an immutable manifest -> exit 5, `state_write_refused` event.
 
 ## Event types

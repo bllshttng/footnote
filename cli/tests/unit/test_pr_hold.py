@@ -251,7 +251,7 @@ def test_hold_for_pr_resolves_root_from_the_passed_cwd_not_the_process_cwd(
 ):
     """Review fix: hold_for_pr(pr_number, cwd) must resolve its own repo
     root from the PASSED cwd, not the invoking process's own directory -
-    `fno pr hold-check --repo <path>` is a real, documented call shape
+    `fno do pr hold-check --repo <path>` is a real, documented call shape
     where the two differ. Exercises the real (unmocked)
     resolve_canonical_worktree against two distinct fake git repos to
     prove cwd, not process cwd, drives the match."""
@@ -394,7 +394,7 @@ def test_hold_check_cli_refuses_with_reason_and_setter(tmp_path, monkeypatch):
             "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
         ),
     )
-    result = CliRunner().invoke(app, ["pr", "hold-check", "42", "--repo", str(tmp_path)])
+    result = CliRunner().invoke(app, ["do", "pr", "hold-check", "42", "--repo", str(tmp_path)])
     assert result.exit_code == 3, result.output
     assert "dispatch-hold:x-5a5c" in result.output
     assert "set_by=king:119e3c52" in result.output

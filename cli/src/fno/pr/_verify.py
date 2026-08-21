@@ -366,7 +366,7 @@ def run_verify_merged(
     # only when require_checks_pass is on, and PENDING is not failing - a
     # still-running check flows into _bounded_remediation, which reports
     # not-green without the misleading "failing" label. Judging pending here
-    # would make verify refuse what `fno pr merge` merges.
+    # would make verify refuse what `fno do pr merge` merges.
     if _auto_merge().require_checks_pass:
         failing = _failing_required(pr_json.get("statusCheckRollup") or [])
         if failing:
@@ -399,7 +399,7 @@ def run_verify_merged(
 def _failing_required(rollup: Sequence[dict]) -> List[str]:
     """Failing checks (whole rollup), classified by the SAME truth table the
     merge verb uses - a second hand-built state table is how verify ends up
-    refusing what `fno pr merge` merges (round 12). _latest_per_name drops
+    refusing what `fno do pr merge` merges (round 12). _latest_per_name drops
     superseded runs; _classify reads pass/fail/pending with the shared
     semantics (a REQUESTED or empty-conclusion check is pending, not failing).
     No isRequired filter - `gh pr view` never emits that key (see
@@ -434,7 +434,7 @@ def _bounded_remediation(
     """Single gh pr merge attempt + single 30s poll (anti-thrash; x-9d11: the
     verb executes - no --auto, no --delete-branch)."""
     # Stacked-base guard: this arm reaches `gh pr merge` without passing through
-    # `fno pr merge`, so it needs its own call - a guard on one of N reachable
+    # `fno do pr merge`, so it needs its own call - a guard on one of N reachable
     # merge paths is decorative. An unevaluated probe proceeds with a
     # breadcrumb; only a confirmed stale base refuses, because it needs a
     # retarget rather than a retry.

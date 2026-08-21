@@ -115,13 +115,13 @@ _eval_sweep_run_stages() {
 
 # _eval_sweep_paused <fno_cmd>
 # True (0) when the loops kill switch is active, so the fire is skipped. The
-# eval sweep IS loop activity, so `fno loops pause-all` must stop it. Fail
+# eval sweep IS loop activity, so `fno do loops pause-all` must stop it. Fail
 # CLOSED: any output that does not begin with "not paused" / "expired" (a
 # corrupt or unreadable state included) is treated as paused (Claude's
 # Discretion 2 - single source of truth via the CLI, fail-closed on ambiguity).
 _eval_sweep_paused() {
     local fno_cmd="$1" status
-    status="$("$fno_cmd" loops status 2>/dev/null)" || return 0
+    status="$("$fno_cmd" do loops status 2>/dev/null)" || return 0
     case "$status" in
         "not paused"* | "expired"*) return 1 ;;
         *) return 0 ;;

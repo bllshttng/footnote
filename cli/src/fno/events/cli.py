@@ -23,7 +23,7 @@ _PROTOCOL_DATA_STR_CAP = 500
 # DELIBERATE. Say it plainly here, because dead code that reads as load-bearing
 # is its own trap. The gate chain runs attestation -> loopcheck -> coverage:
 # `unattested_reviewers_scan` (loopcheck.rs) reads attestations from the PROJECT
-# log alone, and `fno pr merge` reads `review_coverage`, never an attestation.
+# log alone, and `fno do pr merge` reads `review_coverage`, never an attestation.
 # This entry was originally added on a misdiagnosis - the block it was meant to
 # fix was coverage never being produced at all, not an attestation missing from
 # canonical. It stays for symmetry with the coverage path, which loopcheck.rs

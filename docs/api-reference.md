@@ -355,7 +355,7 @@ State files live in `.fno/` at the project root. They are created and managed by
 
 ### target-state.md
 
-Immutable session manifest, written once by `fno target init`. Owned by the target skill. After the control-plane collapse this is an inputs-only file: no `status`, no `current_phase`, no gate booleans, no `iteration`. It records the session's inputs and is never mutated post-init (the sole exception is a first-fill of an empty `plan_path` via `fno state set`).
+Immutable session manifest, written once by `fno do target init`. Owned by the target skill. After the control-plane collapse this is an inputs-only file: no `status`, no `current_phase`, no gate booleans, no `iteration`. It records the session's inputs and is never mutated post-init (the sole exception is a first-fill of an empty `plan_path` via `fno do state set`).
 
 ```yaml
 ---

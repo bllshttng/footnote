@@ -47,7 +47,7 @@ fn setup(response: &str) -> GenericEnv {
     fs::write(
         &evaluator,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            "#!/bin/sh\ncase \"$*\" in\n  'do delivery evaluate --json --plan-path '*) printf '%s\\n' '{}' ;;\n  *) exit 64 ;;\nesac\n",
             response.replace('\'', "'\\''")
         ),
     )
@@ -345,7 +345,7 @@ fn generic_completion_ac_d7_hp_passed_canonical_verdict_terminates_without_gh() 
     assert_eq!(output["termination_reason"], "DoneDelivery");
     let message = output["message"].as_str().unwrap();
     assert!(
-        message.contains("fno delivery evaluate --json"),
+        message.contains("fno do delivery evaluate --json"),
         "{message}"
     );
     assert!(message.contains("sha256:abc"), "{message}");

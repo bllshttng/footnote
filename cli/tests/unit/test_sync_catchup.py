@@ -399,7 +399,7 @@ def _tick_settings(**over):
 
 
 def _run_tick(monkeypatch, catchup_result):
-    """Invoke `fno pr-watch tick` with everything but the catch-up leg stubbed."""
+    """Invoke `fno do pr watch tick` with everything but the catch-up leg stubbed."""
     from typer.testing import CliRunner
 
     from fno.pr_watch import cli as pw

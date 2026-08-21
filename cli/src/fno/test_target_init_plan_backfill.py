@@ -1,6 +1,6 @@
-"""Node plan_path -> manifest back-fill contract for `fno target init` (x-39c0).
+"""Node plan_path -> manifest back-fill contract for `fno do target init` (x-39c0).
 
-`fno target start <node>` / `fno target init --input <node>` used to write
+`fno do target start <node>` / `fno do target init --input <node>` used to write
 ``plan_path: ""`` to the immutable manifest even when the node had a plan bound,
 because init-target-state.sh sources plan_path only from ``TARGET_PLAN_PATH``
 (= ``--plan-path``). The orienter then reported ``plan: none`` for a node that

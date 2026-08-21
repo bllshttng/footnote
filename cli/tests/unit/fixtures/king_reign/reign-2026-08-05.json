@@ -470,7 +470,7 @@
   },
   {
    "tool": "Bash",
-   "target": "fno think inspect \"x-9ae8\" --json 2>&1 | head -150",
+   "target": "fno do think inspect \"x-9ae8\" --json 2>&1 | head -150",
    "index": 82,
    "kind": "tool_use"
   },
@@ -505,7 +505,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .; fno plan path --slug \"four-axis-vocabulary-cutover\" --node \"x-9ae8\" 2>&1; echo \"=== -H flag check ===\"; fno agents spawn --help 2>&1 | rg -n \"harness|provider|model|effort|account\" | head -12",
+   "target": "cd .; fno do plan path --slug \"four-axis-vocabulary-cutover\" --node \"x-9ae8\" 2>&1; echo \"=== -H flag check ===\"; fno agents spawn --help 2>&1 | rg -n \"harness|provider|model|effort|account\" | head -12",
    "index": 88,
    "kind": "tool_use"
   },
@@ -517,7 +517,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno plan validate ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1 | tail -10\necho \"=== link ===\"\nfno backlog update x-9ae8 --plan-path ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1 | tail -3\necho \"=== derived status ===\"\nfno backlog get x-9ae8 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('status:',d['status'],'| p:',d['priority'],'| size:',d.get('size'),'| verb:',d.get('dispatch_verb')); print('plan:',d.get('plan_path'))\"",
+   "target": "cd .\nfno do plan validate ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1 | tail -10\necho \"=== link ===\"\nfno backlog update x-9ae8 --plan-path ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1 | tail -3\necho \"=== derived status ===\"\nfno backlog get x-9ae8 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('status:',d['status'],'| p:',d['priority'],'| size:',d.get('size'),'| verb:',d.get('dispatch_verb')); print('plan:',d.get('plan_path'))\"",
    "index": 90,
    "kind": "tool_use"
   },
@@ -541,7 +541,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .; fno plan validate ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1 | tail -3",
+   "target": "cd .; fno do plan validate ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1 | tail -3",
    "index": 94,
    "kind": "tool_use"
   },
@@ -772,7 +772,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .; fno think inspect \"x-0eaf\" --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\nprint('complete:',d['complete'],'| warnings:',d.get('warnings'))\nr=d['repository']; print('branch:',r['branch'],'head:',r['head'][:12],'dirty:',len(r['dirty_paths']))\ng=d['graph']\nprint('resolved:',g['resolved']['id'],g['resolved']['status'])\nprint('DUPLICATES:')\nfor x in g.get('duplicates',[]): print('  ',x['id'],x['status'],round(x['score'],3),x['title'][:80],'| pr',x.get('pr_number'),x.get('merge_status'))\nprint('EPIC CANDIDATES:')\nfor x in g.get('epic_candidates',[]): print('  ',x['id'],x['status'],round(x['score'],3),x['title'][:70])\nprint('PRs:',d['pull_requests']['status'],d['pull_requests']['matches'])\nprint('db:',d['database']['schema_status'])\n\"",
+   "target": "cd .; fno do think inspect \"x-0eaf\" --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\nprint('complete:',d['complete'],'| warnings:',d.get('warnings'))\nr=d['repository']; print('branch:',r['branch'],'head:',r['head'][:12],'dirty:',len(r['dirty_paths']))\ng=d['graph']\nprint('resolved:',g['resolved']['id'],g['resolved']['status'])\nprint('DUPLICATES:')\nfor x in g.get('duplicates',[]): print('  ',x['id'],x['status'],round(x['score'],3),x['title'][:80],'| pr',x.get('pr_number'),x.get('merge_status'))\nprint('EPIC CANDIDATES:')\nfor x in g.get('epic_candidates',[]): print('  ',x['id'],x['status'],round(x['score'],3),x['title'][:70])\nprint('PRs:',d['pull_requests']['status'],d['pull_requests']['matches'])\nprint('db:',d['database']['schema_status'])\n\"",
    "index": 135,
    "kind": "tool_use"
   },
@@ -802,7 +802,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno plan path --slug \"review-coverage-vs-objection\" --node \"x-0eaf\" 2>&1\necho \"=== did the reply deliver? ===\"\nfno mail reply --to msg-b2fad8 \"(delivery check, ignore) prior reply on the AC11 premise correction stands.\" 2>&1 | grep -Ei \"deliver|queue|hosted|woken\" | head -3",
+   "target": "cd .\nfno do plan path --slug \"review-coverage-vs-objection\" --node \"x-0eaf\" 2>&1\necho \"=== did the reply deliver? ===\"\nfno mail reply --to msg-b2fad8 \"(delivery check, ignore) prior reply on the AC11 premise correction stands.\" 2>&1 | grep -Ei \"deliver|queue|hosted|woken\" | head -3",
    "index": 140,
    "kind": "tool_use"
   },
@@ -826,7 +826,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno plan validate ~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md 2>&1 | tail -3\nfno backlog update x-0eaf --plan-path ~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md 2>&1 | tail -2\nfno backlog get x-0eaf 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('status:',d['status'],'| p:',d['priority'],'| size:',d.get('size'))\"",
+   "target": "cd .\nfno do plan validate ~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md 2>&1 | tail -3\nfno backlog update x-0eaf --plan-path ~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md 2>&1 | tail -2\nfno backlog get x-0eaf 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('status:',d['status'],'| p:',d['priority'],'| size:',d.get('size'))\"",
    "index": 144,
    "kind": "tool_use"
   },
@@ -1214,7 +1214,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno plan validate ~/c3po/internal/fno/plans/20260805-agent-context-self-introspection-x-7685.md 2>&1 | tail -2\nfno backlog get x-7685 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('x-7685 |',d['status'],'| p:',d['priority'],'| size:',d.get('size'),'| plan:',(d.get('plan_path') or 'NONE').split('/')[-1])\"\ngrep -c \"^## \\|^\\*\\*US\\|^\\*\\*AC\" ~/c3po/internal/fno/plans/20260805-agent-context-self-introspection-x-7685.md 2>&1",
+   "target": "cd .\nfno do plan validate ~/c3po/internal/fno/plans/20260805-agent-context-self-introspection-x-7685.md 2>&1 | tail -2\nfno backlog get x-7685 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('x-7685 |',d['status'],'| p:',d['priority'],'| size:',d.get('size'),'| plan:',(d.get('plan_path') or 'NONE').split('/')[-1])\"\ngrep -c \"^## \\|^\\*\\*US\\|^\\*\\*AC\" ~/c3po/internal/fno/plans/20260805-agent-context-self-introspection-x-7685.md 2>&1",
    "index": 212,
    "kind": "tool_use"
   },
@@ -1252,7 +1252,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\necho \"=== PRs ===\"\nfor n in 738 739 740; do gh pr view $n --json number,state,mergeable,statusCheckRollup 2>/dev/null | python3 -c \"\nimport json,sys\nfrom collections import Counter\nd=json.load(sys.stdin)\nc=Counter((r.get('conclusion') or r.get('status')) for r in d['statusCheckRollup'])\nbad=[r['name'] for r in d['statusCheckRollup'] if (r.get('conclusion') or r.get('status')) not in ('SUCCESS','SKIPPED')]\nprint(f\\\"  #{d['number']} {d['state']} {d['mergeable']} {dict(c)} {'BAD:'+','.join(bad[:3]) if bad else ''}\\\")\"; done\necho \"=== live workers ===\"\nfno agents top 2>&1 | rg -i \"x-9963|x-7685|x-2388|think\" | head -5\necho \"=== pr-watch ===\"\nfno pr-watch status 2>&1 | head -5",
+   "target": "cd .\necho \"=== PRs ===\"\nfor n in 738 739 740; do gh pr view $n --json number,state,mergeable,statusCheckRollup 2>/dev/null | python3 -c \"\nimport json,sys\nfrom collections import Counter\nd=json.load(sys.stdin)\nc=Counter((r.get('conclusion') or r.get('status')) for r in d['statusCheckRollup'])\nbad=[r['name'] for r in d['statusCheckRollup'] if (r.get('conclusion') or r.get('status')) not in ('SUCCESS','SKIPPED')]\nprint(f\\\"  #{d['number']} {d['state']} {d['mergeable']} {dict(c)} {'BAD:'+','.join(bad[:3]) if bad else ''}\\\")\"; done\necho \"=== live workers ===\"\nfno agents top 2>&1 | rg -i \"x-9963|x-7685|x-2388|think\" | head -5\necho \"=== pr-watch ===\"\nfno do pr watch status 2>&1 | head -5",
    "index": 219,
    "kind": "tool_use"
   },
@@ -1630,7 +1630,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno backlog find \"eval skill coverage observer\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"king-for-a-day has no evals, and the eval system that would catch its failures has one user out of ~20 skills\" --details \"TWO FINDINGS, filed together because the second explains the first.\n\nFINDING 1 - THE INFRASTRUCTURE EXISTS AND IS BARELY USED. Measured 2026-08-05: three eval surfaces ship today - 'fno evals' (golden-task bank: run/report/graduate/grade), 'fno observer' (skill eval over a RECORDED CORPUS, sweep/replay - i.e. exactly session analysis), and 'fno delivery' (generic delivery evidence). The bank at evals/bank/ holds FOUR tasks total (capability-add-hello-verb, regression-cli-help-smoke, regression-context-pitfalls-reachable, regression-loop-check",
+   "target": "cd .\nfno backlog find \"eval skill coverage observer\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"king-for-a-day has no evals, and the eval system that would catch its failures has one user out of ~20 skills\" --details \"TWO FINDINGS, filed together because the second explains the first.\n\nFINDING 1 - THE INFRASTRUCTURE EXISTS AND IS BARELY USED. Measured 2026-08-05: three eval surfaces ship today - 'fno evals' (golden-task bank: run/report/graduate/grade), 'fno observer' (skill eval over a RECORDED CORPUS, sweep/replay - i.e. exactly session analysis), and 'fno do delivery' (generic delivery evidence). The bank at evals/bank/ holds FOUR tasks total (capability-add-hello-verb, regression-cli-help-smoke, regression-context-pitfalls-reachable, regression-loop-check",
    "index": 287,
    "kind": "tool_use"
   },

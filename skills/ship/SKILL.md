@@ -24,7 +24,7 @@ A thing is a ship type ONLY if it has a definable **green** - a finish line read
 
 ## Vocabulary: "ship" the verb vs the ship phase/gate
 
-`/ship` (this verb) = drive a deliverable to its finish line. It is distinct from the *ship phase* and *ship gate* inside `/target`, from the `DonePRGreen`/`DoneAdvisory` termination reasons, from `fno pr merge`, and from `/ship-docs` (which generates documentation and is NOT a ship type). The single canonical disambiguation lives in `AGENTS.md` -> "Ship vocabulary"; read it if the overlap is confusing.
+`/ship` (this verb) = drive a deliverable to its finish line. It is distinct from the *ship phase* and *ship gate* inside `/target`, from the `DonePRGreen`/`DoneAdvisory` termination reasons, from `fno do pr merge`, and from `/ship-docs` (which generates documentation and is NOT a ship type). The single canonical disambiguation lives in `AGENTS.md` -> "Ship vocabulary"; read it if the overlap is confusing.
 
 ## Composition, not self-containment
 

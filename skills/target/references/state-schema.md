@@ -4,17 +4,17 @@
 
 ## Write-once rule
 
-`fno target init` writes the manifest once at session start. After init, the file is immutable. The only legal post-init mutation is first-fill of an empty `plan_path` via:
+`fno do target init` writes the manifest once at session start. After init, the file is immutable. The only legal post-init mutation is first-fill of an empty `plan_path` via:
 
 ```bash
-fno state set --field plan_path --value "<path>"
+fno do state set --field plan_path --value "<path>"
 ```
 
 Any other field write exits with code 5 and logs a `state_write_refused` event referencing ab-d0337fbc.
 
 **Detection:** a manifest is "immutable" when its frontmatter has no `status:` key (new init style). Old-style manifests (pre-wedge, with `status: IN_PROGRESS`) remain mutable so existing workflows on old state files are unaffected.
 
-## Field list (written by `fno target init`)
+## Field list (written by `fno do target init`)
 
 ### Core inputs
 
@@ -37,9 +37,9 @@ initial_head: "eb7505a7..."          # HEAD at init; `null` in a repo with no co
 
 input: "Add AI chat feature"          # original user argument (idea or plan path)
 plan_path: null                       # resolved plan path; may be first-filled post-init
-                                      # via `fno state set --field plan_path`
+                                      # via `fno do state set --field plan_path`
 target_size: M                        # S | M | L
-dispatch_model: ""                    # model pin from `fno target start/init --model`;
+dispatch_model: ""                    # model pin from `fno do target start/init --model`;
                                       # empty = unpinned. Carried to dispatched workers.
 dispatch_provider: ""                 # provider pin from `--provider`; empty = infer the
                                       # invoking harness at dispatch time. Init-time only.
@@ -71,11 +71,11 @@ scratchpad_path: ""      # path to worktree scratchpad directory (if set)
 ### Authority grant (omitted unless granted)
 
 ```yaml
-authority: full          # `/target beastmode` / `fno target init --beastmode`; absent otherwise
+authority: full          # `/target beastmode` / `fno do target init --beastmode`; absent otherwise
 ```
 
 Absence is the default posture, so an ungranted session is byte-for-byte unchanged.
-Read the grant from the `attended` line of `fno target status`, never from the raw file: a dead manifest never grants authority.
+Read the grant from the `attended` line of `fno do target status`, never from the raw file: a dead manifest never grants authority.
 Contract: [SKILL.md §Authority](../SKILL.md#authority-the-beastmode-grant).
 
 ### Budget caps (omitted when unconfigured)

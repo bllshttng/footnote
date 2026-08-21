@@ -27,7 +27,7 @@
 # allowlist entry below (as `fno lint flock-pattern` now does), not to leave it
 # private and unlisted.
 
-# fno target init - bootstraps the pipeline session manifest; only meaningful
+# fno do target init - bootstraps the pipeline session manifest; only meaningful
 # when the plugin's skills + hooks are present.
 hooks/helpers/init-target-state.sh :: target init --input drift-probe
 
@@ -41,7 +41,7 @@ scripts/lint/no-cross-skill-runtime-calls.sh :: bundle lint
 # degrades with an actionable error when the script is unavailable.
 scripts/lint-flock-pattern.sh :: lint flock-pattern
 
-# fno pr {merge,verify,rebase} - INTERNALIZED (ab-d4c98550). The four pr-*.sh
+# fno do pr {merge,verify,rebase} - INTERNALIZED (ab-d4c98550). The four pr-*.sh
 # were ported to in-package Python (fno/pr/_merge.py, _verify.py, _rebase.py)
 # shelling to gh/git, so these verbs run from a bare pip install with no
 # repo-root script. No allowlist entry remains; the drift guard now passes

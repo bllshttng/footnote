@@ -137,7 +137,7 @@ def add_dir_tokens(
 
 
 def _state_roots() -> list[Path]:
-    """The fno state directories a worker cannot function without.
+    """The fno do state directories a worker cannot function without.
 
     Normally one path (``~/.fno``). Two when they diverge: ``locks_dir`` and the
     global claims root are deliberately config-free ($HOME / ``$FNO_CLAIMS_ROOT``)

@@ -84,7 +84,7 @@ pub enum TerminationReason {
 #[derive(Debug)]
 struct Manifest {
     session_id: Option<String>,
-    /// The harness session that ran `fno target init` in this worktree
+    /// The harness session that ran `fno do target init` in this worktree
     /// (claude UUID / codex thread / etc). Distinct from `session_id`, which is
     /// the target run id: the two differ, and this is the value an attestation's
     /// attester_session_id is compared against to detect self-attestation.
@@ -129,7 +129,7 @@ impl Default for Manifest {
 }
 
 /// Read a single `^<field>: value` line from ANYWHERE in the manifest, not just
-/// the frontmatter block. `fno target init` writes the immutable frontmatter
+/// the frontmatter block. `fno do target init` writes the immutable frontmatter
 /// first, then APPENDS the node-claim fields (`target_claim_key/holder/ttl`)
 /// after the closing `---`, so `parse_manifest` (frontmatter-bounded) never sees
 /// them. Renewal reads them here instead (x-ba4b). Surrounding quotes stripped.
@@ -1875,7 +1875,7 @@ fn graphql_exhausted_reason(q: &GraphqlQuota) -> String {
     format!(
         "GraphQL quota exhausted ({} remaining, resets in ~{}m). `gh pr view` / \
          `gh pr checks` cannot succeed until the reset: stop retrying them this \
-         window. `fno pr status <n>` still answers its CI verdict on the REST \
+         window. `fno do pr status <n>` still answers its CI verdict on the REST \
          budget (the optional review-thread check inside it is still GraphQL, \
          coalesced under its own TTL cache so a repeat poll costs nothing).",
         q.remaining, mins
@@ -2274,7 +2274,7 @@ fn read_pr_info(
     // An explicit PR selector for the branch-resolved gh calls (x-3a3f):
     // Some(n) inserts the number (`gh pr view <n>`, `gh pr checks <n>`) so the
     // standalone review-coverage verb can evaluate a PR from a checkout that is
-    // NOT on its branch (`fno pr merge <n>` from canonical); None keeps the
+    // NOT on its branch (`fno do pr merge <n>` from canonical); None keeps the
     // argv byte-identical to the stop hook's branch-resolved form. The one
     // number-based call (`gh api .../pulls/<n>/comments`) already carries the
     // number the first read returned.
@@ -2357,7 +2357,7 @@ fn read_pr_info(
     // IS the authority. Short-circuit the now-irrelevant CI + review polls
     // (which also avoids a transient gh blip on those reads re-blocking a
     // finished session). The single merge signal is `state` from the same
-    // `gh pr view` call that `reconcile`/`fno pr verify` read - one signal, not
+    // `gh pr view` call that `reconcile`/`fno do pr verify` read - one signal, not
     // two independently-polled sources. done()'s `head_shipped` guard still
     // applies downstream: an unpushed commit on top of a merged PR stays
     // unshipped work.
@@ -3123,8 +3123,8 @@ fn successful_output_text(out: std::io::Result<std::process::Output>) -> Option<
 /// cli/src/fno/pr/_coverage_gate.py: covered count > 0, the row pinned to the PR head
 /// (not merely the local HEAD), and - when `code-review` is a configured
 /// reviewer - a head-pinned local pass from it. The two must agree, because
-/// this status is exactly what lets a merge through where `fno pr merge`
-/// already looked.
+/// this status is exactly what lets a merge through where `fno do pr merge`
+/// already looked; the post-merge audit on main is what catches a drift.
 ///
 /// Skipped entirely when no review lane is configured: a stock install has no
 /// ruleset requiring the context, and a permanent failure status there would
@@ -4507,7 +4507,7 @@ impl Coverage {
 /// `Reviewed` verdict counts regardless of origin, `SelfAttested` included.
 ///
 /// The middle state is deliberately not `Independent`. The manifest names the
-/// session that ran `fno target init` in the worktree, so a self-handoff
+/// session that ran `fno do target init` in the worktree, so a self-handoff
 /// successor or a second agent in a shared worktree is a different session and
 /// is still not independent. A match is strong evidence of self-attestation; a
 /// mismatch is weak evidence of anything.
@@ -4791,7 +4791,7 @@ fn author_is_bot(author: &str, github_app_logins: &[String]) -> bool {
 /// which this node exists to escape). (x-0eaf)
 ///
 /// `author_session` is the manifest's `harness_session_id` (the session that ran
-/// `fno target init` in this worktree). Each local attestation's
+/// `fno do target init` in this worktree). Each local attestation's
 /// `attester_session_id` is compared against it to label `attestation_origin`;
 /// `None` (no manifest / unparseable) leaves every local verdict `Unknown`,
 /// failing open on unknown authorship so the coverage verdict is byte-identical
@@ -4951,7 +4951,7 @@ pub fn classify_coverage(
                 seen_human.insert(author.to_string());
                 // Freshness applies here too, though it changes no count: a
                 // human approval is excluded either way. It changes what a
-                // human READS in `fno pr status`, and an approval rendered
+                // human READS in `fno do pr status`, and an approval rendered
                 // identically whether or not its author saw this code is the
                 // same lie one axis down.
                 let oid = r
@@ -6278,7 +6278,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // renew only bumps expires_at when the on-disk holder still matches, so it
     // can never steal, and any failure is a warning that just shortens the lease
     // (the loop never blocks on it). The claim key/holder/ttl are APPENDED after
-    // the frontmatter by `fno target init`, so scan the whole manifest for them
+    // the frontmatter by `fno do target init`, so scan the whole manifest for them
     // (parse_manifest is frontmatter-bounded and would miss them). Root=None
     // routes node:<id> to the global claims root inside renew.
     if let (Some(key), Some(holder)) = (
@@ -6756,7 +6756,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     &format!(
                         "standing down: {cause} (remaining {remaining_display}, floor \
                          {GRAPHQL_FLOOR}), so this fire spends no GraphQL - `gh pr view` / \
-                         `gh pr checks` are SKIPPED, not retried. `fno pr status <n>` still \
+                         `gh pr checks` are SKIPPED, not retried. `fno do pr status <n>` still \
                          answers its CI verdict on the REST budget (a cache hit skips the \
                          review-thread read too, and REST shares the same secondary limit \
                          as GraphQL, so porting a read to REST alone does not escape a \
@@ -7983,7 +7983,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
-        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `i=0; while [ $i -lt 30 ]; do fno pr status <N> 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` - REST, 60s interval, never `gh pr checks --watch`, which spends the shared GraphQL quota) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
+        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `i=0; while [ $i -lt 30 ]; do fno do pr status <N> 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` - REST, 60s interval, never `gh pr checks --watch`, which spends the shared GraphQL quota) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
         &cwd,
         &session_id,
     );
@@ -8171,7 +8171,7 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
         )
     } else {
         format!(
-            "background Bash `i=0; while [ $i -lt 30 ]; do fno pr status {pr_number} 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` (wakes when CI settles - green or red - or after ~30m)"
+            "background Bash `i=0; while [ $i -lt 30 ]; do fno do pr status {pr_number} 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` (wakes when CI settles - green or red - or after ~30m)"
         )
     };
     format!(
@@ -8229,7 +8229,7 @@ enum ProbeGate {
 
 /// Plan-fidelity stop gate (x-cbab). The stop-gate half of AC5; the merge gate
 /// (`_merge.py`, which imports the core in-process) is the other. Shells
-/// `fno plan fidelity --json <plan_path>` and blocks DonePRGreen when a planned
+/// `fno do plan fidelity --json <plan_path>` and blocks DonePRGreen when a planned
 /// deliverable is unjoined and uncovered by a carveout - the agent must file a
 /// carveout before it may stop. Mirrors `ProbeGate`'s shape deliberately.
 #[derive(Debug)]
@@ -8253,7 +8253,7 @@ enum FidelityGate {
     },
 }
 
-/// Wall-clock ceiling for the `fno plan fidelity` child (x-d21f). Same bound
+/// Wall-clock ceiling for the `fno do plan fidelity` child (x-d21f). Same bound
 /// as `PROBE_TIMEOUT`, under its own name because this and done_probes gate
 /// different things and must be free to drift independently.
 const FIDELITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -8279,7 +8279,7 @@ enum BoundedRun {
 /// `run_probe` (spawn, poll `try_wait`, `kill_process_group`), but capturing
 /// stdout too since the caller needs to parse it as JSON. `Command::output()`
 /// alone has no timeout: it blocks until the child exits, however long that
-/// takes, which is exactly how a hang three calls deep in `fno plan fidelity`
+/// takes, which is exactly how a hang three calls deep in `fno do plan fidelity`
 /// (x-8ad8) turned into loop-check itself hanging forever and stranding the
 /// session behind it. stdout/stderr are drained on background threads for
 /// the same reason `run_probe` drains stderr that way: reading a pipe only
@@ -8374,7 +8374,7 @@ fn run_bounded(
     }
 }
 
-/// Run `fno plan fidelity --json` for the bound plan and classify the decision.
+/// Run `fno do plan fidelity --json` for the bound plan and classify the decision.
 ///
 /// Fail-open on every error path (no fno, non-zero exit, unparseable JSON,
 /// timeout): the stop gate must not block on a broken probe. The inversion
@@ -8393,12 +8393,17 @@ fn evaluate_plan_fidelity(
         Some(p) if !p.is_empty() => p,
         _ => return FidelityGate::Absent,
     };
-    match run_bounded(fno_bin, &["plan", "fidelity", plan, "--json"], cwd, timeout) {
+    match run_bounded(
+        fno_bin,
+        &["do", "plan", "fidelity", plan, "--json"],
+        cwd,
+        timeout,
+    ) {
         BoundedRun::Stdout(out) => classify_plan_fidelity(&out),
         BoundedRun::SpawnFailed | BoundedRun::WaitFailed => FidelityGate::Absent,
         BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
             reason: format!(
-                "plan fidelity check timed out after {:.1}s running `{} plan fidelity {} --json` \
+                "plan fidelity check timed out after {:.1}s running `{} do plan fidelity {} --json` \
                  and was killed; degraded, not a pass - the fno CLI itself is hanging, \
                  investigate that command directly",
                 elapsed.as_secs_f64(),
@@ -8426,7 +8431,7 @@ fn classify_plan_fidelity(stdout: &[u8]) -> FidelityGate {
     }
 }
 
-/// The sized self-review invocation for this worker, via `fno target
+/// The sized self-review invocation for this worker, via `fno do target
 /// review-invocation`. The single construction site stays Python
 /// (`self_review_invocation` + `level_for_diff`); Rust is a dumb pipe for its
 /// stdout, so the invocation a held worker is told to run cannot drift from
@@ -8441,7 +8446,7 @@ fn classify_plan_fidelity(stdout: &[u8]) -> FidelityGate {
 /// caller (from `FNO_LOOPCHECK_FNO_BIN`, default `fno`) so this is hermetically
 /// testable with a stub script, same as `evaluate_plan_fidelity`.
 fn sized_self_review_hint(fno_bin: &str, cwd: &Path, harness: Option<&str>) -> Option<String> {
-    let mut args: Vec<&str> = vec!["target", "review-invocation"];
+    let mut args: Vec<&str> = vec!["do", "target", "review-invocation"];
     if let Some(h) = harness {
         args.push("--harness");
         args.push(h);
@@ -9065,7 +9070,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
         // contradiction the day someone relaxes that guard: read the log now,
         // and idle waiting, in one sentence.
         return format!(
-            "CI red on PR #{}: {} failed. Read the failing log: `fno pr logs {}`.",
+            "CI red on PR #{}: {} failed. Read the failing log: `fno do pr logs {}`.",
             pr.number, check_name, pr.number
         );
     }
@@ -10557,7 +10562,7 @@ mod tests {
 
     #[test]
     fn plan_fidelity_gate_degrades_and_names_the_verb_on_timeout() {
-        // x-d21f: a hung `fno plan fidelity` child (x-8ad8 was one concrete
+        // x-d21f: a hung `fno do plan fidelity` child (x-8ad8 was one concrete
         // cause; the bound must hold regardless of WHY the child hangs) must
         // be killed, not waited on forever, and must report as exactly that -
         // never a silent Absent pass, and never a misattributed message about
@@ -10576,13 +10581,15 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         match gate {
             FidelityGate::Degraded { reason } => {
-                assert!(reason.contains("plan fidelity"), "{reason}");
+                assert!(reason.contains("fno do plan fidelity"), "{reason}");
                 assert!(reason.contains("/x/plan.md"), "{reason}");
                 assert!(reason.contains("timed out"), "{reason}");
                 assert!(!reason.contains("gh read"), "{reason}");
-                // A 200ms bound must read as sub-second, never truncate to a
-                // flat "0s" that misreads as no time having passed at all.
-                assert!(reason.contains("0.2s") || reason.contains("0.3s"));
+                // Preserve fractional precision instead of truncating the
+                // elapsed time to a flat "0.0s". Parallel test scheduling can
+                // delay the observer beyond the nominal 200ms bound.
+                assert!(reason.contains("timed out after "), "{reason}");
+                assert!(!reason.contains("timed out after 0.0s"), "{reason}");
             }
             other => panic!("expected Degraded, got {other:?}"),
         }
@@ -11701,7 +11708,7 @@ mod tests {
 
     #[test]
     fn scan_manifest_field_reads_claim_fields_after_frontmatter() {
-        // x-ba4b regression: `fno target init` APPENDS the node-claim fields
+        // x-ba4b regression: `fno do target init` APPENDS the node-claim fields
         // AFTER the closing `---`, so the frontmatter-bounded parse_manifest must
         // NOT be relied on for them - the whole-file scanner is what drives
         // renewal. Mirrors init's real manifest shape.
@@ -12211,7 +12218,7 @@ mod tests {
         assert!(reason.contains("timeout"), "got: {reason}");
         // The taught watcher is the REST status poll, never the
         // GraphQL `gh pr checks --watch` this assertion used to pin.
-        assert!(reason.contains("fno pr status"), "got: {reason}");
+        assert!(reason.contains("fno do pr status"), "got: {reason}");
         assert!(!reason.contains("gh pr checks"), "got: {reason}");
         assert!(!reason.contains("wait silently"), "got: {reason}");
     }
@@ -13266,7 +13273,7 @@ mod tests {
     fn reviewer_invocation_resolves_the_author_harness_verb() {
         // Per-harness: code-review names the harness's own verb. A codex author
         // is told /review, a claude author /code-review; unknown harness falls
-        // back to the scalar, which is the portable fno review - never
+        // back to the scalar, which is the portable fno do review - never
         // claude's verb silently.
         assert_eq!(
             reviewer_invocation_for("code-review", Some("codex")),
@@ -13507,7 +13514,7 @@ mod tests {
         let msg = graphql_exhausted_reason(&q);
         assert!(msg.contains("GraphQL quota exhausted"), "got: {msg}");
         assert!(msg.contains("~40m"), "got: {msg}");
-        assert!(msg.contains("fno pr status"), "got: {msg}");
+        assert!(msg.contains("fno do pr status"), "got: {msg}");
         assert!(!msg.contains("retrying next fire"), "got: {msg}");
     }
 
@@ -13941,7 +13948,7 @@ mod tests {
         // The CI-wait watcher polls the REST status chokepoint for the
         // POSITIVE settled marker, never `gh pr checks --watch` (GraphQL).
         let ci_hint = arm_watch_hint(404, "ci");
-        assert!(ci_hint.contains("fno pr status 404"), "got: {ci_hint}");
+        assert!(ci_hint.contains("fno do pr status 404"), "got: {ci_hint}");
         assert!(!ci_hint.contains("gh pr checks"), "got: {ci_hint}");
         assert!(ci_hint.contains("'\"settled\": true'"), "got: {ci_hint}");
         assert!(ci_hint.contains("sleep 60"), "got: {ci_hint}");

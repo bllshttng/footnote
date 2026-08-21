@@ -222,7 +222,7 @@ def _global_json(ctx: typer.Context) -> bool:
     The root `fno` callback stores --json/-J in ctx.obj["json"]; an individual
     top-level command must OR it with its own command-local flag so both
     `fno -J whoami` (global) and `fno whoami -J` (local) emit JSON. Mirrors the
-    `fno review` command's merge pattern. Defensive: ctx.obj may be unset or a
+    `fno do review` command's merge pattern. Defensive: ctx.obj may be unset or a
     non-dict when the command is invoked outside the root app (e.g. a bare
     single-command test harness)."""
     obj = getattr(ctx, "obj", None)

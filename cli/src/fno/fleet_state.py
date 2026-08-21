@@ -3,7 +3,7 @@ in its fallback chain.
 
 One file, ``~/.fno/fleet-sweep-state.json``, written as the fleet leg's last
 act on every daemon tick. It exists because a status line is not evidence:
-``fno pr-watch status`` reported the agent loaded while nothing had ticked for
+``fno do pr watch status`` reported the agent loaded while nothing had ticked for
 six hours and eighteen minutes against a 600s interval, and ``failover_swapped``
 had never been emitted once. A freshness check against this file's mtime
 answers "did the trigger run" without trusting anyone's self-report.
@@ -24,7 +24,7 @@ than a chain that ends.
 
 Not single-writer. The fleet leg runs BEFORE ``_tick`` acquires the daemon
 lock, and it runs whether or not that lock turns out to be held, so a manual
-``fno pr-watch tick`` overlapping the launchd one gives two concurrent
+``fno do pr watch tick`` overlapping the launchd one gives two concurrent
 read-modify-write cycles on this file. The loser's link would be dropped and
 the chain would relap the vendor it just tried, which is precisely the loop
 this file exists to prevent. Every mutation therefore takes a sidecar filelock,

@@ -471,7 +471,7 @@ pub(crate) fn codex_git_writable_args(cwd: &std::path::Path) -> Vec<String> {
 
 /// Resolve the configured plan directory through the same public CLI path used
 /// by blueprinting, then grant it to a bounded codex worker. The resolver is
-/// read-only: `fno plan path` prints a prospective document path and this keeps
+/// read-only: `fno do plan path` prints a prospective document path and this keeps
 /// only its parent directory.
 pub(crate) fn codex_plan_writable_args(cwd: &std::path::Path) -> Vec<String> {
     match plan_content_dir(cwd) {
@@ -529,7 +529,7 @@ pub(crate) fn codex_writable_config_args(cwd: &std::path::Path) -> Vec<String> {
 
 fn plan_content_dir(cwd: &std::path::Path) -> Option<String> {
     let out = match std::process::Command::new("fno")
-        .args(["plan", "path", "--slug", "codex-sandbox-grant"])
+        .args(["do", "plan", "path", "--slug", "codex-sandbox-grant"])
         .current_dir(cwd)
         .output()
     {
@@ -1613,7 +1613,7 @@ mod tests {
         std::fs::write(
             &fake_fno,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                "#!/bin/sh\n[ \"$*\" = 'do plan path --slug codex-sandbox-grant' ] || exit 64\nprintf '%s\\n' '{}'\n",
                 plan_dir.join("probe.md").display()
             ),
         )

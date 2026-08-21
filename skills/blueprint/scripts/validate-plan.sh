@@ -37,7 +37,7 @@ warn()  { echo "  WARN:  $*"; ((WARNINGS++)) || true; }
 ok()    { echo "  OK:    $*"; }
 
 # Echo a plan's readiness rung, or `!<reason>` when the verb could not answer.
-# Never classifies statuses itself; the single authority is `fno plan rung`
+# Never classifies statuses itself; the single authority is `fno do plan rung`
 # (fno.graph.ladder).
 #
 # The reason rides in the return VALUE rather than a global, because every
@@ -62,11 +62,11 @@ _plan_rung() {
     if [[ -n "$_src" ]]; then
         local _py="${_src%%|*}" _root="${_src##*|}"
         _out="$(PYTHONPATH="$_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-            "$_py" -m fno.cli plan rung "$1" 2>/dev/null \
+            "$_py" -m fno.cli do plan rung "$1" 2>/dev/null \
             | sed -n 's/^rung=//p' | head -1)"
     fi
     if [[ -z "$_out" ]] && command -v fno >/dev/null 2>&1; then
-        _out="$(fno plan rung "$1" 2>/dev/null | sed -n 's/^rung=//p' | head -1)"
+        _out="$(fno do plan rung "$1" 2>/dev/null | sed -n 's/^rung=//p' | head -1)"
     fi
     set -o pipefail
     if [[ -z "$_out" ]]; then
@@ -157,7 +157,7 @@ _semantic_validate() {
             probe_error=$(PYTHONPATH="$source_pythonpath" \
                 "$python_bin" -c 'import fno.cli, fno.plan.cli, fno.plan.schema, fno.plan.execution_validation' 2>&1) && {
                 PYTHONPATH="$source_pythonpath" \
-                    "$python_bin" -m fno.cli plan validate "$PLAN_DIR" --execution
+                    "$python_bin" -m fno.cli do plan validate "$PLAN_DIR" --execution
                 return
             }
         fi
@@ -165,7 +165,7 @@ _semantic_validate() {
             probe_error=$(uv run --project "$source_root/cli" \
                 python -c 'import fno.cli, fno.plan.cli, fno.plan.schema, fno.plan.execution_validation' 2>&1) && {
                 uv run --project "$source_root/cli" \
-                    python -m fno.cli plan validate "$PLAN_DIR" --execution
+                    python -m fno.cli do plan validate "$PLAN_DIR" --execution
                 return
             }
         fi
@@ -182,11 +182,11 @@ _semantic_validate() {
         echo "fno CLI not found; install or update it before validating executable plans" >&2
         return 2
     fi
-    if ! fno plan validate --help 2>&1 | grep -q -- '--execution'; then
+    if ! fno do plan validate --help 2>&1 | grep -q -- '--execution'; then
         echo "installed fno predates semantic plan validation; run 'fno update' or 'fno doctor --fix'" >&2
         return 2
     fi
-    fno plan validate "$PLAN_DIR" --execution
+    fno do plan validate "$PLAN_DIR" --execution
 }
 
 _dispatch_hold_validate() {
@@ -335,7 +335,7 @@ if [[ -f "$PLAN_DIR" ]]; then
     # A born scaffold sits at the `idea` rung (spelled `stub` before x-3571, still
     # read as `idea`). Refuse to pass one: the fill step must flip it to `ready`,
     # or the linked node derives `idea` and no dispatcher will ever pick it up.
-    # The rung comes from `fno plan rung` - this script does not parse `status:`.
+    # The rung comes from `fno do plan rung` - this script does not parse `status:`.
     _RUNG="$(_plan_rung "$PLAN_DIR")"
     if [[ "$_RUNG" == "idea" ]]; then
         error "$(basename "$PLAN_DIR") is still at the 'idea' rung; set 'status: ready' after filling"
@@ -1332,7 +1332,7 @@ if [[ -n "$target_file" ]]; then
     # re-listing the terminal spellings here. The old grep hardcoded
     # `done|in_review|shipped`, which silently rots every time a spelling
     # retires - `shipped` is itself a retired spelling of `in_review`, and
-    # `fno plan rung` resolves it through the same alias table the Python side
+    # `fno do plan rung` resolves it through the same alias table the Python side
     # uses instead of a second copy that has to be remembered.
     STATUS_FM="$(_plan_rung "$target_file")"
     if [[ "$STATUS_FM" == \!* ]]; then

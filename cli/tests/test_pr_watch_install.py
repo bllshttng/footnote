@@ -1,4 +1,4 @@
-"""Tests for fno pr-watch CLI surface and plist installer.
+"""Tests for fno do pr watch CLI surface and plist installer.
 
 TDD: tests written BEFORE implementation.  Every test targets a named
 acceptance criterion from the task 1.3 spec.
@@ -352,7 +352,7 @@ def test_status_json_emits_liveness_verdict(monkeypatch):
     monkeypatch.setattr(
         m, "liveness_report_live",
         lambda **_kw: {"enabled": True, "verdict": "dead", "detail": "no tick",
-                       "fix": "fno pr-watch install", "loaded": True, "last_tick": None},
+                       "fix": "fno do pr watch install", "loaded": True, "last_tick": None},
     )
     result = CliRunner().invoke(app, ["pr-watch", "status", "--json"])
     assert result.exit_code == 0
@@ -442,7 +442,7 @@ def test_status_prints_dead_verdict_with_fix_command(
     out = capsys.readouterr().out
     import re
     assert re.search(r"^Verdict: +dead \(last tick \d+s ago", out, re.M), out
-    assert re.search(r"^Fix: +fno pr-watch install", out, re.M), out
+    assert re.search(r"^Fix: +fno do pr watch install", out, re.M), out
     assert "timeout" in out
 
 
@@ -1078,7 +1078,7 @@ def test_liveness_dead_stale_tick():
     tick = _install()._parse_ts("2026-06-14T01:00:00Z")
     v = _live(now=tick + 3600)
     assert v["verdict"] == "dead"
-    assert "pr-watch install" in v["fix"]
+    assert "do pr watch install" in v["fix"]
 
 
 def test_liveness_dead_not_loaded():

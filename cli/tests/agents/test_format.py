@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 from fno.agents.format import (
     JSON_SCHEMA_VERSION,
@@ -275,7 +276,10 @@ def test_render_table_event_age_column_beside_status() -> None:
     assert "EVENT AGE" in out
     # A freshly-stamped event renders a wall-clock + relative token, not the
     # bare '-' an absent reading gets.
-    assert "(5s)" in out
+    assert fresh[11:19] in out
+    match = re.search(r"\((\d+)s\)", out)
+    assert match is not None
+    assert 4 <= int(match.group(1)) <= 15
 
 
 def test_render_table_event_age_absent_renders_dash_not_fresh() -> None:

@@ -395,7 +395,7 @@ def test_blueprint_owns_the_consolidation_frontmatter_key():
     assert check_blueprint_can_write("consolidation")
 
 
-# -- the Pydantic shape authority (fno plan validate must agree with the gate) --
+# -- the Pydantic shape authority (fno do plan validate must agree with the gate) --
 
 
 def test_pydantic_model_rejects_malformed_block():

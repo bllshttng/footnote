@@ -34,7 +34,7 @@ from fno.harness_identity import resolve_harness_identity
 # and a Codex surface lacking that primitive reports the downgrade and runs the
 # panel SEQUENTIALLY - slower, but it still reaches a verdict and still attests
 # (docs/HARNESSES.md "Parallel subagent dispatch", docs/SKILL-COMPAT-MATRIX.md
-# "CDX"). Refusing codex here would hard-exit `fno target init` on a
+# "CDX"). Refusing codex here would hard-exit `fno do target init` on a
 # configuration the project documents as supported, which is a worse failure
 # than the one this check exists to prevent.
 #
@@ -80,7 +80,7 @@ class ReviewerVerdict:
 
         `unverifiable` does NOT block. A shell with no harness marker is not a
         session that cannot dispatch subagents, it is one we cannot classify -
-        and refusing it would break a plain-terminal `fno target init` in every
+        and refusing it would break a plain-terminal `fno do target init` in every
         repo that configures a reviewer. The cost of guessing wrong is now
         bounded: if the gate does turn out to be unsatisfiable, the stop-gate
         message names the reviewer and its invocation instead of blaming a bot.
@@ -704,7 +704,7 @@ def local_peers_refusal_message(
     if any(v.status == "unverifiable" for v in verdicts):
         return None
     lines = [
-        "fno target init: config.review.peers has no eligible cross-model "
+        "fno do target init: config.review.peers has no eligible cross-model "
         f"local peer on {session.describe()}.",
     ]
     lines += [f"  {v.line()}" for v in verdicts]
@@ -728,7 +728,7 @@ def refusal_message(
     if not blocked:
         return None
     lines = [
-        f"fno target init: config.review.reviewers cannot be satisfied on "
+        f"fno do target init: config.review.reviewers cannot be satisfied on "
         f"{session.describe()}.",
     ]
     lines += [f"  {v.line()}" for v in blocked]
@@ -958,7 +958,7 @@ def github_apps_refusal_message(verdicts: list[AppVerdict]) -> Optional[str]:
     if not blocked:
         return None
     lines = [
-        "fno target init: config.review.github_apps names a bot that cannot review here.",
+        "fno do target init: config.review.github_apps names a bot that cannot review here.",
     ]
     lines += [f"  {v.line()}" for v in blocked]
     lines += [

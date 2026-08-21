@@ -3,7 +3,7 @@
 #
 # Refuses a PR whose base branch no longer leads to the default branch: merging
 # it reports MERGED while the commits never reach main. The verdict comes from
-# `fno pr base-lineage-check`, the same predicate `fno pr merge`, `fno pr
+# `fno do pr base-lineage-check`, the same predicate `fno do pr merge`, `fno do pr
 # verify` and the Rust auto-merge arm call, so CI and the CLI cannot disagree.
 #
 # Both callers write the SAME status context on purpose. A check-run name and a
@@ -26,7 +26,7 @@ PR="${1:?usage: check-stacked-base.sh <pr-number> <head-sha>}"
 SHA="${2:?usage: check-stacked-base.sh <pr-number> <head-sha>}"
 CONTEXT="stacked-base-guard"
 
-out="$(uv run --project cli fno-py pr base-lineage-check "$PR" 2>&1)"
+out="$(uv run --project cli fno-py do pr base-lineage-check "$PR" 2>&1)"
 rc=$?
 printf '%s\n' "$out"
 

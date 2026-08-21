@@ -6,7 +6,7 @@
 # This script writes target-state.md ONCE at session start. The file is a
 # read-only manifest of session inputs; it must never be updated during the
 # run except for a single allowance: first-fill of an empty plan_path field
-# (done via `fno state set --field plan_path` after blueprint resolves it).
+# (done via `fno do state set --field plan_path` after blueprint resolves it).
 # No gate booleans, status, phase, iteration, or mutable tracking lists are
 # written here. All control-plane decisions live in fno-agents loop-check.
 # See: ab-d0337fbc (control-plane collapse wedge).
@@ -36,7 +36,7 @@ unset TARGET_START
 rm -f "$STATE_DIR/.target-starting"
 
 # ── Review-capability gate on the unwrapped path (x-4a60) ────────────
-# `fno target init` runs both review refusals in-process and says so with
+# `fno do target init` runs both review refusals in-process and says so with
 # FNO_TARGET_INIT_GATED; the direct path SKILL.md documents never ran them, so
 # a typo'd config.review.github_apps login started a full run and surfaced only
 # at the stop gate. Delegates to the one implementation - the reviewer
@@ -53,7 +53,7 @@ rm -f "$STATE_DIR/.target-starting"
 # the moment the CLI fell behind source.
 if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
   if command -v fno >/dev/null 2>&1; then
-    fno target check-review-gate && _RG_RC=0 || _RG_RC=$?
+    fno do target check-review-gate && _RG_RC=0 || _RG_RC=$?
     if [[ "$_RG_RC" -eq 9 ]]; then
       echo "[init-target-state] REFUSED: review capability gate (see above). Refusing to write state file." >&2
       exit 2
@@ -63,7 +63,7 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
     # Plan-level hold gate. Unlike compatibility guards, an unreadable hold
     # state refuses: dispatch cannot prove the plan is unheld. The wrapper runs
     # this in-process; this call covers the documented direct script path.
-    fno target check-dispatch-hold && _DH_RC=0 || _DH_RC=$?
+    fno do target check-dispatch-hold && _DH_RC=0 || _DH_RC=$?
     if [[ "$_DH_RC" -eq 9 ]]; then
       echo "[init-target-state] REFUSED: dispatch hold (see above). Refusing to write state file or claim." >&2
       exit 2
@@ -78,7 +78,7 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
     # and its own rc, so a broken gate cannot suppress the other one; the node
     # is read from TARGET_INPUT/TARGET_PLAN_PATH by the verb, so the shell
     # passes nothing and cannot pass the wrong node.
-    fno target check-contained && _CT_RC=0 || _CT_RC=$?
+    fno do target check-contained && _CT_RC=0 || _CT_RC=$?
     if [[ "$_CT_RC" -eq 9 ]]; then
       echo "[init-target-state] REFUSED: contained node (see above). Refusing to write state file or claim." >&2
       exit 2
@@ -368,7 +368,7 @@ elif _is_true "$AUTO_MERGE_ENABLED"; then
 fi
 # Posture is flag/env/config only (x-9d11): free text in INITIAL_INPUT is NOT a
 # control input. Grants were hardened against prose by x-51a3; refusals match
-# here. A brief that says no-merge must reach --no-merge on `fno target
+# here. A brief that says no-merge must reach --no-merge on `fno do target
 # start/init` to take effect - attributable, not parsed out of prose.
 # An EXPLICIT config refusal is still `config`, not `default-off`: the operator
 # set the key, so "which layer said no" must answer config, not "nothing set".
@@ -383,7 +383,7 @@ fi
 # typing the pre-x-9d11 bare token deserves to learn their refusal did not
 # land rather than discover it from a merged PR. Warn-only by design.
 if [[ " ${INITIAL_INPUT:-} " == *" no-merge "* ]]; then
-  echo "[init-target-state] note: input contains a bare 'no-merge' token, which is no longer a control input - it set nothing. Pass --no-merge to 'fno target start/init' for the refusal posture." >&2
+  echo "[init-target-state] note: input contains a bare 'no-merge' token, which is no longer a control input - it set nothing. Pass --no-merge to 'fno do target start/init' for the refusal posture." >&2
 fi
 
 # Auto-merge implies external review on.
@@ -553,7 +553,7 @@ _worktree_has_fresh_activity() {
 #      status field, so without this a completed session's manifest survives in
 #      the shared .fno and every new session (even in a fresh worktree, via the
 #      .fno symlink) trips on it and hand-clears it. The reap keys on the CLAIM,
-#      NOT owner_pid: owner_pid is the transient `fno target init` wrapper pid
+#      NOT owner_pid: owner_pid is the transient `fno do target init` wrapper pid
 #      (dead ~1s after init returns, per cli/src/fno/claims/session_pid.py), so
 #      it cannot tell a completed session from a live one. The node claim is
 #      acquired with the DURABLE session pid (nearest claude ancestor) + TTL, so
@@ -753,7 +753,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
   fi
 
   # ── in_review dispatch guard (x-2dc5) ─────────────────────────────
-  # A FRESH named-node dispatch (/target <id>, fno target start <id>, direct
+  # A FRESH named-node dispatch (/target <id>, fno do target start <id>, direct
   # init) must not re-launch a node that already carries an open, unmerged PR
   # (derives status == in_review) - it would redo shipped work and race a
   # second PR. Lives inside this fresh-init branch ONLY: a resume (valid state
@@ -861,10 +861,10 @@ EOF
   # Python, so it shells out once and parses KEY=value lines. A stale fno without
   # the verb prints nothing and the run fails OPEN to detect_provider (today's
   # precedence) rather than bricking init - the same degrade every other
-  # fno target check-* gate here already uses.
+  # fno do target check-* gate here already uses.
   _OWNED_OUT=""
   if command -v fno >/dev/null 2>&1; then
-    _OWNED_OUT="$(fno target resolve-owned-identity 2>/dev/null || true)"
+    _OWNED_OUT="$(fno do target resolve-owned-identity 2>/dev/null || true)"
   fi
   if [[ -n "$_OWNED_OUT" ]]; then
     # Parse the verb's KEY=value lines in one read (zero subprocesses), not four
@@ -1097,7 +1097,7 @@ claude_session_id: $claude_transcript_id
 codex_thread_id: $codex_thread_id
 scratchpad_path: $REPO_ROOT/.fno/scratchpad
 target_size: ${TARGET_SIZE:-}
-# Dispatch pins - a model/provider chosen at \`fno target start\`/\`init\`, carried
+# Dispatch pins - a model/provider chosen at \`fno do target start\`/\`init\`, carried
 # to this session's dispatched workers. Empty = unpinned (spawn-time defaults).
 dispatch_model: ${TARGET_DISPATCH_MODEL:-}
 dispatch_provider: ${TARGET_DISPATCH_PROVIDER:-}
@@ -1388,7 +1388,7 @@ PYEOF
         #
         # `cmd && rc=0 || rc=$?`, not `if ! cmd`: after a negation `$?` is the
         # negation's status, so the rc test would never see the 9.
-        TARGET_INPUT="$_NODE_ID" TARGET_PLAN_PATH="" fno target check-contained \
+        TARGET_INPUT="$_NODE_ID" TARGET_PLAN_PATH="" fno do target check-contained \
           && _PC_RC=0 || _PC_RC=$?
         # A BROKEN gate on this path degrades silently unless it is said out
         # loud, exactly like the pre-claim gate a hundred lines above: only 9

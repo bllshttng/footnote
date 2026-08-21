@@ -6,7 +6,7 @@
 # individually stamped at creation; every other named node stayed open
 # forever. The fix is an exact `Backlog-Closure: <id> [<id>...]` trailer,
 # bound atomically at merge - this gate is its CI backstop for the direct
-# `gh pr create` path, which never runs the `fno pr closure-trailer`
+# `gh pr create` path, which never runs the `fno do pr closure-trailer`
 # generator. It never infers extra nodes from prose or diffs: it only checks
 # that a node id already present in the HEAD ref is also named in the exact
 # trailer line.
@@ -139,7 +139,7 @@ if [[ $claimed -eq 0 ]]; then
     echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' names $(IFS=,; echo "${candidates[*]}"), and the exact trailer claims none of them."
     echo "  Add a line reading:"
     echo "    Backlog-Closure: <the node id this PR closes>"
-    echo "  Generate it with: fno pr closure-trailer <node-id>, which checks the"
+    echo "  Generate it with: fno do pr closure-trailer <node-id>, which checks the"
     echo "  id against the graph. Do NOT paste a candidate from this message:"
     echo "  a branch segment can match the id grammar without being a real node,"
     echo "  and one unknown id voids the whole binding at merge."

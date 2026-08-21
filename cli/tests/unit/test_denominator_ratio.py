@@ -1,7 +1,7 @@
 """The deliverables-1 ratio measurement (x-cbab, task 7).
 
 Shipped as a TASK, not a note: a ``target_denominator`` event recorded at init +
-a ``fno target denominator-ratio`` command that reads it. The cheap
+a ``fno do target denominator-ratio`` command that reads it. The cheap
 ``--deliverables 1`` exit is the load-bearing bypass risk; this measures whether
 it is reflexive (past ~80 percent, ``enumerated_scope`` needs widening).
 """
@@ -65,7 +65,7 @@ def test_ratio_command_flags_a_bypass(monkeypatch, tmp_path):
     (tmp_path / ".fno" / "events.jsonl").write_text("\n".join(events) + "\n")
     monkeypatch.setattr("fno.paths.resolve_repo_root", lambda *a, **k: tmp_path)
 
-    r = CliRunner().invoke(app, ["target", "denominator-ratio", "--json"])
+    r = CliRunner().invoke(app, ["do", "target", "denominator-ratio", "--json"])
     assert r.exit_code == 0, r.output
     obj = json.loads(r.output)
     assert obj["deliverables_1_ratio_pct"] == 80.0
@@ -82,7 +82,7 @@ def test_ratio_command_reports_healthy_below_threshold(monkeypatch, tmp_path):
     (tmp_path / ".fno" / "events.jsonl").write_text("\n".join(events) + "\n")
     monkeypatch.setattr("fno.paths.resolve_repo_root", lambda *a, **k: tmp_path)
 
-    obj = json.loads(CliRunner().invoke(app, ["target", "denominator-ratio", "--json"]).output)
+    obj = json.loads(CliRunner().invoke(app, ["do", "target", "denominator-ratio", "--json"]).output)
     assert obj["deliverables_1_ratio_pct"] == 33.3
     assert obj["verdict"] == "healthy"
 
@@ -100,7 +100,7 @@ def test_ratio_command_respects_the_window(monkeypatch, tmp_path):
     monkeypatch.setattr("fno.paths.resolve_repo_root", lambda *a, **k: tmp_path)
 
     obj = json.loads(
-        CliRunner().invoke(app, ["target", "denominator-ratio", "--json", "--since-days", "28"]).output
+        CliRunner().invoke(app, ["do", "target", "denominator-ratio", "--json", "--since-days", "28"]).output
     )
     assert obj["plan_backed"] == 1
     assert obj["deliverables_declared"] == 0  # the 40-day-old one excluded
@@ -112,6 +112,6 @@ def test_ratio_command_handles_no_data(monkeypatch, tmp_path):
     (tmp_path / ".fno").mkdir()
     monkeypatch.setattr("fno.paths.resolve_repo_root", lambda *a, **k: tmp_path)
 
-    obj = json.loads(CliRunner().invoke(app, ["target", "denominator-ratio", "--json"]).output)
+    obj = json.loads(CliRunner().invoke(app, ["do", "target", "denominator-ratio", "--json"]).output)
     assert obj["deliverables_1_ratio_pct"] is None
     assert "no declared-denominator" in obj["verdict"]
