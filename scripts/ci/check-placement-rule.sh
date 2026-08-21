@@ -56,6 +56,9 @@
 #      model_env_scrub.rs, attest-model.sh) NAME ~/.claude/settings.json in
 #      operator-facing text - they advise a pin in Claude Code's own config,
 #      never construct or write a path there.
+#      self_stamp.py's identity-ambiguity remedy likewise NAMES the Codex and
+#      Claude transcript roots so an operator can locate the conflicting
+#      session marker. It constructs and writes no path there.
 #      review_capability.py's `requires: skill` predicate globs the two roots
 #      Claude resolves a bare skill name from (~/.claude/skills and
 #      <cwd>/.claude/skills) to answer "is this registered reviewer's skill
@@ -179,6 +182,7 @@ cli/src/fno/agents/model_routing.py
 cli/src/fno/agents/read.py
 cli/src/fno/agents/registry.py
 cli/src/fno/agents/rust_runtime.py
+cli/src/fno/agents/self_stamp.py
 cli/src/fno/agents/spawn_gate.py
 cli/src/fno/agents/test_account_env.py
 cli/src/fno/agents/whoami.py
