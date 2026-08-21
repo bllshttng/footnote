@@ -8,6 +8,7 @@ by the inspectable `--dry-run` path.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import types
 from pathlib import Path
@@ -1326,7 +1327,8 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
             state["built"] = True
         elif cmd and cmd[0] == "pgrep":
             pass  # daemon advisory
-        return types.SimpleNamespace(returncode=0)
+        # stdout/stderr: the update:fno claim guard's hostid probe reads them.
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
     # stale before cargo -> rebuild; deployed binary reports source rev -> verify OK.
@@ -1339,6 +1341,8 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
         call_order.append("execvp")
 
     monkeypatch.setattr(update.os, "execvp", _fake_execvp)
+    # The install-claim guard writes a machine-scoped claim; keep it in tmp.
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     # Patch shutil.which through the update module so _refresh_rust_bins sees it
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
 
@@ -1445,11 +1449,14 @@ def test_ac1_err_cli_execvp_still_called_after_cargo_failure(
 
     def _fake_run(cmd, **kwargs):
         if cmd and cmd[0] == "cargo":
-            return types.SimpleNamespace(returncode=1)
-        return types.SimpleNamespace(returncode=0)
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+        # stdout/stderr: the update:fno claim guard's hostid probe reads them.
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
     monkeypatch.setattr(update.os, "execvp", lambda prog, args: execvp_called.append(prog))
+    # The install-claim guard writes a machine-scoped claim; keep it in tmp.
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     # Patch through the update module so _refresh_rust_bins sees it
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
 
@@ -2536,3 +2543,104 @@ def test_update_readiness_shells_and_revivable_none_when_unknown(monkeypatch, tm
     assert result["shells_ended"] is None
     assert result["sessions"] is None
     assert result["revivable"] is None
+
+
+# ---------------------------------------------------------------------------
+# update:fno install-claim guard: concurrent reinstalls must refuse, not race
+# ---------------------------------------------------------------------------
+
+
+def _guard_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    source_rev: str = "deadbeefcafe1234",
+) -> tuple[list, Path]:
+    """Isolation for update_command guard tests.
+
+    Redirects the claims root and the installed-rev marker into tmp, stubs
+    source discovery / session guard / rust leg, fakes uv on PATH, and
+    replaces os with a recorder so a test that reaches the install exec
+    records it instead of exec'ing. Returns (exec_calls, marker_path).
+    """
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-home"))
+    src = tmp_path / "src"
+    _write_pyproject(src)
+    monkeypatch.setattr(update, "_discover_source", lambda source=None: src)
+    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
+    monkeypatch.setattr(update, "_refresh_rust_bins", lambda *a, **k: None)
+    monkeypatch.setattr(update, "_cache_source_path", lambda source: None)
+    monkeypatch.setattr(update, "_source_rev", lambda source: source_rev)
+    marker = tmp_path / "installed-rev"
+    monkeypatch.setattr(update, "_INSTALLED_REV_FILE", marker)
+    monkeypatch.setattr(
+        update, "shutil", types.SimpleNamespace(which=lambda n: "/usr/bin/uv" if n == "uv" else None)
+    )
+    exec_calls: list = []
+    monkeypatch.setattr(
+        update,
+        "os",
+        types.SimpleNamespace(getpid=lambda: 424242, execvp=lambda *a, **k: exec_calls.append(a)),
+    )
+    return exec_calls, marker
+
+
+def _pre_hold_update_claim(reason: str = "test pre-hold") -> None:
+    """Hold update:fno as a LIVE other session (this pid is alive by definition)."""
+    from fno.claims import acquire_claim
+    from fno.claims.io import claims_root_for
+
+    acquire_claim(
+        "update:fno",
+        holder="other-update-session",
+        pid=os.getpid(),
+        reason=reason,
+        root=claims_root_for("update:fno"),
+    )
+
+
+def test_update_refuses_not_queues_when_claim_held_by_live_other(monkeypatch, tmp_path, capsys):
+    """AC1-ERR: a live update:fno claim held elsewhere refuses before any exec.
+
+    The loser reports the holder, exits clean (no exception, no exec), and
+    never queues: two concurrent `uv tool install --reinstall` runs is the
+    defect this guard exists to make impossible.
+    """
+    exec_calls, _marker = _guard_env(monkeypatch, tmp_path)
+    _pre_hold_update_claim()
+
+    update.update_command()
+
+    out = capsys.readouterr().out
+    assert "another session is updating" in out
+    assert "other-update-session" in out
+    assert exec_calls == []
+
+
+def test_update_reports_already_landed_when_marker_matches_source_rev(monkeypatch, tmp_path, capsys):
+    """AC2-HP: a refused loser whose rev already landed says so and exits clean.
+
+    The exact post-completion shape: the winner's exec never released the
+    claim (execvp cannot), the corpse is still live-pinned during the
+    post-install chain, and the loser's update_readiness inputs (marker ==
+    source rev) prove there is nothing left to do.
+    """
+    exec_calls, marker = _guard_env(monkeypatch, tmp_path)
+    marker.write_text("deadbeefcafe1234\n", encoding="utf-8")
+    _pre_hold_update_claim()
+
+    update.update_command()
+
+    out = capsys.readouterr().out
+    assert "already landed" in out
+    assert exec_calls == []
+
+
+def test_update_proceeds_to_exec_once_when_claim_free(monkeypatch, tmp_path):
+    """AC1-HP: with the claim free, the guard is invisible: one install exec."""
+    exec_calls, _marker = _guard_env(monkeypatch, tmp_path)
+
+    update.update_command()
+
+    assert len(exec_calls) == 1
+    assert exec_calls[0][0] == "/bin/sh"

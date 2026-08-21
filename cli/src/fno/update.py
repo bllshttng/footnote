@@ -1455,6 +1455,48 @@ def update_command(
         refresh_cmds = []
         _await_bin = None
 
+    # The reinstall is now inevitable, so this is where the machine-scoped
+    # guard belongs (not at the verb entry): every path that reaches an
+    # install exec passes through here. `--reinstall` tears down the venv
+    # every running fno verb executes from, so two concurrent updates kill
+    # unrelated sessions mid-turn. REFUSE, never queue: the loser's update is
+    # either already landed (next lines say so) or minutes away, and waiting
+    # would serialize twenty reinstalls of one version. The default pid
+    # anchoring is the release mechanism: os.execvp keeps this pid, the
+    # claim's liveness tracks the installer itself, and once the exec'd shell
+    # exits the next acquire_claim stale-reclaims the corpse - so there is
+    # deliberately no release here (a try/finally after execvp is dead code).
+    from fno.claims import CLAIM_UNAVAILABLE, acquire_claim
+    from fno.claims.io import claims_root_for
+
+    _UPDATE_CLAIM_KEY = "update:fno"
+    try:
+        acquire_claim(
+            _UPDATE_CLAIM_KEY,
+            holder=f"fno-update-pid{os.getpid()}",
+            reason="uv tool env reinstall guard",
+            root=claims_root_for(_UPDATE_CLAIM_KEY),
+        )
+    except CLAIM_UNAVAILABLE as exc:
+        holder = getattr(exc, "holder", "another session")
+        try:
+            from fno import doctor
+
+            installed_rev = doctor._read_marker()
+        except Exception:
+            installed_rev = None
+        if rev and installed_rev == rev:
+            typer.echo(
+                f"fno doctor update: revision {rev} already landed by another "
+                "session; nothing to do."
+            )
+        else:
+            typer.echo(
+                "fno doctor update: another session is updating fno right now "
+                f"(claim held by {holder}); skipping. Re-run once it finishes."
+            )
+        return
+
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the
         # installer as a child and terminates the parent with status 0,
