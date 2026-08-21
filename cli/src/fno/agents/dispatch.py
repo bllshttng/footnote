@@ -6067,9 +6067,9 @@ def _hold_lapsed_for(entry) -> bool:
     try:
         from fno.mail import hold as _hold
 
-        for form in _hold.addresses(entry):
-            if _hold.read(form) is not None:
-                return _hold.lapsed(form)
+        if _hold.read_any(entry) is None:
+            return False
+        return _hold.lapsed(entry)
     except Exception:  # noqa: BLE001 - the gate never raises, and never lifts a hold it could not read
         return False
     return False

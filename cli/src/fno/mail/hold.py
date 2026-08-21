@@ -178,7 +178,7 @@ def extend(handle: str) -> Optional[Hold]:
     )
 
 
-def lapsed(handle: str) -> bool:
+def lapsed(handle) -> bool:
     """True when a TIMED hold for ``handle`` has run out. Only ever timed.
 
     An absent or unreadable clock reads as NOT lapsed, which leaves the flag
@@ -201,7 +201,7 @@ def lapsed(handle: str) -> bool:
     Pure read. It never mutates the registry, so it cannot deadlock a caller
     that already holds the registry lock and cannot raise into the gate.
     """
-    hold = read(handle)
+    hold = read_any(handle)
     if hold is None or hold.until is None:
         return False
     return hold.until <= _now()
@@ -226,7 +226,39 @@ def tidy_lapsed(handle: str) -> bool:
     return True
 
 
-def dnd_label(handle: str) -> Optional[str]:
+def candidate_keys(target) -> tuple:
+    """Every key a clock for ``target`` could sit under, from any address form.
+
+    The ONE resolution rule every READER shares. ``target`` is a registry row
+    or any token that addresses one: a name, a short id, a full session id, or
+    the canonical handle.
+
+    This exists because three readers each keyed differently and each looked
+    correct on claude, where the name, the short id and the canonical handle
+    tend to coincide. On codex they do not, so the DND column read a spawn
+    label, the bounce read whatever the sender typed, and the gate read three
+    forms no writer uses. Same defect, three places, one fix.
+    """
+    if hasattr(target, "harness_session_id") or hasattr(target, "name"):
+        return addresses(target)
+    token = str(target)
+    entry = resolve_entry(token)
+    if entry is None:
+        return (token,)
+    keys = addresses(entry)
+    return keys if token in keys else (token,) + keys
+
+
+def read_any(target) -> Optional[Hold]:
+    """The clock for ``target`` under whichever of its keys carries one."""
+    for key in candidate_keys(target):
+        clock = read(key)
+        if clock is not None:
+            return clock
+    return None
+
+
+def dnd_label(handle) -> Optional[str]:
     """What the DND column shows for a row whose flag IS ``bus-only``.
 
     Defined in terms of :func:`lapsed`, so the column and the delivery gate can
@@ -245,14 +277,14 @@ def dnd_label(handle: str) -> Optional[str]:
     return remaining_label(handle) or "held"
 
 
-def remaining_label(handle: str) -> Optional[str]:
+def remaining_label(handle) -> Optional[str]:
     """The compact remaining-time string alone, or None when there is no clock.
 
     Callers rendering the operator-facing column want :func:`dnd_label`, which
     answers the question the column asks. This one answers only "how long is
     left", and returns None for a row that is held with no end recorded.
     """
-    hold = read(handle)
+    hold = read_any(handle)
     if hold is None:
         return None
     if hold.until is None:
@@ -265,7 +297,7 @@ def remaining_label(handle: str) -> Optional[str]:
     return f"~{math.ceil(seconds / 60)}m"
 
 
-def bounce_reason(recipient: str) -> Optional[str]:
+def bounce_reason(recipient) -> Optional[str]:
     """The busy-mode receipt a sender reads, or None when no hold is running.
 
     A refusal that says nothing is the defect this replaces. A sender that gets

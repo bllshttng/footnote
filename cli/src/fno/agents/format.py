@@ -109,7 +109,10 @@ def _dnd_label(entry: AgentEntry) -> Optional[str]:
     try:
         from fno.mail import hold as _hold
 
-        return _hold.dnd_label(entry.name)
+        # The ENTRY, not `entry.name`. A codex row's name is a spawn label and
+        # its clock sits under the canonical handle, so keying by the name read
+        # a blank cell for a held codex session.
+        return _hold.dnd_label(entry)
     except Exception:  # noqa: BLE001 - a render helper never breaks the listing
         return None
 
