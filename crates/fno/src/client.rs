@@ -975,6 +975,25 @@ struct View {
     tab_drag: Option<TabDrag>,
     /// (v43, x-d6a8 G3) A sideline-row placement drag in flight.
     row_drag: Option<RowDrag>,
+    /// (x-b465) A press being held on a sideline row that is NOT a drag source -
+    /// a workspace name row, a section header. Those rows carry menus
+    /// (`open_row_menu` builds one for a squad row), but the long-press arm that
+    /// opens a menu lives inside the `row_drag` branch, and `row_drag_source_at`
+    /// answers only for agent rows. So a hold on a workspace row armed no state
+    /// and the gesture did nothing at all.
+    ///
+    /// Deliberately NOT a widening of `row_drag_source_at`: a workspace row is
+    /// not a placement source, and making it one would offer a drag with nowhere
+    /// to land. This is the hold clock and the pressed row, nothing else.
+    ///
+    /// `(display_row, identity, pressed_at)`. The identity is load-bearing: an
+    /// index alone is not a row. `display_rows()` is rebuilt on every layout
+    /// push, so a row dropped during the hold slides a DIFFERENT row under the
+    /// same number, and the release would open that row's lifecycle menu - Stop
+    /// and Remove pointed at a worker nobody pressed. Re-checked at release
+    /// against [`View::row_identity`], the same discipline `RowDrag` gets from
+    /// `RowSource` and the selector gets from its name re-anchor.
+    press_hold: Option<(usize, String, Instant)>,
     /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
@@ -1372,6 +1391,16 @@ fn build_keys_modal() -> KeysModal {
         PopupRow::Header("Terminal.app never does · iTerm2: report mouse events".into()),
         None,
     );
+    // (x-b465) Ghostty joins the named list: it binds right-click to its own
+    // context menu by default (`right-click-action`), measured against Warp on
+    // the same build, where the identical press opens the menu. The SETTING is
+    // named, not a value to set: which value restores forwarding is untested
+    // here, and a config line this text cannot vouch for is the kind of
+    // confident wrong answer that cost a whole diagnosis round already.
+    add(
+        PopupRow::Header("Ghostty binds it too · see right-click-action".into()),
+        None,
+    );
     add(
         PopupRow::Header(format!(
             "in tmux set mouse off · else m, or hold Left {}ms",
@@ -1566,6 +1595,18 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         glyph: glyph.into(),
         label: label.into(),
     };
+    // A live row cannot be removed - the server refuses `RemoveAgent` on one
+    // with "still live - stop it first". Rendering the entry greyed beside Stop
+    // says the row CAN be removed and names the precondition, where leaving it
+    // out of the live menus entirely said the action does not exist. Disabled
+    // contributes zero targets (`PopupRow::cells`), so it carries no action and
+    // the actions vector stays aligned with the selectable rows.
+    let inert = |glyph: &str, label: &str, hint: &str| PopupRow::Entry {
+        glyph: glyph.into(),
+        label: label.into(),
+        hint: hint.into(),
+        enabled: false,
+    };
     add(PopupRow::Header(agent.name.clone()), &[]);
     add(PopupRow::Rule, &[]);
     if agent.exited {
@@ -1605,6 +1646,7 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         );
         add(PopupRow::Rule, &[]);
         add(entry("■", "Stop"), &[MenuAction::Stop]);
+        add(inert("✕", "Remove", "stop first"), &[]);
     } else if agent.attach_id.is_some() {
         // Paneless bg row: the motivating case - open as a tab or a split pane.
         // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
@@ -1633,11 +1675,13 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
         add(entry("✉", "Mail"), &[MenuAction::Mail]);
         add(entry("■", "Stop"), &[MenuAction::Stop]);
+        add(inert("✕", "Remove", "stop first"), &[]);
     } else {
         // A live row that is neither pane-hosted nor attachable here.
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
         add(entry("✉", "Mail"), &[MenuAction::Mail]);
         add(entry("■", "Stop"), &[MenuAction::Stop]);
+        add(inert("✕", "Remove", "stop first"), &[]);
     }
     // Diff is common to every row state: it reads the row's worktree,
     // which an exited or paneless row has just as much as a live pane-hosted
@@ -1840,7 +1884,10 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
     // names a join (the gesture path is the tab drag), and LD9 forbids a
     // literal chord standing in for one.
     add(
-        PopupRow::Header(tab_label_text(&tab.name, idx, tab.named)),
+        PopupRow::Header(tab_group_label(
+            tab_label_text(&tab.name, idx, tab.named),
+            tab.panes.len(),
+        )),
         &[],
     );
     add(PopupRow::Rule, &[]);
@@ -1869,10 +1916,10 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
         &[MenuAction::TabJoin(Dir::Up), MenuAction::TabJoin(Dir::Down)],
     );
     add(PopupRow::Rule, &[]);
-    add(
-        entry_kb("✕", "Close tab", "close-tab"),
-        &[MenuAction::TabClose],
-    );
+    // `✕ Close`, not `✕ Close tab`: one shape with the row menu's `✕ Remove`,
+    // so the two destructive affordances read as one vocabulary. The action id
+    // and its `&` chord are untouched.
+    add(entry_kb("✕", "Close", "close-tab"), &[MenuAction::TabClose]);
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Tab(tab.id),
@@ -2237,6 +2284,7 @@ impl View {
             pane_drag: None,
             tab_drag: None,
             row_drag: None,
+            press_hold: None,
             confirm: None,
             create: None,
             create_esc: Vec::new(),
@@ -3294,6 +3342,26 @@ impl View {
                 }
             }
             self.set_notice("no menu on the held row".into());
+            return false;
+        }
+        // (x-b465) The press-hold latch gets the same treatment, and needs it
+        // more: a hold on a workspace row emits no events at all while it is
+        // held, so without this the menu waits for the release. Identity
+        // re-checked here too - the reaper fires precisely when a layout push
+        // is most likely to have landed under the held pointer.
+        if let Some((i, id, start)) = self.press_hold.clone() {
+            if !held_long_enough(start, false) {
+                return false;
+            }
+            self.press_hold = None;
+            if self.row_identity(i).as_ref() != Some(&id) {
+                self.set_notice("the held row moved".into());
+                return false;
+            }
+            if self.open_row_menu(i, Anchor::Center) {
+                return true;
+            }
+            self.set_notice("no menu on the held row".into());
         }
         false
     }
@@ -4078,6 +4146,64 @@ impl View {
             c += w;
         }
         None
+    }
+
+    /// (x-b465) A content-derived identity for the sideline row at `i`, stable
+    /// across a layout push. `None` for a row with no identity of its own (a
+    /// spacer, a table head): those cannot be re-checked after a push, so a
+    /// gesture must not latch onto one in the first place.
+    ///
+    /// An INDEX is not an identity. `display_rows()` is rebuilt on every layout,
+    /// so a row that vanishes mid-gesture slides a different row under the same
+    /// number - which is why `set_layout` re-anchors the selector by agent name
+    /// and why `RowDrag` carries a `RowSource` rather than a position.
+    fn row_identity(&self, i: usize) -> Option<String> {
+        match self.display_rows().get(i)? {
+            DisplayRow::Agent(a) => Some(format!("agent:{}", a.name)),
+            DisplayRow::Sel(s) => Some(format!("squad:{}:{:?}", s.squad, s.tab)),
+            DisplayRow::Card(c) => Some(format!("card:{}", c.id)),
+            DisplayRow::Header { key, .. } => Some(format!("header:{key:?}")),
+            DisplayRow::IdleFold { key, .. } => Some(format!("idlefold:{key:?}")),
+            // A `Sub` line's own text is not unique: it carries an agent's
+            // `cwd_base`, and two agents in one directory render the same
+            // string, as do repeated `+N more` remainders. Anchor it to the
+            // nearest identifiable row above plus its offset from that anchor,
+            // which survives a push the way a bare index does not.
+            DisplayRow::Sub(t) => {
+                let rows = self.display_rows();
+                let anchor = (0..i)
+                    .rev()
+                    .find(|&j| !matches!(rows.get(j), Some(DisplayRow::Sub(_))));
+                let (head, off) = match anchor {
+                    Some(j) => (self.row_identity(j).unwrap_or_default(), i - j),
+                    None => (String::new(), i),
+                };
+                Some(format!("sub:{head}+{off}:{t}"))
+            }
+            DisplayRow::NewSquad => Some("newsquad".into()),
+            DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
+        }
+    }
+
+    /// (x-b465) The sideline row a press at `(row, col)` should HOLD on, with the
+    /// identity to re-check it by, for the rows `row_drag_source_at` declines.
+    /// Inert rows qualify: a hold that opens no menu answers with a notice, and
+    /// silence is the defect this fixes. A row with no stable identity does not,
+    /// so its press keeps the pre-hold behavior rather than latching.
+    ///
+    /// The density button is the one positional exclusion, mirroring
+    /// `row_drag_source_at`'s own row-0 guard - it is pinned chrome painted OVER
+    /// an agent row, so holding it must not open that row's menu.
+    fn press_hold_row_at(&self, row: u16, col: u16) -> Option<(usize, String)> {
+        if row == 0 {
+            if let Some(range) = self.density_button_range(self.panel_w() as usize) {
+                if range.contains(&(col as usize)) {
+                    return None;
+                }
+            }
+        }
+        let i = self.sideline_row_at(row, col)?;
+        Some((i, self.row_identity(i)?))
     }
 
     /// (v43, x-d6a8 G3) The drag source of a sideline agent row under a cell, if
@@ -6049,9 +6175,16 @@ impl View {
     /// content, which is a different complaint from hard to read. It already
     /// measured 9.9:1 on the reporter's scheme.
     ///
-    /// Two things it must not do: stack `BOLD` on the inversion (bold brightens
-    /// the foreground, which reverse has made the background), or pick its own
-    /// colours - see [`MODAL_FG`].
+    /// It must not stack `BOLD` on the inversion: bold brightens the foreground,
+    /// which reverse has made the background. The shared framer handles that.
+    ///
+    /// (x-b465) It wears the SHARED chrome now, the same `Chrome` + `frame` +
+    /// `blit` path the settings, connections and catch-up modals take, with the
+    /// target as the title and the blank-clears rule as the footer. It used to
+    /// hand-paint a bare three-row inverse block with no border, no title bar
+    /// and no esc chip, which under a named theme read as a different
+    /// application dropped into the middle of the screen. That was the last
+    /// modal still inventing its own look.
     fn draw_name_modal(
         &self,
         cells: &mut [Cell],
@@ -6064,51 +6197,42 @@ impl View {
         for c in 0..cols {
             cells[(rows - 1) * cols + c] = Cell::default();
         }
-        let text = match hint {
-            Some(h) => format!("{label}: {name}_   ({h})"),
-            None => format!("{label}: {name}_"),
-        };
-        // Two columns of inverse margin each side, clamped to the terminal.
-        let w = (text.chars().count() + 4).min(cols);
-        // A name longer than the strip scrolls, keeping the CURSOR end visible.
-        // Stamping the head instead cut the `_` off the right edge, so on a
-        // narrow terminal the operator typed a name they could not see - the
-        // one thing a name prompt has to get right.
-        let text = if text.chars().count() + 4 > w {
-            let drop = text.chars().count() + 4 - w;
+        let (origin, dims) = self.overlay_viewport();
+        // The typed name plus its cursor IS the body; the target and the
+        // blank-clears rule move into the chrome, where every other modal puts
+        // them.
+        let mut chrome = chrome::Chrome::new(label, Anchor::Center);
+        if let Some(h) = hint {
+            chrome = chrome.footer(h);
+        }
+        // The footer widens the frame to fit, so on a narrow viewport it has to
+        // be clamped or the right border leaves the screen.
+        chrome = chrome.fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
+        // A name longer than the body scrolls, keeping the CURSOR end visible.
+        // Stamping the head instead cuts the `_` off the right edge, so on a
+        // narrow terminal the operator types a name they cannot see - the one
+        // thing a name prompt has to get right. The shared framer truncates from
+        // the head, so the tail-keeping happens HERE, before it is handed over.
+        let body_w = dims.1.saturating_sub(chrome::Chrome::FRAME_COLS).max(1);
+        let text = format!("{name}_");
+        let text = if text.chars().count() > body_w {
+            let drop = text.chars().count() - body_w;
             let kept: String = text.chars().skip(drop + 1).collect();
             format!("…{kept}")
         } else {
             text
         };
-        let c0 = cols.saturating_sub(w) / 2;
-        let r = rows / 2;
-        let put = |cells: &mut [Cell], row: usize, s: &str| {
-            if row >= rows {
-                return;
-            }
-            // The block stamps a sub-range of each row, so a double-width glyph
-            // in the pane content can straddle either edge. The one-row version
-            // this replaced cleared whole rows and never had to care.
-            blank_straddling_pair(cells, cols, row, c0, c0 + w);
-            for (i, ch) in s.chars().take(w).enumerate() {
-                let col = c0 + i;
-                if col < cols {
-                    cells[row * cols + col] = Cell {
-                        c: ch,
-                        fg: MODAL_FG,
-                        bg: MODAL_BG,
-                        flags: cell_flags::INVERSE,
-                    };
-                }
-            }
-        };
-        // Margins first, text last: on a terminal short enough for the rows to
-        // collide the prompt itself still wins the cell.
-        let blank = " ".repeat(w);
-        put(cells, r.saturating_sub(1), &blank);
-        put(cells, r + 1, &blank);
-        put(cells, r, &format!("  {text}  "));
+        draw_lines_overlay(
+            cells,
+            rows,
+            cols,
+            origin,
+            dims,
+            &chrome,
+            &[text],
+            &self.theme,
+            None,
+        );
     }
 
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
@@ -6333,7 +6457,18 @@ impl View {
             ConfirmKind::ClearDead { dead, .. } => {
                 format!(" clear {dead} dead row(s) in {label}? ⏎/esc")
             }
-            ConfirmKind::CloseTab { .. } => format!(" close tab {label}? ⏎/esc"),
+            // A tab close is a GROUP close on the wire: the server reaps every
+            // leaf in the tab, not the focused pane. Say the count when there is
+            // more than one, so the prompt names what the Enter destroys. Read
+            // from the LIVE layout at draw time, never from the capture: the
+            // prompt may have sat open while panes came and went, and the
+            // commit re-resolves the tab for exactly the same reason.
+            ConfirmKind::CloseTab { tab } => match self.find_tab(*tab) {
+                Some((_, _, t)) if t.panes.len() > 1 => {
+                    format!(" close tab {label} and its {} panes? ⏎/esc", t.panes.len())
+                }
+                _ => format!(" close tab {label}? ⏎/esc"),
+            },
         };
         for (i, ch) in text.chars().take(cols).enumerate() {
             cells[r * cols + i] = Cell {
@@ -6468,7 +6603,7 @@ impl View {
             role: SpanRole::Squad,
         });
         for (i, t) in s.tabs.iter().enumerate() {
-            let label = tab_label_text(&t.name, i, t.named);
+            let label = tab_group_label(tab_label_text(&t.name, i, t.named), t.panes.len());
             // x-df4c US4: a leading max-severity rollup glyph so a background
             // tab's blocked/working pane reads at the strip without opening it,
             // carrying the lattice's weight and color. `None` (no live panes:
@@ -6945,6 +7080,14 @@ impl View {
                 view,
             });
             if view != SectionView::Collapsed {
+                // (x-b465) Inert on purpose, and it stays that way. A mission
+                // squad is a render-time grouping the server appends to the
+                // LAYOUT catalog only (`push_layout`); it is absent from
+                // `session.squads`, so `RenameSquad` and `RemoveSquad` both
+                // answer `no such squad` for its id. A menu built from those
+                // would be entries that all fail, which is worse than none. The
+                // hold answers with `no menu on the held row` instead, so the
+                // row is inert but never silent.
                 for m in missions {
                     out.push(DisplayRow::Sub(m.name.clone()));
                 }
@@ -7837,7 +7980,27 @@ fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
     // mark the active tab, and the squad label's own surrounding spaces.
     let shrink = |s: &mut TabSpan| {
         let mut chars: Vec<char> = s.text.chars().collect();
-        chars.remove(chars.len() - 2);
+        // (x-b465) A group marker must not outlive the name it marks. Columns
+        // come off the right, so the `·N` count goes early - correct, it is the
+        // least of the three. The leading glyph would otherwise survive to the
+        // floor and leave a strip of identical nameless cells, which is worse
+        // than no marker at all: before the marker existed each tab still kept
+        // its first character. Once the count is gone and the name is down to
+        // its last couple of characters, the glyph goes instead.
+        let glyph_at = chars.iter().position(|&c| c == TAB_GROUP_GLYPH);
+        let count_gone = !chars.contains(&TAB_GROUP_SEP);
+        match glyph_at {
+            Some(g) if count_gone && chars.len() <= GROUP_GLYPH_FLOOR => {
+                // The glyph and the space after it.
+                if chars.get(g + 1) == Some(&' ') {
+                    chars.remove(g + 1);
+                }
+                chars.remove(g);
+            }
+            _ => {
+                chars.remove(chars.len() - 2);
+            }
+        }
         s.text = chars.into_iter().collect();
     };
     while total(spans) > width {
@@ -8414,6 +8577,39 @@ fn tab_label_text(name: &str, i: usize, named: bool) -> String {
     }
 }
 
+/// Mark a tab that holds more than one pane: the stacked glyph in front, the
+/// pane count behind. A tab holding four panes rendered identically to one
+/// holding a single pane, so an operator could not tell what a tab-level close
+/// would destroy before pressing it.
+///
+/// Separate from [`tab_label_text`] rather than a parameter on it: that helper
+/// is layout-free and its tests pin the ordinal-collapse rules, while a pane
+/// count is a layout fact. One implementation, shared by the strip and the tab
+/// menu's header, so the menu can never describe a different tab than the cell
+/// the operator pressed.
+///
+/// A single-pane tab passes through unchanged, byte-identical to the render
+/// before this existed.
+fn tab_group_label(label: String, panes: usize) -> String {
+    if panes > 1 {
+        format!("{TAB_GROUP_GLYPH} {label}{TAB_GROUP_SEP}{panes}")
+    } else {
+        label
+    }
+}
+
+/// The stacked glyph a grouped tab leads with, and the separator before its
+/// count. Named because [`condense_to_width`] has to recognize them: a marker
+/// that outlives the name it marks turns a crowded strip into identical
+/// nameless cells.
+const TAB_GROUP_GLYPH: char = '▤';
+const TAB_GROUP_SEP: char = '·';
+
+/// Total span width at or below which [`condense_to_width`] drops a group glyph
+/// rather than another name character: one pad, the glyph and its space, two
+/// characters of name, one pad.
+const GROUP_GLYPH_FLOOR: usize = 6;
+
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
 /// boundary so `/home/user2/...` never reads as `~2/...`.
 fn abbrev_home(p: &str) -> String {
@@ -8518,6 +8714,29 @@ fn draw_lines_overlay<S: AsRef<str>>(
     let box_w = framed.width.min(content_cols);
     let origin_r = base_r + content_rows.saturating_sub(box_h) / 2;
     let origin_c = base_c + content_cols.saturating_sub(box_w) / 2;
+    // (x-b465) A framed block stamps a SUB-RANGE of each row, so a double-width
+    // glyph in the pane content underneath can straddle either edge, leaving one
+    // half painted and the row corrupted. The name modal carried this guard when
+    // it hand-painted its own block; every family-B overlay needs it for the same
+    // reason, so it lives here, once, rather than travelling with one caller.
+    for i in 0..framed.lines.len() {
+        let r = origin_r + i;
+        if r >= rows {
+            break;
+        }
+        // `framed.width`, not `box_w`: `blit` paints the FULL framed width, and
+        // `box_w` is that width clamped to the viewport. When the chrome's own
+        // minimum (a long title) pushes the frame past the viewport the two
+        // differ, and clamping here would leave the real right edge unchecked -
+        // stranding a spacer on exactly the overflow this guard exists for.
+        blank_straddling_pair(
+            cells,
+            cols,
+            r,
+            origin_c,
+            (origin_c + framed.width).min(cols),
+        );
+    }
     chrome::blit(cells, rows, cols, (origin_r, origin_c), &framed, theme);
 }
 
@@ -8840,16 +9059,6 @@ enum LatticeState {
 /// default `terminal` theme the two are the same `Indexed(3)` (x-f75e).
 #[cfg(test)]
 const LATTICE_ACCENT: Color = Color::Indexed(3);
-
-/// The name-entry modal's pair: the theme's own, inverted.
-///
-/// Briefly `Indexed(0)` on `Indexed(15)`, on the theory that every scheme keeps
-/// 0 and 15 at the extremes. It does not: Macchiato's are `#494d64` and
-/// `#b8c0e0`, which measure 4.6:1 where the inverted default pair measures
-/// 9.9:1. A scheme's default pair is the one pair its author guaranteed
-/// readable. Pinned by `palette_extremes_are_not_extremes_in_a_real_scheme`.
-const MODAL_FG: Color = Color::Default;
-const MODAL_BG: Color = Color::Default;
 
 struct LatticeStyle {
     glyph: char,
@@ -9813,6 +10022,17 @@ async fn attach_and_run(
                     .as_ref()
                     .map(|d| d.last_at + PANE_DRAG_TIMEOUT),
             )
+            // (x-b465) The press-hold latch joins the same reaper. It has no
+            // `last_at` to refresh - a hold is motionless by definition - so its
+            // deadline runs from the press. Lose terminal focus mid-hold and the
+            // release lands in the other app; without this the latch survives,
+            // and a later stray release pops a menu on a row nobody is pressing,
+            // its clock long past the long-press threshold.
+            .chain(
+                view.press_hold
+                    .as_ref()
+                    .map(|(_, _, start)| *start + PANE_DRAG_TIMEOUT),
+            )
             .min();
         // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
         // while the overlay is open, wake at the next frame boundary so the
@@ -10328,6 +10548,20 @@ async fn attach_and_run(
                 if !view.open_drag_menu() {
                     view.cancel_tab_drag();
                     view.cancel_row_drag();
+                    // (x-b465) A press-hold `open_drag_menu` declined is a dead
+                    // gesture - drop it so a later stray release cannot claim
+                    // it. Only when its OWN deadline expired, though: the
+                    // deadline above is a `min()` across the latches, so a tab
+                    // drag firing first must not clear a press-hold that is
+                    // still young. That would swallow the click its press
+                    // deferred, with nothing left to run it.
+                    if view
+                        .press_hold
+                        .as_ref()
+                        .is_some_and(|(_, _, start)| start.elapsed() >= PANE_DRAG_TIMEOUT)
+                    {
+                        view.press_hold = None;
+                    }
                 }
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
@@ -10401,11 +10635,18 @@ async fn handle_stdin(
         // would leave the drag latched - visibly stuck, eating input until its
         // timeout - for a gesture the operator has already finished. Nobody is
         // shift-selecting text mid-drag, so nothing is taken away here.
+        // (x-b465) `press_hold` belongs in this list for the same reason and with
+        // more at stake: the press it latched DEFERRED a click, so dropping its
+        // release does not merely leave state armed - it swallows the action
+        // entirely. On a terminal that marks releases with Shift, every plain
+        // click on a workspace, section or card row would become a no-op, and
+        // the reaper would later open a menu nobody asked for.
         let ends_a_drag = matches!(rep.kind, MouseKind::Release(MouseButton::Left))
             && (view.pane_drag.is_some()
                 || view.seam_drag.is_some()
                 || view.tab_drag.is_some()
-                || view.row_drag.is_some());
+                || view.row_drag.is_some()
+                || view.press_hold.is_some());
         if rep.shift && !ends_a_drag {
             continue;
         }
@@ -10670,6 +10911,90 @@ async fn handle_stdin(
                 }
             }
         }
+        // (x-b465) A press held on a menu-bearing sideline row that is not a drag
+        // source. The drag arms above own their own releases; this owns the rest,
+        // so a workspace row answers a hold the way an agent row does.
+        if view.press_hold.is_some() {
+            match rep.kind {
+                MouseKind::Release(MouseButton::Left) => {
+                    let held = view.press_hold.take();
+                    // A TIME question, not a position one, matching the row-drag
+                    // arm: a release that slips off the pressed row during a
+                    // genuine motionless hold must not end in silence. The menu
+                    // opens on the row the press LANDED on, never on whatever
+                    // the release reports, so a slip can never act on a
+                    // neighbour. Under a usurping overlay the hold degrades to
+                    // the plain click below - a menu there would steal the
+                    // overlay's keys.
+                    // Fail closed unless the pressed row is STILL that row. A
+                    // layout push during the hold rebuilds `display_rows()`, so
+                    // a row that vanished slides its neighbour under the same
+                    // index and the menu would open on a worker nobody pressed
+                    // - Stop and Remove aimed at the wrong agent. Re-checking
+                    // the identity is what `still_on_row` is for the drag arm.
+                    let same_row = held
+                        .as_ref()
+                        .is_some_and(|(i, id, _)| view.row_identity(*i).as_ref() == Some(id));
+                    let long_press = same_row
+                        && !view.menu_usurping_open()
+                        && held
+                            .as_ref()
+                            .is_some_and(|(_, _, start)| held_long_enough(*start, false));
+                    if long_press {
+                        let opened = held.as_ref().is_some_and(|(i, _, _)| {
+                            view.open_row_menu(
+                                *i,
+                                Anchor::At {
+                                    row: rep.row,
+                                    col: rep.col,
+                                },
+                            )
+                        });
+                        // A row whose menu `open_row_menu` declines (a Backlog
+                        // section, an inert label) still SAYS so - the same
+                        // notice the row-drag arm emits, for the same reason.
+                        if !opened {
+                            view.set_notice("no menu on the held row".into());
+                        }
+                        view.refresh_hover_affordances(rep.row, rep.col);
+                        continue;
+                    }
+                    // Too short to be a hold: it was a click, so run the action
+                    // the press deferred.
+                    //
+                    // Two gates, because `chrome_hit` resolves at the RELEASE
+                    // coordinates and the identity check only vouches for the
+                    // PRESSED index. A release that slipped to another row - no
+                    // intervening Drag report is required, the row-drag arm
+                    // above assumes terminals that omit them - would otherwise
+                    // run the OTHER row's action: a different workspace
+                    // selected, a different card's dispatch confirm armed. So
+                    // the release must still land on the row that was pressed,
+                    // which is `still_on_row` in the drag arm's vocabulary.
+                    // Position matters here even though it must not gate the
+                    // MENU: opening a menu on the pressed row is unambiguous,
+                    // acting on a row nobody pressed is not.
+                    let still_on_row = held.as_ref().is_some_and(|(i, _, _)| {
+                        view.press_hold_row_at(rep.row, rep.col).map(|(j, _)| j) == Some(*i)
+                    });
+                    if same_row && still_on_row {
+                        if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
+                            apply_hit(view, hit, sock_w).await?;
+                        }
+                    }
+                    view.refresh_hover_affordances(rep.row, rep.col);
+                    continue;
+                }
+                // Real motion under the held button disqualifies the hold, and
+                // any other termination drops it. Neither runs the deferred
+                // click: a gesture that turned into something else is not one.
+                MouseKind::Drag(MouseButton::Left) => {
+                    view.press_hold = None;
+                }
+                MouseKind::Move => {}
+                _ => view.press_hold = None,
+            }
+        }
         // x-d807: the sideline border drag, same ownership rule as a seam drag.
         // Client-local: the sideline is never on the wire, so a width change only
         // tells the server its content area changed (x-2e86: a free width now,
@@ -10694,12 +11019,23 @@ async fn handle_stdin(
             }
         }
         // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
-        // click / scroll cancels it and is SWALLOWED - it must never leak to a
+        // PRESS / scroll cancels it and is SWALLOWED - it must never leak to a
         // pane underneath (the confirm prompt spans the full-width bottom row) nor
         // silently open a second card's confirm (codex peer review). Hover (Move)
         // still falls through to update the highlight beneath the prompt.
+        //
+        // A Release is swallowed like the rest but does NOT cancel. Every real
+        // dismissal starts with a press, which this arm already ate, so the only
+        // release that can reach here is the tail of the click that ARMED the
+        // confirm - and cancelling on that made every menu entry ending in a
+        // confirm dead to the mouse: the prompt opened and vanished inside one
+        // click, which reads as "the menu item does nothing". Swallowing it
+        // still matters: a release forwarded to the inner app would arrive with
+        // no press before it.
         if view.confirm.is_some() && !matches!(rep.kind, MouseKind::Move) {
-            view.confirm = None;
+            if !matches!(rep.kind, MouseKind::Release(_)) {
+                view.confirm = None;
+            }
             continue;
         }
         // Bare motion is hover (x-a496): record the sideline highlight + the
@@ -10724,6 +11060,17 @@ async fn handle_stdin(
             }
             if let Some(src) = view.row_drag_source_at(rep.row, rep.col) {
                 view.begin_row_drag(src, Instant::now());
+                continue;
+            }
+            // (x-b465) A sideline row that is NOT a drag source still has a menu
+            // to hold for - a workspace name row is the motivating case. Arm the
+            // hold clock and DEFER the click: the release decides between the
+            // menu and `chrome_hit`'s own action, exactly as the drag arm defers
+            // a zone-less release to that same action. Before `chrome_hit`, for
+            // the same reason `begin_row_drag` is: applying the click here would
+            // spend the press before the hold could be measured.
+            if let Some((i, id)) = view.press_hold_row_at(rep.row, rep.col) {
+                view.press_hold = Some((i, id, Instant::now()));
                 continue;
             }
             if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
@@ -19852,30 +20199,36 @@ mod tests {
     fn name_entry_prompt_renders_centered_naming_its_target() {
         // The create/rename/recruit name inputs used to paint the bottom-left
         // chrome row (plain BOLD, outside the operator's field of view). They now
-        // render as a centered inverse-video modal that names the target.
+        // render as a centered modal that names the target.
+        //
+        // (x-b465) The target moved into the chrome TITLE and the name is the
+        // body, so this scans the whole block rather than one line - the modal
+        // wears the shared frame now and its parts sit on different rows.
         let mut v = two_pane_view();
         v.rename = Some((RenameTarget::Squad(1), "renamed".into()));
         let (rows, cols) = (v.term.0 as usize, v.term.1 as usize);
         let mut cells = vec![Cell::default(); rows * cols];
         v.draw_bottom_row(&mut cells, rows, cols);
-        let mid = rows / 2;
-        let midline: String = cells[mid * cols..(mid + 1) * cols]
-            .iter()
-            .map(|c| c.c)
-            .collect();
+        let screen: String = (0..rows)
+            .map(|r| {
+                cells[r * cols..(r + 1) * cols]
+                    .iter()
+                    .map(|c| c.c)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            midline.contains("rename workspace"),
-            "centered modal names its target: {midline:?}"
+            screen.contains("rename workspace"),
+            "the modal names its target: {screen}"
         );
         assert!(
-            midline.contains("renamed_"),
-            "shows the in-progress name + cursor: {midline:?}"
+            screen.contains("renamed_"),
+            "shows the in-progress name + cursor: {screen}"
         );
         assert!(
-            cells[mid * cols..(mid + 1) * cols]
-                .iter()
-                .any(|c| c.flags & cell_flags::INVERSE != 0),
-            "the centered modal inverts the theme pair, not the old plain bottom row"
+            cells.iter().any(|c| c.flags & cell_flags::INVERSE != 0),
+            "the modal inverts the theme pair, not the old plain bottom row"
         );
         let bottom: String = cells[(rows - 1) * cols..rows * cols]
             .iter()
@@ -20300,7 +20653,8 @@ mod tests {
         );
         // The destructive item sits last, after a Rule (menu grammar).
         let labels = menu_labels(m);
-        assert_eq!(labels.last().map(String::as_str), Some("Close tab"));
+        // `Close`, not `Close tab`: one shape with the row menu's `✕ Remove`.
+        assert_eq!(labels.last().map(String::as_str), Some("Close"));
         assert!(
             m.popup
                 .rows
@@ -20438,6 +20792,69 @@ mod tests {
             ClientMsg::Mouse { pane, .. } => assert_eq!(pane, 10, "forwarded to pane 10"),
             other => panic!("expected a pane mouse forward, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_confirm_survives_the_release_of_the_click_that_armed_it() {
+        // The mouse path, end to end: clicking a menu entry that arms a confirm
+        // used to cancel it on the RELEASE of that same click, so the prompt
+        // opened and vanished inside one gesture and the entry read as dead.
+        // Driven through handle_stdin with real SGR bytes - the builder-level
+        // tests never touched this path, which is how the gap survived them.
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        let row = agent_row_at(&v, |a| a.name == "w");
+        assert!(v.open_row_menu(row, Anchor::Center));
+        menu_select(&mut v, super::MenuAction::Stop).await;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(v.confirm.is_some(), "the entry armed a confirm");
+
+        // The release of that click. Left release at 0-based (5, 30): `m`
+        // terminates an SGR release, `M` a press.
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<0;31;6m", &mut buf)
+            .await
+            .unwrap();
+        assert!(
+            v.confirm.is_some(),
+            "the arming click's own release must not cancel the confirm"
+        );
+        assert!(
+            buf.is_empty(),
+            "and it is still swallowed - a release must never reach the pane \
+             underneath with no press before it"
+        );
+
+        // Enter still commits it.
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::StopAgent { name: "w".into() }],
+            "Enter commits the confirm the click armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_press_still_cancels_an_armed_confirm() {
+        // The narrowing is release-only: a genuine dismissal starts with a
+        // PRESS, and that still cancels and is still swallowed (no leak to the
+        // pane underneath).
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        let row = agent_row_at(&v, |a| a.name == "w");
+        assert!(v.open_row_menu(row, Anchor::Center));
+        menu_select(&mut v, super::MenuAction::Stop).await;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(v.confirm.is_some());
+
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<0;31;6M", &mut buf)
+            .await
+            .unwrap();
+        assert!(v.confirm.is_none(), "a press cancels");
+        assert!(buf.is_empty(), "and is swallowed, never reaching the pane");
     }
 
     #[tokio::test]
@@ -20639,6 +21056,263 @@ mod tests {
             "the held row's menu opened"
         );
         assert!(buf.is_empty(), "no focus or pane input rode the long press");
+    }
+
+    #[tokio::test]
+    async fn a_long_press_on_a_workspace_row_opens_its_menu() {
+        // (x-b465) The reported gap: a hold on a workspace row did nothing at
+        // all. `open_row_menu` has built that menu since x-10ec, but the
+        // long-press arm lived inside the `row_drag` branch and
+        // `row_drag_source_at` answers only for agent rows, so a workspace press
+        // armed no state and the release had nothing to resolve.
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        let hdr = squad_header_at(&v, 1);
+        let id = v
+            .row_identity(hdr)
+            .expect("a workspace row has an identity");
+        v.press_hold = Some((hdr, id, Instant::now() - Duration::from_millis(600)));
+        let mut buf: Vec<u8> = Vec::new();
+        release_left(&mut v, hdr as u16, 5, &mut buf).await.unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Section { squad: Some(1), .. })
+            ),
+            "the held workspace row's menu opened: {:?}",
+            v.row_menu.as_ref().map(|m| &m.target)
+        );
+        assert!(buf.is_empty(), "no workspace selection rode the long press");
+    }
+
+    #[tokio::test]
+    async fn a_short_press_on_a_workspace_row_still_selects_it() {
+        // The deferral must be invisible below the hold threshold: the press no
+        // longer applies the click action, so the RELEASE has to.
+        // Squad 2's row, not the active squad's: clicking the ACTIVE one cycles
+        // its section view client-side and puts nothing on the wire, which
+        // cannot tell a deferred click from a dropped one.
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        let hdr = squad_header_at(&v, 2);
+        let id = v
+            .row_identity(hdr)
+            .expect("a workspace row has an identity");
+        v.press_hold = Some((hdr, id, Instant::now()));
+        let mut buf: Vec<u8> = Vec::new();
+        release_left(&mut v, hdr as u16, 4, &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "too short to be a hold");
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::SelectSquad(2)],
+            "the click the press deferred runs on the release"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_press_on_an_inert_row_says_so_instead_of_nothing() {
+        // A mission row is a `DisplayRow::Sub` label with no menu by
+        // construction (its synthetic squad id is absent from `session.squads`,
+        // so every squad verb would answer `no such squad`). The hold must still
+        // ANSWER - silence is the defect, and a menu of failing entries would be
+        // worse than none.
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        // Seed a real mission squad: the fixture's own squads are ids 1 and 2,
+        // neither synthetic, so without this there is no `Sub` row and the test
+        // asserts nothing. An earlier version guarded on the row's existence and
+        // returned - a green test measuring nothing.
+        v.layout.squads.push(mission_meta(7, "epic  1/2"));
+        let sub = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Sub(_)))
+            .expect("the mission band renders its squad as an inert Sub row");
+        let id = v.row_identity(sub).expect("a Sub row has an identity");
+        v.press_hold = Some((sub, id, Instant::now() - Duration::from_millis(600)));
+        let mut buf: Vec<u8> = Vec::new();
+        release_left(&mut v, sub as u16, 5, &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "an inert row opens no menu");
+        assert_eq!(
+            v.notice.as_ref().map(|(t, _)| t.as_str()),
+            Some("no menu on the held row"),
+            "the hold answers rather than falling silent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hold_whose_row_moved_under_it_refuses_rather_than_acting() {
+        // An INDEX is not a row. `display_rows()` is rebuilt on every layout
+        // push, so a row dropped mid-hold slides its neighbour under the same
+        // number. Acting on that number would open a lifecycle menu - Stop,
+        // Remove - on a worker nobody pressed. The same trap `RowDrag` avoids
+        // with `RowSource` and the selector avoids by re-anchoring on name.
+        let mut v = view_with_agents(vec![
+            agent_row("alpha", 10, Some(AgentBadge::Working), false),
+            agent_row("beta", 11, Some(AgentBadge::Working), false),
+        ]);
+        let held = agent_row_at(&v, |a| a.name == "alpha");
+        let id = v.row_identity(held).expect("an agent row has an identity");
+        v.press_hold = Some((held, id, Instant::now() - Duration::from_millis(600)));
+        // alpha leaves while the button is down; beta takes its index.
+        v.layout.agents.retain(|a| a.name != "alpha");
+        assert_eq!(
+            v.row_identity(held),
+            Some("agent:beta".into()),
+            "fixture: beta really did slide under the held index"
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        release_left(&mut v, held as u16, 5, &mut buf)
+            .await
+            .unwrap();
+        assert!(
+            v.row_menu.is_none(),
+            "no menu opens on the row that took the index"
+        );
+        assert!(buf.is_empty(), "and no command rides the released press");
+    }
+
+    #[test]
+    fn the_reaper_opens_a_qualifying_hold_and_refuses_a_moved_one() {
+        // A motionless hold emits no events, so for a workspace row the dead-
+        // gesture reaper is the only thing that can fire before the release.
+        // Both of its outcomes are asserted here: the untested half of a branch
+        // is how the vacuous mission-row test got through.
+        let mut v = view_with_agents(vec![
+            agent_row("alpha", 10, Some(AgentBadge::Working), false),
+            agent_row("beta", 11, Some(AgentBadge::Working), false),
+        ]);
+        let held = agent_row_at(&v, |a| a.name == "alpha");
+        let id = v.row_identity(held).expect("an agent row has an identity");
+
+        // Still the same row: the reaper opens its menu rather than dropping it.
+        v.press_hold = Some((
+            held,
+            id.clone(),
+            Instant::now() - Duration::from_millis(600),
+        ));
+        assert!(
+            v.open_drag_menu(),
+            "a qualifying hold opens from the reaper"
+        );
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Agent(ident)) if ident.name == "alpha"
+            ),
+            "and on the row that was actually held"
+        );
+        assert!(v.press_hold.is_none(), "the reaper consumed the latch");
+
+        // Row replaced under the index: refuse, and say why.
+        v.row_menu = None;
+        v.notice = None;
+        v.press_hold = Some((held, id, Instant::now() - Duration::from_millis(600)));
+        v.layout.agents.retain(|a| a.name != "alpha");
+        assert!(!v.open_drag_menu(), "a moved row opens nothing");
+        assert!(
+            v.row_menu.is_none(),
+            "least of all the row that replaced it"
+        );
+        assert_eq!(
+            v.notice.as_ref().map(|(t, _)| t.as_str()),
+            Some("the held row moved"),
+            "and the refusal is stated, not silent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_press_on_a_sideline_row_defers_its_click_to_the_release() {
+        // The press arm end to end, through handle_stdin: it now defers EVERY
+        // sideline click to the release, so a regression that swallowed the
+        // press without the release re-applying it would look green in a suite
+        // that only ever sets `press_hold` by hand.
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        let hdr = squad_header_at(&v, 2);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let press = format!("\x1b[<0;{};{}M", 4 + 1, hdr + 1);
+        super::handle_stdin(&mut v, &mut scanner, &mut carry, press.as_bytes(), &mut buf)
+            .await
+            .unwrap();
+        assert!(v.press_hold.is_some(), "the press armed the hold");
+        assert!(
+            buf.is_empty(),
+            "and sent nothing yet - the click is deferred"
+        );
+
+        release_left(&mut v, hdr as u16, 4, &mut buf).await.unwrap();
+        assert!(v.press_hold.is_none(), "the release consumed the hold");
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::SelectSquad(2)],
+            "and the deferred click ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_press_on_a_row_with_no_identity_is_not_deferred() {
+        // A spacer has nothing to re-check after a layout push, so it must not
+        // latch at all - its press keeps the pre-hold behavior rather than
+        // deferring a click that can never be validated.
+        let v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        let blank = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Blank))
+            .expect("two squads put a spacer between the groups");
+        assert!(
+            v.press_hold_row_at(blank as u16, 4).is_none(),
+            "a spacer arms no hold"
+        );
+    }
+
+    #[test]
+    fn only_a_multi_pane_tab_wears_the_group_marker() {
+        // A tab holding four panes rendered identically to one holding a single
+        // pane, so the operator could not tell what a tab-level close would
+        // destroy before pressing it.
+        assert_eq!(
+            super::tab_group_label("3:build".into(), 4),
+            "▤ 3:build·4",
+            "a group names its size"
+        );
+        assert_eq!(
+            super::tab_group_label("3:build".into(), 1),
+            "3:build",
+            "a single-pane tab is untouched"
+        );
+        assert_eq!(
+            super::tab_group_label("3:build".into(), 0),
+            "3:build",
+            "and so is an empty one"
+        );
+    }
+
+    #[test]
+    fn a_live_row_shows_remove_as_inert_rather_than_hiding_it() {
+        // The server refuses RemoveAgent on a live row ("still live - stop it
+        // first"). Hiding the entry said the action does not exist; showing it
+        // greyed says it exists and names the precondition. Disabled contributes
+        // zero targets, so it can never be selected and never shifts the actions
+        // vector.
+        let live = agent_row("w", 10, Some(AgentBadge::Working), false);
+        let menu = super::build_row_menu(&live, Anchor::Center);
+        let inert: Vec<&PopupRow> = menu
+            .popup
+            .rows
+            .iter()
+            .filter(|r| matches!(r, PopupRow::Entry { enabled: false, .. }))
+            .collect();
+        assert!(
+            matches!(
+                inert.as_slice(),
+                [PopupRow::Entry { label, hint, .. }] if label == "Remove" && hint == "stop first"
+            ),
+            "exactly one greyed Remove naming its precondition: {inert:?}"
+        );
+        assert!(
+            !menu.actions.contains(&super::MenuAction::Remove),
+            "a live row's Remove carries no action to run"
+        );
     }
 
     #[tokio::test]
@@ -20996,7 +21670,10 @@ mod tests {
         // dismissing itself. Unlike peek (which the menu-open path clears),
         // none is cleared on open, so a menu over one steals its keys - Enter
         // meant to accept an answer could run a menu action on a live agent.
-        let overlays: [(&str, Box<dyn FnOnce(&mut super::View)>); 3] = [
+        // Named so clippy's type_complexity stays quiet: the array is a table of
+        // (label, opener), and spelling the boxed closure inline said neither.
+        type OpenOverlay = Box<dyn FnOnce(&mut super::View)>;
+        let overlays: [(&str, OpenOverlay); 3] = [
             ("answers", Box::new(|v| v.answers = Some(0))),
             (
                 "yard",
@@ -21222,7 +21899,7 @@ mod tests {
             ("Rename", "rename-tab"),
             ("Move left", "move-tab-left"),
             ("Move right", "move-tab-right"),
-            ("Close tab", "close-tab"),
+            ("Close", "close-tab"),
         ] {
             assert_eq!(
                 hint_of(&tab, label),
@@ -29702,17 +30379,27 @@ mod tests {
             vec![],
         );
         let (rows, cols) = (24usize, 80usize);
-        let r = rows / 2;
 
         // Read the block's extent off a probe rather than recomputing its
-        // format here: a test that restates the format stops testing it.
+        // format here: a test that restates the format stops testing it. Since
+        // x-b465 the block is the SHARED frame, so its height and origin come
+        // from the chrome - discover which rows it paints instead of naming
+        // three.
         let mut probe = vec![Cell::default(); rows * cols];
         view.draw_name_modal(&mut probe, rows, cols, "rename tab", "release", None);
-        let lit: Vec<usize> = (0..cols)
-            .filter(|c| probe[r * cols + c].flags & cell_flags::INVERSE != 0)
+        let painted: Vec<(usize, usize, usize)> = (0..rows)
+            .filter_map(|r| {
+                let lit: Vec<usize> = (0..cols)
+                    .filter(|&c| probe[r * cols + c] != Cell::default())
+                    .collect();
+                (!lit.is_empty()).then(|| (r, lit[0], lit[lit.len() - 1] + 1))
+            })
             .collect();
-        let (c0, end) = (lit[0], lit[lit.len() - 1] + 1);
-        assert!(c0 > 0 && end < cols, "fixture needs margins on both sides");
+        assert!(!painted.is_empty(), "the modal painted nothing");
+        assert!(
+            painted.iter().all(|&(_, c0, end)| c0 > 0 && end < cols),
+            "fixture needs margins on both sides: {painted:?}"
+        );
 
         let mut cells = vec![Cell::default(); rows * cols];
         let lead = |c: char| Cell {
@@ -29729,7 +30416,7 @@ mod tests {
         };
         // Straddle BOTH edges of EVERY row the block touches: a pair whose
         // spacer is the block's first cell, and one whose lead is its last.
-        for row in [r - 1, r, r + 1] {
+        for &(row, c0, end) in &painted {
             cells[row * cols + c0 - 1] = lead('\u{4f60}');
             cells[row * cols + c0] = spacer;
             cells[row * cols + end - 1] = lead('\u{597d}');
@@ -29737,18 +30424,25 @@ mod tests {
         }
 
         view.draw_name_modal(&mut cells, rows, cols, "rename tab", "release", None);
-        for row in [r - 1, r, r + 1] {
+        for &(row, _, _) in &painted {
             assert_pairs_intact(
                 &cells[row * cols..(row + 1) * cols],
                 &format!("modal row {row}"),
             );
         }
-        // And the prompt still drew.
-        let text: String = (0..cols).map(|c| cells[r * cols + c].c).collect();
-        assert!(
-            text.contains("rename tab: release_"),
-            "prompt missing: {text:?}"
-        );
+        // And the prompt still drew: the target in the chrome, the name in the
+        // body.
+        let screen: String = (0..rows)
+            .map(|r| {
+                cells[r * cols..(r + 1) * cols]
+                    .iter()
+                    .map(|c| c.c)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("rename tab"), "target missing: {screen}");
+        assert!(screen.contains("release_"), "prompt missing: {screen}");
     }
 
     #[test]
@@ -29767,22 +30461,35 @@ mod tests {
         let long = "a-really-quite-long-release-branch-name";
         view.draw_name_modal(&mut cells, rows, cols, "rename tab", long, None);
 
-        let r = rows / 2;
-        let line: String = (0..cols).map(|c| cells[r * cols + c].c).collect();
+        // (x-b465) The name is the framed body, so read the whole block: the
+        // title sits on the top border, the name a row below it.
+        let screen = |cells: &[Cell]| -> String {
+            (0..rows)
+                .map(|r| {
+                    cells[r * cols..(r + 1) * cols]
+                        .iter()
+                        .map(|c| c.c)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let shot = screen(&cells);
         assert!(
-            line.contains("name_"),
-            "the cursor and the tail of what was typed must be visible: {line:?}"
+            shot.contains("name_"),
+            "the cursor and the tail of what was typed must be visible: {shot}"
         );
         assert!(
-            line.contains('…'),
-            "and the scroll has to be visible as a scroll: {line:?}"
+            shot.contains('…'),
+            "and the scroll has to be visible as a scroll: {shot}"
         );
-        // A name that fits is untouched: no ellipsis, label still shown.
+        // A name that fits is untouched: no ellipsis, target still named.
         let mut cells = vec![Cell::default(); rows * cols];
         view.draw_name_modal(&mut cells, rows, cols, "rename tab", "short", None);
-        let line: String = (0..cols).map(|c| cells[r * cols + c].c).collect();
-        assert!(line.contains("rename tab: short_"), "got {line:?}");
-        assert!(!line.contains('…'), "nothing to scroll: {line:?}");
+        let shot = screen(&cells);
+        assert!(shot.contains("rename tab"), "got {shot}");
+        assert!(shot.contains("short_"), "got {shot}");
+        assert!(!shot.contains('…'), "nothing to scroll: {shot}");
     }
 
     #[test]
@@ -30185,9 +30892,21 @@ mod tests {
     #[test]
     fn ux_shot_rename_prompt_is_legible() {
         use crate::frame_html::{self, write_shot};
+        // (x-b465) The modal wears the shared frame, so the typed name no longer
+        // sits on the terminal's middle row - the border, title and footer share
+        // the block. Find the BODY row by its content: that is the row whose
+        // legibility this test is about.
         let modal_at = |view: &View| -> (Frame, usize) {
             let frame = view.compose();
-            let row = frame.rows as usize / 2;
+            let cols = frame.cols as usize;
+            let row = (0..frame.rows as usize)
+                .find(|r| {
+                    (0..cols)
+                        .map(|c| frame.cells[r * cols + c].c)
+                        .collect::<String>()
+                        .contains('_')
+                })
+                .unwrap_or(frame.rows as usize / 2);
             (frame, row)
         };
         let mut view = shot_view(
@@ -30203,21 +30922,23 @@ mod tests {
         // focused-row band and the divider accents are inverse too, and they
         // are different rules with different styles (one of them BOLD), so a
         // bare flag test would judge them against the modal's contract.
-        let modal_cols = |f: &Frame, row: usize| -> Option<std::ops::RangeInclusive<usize>> {
-            let inv = |c: usize| f.cells[row * cols + c].flags & cell_flags::INVERSE != 0;
-            let mid = cols / 2;
-            if !inv(mid) {
-                return None;
-            }
-            let lo = (0..=mid)
-                .rev()
-                .take_while(|&c| inv(c))
-                .last()
-                .unwrap_or(mid);
-            let hi = (mid..cols).take_while(|&c| inv(c)).last().unwrap_or(mid);
-            Some(lo..=hi)
-        };
-        let span = modal_cols(&frame, row).expect("the prompt row painted nothing");
+        // Anchor the span walk on a column the modal certainly owns - the cursor
+        // it just drew. The block is centered on the CONTENT viewport, which the
+        // sideline offsets, so the frame's own middle column can sit outside it.
+        let modal_cols =
+            |f: &Frame, row: usize, at: usize| -> Option<std::ops::RangeInclusive<usize>> {
+                let inv = |c: usize| f.cells[row * cols + c].flags & cell_flags::INVERSE != 0;
+                if !inv(at) {
+                    return None;
+                }
+                let lo = (0..=at).rev().take_while(|&c| inv(c)).last().unwrap_or(at);
+                let hi = (at..cols).take_while(|&c| inv(c)).last().unwrap_or(at);
+                Some(lo..=hi)
+            };
+        let cursor_col = (0..cols)
+            .find(|&c| frame.cells[row * cols + c].c == '_')
+            .unwrap_or(cols / 2);
+        let span = modal_cols(&frame, row, cursor_col).expect("the prompt row painted nothing");
         let prompt: Vec<&Cell> = span.clone().map(|c| &frame.cells[row * cols + c]).collect();
         for cell in &prompt {
             assert_eq!(
@@ -30252,7 +30973,8 @@ mod tests {
                 );
             }
         }
-        // The block, not a text-hugging stripe: margin rows above and below.
+        // The block, not a text-hugging stripe: the frame's own rows above and
+        // below the body.
         for r in [row - 1, row + 1] {
             assert!(
                 span.clone()
@@ -30261,12 +30983,21 @@ mod tests {
             );
         }
         // The hint has to be as readable as the prompt it qualifies; it is the
-        // half the operator called out, and it shares the block by construction.
+        // half the operator called out. Since x-b465 the target is the chrome
+        // title and the hint is the footer, so both live in the block on rows of
+        // their own rather than sharing one line.
         let text = frame_text(&frame);
-        let line = text.lines().nth(row).unwrap_or_default();
         assert!(
-            line.contains("rename tab: release-notes_") && line.contains("(empty resets to auto)"),
-            "prompt line lost its label or hint: {line:?}"
+            text.contains("rename tab"),
+            "the modal lost the target it names: {text}"
+        );
+        assert!(
+            text.contains("release-notes_"),
+            "the modal lost the name being typed: {text}"
+        );
+        assert!(
+            text.contains("empty resets to auto"),
+            "the modal lost its hint: {text}"
         );
         // Same painter, same guarantee, for the sibling prompts.
         let mut sib = shot_view(
@@ -30276,8 +31007,11 @@ mod tests {
         );
         sib.create = Some("growth".into());
         let (sib_frame, sib_row) = modal_at(&sib);
+        let sib_col = (0..cols)
+            .find(|&c| sib_frame.cells[sib_row * cols + c].c == '_')
+            .unwrap_or(cols / 2);
         assert!(
-            modal_cols(&sib_frame, sib_row).is_some(),
+            modal_cols(&sib_frame, sib_row, sib_col).is_some(),
             "the new-workspace prompt does not share the modal treatment"
         );
         write_shot(&frame, "01-rename-prompt", "rename prompt (after)");
@@ -30532,6 +31266,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// (x-b465) The group marker costs three columns on every grouped tab, and
+    /// the strip is the surface with the least room to spare. Condensation has
+    /// to survive it: the `+` is still the only mouse route to a new tab, and an
+    /// overflow counter that scrolls away is worse than a missing marker.
+    #[test]
+    fn a_strip_full_of_grouped_tabs_still_condenses() {
+        let names: Vec<String> = (1..=20)
+            .map(|i| format!("release-candidate-{i:02}"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for cols in [44u16, 52, 60, 68, 80, 100] {
+            let mut squad = named_meta(1, "readyrule/readyrule-web", &refs, 13);
+            // Every tab a four-pane group, the worst case for width.
+            for (t, tab) in squad.tabs.iter_mut().enumerate() {
+                tab.panes = (0..4)
+                    .map(|p| crate::proto::PaneMeta {
+                        id: (t * 10 + p) as u64,
+                        label: String::new(),
+                    })
+                    .collect();
+            }
+            let view = shot_view((24, cols), vec![squad], vec![]);
+            let window = view.tab_bar_window();
+            let painted: usize = window.iter().map(|s| s.text.chars().count()).sum();
+            let avail = (cols as usize).saturating_sub(view.panel_w() as usize);
+            assert!(
+                painted <= avail,
+                "a grouped strip overflows at {cols} cols: {painted} > {avail}"
+            );
+            assert!(
+                window.iter().any(|s| matches!(s.hit, Some(TabHit::NewTab))),
+                "the + must survive the markers at {cols} cols"
+            );
+            // Width and the `+` alone pass on the outcome that matters most:
+            // a strip of identical nameless `▤` cells. Columns come off the
+            // right, so the marker would otherwise outlive the name it marks.
+            // No visible tab may be marker-only.
+            for span in window.iter().filter(|s| s.role == SpanRole::Tab) {
+                let bare: String = span
+                    .text
+                    .chars()
+                    .filter(|c| !matches!(c, ' ' | '[' | ']') && *c != TAB_GROUP_GLYPH)
+                    .collect();
+                assert!(
+                    !bare.is_empty(),
+                    "a tab kept its marker and lost its whole name at {cols} cols: {:?}",
+                    span.text
+                );
+            }
+        }
+        // And the marker really is rendering, or the widths above prove nothing.
+        let mut squad = named_meta(1, "footnote", &["build"], 0);
+        squad.tabs[0].panes = (0..4)
+            .map(|p| crate::proto::PaneMeta {
+                id: p,
+                label: String::new(),
+            })
+            .collect();
+        let view = shot_view((24, 100), vec![squad], vec![]);
+        let strip: String = view
+            .tab_bar_window()
+            .iter()
+            .map(|s| s.text.clone())
+            .collect();
+        assert!(
+            strip.contains("▤ build·4"),
+            "a four-pane tab names its size in the strip: {strip:?}"
+        );
+    }
+
+    #[test]
+    fn condensing_sheds_a_group_marker_before_the_last_of_its_name() {
+        // Tested on `condense_to_width` directly, not through the strip. Under
+        // real layouts the strip HIDES a tab into the overflow counter long
+        // before shrinking one this far - measured across a dozen widths and
+        // both tab counts - so an integration assertion here passes whatever
+        // `shrink` does. That is the vacuous-test trap twice over in this PR
+        // already; this pins the rule where the rule lives.
+        let span = |text: &str| TabSpan {
+            text: text.to_string(),
+            flags: 0,
+            fg: Color::Default,
+            hit: Some(TabHit::Tab(1)),
+            role: SpanRole::Tab,
+        };
+        let mut spans = vec![span(" ▤ build·4 ")];
+        super::condense_to_width(&mut spans, 4);
+        let text = spans.first().map(|s| s.text.clone()).unwrap_or_default();
+        let name: String = text.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        assert!(
+            !name.is_empty(),
+            "the marker outlived the name it marks: {text:?}"
+        );
     }
 
     /// The before/after pair the operator can compare: the same twenty tabs

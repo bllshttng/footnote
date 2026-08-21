@@ -75,6 +75,37 @@ impl Chrome {
         self.level
     }
 
+    /// (x-b465) Clamp the chrome's own text to an inner width the viewport can
+    /// actually hold, eliding what does not fit.
+    ///
+    /// [`min_inner_w`](Self::min_inner_w) widens the frame to fit the subtitle
+    /// and footer, and nothing above it knows how wide the terminal is: `frame`
+    /// takes no viewport and `blit` paints the full framed width, clipping at
+    /// the screen edge. So a footer wider than the content area used to push the
+    /// right border and the esc chip off the right of the screen - the very
+    /// outcome the widening was meant to prevent, moved one step out.
+    ///
+    /// The title is deliberately untouched. Its `title + 9` minimum predates
+    /// this and every modal is sized by it, so clamping it here would resize
+    /// surfaces this change has no business resizing.
+    pub fn fit_to(mut self, inner_w: usize) -> Self {
+        let elide = |s: &str, w: usize| -> String {
+            if s.chars().count() <= w {
+                return s.to_string();
+            }
+            let keep = w.saturating_sub(1);
+            let head: String = s.chars().take(keep).collect();
+            format!("{head}…")
+        };
+        if let Some(f) = self.footer.take() {
+            self.footer = Some(elide(&f, inner_w));
+        }
+        if let Some(s) = self.subtitle.take() {
+            self.subtitle = Some(elide(&s, inner_w));
+        }
+        self
+    }
+
     /// The rule, in code: anchored menus wear `Bare`, centered modals wear
     /// `Full`. Stated here rather than per call site so two menus can never
     /// disagree about it.
@@ -118,11 +149,20 @@ impl Chrome {
     fn min_inner_w(&self) -> usize {
         // ` esc ` is 5; every level reserves at least that plus a leading `─`.
         const ESC_INNER: usize = 6;
-        match self.level {
-            Level::Bare => ESC_INNER,
+        let title_w = match self.level {
+            Level::Bare => return ESC_INNER,
             Level::Full if self.title.is_empty() => ESC_INNER,
             Level::Full => self.title.chars().count() + 9, // `─ {title} ─ esc `
-        }
+        };
+        // (x-b465) The subtitle and footer are chrome the caller never sized:
+        // body lines arrive pre-padded to `body_w`, those two arrive raw. A
+        // footer longer than the body used to overhang the right border by the
+        // difference, so the box rendered one column ragged - visible the first
+        // time a modal set a footer wider than its content. Widen to fit them
+        // instead of cutting them.
+        let sub_w = self.subtitle.as_ref().map_or(0, |s| s.chars().count());
+        let foot_w = self.footer.as_ref().map_or(0, |f| f.chars().count());
+        title_w.max(sub_w).max(foot_w)
     }
 }
 
@@ -225,7 +265,9 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
             // The close words are a mouse target, defined once here so every
             // popup that sets this footer inherits the clickable close (a
             // per-modal hit test leaves the others printing the same lie).
-            if let Some((off, len)) = esc_close_span(f) {
+            // Only when the words survived the row's width: a hit span reaching
+            // past the border would advertise a click target that is not drawn.
+            if let Some((off, len)) = esc_close_span(f).filter(|&(off, len)| off + len <= inner_w) {
                 row.hits.push((ESC_CLOSE_HIT, off + 1, len)); // +1: past the left border
             }
             out.push(row);
@@ -334,7 +376,10 @@ fn edge_row(
 /// `│ content │`, content left-aligned, padded with spaces (same role) so the
 /// inverse block stays a clean rectangle.
 fn content_row(content: &str, role: Role, inner_w: usize) -> FramedLine {
-    let mut inner: Vec<Seg> = content.chars().map(|c| (c, role)).collect();
+    // Truncate as well as pad. `min_inner_w` widens the box to fit the subtitle
+    // and footer, so this only bites when the TERMINAL is too narrow for them -
+    // and there a clipped word beats a border pushed off the right edge.
+    let mut inner: Vec<Seg> = content.chars().take(inner_w).map(|c| (c, role)).collect();
     let used = inner.len();
     for _ in used..inner_w {
         inner.push((' ', role));
@@ -542,6 +587,92 @@ mod tests {
 
     fn bl(s: &str) -> BodyLine {
         BodyLine::plain(s)
+    }
+
+    #[test]
+    fn a_footer_wider_than_the_body_keeps_the_box_square() {
+        // (x-b465) Body lines reach `frame` pre-padded to `body_w`; the subtitle
+        // and footer arrive raw and were only ever PADDED, never truncated or
+        // measured. So a footer longer than the body overhung the right border
+        // by the difference and the box rendered ragged - caught the first time
+        // a modal set a footer wider than its content (the name modal's
+        // "empty resets to auto" over a short name).
+        let chrome = Chrome::new("rename tab", Anchor::Center).footer("empty resets to auto");
+        let framed = frame(&[bl("short_")], &chrome, 6, None);
+        let widths: Vec<usize> = framed
+            .lines
+            .iter()
+            .map(|l| l.text.chars().count())
+            .collect();
+        assert!(
+            widths.iter().all(|&w| w == framed.width),
+            "every row is the framed width {}: {widths:?}",
+            framed.width
+        );
+        assert!(
+            framed
+                .lines
+                .iter()
+                .any(|l| l.text.contains("empty resets to auto")),
+            "and the footer is widened to fit, not cut"
+        );
+    }
+
+    #[test]
+    fn fit_to_keeps_the_widened_frame_inside_the_viewport() {
+        // The widening in `min_inner_w` has no idea how wide the terminal is,
+        // and `blit` paints the full framed width, so an unclamped footer pushes
+        // the right border off the screen - the same defect the widening fixed,
+        // moved one step out.
+        //
+        // An earlier version of this test asserted "clipping" against `frame`
+        // alone, where it can never happen: the widening always removes the need
+        // to clip, so the test passed with or without the code it named.
+        let footer = "esc close and a great deal more besides";
+        let inner = 12;
+        let chrome = Chrome::new("t", Anchor::Center)
+            .footer(footer)
+            .fit_to(inner);
+        let framed = frame(&[bl("x")], &chrome, 4, None);
+        assert!(
+            framed.width <= inner + Chrome::FRAME_COLS,
+            "the frame outgrew the viewport it was fitted to: {}",
+            framed.width
+        );
+        let widths: Vec<usize> = framed
+            .lines
+            .iter()
+            .map(|l| l.text.chars().count())
+            .collect();
+        assert!(
+            widths.iter().all(|&w| w == framed.width),
+            "and it is still square: {widths:?}"
+        );
+        let text: String = framed.lines.iter().map(|l| l.text.clone()).collect();
+        assert!(
+            text.contains('…'),
+            "the elision is visible as one: {text:?}"
+        );
+        assert!(
+            !text.contains("besides"),
+            "the tail really was dropped: {text:?}"
+        );
+        for line in &framed.lines {
+            for &(_, off, len) in &line.hits {
+                assert!(
+                    off + len <= line.text.chars().count(),
+                    "a hit span must stay inside the row it is drawn on"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fit_to_leaves_text_that_already_fits_alone() {
+        let chrome = Chrome::new("t", Anchor::Center)
+            .footer("empty resets to auto")
+            .fit_to(40);
+        assert_eq!(chrome.footer.as_deref(), Some("empty resets to auto"));
     }
 
     #[test]
