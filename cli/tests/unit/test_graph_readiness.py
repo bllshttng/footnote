@@ -217,3 +217,109 @@ def test_locked_mutate_graph_overlays_blocked_on_the_entries_it_hands_to_render(
     rows = {e["id"]: e for e in result}
     assert rows["ab-rrrrrrrr"]["status"] == "blocked"
     assert rows["ab-rrrrrrrr"]["blocked_reason"] == "blocked-by:ab-qqqqqqqq"
+
+
+# -- children summaries derive through the same overlay --
+
+# The parent's `children` array is the surface a king surveys an epic with.
+# Its `status` must speak the derived truth (open blocker -> blocked), never
+# the stored field, which by design never encodes blocked.
+
+
+def test_read_graph_children_summary_derives_blocked(tmp_path: Path):
+    """The exact on-disk shape a mis-dispatched epic child carries today:
+    a child stored `ready` with a non-empty blocked_by over an open blocker
+    must read `blocked` BOTH at top level and inside the parent's summary."""
+    p = _write(
+        tmp_path,
+        [
+            _entry("ab-epic00001"),
+            _entry("ab-block0001"),
+            _entry(
+                "ab-child0002",
+                parent="ab-epic00001",
+                blocked_by=["ab-block0001"],
+            ),
+        ],
+    )
+    rows = {e["id"]: e for e in read_graph(p)}
+    assert rows["ab-child0002"]["status"] == "blocked"
+    summary = rows["ab-epic00001"]["children"][0]
+    assert summary["id"] == "ab-child0002"
+    assert summary["status"] == "blocked"
+
+
+def test_write_persists_derived_children_summary(tmp_path: Path):
+    """Raw graph.json readers (the Rust mux) see the summary as persisted, so
+    the write path must stamp the derived status, not the cascade field."""
+    from fno.graph.store import _read_json
+
+    p = _write(
+        tmp_path,
+        [
+            _entry("ab-epic00002"),
+            _entry("ab-block0002"),
+            _entry(
+                "ab-child0003",
+                parent="ab-epic00002",
+                blocked_by=["ab-block0002"],
+            ),
+        ],
+    )
+    locked_mutate_graph(p, lambda entries: entries)
+    raw = {e["id"]: e for e in _read_json(p)}
+    # The child's own stored status stays cascade-derived (never `blocked`
+    # on disk) while its summary in the parent reads blocked.
+    assert raw["ab-child0003"]["status"] == "ready"
+    assert raw["ab-epic00002"]["children"][0]["status"] == "blocked"
+
+
+def test_children_summary_terminal_statuses_pass_through(tmp_path: Path):
+    """done / in_review children keep their own status even with a stale
+    blocked_by: terminal facts about the child outrank the overlay, and an
+    epic's done count must not change under derivation."""
+    p = _write(
+        tmp_path,
+        [
+            _entry("ab-epic00003"),
+            _entry("ab-block0003"),
+            _entry(
+                "ab-child0004",
+                parent="ab-epic00003",
+                completed_at="2026-08-21T00:00:00Z",
+                # Stored terminal: the completed_at cascade stamps done at
+                # write time, so that is the shape a live row carries on disk.
+                status="done",
+                blocked_by=["ab-block0003"],
+            ),
+            _entry(
+                "ab-child0005",
+                parent="ab-epic00003",
+                pr_number=1234,
+                # Stored terminal: the pr_number cascade stamps in_review at
+                # write time, so that is the shape a live row carries on disk.
+                status="in_review",
+                blocked_by=["ab-block0003"],
+            ),
+        ],
+    )
+    rows = {e["id"]: e for e in read_graph(p)}
+    statuses = {c["id"]: c["status"] for c in rows["ab-epic00003"]["children"]}
+    assert statuses == {"ab-child0004": "done", "ab-child0005": "in_review"}
+
+
+def test_readiness_status_terminal_passthrough_and_reason():
+    """The shared wrapper: terminal statuses return untouched; an open
+    blocker returns blocked plus its reason; ready returns the cascade
+    status unchanged."""
+    from fno.graph.statuses import readiness_status
+
+    blocker = _entry("ab-block0004")
+    assert readiness_status(_entry("ab-ssssssss", status="done"),
+                            {"ab-block0004": blocker}) == ("done", None)
+    assert readiness_status(
+        _entry("ab-tttttttt", blocked_by=["ab-block0004"]),
+        {"ab-block0004": blocker},
+    ) == ("blocked", "blocked-by:ab-block0004")
+    assert readiness_status(_entry("ab-uuuuuuuu"),
+                            {"ab-block0004": blocker}) == ("ready", None)

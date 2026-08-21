@@ -94,6 +94,38 @@ def compute_readiness(entry: dict, id_to_entry: dict[str, dict]) -> tuple[str, s
     return ("ready", None)
 
 
+# Lifecycle facts about THIS entry that outrank the blocked overlay: a done,
+# shelved, or in-review node is not a dependency question. Kept beside
+# compute_readiness so the precedence and the derivation live together.
+_OVERLAY_TERMINAL_STATUSES = frozenset({"done", "superseded", "deferred", "in_review"})
+
+
+def readiness_status(entry: dict, id_to_entry: dict[str, dict]) -> tuple[str, str | None]:
+    """The one overlay wrapper every status consumer shares.
+
+    Returns ``(status, blocked_reason)`` under the same precedence
+    ``_apply_graph_defaults`` applies at read time: terminal statuses pass
+    through untouched; everything else overlays ``compute_readiness`` so an
+    open blocker reads ``blocked`` with its reason and a ready entry keeps
+    its cascade status. Both the graph read seam
+    (``store._apply_readiness_overlay``) and the parent children summaries
+    (``store._compute_children``) call this, so a parent's snapshot can never
+    speak a stored ``ready`` that a live read derives into ``blocked`` - a
+    second caller-side implementation of the precedence is the defect this
+    function exists to make impossible.
+    """
+    status = entry.get("status")
+    # isinstance-first: a hand-mangled unhashable status value ({"nope": 1})
+    # must fall through to the non-terminal branch, not raise on the set
+    # membership hash. Tuple-`in` tolerated this; a frozenset does not.
+    if isinstance(status, str) and status in _OVERLAY_TERMINAL_STATUSES:
+        return status, None
+    kind, blocker_id = compute_readiness(entry, id_to_entry)
+    if kind == "ready":
+        return status, None
+    return "blocked", f"{kind}:{blocker_id}"
+
+
 def is_stale_lock(task: dict) -> bool:
     """Check if a feature's claim has expired (>TTL hours)."""
     lock_time_str = task.get("claimed_at")
