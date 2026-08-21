@@ -512,3 +512,26 @@ def closure_trailer(
     line = render_pr_closure_trailer(entries, node, extra_ids=list(extra))
     if line:
         typer.echo(line)
+
+
+@pr_app.command("bind-created", hidden=True)
+def bind_created(
+    url: str = typer.Option(..., "--url", help="Created PR URL."),
+    owner: Optional[str] = typer.Option(None, "--owner", help="Best-known live owner."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Repository worktree."),
+) -> None:
+    """Bind a raw ``gh pr create`` result to its one real branch node."""
+    from fno.pr.closure import bind_created_pr_from_branch
+
+    result = bind_created_pr_from_branch(url, owner=owner, cwd=repo or os.getcwd())
+    typer.echo(
+        json.dumps(
+            {
+                "outcome": result.outcome,
+                "claimed_ids": result.claimed_ids,
+                "refusal": result.refusal,
+            },
+            separators=(",", ":"),
+        )
+    )
+    raise typer.Exit(code=0 if result.outcome == "bound" else 1)

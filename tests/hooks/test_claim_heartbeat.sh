@@ -412,5 +412,73 @@ else
 fi
 teardown_env
 
+# ── T21: pre-init spawn handover stays alive on PostToolUse ─────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166"
+export FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+if grep -q "claim refresh node:x-a166 --holder spawn-handover:build-x-a166 --ttl 15m" "$CALLLOG" \
+    && [[ ! -e "${CWD}/.fno/target-state.md" ]]; then
+  pass "T21 pre-init handover refreshes its exact 15m claim without creating a manifest"
+else
+  fail "T21 expected pre-init handover refresh only; calls: $(cat "$CALLLOG")"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T22: pre-init handover never refreshes another holder ───────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166"
+export FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="spawn-handover:some-other-worker"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+if grep -q "claim refresh" "$CALLLOG"; then
+  fail "T22 pre-init handover refreshed another holder"
+else
+  pass "T22 pre-init handover mismatch does not acquire or steal"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T23: successful raw gh pr create invokes the branch binder ──────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42\n"}}')"
+printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" >/dev/null 2>&1
+if grep -q "pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG" \
+    && grep -q -- "--owner 182b29c8-owner-uuid" "$CALLLOG"; then
+  pass "T23 successful raw gh pr create invokes the idempotent binder"
+else
+  fail "T23 expected bind-created call; calls: $(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T24: failed or ambiguous gh output never invokes the binder ───────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stderr:"failed: https://github.com/acme/widgets/pull/42 and https://github.com/acme/widgets/pull/43"}}')"
+printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" >/dev/null 2>&1
+if grep -q "pr bind-created" "$CALLLOG"; then
+  fail "T24 ambiguous output invoked the binder"
+else
+  pass "T24 ambiguous output mutates nothing"
+fi
+teardown_env
+
+# ── T25: a nonzero gh result cannot bind even when it mentions one URL ─────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{exit_code:1,stderr:"failed after reserving https://github.com/acme/widgets/pull/42"}}')"
+printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" >/dev/null 2>&1
+if grep -q "pr bind-created" "$CALLLOG"; then
+  fail "T25 failed gh result invoked the binder"
+else
+  pass "T25 failed gh result mutates nothing"
+fi
+teardown_env
+
 echo "[heartbeat] ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 
 from fno.pr.closure import (
+    bind_created_pr,
     ClosureQueryError,
     bind_closure_claims,
     contained_descendant_ids,
@@ -20,6 +21,55 @@ def _node(**kw) -> dict:
     base = {"id": "x-0001", "status": "ready"}
     base.update(kw)
     return base
+
+
+def test_bind_created_pr_maps_one_real_branch_node_and_owner():
+    entries = [_node(id="x-38e0"), _node(id="x-9999")]
+
+    result = bind_created_pr(
+        entries,
+        head_ref="feature/x-38e0-live-node",
+        pr_url="https://github.com/o/r/pull/1038",
+        owner="worker-session",
+    )
+
+    assert result.outcome == "bound"
+    assert entries[0]["pr_number"] == 1038
+    assert entries[0]["pr_url"] == "https://github.com/o/r/pull/1038"
+    assert entries[0]["locked_by"] == "worker-session"
+    assert entries[0]["session_id"] == "worker-session"
+
+
+def test_bind_created_pr_is_idempotent():
+    entries = [_node(id="x-38e0")]
+    kwargs = {
+        "head_ref": "feature/x-38e0-live-node",
+        "pr_url": "https://github.com/o/r/pull/1038",
+        "owner": "worker-session",
+    }
+
+    first = bind_created_pr(entries, **kwargs)
+    snapshot = [dict(entry) for entry in entries]
+    second = bind_created_pr(entries, **kwargs)
+
+    assert first.outcome == second.outcome == "bound"
+    assert entries == snapshot
+
+
+def test_bind_created_pr_refuses_unknown_ambiguous_and_malformed_without_mutation():
+    cases = [
+        ("feature/x-dead", "https://github.com/o/r/pull/1038"),
+        ("feature/x-38e0/x-9999", "https://github.com/o/r/pull/1038"),
+        ("feature/x-38e0", "not-a-pr-url"),
+    ]
+    for head_ref, pr_url in cases:
+        entries = [_node(id="x-38e0"), _node(id="x-9999")]
+        snapshot = [dict(entry) for entry in entries]
+
+        result = bind_created_pr(entries, head_ref=head_ref, pr_url=pr_url, owner="worker-session")
+
+        assert result.outcome == "refused"
+        assert entries == snapshot
 
 
 # ---------------------------------------------------------------------------

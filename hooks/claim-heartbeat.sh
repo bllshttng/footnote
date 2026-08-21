@@ -128,6 +128,77 @@ if [[ -n "$LIVE_DIR" && "$LIVE_SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
   fi
 fi
 
+# A raw `gh pr create` bypasses the fno PR path, but PostToolUse still observes
+# its successful URL. Bind only one unambiguous GitHub PR URL; the binder then
+# verifies the current branch names exactly one real graph node. Every refusal
+# is non-fatal and leaves the graph unchanged.
+TOOL_NAME=""
+TOOL_COMMAND=""
+if [[ -n "$STDIN" ]] && command -v jq >/dev/null 2>&1; then
+  TOOL_NAME="$(printf '%s' "$STDIN" | jq -r '.tool_name // empty' 2>/dev/null)"
+  TOOL_COMMAND="$(printf '%s' "$STDIN" | jq -r '.tool_input.command // empty' 2>/dev/null)"
+fi
+if [[ "$TOOL_NAME" =~ ^(Bash|Shell|exec_command)$ ]] \
+    && [[ "$TOOL_COMMAND" =~ (^|[\;\&\|][[:space:]]*)gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$) ]] \
+    && command -v fno >/dev/null 2>&1; then
+  _CREATED_PR_FAILED="$(printf '%s' "$STDIN" | jq -r '
+    if (.tool_response | type) == "object" and (
+      ((.tool_response.is_error // .tool_response.isError // false) == true) or
+      (((.tool_response.exit_code // .tool_response.exitCode // 0) | tonumber? // 0) != 0)
+    ) then 1 else 0 end' 2>/dev/null)"
+  _CREATED_PR_URLS="$(printf '%s' "$STDIN" | jq -r '
+    [.tool_response | .. | strings
+      | scan("https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+")]
+    | unique | .[]' 2>/dev/null)"
+  _CREATED_PR_URL_COUNT="$(printf '%s\n' "$_CREATED_PR_URLS" | awk 'NF { n++ } END { print n+0 }')"
+  if [[ "$_CREATED_PR_FAILED" == 0 && "$_CREATED_PR_URL_COUNT" -eq 1 ]]; then
+    _BIND_OWNER="$CUR_CLAUDE_SID"
+    [[ "$IS_CODEX_HOOK" -eq 1 ]] && _BIND_OWNER="$CUR_CODEX_THREAD_ID"
+    if [[ -z "$_BIND_OWNER" && "${FNO_NODE_CLAIM_HOLDER:-}" == spawn-handover:* ]]; then
+      _BIND_OWNER="${FNO_NODE_CLAIM_HOLDER#spawn-handover:}"
+    fi
+    _bind_args=(pr bind-created --url "$_CREATED_PR_URLS" --repo "$CWD")
+    [[ -n "$_BIND_OWNER" ]] && _bind_args+=(--owner "$_BIND_OWNER")
+    with_timeout "${FNO_PR_BIND_CREATED_TIMEOUT:-5}" fno "${_bind_args[@]}" \
+      >/dev/null 2>&1 || true
+  fi
+fi
+
+# Before target init there is no manifest, but an explicit spawn already owns
+# a 15-minute handover lease. Keep only that exact holder alive while its worker
+# is producing tool activity. `refresh` can extend; it cannot acquire or steal.
+_HANDOVER_NODE="${FNO_NODE:-}"
+_HANDOVER_HOLDER="${FNO_NODE_CLAIM_HOLDER:-}"
+if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
+      && "$_HANDOVER_HOLDER" == spawn-handover:* \
+      && "$_HANDOVER_HOLDER" != "spawn-handover:" ]] \
+      && command -v fno >/dev/null 2>&1; then
+  _HANDOVER_STAMP="$CWD/.fno/.claim-handover-heartbeat.stamp"
+  _HANDOVER_THROTTLE="${FNO_CLAIM_HANDOVER_HEARTBEAT_THROTTLE:-300}"
+  _handover_due=1
+  if [[ -f "$_HANDOVER_STAMP" ]]; then
+    _handover_now="$(date +%s 2>/dev/null || echo 0)"
+    _handover_mtime="$(stat -c %Y "$_HANDOVER_STAMP" 2>/dev/null || stat -f %m "$_HANDOVER_STAMP" 2>/dev/null || echo 0)"
+    (( _handover_now > 0 && _handover_mtime > 0 \
+       && _handover_now - _handover_mtime < _HANDOVER_THROTTLE )) && _handover_due=0
+  fi
+  if [[ "$_handover_due" -eq 1 ]]; then
+    _HANDOVER_STATUS="$(with_timeout "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
+      fno claim status "node:$_HANDOVER_NODE" --json --no-roster 2>/dev/null)"
+    [[ -n "$_HANDOVER_STATUS" ]] || _HANDOVER_STATUS="$(with_timeout \
+      "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
+      fno claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
+    _RECORDED_HANDOVER_HOLDER="$(printf '%s' "$_HANDOVER_STATUS" \
+      | jq -r '.holder // empty' 2>/dev/null)"
+    if [[ "$_RECORDED_HANDOVER_HOLDER" == "$_HANDOVER_HOLDER" ]]; then
+      with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
+        fno claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
+        --ttl "${FNO_CLAIM_HANDOVER_TTL:-15m}" >/dev/null 2>&1 || true
+    fi
+    touch "$_HANDOVER_STAMP" 2>/dev/null || true
+  fi
+fi
+
 MANIFEST="$CWD/.fno/target-state.md"
 [[ -f "$MANIFEST" ]] || exit 0   # no target session here -> nothing to refresh
 
