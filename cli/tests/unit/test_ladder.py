@@ -198,6 +198,38 @@ def test_recompute_rolls_container_status_up_from_real_child_edges(tmp_path):
     assert by_id["x-parent"]["status"] == "done"
 
 
+def test_recompute_keeps_container_in_review_when_it_owns_an_open_pr(tmp_path):
+    """All-done children must not close a parent that still has its own open PR."""
+    from fno.graph.statuses import recompute_statuses
+
+    entries = [
+        {"id": "x-parent", "pr_number": 42},
+        {"id": "x-kid", "parent": "x-parent", "completed_at": "2026-08-20T00:00:00Z"},
+    ]
+    recompute_statuses(entries)
+    parent = entries[0]
+    # done here would drop the row off the board with its PR still open, while
+    # completed_at stays absent so every open-ness predicate still reads it open.
+    assert parent["status"] == "in_review"
+    assert parent.get("completed_at") is None
+
+
+def test_recompute_keeps_container_in_progress_when_it_owns_a_claim(tmp_path):
+    from fno.graph.statuses import recompute_statuses
+
+    from datetime import datetime, timezone
+
+    # A fresh claim: a stale one is reaped before the rollup runs, which would
+    # make this pass for the wrong reason.
+    fresh = datetime.now(timezone.utc).isoformat()
+    entries = [
+        {"id": "x-parent", "locked_by": "sess-1", "claimed_at": fresh},
+        {"id": "x-kid", "parent": "x-parent", "completed_at": "2026-08-20T00:00:00Z"},
+    ]
+    recompute_statuses(entries)
+    assert entries[0]["status"] == "in_progress"
+
+
 def test_recompute_preserves_explicit_container_terminal_marker(tmp_path):
     from fno.graph.statuses import recompute_statuses
 

@@ -389,8 +389,17 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             parent["status"] = "deferred"
             continue
         child_statuses = [child.get("status") for child in children_by_parent[parent_id]]
+        # The parent's own leaf status was derived above from its own row. A
+        # container carrying live work of its own - an open PR, a claim, an open
+        # `do` row - is NOT done just because its children are, and rolling
+        # `done` over that would drop the row off the board while its PR is
+        # still open while every open-ness predicate (node_is_open, _is_live)
+        # still reads it open off the absent completed_at. Children decide a
+        # container that has no truth of its own; they never outvote one that has.
+        own_work_live = parent.get("status") in {"in_review", "in_progress"}
         if child_statuses and all(status == "done" for status in child_statuses):
-            parent["status"] = "done"
+            if not own_work_live:
+                parent["status"] = "done"
         elif any(
             status in {"done", "in_review", "in_progress"}
             or pending_supersession_reason(child)
