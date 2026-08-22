@@ -24,6 +24,36 @@ It never establishes death, orphaning, work ownership, or completion, and it is 
 
 Verify the writer and reader contracts with `bash tests/hooks/test_claim_heartbeat.sh` and `bash tests/hooks/test_worktree_live_peers.sh`.
 
+## What is proved and what is assumed
+
+Every liveness word the fleet renders is one of two things. A measurement, which some code actually took. Or an inference, which some code drew from evidence that does not entail it. The words look identical in a row, so this table says which is which.
+
+| Record | What a reader takes it to assert | What the code probed | Proved? |
+|---|---|---|---|
+| claim `live` | the holder process is running | pid exists on this host, and its create time predates the claim | yes |
+| claim `stale` | the holder is dead | the TTL lapsed and the pid is not live | yes |
+| claim `suspect` | something is wrong with the holder | one bit: `is_live` returned false | no, five causes share the word |
+| `liveness_origin` `survivor` or `resumed` | the pid started with, or after, the session | `created_at` and `pid_start_time` inside a 600 second band | yes |
+| `liveness_origin: null` | no origin could be established | one of five named causes, in `liveness_origin_basis` | yes, since the basis names it |
+| roster `live` from a spawn receipt | the worker can do work | a process started and a seed was accepted | no, it cannot show the model runs |
+| roster `orphaned` | the worker died | a family-1 `done` or `stalled` verdict | yes for `stalled`, an inference for `done` |
+
+`claim suspect` is the one row where a reader cannot recover the cause. `cli/src/fno/claims/staleness.py::is_live` returns false for five distinct situations: the claim is on another machine, the OS does not report the pid, the pid was reused, inspection was refused by permissions, and the holder was never a long-lived process. `claim_status` returns the raw inputs but no basis, so every caller reads one word for all five. A PreToolUse hook exits immediately, so every hook-registered hold sits in this state permanently and looks the same as a crashed worker.
+
+### The claim classifier is duplicated and only partly guarded
+
+`cli/src/fno/claims/staleness.py::classify` and `crates/fno-agents/src/claims.rs::classify` are two implementations of one rule, including the hybrid and suspect arms. Each says in a comment that it mirrors the other. No test drives both, so the comment is the only thing holding them together. They agree today, read line by line.
+
+`liveness_origin` is the same shape and now has the guard the classifier lacks. Both producers read one corpus, `schemas/agents-row-contradiction.json`, asserted from Python in `cli/tests/agents/test_row_contradiction.py` and from Rust in `row_contradiction_fixture_matches_python_projection`.
+
+That corpus is worth reading before trusting any parity claim here. It existed and drove both languages while the two producers still disagreed, because none of its cases carried the one row shape that separated them. A corpus blind to a divergence reads exactly like a corpus proving there is none, so add the case that fails before adding the rule that passes.
+
+### `pid_start_time` is epoch microseconds on every platform
+
+Both producers of this token now return epoch microseconds. The Linux path returned raw clock ticks since boot until it was changed, which is a small integer, and both row parsers refuse anything at or below the epoch-micros floor. So the field read null on every Linux row while a reader took null to mean no start time was recorded.
+
+The unit was defensible while the value was only compared for equality against a capture for the same pid. `liveness_origin` broke that by comparing it to `created_at` as a wall clock. A later consumer cannot see an invariant that lives in a comment, which is why both platforms now agree rather than the comment being reworded.
+
 ## Read-side dispositions
 
 | Surface | Disposition |
