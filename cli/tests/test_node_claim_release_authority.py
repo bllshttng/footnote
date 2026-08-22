@@ -63,6 +63,18 @@ ALLOWLIST = {
     # between the two calls. Not releasing would strand a bogus 2h claim on a
     # node no one is building.
     "hooks/helpers/init-target-state.sh",
+    # graph/store.py release_node_claim_at_closure: the node-CLOSURE release.
+    # Fired at the one choke point every closure path funnels through (the
+    # terminal-rung transition inside locked_mutate_graph, plus the tracker
+    # seam right after close()) and nowhere else, it is deliberately
+    # holder-agnostic: a closed node has no work left to protect, so there is
+    # no legitimate holder to verify - the terminal rung IS the authority.
+    # Before it, closing a node never released its claim, so a live worker
+    # that finished one node and moved to the next kept a permanent lock the
+    # reaper could not settle (measured 2026-08-21: 16h past the node's own
+    # completion). Scratch-graph closures are gated out; only the process's
+    # configured graph releases.
+    "cli/src/fno/graph/store.py",
 }
 
 _EXTS = {".py", ".sh", ".bash", ".rs"}
