@@ -38,7 +38,7 @@ Every liveness word the fleet renders is one of two things. A measurement, which
 | roster `live` from a spawn receipt | the worker can do work | a process started and a seed was accepted | no, it cannot show the model runs |
 | roster `orphaned` | the worker died | a family-1 `done` or `stalled` verdict | yes for `stalled`, an inference for `done` |
 
-`claim suspect` is the one row where a reader cannot recover the cause. `cli/src/fno/claims/staleness.py::is_live` returns false for five distinct situations: the claim is on another machine, the OS does not report the pid, the pid was reused, inspection was refused by permissions, and the holder was never a long-lived process. `claim_status` returns the raw inputs but no basis, so every caller reads one word for all five. A PreToolUse hook exits immediately, so every hook-registered hold sits in this state permanently and looks the same as a crashed worker.
+`claim suspect` is the one row where a reader cannot recover the cause. `cli/src/fno/claims/staleness.py::is_live` returns false for five distinct situations. The claim is on another machine. The OS does not report the pid. The pid was reused. Permissions refused the inspection. Or the holder was never a long-lived process. `claim_status` returns the raw inputs but no basis, so every caller reads one word for all five. A PreToolUse hook exits immediately, so every hook-registered hold sits in this state permanently and looks the same as a crashed worker.
 
 ### The claim classifier is duplicated and only partly guarded
 
@@ -46,11 +46,11 @@ Every liveness word the fleet renders is one of two things. A measurement, which
 
 `liveness_origin` is the same shape and now has the guard the classifier lacks. Both producers read one corpus, `schemas/agents-row-contradiction.json`, asserted from Python in `cli/tests/agents/test_row_contradiction.py` and from Rust in `row_contradiction_fixture_matches_python_projection`.
 
-That corpus is worth reading before trusting any parity claim here. It existed and drove both languages while the two producers still disagreed, because none of its cases carried the one row shape that separated them. A corpus blind to a divergence reads exactly like a corpus proving there is none, so add the case that fails before adding the rule that passes.
+That corpus is worth reading before trusting any parity claim here. It existed and drove both languages while the two producers still disagreed, because none of its cases carried the one row shape that separated them. A corpus blind to a divergence reads exactly like a corpus proving there is none. Add the case that fails before you add the rule that passes.
 
 ### `pid_start_time` is epoch microseconds on every platform
 
-Both producers of this token now return epoch microseconds. The Linux path returned raw clock ticks since boot until it was changed, which is a small integer, and both row parsers refuse anything at or below the epoch-micros floor. So the field read null on every Linux row while a reader took null to mean no start time was recorded.
+Both producers of this token now return epoch microseconds. The Linux path returned raw clock ticks since boot until it was changed. A tick count is a small integer. Both row parsers refuse anything at or below the epoch-micros floor. So the field read null on every Linux row while a reader took null to mean no start time was recorded.
 
 The unit was defensible while the value was only compared for equality against a capture for the same pid. `liveness_origin` broke that by comparing it to `created_at` as a wall clock. A later consumer cannot see an invariant that lives in a comment, which is why both platforms now agree rather than the comment being reworded.
 
