@@ -86,7 +86,7 @@
 <body>
   <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span><button id="fitbtn" type="button" title="fit the grid to the screen width, or show it at full size">fit</button></div>
   <div id="picker"></div>
-  <div id="screen"><pre id="term"></pre></div>
+  <div id="screen"><pre id="term"><span id="keptnote" class="kept-note"></span><span id="kept" class="kept"></span><span id="live"></span></pre></div>
   <div id="overlay"></div>
 <script>
 "use strict";
@@ -94,7 +94,8 @@
   const $ = (id) => document.getElementById(id);
   const bar = $("bar"), statusEl = $("status"), subEl = $("sub"),
         picker = $("picker"), term = $("term"), overlay = $("overlay"),
-        screenEl = $("screen"), fitBtn = $("fitbtn");
+        screenEl = $("screen"), fitBtn = $("fitbtn"), keptEl = $("kept"),
+        keptNoteEl = $("keptnote"), liveEl = $("live");
 
   // ---- state ----
   const frames = new Map();   // pane_id -> latest Frame (insertion order = LRU)
@@ -106,9 +107,12 @@
   // Retention (x-ce65), NOT scrollback: rows evicted off the top of the live
   // grid, kept by this browser for the SELECTED pane only. The file header says
   // why the protocol cannot answer this and what the ceiling is.
-  const kept = [];            // rendered rows that scrolled off, oldest first
-  const MAX_KEPT_ROWS = 1000; // hard cap; the front is dropped past it
-  let keptFor = null;         // the pane `kept` belongs to
+  // The retained rows live in their OWN element, appended to and trimmed in
+  // place. Rebuilding them into the live grid's innerHTML each frame reparsed
+  // the whole region per frame - megabytes of HTML at the cap, on the phone this
+  // feature exists for. Only the live grid is rewritten per frame now.
+  const MAX_KEPT_ROWS = 1000; // hard cap; the oldest row is dropped past it
+  let keptFor = null;         // the pane the retained region belongs to
   let prevRows = null;        // last drawn rows, for the overlap diff
   const KEPT_NOTE = "recent output kept by this browser since you opened this pane, not terminal scrollback";
   const BREAK_RULE = "─".repeat(8) + " break in output " + "─".repeat(8);
@@ -258,15 +262,34 @@
   addEventListener("resize", refit);
   addEventListener("orientationchange", refit);
 
+  // One row per element, so the cap can drop the oldest without rebuilding the
+  // rest. Row HTML is already newline-terminated.
+  function pushKept(html) {
+    keptEl.insertAdjacentHTML("beforeend", `<span>${html}</span>`);
+    while (keptEl.childElementCount > MAX_KEPT_ROWS) keptEl.firstElementChild.remove();
+  }
+
+  function resetKept() {
+    keptEl.textContent = "";
+    keptNoteEl.textContent = "";
+    prevRows = null;
+  }
+
   function draw() {
     const fr = current != null ? frames.get(current) : null;
     // Retention belongs to one pane. Every path that changes `current` - the
     // picker, LRU eviction, an exited agent, the first paint - lands here, so
     // resetting on the mismatch covers them all without touching each one.
-    if (keptFor !== current) { kept.length = 0; prevRows = null; keptFor = current; }
-    if (!fr) { term.textContent = current == null ? "" : "…"; return; }
+    if (keptFor !== current) { resetKept(); keptFor = current; }
+    if (!fr) { liveEl.textContent = current == null ? "" : "…"; return; }
     // Defensive re-guard: never draw a geometry-inconsistent grid (AC5-FR twin).
     if (fr.cells.length !== fr.rows * fr.cols) return;
+
+    // Read the pin BEFORE anything mutates the DOM. Appending evicted rows grows
+    // scrollHeight while scrollTop stays put, so a pin measured afterwards reads
+    // the gap it just created as "the operator scrolled up" - and a burst of
+    // several rows loses the tail for good, on exactly the busy pane this is for.
+    const pinned = screenEl.scrollHeight - screenEl.scrollTop - screenEl.clientHeight < 24;
 
     const rows = [];
     for (let r = 0; r < fr.rows; r++) rows.push(renderRow(fr, r, false));
@@ -276,10 +299,10 @@
       if (evicted >= prevRows.length) {
         // No overlap: the screen was repainted, or output outran the frame rate.
         // Say so in the output rather than butting unrelated text together.
-        kept.push(`<span class="kept-break">${esc(BREAK_RULE)}</span>\n`);
+        pushKept(`<span class="kept-break">${esc(BREAK_RULE)}</span>\n`);
       }
-      for (let i = 0; i < Math.min(evicted, prevRows.length); i++) kept.push(prevRows[i]);
-      if (kept.length > MAX_KEPT_ROWS) kept.splice(0, kept.length - MAX_KEPT_ROWS);
+      for (let i = 0; i < Math.min(evicted, prevRows.length); i++) pushKept(prevRows[i]);
+      if (!keptNoteEl.textContent) keptNoteEl.textContent = KEPT_NOTE + "\n";
     }
     prevRows = rows;
 
@@ -289,12 +312,9 @@
       live[fr.cursor_row] = renderRow(fr, fr.cursor_row, true);
     }
 
-    // Follow the tail unless the operator has scrolled up to read something.
-    const pinned = screenEl.scrollHeight - screenEl.scrollTop - screenEl.clientHeight < 24;
     applyFit(fr.cols); // before the write: the type size decides scrollHeight
-    const head = kept.length ? `<span class="kept-note">${esc(KEPT_NOTE)}</span>\n` : "";
-    term.innerHTML =
-      (kept.length ? `<span class="kept">${head}${kept.join("")}</span>` : "") + live.join("");
+    liveEl.innerHTML = live.join("");
+    // Follow the tail unless the operator had scrolled up to read something.
     if (pinned) screenEl.scrollTop = screenEl.scrollHeight;
   }
 
