@@ -415,8 +415,12 @@ def test_ac2_hp_ship_stamps_node_pr_link(tmp_path, monkeypatch):
         "fno", "do", "pr", "bind-created",
         "--url", "https://github.com/owner/repo/pull/42",
         "--repo", str(tmp_path),
+        # The manifest id, not the branch: bind-created resolves from the branch
+        # alone without it, which binds nothing on a branch that never carried
+        # the id and binds the WRONG node on a reused worktree.
+        "--node", "x-1a2b",
     ]
-    # The ship row now lands inside the update above, so ship() must NOT fire a
+    # bind-created stamps the ship row itself, so ship() must NOT fire a
     # separate `session add --phase ship`: a double-fire would write two ship
     # rows for one PR link.
     argvs = [c[0][0] for c in mock_run.call_args_list]
@@ -453,7 +457,7 @@ def test_ac2_err_stamp_failure_reports_incomplete_delivery(tmp_path, monkeypatch
     assert result["repair_command"] == (
         "fno do pr bind-created --url "
         "https://github.com/owner/repo/pull/42 --repo "
-        f"{tmp_path}"
+        f"{tmp_path} --node x-1a2b"
     )
 
 

@@ -657,9 +657,10 @@ def _stamp_ship_on_pr_link(node_id: str) -> None:
     The PR link is ship's START (the PR is open, awaiting review/merge), so the
     row carries started_at only - no ended_at, since merge is recorded elsewhere
     or not at all, and the roster renders the row 'in progress' rather than
-    guessing an end. ``backlog update --pr-number`` is the one site every shipped
-    node passes through regardless of which worker or skill opened the PR, so the
-    row records the implementer's identity, not the merger's. Best-effort: an
+    guessing an end. Every shipped node passes through a PR-link site regardless
+    of which worker or skill opened the PR, so the
+    row records the implementer's identity, not the merger's. ``fno do pr
+    bind-created`` is the second such site and calls this too. Best-effort: an
     unresolvable identity or a graph failure skips with a named stderr reason and
     never fails the update. Idempotent: append_session_record collapses a
     re-stamp of the same (phase, harness, session_id).

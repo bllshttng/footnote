@@ -383,13 +383,20 @@ def bind_created_pr(
     head_ref: str,
     pr_url: str,
     owner: Optional[str] = None,
+    node_id: Optional[str] = None,
 ) -> ClosureBindResult:
-    """Bind one newly-created PR to the one real node named by its branch.
+    """Bind one newly-created PR to its one real node.
 
-    Branch text is only a candidate. Exactly one well-formed segment must name
-    a node in this graph; zero or several refuse before any node changes. The
-    URL must carry both a repository and PR number. Repeating the same
-    observation is idempotent.
+    ``node_id`` is the caller's authoritative identity - the target manifest's
+    graph_node_id. It LEADS, and the branch is only a fallback, because a branch
+    is free text: one that never carried the id resolves to nothing, and a reused
+    or handed-off worktree still carries the PREVIOUS node's id and would bind
+    the PR to it.
+
+    With no ``node_id``, branch text is a candidate only. Exactly one well-formed
+    segment must name a node in this graph; zero or several refuse before any
+    node changes. The URL must carry both a repository and PR number. Repeating
+    the same observation is idempotent.
     """
     from fno.graph._reconcile import (
         pr_number_from_url,
@@ -408,7 +415,10 @@ def bind_created_pr(
         for entry in entries
         if isinstance(entry, dict) and isinstance(entry.get("id"), str)
     }
-    matched = list(dict.fromkeys(nid for nid in branch_node_ids(head_ref) if nid in real_ids))
+    if isinstance(node_id, str) and node_id.strip() in real_ids:
+        matched = [node_id.strip()]
+    else:
+        matched = list(dict.fromkeys(nid for nid in branch_node_ids(head_ref) if nid in real_ids))
     if len(matched) != 1:
         return ClosureBindResult(
             outcome="refused",
@@ -440,16 +450,22 @@ def bind_created_pr_from_branch(
     owner: Optional[str] = None,
     cwd: Optional[str] = None,
     head_ref: Optional[str] = None,
+    node_id: Optional[str] = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> ClosureBindResult:
-    """Resolve the current branch and persist a created-PR binding atomically."""
+    """Persist a created-PR binding atomically, manifest id first.
+
+    A caller holding an authoritative ``node_id`` skips branch resolution
+    entirely; the branch lookup below is the fallback for callers that do not.
+    """
     from fno.graph.store import locked_mutate_graph, read_graph_strict
     from fno.paths import graph_json
     from fno.tracker import active_backend_name
 
     if active_backend_name() != "graph":
         return ClosureBindResult(outcome="refused", refusal="graph backend is not active")
-    if head_ref is None:
+    authoritative = node_id.strip() if isinstance(node_id, str) and node_id.strip() else None
+    if head_ref is None and authoritative is None:
         try:
             proc = runner(
                 ["git", "branch", "--show-current"],
@@ -462,7 +478,8 @@ def bind_created_pr_from_branch(
         except (OSError, subprocess.TimeoutExpired) as exc:
             return ClosureBindResult(outcome="refused", refusal=f"branch lookup failed: {exc}")
         head_ref = (proc.stdout or "").strip() if proc.returncode == 0 else ""
-    if not head_ref:
+    head_ref = head_ref or ""
+    if not head_ref and authoritative is None:
         return ClosureBindResult(outcome="refused", refusal="current branch is unknown")
 
     path = graph_json()
@@ -470,14 +487,19 @@ def bind_created_pr_from_branch(
         snapshot = read_graph_strict(path)
     except Exception as exc:
         return ClosureBindResult(outcome="refused", refusal=f"graph read failed: {exc}")
-    probe = bind_created_pr(copy.deepcopy(snapshot), head_ref=head_ref, pr_url=pr_url, owner=owner)
+    probe = bind_created_pr(
+        copy.deepcopy(snapshot), head_ref=head_ref, pr_url=pr_url, owner=owner,
+        node_id=authoritative,
+    )
     if probe.outcome != "bound":
         return probe
 
     box: list[ClosureBindResult] = []
 
     def _mutate(entries: list[dict]) -> list[dict]:
-        box.append(bind_created_pr(entries, head_ref=head_ref, pr_url=pr_url, owner=owner))
+        box.append(bind_created_pr(
+            entries, head_ref=head_ref, pr_url=pr_url, owner=owner, node_id=authoritative,
+        ))
         return entries
 
     locked_mutate_graph(path, _mutate)

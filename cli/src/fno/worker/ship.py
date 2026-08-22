@@ -251,7 +251,52 @@ def ship(
         pr_number = _extract_pr_number(pr_url)
         action = "pr_created"
 
-    # Step 2: write ship artifact
+    # Step 2.5: stamp the backlog node <-> PR link (x-a166). Without this the
+    # node's pr_number stays null through the whole PR review window, so the
+    # _has_unmerged_open_pr selection guard and `fno backlog reconcile` cannot
+    # see the in-flight/merged PR - leaving only the 2h PID claim to guard the
+    # node, which lapses and lets the dispatcher re-spawn a finished node.
+    # Best-effort + idempotent (re-stamping the same PR is a no-op); a stamp
+    # failure logs but never fails the ship.
+    node_id = _read_graph_node_id(state_path)
+    binding_error: Optional[str] = None
+    repair_command: Optional[str] = None
+    pr_action = action
+    if node_id and pr_number:
+        repo_root = os.getcwd()
+        owner = state.get("target_claim_holder")
+        # The MANIFEST id leads and the branch is only a fallback, so pass it.
+        # Without --node this resolves the node from `git branch --show-current`
+        # alone: a branch not carrying the id binds nothing, and a reused or
+        # handed-off worktree binds this PR to the PREVIOUS node.
+        bind_args = [
+            "fno", "do", "pr", "bind-created", "--url", pr_url,
+            "--repo", repo_root, "--node", node_id,
+        ]
+        if isinstance(owner, str) and owner.strip():
+            bind_args.extend(["--owner", owner.strip()])
+        repair_command = " ".join(bind_args)
+        stamp = subprocess.run(
+            bind_args,
+            capture_output=True,
+            text=True,
+        )
+        if stamp.returncode != 0:
+            binding_error = (stamp.stderr or stamp.stdout).strip()[:200]
+            action = "incomplete_delivery"
+            import sys
+            print(
+                f"worker.ship: node<->PR stamp failed for {node_id} "
+                f"PR {pr_number}: {binding_error}; repair with `{repair_command}`",
+                file=sys.stderr,
+            )
+        # `bind-created` stamps the ship lifecycle row itself, on the binding
+        # rather than on one particular verb, so no second stamp here.
+
+    # Step 3: write the ship artifact, AFTER binding. It is factor-2 of the
+    # two-factor gate check, so it must record the action the call actually
+    # returns; writing it first left the file saying pr_created while the
+    # return value said incomplete_delivery.
     artifact_path = artifacts_dir / f"ship-{session_id}.md"
     artifact_content = (
         f"---\n"
@@ -271,47 +316,6 @@ def ship(
     from fno.state.io import atomic_write
     atomic_write(artifact_path, artifact_content)
 
-    # Step 2.5: stamp the backlog node <-> PR link (x-a166). Without this the
-    # node's pr_number stays null through the whole PR review window, so the
-    # _has_unmerged_open_pr selection guard and `fno backlog reconcile` cannot
-    # see the in-flight/merged PR - leaving only the 2h PID claim to guard the
-    # node, which lapses and lets the dispatcher re-spawn a finished node.
-    # Best-effort + idempotent (re-stamping the same PR is a no-op); a stamp
-    # failure logs but never fails the ship.
-    node_id = _read_graph_node_id(state_path)
-    binding_error: Optional[str] = None
-    repair_command: Optional[str] = None
-    if node_id and pr_number:
-        repo_root = os.getcwd()
-        owner = state.get("target_claim_holder")
-        bind_args = [
-            "fno", "do", "pr", "bind-created", "--url", pr_url,
-            "--repo", repo_root,
-        ]
-        repair_command = " ".join(bind_args)
-        if isinstance(owner, str) and owner.strip():
-            bind_args.extend(["--owner", owner.strip()])
-            repair_command = " ".join(bind_args)
-        stamp = subprocess.run(
-            bind_args,
-            capture_output=True,
-            text=True,
-        )
-        if stamp.returncode != 0:
-            binding_error = (stamp.stderr or stamp.stdout).strip()[:200]
-            action = "incomplete_delivery"
-            import sys
-            print(
-                f"worker.ship: node<->PR stamp failed for {node_id} "
-                f"PR {pr_number}: {binding_error}; repair with `{repair_command}`",
-                file=sys.stderr,
-            )
-        # Step 2.6 used to stamp ship provenance here with an explicit
-        # `session add --phase ship`. The `update --pr-number` call above now
-        # owns that stamp (it fires on the pr_number unset->set transition with
-        # the same ambient identity), so a second explicit stamp would only
-        # double-fire.
-
     # Arming auto-merge here would pre-authorize a merge before any gate ran, so
     # it moved to `fno-agents finalize` (see the module docstring). The
     # `auto_merge_armed` / `auto_merge_error` keys went with it rather than
@@ -323,6 +327,9 @@ def ship(
         "pr_url": pr_url,
         "artifact_path": str(artifact_path),
         "session_id": session_id,
+        # Preserved so a binding failure does not erase whether this call opened
+        # the PR or found one already open.
+        "pr_action": pr_action,
         **({"binding_error": binding_error} if binding_error else {}),
         **({"repair_command": repair_command} if binding_error else {}),
     }

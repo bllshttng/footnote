@@ -225,7 +225,7 @@ def test_worker_ship_reports_incomplete_delivery_when_graph_binding_fails(tmp_pa
     assert result["pr_url"] == pr_url
     assert result["binding_error"] == "binding refused"
     assert result["repair_command"] == (
-        f"fno do pr bind-created --url {pr_url} --repo {tmp_path}"
+        f"fno do pr bind-created --url {pr_url} --repo {tmp_path} --node x-49ec"
     )
 
 
@@ -750,3 +750,43 @@ def test_page_sized_file_list_reads_as_truncated():
 
     state = query_pr_merge_state(5, runner=runner)
     assert state.files_truncated is True
+
+
+def test_manifest_node_id_beats_a_stale_branch():
+    """A reused worktree's branch still names the PREVIOUS node; the manifest wins."""
+    from fno.pr.closure import bind_created_pr
+
+    entries = [{"id": "x-9f0c"}, {"id": "x-1a2b"}]
+    result = bind_created_pr(
+        entries,
+        head_ref="feature/x-prev",
+        pr_url="https://github.com/o/r/pull/7",
+        node_id="x-1a2b",
+    )
+    assert result.outcome == "bound"
+    assert result.bound_ids == ["x-1a2b"]
+    assert {e["id"]: e.get("pr_number") for e in entries} == {"x-9f0c": None, "x-1a2b": 7}
+
+
+def test_manifest_id_binds_when_the_branch_names_no_node():
+    from fno.pr.closure import bind_created_pr
+
+    entries = [{"id": "x-1a2b"}]
+    result = bind_created_pr(
+        entries, head_ref="tmp-scratch", pr_url="https://github.com/o/r/pull/7",
+        node_id="x-1a2b",
+    )
+    assert result.outcome == "bound"
+    assert result.bound_ids == ["x-1a2b"]
+
+
+def test_unknown_manifest_id_falls_back_to_the_branch():
+    from fno.pr.closure import bind_created_pr
+
+    entries = [{"id": "x-1a2b"}]
+    result = bind_created_pr(
+        entries, head_ref="feature/x-1a2b", pr_url="https://github.com/o/r/pull/7",
+        node_id="x-dead",
+    )
+    assert result.outcome == "bound"
+    assert result.bound_ids == ["x-1a2b"]

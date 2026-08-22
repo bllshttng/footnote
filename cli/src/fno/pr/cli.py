@@ -519,11 +519,25 @@ def bind_created(
     url: str = typer.Option(..., "--url", help="Created PR URL."),
     owner: Optional[str] = typer.Option(None, "--owner", help="Best-known live owner."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Repository worktree."),
+    node: Optional[str] = typer.Option(
+        None, "--node",
+        help="Authoritative node id (the manifest's). Leads; branch is the fallback.",
+    ),
 ) -> None:
-    """Bind a raw ``gh pr create`` result to its one real branch node."""
+    """Bind a raw ``gh pr create`` result to its one real node."""
     from fno.pr.closure import bind_created_pr_from_branch
 
-    result = bind_created_pr_from_branch(url, owner=owner, cwd=repo or os.getcwd())
+    result = bind_created_pr_from_branch(
+        url, owner=owner, cwd=repo or os.getcwd(), node_id=node
+    )
+    if result.outcome == "bound":
+        # The ship row follows the binding, not one particular verb. This used
+        # to ride on `backlog update --pr-number`; when ship switched to this
+        # command the stamp silently stopped happening for every PR it opened.
+        from fno.graph.cli import _stamp_ship_on_pr_link
+
+        for bound_id in result.bound_ids:
+            _stamp_ship_on_pr_link(bound_id)
     typer.echo(
         json.dumps(
             {
