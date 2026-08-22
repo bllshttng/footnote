@@ -758,6 +758,18 @@ def _smoke_prereqs(selected_cmds: Sequence[str]) -> Optional[str]:
     return None
 
 
+def smoke_steps(root: Path) -> list[tuple[str, str, str]]:
+    """The real smoke registry: the structural steps plus what discovery finds.
+
+    One copy, so a caller reasoning about the registry (the shard-coverage
+    test) reads the list the runner will actually execute rather than a
+    restatement of it that can drift.
+    """
+    structural = list(_STRUCTURAL_STEPS)
+    referenced = _referenced_sh_files(structural)
+    return structural + _smoke_discovered_steps(root, referenced)
+
+
 def _name_matches(name: str, globs: str) -> bool:
     """True when `name` matches any glob in a comma-separated list.
 
@@ -1359,9 +1371,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
             exec(fh.read(), ns)
         steps = list(ns["STEPS"])
     else:
-        structural = list(_STRUCTURAL_STEPS)
-        referenced = _referenced_sh_files(structural)
-        steps = structural + _smoke_discovered_steps(root, referenced)
+        steps = smoke_steps(root)
 
     names = [s[0] for s in steps]
     total = len(steps)
