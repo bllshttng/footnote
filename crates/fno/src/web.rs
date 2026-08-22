@@ -627,6 +627,31 @@ mod tests {
         assert_eq!(v["_bridge"]["state"], "disconnected");
     }
 
+    /// The served page must stay pinch-zoomable (x-ce65). A pane grid is as wide
+    /// as its terminal, so on a phone zooming is the only way to read a grid
+    /// wider than the screen; `maximum-scale` / `user-scalable=no` take that away.
+    /// Anchored on the meta line itself, so a page that lost the tag entirely
+    /// fails here rather than passing on an absence.
+    #[test]
+    fn served_page_leaves_pinch_zoom_enabled() {
+        let meta = PAGE
+            .lines()
+            .find(|l| l.contains(r#"name="viewport""#))
+            .expect("the served page declares a viewport meta");
+        assert!(
+            meta.contains("width=device-width"),
+            "viewport still maps the layout to the device: {meta}"
+        );
+        assert!(
+            !meta.contains("maximum-scale"),
+            "maximum-scale disables pinch-zoom on iOS: {meta}"
+        );
+        assert!(
+            !meta.contains("user-scalable"),
+            "user-scalable=no disables pinch-zoom on iOS: {meta}"
+        );
+    }
+
     #[test]
     fn bind_addr_brackets_ipv6_only() {
         assert_eq!(bind_addr("127.0.0.1", 8722), "127.0.0.1:8722");

@@ -13,7 +13,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<!-- No maximum-scale / user-scalable: that pair disables pinch-zoom on iOS, and a
+     pane grid is as wide as its TERMINAL (183 columns in the reported specimen),
+     so zooming is the operator's only way in on a phone. -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; connect-src 'self' ws: wss:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>fno mux (read-only)</title>
