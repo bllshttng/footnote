@@ -758,6 +758,18 @@ def _smoke_prereqs(selected_cmds: Sequence[str]) -> Optional[str]:
     return None
 
 
+def _name_matches(name: str, globs: str) -> bool:
+    """True when `name` matches any glob in a comma-separated list.
+
+    `--only` and `--skip` share this, which is what makes them exact
+    complements: the same list partitions any step list into the steps one
+    selector keeps and the steps the other keeps, with nothing in neither.
+    That is the property CI's two shards rely on, so a step added to the
+    registry later cannot fall through the crack.
+    """
+    return any(fnmatch.fnmatch(name, g.strip()) for g in globs.split(",") if g.strip())
+
+
 def _parse_smoke_args(args: Sequence[str]) -> dict:
     """Parse smoke flags into an options dict.
 
@@ -766,11 +778,11 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
     """
     opts: dict = {
         "list": False, "keep_going": False, "retry_failed": False,
-        "verbose": False, "only": "", "changed": False, "base": "", "head": "",
-        "ambient": "clean",
+        "verbose": False, "only": "", "skip": "", "changed": False,
+        "base": "", "head": "", "ambient": "clean",
     }
     valued = {
-        "--only": "only", "--base": "base", "--head": "head",
+        "--only": "only", "--skip": "skip", "--base": "base", "--head": "head",
         "--ambient": "ambient",
     }
     pending = ""
@@ -815,6 +827,7 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
     # silently win and mislabel the evidence.
     subsets = [n for n, on in
                (("--changed", opts["changed"]), ("--only", bool(opts["only"])),
+                ("--skip", bool(opts["skip"])),
                 ("--retry-failed", opts["retry_failed"])) if on]
     if len(subsets) > 1:
         raise ValueError(f"smoke: {' and '.join(subsets)} are separate subset modes - pick one")
@@ -1263,7 +1276,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     actual rc (no pipe/tail masking), so preflight's attestation gate reads the
     truth.
 
-    Flags: --list [--verbose], --keep-going, --only <glob>, --retry-failed,
+    Flags: --list [--verbose], --keep-going, --only <globs>, --skip <globs>, --retry-failed,
     and --changed [--base REV --head REV] for the changed-surface packet (a
     CHANGED SUBSET; exits 20 when nothing mapped, 21 when the diff is not
     trustworthy - neither is a green verdict, and the full run still gates).
@@ -1330,6 +1343,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     _AMBIENT_MODE = opts["ambient"]
     list_mode, keep_going = opts["list"], opts["keep_going"]
     retry_failed, verbose, only_glob = opts["retry_failed"], opts["verbose"], opts["only"]
+    skip_glob = opts["skip"]
 
     env = _smoke_env(root)
 
@@ -1375,9 +1389,20 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
             retry_fell_back = True
             selected = list(range(total))
     elif only_glob:
-        selected = [i for i, n in enumerate(names) if fnmatch.fnmatch(n, only_glob)]
+        selected = [i for i, n in enumerate(names) if _name_matches(n, only_glob)]
         if not selected:
             sys.stderr.write(f"smoke: --only {only_glob!r} matched no steps. Available:\n")
+            for n in names:
+                sys.stderr.write(f"  {n}\n")
+            return 1
+    elif skip_glob:
+        selected = [i for i, n in enumerate(names) if not _name_matches(n, skip_glob)]
+        if not selected:
+            # A skip that leaves nothing is a caller bug, never an instruction.
+            # Running zero steps and exiting 0 is a green that proves nothing,
+            # which is the absence-reads-as-success failure this runner refuses
+            # everywhere else.
+            sys.stderr.write(f"smoke: --skip {skip_glob!r} left no steps. Available:\n")
             for n in names:
                 sys.stderr.write(f"  {n}\n")
             return 1
@@ -1399,6 +1424,8 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         label = "RETRY SUBSET"
     elif only_glob:
         label = "ONLY SUBSET"
+    elif skip_glob:
+        label = "SKIP SUBSET"
     kg = " keep-going" if keep_going else ""
     print(f"smoke: mode={label} steps={len(selected)}/{total}{kg}", flush=True)
     if retry_fell_back:
