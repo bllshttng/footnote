@@ -2017,6 +2017,72 @@ def test_dispatch_send_lock_timeout_budget_refusal_clears_dispatch_context(
     assert dispatch_mod._DISPATCH_CTX.get() is None
 
 
+def test_registered_sender_normal_and_timeout_paths_share_canonical_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.bus.log import iter_messages
+
+    write_registry(
+        [
+            AgentEntry(
+                name="sender-worker",
+                harness="claude",
+                harness_session_id="cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee",
+                short_id="cccccccc",
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+            AgentEntry(
+                name="red",
+                harness="claude",
+                harness_session_id="abcd1234-bbbb-cccc-dddd-eeeeeeeeeeee",
+                short_id="abcd1234",
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._registered_family1_state",
+        lambda _entry: "sleeping",
+    )
+    body = " ".join("word" for _ in range(79))
+
+    first = dispatch_send(
+        name="red",
+        message=body,
+        provider=None,
+        cwd=tmp_path,
+        from_name="sender-worker",
+    )
+    assert first.delivery == "durable"
+
+    _fail_first_lock_acquire(monkeypatch)
+    with pytest.raises(DispatchAskError) as raised:
+        dispatch_send(
+            name="red",
+            message=body,
+            provider=None,
+            cwd=tmp_path,
+            lock_timeout=0.2,
+            from_name="sender-worker",
+        )
+
+    assert raised.value.exit_code == 1
+    assert "running=79 current=79 projected=158 cap=80 window=10m" in str(
+        raised.value
+    )
+    rows = [row for row in iter_messages(warn=False) if row.kind == "send"]
+    assert len(rows) == 1
+    assert rows[0].from_ == "cccccccc"
+
+
 def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
     tmp_path: Path, monkeypatch
 ) -> None:

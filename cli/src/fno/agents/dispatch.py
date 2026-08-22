@@ -7044,7 +7044,7 @@ def _queue_durable_fallback(
     try:
         write_new_thread(
             recipient=durable_recipient,
-            sender=from_name,
+            sender=mail_ctx.from_,
             kind="send",
             body=durable_body,
             msg_id=msg_id,
@@ -7775,9 +7775,30 @@ def dispatch_send(
                 from fno.inbox.store import generate_msg_id
 
                 msg_id = generate_msg_id()
+                sender_entry = next(
+                    (entry for entry in timeout_entries if entry.name == from_name),
+                    None,
+                )
+                from_session = provider_from = None
+                if sender_entry is not None:
+                    provider_from = sender_entry.harness
+                    from_session = (
+                        getattr(sender_entry, "harness_session_id", None)
+                        or getattr(sender_entry, "short_id", None)
+                    )
+                timeout_recipient = canonical_handle(
+                    timeout_entry.harness_session_id
+                )
+                timeout_mail_ctx = _build_mail_ctx(
+                    from_name,
+                    from_session,
+                    provider_from,
+                    to=timeout_recipient,
+                    id=msg_id,
+                )
                 reservation = _reserve_send_budget(
-                    sender=from_name,
-                    recipient=canonical_handle(timeout_entry.harness_session_id),
+                    sender=timeout_mail_ctx.from_,
+                    recipient=timeout_recipient,
                     message=message,
                     msg_id=msg_id,
                     enforce=budget_enforce,
@@ -7798,6 +7819,7 @@ def dispatch_send(
                             timeout_entries,
                             msg_id=msg_id,
                             reason=queue_reason,
+                            mail_ctx=timeout_mail_ctx,
                         )
                     except Exception:
                         from fno.mail import budget
