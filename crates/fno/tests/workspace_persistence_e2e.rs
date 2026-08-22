@@ -138,11 +138,19 @@ fn symptom_hand_split_survives_restart() {
     c.detach();
 
     let mut r = restart(&scratch);
-    // Restore materializes persisted squads; wait until "w" reappears, then
-    // pin its shape: still ONE tab holding TWO panes.
-    r.client.wait_layout(15, "workspace w restores", |l| {
-        l.squads.iter().any(|s| s.name == "w")
-    });
+    // Wait for the SHAPE, not just the name, exactly as the pre-restart wait
+    // ten lines up does. Restore materializes a squad and its panes in more
+    // than one step, so a predicate satisfied by the name alone returns while
+    // the second pane is still arriving, and the assertions below then read a
+    // half-built layout and report one pane. Waiting on a weaker condition
+    // than the one being asserted is the whole defect: the assertions stay so
+    // a genuine topology loss still names what it found.
+    r.client
+        .wait_layout(15, "workspace w restores with its split", |l| {
+            l.squads
+                .iter()
+                .any(|s| s.name == "w" && s.tabs.len() == 1 && s.panes == 2)
+        });
     let w = r
         .client
         .layout
