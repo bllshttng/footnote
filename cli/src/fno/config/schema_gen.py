@@ -322,7 +322,9 @@ def wizard_plan() -> str:
             {
                 "path": leaf.path,
                 "type": leaf.type_str,
-                "default": leaf.default,
+                # Reduced, because a default can be a record now and the wizard
+                # plan is JSON the /fno:setup skill parses.
+                "default": _jsonable(leaf.default),
                 "tier": meta.wizard,
                 "question": meta.question,
                 "default_source": meta.default_source,

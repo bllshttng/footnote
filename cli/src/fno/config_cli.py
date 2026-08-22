@@ -766,7 +766,15 @@ def get_cmd(
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())
     elif isinstance(node, (dict, list)):
-        typer.echo(json.dumps(node, default=str))
+        # A container can now hold RECORDS (`agents.max_lanes` maps a provider
+        # to a ProviderBudget), and `default=str` renders one as its repr. A
+        # reader cannot paste that back into config.toml, so dump the record.
+        typer.echo(
+            json.dumps(
+                node,
+                default=lambda v: v.model_dump() if isinstance(v, BaseModel) else str(v),
+            )
+        )
     else:
         typer.echo("" if node is None else str(node))
     typer.echo(source_line, file=sys.stderr)
