@@ -16,10 +16,10 @@
 #      the scan, the baseline entry goes stale, and CI names the untouched
 #      sibling ("fixed the receipt in Rust, missed the Python twin").
 #   B  auto-loaded prose duplication - a normalized line >= 60 chars stated
-#      in both an auto-loaded surface (AGENTS.md, skills/using-fno/SKILL.md;
-#      the same set check-preamble-budget.sh budgets, kept in sync with it)
-#      and any other tracked .md. The copy nobody loads at session start is
-#      the copy that drifts.
+#      in both an auto-loaded surface (AGENTS.md, CLAUDE.md, using-fno, and
+#      every .claude/rules/*.md; mirroring what check-preamble-budget.sh
+#      budgets, kept in sync with it) and any other tracked .md. The copy
+#      nobody loads at session start is the copy that drifts.
 #   R  must-reference registry - "a site matching X must also reference Y in
 #      the enclosing function". Covers BOTH halves of the class: writer half
 #      (every env build on a spawn path must scrub), reader half (every
@@ -28,10 +28,20 @@
 #      itself a failure: a decorative guard guarding zero paths.
 #
 # Baseline contract (scripts/ci/reachable-paths-baseline.txt): current
-# duplicates/offenders are held with a reason per line. NEW findings fail
-# (justify or single-source); STALE entries fail (one side changed alone, or
-# an offender was fixed - update the sibling or delete the line). Neither
-# passes forever by describing today.
+# duplicates/offenders are held with a reason per line, and A/B lines carry
+# their CARRIER SET (the files on each side). NEW findings fail (justify or
+# single-source); CARRIER-SET drift on a baselined entry fails (a twin copied
+# into one more file is a finding, not silence); STALE entries fail (one side
+# changed alone, or an offender was fixed - update the sibling or delete the
+# line). Neither passes forever by describing today.
+#
+# What this gate does NOT catch, and the discipline that still lives here
+# because the graduated AGENTS.md entry is gone: text cannot see an operation
+# implemented on N paths. Before trusting a guard, enumerate every path a
+# caller can reach - in-process test, exec'd binary, skill layer, direct CLI,
+# spawned worker - because a guard on only one of them reads as protection
+# and ships green while the rest stay broken. The engines below catch the
+# textual shapes; the enumeration is still the author's job.
 #
 # Run:  bash scripts/ci/check-reachable-paths.sh [--self-test|--dump-baseline]
 # Exit: 0 clean, 1 findings or a control that did not fire, 2 misuse.
@@ -46,7 +56,7 @@ MODE="check"
 case "${1:-}" in
   --self-test) MODE="self-test" ;;
   --dump-baseline) MODE="dump" ;;
-  -h|--help) sed -n '1,35p' "$0"; exit 0 ;;
+  -h|--help) awk '/^set -uo pipefail/ {exit} {print}' "$0" | sed -e '$d'; exit 0 ;;
   "") ;;
   *) echo "check-reachable-paths: unknown argument: $1 (use --self-test or --dump-baseline)" >&2; exit 2 ;;
 esac
@@ -139,6 +149,12 @@ def norm_literal(raw):
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
+# Double quotes only, on both sides of the language pair. Known blind spot:
+# a python twin phrased with single quotes is not scanned. Matching single
+# quotes too is NOT a one-regex fix - an outer single-quoted string swallows
+# the double-quoted literals inside it, and apostrophe prose pairs into junk
+# twins. The real fix is tokenizing .py files (tokenize module) while keeping
+# this regex for .rs; until then, write message twins double-quoted.
 LITERAL_RE = re.compile(r'"((?:[^"\\\n]|\\.){%d,})"' % A_MIN)
 
 def engine_a():
@@ -190,7 +206,7 @@ def engine_b():
                 continue
             norm = norm_prose(stripped)
             if len(norm) >= B_MIN and norm in auto_lines:
-                dups[norm] = rel
+                dups.setdefault(norm, set()).add(rel)
     return dups
 
 def engine_r():
@@ -209,20 +225,25 @@ def engine_r():
                 continue
             spans = function_spans(lines)
             for i, line in enumerate(lines):
-                if not site_re.search(line):
+                # Comment text is not a site: a prose mention of the pattern
+                # must neither create an offender nor keep a dead glob alive.
+                if line.lstrip().startswith("#") or not site_re.search(line):
                     continue
                 matches += 1
                 fn, start, end = span_at(spans, i)
                 body = "\n".join(lines[start:end])
-                if fn is not None and not req_re.search(body):
-                    offenders.append(f"{entry['name']}:{rel}::{fn}")
+                if not req_re.search(body):
+                    offenders.append(f"{entry['name']}:{rel}::{fn or ''}")
         if matches == 0:
             vacuous.append(entry["name"])
     return sorted(set(offenders)), vacuous
 
 def function_spans(lines):
     """Outermost def spans with class-body scope reset (nested defs fold into
-    the enclosing def). Same attribution walk as check-mail-inject-callers.sh."""
+    the enclosing def). `async def` parses like `def`. The module prologue
+    before the first def is a span of its own (""), so a module-level site is
+    judged rather than silently skipped - the mail-inject-callers rel:: key
+    records its unattributed sites the same way."""
     spans = []
     fn, indent, start = "", None, None
     for i, line in enumerate(lines):
@@ -231,13 +252,18 @@ def function_spans(lines):
                 spans.append((fn, start, i))
             fn, indent, start = "", None, None
             continue
-        m = re.match(r"^([ \t]*)def ([A-Za-z_]\w*)\b", line)
+        m = re.match(r"^([ \t]*)(?:async[ \t]+)?def ([A-Za-z_]\w*)\b", line)
         if m and (indent is None or len(m.group(1)) <= indent):
             if fn:
                 spans.append((fn, start, i))
             fn, indent, start = m.group(2), len(m.group(1)), i
     if fn:
         spans.append((fn, start, len(lines)))
+    if spans:
+        if spans[0][1] > 0:
+            spans.insert(0, ("", 0, spans[0][1]))
+    else:
+        spans = [("", 0, len(lines))]
     return spans
 
 def span_at(spans, idx):
@@ -247,6 +273,11 @@ def span_at(spans, idx):
     return None, idx, idx + 1
 
 def load_baseline():
+    """entries[engine][key] = (meta, reason). A/B lines carry a carrier meta
+    column (A: `py=...;rs=...`, B: `in=...`) so the ratchet holds the CARRIER
+    SET, not just first occurrence: a baselined twin copied into one more file
+    is a finding, not silence. R lines have no meta (the key names the site).
+    """
     entries = {"A": {}, "B": {}, "R": {}}
     if not BASELINE_PATH or not os.path.isfile(BASELINE_PATH):
         return entries, []
@@ -256,12 +287,25 @@ def load_baseline():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         parts = line.split("\t")
-        if len(parts) < 3 or not parts[2].strip().startswith("#") or not parts[2].strip()[1:].strip():
-            malformed.append(line)
-            continue
-        key = parts[0]
-        if key in entries and parts[1]:
-            entries[key][parts[1]] = parts[2].strip()
+        key, ident = parts[0], parts[1] if len(parts) > 1 else ""
+        if key in ("A", "B"):
+            if (
+                len(parts) < 4
+                or not parts[3].strip().startswith("#")
+                or not parts[3].strip()[1:].strip()
+            ):
+                malformed.append(line)
+                continue
+            entries[key][ident] = (parts[2].strip(), parts[3].strip())
+        elif key == "R":
+            if (
+                len(parts) < 3
+                or not parts[2].strip().startswith("#")
+                or not parts[2].strip()[1:].strip()
+            ):
+                malformed.append(line)
+                continue
+            entries[key][ident] = ("", parts[2].strip())
         else:
             malformed.append(line)
     return entries, malformed
@@ -275,27 +319,53 @@ def main():
     if MODE == "dump":
         for norm in sorted(twins):
             py, rs = twins[norm]
-            print(f"A\t{norm}\t# CLASSIFY protocol|msg-twin|data  py={py[0]} rs={rs[0]}")
+            meta = "py=" + "|".join(py) + ";rs=" + "|".join(rs)
+            print(f"A\t{norm}\t{meta}\t# CLASSIFY protocol|msg-twin|data")
         for norm in sorted(dups):
-            print(f"B\t{norm}\t# CLASSIFY pointer|restated  in={dups[norm]}")
+            meta = "in=" + "|".join(sorted(dups[norm]))
+            print(f"B\t{norm}\t{meta}\t# CLASSIFY pointer|restated")
         for off in sorted(offenders):
             print(f"R\t{off}\t# offender - carry a reason or fix in this PR")
         return 0
 
+    def a_meta(norm):
+        py, rs = twins[norm]
+        return "py=" + "|".join(py) + ";rs=" + "|".join(rs)
+
+    def b_meta(norm):
+        return "in=" + "|".join(sorted(dups[norm]))
+
     a_new = [n for n in twins if n not in base["A"]]
+    a_drift = [n for n in twins if n in base["A"] and base["A"][n][0] != a_meta(n)]
     a_stale = [n for n in base["A"] if n not in twins]
     b_new = [n for n in dups if n not in base["B"]]
+    b_drift = [n for n in dups if n in base["B"] and base["B"][n][0] != b_meta(n)]
     b_stale = [n for n in base["B"] if n not in dups]
     r_new = [o for o in offenders if o not in base["R"]]
     r_stale = [o for o in base["R"] if o not in offenders]
 
     findings = []
     for n in sorted(a_new):
-        findings.append(f"A new twin literal (in both .py and .rs): {n[:100]}  py={twins[n][0][0]} rs={twins[n][1][0]}")
+        findings.append(f"A new twin literal (in both .py and .rs): {n[:100]}  {a_meta(n)}")
+    for n in sorted(a_drift):
+        findings.append(
+            f"A carrier set changed for a baselined twin: {n[:100]}  "
+            f"baseline {base['A'][n][0]}  now {a_meta(n)}  "
+            f"(update the baseline in the same PR, or single-source)"
+        )
     for n in sorted(a_stale):
-        findings.append(f"A stale baseline entry (no longer a twin - one side changed alone): {n[:100]}")
+        # Echo the recorded meta so CI names the sibling pair the developer
+        # did NOT touch (the header's stated contract).
+        recorded = base["A"].get(n, ("", ""))[1]
+        suffix = f"  recorded: {recorded}" if recorded else ""
+        findings.append(f"A stale baseline entry (no longer a twin - one side changed alone): {n[:100]}{suffix}")
     for n in sorted(b_new):
-        findings.append(f"B auto-loaded prose restated in {dups[n]}: {n[:100]}")
+        findings.append(f"B auto-loaded prose restated in {b_meta(n)}: {n[:100]}")
+    for n in sorted(b_drift):
+        findings.append(
+            f"B carrier set changed for a baselined duplication: {n[:100]}  "
+            f"baseline {base['B'][n][0]}  now {b_meta(n)}"
+        )
     for n in sorted(b_stale):
         findings.append(f"B stale baseline entry (duplication gone): {n[:100]}")
     for o in sorted(r_new):
@@ -306,7 +376,9 @@ def main():
     for name in vacuous:
         findings.append(f"R vacuous registry entry (site pattern matches nothing): {name}")
     for line in malformed:
-        findings.append(f"malformed baseline line (need ENGINE<TAB>id<TAB># reason): {line[:100]}")
+        findings.append(
+            f"malformed baseline line (A/B need ENGINE<TAB>id<TAB>meta<TAB># reason; R needs ENGINE<TAB>id<TAB># reason): {line[:100]}"
+        )
 
     if findings:
         print("check-reachable-paths: findings:", file=sys.stderr)
@@ -394,10 +466,20 @@ self_test() {
   fi
 
   # Stale control: a baseline entry whose twin no longer exists must fail.
-  printf 'A\tnot a twin anywhere in this tree any more\t# reason\n' > "$tmp/stale-baseline.txt"
+  printf 'A\tnot a twin anywhere in this tree any more\tpy=x.py;rs=y.rs\t# reason\n' > "$tmp/stale-baseline.txt"
   out="$(run_scan "$tmp/clean" "$tmp/stale-baseline.txt" check 2>&1)"
   grep -q "A stale baseline entry" <<<"$out" || {
     echo "check-reachable-paths self-test: stale-entry control did not fire" >&2
+    echo "$out" >&2
+    return 1
+  }
+
+  # Carrier-drift control: a baselined twin whose carrier set changed (a new
+  # file copied it, or a carrier was removed) must fail - not pass silently.
+  printf 'A\ttwin canary literal long enough to clear the threshold\tpy=other.py;rs=b.rs\t# reason\n' > "$tmp/drift-baseline.txt"
+  out="$(run_scan "$tmp/canary" "$tmp/drift-baseline.txt" check 2>&1)"
+  grep -q "carrier set changed" <<<"$out" || {
+    echo "check-reachable-paths self-test: carrier-drift control did not fire" >&2
     echo "$out" >&2
     return 1
   }
@@ -412,7 +494,7 @@ self_test() {
     return 1
   }
 
-  echo "check-reachable-paths self-test: OK (canaries fired, clean/stale/vacuous controls held)"
+  echo "check-reachable-paths self-test: OK (canaries fired, clean/stale/drift/vacuous controls held)"
   return 0
 }
 
