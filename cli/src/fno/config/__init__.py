@@ -3119,9 +3119,11 @@ class MuxBlock(BaseModel):
     # checkout's `project.id`, which resolves through git and so answers the
     # same for every worktree layout; `all` is the historical board;
     # `workspace:<name>` takes the project set `work.workspaces.<name>` already
-    # declares rather than inventing a second place to list projects. Read
-    # straight from config by the Rust mux server (same split-brain as
-    # attach_digest), which REFUSES to widen when the scope cannot resolve.
+    # declares rather than inventing a second place to list projects. Read by
+    # the Rust mux CLIENT at server birth and passed in on the env, never by the
+    # server itself (a subprocess on its startup path wedged shutdown). A scope
+    # that cannot resolve falls back to every project; `fno mux doctor` is where
+    # that is visible.
     board_scope: str = "repo"
     # The prefix key, as a spec the Rust client parses (`C-a`, `Ctrl-a`, `^a`, or
     # a bare printable char). None keeps the built-in Ctrl-b.
