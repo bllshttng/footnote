@@ -1590,9 +1590,13 @@ class _StoredSession:
 
 
 def _asked_question_with_asker(root: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    # The asker handle is stamped on a durable question event, so `ask` resolves
+    # it through the owned path rather than raw precedence.
     monkeypatch.setattr(
-        "fno.harness_identity.resolve_harness_identity",
-        lambda: HarnessIdentity(session_id="89abcdef-full-session", harness="codex"),
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: OwnedHarnessIdentity(
+            "89abcdef-full-session", "codex", (), "single"
+        ),
     )
     asked = runner.invoke(outstanding_app, ["ask", "which lane?"])
     return asked.stdout.strip().splitlines()[-1]
