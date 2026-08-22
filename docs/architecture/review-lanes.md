@@ -477,21 +477,23 @@ worker; a role table cannot enforce it.
 
 ## The in-flight review hold
 
-Every gate above answers one question: what verdict EXISTS for this head. None of them can answer the other one. A review that is RUNNING has produced no verdict yet, so it is invisible to `review_coverage`, to `required_bots`, and to `ready`.
+Every gate above answers one question. What verdict EXISTS for this head. None of them answers the other one. A review that is RUNNING has produced no verdict yet. So it stays invisible to `review_coverage`, to `required_bots`, and to `ready`.
 
-Three PRs on 2026-08-22 read green, settled, mergeable and `ready: true` with an empty `ready_blockers` while a review of that exact head was mid-flight. PR 1068 had a code-review fork writing to the worktree. PR 1071's worker was mid-sentence, "Committing the review fixes". PR 1072's worker had already counted five findings and named the two files. All three were caught by a human holding on judgment, and that judgment was encoded nowhere.
+Three PRs on 2026-08-22 read green, settled, mergeable and `ready: true` with an empty `ready_blockers`. A review of that exact head was mid-flight on each. PR 1068 had a code-review fork writing to the worktree. PR 1071's worker was mid-sentence, "Committing the review fixes". PR 1072's worker had counted five findings and named the two files. A human held all three on judgment. That judgment lived nowhere in the code.
 
-The window is the default ordering rather than a race. A review is dispatched when a head is pushed. CI runs against that same head in parallel. CI is bounded, roughly nineteen minutes in this repo, and a review is not. Green therefore arrives FIRST, reliably, so any merge decision taken the moment a PR turns green lands inside the window.
+The window is the default ordering, not a race. A push starts a review. CI runs against that same head in parallel. CI is bounded, roughly nineteen minutes in this repo. A review is not. Green arrives FIRST, reliably. Any merge taken at the moment a PR turns green lands inside the window.
 
-Config makes this worse rather than better. With `required_bots` unset, `reviewers` empty and `self_review_required` false, `_review_lane_configured` short-circuits the coverage gate to COVERED, so `ready: true` is correct against the configured policy and wrong against the world. The hold is therefore config-independent: a review that is running blocks whether or not any review was ever required.
+Config makes this worse rather than better. With no `required_bots`, no `reviewers` and `self_review_required` false, `_review_lane_configured` short-circuits coverage to COVERED. So `ready: true` is correct against the configured policy and wrong against the world. The hold is therefore config-independent. A running review blocks whether or not the project requires any review.
 
 ### Two layers
 
-The **registered hold** is a TTL claim on `review:branch:<branch>`, taken where a review is DISPATCHED rather than by the reviewer itself, so a reviewer that crashes still leaves behind the hold its dispatcher took. It is a claim rather than a new state file because `fno.claims` already owns atomic acquisition, TTL bounds, the LIVE / SUSPECT / STALE / CORRUPTED classification, and a reaper. `review:` is not a global-id prefix, so the key routes to the canonical repo root and every worktree of the project shares one hold.
+The **registered hold** is a TTL claim on `review:branch:<branch>`. A review DISPATCH takes it, never the reviewer itself. A reviewer that crashes still leaves behind the hold its dispatcher took.
 
-The **worktree probe** is derived and needs no cooperation: tracked modifications on the branch, or a local HEAD that is not what the PR would merge. It covers every review footnote never dispatched.
+It is a claim rather than a new state file. `fno.claims` already owns atomic acquisition, TTL bounds, the LIVE / SUSPECT / STALE / CORRUPTED classification, and a reaper. `review:` is not a global-id prefix. So the key routes to the canonical repo root, and every worktree of the project shares one hold.
 
-Neither layer covers the specimens alone. The probe is blind to the window between "review dispatched" and "first edit", which is where PR 1072 sat when it went green. The hold is blind to any review nothing registered.
+The **worktree probe** is derived and needs no cooperation. It reads tracked modifications on the branch, and a local HEAD that differs from what the PR merges. It covers every review footnote never dispatched.
+
+Neither layer covers the specimens alone. The probe cannot see the window between a dispatched review and its first edit. When PR 1072 went green, it sat in exactly that window. The hold cannot see a review that nothing registered.
 
 ### Where the hold is taken and cleared
 
@@ -502,7 +504,7 @@ Neither layer covers the specimens alone. The probe is blind to the window betwe
 | `skills/review/scripts/emit-attestation.sh` | releases | the positive completion marker: a verdict now exists for this head, so the release and the proof are one event |
 | a human or an unhooked harness | no | the named residual gap, covered only by the worktree probe |
 
-Registration NEVER blocks a review from starting. A review that runs unheld is covered by the probe; a review that refuses to start because a lockfile write failed is strictly worse.
+Registration NEVER blocks a review from starting. The probe still covers a review that runs unheld. A review that refuses to start because a lockfile write failed is strictly worse.
 
 ### Who reads it
 
@@ -513,15 +515,17 @@ Registration NEVER blocks a review from starting. A review that runs unheld is c
 | the auto-merge lane | the same refusal: it is not a separate caller, it is `run_merge` with `auto_merge.enabled`, and it is the caller with no judgment to fall back on |
 | a bare `gh pr merge` via `hooks/git-protection.py` | denies coarsely, reading the claims directory directly |
 
-The hook reads files rather than shelling a third `fno` probe. The two vetoes above it already spend 25s each against a 60s harness budget with under 6s of margin, and a hook that gets killed emits no verdict at all. That coarseness is deliberate in the safe direction: any review hold in the repo denies, without mapping the PR to its branch, which would need the network call the hook path exists to avoid. It also does not judge expiry, because hybrid liveness can keep a TTL-lapsed hold LIVE, so a TTL-only read there could ALLOW what the guard refuses. A wrong deny costs one command.
+The hook reads files rather than shelling a third `fno` probe. The two vetoes above it already spend 25s each. The harness hook budget is 60s, and the margin is under 6s. A killed hook emits no verdict at all.
+
+That coarseness is deliberate, in the safe direction. Any review hold in the repo denies. The hook never maps the PR to its branch, because that needs the network call this path exists to avoid. It never judges expiry either. Hybrid liveness can keep a TTL-lapsed hold LIVE, so a TTL-only read here can ALLOW what the guard refuses. A wrong deny costs one command.
 
 ### Failing safe in both directions
 
-A missing hold is never by itself the clear answer. It clears only when the worktree enumeration also RAN and answered. A corrupted lockfile, an unreadable claims root, a failed `git worktree list`, or a PR whose head branch cannot be resolved all block, because an unprobed PR is not a clear one.
+A missing hold is never by itself the clear answer. It clears only after the worktree enumeration RAN and answered. Four readings block instead: a corrupted lockfile, an unreadable claims root, a failed `git worktree list`, and a PR whose head branch will not resolve. An unprobed PR is not a clear one.
 
-A hold that outlives a crashed reviewer would wedge the merge lane permanently, which is worse than the defect it prevents, so it ages out on `config.review.hold_ttl_minutes` (default 90). It never ages out silently: the surface that clears past a lapsed hold prints a line naming the holder and the expiry, and emits `review_hold_expired`. A lane that clears with no receipt is indistinguishable from one that was never held.
+A hold that outlives a crashed reviewer wedges the merge lane permanently. That is worse than the defect it prevents. So it ages out on `config.review.hold_ttl_minutes`, which defaults to 90. It never ages out silently. The surface that clears past a lapsed hold prints the holder and the expiry, and emits `review_hold_expired`. A lane that clears with no receipt reads exactly like a lane nobody ever held.
 
-There is no self-exemption. An author who merges over its own uncommitted fixes loses them as surely as a stranger does, and a caller-relative `ready` would mean two readers of one payload get different answers.
+There is no self-exemption. An author who merges over its own uncommitted fixes loses them, exactly as a stranger does. A caller-relative `ready` also means two readers of one payload get different answers.
 
 To clear a hold by hand: `fno do pr review-hold release --branch <b> --holder <h>`. To read one: `fno do pr review-hold check <pr>`, exit 0 clear, 3 held, 4 a dead instrument.
 
