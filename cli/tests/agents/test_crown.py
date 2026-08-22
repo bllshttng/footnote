@@ -211,6 +211,48 @@ def test_crown_grantor_defaults_to_human_for_a_direct_spawn(tmp_path: Path, monk
     assert row.crown_level == 0
 
 
+def test_pane_spawn_clears_a_terminal_holder_before_reclaiming_its_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="dead-king",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                harness_session_id="dead-session",
+                status="exited",
+                crown_level=1,
+                crown_scope="epic-x",
+                crown_grantor="human",
+            )
+        ]
+    )
+
+    _spawn_crowned(
+        monkeypatch,
+        tmp_path,
+        grantor_env="dead-session",
+        crown_level=1,
+        crown_scope="epic-x",
+    )
+
+    dead = next(row for row in load_registry() if row.name == "dead-king")
+    assert (dead.crown_level, dead.crown_scope, dead.crown_grantor) == (
+        None,
+        None,
+        None,
+    )
+    assert [row.name for row in load_registry() if row.crown_scope == "epic-x"] == [
+        "king-epic"
+    ]
+
+
 def test_uncrowned_spawn_leaves_crown_none(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.registry import load_registry
 

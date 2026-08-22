@@ -135,6 +135,21 @@ def test_a_dead_king_does_not_need_succession(court) -> None:
     _spawn_heir()
 
     assert _row("heir").crown_level == 2
+    from fno.agents.registry import register_existing_session
+
+    register_existing_session(
+        session_id=CALLER_SESSION,
+        cwd="/tmp",
+        harness="claude",
+        name="dead-king",
+    )
+    dead = _row("dead-king")
+    assert (dead.crown_level, dead.crown_scope, dead.crown_grantor) == (
+        None,
+        None,
+        None,
+    )
+    assert [row.name for row in load_registry() if row.crown_scope == SCOPE] == ["heir"]
 
 
 def test_succession_matches_cc_session_id_for_a_partially_backfilled_row(court) -> None:

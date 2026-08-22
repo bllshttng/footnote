@@ -3582,6 +3582,23 @@ def dispatch_spawn_pane(
                 crown_scope = None
                 crown_grantor_val = None
             if crown_level is not None and crown_scope:
+                # Reclaiming an abandoned scope also clears the terminal
+                # holder's stale crown in this same write. Terminal rows are
+                # excluded from `holders`, but their crown fields still make
+                # them appear crowned to readers and can create a double-rule
+                # after re-registration.
+                rows = [
+                    replace(
+                        r,
+                        crown_level=None,
+                        crown_scope=None,
+                        crown_grantor=None,
+                    )
+                    if r.crown_scope == crown_scope
+                    and r.status in TERMINAL_STATUSES
+                    else r
+                    for r in rows
+                ]
                 holders = [
                     r
                     for r in rows
