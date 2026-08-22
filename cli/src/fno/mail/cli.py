@@ -1788,7 +1788,11 @@ def _reply_session_for(from_name: Optional[str]) -> Optional[str]:
     key = session_identity_key(session)
     # A caller may name itself by short handle or by full id; both are this
     # session, and only a THIRD address means "route the reply elsewhere".
-    return session if from_name in (key[:8], key, session) else None
+    # Case-folded, because `session_identity_key` lowercases and a hex address
+    # does not care: an uppercase self-address that fell through here dropped
+    # `from_session` silently and sent the reply back to the colliding head-8.
+    named = from_name.strip().lower()
+    return session if named in (key[:8], key, session.lower()) else None
 
 
 def _name_lane_send(
@@ -1886,8 +1890,25 @@ def _name_lane_send(
             # bare hex short-handle of a session no store currently knows still
             # earns a durable write (it may yet drain if that session revives).
             if not is_session_shaped(token):
-                raise UnreachableTokenError(token)
-            recipient = token
+                # --force is the exception, and the refusal above says why it is
+                # one: a name cannot be a DURABLE recipient because the drain is
+                # handle-keyed. Forcing writes no such row. It types at a pane
+                # the registry names, and the registry is exactly what resolves
+                # a friendly name to the session behind it. Discovery is
+                # liveness-gated, so this arm IS the situation --force exists
+                # for, and refusing here made the flag unusable for the address
+                # its own error text tells you to use.
+                forced_entry = _resolve_pane_entry(None, None, token) if force else None
+                forced_session = (
+                    getattr(forced_entry, "session_id", None)
+                    or getattr(forced_entry, "harness_session_id", None)
+                ) if forced_entry is not None else None
+                if not forced_session:
+                    raise UnreachableTokenError(token)
+                recipient = canonical_handle(forced_session)
+                provider = getattr(forced_entry, "harness", None) or provider
+            else:
+                recipient = token
         provider = (
             token_reachable.agent if token_reachable is not None else provider
         ) or "claude"
@@ -3310,6 +3331,31 @@ def cmd_send(
         message = name
         name = canonical_handle(ident.session_id)
 
+    # --force ABOVE every lane that returns without reading it. Four lanes below
+    # end the command on their own, so a guard placed after any of them leaves
+    # the flag silently dropped there -- which is the defect this guard exists to
+    # close, reintroduced one line at a time. A dropped transport flag is worse
+    # than a refused one, because the receipt reads like a success: the send
+    # prints `queued (durable)` while the sender believes it was typed at a
+    # prompt. Only the name lane can force, because only it names one pane.
+    if force:
+        why = None
+        if raw:
+            why = "--raw already types at the prompt line, unwrapped"
+        elif kind is not None:
+            why = f"--kind {kind} is a durable inbox note by design"
+        elif to_project:
+            why = "a project addresses a repo, not a pane"
+        elif name and _is_job_name(name):
+            why = "a job address names work that outlives any one session"
+        if why is not None:
+            print(
+                f"error: --force types into one named pane and {why}. Send to "
+                f"the agent by name to force a pane, or drop --force.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
     # --raw: fire a verb in a peer by injecting the payload UNWRAPPED at the
     # prompt line (no <fno_mail> envelope, so the REPL slash parser runs it).
     # Separate flow: never wraps, never queues durable, four-state receipt.
@@ -3593,22 +3639,6 @@ def cmd_send(
             verb = "appended (durable) to" if res.appended else "queued (durable) for"
             print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]")
         return
-
-    # --force types at ONE named pane, and neither lane below has one to name: a
-    # project note addresses a repo, and a job address addresses work that
-    # outlives whatever session holds it. Both returned without ever reading the
-    # flag, so the send printed `queued (durable)` while the sender believed it
-    # had been typed at a prompt. A dropped transport flag is worse than a
-    # refused one, because the receipt looks like a success.
-    if force and (to_project or (name and _is_job_name(name))):
-        addressed = "a project" if to_project else "a job address"
-        print(
-            f"error: --force types into a named pane and {addressed} has none. "
-            f"Send it to the agent by name to force a pane, or drop --force to "
-            f"queue it durable.",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
 
     # Project mode: the message is the sole positional, so `send --to-project X
     # "msg"` parks "msg" in the `name` slot - accept it from either slot.

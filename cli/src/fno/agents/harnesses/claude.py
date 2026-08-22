@@ -641,12 +641,21 @@ def bg_create(
 
     spawn_env = worker_environment(spawn_env)
 
-    # Seed provenance (x-3a64), set AFTER the env floor. The seed argument stays
+    # Seed provenance, set AFTER the env floor. The seed argument stays
     # byte-identical - a leading-slash payload is classified by that first
     # character - so who sent it travels as env and a SessionStart hook renders
     # the <fno_mail> envelope. It goes after `worker_environment` because that
     # floor CLEARS this group for every adapter (a child must never inherit its
     # parent's seed attribution); setting before it would be silently undone.
+    #
+    # KNOWN GAP on this lane, and the same one x-6de8 names ~90 lines up: a
+    # ROUTED `claude --bg` session is forked by the claude daemon with the
+    # DAEMON's env, not this spawn_env, so these fields do not reach that
+    # child and its SessionStart renders no sidecar. The forgery refusal below
+    # still fires, because it reads the seed here rather than in the child.
+    # Reaching a daemon-forked worker needs a carrier that survives the fork,
+    # the way `materialize_model_scrub_settings` floats a settings file for the
+    # model vars. Do not read the update below as proof the bg lane is covered.
     from fno.mail.seed_provenance import SeedProvenanceRefused
     from fno.mail.seed_provenance import build_env as _seed_provenance_env
 

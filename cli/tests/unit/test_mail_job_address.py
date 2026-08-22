@@ -441,6 +441,32 @@ def test_job_lane_record_carries_the_full_reply_address(runner, isolated, monkey
     assert captured == [SELF_SESSION]
 
 
+def test_an_uppercase_self_address_still_counts_as_this_session(
+    runner, isolated, monkeypatch
+):
+    """`session_identity_key` lowercases and a hex address does not care.
+
+    An uppercase self-address that missed the comparison dropped `from_session`
+    without a word and routed the reply back to the colliding head-8, which is
+    the address this whole branch exists to stop relying on.
+    """
+    _acquire_node("upper-abc", "55555555-5555-5555-5555-555555555555")
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
+    _stub_self_session(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True
+    )
+
+    res = runner.invoke(
+        app,
+        ["mail", "send", "node:upper-abc", "ship it",
+         "--from-name", SELF_SESSION[:8].upper()],
+    )
+    assert res.exit_code == 0, res.output
+    rows = _bus_to("node:upper-abc")
+    assert rows[0].from_session == SELF_SESSION
+
+
 def test_an_explicit_from_name_keeps_the_reply_address_it_named(
     runner, isolated, monkeypatch
 ):

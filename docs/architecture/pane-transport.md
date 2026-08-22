@@ -74,6 +74,8 @@ So the prompt stays byte-identical and the attribution arrives beside it. Every 
 
 Startup only. `resume` and `compact` fire `SessionStart` too. Emitting there puts a second copy of one spawn's envelope in the transcript and makes `grep '</fno_mail>'` overcount one spawn as several.
 
+A routed `claude --bg` session does not receive these fields. The claude daemon forks that serving session with the daemon's own env, so a spawn env never reaches it and its SessionStart renders no sidecar. The same fork is why `materialize_model_scrub_settings` floats a settings file for the model vars. Covering the bg lane needs a carrier of that kind. The seed is arbitrary text rather than a setting, so it is not the same fix.
+
 The group is cleared as a whole at the shared env floor every adapter's child crosses. A child that inherits half of it attributes its own first message to whoever seeded its parent, which is an envelope naming the wrong peer. A launcher that knows the seed sets the fields after crossing that floor. A launcher that does not, such as a headless one-shot, emits no sidecar rather than a wrong one.
 
 An operator spawn emits nothing. A person typing `fno agents spawn` in a shell authored the seed themselves. Stamping a peer envelope on it names an agent sender that does not exist.

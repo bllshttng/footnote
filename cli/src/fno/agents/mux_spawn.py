@@ -2458,7 +2458,15 @@ def _evaluate_manifest_screen(
     """Ask the Rust manifest engine for the winning rule on this exact screen."""
     from fno import rust_binary
 
-    binary = rust_binary.resolve_installed_binary()
+    # The INSTALLED set first, then the full one. `resolve_installed_binary`
+    # narrows deliberately, but for two reasons that do not apply here: it keeps
+    # a dev checkout's DEFAULT DISPATCH on Python, and it keeps the in-process
+    # suite from exec'ing the binary. This is neither. It is a read-only
+    # screen -> verdict evaluation with no dispatch decision in it, and every
+    # caller treats an unavailable detector as a hard refusal. Under the narrow
+    # set alone a source checkout has no detector at all, so the prompt gate
+    # refused every enveloped pane send on it and the whole lane went dark.
+    binary = rust_binary.resolve_installed_binary() or rust_binary.resolve_binary()
     if binary is None:
         return {"matched": False, "error": "manifest-eval binary unavailable"}
     try:

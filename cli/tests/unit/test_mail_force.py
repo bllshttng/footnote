@@ -265,16 +265,18 @@ def test_force_refuses_a_send_to_this_session(_tmp_state, monkeypatch):
     [
         ["send", "node:x-1234", "ship it", "--force"],
         ["send", "--to-project", "footnote", "ship it", "--force"],
+        ["send", "worker", "/fno:review", "--raw", "--force"],
+        ["send", "--to-project", "footnote", "heads up", "--kind", "heads-up", "--force"],
     ],
-    ids=["job-address", "project"],
+    ids=["job-address", "project", "raw", "kind"],
 )
 def test_force_refuses_the_lanes_that_have_no_pane(_tmp_state, monkeypatch, argv):
     """A dropped transport flag is worse than a refused one.
 
-    Neither lane names a pane: a project note addresses a repo, and a job
-    address addresses work that outlives whatever session holds it. Both used to
-    return without ever reading the flag, so the send printed `queued (durable)`
-    while the sender believed it had been typed at a prompt.
+    None of these lanes names one pane, and each ENDS the command itself. So a
+    guard placed after any of them leaves the flag dropped there, which is how
+    the first version of this guard missed `--raw` and `--kind`: it sat below
+    both. The parametrize is the point, not the individual cases.
     """
     _entry_row, sent = _install(monkeypatch)
 
@@ -284,3 +286,26 @@ def test_force_refuses_the_lanes_that_have_no_pane(_tmp_state, monkeypatch, argv
     assert "--force" in (result.stderr or "")
     assert not sent
     assert "queued (durable)" not in result.output
+
+
+def test_force_reaches_a_registered_agent_by_name(_tmp_state, monkeypatch):
+    """The address the refusal text tells you to use has to work.
+
+    Discovery is liveness-gated, so a registered worker whose listing misses
+    lands on the token rung, and that IS the situation `--force` exists for. The
+    token rung refused any non-session-shaped token, because a name cannot be a
+    durable recipient when the drain is handle-keyed. Forcing writes no such
+    row: it types at a pane the registry names, and the registry resolves the
+    name to the session behind it.
+    """
+    entry, sent = _install(monkeypatch)
+    entry.name = "blueprint-x-ce6e"
+
+    result = runner.invoke(mail_app, ["send", "blueprint-x-ce6e", "status?", "--force"])
+
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert "typed (pane 45)" in result.output
+    assert sent, "a live row with a pane must be typed into, not refused"
+    # Addressed by the resolved session's handle, never by the friendly name:
+    # the name is not a mail address and a row keyed on it strands the message.
+    assert "0199aaaa" in result.output
