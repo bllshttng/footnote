@@ -518,6 +518,7 @@ fn concurrent_strict_spawn_only_one_commits() {
                 split: Some(Dir::Down),
                 here: false,
                 fallback: PlacementFallback::Refuse,
+                max_panes: None,
             },
         },
     };

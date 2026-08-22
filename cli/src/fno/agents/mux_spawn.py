@@ -3108,6 +3108,7 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
+            placement_args += ["--max-panes", str(_pane_group_max())]
         # Same reasoning as the spawn-clock stamp below, snapshotted first: a
         # sibling pane starting during the lock-wait or argv-build above would
         # otherwise widen the daemon oracle's candidate set. Gated to codex
