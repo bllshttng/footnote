@@ -238,6 +238,12 @@ def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
         )
 
 
+#: Matches either end of the peer-follow-up container, case-insensitively, for
+#: the same reason `contains_fno_mail_tag` is case-insensitive: an exact-case
+#: check is bypassed by one capital letter.
+_CROSS_SESSION_TAG_RE = re.compile(r"</?cross-session-message", re.IGNORECASE)
+
+
 def _refuse_forged_envelope(body: str) -> None:
     """Refuse a body containing an ``<fno_mail`` open tag or ``</fno_mail>`` close
     tag (x-4ce4), with a CLI-friendly error before the body ever reaches
@@ -1335,6 +1341,20 @@ def cmd_pane_prepare(
         )
         raise typer.Exit(code=3) from exc
     _refuse_forged_envelope(body)
+    # BOTH attribution containers, because `_already_wrapped` passes both. The
+    # guard above knows only `<fno_mail`, so a handcrafted
+    # `<cross-session-message from-name="king">` sailed through it, matched the
+    # passthrough, and was typed at a worker's pane as an attributed peer order
+    # with no envelope of ours and no audit row. Refusing one tag and not its
+    # sibling is not a boundary. `claude_ask.rs` already refuses both.
+    if _CROSS_SESSION_TAG_RE.search(body):
+        print(
+            "error: body carries a <cross-session-message> container. That tag "
+            "marks a peer's attributed turn, and a body cannot supply its own. "
+            "Send it as mail, or use --raw to type it as keystrokes.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
     try:
         print(prepare(body, session=session, pane_id=pane, harness=harness), end="")
     except PaneSendRefused as exc:
@@ -1987,9 +2007,16 @@ def _name_lane_send(
                 # for, and refusing here made the flag unusable for the address
                 # its own error text tells you to use.
                 forced_entry = _resolve_pane_entry(None, None, token) if force else None
+                # `harness_session_id` FIRST, matching `_pane_recipient_handle`
+                # and `resolve_pane_recipient`. `AgentEntry.session_id` is a
+                # property that returns claude's short_id (an attach jobId) when
+                # one is present, and that is not a mail address. Bounded today
+                # by the mux-XOR-bg invariant so it only ever reached a refusal
+                # string, but three places deriving one address must not derive
+                # it three ways.
                 forced_session = (
-                    getattr(forced_entry, "session_id", None)
-                    or getattr(forced_entry, "harness_session_id", None)
+                    getattr(forced_entry, "harness_session_id", None)
+                    or getattr(forced_entry, "session_id", None)
                 ) if forced_entry is not None else None
                 if not forced_session:
                     raise UnreachableTokenError(token)
@@ -3135,9 +3162,16 @@ def _raw_send(
             confirm=True,
             sender=transport_sender,
             # raw: this lane exists to make the REPL slash parser fire, which an
-            # envelope defeats. It is the archetypal keystroke case the
-            # pane-send default opts out of, not an oversight.
+            # envelope defeats.
             raw=True,
+            # But GATED. This is the middle case, not the keystroke case. The
+            # keystroke exemption exists for a payload that ANSWERS a showing
+            # prompt (a digit, a control key), where the prompt has to be there.
+            # This lane fires a verb, which a showing prompt swallows exactly
+            # the way it swallows mail: at a codex auth wall the CR takes the
+            # wall's default, the verb never runs, and codex has no transcript
+            # confirm, so the receipt still reads `injected`.
+            gate=True,
         )
     else:  # claude control.sock - the only other keystroke lane
         delivered = _mail_inject_claude(

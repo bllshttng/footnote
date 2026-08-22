@@ -708,10 +708,12 @@ def test_raw_generic_daemon_lane_keeps_its_refusal(mailbox, monkeypatch, capsys,
     monkeypatch.setattr(
         "fno.agents.dispatch._mux_pane_send",
         # `raw` is what keeps this lane unwrapped: the payload is a slash verb
-        # aimed at the REPL parser, which an envelope defeats.
-        lambda resolved, payload, guarded=True, sender=None, confirm=False, raw=False: (
-            injected.append((resolved, payload, sender, raw))
-        )
+        # aimed at the REPL parser, which an envelope defeats. `gate` is
+        # separate and stays ON here, because a showing prompt swallows a verb
+        # exactly as it swallows mail. `**_kw` so a new transport argument does
+        # not break this stub with a TypeError that reads like a lane failure.
+        lambda resolved, payload, guarded=True, sender=None, confirm=False,
+        raw=False, **_kw: (injected.append((resolved, payload, sender, raw)))
         or True,
     )
     review_calls = []

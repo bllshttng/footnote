@@ -34,6 +34,20 @@ def _bridge_argv() -> list[str]:
     return re.findall(r'"([^"]+)"', block.group(1))
 
 
+def _declared_options() -> set[str]:
+    """Every option string `mail pane-prepare` declares."""
+    from typer.main import get_command
+
+    group = get_command(mail_app)
+    prepare_cmd = group.commands["pane-prepare"]  # type: ignore[attr-defined]
+    opts: set[str] = set()
+    for param in prepare_cmd.params:
+        opts.update(getattr(param, "opts", []) or [])
+        opts.update(getattr(param, "secondary_opts", []) or [])
+    assert opts, "pane-prepare declares no options; the introspection broke"
+    return opts
+
+
 def test_the_rust_bridge_names_a_command_this_cli_has():
     argv = _bridge_argv()
     # The shape it has always had: `mail pane-prepare` plus flags.
@@ -55,5 +69,11 @@ def test_the_rust_bridge_flags_still_exist(flag):
     caller would refuse every non-raw send and no test would say so.
     """
     assert flag in _bridge_argv(), f"{flag} is no longer in the bridge argv"
-    help_text = CliRunner().invoke(mail_app, ["pane-prepare", "--help"]).output
-    assert flag in help_text, f"`mail pane-prepare` no longer accepts {flag}"
+    # Introspect the parameters, never the rendered help. Typer draws help in a
+    # Rich box that wraps to the terminal width, so a narrower CI terminal
+    # splits a long flag across lines and a substring search reports it missing.
+    # The parameter list is what the command actually accepts, and it does not
+    # depend on how wide the screen is.
+    assert flag in _declared_options(), (
+        f"`mail pane-prepare` no longer accepts {flag}; the Rust bridge passes it"
+    )
