@@ -39,6 +39,7 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Optional
 
 from fno import paths
 from fno.agents import events
+from fno.agents import rm_notice
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
@@ -3653,6 +3654,19 @@ def rm_agent(
             # Non-None only when --force swallowed a teardown failure; rides
             # the terminal event so the forensic stream stays single and true.
             teardown_error: Optional[str] = None
+
+            # The teardown below destroys the harness session record, which IS
+            # the resume handle. Name it and name the verb that reverses it,
+            # before anything is torn down. The interactive prompt lives at the
+            # `rust_runtime` seam instead, because that is the one place both
+            # runtimes pass through; this is the warning half only, so the
+            # documented wedged-daemon escape hatch (`python -c "... rm_agent
+            # (...)"` in the king brief's CLI reference) is not silent either.
+            handle = rm_notice.resume_handle_for(existing)
+            if handle is not None:
+                sys.stderr.write(
+                    rm_notice.resume_handle_notice(name, existing.harness, handle)
+                )
 
             if existing.harness == "claude":
                 short_id = existing.short_id

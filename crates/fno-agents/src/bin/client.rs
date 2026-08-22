@@ -2253,6 +2253,11 @@ fn format_success(
             let harness = result.get("harness").and_then(Value::as_str).unwrap_or("");
             let mut removed = vec!["fno"];
             let mut notes = Vec::new();
+            // The harness row we just tore down IS the resume handle. The seam
+            // warns BEFORE the reap; this names the reversal AFTER it, so a
+            // direct `fno-agents rm` (which never passes the Python seam) is
+            // not silent about the loss either.
+            let mut adopt_hint: Option<String> = None;
             if !harness.is_empty() {
                 let reason = result
                     .get("harness_reason")
@@ -2263,7 +2268,16 @@ fn format_success(
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
                 match result.get("harness_removed").and_then(Value::as_bool) {
-                    Some(true) => removed.push(harness),
+                    Some(true) => {
+                        removed.push(harness);
+                        if row_id != "unknown" {
+                            adopt_hint = Some(format!(
+                                "\nthe {harness} session record was the resume handle; \
+                                 the transcript stays on disk.\nreverse it with: \
+                                 fno agents adopt {row_id}"
+                            ));
+                        }
+                    }
                     Some(false) if reason.contains("already absent") => {
                         notes.push(format!("{harness} row already absent"))
                     }
@@ -2328,7 +2342,10 @@ fn format_success(
             } else {
                 format!("{surfaces}; {}", notes.join("; "))
             };
-            Some(format!("removed: {name} ({detail})"))
+            Some(format!(
+                "removed: {name} ({detail}){}",
+                adopt_hint.unwrap_or_default()
+            ))
         }
         "list" => {
             let agents = &result["agents"];
@@ -3224,6 +3241,39 @@ mod tests {
             "harness": "claude",
             "harness_removed": true,
             "was_orphaned": false
+        });
+        let out = format_success("rm", "bar-agent", &result, false, true, false);
+        assert_eq!(out, Some("removed: bar-agent (fno + claude)".to_string()));
+    }
+
+    /// A reap that really removed a harness row names the verb that puts it
+    /// back. Asserted on the literal `fno agents adopt` string, not merely on
+    /// the receipt being longer: an absence has two explanations.
+    #[test]
+    fn format_success_rm_names_the_adopt_reversal() {
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "claude",
+            "harness_row_id": "0a6e775f",
+            "harness_removed": true
+        });
+        let out = format_success("rm", "bar-agent", &result, false, true, false)
+            .expect("rm renders a receipt");
+        assert!(out.starts_with("removed: bar-agent (fno + claude)"), "{out}");
+        assert!(out.contains("fno agents adopt 0a6e775f"), "{out}");
+        assert!(out.contains("resume handle"), "{out}");
+    }
+
+    /// No row id means no handle to name, so the receipt stays exactly as it
+    /// was rather than printing `fno agents adopt unknown`.
+    #[test]
+    fn format_success_rm_omits_the_hint_without_a_row_id() {
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "claude",
+            "harness_removed": true
         });
         let out = format_success("rm", "bar-agent", &result, false, true, false);
         assert_eq!(out, Some("removed: bar-agent (fno + claude)".to_string()));
