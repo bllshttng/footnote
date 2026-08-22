@@ -132,10 +132,15 @@ Replaced by one placeholder token, so they cost one word:
 - paths and URLs
 - flags
 - markdown link targets, with the link text kept
+- double-quoted spans
+- dotted filenames
+- underscore identifiers
 
 ## The escape
 
 Add a `style-exception:` line with a reason to bypass one body. An empty reason does not count. The escape scopes to the whole unit, so reaching for it is a decision. The receipt prints the reason, so the bypass is never silent.
+
+Quoting a word is not a bypass. A banned word inside double quotes or backticks is a mention, not a use. The masking pass turns the quoted span into one placeholder token before any rule runs. So `"should"` names the word without tripping rule 3. Reach for this before the `style-exception` line: it scopes to one word, the exception scopes to a whole body.
 
 Set `FNO_STYLE_ENFORCE` to 0 to disable the check in an emergency.
 
