@@ -8,7 +8,7 @@ Extends the retro / auto-triage feature ([retro-auto-triage.md](retro-auto-triag
 
 The existing machinery covered ~70% of the ritual but left two gaps:
 
-1. **Prose todos were 100% manual.** `fno backlog reconcile` *explicitly* never writes inbox lines, and `fno retro run` files graph nodes, not the per-project vault markdown at `internal/<area>/backlog/inbox.md`. Writing those prose next-steps requires reading the merged diff and applying judgment, so it stayed a re-pasted prompt.
+1. **Prose todos were 100% manual.** `fno backlog reconcile` *explicitly* never writes inbox lines, and `fno backlog retro run` files graph nodes, not the per-project vault markdown at `internal/<area>/backlog/inbox.md`. Writing those prose next-steps requires reading the merged diff and applying judgment, so it stayed a re-pasted prompt.
 2. **No trigger fires at merge.** `reconcile` runs on the *next* footnote session in the repo or a megawalk iteration; a GitHub web-button self-merge produces no local event at all. (Phase 2 below; deferred.)
 
 > **Two different "inbox"es.** This skill writes the per-project **vault markdown** `internal/<area>/backlog/inbox.md` (a human reading queue). That is NOT the cross-project message bus `fno agents mail` (`config.paths.inbox_dir`, thread-per-file). The vault-area name does not equal the project name (`example-pipeline -> internal/etl`, `acme-web -> internal/web`), which is exactly why the path must be explicit config and is never derived.
@@ -23,7 +23,7 @@ Step 1  resolve context   config.post_merge.{enabled,parking_lot_path} + config.
                           FAIL LOUD if parking_lot_path unset; distinguish a read failure
                           (fno missing/too old or settings invalid) from "not opted in"
 Step 2  completion stamp   fno backlog reconcile [--node ab-XXXX]  (close + stamp)
-Step 3  mechanical triage  fno retro run                          (sentinels + carveouts)
+Step 3  mechanical triage  fno backlog retro run                          (sentinels + carveouts)
 Step 4  idempotency        inbox-has-pr.sh <inbox> <pr>  -> exit 0 = already done, skip
 Step 5  judgment           read gh pr diff; (a) append dated prose section to parking-lot.md
                           keyed by a PR-number marker; (b) fno backlog idea per item
@@ -43,11 +43,11 @@ config:
 
 ### Idempotency
 
-Each prose section starts with an HTML-comment marker `<!-- post-merge:pr-<N> -->`. `skills/pr/scripts/inbox-has-pr.sh` greps for that marker (fno-free, so it is deterministic across CLI versions); exit 0 means "already written, skip". This marker guard is the *sole* idempotency barrier for the judgment half: `fno backlog reconcile` and `fno retro run` are independently idempotent, but `fno backlog idea` is not (it appends a fresh node every call), so Step 5 must never run once Step 4 short-circuits.
+Each prose section starts with an HTML-comment marker `<!-- post-merge:pr-<N> -->`. `skills/pr/scripts/inbox-has-pr.sh` greps for that marker (fno-free, so it is deterministic across CLI versions); exit 0 means "already written, skip". This marker guard is the *sole* idempotency barrier for the judgment half: `fno backlog reconcile` and `fno backlog retro run` are independently idempotent, but `fno backlog idea` is not (it appends a fresh node every call), so Step 5 must never run once Step 4 short-circuits.
 
 ### No new mutation primitives
 
-The skill reuses `fno backlog reconcile`, `fno retro run`, and `fno backlog idea`. The only new code is the read-only `config.post_merge` schema block and the skill + its idempotency helper.
+The skill reuses `fno backlog reconcile`, `fno backlog retro run`, and `fno backlog idea`. The only new code is the read-only `config.post_merge` schema block and the skill + its idempotency helper.
 
 ## Phase 2 - the trigger (shipped as the global pr-watch daemon)
 

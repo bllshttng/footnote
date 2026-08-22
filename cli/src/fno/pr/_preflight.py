@@ -2,7 +2,7 @@
 
 A worktree branched from a stale local HEAD ships a PR full of phantom
 deletions (changes you never made appear as reverts), costing a manual
-rebase+repush cycle. ``fno worktree ensure`` bases new worktrees off
+rebase+repush cycle. ``fno workspace worktree ensure`` bases new worktrees off
 ``origin/main``, but the EnterWorktree and manual-worktree paths bypass it, so
 guard at PR-creation time where every path converges.
 

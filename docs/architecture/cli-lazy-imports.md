@@ -25,7 +25,7 @@ app.add_typer(state_app, name="state")
 
 Every `fno <verb>` invocation paid the union cost of importing all 30
 sub-apps before even parsing `argv`. `fno --help` median wall time was
-225ms p50; `fno paths state-dir` (the cheapest possible hot-path call)
+225ms p50; `fno config paths state-dir` (the cheapest possible hot-path call)
 was 206ms. Earlier measurement found the fno-daemon proposal would save ~0.22%
 of target phase wall time and deferred the daemon in favor of this
 simpler approach.
@@ -207,7 +207,7 @@ Every provisioning site therefore passes `--compile-bytecode`. The venv ships it
 A future refactor must preserve:
 
 1. `fno --help` does not import sub-app bodies. Test: `tests/test_lazy_imports.py::test_fno_help_does_not_import_sub_app_modules`.
-2. `fno paths state-dir` does not import the heavy sub-apps. Test: `test_fno_paths_does_not_import_heavy_subapps`.
+2. `fno config paths state-dir` does not import the heavy sub-apps. Test: `test_fno_paths_does_not_import_heavy_subapps`.
 3. Single-command sub-apps keep their group shape. Test: `test_single_command_subapp_group_shape_preserved`.
 4. Parent-side `add_typer` overrides survive lazy loading (see `info_overrides` above). Test: `test_single_command_subapp_group_shape_preserved` covers the group shape. The overrides themselves are exercised by the `--help` tests.
 5. Misconfigured lazy entries fail loudly with the bad path in stderr. Tests: `test_bad_lazy_entry_fails_loud`, `test_bad_module_path_fails_loud`.

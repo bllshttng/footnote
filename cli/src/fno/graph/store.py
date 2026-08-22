@@ -960,7 +960,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                 entry["touched_at"] = _now_iso
         # Node closure releases the node claim (x-94f8). A transition into a
         # terminal rung during THIS mutation is the one moment every closure
-        # path shares - `backlog done`, `fno done`, reconcile, the epic sweep,
+        # path shares - `backlog done` (either spelling), reconcile, the epic sweep,
         # and GraphTracker.close all persist through here, and the Rust daemon
         # shells out to `fno backlog done` - so the release lives here rather
         # than on any one caller, where the other N-1 paths would keep leaking.

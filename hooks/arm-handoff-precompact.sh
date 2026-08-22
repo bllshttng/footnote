@@ -54,10 +54,10 @@ if command -v jq >/dev/null 2>&1; then
   printf '%s' "$LAST_ASSISTANT" | grep -q '<promise>' && exit 0
 fi
 
-# Context pressure via the single CLI implementation behind `fno context`. Any
+# Context pressure via the single CLI implementation behind `fno whoami context`. Any
 # nonzero exit (incl. no CLI on PATH) or a missing reading -> no pressure ->
 # decline (fail-safe). `context` is a Python verb: reach it through fno-py
-# (the Python CLI) and fall back to the fno mux. A bare `fno context` dies
+# (the Python CLI) and fall back to the fno mux. A bare `fno whoami context` dies
 # where no mux is installed, or where a freshly installed mux forwards to a
 # published wheel that predates the verb; either way this probe would be
 # silently inert. The shim (skills/target/scripts/context-probe.sh) resolves

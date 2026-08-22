@@ -100,7 +100,7 @@ _verify_pack() {
   if command -v uv >/dev/null 2>&1; then
     uv run --project "$SOURCE_ROOT/cli" fno-py plugins verify "$manifest" >/dev/null 2>&1 || return 1
   elif command -v fno >/dev/null 2>&1; then
-    fno plugins verify "$manifest" >/dev/null 2>&1 || return 1
+    fno config plugins verify "$manifest" >/dev/null 2>&1 || return 1
   else
     return 2
   fi
@@ -117,7 +117,7 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
   if [ "$rc" -eq 2 ]; then
     echo "ERROR: cannot verify pack $SKILL (no fno or uv available); refusing to bundle unverified" >&2; exit 1
   elif [ "$rc" -ne 0 ]; then
-    echo "ERROR: pack $SKILL fails verification; refusing to bundle (run: fno plugins verify $manifest)" >&2; exit 1
+    echo "ERROR: pack $SKILL fails verification; refusing to bundle (run: fno config plugins verify $manifest)" >&2; exit 1
   fi
 done < "$ROWS_FILE"
 

@@ -9,21 +9,21 @@ Use the release channel for normal Codex sessions.
 It installs `fno@footnote` from the Git-backed `bllshttng/footnote` marketplace and keeps the version in `.codex-plugin/plugin.json` authoritative.
 
 ```bash
-fno setup codex-plugin --channel release
+fno config setup codex-plugin --channel release
 ```
 
 Use the dev channel while changing plugin content locally.
 It installs `fno@footnote` from the durable canonical checkout rather than a disposable feature worktree.
 
 ```bash
-fno setup codex-plugin --channel dev
+fno config setup codex-plugin --channel dev
 ```
 
 Codex caches plugins by version, so local edits at the same manifest version require an explicit refresh.
 Refresh removes and re-adds the selected copy through Codex, which deterministically rebuilds its cache without changing release version files.
 
 ```bash
-fno setup codex-plugin --channel dev --refresh
+fno config setup codex-plugin --channel dev --refresh
 ```
 
 Setup first validates the requested marketplace and plugin in an isolated temporary `CODEX_HOME`, leaving the working channel untouched when the candidate is invalid.
@@ -81,13 +81,13 @@ For older Codex builds or CLI-only sessions where plugin-bundled hooks are unava
 wire the SessionStart hook into user config:
 
 ```bash
-fno setup cli-hooks-codex
+fno config setup cli-hooks-codex
 ```
 
 The compatibility command remains available:
 
 ```bash
-fno setup cli-hooks --no-gemini --no-claude
+fno config setup cli-hooks --no-gemini --no-claude
 ```
 
 `--no-claude` keeps this Codex-only: without it, `cli-hooks` also wires Claude's
@@ -112,7 +112,7 @@ legacy `$CODEX_HOME/hooks.json` and preferred TOML layer both contain SessionSta
 If the JSON entries are footnote-owned, migrate only those entries with:
 
 ```bash
-fno setup cli-hooks-codex --migrate-legacy-hooks-json
+fno config setup cli-hooks-codex --migrate-legacy-hooks-json
 ```
 
 The migration preserves foreign JSON hooks. For example, a `herdr-agent-state.sh` hook is

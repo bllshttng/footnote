@@ -1,4 +1,4 @@
-"""fno scoreboard - read-only telemetry fold over the ledger + events.
+"""fno whoami scoreboard - read-only telemetry fold over the ledger + events.
 
 Wave 5 of epic x-f063. Writes no state, ever. Folds what exists:
 ledger.json (stop-cause, spend, coverage) plus events.jsonl (human_touch,

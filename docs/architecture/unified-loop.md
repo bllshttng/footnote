@@ -262,7 +262,7 @@ That matters because the fail-closed path keys off "did a prior fire record prob
 `DoneAdvisory`, `DonePlanned`, and `DoneBatched` return earlier and do not consult probes.
 Those units ship no PR of their own, so there is no ship gate to hang evidence on; a recurring deliverable reaches its finish line through `DonePRGreen`.
 
-Every fire records its results in the `loop_check` event as `data.done_probes` (`{"<cmd>": "pass" \| "fail:<code>" \| "timeout"}`), which is what `fno scoreboard --plan-fidelity` joins against the declaration to report probes declared vs passed.
+Every fire records its results in the `loop_check` event as `data.done_probes` (`{"<cmd>": "pass" \| "fail:<code>" \| "timeout"}`), which is what `fno whoami scoreboard --plan-fidelity` joins against the declaration to report probes declared vs passed.
 
 ### Review coverage: `DoneUnreviewed`
 

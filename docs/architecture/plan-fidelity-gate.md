@@ -57,7 +57,7 @@ A stop-gate-only check is skipped by a direct `fno do pr merge`. A merge-gate-on
 
 ## Carveout severity, stamped by provenance
 
-`fno carveout add` gained a `severity` field, one of `critical`, `high`, `medium`, or `low`. It is plumbed to `RawItem.severity`. The existing `severity_to_priority` in `retro/classify.py` maps it to `p0..p3`. The routing already existed. Only the field was missing.
+`fno backlog carveout add` gained a `severity` field, one of `critical`, `high`, `medium`, or `low`. It is plumbed to `RawItem.severity`. The existing `severity_to_priority` in `retro/classify.py` maps it to `p0..p3`. The routing already existed. Only the field was missing.
 
 A carveout created to satisfy the fidelity gate is, by construction, a planned deliverable that went unbuilt. The gate stamps that severity from provenance. The filer cannot pick it and cannot downgrade it. `--severity` stays available for hand-filed carveouts. It defaults to today's `p3` behavior.
 

@@ -2,7 +2,7 @@
 
 Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical source; `CLAUDE.md` / `GEMINI.md` are stubs that import it. Quick reference + index: deep subsystem mechanics live in `docs/` (see [Deep-dive docs](#deep-dive-docs)).
 
-**footnote** is a Claude Code plugin: an autonomous delivery pipeline that takes a feature from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno setup wizard` (terminal) or `/fno:setup` (in-session). Defaults work without config.
+**footnote** is a Claude Code plugin: an autonomous delivery pipeline that takes a feature from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno config setup wizard` (terminal) or `/fno:setup` (in-session). Defaults work without config.
 
 ## Precedence and output style
 
@@ -16,7 +16,7 @@ Lead responses with the next action, number multi-step work, give concrete time 
 1. **Think before coding.** State assumptions; if uncertain, ask. Surface alternative interpretations and simpler options instead of silently picking.
 2. **Simplicity first.** Minimum code that solves the problem. No speculative features, single-use abstractions, unrequested config. If 200 lines could be 50, rewrite.
 3. **OSS-first: fix in the project, never memory-only.** Anything load-bearing (workaround, invariant, gotcha, "next time do X") goes in code, docs, `--help` text, a gate, a test, or a filed node - never private agent memory, which ships to nobody. Full rule: [.claude/rules/oss-fix-not-memory.md](.claude/rules/oss-fix-not-memory.md).
-4. **Fix what you find - overrides "surgical changes."** Fix pre-existing problems in this PR, even when unrelated. Prefer FEWER, larger PRs. Carveouts (`fno carveout add`) / follow-up nodes are for genuinely large separable efforts only.
+4. **Fix what you find - overrides "surgical changes."** Fix pre-existing problems in this PR, even when unrelated. Prefer FEWER, larger PRs. Carveouts (`fno backlog carveout add`) / follow-up nodes are for genuinely large separable efforts only.
 5. **Goal-driven execution.** Turn tasks into verifiable goals with a verify step each ("add validation" -> "write failing tests, make them pass").
 6. **Comments earn their place.** Match the surrounding file's comment density and idiom; add one only for a non-obvious invariant, race, or why-not-the-obvious. Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them).
 7. **Reproduce before you fix.** Reproduce a bug end-to-end on the real user path before editing; the repro is also the proof the fix landed. When a UI is in the loop, exercise it and be picky (see #4).
@@ -165,7 +165,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **`fno agents claim`** - the one work-claim primitive; atomic lockfiles under `.fno/claims/`. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
 - **`fno agents mail` - king-mediated native review.** A worker self-invokes the native review verb (claude `/code-review`, codex `/review`) via the Skill tool first; when refused, `fno agents mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply won't). The code-payload self-review obligation is enforced at the stop gate (`loopcheck.rs`) and `fno do pr merge`; opt out `config.review.self_review_required = false`. [review lanes](docs/architecture/review-lanes.md).
 - **`fno backlog decide`** - records a ruling per subject. `fno backlog decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
-- **`fno whoami` / `fno status`** - read-only self-introspection; run when confused after compaction.
+- **`fno whoami` / `fno whoami status`** - read-only self-introspection; run when confused after compaction.
 - **`fno do target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> heal `.fno` symlink -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). `-p` is reachable only via explicit `headless`; never default to it.
 - **`fno agents watchdog`** - fleet sweep from transcript truth: wake / reroute / reap. Dry run by default; `--apply` (wake), `--apply-all` (reroute; reap needs `config.recovery.watchdog_reap`, it deletes worktrees). Cadence behind `config.recovery.watchdog`. [fleet-watchdog](docs/architecture/fleet-watchdog.md)

@@ -28,7 +28,7 @@ The **crown** is that authority itself, three levels deep at most, and a session
 Claude Code:   /plugin marketplace add bllshttng/footnote
                /plugin install fno@footnote
 Gemini CLI:    gemini extensions install https://github.com/bllshttng/footnote
-Codex CLI:     fno setup codex-plugin --channel release
+Codex CLI:     fno config setup codex-plugin --channel release
 ```
 
 Then configure with `/fno:setup` and point it at a feature:
@@ -37,7 +37,7 @@ Then configure with `/fno:setup` and point it at a feature:
 /fno:target "add OAuth login"
 ```
 
-**CLI only** - just the `fno` binary, for scripting, CI, or driving footnote yourself. This installs `fno` but **not** the `/fno:*` slash commands (those need the agent integration above, or run `fno setup wizard`, which offers to wire them into the agent CLIs it finds on your PATH):
+**CLI only** - just the `fno` binary, for scripting, CI, or driving footnote yourself. This installs `fno` but **not** the `/fno:*` slash commands (those need the agent integration above, or run `fno config setup wizard`, which offers to wire them into the agent CLIs it finds on your PATH):
 
 ```
 curl -fsSL fno.sh | sh          # one-liner
@@ -53,7 +53,7 @@ Local-clone install and path configuration: [docs/getting-started.md](docs/getti
 Configure a project from a Claude Code session with `/fno:setup`, or from the terminal with no agent:
 
 ```
-fno setup wizard              # asks the few real per-project decisions, writes them validated
+fno config setup wizard              # asks the few real per-project decisions, writes them validated
                               # then offers to install the /fno:* integration for each agent CLI on your PATH
 ```
 

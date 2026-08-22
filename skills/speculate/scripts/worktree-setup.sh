@@ -37,7 +37,7 @@ _gate_repo="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null 
 _WT_POLICY=""
 if [[ -n "$_gate_repo" ]] && command -v fno >/dev/null 2>&1; then
     # `|| true` is load-bearing under `set -euo pipefail`; see hooks/worktree-setup.sh.
-    _WT_POLICY="$(fno worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    _WT_POLICY="$(fno workspace worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
 fi
 
 if [[ -z "$WORKTREE_PATH" ]]; then
@@ -93,7 +93,7 @@ MAIN_REPO=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | 
 # Read config from settings.yaml if available
 # Source paths.sh for typed path vars; the global tier is the per-user file, never CONFIG_FILE (ab-5d6c3d47).
 if command -v fno >/dev/null 2>&1; then
-    _PATHS_SH="$(fno paths shell-stub 2>/dev/null || true)"
+    _PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
     [[ -f "$_PATHS_SH" ]] && source "$_PATHS_SH" 2>/dev/null || true
     unset _PATHS_SH
 fi

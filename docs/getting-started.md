@@ -25,7 +25,7 @@ The rest of this page fills in the details.
    If it is not, run `gh auth login`.
 4. Run the setup wizard and accept every default:
    ```bash
-   fno setup wizard
+   fno config setup wizard
    ```
 5. Point the loop at a small task:
    ```
@@ -88,13 +88,13 @@ Configuration lives in `.fno/config.toml` (project-local) layered over `~/.fno/c
 **In the terminal, no agent (CLI-native):**
 
 ```bash
-fno setup wizard            # asks the few real per-project decisions, writes them validated
-fno setup wizard --advanced # also surfaces the advanced settings
+fno config setup wizard            # asks the few real per-project decisions, writes them validated
+fno config setup wizard --advanced # also surfaces the advanced settings
 ```
 
 Both walk the same schema-derived question plan and write through the validated config writer, so a typo or an out-of-range value is rejected, not silently stored.
 
-The terminal wizard also offers, defaulting to No, to wire footnote's SessionStart context into Codex and Gemini user config. You can do the same later with `fno setup cli-hooks`.
+The terminal wizard also offers, defaulting to No, to wire footnote's SessionStart context into Codex and Gemini user config. You can do the same later with `fno config setup cli-hooks`.
 
 ### Reading and editing config directly
 

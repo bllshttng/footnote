@@ -22,7 +22,7 @@ This cache answers only whether another session recently touched this worktree.
 It never establishes death, orphaning, work ownership, or completion, and it is not registered on `PreToolUse`, so it cannot refuse `Edit`, `Write`, or `Bash`.
 Missing, malformed, or unreadable stamp state fails open to silence; stale files are harmless because the reader judges only mtime and needs no retention sweep.
 The advisory includes the stable `fno-overlap-observed` marker.
-Both SessionStart carriers route that one observation through `fno worktree overlap-record`, so the machine-global event journal, not the transcript, is the durable, countable record; read recurrence with `fno worktree overlaps [--since DAYS] [--json]`.
+Both SessionStart carriers route that one observation through `fno workspace worktree overlap-record`, so the machine-global event journal, not the transcript, is the durable, countable record; read recurrence with `fno workspace worktree overlaps [--since DAYS] [--json]`.
 The carrier is advisory-only and always exits zero: a missing or old CLI, a rejected payload, lock contention, or a degraded fold surfaces `[fno-overlap-unrecorded]` or `[fno-overlap-count-unavailable]` rather than refusing a tool call.
 The shared predicate stays read-only and is never registered on `PreToolUse`.
 

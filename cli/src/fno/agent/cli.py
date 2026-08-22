@@ -1,17 +1,20 @@
-"""fno self-introspection commands: whoami + status.
+"""fno self-introspection commands: the ``whoami`` group.
 
-Two read-only top-level commands (registered in ``fno.cli`` as
-``fno whoami`` / ``fno status``). They were formerly ``fno agent whoami`` /
-``fno agent status``; the ``fno agent`` (singular) namespace was retired
-(ab-12dd2a5d) once ``suggest`` / ``capabilities`` were trimmed - neither was
-auto-invoked anywhere. ``fno agents`` (plural, the dispatch mesh) is unrelated
-and untouched.
+``whoami`` is a group (unit 6 of the x-9d6c reorg) whose bare invocation is
+still the one-line operating-stack summary, byte-identical to the former
+single command. The session-read leaves folded under it: ``status`` (the
+former top-level status root, one session read under two names),
+``context``, ``cost``, and ``scoreboard``. The old top-level spellings stay
+one-release shims (``fno.verb_moves``).
 
-    whoami   - one-line operating-stack summary (project + fleet + walker + session)
-    status   - gate satisfaction + bounded events tail + inconsistencies
+    whoami            - operating-stack summary (project + fleet + walker + session)
+    whoami status     - gate satisfaction + bounded events tail + inconsistencies
+    whoami context    - context-window usage for this session or a transcript
+    whoami cost       - cost + usage metrics from transcripts and ledger.json
+    whoami scoreboard - read-only telemetry: stop-cause, spend, autonomy, coverage
 
-Both are read-only (no state mutations, no events emitted); tests assert
-paired-state hash invariance. Shared options on each command:
+All are read-only (no state mutations, no events emitted); tests assert
+paired-state hash invariance. Shared options on the summary and status:
 
     --json / -J    emit JSON to stdout (command-specific shape)
     --state-file   override session state-file detection
@@ -234,7 +237,15 @@ def _global_json(ctx: typer.Context) -> bool:
 
 # --- whoami --------------------------------------------------------------
 
+whoami_app = typer.Typer(
+    name="whoami",
+    help="Operating-stack summary: project + fleet + walker + session + harness.",
+    # Bare `fno whoami` must keep invoking the summary (AC28), not print help.
+    invoke_without_command=True,
+)
 
+
+@whoami_app.callback(invoke_without_command=True)
 def whoami_command(
     ctx: typer.Context,
     json_output: bool = typer.Option(
@@ -251,6 +262,10 @@ def whoami_command(
     ),
 ) -> None:
     """Print the agent's operating stack: project + fleet + walker + session."""
+    # Group callback discipline: click runs this callback before a subcommand
+    # too, so the summary body must not fire on `fno whoami status` etc.
+    if ctx.invoked_subcommand is not None:
+        return
     opts = AgentOptions(
         json_output=json_output or _global_json(ctx),
         state_file=state_file,
@@ -500,3 +515,52 @@ def status_command(
     if events_warning:
         typer.echo(f"warn: {events_warning}", err=True)
     _emit_warnings(state)
+
+
+# --- the folded session-read leaves --------------------------------------
+#
+# `status` is a merge, not a relocation: this is the same command object the
+# former top-level status root served, so `fno whoami status` and the old
+# spelling (one release, via fno.verb_moves) share one session read.
+whoami_app.command("status")(status_command)
+
+from fno.context_probe import context_command  # noqa: E402
+from fno.scoreboard.cli import scoreboard_command  # noqa: E402
+
+whoami_app.command("context", hidden=True)(context_command)
+whoami_app.command("scoreboard", hidden=True)(scoreboard_command)
+
+
+def cost_command(
+    ctx: typer.Context,
+) -> None:
+    """Forward all args to the in-package cost CLI (``fno.cost._session_cost``).
+
+    Moved under whoami from an eager root command (unit 6, x-9d6c). The heavy
+    ``_session_cost`` import stays deferred to call time, so loading the
+    whoami group never pays for it. argparse owns the flag parsing; we bridge
+    via ``sys.argv`` and translate its ``SystemExit`` into a ``typer.Exit`` so
+    the exit code propagates cleanly.
+    """
+    from fno.cost import _session_cost
+
+    argv_backup = sys.argv
+    sys.argv = ["fno whoami cost", *list(ctx.args)]
+    try:
+        _session_cost.main()
+    except SystemExit as exc:  # argparse exits on -h / parse error / explicit exit
+        code = exc.code
+        if code is None:
+            code = 0
+        elif not isinstance(code, int):
+            code = 1
+        raise typer.Exit(code=code)
+    finally:
+        sys.argv = argv_backup
+
+
+whoami_app.command(
+    "cost",
+    hidden=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)(cost_command)

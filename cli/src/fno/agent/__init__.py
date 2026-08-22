@@ -1,6 +1,6 @@
 """fno self-introspection: read-only operating-context surface.
 
-Two commands (``fno whoami`` / ``fno status``) give an agent operating fno a
+Two commands (``fno whoami`` / ``fno whoami status``) give an agent operating fno a
 curated view of its operating context (fleet -> walker -> session). Read-only;
 no state mutations, no events emitted. Formerly the ``fno agent`` (singular)
 namespace; retired in ab-12dd2a5d (the ``suggest`` / ``capabilities`` verbs were

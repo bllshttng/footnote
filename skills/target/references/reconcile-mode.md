@@ -72,7 +72,7 @@ Do **not** de-stub. Do **not** flip the PR ready (it stays draft, so it can neve
 merge with mocks). Surface the gap so a human resolves it:
 
 ```bash
-fno carveout add --kind oos-bug --priority p1 \
+fno backlog carveout add --kind oos-bug --priority p1 \
   "reconcile drift on $NODE: landed schema failed the contract-test gate; auto-de-stub refused"
 gh pr comment <pr-number> --body "⚠️ Reconciliation refused: <validate detail>. The landed schema failed the contract-test gate (or no executable gate exists). De-stubbing needs a human - this PR stays draft until then."
 ```

@@ -67,7 +67,7 @@ def _build_cache() -> dict[str, str]:
     if not path.exists():
         raise SettingsNotFound(
             f"config.toml not found at {SETTINGS_PATH}; "
-            "run 'fno setup' or create ~/.fno/config.toml"
+            "run 'fno config setup' or create ~/.fno/config.toml"
         )
 
     # read_config_flat parses config.toml (or a legacy settings.yaml) into the

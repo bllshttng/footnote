@@ -1718,7 +1718,7 @@ def _emit_human(
     if mb.get("stale"):
         out(
             f"fno doctor: {mb['file']} footnote block is v{mb['stamped']} "
-            f"(current v{mb['current']}); re-run `fno setup` to refresh it."
+            f"(current v{mb['current']}); re-run `fno config setup` to refresh it."
         )
 
     surf = result.get("harness_surface") or {}
@@ -1726,12 +1726,12 @@ def _emit_human(
     if oc == "stale":
         out(
             "fno doctor: opencode footnote plugin is STALE (drifted from the "
-            "shipped source); re-run `fno setup` to refresh it."
+            "shipped source); re-run `fno config setup` to refresh it."
         )
     elif oc == "missing":
         out(
             "fno doctor: opencode is set up but its footnote plugin is missing; "
-            "re-run `fno setup` to install it."
+            "re-run `fno config setup` to install it."
         )
     _emit_codex_context_window(result, out=out)
     dupes = surf.get("codex_marketplace_duplicates") or []
@@ -1875,7 +1875,7 @@ def _emit_human(
     if surf.get("codex_hooks_dual"):
         out(
             "fno doctor: codex hooks load from both config.toml and hooks.json; "
-            "run `fno setup cli-hooks-codex --migrate-legacy-hooks-json` to "
+            "run `fno config setup cli-hooks-codex --migrate-legacy-hooks-json` to "
             "converge (or `fno doctor --codex-hooks` for detail)."
         )
 
@@ -2441,7 +2441,7 @@ def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
     if result["footnote_json_hooks"]:
         out(
             "fno doctor: codex hooks: run "
-            "`fno setup cli-hooks-codex --migrate-legacy-hooks-json` to remove only "
+            "`fno config setup cli-hooks-codex --migrate-legacy-hooks-json` to remove only "
             "footnote-owned legacy JSON hooks."
         )
 
@@ -2452,7 +2452,7 @@ def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
         )
 
     if not result["footnote_toml_wired"] and not result["errors"]:
-        command = "fno setup cli-hooks-codex"
+        command = "fno config setup cli-hooks-codex"
         if result["footnote_json_hooks"]:
             command += " --migrate-legacy-hooks-json"
         out(f"fno doctor: codex hooks: run `{command}` to wire the preferred TOML hook.")
@@ -2761,7 +2761,7 @@ def _harness_surface_report() -> dict[str, Any]:
                 "status": "unknown",
                 "issue": "inspection-failed",
                 "detail": str(exc)[-500:],
-                "remedy": "fno setup codex-plugin --channel release --refresh",
+                "remedy": "fno config setup codex-plugin --channel release --refresh",
             }
 
     # Surface codex hooks dual-representation in the MAIN run too, not only the

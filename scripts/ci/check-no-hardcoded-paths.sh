@@ -5,7 +5,7 @@
 # After Phase 03 of the path-config migration (plan 2026-05-14-path-config-impl),
 # all path resolution must go through:
 #   Python : from fno import paths  (paths.state_dir(), paths.graph_json(), ...)
-#   Bash   : source "$(fno paths shell-stub)"  then use $STATE_DIR, $GRAPH_JSON_PATH, etc.
+#   Bash   : source "$(fno config paths shell-stub)"  then use $STATE_DIR, $GRAPH_JSON_PATH, etc.
 #
 # Run: bash scripts/ci/check-no-hardcoded-paths.sh
 # Exits 0 when no violations found; exits 1 with a report when violations detected.
@@ -169,9 +169,9 @@ add_violation "skills/ bare \$HOME/.fno violations:" "$SKILLS_SH_HITS"
 
 # ---------------------------------------------------------------------------
 # handoffs/ path joins: the canon handoff doc location is configured via
-# paths.handoffs_dir() and surfaced by `fno paths handoff`. A skill or hook
+# paths.handoffs_dir() and surfaced by `fno config paths handoff`. A skill or hook
 # that composes a `handoffs/` path by hand re-hardcodes the convention the verb
-# exists to retire. The verb (`fno paths handoff`) and the
+# exists to retire. The verb (`fno config paths handoff`) and the
 # worktree-local succession brief (`.fno/artifacts/handoff/`, singular) do not
 # match this plural-slash form, so there are no legitimate hits to exclude.
 # ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ HANDOFFS_HITS=$(
     | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' \
     || true
 )
-add_violation "skills/ + hooks/ hardcoded handoffs/ joins (use 'fno paths handoff'):" "$HANDOFFS_HITS"
+add_violation "skills/ + hooks/ hardcoded handoffs/ joins (use 'fno config paths handoff'):" "$HANDOFFS_HITS"
 
 # scripts/ directory: exclude scripts/tests/ (sandboxed) and scripts/ci/ (this script)
 # also exclude scripts/lib/paths.sh
@@ -217,7 +217,7 @@ fi
     echo "$REPORT"
     echo
     echo "To fix: route paths through 'from fno import paths' (Python)"
-    echo "        or source \"\$(fno paths shell-stub)\" + \${STATE_DIR} (Bash)."
+    echo "        or source \"\$(fno config paths shell-stub)\" + \${STATE_DIR} (Bash)."
     echo "See: scripts/lib/paths.sh, cli/src/fno/paths.py"
 } >&2
 exit 1

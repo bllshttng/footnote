@@ -21,7 +21,7 @@
 
 # Use CONFIG_FILE from paths.sh if available; fall back to hardcoded default.
 if [[ -z "${CONFIG_FILE:-}" ]] && command -v fno >/dev/null 2>&1; then
-    _PATHS_SH="$(fno paths shell-stub 2>/dev/null || true)"
+    _PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
     [[ -f "$_PATHS_SH" ]] && source "$_PATHS_SH" 2>/dev/null || true
     unset _PATHS_SH
 fi

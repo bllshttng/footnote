@@ -67,7 +67,7 @@ Do not grep state files. Ask the agent stack directly:
 
 ```bash
 fno whoami    # one line: fleet + walker + session + harness
-fno status    # gate-by-gate satisfaction, recent events, flagged inconsistencies
+fno whoami status    # gate-by-gate satisfaction, recent events, flagged inconsistencies
 ```
 
 Both are read-only.

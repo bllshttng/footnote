@@ -216,7 +216,7 @@ def _kanban_card(
             note = (extra.get("note") or "").strip()
             body_lines.append(f"  {label}{' - ' + note if note else ''}")
 
-    # artifact_url: the user-supplied design/doc link (fno done --link). Shown
+    # artifact_url: the user-supplied design/doc link (done --link). Shown
     # on the board so the field has a purpose-built reader, not just a writer.
     # Non-http(s) schemes render as code so a markdown auto-linker cannot turn a
     # javascript:/data: URI into a clickable anchor (parity with render_html).

@@ -155,7 +155,7 @@ is known):
      is what keeps the flat project total correct with no dedup logic.
    - closes automatically when the unit's PR merges, with a completion note
      naming the unit and its PR - so the null cost reads as located, not
-     missing. Via `reconcile` (the truth comes from GitHub), not `fno done`.
+     missing. Via `reconcile` (the truth comes from GitHub), not `fno backlog done`.
 
    So do not point a `blocked_by` at an adopted node: it is not a delivery unit
    and the cascade close does not dispatch its dependents. Block on the group

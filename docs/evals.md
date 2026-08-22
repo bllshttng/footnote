@@ -61,7 +61,7 @@ The report has two wired consumers from day one, so the harness is not a write-o
 
 ## Context-to-outcome trace
 
-`fno scoreboard --plan-fidelity` derives a context-to-outcome trace from the ledger, backlog graph, and canonical event journal.
+`fno whoami scoreboard --plan-fidelity` derives a context-to-outcome trace from the ledger, backlog graph, and canonical event journal.
 It does not persist a second graph or treat a terminal label as downstream evidence.
 A context-pruning or graph-widening comparison is labeled an improvement only when its event-carried contract declares the cohort members, observation window, exclusions, budgets, and declaration time before the window starts.
 Every selected trace must also carry a falsifiable CI, review, merge, revert, recovery, latency, or spend observation.

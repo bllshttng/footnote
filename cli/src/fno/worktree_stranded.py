@@ -427,7 +427,7 @@ def apply_sweep(rows: list[Row], *, wake: bool = True) -> list[dict]:
     ``wake=False`` (the fleet watchdog's "report" posture) still records
     every UNKNOWN row - recording is reporting, not acting, per this
     module's own fail-open contract - but skips the STRANDED push+file, the
-    one genuinely mutating act here. The explicit ``fno worktree stranded
+    one genuinely mutating act here. The explicit ``fno workspace worktree stranded
     --apply`` verb is a direct user request, not a watchdog-mode read, so
     it keeps the wake=True default and always acts."""
     outcomes: list[dict] = []

@@ -624,7 +624,7 @@ def read_scope_value(
     genuinely absent file (an unconfigured scope); an unreadable or malformed file
     RAISES ``ConfigSetError`` so a read-merge-write caller surfaces the config
     error instead of silently treating it as an empty map (a false no-op). Only
-    dict-valued keys resolve here (the caller, ``fno route set``, merges roles)."""
+    dict-valued keys resolve here (the caller, ``fno config route set``, merges roles)."""
     target = _target_path(scope, repo_root)
     if target.is_symlink():
         target = Path(os.path.realpath(target))

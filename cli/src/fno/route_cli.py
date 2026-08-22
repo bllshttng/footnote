@@ -1,4 +1,4 @@
-"""``fno route``: legible, on-the-fly provider route lanes.
+"""``fno config route``: legible, on-the-fly provider route lanes.
 
 Four verbs over the existing per-spawn model-routing machinery
 (``fno.agents.model_routing``), which stays the single source of the z.ai
@@ -248,7 +248,7 @@ def env_cmd(
 ) -> None:
     """Print an eval-able env block for interactive use.
 
-        eval "$(fno route env build)" && claude
+        eval "$(fno config route env build)" && claude
 
     Fails CLOSED: if the target has no resolvable key it exits non-zero, names
     the checked env var/file on stderr, and emits NO export lines on stdout (a

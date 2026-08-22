@@ -11,7 +11,7 @@
 // second-hand percentage whose denominator we could not see or validate, which
 // is how it produced 200K-window numbers on a 1M-context model.
 //
-// Context pressure has ONE measurement path now: `fno context` (the CLI
+// Context pressure has ONE measurement path now: `fno whoami context` (the CLI
 // implementation that the skill-local shim delegates to), which counts tokens
 // from the transcript itself and owns its own denominator.
 
@@ -66,7 +66,7 @@ function probeCost(sessionId) {
 }
 
 // Actual running model from the transcript via the single CLI implementation.
-// Reused instead of an fno cost call so the drift check honors AC6 (no cost
+// Reused instead of an fno whoami cost call so the drift check honors AC6 (no cost
 // call when the cap is unset). null on any failure.
 function probeModel(transcriptPath) {
   if (!transcriptPath) return null
@@ -129,7 +129,7 @@ function checkSpendAndDrift(sessionId, transcriptPath, tmpDir) {
 
     state.lastTs = now
     // Nothing to check -> record the tick and bail. AC6: with the cap unset AND
-    // no drift target, no `fno cost` call is made.
+    // no drift target, no `fno whoami cost` call is made.
     if (capUsd === null && !intendedModel) {
       persist(state)
       return NOOP

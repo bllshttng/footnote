@@ -25,6 +25,24 @@ from fno._lazy_group import make_lazy_group_cls
 # mounting it eagerly here would have moved that cost onto every `fno config`.
 _LAZY_SUBCOMMANDS = {
     "accounts": ("fno.adapters.providers.cli:cli", "Manage account records."),
+    # Folded under config (unit 6, x-9d6c). The old top-level spellings stay
+    # one-release shims (fno.verb_moves); these mounts are the canonical
+    # homes. Lazy for the same reason `accounts` is: `fno config get` runs
+    # from shell dozens of times per phase and must not pay for their imports.
+    # Hidden: the menu cap is 12 and config already curates nine visible
+    # verbs; `fno help config --all` lists these.
+    "paths": ("fno.paths_cli:app", "Path resolution helpers", {"hidden": True}),
+    "plugins": (
+        "fno.plugins.cli:plugins_app",
+        "Install, verify, activate, and inspect function packs.",
+        {"hidden": True},
+    ),
+    "route": (
+        "fno.route_cli:route_app",
+        "Provider route lanes: ls / set / unset / env (GLM build lane).",
+        {"hidden": True},
+    ),
+    "setup": ("fno.setup_cli:app", "Interactive settings.yaml wizard", {"hidden": True}),
 }
 
 app = typer.Typer(
@@ -77,7 +95,7 @@ class PostMergeVerdict:
             return (
                 "[doctor] post-merge: unconfigured - "
                 "config.post_merge.parking_lot_path is unset; the /fno:pr merged "
-                "prose+triage will be skipped. Set it with: fno setup post-merge"
+                "prose+triage will be skipped. Set it with: fno config setup post-merge"
             )
         if self.status == "opted_out":
             return "[doctor] post-merge: opted_out (config.post_merge.enabled=false)"

@@ -1,13 +1,13 @@
 """Install footnote's recommended claude-code rules into ~/.claude/rules/.
 
-Opt-in only (wired into ``fno setup wizard``). Symlinks each shipped
+Opt-in only (wired into ``fno config setup wizard``). Symlinks each shipped
 ``rules/*.md`` into the user's global ``~/.claude/rules/``, falling back to a
 copy where symlinks are unavailable. Idempotent (running twice leaves exactly
 one link per rule), and it never overwrites a real (non-symlink) file the user
 has hand-edited.
 
 Mirrors ``scripts/ensure-global-dir.sh``'s "merge into the user's global claude
-config" pattern, but in Python so ``fno setup`` calls it directly instead of
+config" pattern, but in Python so ``fno config setup`` calls it directly instead of
 shelling to a repo-root script (shellout-drift-safe). On a bare ``pip install
 fno`` no ``rules/`` dir ships, so it degrades to installing nothing (exit clean).
 """

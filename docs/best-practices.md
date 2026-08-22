@@ -44,11 +44,11 @@ A carve-out is a chore you hand to a human, not work you did.
 When you want something visible on the board, file a backlog node instead.
 
 ```bash
-fno carveout add --kind deferred --need "<open question>" "<what + why>"
-fno carveout add --kind oos-bug --priority p2 "<what + why>"
+fno backlog carveout add --kind deferred --need "<open question>" "<what + why>"
+fno backlog carveout add --kind oos-bug --priority p2 "<what + why>"
 ```
 
-The retro-triage harvest at merge turns surviving items into backlog nodes. That harvest is manual by design. Only `fno retro sweep-carveouts --apply` clears the ledger, and nothing runs it for you. Run `fno inbox outstanding` to see what has piled up.
+The retro-triage harvest at merge turns surviving items into backlog nodes. That harvest is manual by design. Only `fno backlog retro sweep-carveouts --apply` clears the ledger, and nothing runs it for you. Run `fno inbox outstanding` to see what has piled up.
 
 ## Record a ruling, so the next session can read it back
 

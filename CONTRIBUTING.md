@@ -64,7 +64,7 @@ There is also a large set of bash integration tests under `tests/` (hooks, gates
 
 CI runs these on every PR (`.github/workflows/`):
 
-- **cli-ci** - `uv build`, the pytest suite, `fno paths verify`, and the bash hook/gate/event integration tests.
+- **cli-ci** - `uv build`, the pytest suite, `fno config paths verify`, and the bash hook/gate/event integration tests.
 - **rust-ci** - `cargo test --all-targets`, `cargo build --bin fno-agents`, and `scripts/check-event-schema-parity.sh`.
 - **provider-smoke** - provider-adapter smoke checks.
 

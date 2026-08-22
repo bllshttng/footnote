@@ -12,7 +12,7 @@ Contract (the invariants the report must keep):
     plus the single command that resolves it -- never a stack trace, never an
     abort. A degraded ``gh``/``git``/graph never blocks the whole report.
 
-This is the introspection family (``fno whoami`` / ``fno status``), reusing
+This is the introspection family (``fno whoami`` / ``fno whoami status``), reusing
 ``load_agent_context`` for the manifest read rather than a parallel surface.
 """
 from __future__ import annotations

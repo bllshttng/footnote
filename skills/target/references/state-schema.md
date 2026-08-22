@@ -164,7 +164,7 @@ The following fields existed in pre-wedge manifests and are no longer written:
 
 ```bash
 fno whoami    # prints phase=n/a (collapsed) when current_phase absent
-fno status    # derives session status from latest termination event in events.jsonl
+fno whoami status    # derives session status from latest termination event in events.jsonl
 ```
 
 ## Back-compat

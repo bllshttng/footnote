@@ -1,4 +1,4 @@
-"""Hidden ``fno plugins`` administrative surface.
+"""Hidden ``fno config plugins`` administrative surface.
 
 ``ls``, ``inspect``, and ``verify`` are read-only; ``activate`` and ``deactivate``
 are the only writers. The group registers hidden in ``LAZY_SUBCOMMANDS`` so it

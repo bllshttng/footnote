@@ -143,7 +143,7 @@ event_types:
           type: array
         node_id:
           type: string
-    consumers: [fno scoreboard --plan-fidelity]
+    consumers: [fno whoami scoreboard --plan-fidelity]
 
   - name: context_comparison_declared
     description: "A predeclared context-pruning or graph-widening comparison contract. The derived scoreboard reads it but never mutates or persists a comparison result."
@@ -153,7 +153,7 @@ event_types:
       properties:
         comparison_contract:
           type: object
-    consumers: [fno scoreboard --plan-fidelity]
+    consumers: [fno whoami scoreboard --plan-fidelity]
 
   - name: verification_receipt
     description: "Commit-bound deterministic verification evidence. Mode describes coverage; result describes the observed state. Only an exact-SHA full/passed receipt with every expected step executed may satisfy a full-evidence gate."
@@ -318,14 +318,14 @@ event_types:
     consumers: [fno-agents loop-check, fno do pr]
 
   - name: review_finding
-    description: "An operator annotated a node's work (via `fno annotate add` / `fno mux block annotate`). loop-check treats an open finding as a blocking review-gate input: terminal-allow is denied while any review_finding for the node has no matching review_finding_resolved. Node-scoped and NOT head-pinned - only an explicit resolve clears it, a new commit does not. The recorded text is the original; only the mail live-inject frame is x-9ed6-defanged."
+    description: "An operator annotated a node's work (via `fno backlog annotate add` / `fno mux block annotate`). loop-check treats an open finding as a blocking review-gate input: terminal-allow is denied while any review_finding for the node has no matching review_finding_resolved. Node-scoped and NOT head-pinned - only an explicit resolve clears it, a new commit does not. The recorded text is the original; only the mail live-inject frame is x-9ed6-defanged."
     sources: [observer]
     data:
       required: [finding_id, node, text]
       properties:
         finding_id:
           type: string
-          description: "Collision-safe short id minted at emit, never operator-supplied. loop-check quotes it in the deny reason and `fno annotate resolve` clears it."
+          description: "Collision-safe short id minted at emit, never operator-supplied. loop-check quotes it in the deny reason and `fno backlog annotate resolve` clears it."
         node:
           type: string
           description: "The backlog node the finding is scoped to. loop-check matches the session's node against this."
@@ -341,7 +341,7 @@ event_types:
     consumers: [fno-agents loop-check]
 
   - name: review_finding_resolved
-    description: "A review_finding was explicitly resolved (by operator or self-resolving worker via `fno annotate resolve`). Clears the matching finding for the loop-check gate. Idempotent: a second resolve of the same id is a warning no-op and emits nothing."
+    description: "A review_finding was explicitly resolved (by operator or self-resolving worker via `fno backlog annotate resolve`). Clears the matching finding for the loop-check gate. Idempotent: a second resolve of the same id is a warning no-op and emits nothing."
     sources: [observer]
     data:
       required: [finding_id]
@@ -778,7 +778,7 @@ event_types:
     consumers: [operator]
 
   - name: done_race_collision
-    description: "Two fno done calls landed on the same node; second saw status already done."
+    description: "Two backlog done calls landed on the same node; second saw status already done."
     sources: [fno-loop]
     data:
       required: [node_id, first_completed_at, second_attempt_at]
@@ -791,7 +791,7 @@ event_types:
           description: "The completed_at timestamp already stored in the graph entry."
         second_attempt_at:
           type: string
-          description: "UTC ISO8601 timestamp of the second fno done call."
+          description: "UTC ISO8601 timestamp of the second backlog done call."
     consumers: [operator]
 
   - name: backlog_done_refused
@@ -1418,7 +1418,7 @@ event_types:
     consumers: [audit]
 
   - name: worktree_overlap_observed
-    description: "A SessionStart carrier observed at least one other session with a fresh worktree-local liveness stamp. Advisory-only: it proves concurrent recent activity, not simultaneous writes, ownership, or harm. Written to the machine-global journal so it survives worktree cleanup; consumed by `fno worktree overlaps` for recurrence reporting. Harness identity may ride as optional diagnostic metadata but never shapes the predicate, the observation id, or the recurrence threshold."
+    description: "A SessionStart carrier observed at least one other session with a fresh worktree-local liveness stamp. Advisory-only: it proves concurrent recent activity, not simultaneous writes, ownership, or harm. Written to the machine-global journal so it survives worktree cleanup; consumed by `fno workspace worktree overlaps` for recurrence reporting. Harness identity may ride as optional diagnostic metadata but never shapes the predicate, the observation id, or the recurrence threshold."
     sources: [hook]
     data:
       required: [observation_id, repository_key, worktree_key, observer_session_id, peer_session_ids, live_window_seconds]
@@ -1445,7 +1445,7 @@ event_types:
         harness:
           type: string
           description: "Optional diagnostic: the observer harness (claude|codex). Never participates in the predicate, observation id, or recurrence threshold."
-    consumers: [fno worktree overlaps]
+    consumers: [fno workspace worktree overlaps]
 
 # ---------------------------------------------------------------------------
 # W7 additive: Rust fno-agents supervisor event kinds.
@@ -1841,7 +1841,7 @@ event_types:
           type: [integer, "null"]
 
   - name: worktree_sweep
-    description: "One repo's reading from the daemon's 24h worktree report sweep (x-5a30): what `fno worktree cleanup --merged` WOULD archive. Report-only by construction, because a merged PR is external proof that work landed and a timer tick is not; removal stays on the merge-triggered path gated by post_merge.self_reap. Emitted for every repo including those reading zero, so a quiet repo is never mistaken for a sweep that did not run. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
+    description: "One repo's reading from the daemon's 24h worktree report sweep (x-5a30): what `fno workspace worktree cleanup --merged` WOULD archive. Report-only by construction, because a merged PR is external proof that work landed and a timer tick is not; removal stays on the merge-triggered path gated by post_merge.self_reap. Emitted for every repo including those reading zero, so a quiet repo is never mistaken for a sweep that did not run. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
     sources: [daemon]
     data:
       required: []
@@ -3537,7 +3537,7 @@ event_types:
           description: "ok when graph_node_id resolved (pane FNO_NODE provenance / graph pr_number match / reconcile record); failed otherwise."
 
   - name: verifier_verdict
-    description: "Ship-gate verifier advisory verdict (W6 x-f063): the plan-AC check ran against the ship diff at finalize time. Advisory only - no code path may gate a ship on it (Locked Decision #6). One event per ship; `fno scoreboard --calibration` joins these to per-node outcomes to measure the verifier's false-positive rate before anyone proposes flipping it to a gate. error = the verifier itself failed (spawn/timeout/parse); not_applicable = doc ship, no plan bound, or no ACs to check."
+    description: "Ship-gate verifier advisory verdict (W6 x-f063): the plan-AC check ran against the ship diff at finalize time. Advisory only - no code path may gate a ship on it (Locked Decision #6). One event per ship; `fno whoami scoreboard --calibration` joins these to per-node outcomes to measure the verifier's false-positive rate before anyone proposes flipping it to a gate. error = the verifier itself failed (spawn/timeout/parse); not_applicable = doc ship, no plan bound, or no ACs to check."
     sources: [target, test]
     data:
       required: [graph_node_id, verdict, source]
@@ -3571,7 +3571,7 @@ event_types:
           description: "obs-<skill_id>-<UTC-timestamp>, minted once per sweep/replay-batch; correlates every finding in a run to its terminal skill_eval_run_complete."
         skill_id:
           type: string
-          description: "Skill under evaluation, e.g. fno:blueprint or fno:review - same id fno scoreboard --by-skill (x-4829) emits."
+          description: "Skill under evaluation, e.g. fno:blueprint or fno:review - same id fno whoami scoreboard --by-skill (x-4829) emits."
         skill_version:
           type: string
           description: "Best-effort git hash of the skill's SKILL.md at the corpus item's timestamp, or 'unknown' - x-4829's convention, reused verbatim."
@@ -3631,7 +3631,7 @@ event_types:
           description: "Total spend for the run: 0 for a sweep, the sum of per-item headless-spawn costs for a replay batch."
         coverage_pct:
           type: integer
-          description: "Attributable-and-scored fraction of the window's total rows, 0-100 - the same coverage-honesty rule fno scoreboard already enforces, carried into this event since x-0ca7's original proposal did not have one."
+          description: "Attributable-and-scored fraction of the window's total rows, 0-100 - the same coverage-honesty rule fno whoami scoreboard already enforces, carried into this event since x-0ca7's original proposal did not have one."
         failure_ranking:
           type: array
           description: "[{dimension, fail_count}] sorted by fail_count descending - only the dimensions actually scorable in this run (a replay batch's ranking carries structural_validity/collision_free only, per Review Amendment A1)."
@@ -3771,7 +3771,7 @@ event_types:
         dedup_key:
           type: string
           description: "PR-less dedup bucket (reason:session:day) for a spawn-cap/manual escape with no `pr`. Collapses a looped intervention to one count (x-91b5); not consumed by retro (optional)."
-    consumers: [fno retro run]
+    consumers: [fno backlog retro run]
 
   - name: executor_resolved
     description: "The /execute three-tier executor resolver (skills/execute/scripts/resolve-executor.sh) decided a task's executor. Best-effort telemetry: routing is byte-identical whether or not this emits (x-64cb). Folded into `fno backlog triage health` as tier distribution + inference share + warn-fallback count + override-after-inference rate."
@@ -4234,7 +4234,7 @@ event_types:
     consumers: [operator]
 
   - name: carveout_resolved
-    description: "Emitted by `fno carveout resolve --reason`. A carve-out removed from the ledger with no node filed leaves no trace anywhere else, so the reason is the only record that the work was dispositioned rather than dropped. Required when the ledger row is retired without becoming tracked work: the backlog has no delete verb, so a junk node is permanent and a reasoned resolve is the cheaper correction."
+    description: "Emitted by `fno backlog carveout resolve --reason`. A carve-out removed from the ledger with no node filed leaves no trace anywhere else, so the reason is the only record that the work was dispositioned rather than dropped. Required when the ledger row is retired without becoming tracked work: the backlog has no delete verb, so a junk node is permanent and a reasoned resolve is the cheaper correction."
     sources: [backlog]
     data:
       required: [carveout_ids, reason]

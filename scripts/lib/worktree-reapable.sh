@@ -75,7 +75,7 @@ wt_reapable() {
     # the second look; only then do we fail closed.
     if [[ "$verdict" -eq 2 ]] && command -v fno >/dev/null 2>&1; then
         rc=0
-        out="$(fno worktree reapable "$target" 2>/dev/null)" || rc=$?
+        out="$(fno workspace worktree reapable "$target" 2>/dev/null)" || rc=$?
         verdict=0; _wt_reapable_verdict "$rc" "$out" || verdict=$?
     fi
 

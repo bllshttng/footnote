@@ -1,4 +1,4 @@
-"""fno setup migrate-paths
+"""fno config setup migrate-paths
 
 Idempotent migration. Detects existing install by probing the schema's
 path-key enumeration; writes a settings.yaml that reproduces it; sets
@@ -189,7 +189,7 @@ def print_summary(detected: dict[str, Any], settings_path: Path) -> None:
     """Print a stable one-screen migration summary (5 lines max) to stderr.
 
     Writing to stderr (not stdout) keeps stdout clean for commands consumed via
-    command substitution (e.g. ``source "$(fno paths shell-stub)"``).
+    command substitution (e.g. ``source "$(fno config paths shell-stub)"``).
     Migration is a side-effect; its output belongs on stderr.
     """
     obsidian = detected.get("obsidian", {})

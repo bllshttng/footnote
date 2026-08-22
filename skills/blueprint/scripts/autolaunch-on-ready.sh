@@ -102,11 +102,11 @@ fi
 unset _FRONTMATTER
 if [[ -z "$node" ]] && command -v python3 >/dev/null 2>&1; then
   # Tier c: best-effort plan_path lookup against graph.json. Resolve the graph
-  # path the same way scripts/lib/graph-resolve.sh does (env -> fno paths
+  # path the same way scripts/lib/graph-resolve.sh does (env -> fno config paths
   # shell-stub -> ~/.fno/graph.json). NEVER fails the gate: any miss leaves
   # $node empty and falls through to the "nothing to launch" exit below.
   if [[ -z "${GRAPH_JSON:-}" ]] && command -v fno >/dev/null 2>&1; then
-    _PATHS_SH="$(fno paths shell-stub 2>/dev/null || true)"
+    _PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
     if [[ -n "$_PATHS_SH" && -f "$_PATHS_SH" ]]; then
       # shellcheck disable=SC1090
       source "$_PATHS_SH" 2>/dev/null || true
@@ -178,7 +178,7 @@ fi
 #     the tier-c block above; unreadable/absent graph -> no redirect (dispatch as-is).
 if command -v python3 >/dev/null 2>&1; then
   if [[ -z "${GRAPH_JSON:-}" ]] && command -v fno >/dev/null 2>&1; then
-    _PATHS_SH="$(fno paths shell-stub 2>/dev/null || true)"
+    _PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
     if [[ -n "$_PATHS_SH" && -f "$_PATHS_SH" ]]; then
       # shellcheck disable=SC1090
       source "$_PATHS_SH" 2>/dev/null || true

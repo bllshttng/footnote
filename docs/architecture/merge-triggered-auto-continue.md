@@ -140,7 +140,7 @@ Do not reuse the defer horizon here - it answers the opposite question.
 - **Root from the work map, never guessed.** The dependent's `--cwd` is `project_root_from_settings(dep.project)` (exposed standalone as `fno backlog project-root <project>`). An unmapped project is refused by name (`advance_skipped{unmapped-project, detail=<project>}`), never launched against a guessed cwd.
 - **At most one worker.** Reuses the same `dispatch:<id>` TTL reservation + `node:<id>` liveness gate, so a successor seen by both `advance()` and `advance_dependents()` - or by reconcile and the explicit `backlog advance --closed` (both fire in `/pr merged`) - dispatches exactly once. One decision event per dependent; strictly non-fatal.
 
-Wired alongside `advance()` in `reconcile` and `cmd_advance`. The session-side mirror is **G2** (the `/execute` session-project invariant): a `/execute` wave in a foreign project is spawned (unblocked) or deferred via `fno carveout` (blocked, picked up later by this G1 path on merge), never executed in place. See `skills/execute/references/session-project-invariant.md`.
+Wired alongside `advance()` in `reconcile` and `cmd_advance`. The session-side mirror is **G2** (the `/execute` session-project invariant): a `/execute` wave in a foreign project is spawned (unblocked) or deferred via `fno backlog carveout` (blocked, picked up later by this G1 path on merge), never executed in place. See `skills/execute/references/session-project-invariant.md`.
 
 ## Scope
 

@@ -20,16 +20,16 @@ costs a bounded two dispatches and then stops.
 
 ## 1. Activation gate
 
-Run `fno plugins ls`.
+Run `fno config plugins ls`.
 If growth-studio is absent or not active, print the activate command for this
 pack's `plugin.yaml` and stop with a non-zero exit, creating no campaign
 directory and falling back to nothing. The path is the pack's source manifest:
 in this (dogfood) checkout that is `plugins/growth-studio/plugin.yaml`; in a
 consuming project it is wherever that project installed the pack:
 
-    fno plugins activate plugins/growth-studio/plugin.yaml
+    fno config plugins activate plugins/growth-studio/plugin.yaml
 
-A failing or non-zero `fno plugins ls` is a refusal, never an assume-active.
+A failing or non-zero `fno config plugins ls` is a refusal, never an assume-active.
 Print the underlying error and stop.
 This gate is the whole reason the faucet is gated: bundling made the skill
 present unconditionally at session start, activation is what makes it permitted.
@@ -56,7 +56,7 @@ Derive the activated pack's root from its receipt so paths resolve whether the
 pack is the in-tree dogfood copy or an installed pack in another project:
 
 ```bash
-PACK_ROOT="$(dirname "$(fno plugins inspect growth-studio --json \
+PACK_ROOT="$(dirname "$(fno config plugins inspect growth-studio --json \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["manifest_path"])')")"
 ```
 

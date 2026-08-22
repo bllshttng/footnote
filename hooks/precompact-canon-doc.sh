@@ -79,7 +79,7 @@ SHORT="${SID: -8}"
 # ---------------------------------------------------------------------------
 # Resolve the canon doc path. A manual /compact <path> carries a path the
 # session deliberately chose - enrich THAT file rather than minting a sibling.
-# Otherwise fall back to fno paths handoff. Only treat custom_instructions as a
+# Otherwise fall back to fno config paths handoff. Only treat custom_instructions as a
 # path when it plainly is one (ends in .md); prose instructions fall through.
 # ---------------------------------------------------------------------------
 DOC_PATH=""
@@ -89,13 +89,13 @@ _ci="${_ci#"${_ci%%[![:space:]]*}"}"  # trim leading whitespace
 # Only treat custom_instructions as a doc path when it plainly IS one: a
 # path-anchored .md route the session deliberately chose, or an existing file.
 # Bare prose that happens to end in .md ("remember to update README.md") must
-# fall through to fno paths handoff, not become a junk filename in the cwd.
+# fall through to fno config paths handoff, not become a junk filename in the cwd.
 case "$_ci" in
   /*.md|./*.md|../*.md) DOC_PATH="$_ci" ;;
   *.md) [[ -f "$_ci" ]] && DOC_PATH="$_ci" ;;
 esac
 if [[ -z "$DOC_PATH" ]]; then
-  DOC_PATH="$(fno paths handoff --session-id "$SID" 2>/dev/null || true)"
+  DOC_PATH="$(fno config paths handoff --session-id "$SID" 2>/dev/null || true)"
 fi
 # No resolvable doc path -> a bare discard list with no pointer is worth little.
 [[ -n "$DOC_PATH" ]] || exit 0

@@ -21,7 +21,7 @@ operator-authority matrix enforcement + its integration test land in Wave 8
 
 Lives at the platform layer rather than under ``fno.agents``: it is a read-only
 state-file reader whose only dependency is ``fno.paths``, and its consumers sit
-below the runtime (``fno backlog done``, ``fno done``, the stop-hook seam).
+below the runtime (``fno backlog done``, its deprecated spelling, the stop-hook seam).
 """
 from __future__ import annotations
 

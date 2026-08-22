@@ -674,7 +674,7 @@ pub fn carveout_age_item(carveouts_raw: &str, now: u64) -> Option<NeedItem> {
         title: None,
         ts: oldest_ts,
         evidence: format!(
-            "{count} unharvested carve-out(s), oldest {}d - fno retro sweep-carveouts --apply",
+            "{count} unharvested carve-out(s), oldest {}d - fno backlog retro sweep-carveouts --apply",
             age / 86_400
         ),
         live: false, // stamped true by stamp_liveness

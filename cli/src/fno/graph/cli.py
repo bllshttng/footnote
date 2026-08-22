@@ -77,6 +77,19 @@ cli.command("decisions", hidden=True)(backlog_decisions)
 cli.command("decide-reindex", hidden=True)(backlog_decide_reindex)
 
 
+# Node-lifecycle sub-apps folded under backlog (unit 6 of the x-9d6c reorg):
+# annotate findings, carve-out records, and the retro harvest are all node
+# metadata operations. The old top-level spellings stay one-release shims
+# (fno.verb_moves); the mounts below are the canonical homes.
+from fno.annotate.cli import annotate_app as _annotate_app  # noqa: E402
+from fno.carveout.cli import carveout_app as _carveout_app  # noqa: E402
+from fno.retro.cli import retro_app as _retro_app  # noqa: E402
+
+cli.add_typer(_annotate_app, name="annotate", hidden=True)
+cli.add_typer(_carveout_app, name="carveout", hidden=True)
+cli.add_typer(_retro_app, name="retro", hidden=True)
+
+
 # Selection-time enforcement (ab-fcf9cec5): a node another session is actively
 # driving holds a live ``node:<id>`` claim and must be skipped so two sessions
 # never pick up the same node. The implementation is homed in graph/statuses.py
@@ -7324,7 +7337,7 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
 
     Three deliberate omissions, each load-bearing:
 
-    - No ledger rollup. Reusing ``fno done``'s path would hand each contained
+    - No ledger rollup. Reusing the done root's path would hand each contained
       node the same plan's cost and re-introduce the very triple count task 1.4
       just removed. ``cost_usd`` stays None; the note is what makes that null
       read as located rather than missing.
@@ -7663,7 +7676,7 @@ def _done_gate_pipeline(
     the forced-close journal, and the promise gate, with today's exit-code
     contract (3 refused / 4 outage / 5 awaiting merge / 6 promise unmet).
     Both completion front doors (``backlog done`` on either backend,
-    ``fno done``) run this BEFORE any close so neither can bypass the
+    the deprecated ``done`` spelling) run this BEFORE any close so neither can bypass the
     gates. Returns the evidencing PR url (None when no evidence).
     """
     from fno.graph._reconcile import (
@@ -7685,7 +7698,7 @@ def _done_gate_pipeline(
         # There are PR references; require evidence before closing.
         first_pr_number, _ = refs[0]
 
-        # Shared with `fno done` so the two verbs cannot drift apart on what
+        # Shared with `done_command` so the two paths cannot drift apart on what
         # counts as evidence.
         evidence = resolve_merge_evidence(
             refs, cwd=node.get("cwd"), query=_done_gh_query
@@ -8027,7 +8040,7 @@ def cmd_done(
 
     # Cost stamp (Wave 2.2): the ledger has per-plan cost the node never captured
     # (2-3 fills). Aggregate it outside the lock; ledger absent/rowless -> null,
-    # never blocks the close. Reuses the same rollup `fno done` uses.
+    # never blocks the close. Reuses the same rollup the done root uses.
     cost_rollup: dict = {}
     try:
         from fno.done.cli import _rollup_from_ledger
@@ -8047,7 +8060,7 @@ def cmd_done(
             already_holder[0] = True
             return entries
         _apply_completion_fields(n, merge_status="merged" if evidence_pr_url else None)
-        # Fill-only: never overwrite a cost a richer path (e.g. `fno done`)
+        # Fill-only: never overwrite a cost a richer path (e.g. the done root)
         # already stamped, and don't drop rows appended during the run.
         if cost_rollup.get("cost_usd") is not None and not n.get("cost_usd"):
             n["cost_usd"] = cost_rollup["cost_usd"]

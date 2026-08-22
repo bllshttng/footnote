@@ -173,7 +173,7 @@ def legacy_worktree_path(name: str, repo_root: Path | None = None) -> Path:
 # ---------------------------------------------------------------------------
 # Per-project opt-out from auto-isolation. The c3po incident: an Obsidian vault
 # whose working tree IS the product got auto-worktree'd. The gate reads this
-# resolver as step 0 of `fno worktree ensure`; a `never` project launches in
+# resolver as step 0 of `fno workspace worktree ensure`; a `never` project launches in
 # place, and a parse error / out-of-enum value REFUSES creation (fail closed).
 
 VALID_WORKTREE_POLICIES = ("never", "harness-native", "external")

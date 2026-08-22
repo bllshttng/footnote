@@ -50,7 +50,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 | `fno whoami\|status` | Self-introspection; run when confused after compaction. |
 | `fno agents mail send\|reply\|unread\|ack` | Cross-project jsonl messaging; live-inject-first, durable fallback. |
 | `fno agents spawn\|ask\|peek\|attach\|resume\|wait` | Cross-CLI agent lifecycle; per-harness support in `docs/harness-command-matrix.md`. |
-| `fno carveout add` | Last resort: work too big for this PR. Else fix it here. |
+| `fno backlog carveout add` | Last resort: work too big for this PR. Else fix it here. |
 | `fno outstanding` / `fno backlog` | Awaiting a human: carve-outs + questions; `ask`/`clear`. `clear --answer` delivers the answer to the asker over mail, or states why it cannot. `backlog decide` records a ruling; `backlog decisions` recovers it (no subject = recent). |
 
 **Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno agents mail reply --to X "..."`: it threads the reply and resolves the sender itself, whether the message arrived live or was drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
@@ -67,7 +67,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 **Mail is user-shaped.** It is the fallback after a worker's own invocation is refused: `fno agents mail send <worker> --raw '/<verb>'`. A mail probe proves user-triggered behavior, never autonomy. No live king means [advisory self-review](docs/architecture/review-lanes.md).
 
-**Fix what you find. Carve out only what is too big.** A problem you spot mid-task gets FIXED in this PR as its own commit, unrelated or not. SIZE is the only justification for filing instead: `fno carveout add --kind deferred|oos-bug "<what + why>"`. Harvested at merge, cleared only by `fno retro sweep-carveouts --apply`. Prefer a node. Applies in every pipeline.
+**Fix what you find. Carve out only what is too big.** A problem you spot mid-task gets FIXED in this PR as its own commit, unrelated or not. SIZE is the only justification for filing instead: `fno backlog carveout add --kind deferred|oos-bug "<what + why>"`. Harvested at merge, cleared only by `fno backlog retro sweep-carveouts --apply`. Prefer a node. Applies in every pipeline.
 
 **Discovery:** `fno help` for the catalog, `fno help <verb>` for call shapes.
 
@@ -85,7 +85,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 | "Mark node `<id>` done" | `fno backlog done <id>` (NOT a skill) |
 | "Review my changes" | `/fno:review` |
 | "Which task next?" | `fno backlog next` / `ready` |
-| "What state am I in after compaction?" | `fno whoami` then `fno status` |
+| "What state am I in after compaction?" | `fno whoami` then `fno whoami status` |
 | "Open a PR" | `/fno:pr create` |
 | "Wait for external review" | `/fno:pr check` |
 | "Is this PR ready to merge?" | `fno do pr status <n>` |

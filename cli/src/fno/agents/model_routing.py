@@ -10,7 +10,7 @@ The ``build`` lane extends the same mechanism to *delivery* spawns (``/target
 bg`` + blueprint autolaunch). It is opt-in by config presence: unconfigured it
 routes nothing (fail-safe ``None``); writing ``model_routing.roles.build`` is
 the consent. ``build`` is not in :data:`DEFAULT_ROUTED_ROLES` but is named in
-:data:`KNOWN_LANE_ROLES` so ``fno route ls`` renders it even before it is set.
+:data:`KNOWN_LANE_ROLES` so ``fno config route ls`` renders it even before it is set.
 
 Mechanism (Locked Decision 2): a spawn stamps ``ANTHROPIC_BASE_URL`` +
 ``ANTHROPIC_AUTH_TOKEN`` + the model env vars into the worker env. No proxy in
@@ -289,7 +289,7 @@ def resolve_spawn_route(
 # Routable lanes that are part of the known vocabulary but are NOT auto-routed
 # by default: config presence is the opt-in (writing model_routing.roles.build
 # IS the consent). `_role_target` already resolves any config-present name, so
-# these need no resolution-path change; they exist so `fno route ls` can render
+# these need no resolution-path change; they exist so `fno config route ls` can render
 # a lane that has no config line yet (an unconfigured `build` row) instead of
 # hiding it. `build` is the sanctioned delivery lane for /target bg + blueprint
 # autolaunch; `pr-create` is the PR-creation worker (/pr create). Unconfigured
@@ -367,7 +367,7 @@ def remap_conflict_message(alias: str, remapped: str) -> str:
         f"  --account <id> --model {alias}      # Anthropic's {alias} "
         "(ids from `fno config accounts list`)\n"
         f"  -P <vendor> --model {remapped}   # stay on the routed vendor "
-        "(vendors from `fno route ls`)\n"
+        "(vendors from `fno config route ls`)\n"
         f"Or unset {var} for this command."
     )
 
@@ -716,7 +716,7 @@ def key_source(
     file path that yielded a key (``None`` when missing); ``checked`` lists every
     source consulted, in precedence order, for a legible ``MISSING (checked ...)``
     message. Same env-beats-file precedence as :func:`_resolve_key`; used by
-    ``fno route ls`` so the key column names its source without leaking secrets.
+    ``fno config route ls`` so the key column names its source without leaking secrets.
     """
     if env is None:
         import os
@@ -1399,7 +1399,7 @@ def effective_providers(
 ) -> dict[str, dict[str, Optional[str]]]:
     """Public: the merged built-in + config providers map (config wins per field).
 
-    Used by ``fno route ls`` (render) and ``fno route set`` (reject a target
+    Used by ``fno config route ls`` (render) and ``fno config route set`` (reject a target
     naming a provider absent from this map) so provider knowledge lives in one
     place."""
     providers: dict[str, dict[str, Optional[str]]] = {
@@ -1421,7 +1421,7 @@ AUTO_ASSIGNED_BY: dict[str, str] = {
 }
 
 # Why each protected name is guarded, rendered in the `assigned_by` column so a
-# reader of `fno route ls` learns what the guard does NOT cover without opening
+# reader of `fno config route ls` learns what the guard does NOT cover without opening
 # source. Both names have drifted from the dispatch surface: `build` carries the
 # delivery payload `implement` names, and nothing declares `review-verdict` at
 # all (the reviewer's model is the reviewing session's own). See
@@ -1431,12 +1431,12 @@ PROTECTED_ROLE_NOTE: dict[str, str] = {
     "review-verdict": "protected name; no dispatch surface declares it",
 }
 
-# The same facts at sentence length, for `fno route set`'s refusal. Kept beside
+# The same facts at sentence length, for `fno config route set`'s refusal. Kept beside
 # the column text so the two registers cannot drift apart.
 PROTECTED_ROLE_HINT: dict[str, str] = {
     "implement": (
         "delivery spawns route via the 'build' lane "
-        "(fno route set build <provider/model>)"
+        "(fno config route set build <provider/model>)"
     ),
     "review-verdict": (
         "nothing declares this role; a verdict runs on the model of the session "
@@ -1450,7 +1450,7 @@ def build_route_table(
     settings: "Optional[SettingsModel]" = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> list[dict[str, str]]:
-    """The effective routing table, one row per role, for ``fno route ls``.
+    """The effective routing table, one row per role, for ``fno config route ls``.
 
     Merges built-in roles/providers with config overrides. Each row is the
     canonical 5-field shape: ``role | provider_model | protocol | key | assigned_by``

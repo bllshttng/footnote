@@ -145,7 +145,7 @@ class HermesCliAdapter:
             worker_id = str(uuid.uuid4())
             return {
                 "action": "skill_dispatch_required",
-                "next_step": f"fno runtime register-worker {worker_id}",
+                "next_step": f"fno workspace register-worker {worker_id}",
                 "worker_id": worker_id,
                 "reason": "in-session shell spawn is forbidden; use Agent tool dispatch",
             }

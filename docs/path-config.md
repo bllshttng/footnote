@@ -72,7 +72,7 @@ config:
     # <id_prefix><hex> (e.g. fno-a3f9). Resolution is format-agnostic, so any
     # node ID resolves regardless of the prefix/width it was minted under.
     id_prefix: null     # e.g. fno-, xy-; lowercase, <=7 chars, not cv-/fu-/tgt-.
-                        # Set at `fno setup`. null falls back to the ab- prefix.
+                        # Set at `fno config setup`. null falls back to the ab- prefix.
     id_hex_width: 8     # hex chars in a minted id, 4-8. The setup wizard offers 4;
                         # an absent key resolves to 8.
 ```
@@ -128,7 +128,7 @@ config:
     enabled: false
 ```
 
-All paths derive from `~/.fno/`. This is also what `fno setup migrate-paths` writes on first run.
+All paths derive from `~/.fno/`. This is also what `fno config setup migrate-paths` writes on first run.
 
 ## Lookup order for path resolution
 
@@ -162,7 +162,7 @@ When a suspicious path is found:
 [doctor] 1 suspicious path(s) detected:
   - state_dir = /private/tmp/fno: temp directory; data will not survive reboot
 
-Run 'fno setup migrate-paths --force' to regenerate paths.
+Run 'fno config setup migrate-paths --force' to regenerate paths.
 ```
 
 Suspicious patterns and their reasons:
@@ -176,21 +176,21 @@ Suspicious patterns and their reasons:
 | `~/OneDrive/` | OneDrive sync; conflicted copies on multi-machine setups |
 | `.git/` | Git internal; may be cleaned by git gc |
 
-## `fno setup migrate-paths` flow
+## `fno config setup migrate-paths` flow
 
 On first run after install, the CLI automatically writes `~/.fno/config.toml` with built-in defaults. The sentinel `~/.fno/.path-migration-done` prevents re-running.
 
 To regenerate settings explicitly:
 
 ```bash
-fno setup migrate-paths --force
+fno config setup migrate-paths --force
 ```
 
 This rewrites `config.toml` from the built-in defaults. Any custom values are overwritten; back up the file first if you have customizations.
 
 ## Deprecation pathway
 
-Before the path-config substrate was introduced, hardcoded `~/.fno/` references were scattered across shell scripts and Python code. The resolver layer (`fno.paths`) is the migration target. Shell scripts use `fno paths emit-shell` to source path variables; Python code imports `from fno import paths`.
+Before the path-config substrate was introduced, hardcoded `~/.fno/` references were scattered across shell scripts and Python code. The resolver layer (`fno.paths`) is the migration target. Shell scripts use `fno config paths emit-shell` to source path variables; Python code imports `from fno import paths`.
 
 If you find a script that still hardcodes `~/.fno/`, file an issue or use `FNO_CONFIG` to point it at the right file while the migration is underway.
 

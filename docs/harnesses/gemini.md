@@ -11,7 +11,7 @@ The experimental project-agent mode (`.gemini/agents/` + a `gemini_experimental_
 
 - `GEMINI.md` project context
 - Gemini extension manifest via `gemini-extension.json`
-- SessionStart context hook (vision, `fno whoami`, worktree hygiene, first-run setup nudge), installed with `fno setup cli-hooks` into `~/.gemini/settings.json` (`hooks.SessionStart` -> `hooks/session-start.sh`). Idempotent, backs up first, never clobbers your other hooks.
+- SessionStart context hook (vision, `fno whoami`, worktree hygiene, first-run setup nudge), installed with `fno config setup cli-hooks` into `~/.gemini/settings.json` (`hooks.SessionStart` -> `hooks/session-start.sh`). Idempotent, backs up first, never clobbers your other hooks.
 - Shared skills under `skills/`
 - Sequential `do`, `operator`, and `target` execution
 

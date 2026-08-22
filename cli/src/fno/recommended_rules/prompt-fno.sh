@@ -6,7 +6,7 @@
 # nothing (gated on $FNO_NODE). This is the starship-free path - it edits only
 # $PS1 and needs no external tool.
 #
-# Install: `fno setup wizard` offers to add the `source` line, or add it yourself:
+# Install: `fno config setup wizard` offers to add the `source` line, or add it yourself:
 #   echo 'source "$(fno path prompt-snippet 2>/dev/null || true)"' >> ~/.zshrc
 # (starship users: see starship-fno.toml for the equivalent custom module.)
 

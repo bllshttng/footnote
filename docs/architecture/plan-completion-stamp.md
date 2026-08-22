@@ -70,7 +70,8 @@ A plan reaching `done` and a node closing are gated separately. The merge gate
 asks "is a PR merged" (a fact about an artifact); the promise gate asks "did
 the plan's declared work all ship". One verdict function,
 `resolve_promise_evidence`, is consulted by all three close verbs
-(`fno backlog done`, `fno backlog reconcile`, `fno done`) so a node can never
+(`fno backlog done`, `fno backlog reconcile`, and the deprecated `done`
+spelling that forwards to it) so a node can never
 close through a second, ungated path.
 
 The gate fires ONLY on an explicit declaration. A plan that declares **neither

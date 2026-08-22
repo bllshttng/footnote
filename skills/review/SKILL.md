@@ -147,7 +147,7 @@ Nothing witnesses an invocation implicitly.
 The `/target` session runs your `invocation` and then `bash skills/review/scripts/emit-attestation.sh <name>` on the final HEAD, exactly as it does for `code-review` ([ship-and-promise.md](../target/references/ship-and-promise.md)).
 That helper takes any reviewer name, which is why a registered reviewer needs no producer machinery of its own.
 
-**Rung two: emit your findings.** Call `fno annotate add -m "<finding>" --node <id>` and the gate becomes real.
+**Rung two: emit your findings.** Call `fno backlog annotate add -m "<finding>" --node <id>` and the gate becomes real.
 An unaddressed blocking finding holds the loop until someone resolves it, independently of any attestation, and it needs no new footnote machinery on your side.
 
 `requires = "skill"` is checked at `fno do target init`: a skill that resolves on none of the harness's skill roots refuses there, naming the roots searched, rather than wedging the stop gate after the work is done.

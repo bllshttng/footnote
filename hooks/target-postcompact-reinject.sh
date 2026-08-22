@@ -87,7 +87,7 @@ fi
 # Extract key state fields. The manifest is inputs-only post-wedge (ab-d0337fbc):
 # no current_phase / iteration / *_passed gate booleans live here anymore
 # (ab-88f0854d removed those dead reads). Progress is external now - git HEAD,
-# PR/CI, the loop-check verb - surfaced via `fno whoami` / `fno status`.
+# PR/CI, the loop-check verb - surfaced via `fno whoami` / `fno whoami status`.
 GOAL=$(grep '^input:' "$STATE_FILE" 2>/dev/null | head -1 | sed 's/^input: *//' | sed 's/^"//' | sed 's/"$//')
 PLAN_PATH=$(grep '^plan_path:' "$STATE_FILE" 2>/dev/null | head -1 | sed 's/^plan_path: *//' | tr -d '"')
 NODE=$(grep '^graph_node_id:' "$STATE_FILE" 2>/dev/null | head -1 | sed 's/^graph_node_id: *//' | tr -d '"' | tr -d "'")
@@ -108,7 +108,7 @@ fi
 
 CONTEXT="${CONTEXT}
 
-Progress is not in the manifest. Run \`fno whoami\` then \`fno status\`
+Progress is not in the manifest. Run \`fno whoami\` then \`fno whoami status\`
 for live phase + completion state (git HEAD, PR/CI, review)."
 
 [[ -n "$HANDOFF_NUDGE" ]] && CONTEXT="${CONTEXT}

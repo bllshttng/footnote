@@ -1,4 +1,4 @@
-"""CLI-integration installers for `fno setup` (the agent-door opt-in).
+"""CLI-integration installers for `fno config setup` (the agent-door opt-in).
 
 A CLI-only install of footnote (`curl fno.sh | sh`, `uv`, `brew`, `cargo`) lands
 the `fno` binary but **not** the ``/fno:*`` slash commands - those come from the
@@ -441,7 +441,7 @@ def run_cli_integration(
     echo_fn: Callable[[str], None] = lambda _m: None,
     adapters: "Optional[list[IntegrationAdapter]]" = None,
 ) -> "list[IntegrationResult]":
-    """Interactive-agnostic core of the ``fno setup`` CLI-integration step.
+    """Interactive-agnostic core of the ``fno config setup`` CLI-integration step.
 
     Detects agent CLIs on PATH, pre-marks already-installed integrations, asks
     ``select_fn`` which of the not-yet-installed CLIs to wire up, and runs each

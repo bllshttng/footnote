@@ -14,8 +14,8 @@ list. It asks `fno` for the questions, so the wizard can never drift from the
 schema and can never write a key that does not exist:
 
 ```bash
-fno setup plan              # the ~4-6 "always" decisions, as JSON
-fno setup plan --advanced   # also the "advanced" tier
+fno config setup plan              # the ~4-6 "always" decisions, as JSON
+fno config setup plan --advanced   # also the "advanced" tier
 ```
 
 Each emitted field carries `{path, type, default, tier, question, default_source, doc}`.
@@ -48,8 +48,8 @@ overwrite the answers the user changes.
 ## Step 1: Get the question plan
 
 ```bash
-fno setup plan              # /setup and /setup local
-fno setup plan --advanced   # /setup advanced
+fno config setup plan              # /setup and /setup local
+fno config setup plan --advanced   # /setup advanced
 ```
 
 Parse the JSON. For each field, ask the user using its `question` text. Use the
@@ -61,7 +61,7 @@ Parse the JSON. For each field, ask the user using its `question` text. Use the
 
 The `always` set today is roughly: Obsidian on/off (+ vault name), project
 vision, backlog id_prefix, external reviewer(s), auto-merge on/off. Ask only
-what `fno setup plan` returns; do not invent extra questions.
+what `fno config setup plan` returns; do not invent extra questions.
 
 ## Step 2: Write each answer through `fno config set`
 
@@ -99,7 +99,7 @@ fno config set config.auto_merge.enabled false
 
 ## Step 2b: Review gate (how a PR is allowed to go green)
 
-`fno setup plan` asks about `config.review.external_reviewers` (which logins to *request* and *recognize*), but the GATE - what `fno-agents loop-check` REQUIRES before `/target` promises - lives in three `advanced`-tier keys the default plan does not surface, so most users never learn the bot-less options exist. Offer the choice explicitly (ask; default = none / PR + CI only). These are additive - a repo can require both a bot AND a local sigma pass:
+`fno config setup plan` asks about `config.review.external_reviewers` (which logins to *request* and *recognize*), but the GATE - what `fno-agents loop-check` REQUIRES before `/target` promises - lives in three `advanced`-tier keys the default plan does not surface, so most users never learn the bot-less options exist. Offer the choice explicitly (ask; default = none / PR + CI only). These are additive - a repo can require both a bot AND a local sigma pass:
 
 > "How should review gate a PR before `/target` considers it done?
 >  1. **GitHub App bots** - a bot login (e.g. `chatgpt-codex-connector`, `gemini-code-assist`) must post a review. Needs the bot installed on the repo.
@@ -125,7 +125,7 @@ Leaving all three empty keeps today's PR + CI-only behavior.
 ## Step 3: Workspace / project topology (`config.work.workspaces`)
 
 The `config.work` map (workspace -> projects[]) is topology, not a scalar leaf,
-so it is not asked via `fno setup plan`. When setting up a workspace,
+so it is not asked via `fno config setup plan`. When setting up a workspace,
 auto-detect the current project and confirm it:
 
 ```bash
@@ -149,7 +149,7 @@ from the project name (the vault area often differs). Delegate to the dedicated
 scaffold rather than guessing:
 
 ```bash
-fno setup post-merge
+fno config setup post-merge
 ```
 
 ## Step 4b: Offer global shell integration (OPTIONAL, consent-gated)

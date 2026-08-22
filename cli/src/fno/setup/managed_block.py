@@ -10,7 +10,7 @@ Three hard rules, all enforced here:
 
 - **Never forced.** ``offer_managed_block`` writes only after ``confirm_fn``
   returns True. A first-time decline is durable (a marker under ``.fno/``), so a
-  later ``fno setup`` never re-nags.
+  later ``fno config setup`` never re-nags.
 - **Only its own fences.** ``stamp_block`` splices the region between the markers
   and preserves every byte outside them; a re-stamp replaces only the fenced
   content.
@@ -43,7 +43,7 @@ _BODY = """\
 This repo uses the footnote delivery pipeline. Two surfaces that compose:
 
 - **`fno` CLI** - atomic state ops: `fno backlog` (the feature graph), `fno do pr`,
-  `fno agents mail`, `fno carveout`. Run `fno help` for the catalog.
+  `fno agents mail`, `fno backlog carveout`. Run `fno help` for the catalog.
 - **`/fno:*` commands** - orchestration: `/fno:target` (idea -> shipped PR),
   `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`.
 
@@ -54,7 +54,7 @@ Worktree-first: for repo work use a dedicated feature worktree; keep the main
 checkout pullable. Cancel a running pipeline with `touch .fno/.target-cancelled`.
 
 Spot a small pre-existing bug while building? Fold the fix into the current PR as
-its own atomic commit. Capture non-small finds with `fno carveout add`."""
+its own atomic commit. Capture non-small finds with `fno backlog carveout add`."""
 
 
 def _read(path: Path) -> str:

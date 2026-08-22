@@ -476,7 +476,7 @@ pub struct WorktreeSweepReport {
     pub dirty: usize,
 }
 
-/// Parse `fno worktree cleanup --merged`'s summary line.
+/// Parse `fno workspace worktree cleanup --merged`'s summary line.
 ///
 /// Returns `None` rather than a zeroed report when the line is absent. A sweep
 /// that could not read its own output must not report "0 eligible, 0 dirty",
@@ -1019,7 +1019,7 @@ fn is_linked_worktree(cwd: &str) -> bool {
 /// `Some(true)` yes, `Some(false)` no, `None` the probe could not determine it
 /// -> the caller fails closed and keeps the row.
 ///
-/// Routes through `fno worktree reapable`, the same answer the `--merged` sweep
+/// Routes through `fno workspace worktree reapable`, the same answer the `--merged` sweep
 /// and `archive-worktree.sh` use, so three call sites cannot drift apart (an
 /// equivalence test pins that they agree). The old rule here was "is
 /// `git status --porcelain` empty", which blocked on a tracked file merely
@@ -1032,7 +1032,7 @@ fn is_linked_worktree(cwd: &str) -> bool {
 fn worktree_clean_probe(cwd: &str) -> Option<bool> {
     let out = std::process::Command::new("fno")
         .current_dir(cwd)
-        .args(["worktree", "reapable", cwd])
+        .args(["workspace", "worktree", "reapable", cwd])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -2759,7 +2759,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         worktree_sweep(&home, &emitter, now, &roots, &|root| {
                             std::process::Command::new("fno")
                                 .current_dir(root)
-                                .args(["worktree", "cleanup", "--merged"])
+                                .args(["workspace", "worktree", "cleanup", "--merged"])
                                 .output()
                                 .ok()
                                 .filter(|o| o.status.success())

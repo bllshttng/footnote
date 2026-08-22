@@ -1,6 +1,6 @@
 # Hidden options on argument-dispatched actions, one per line.
-agents discovered-json !--provider
 agents ask !--provider
+agents discovered-json !--provider
 agents gate !--notes
 agents gate !--probe
 agents gate !--record
@@ -23,21 +23,10 @@ backlog decide !--subject
 backlog decisions !--subject
 backlog idea !--tag
 backlog intake !--batch
+backlog retro run !--pr
+backlog retro run !--session
 backlog update !--tag
 backlog update !--untag
-mail hold-release !--poll-s
-mail send !--provider
-paths handoff !--session
-resume receipt validate !--session
-resume receipt write !--session
-retro run !--pr
-retro run !--session
-state init !--allow-stub
-target resolve-model !--provider
-target init !--provider
-target start !--provider
-worker external !--pr
-worker review !--session
 do resume receipt validate !--session
 do resume receipt write !--session
 do review !--session
@@ -54,3 +43,16 @@ do state init !--allow-stub
 do target init !--provider
 do target resolve-model !--provider
 do target start !--provider
+mail hold-release !--poll-s
+mail send !--provider
+paths handoff !--session
+resume receipt validate !--session
+resume receipt write !--session
+retro run !--pr
+retro run !--session
+state init !--allow-stub
+target init !--provider
+target resolve-model !--provider
+target start !--provider
+worker external !--pr
+worker review !--session

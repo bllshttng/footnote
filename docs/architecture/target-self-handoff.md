@@ -47,7 +47,7 @@ The `session_satisfied(trigger=delegated)` event written at step 8 is the audit 
 
 ## Context probe contract
 
-`fno context --transcript <path> --json` reads ground truth from the session transcript JSONL: one implementation in the repo (ported out of the skill-local probe so a codex/agy/opencode worker and every hook reach the same arithmetic). `handoff.sh` calls it at pressure boundaries, `fno whoami` prints the `context:` line so the model reads its own window without reverse-engineering a hook, and the bundled skill's local probe is now a shim over the verb.
+`fno whoami context --transcript <path> --json` reads ground truth from the session transcript JSONL: one implementation in the repo (ported out of the skill-local probe so a codex/agy/opencode worker and every hook reach the same arithmetic). `handoff.sh` calls it at pressure boundaries, `fno whoami` prints the `context:` line so the model reads its own window without reverse-engineering a hook, and the bundled skill's local probe is now a shim over the verb.
 
 - Input: path to the session transcript JSONL (resolved from the session manifest's `claude_transcript_id` field)
 - Selects the last assistant message carrying a `usage` block
@@ -66,7 +66,7 @@ The wrapper was never shipped, nothing in this repo ever wrote the sidecar or it
 It was also structurally the wrong source: a second-hand percentage whose denominator footnote could neither see nor validate, which is how it reported 200K-window numbers on a 1M-context model.
 `hooks/spend-drift-monitor.js` now carries only the spend-cap and model-drift guards; its context-percentage path was deleted.
 
-`fno context` (the CLI behind the skill-local shim) is the single context-measurement path: first-hand token counts from the transcript, with a denominator this repo owns.
+`fno whoami context` (the CLI behind the skill-local shim) is the single context-measurement path: first-hand token counts from the transcript, with a denominator this repo owns.
 
 ### Why the PreCompact arm hook was silent
 

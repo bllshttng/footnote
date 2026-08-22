@@ -1,5 +1,5 @@
 """Context-window usage probe: the single implementation behind ``fno whoami``,
-the hidden ``fno context`` verb, and the skill-local shim (x-7685).
+the hidden ``fno whoami context`` verb, and the skill-local shim (x-7685).
 
 Ported VERBATIM from ``skills/target/scripts/context-probe.sh``: the token sum
 (input + cache_creation + cache_read off the LAST assistant line carrying a
@@ -124,7 +124,7 @@ def probe_context(transcript_path: Optional[Path] = None) -> Optional[ContextRea
     With ``transcript_path`` it reads that file - the door hooks use, which are
     handed an authoritative path in their payload. Without one it self-resolves
     through the same harness-aware locator the model resolver uses, so ``fno
-    whoami`` and ``fno context`` answer from the same transcript. The number is
+    whoami`` and ``fno whoami context`` answer from the same transcript. The number is
     derived, never stored: the transcript is the only source.
     """
     if transcript_path is None:

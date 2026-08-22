@@ -49,7 +49,7 @@ if [[ -n "$_gate_repo" ]] && command -v fno >/dev/null 2>&1; then
     # (stale binary lacking `worktree policy`, misconfigured, etc.) would
     # abort the hook and skip all setup. The old inline `[[ ]]` read absorbed
     # this; the hoisted assignment does not.
-    _WT_POLICY="$(fno worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    _WT_POLICY="$(fno workspace worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
 fi
 
 if [[ -z "$WORKTREE_PATH" ]]; then
@@ -122,7 +122,7 @@ MAIN_REPO=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | 
 # Read config from settings.yaml if available.
 # Source paths.sh for typed path vars; the global tier is the per-user file, never CONFIG_FILE (ab-5d6c3d47).
 if command -v fno >/dev/null 2>&1; then
-    PATHS_SH="$(fno paths shell-stub 2>/dev/null || true)"
+    PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
     [[ -f "$PATHS_SH" ]] && source "$PATHS_SH" 2>/dev/null || true
 fi
 SETTINGS=""

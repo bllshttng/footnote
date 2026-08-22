@@ -6,7 +6,7 @@
 # `when` guard means it appears ONLY inside an fno pane - a plain terminal shows
 # no fno segment.
 #
-# Install: `fno setup wizard` offers to append this to your starship.toml, or
+# Install: `fno config setup wizard` offers to append this to your starship.toml, or
 # copy the block below into ~/.config/starship.toml by hand.
 #
 # Not a starship user? See prompt-fno.sh for a portable bash/zsh segment that

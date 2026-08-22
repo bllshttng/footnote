@@ -14,7 +14,7 @@ unit-testable without a live mesh.
 
 Read-only by construction: no registry write, no event emit, no state-file
 mutation (the CLI tests assert paired-state md5 invariance, mirroring the
-``fno whoami`` / ``fno status`` proof).
+``fno whoami`` / ``fno whoami status`` proof).
 """
 from __future__ import annotations
 

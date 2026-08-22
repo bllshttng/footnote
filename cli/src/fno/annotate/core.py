@@ -92,7 +92,7 @@ def _deliver(node: str, finding_id: str, text: str, excerpt: Optional[str]) -> s
     body = f"review finding {finding_id} on {node}:\n{defang(text)}"
     if excerpt:
         body += f"\n\n--- block ---\n{defang(excerpt)}"
-    body += f"\n\n(resolve with: fno annotate resolve {finding_id})"
+    body += f"\n\n(resolve with: fno backlog annotate resolve {finding_id})"
     frame = wrap_fno_mail(body, from_="annotate", harness="claude-code", model="operator", node=node)
 
     try:

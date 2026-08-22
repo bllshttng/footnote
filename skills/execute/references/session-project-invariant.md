@@ -79,7 +79,7 @@ case "$STATUS" in
   blocked)
     # DEFER: a spawned worker would refuse on the still-blocked node. Record it
     # and rely on G1 (advance_dependents dispatches it when the blocker merges).
-    fno carveout add --kind deferred \
+    fno backlog carveout add --kind deferred \
       --need "blocked foreign node $WAVE_NODE (project $WAVE_PROJECT)" \
       "foreign wave $WAVE_NODE blocked at /execute time; G1 dispatches on blocker merge"
     echo "do: deferred $WAVE_NODE to $WAVE_PROJECT; dispatch on blocker merge"   # AC3-UI

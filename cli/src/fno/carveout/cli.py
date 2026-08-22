@@ -1,4 +1,4 @@
-"""`fno carveout` - capture left-out work to a session ledger.
+"""`fno backlog carveout` - capture left-out work to a session ledger.
 
 Machine-first surface (Locked Decision #3: a CLI verb, not a transcript tag):
 the new carve-out id prints to stdout; warnings and errors go to stderr;
@@ -30,7 +30,7 @@ carveout_app = typer.Typer(
         "Records to .fno/carveouts.jsonl; the retro-triage harvest at merge "
         "turns deferred/oos-bug into backlog nodes (deduped, classified), "
         "while `backfill` is handled by /fno:pr merged. That harvest is "
-        "manual: `fno retro sweep-carveouts --apply` is the only thing that "
+        "manual: `fno backlog retro sweep-carveouts --apply` is the only thing that "
         "clears the ledger, so every row you file is a chore for a human. "
         "See `fno inbox outstanding` for what has piled up."
     ),
@@ -41,8 +41,8 @@ _PRIORITY_RE = re.compile(r"^p[0-3]$")
 
 @carveout_app.command(
     "add",
-    epilog="Paired verbs: `fno carveout update <id>` corrects one in place "
-    "(the id survives); `fno carveout resolve <id>` retires it.",
+    epilog="Paired verbs: `fno backlog carveout update <id>` corrects one in place "
+    "(the id survives); `fno backlog carveout resolve <id>` retires it.",
 )
 def add(
     description: str = typer.Argument(
@@ -142,8 +142,8 @@ def add(
     typer.echo(
         "carveout: filed as a last resort - SIZE is the only justification. "
         "If this was small enough to fix in this PR, fix it here and "
-        "`fno carveout resolve` this row. Clears only via "
-        "`fno retro sweep-carveouts --apply`, which nobody runs unprompted.",
+        "`fno backlog carveout resolve` this row. Clears only via "
+        "`fno backlog retro sweep-carveouts --apply`, which nobody runs unprompted.",
         err=True,
     )
 
@@ -330,7 +330,7 @@ def list_carveouts(
 @carveout_app.command(
     "update",
     epilog="Reverses nothing - it CORRECTS. To retire a row instead, "
-    "`fno carveout resolve <id> --reason \"...\"`.",
+    "`fno backlog carveout resolve <id> --reason \"...\"`.",
 )
 def update(
     cv_id: str = typer.Argument(..., help="Carve-out id to edit (e.g. cv-ab12cd34)."),
@@ -501,7 +501,7 @@ def resolve_carveouts(
     believed un-file-able. Corrected here rather than deleted, because the
     failure mode is worth naming: prose in a docstring is consulted as fact.
 
-    To CORRECT a carve-out rather than retire it, use ``fno carveout update``,
+    To CORRECT a carve-out rather than retire it, use ``fno backlog carveout update``,
     which preserves the id. Resolving and re-adding changes the id and loses
     the content if the second step fails.
     """

@@ -148,7 +148,7 @@ will block exit in all of them until the target session completes.
 Pick ONE:
 
   1) Worktree (recommended for /target M, L, or cross-project):
-       wt=\$(fno worktree ensure --repo "$REPO_ROOT" --name <slug> --harness <yours>)
+       wt=\$(fno workspace worktree ensure --repo "$REPO_ROOT" --name <slug> --harness <yours>)
        cd "\$wt" && bash scripts/setup/setup-worktree.sh  # if present
        # then re-run your target command
 
@@ -291,7 +291,7 @@ if [[ -f "$_CONFIG_SH" ]]; then
   # shellcheck source=/dev/null
   source "$_CONFIG_SH"
 fi
-# config.sh sources the `fno paths` shell-stub, which exports STATE_DIR as the
+# config.sh sources the `fno config paths` shell-stub, which exports STATE_DIR as the
 # GLOBAL fno home ($HOME/.fno) - a name collision with this
 # script's project-local STATE_DIR. Re-derive ours or every sentinel/manifest
 # path below silently retargets the global dir (caught by

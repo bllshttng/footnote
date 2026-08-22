@@ -2739,7 +2739,7 @@ def start(
     origin/main -> phantom-deletion PRs) live only in agent memory - into one
     idempotent verb with a printed receipt, so a memory-less agent succeeds.
 
-    Composes: ``fno worktree ensure`` (create/reuse off origin/main, never local
+    Composes: ``fno workspace worktree ensure`` (create/reuse off origin/main, never local
     HEAD) -> heal ``.fno`` + link shared state -> ``fno do target init`` (writes the
     manifest, claims the node exactly once) -> receipt. Run from INSIDE a valid
     worktree it is a no-op.

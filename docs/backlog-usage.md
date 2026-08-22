@@ -196,8 +196,8 @@ human merge); only the graph close waits for the merge, so the "done" state mean
 
 `fno backlog update` cannot close a node.
 It once carried a `--completed` flag that applied completion with no gh evidence check and emitted no event; that silence is what let a ledger append close nodes hours before their PRs merged, so the flag is removed.
-The only closers are `fno backlog done` (merge-gated, with `--force --reason TEXT` for the un-cross-checked case), `fno done` (merge-gated, no bypass), and `reconcile`.
-Both done verbs resolve merge evidence through one shared helper and share the exit codes: 0 closed, 3 refusal, 4 gh outage (retryable), 5 awaiting merge.
+The only closers are `fno backlog done` (merge-gated, with `--force --reason TEXT` for the un-cross-checked case), its deprecated one-release `done` spelling (merge-gated, no bypass), and `reconcile`.
+Both surfaces resolve merge evidence through one shared helper and share the exit codes: 0 closed, 3 refusal, 4 gh outage (retryable), 5 awaiting merge.
 
 ## Priority tiers
 
@@ -292,7 +292,7 @@ fno backlog lanes                  # rollup: live lanes vs the cap, per-node sta
 ## Worktree isolation policy
 
 Every code payload launched from a repo main checkout is auto-isolated into a
-worktree by `fno worktree ensure`. `config.worktree.policy` opts a project out
+worktree by `fno workspace worktree ensure`. `config.worktree.policy` opts a project out
 of that. Values (`never | harness-native | external`):
 
 - `never` - launch in place, no worktree. For a checkout whose working tree IS
@@ -327,7 +327,7 @@ trap: a misspelled key silently means "default policy"). Read the resolved
 verdict without creating anything:
 
 ```bash
-fno worktree policy --repo <path> [--harness claude]
+fno workspace worktree policy --repo <path> [--harness claude]
 ```
 
 ## Public roadmap

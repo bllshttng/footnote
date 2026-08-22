@@ -3902,7 +3902,7 @@ def run_config_migration(
     """Convert every legacy settings.yaml (+ its settings.local.yaml) in the
     candidate chain to a flat config.toml, returning ``(toml_path, action)`` per
     file for the CLI to report. ``action`` is ``migrated`` | ``already-migrated``
-    | ``absent``. The explicit ``fno setup migrate-config`` verb over the same
+    | ``absent``. The explicit ``fno config setup migrate-config`` verb over the same
     one-shot conversion the loader runs, so a deployed install converts on demand
     (comments are NOT carried across the round-trip). Idempotent + atomic.
     """

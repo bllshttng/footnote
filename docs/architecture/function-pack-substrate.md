@@ -27,7 +27,7 @@ cli/src/fno/plugins/manifest.py   frozen PackManifest and component declarations
 cli/src/fno/plugins/verify.py     pure two-axis verification
 cli/src/fno/plugins/registry.py   installed packs, digests, activation receipts
 cli/src/fno/plugins/activate.py   projection into the plugin role layer
-cli/src/fno/plugins/cli.py        hidden `fno plugins` administrative surface
+cli/src/fno/plugins/cli.py        hidden `fno config plugins` administrative surface
 plugins/growth-studio/            the first pack (content, not code)
 ```
 
@@ -52,7 +52,7 @@ surfaces read. Activation never acts on it.
 
 ## Two verification axes
 
-`fno plugins verify` reports every condition twice on independent axes:
+`fno config plugins verify` reports every condition twice on independent axes:
 
 - `checked` or `unchecked`: was the condition evaluated at all?
 - `passed`, `failed`, `blocked`, or `unknown`: the result, reusing
@@ -100,7 +100,7 @@ blast radius than the same text reaching a bounded one.
 The registry persists installed packs (id, version, digest, declared effect
 ceiling) and activation receipts naming the exact role-layer paths each
 activation wrote. The receipt's written-path list is what makes deactivation
-surgical: `fno plugins deactivate` removes only the paths this pack's receipt
+surgical: `fno config plugins deactivate` removes only the paths this pack's receipt
 recorded, leaving a hand-written definition in the same plugin layer untouched.
 
 Adapter conformance is attributed to its pack digest. The approval store cannot

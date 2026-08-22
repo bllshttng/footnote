@@ -31,7 +31,7 @@
 # arming proof is the one question its predecessor (arm-handoff-precompact.sh,
 # gated on a pid dead ~1s after init) could never answer.
 #
-# The context check does NOT depend on the registry. The probe (`fno context`)
+# The context check does NOT depend on the registry. The probe (`fno whoami context`)
 # is the only truthful pressure source: it counts tokens from the transcript and
 # owns its denominator. The registry is BEST-EFFORT here, used only to pick the
 # king trigger + king message and to run the orphan check. A missing row or an
@@ -153,7 +153,7 @@ USED_PCT=""
 USED_TOKENS=""
 WINDOW_TOKENS=""
 if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    PROBE_OUT=$(with_timeout 5 fno context --transcript "$TRANSCRIPT" --json 2>/dev/null || true)
+    PROBE_OUT=$(with_timeout 5 fno whoami context --transcript "$TRANSCRIPT" --json 2>/dev/null || true)
     # jq, not sed: BSD sed (macOS) does not support `[0-9]\+` in basic regex, and
     # the hook already requires jq for the registry read below.
     _p=$(printf '%s' "$PROBE_OUT" | jq -r '.used_pct // empty' 2>/dev/null)
@@ -239,10 +239,10 @@ fi
 # They live in a `latches/` SUBDIR of that state dir, not its top level. Four
 # files per session per band at the root buried it: 395 of 527 entries, with no
 # deleter, six days after this hook landed. The location resolves through the
-# same door as every other path (`fno paths shell-stub`), so an overridden
+# same door as every other path (`fno config paths shell-stub`), so an overridden
 # `config.state_dir` moves the latches with it; hardcoding a new
 # `$HOME/.fno/latches` would repeat the bug one directory down.
-_stub="$(with_timeout 3 fno paths shell-stub 2>/dev/null || true)"
+_stub="$(with_timeout 3 fno config paths shell-stub 2>/dev/null || true)"
 [ -n "$_stub" ] && [ -f "$_stub" ] && . "$_stub" 2>/dev/null
 LATCH_DIR="${LATCHES_DIR:-${STATE_DIR:-$HOME/.fno}/latches}"
 mkdir -p "$LATCH_DIR" 2>/dev/null || true
@@ -381,11 +381,11 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         fi
         _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session compact trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now: your session id, mail handle, and claims all survive it. ${_compact_ask}"
         if [[ -n "$PLAN_PATH" ]]; then
-            REASON="${_compact_core} You have a plan bound, so the plan, STATE.md and SUMMARY.md survive the compact - but your in-flight judgment does not. Before you compact, flush what is only in volatile state: commit small fixes in this PR as their own atomic commit, 'fno carveout add -k deferred \"...\"' for separable work, 'fno backlog idea' for new findings, and note any plan drift in SUMMARY.md."
+            REASON="${_compact_core} You have a plan bound, so the plan, STATE.md and SUMMARY.md survive the compact - but your in-flight judgment does not. Before you compact, flush what is only in volatile state: commit small fixes in this PR as their own atomic commit, 'fno backlog carveout add -k deferred \"...\"' for separable work, 'fno backlog idea' for new findings, and note any plan drift in SUMMARY.md."
         else
             CANON_DOC=""
             if command -v fno >/dev/null 2>&1; then
-                CANON_DOC=$(with_timeout 3 fno paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
+                CANON_DOC=$(with_timeout 3 fno config paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
             fi
             if [[ -n "$CANON_DOC" ]]; then
                 REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc at ${CANON_DOC} - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off. The PreCompact hook keeps that doc's mechanical sections fresh; you fill its merge-order and open-decisions sections."
@@ -406,7 +406,7 @@ if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
         # --all is load-bearing: `carveout list` now scopes to the current
         # session by default, and this check must see a carveout filed by ANY
         # session (the king that stated the orphaning is usually not this one).
-        CARVEOUTS=$(with_timeout 3 fno carveout list --all --json 2>/dev/null || true)
+        CARVEOUTS=$(with_timeout 3 fno backlog carveout list --all --json 2>/dev/null || true)
         # carveout list --json emits JSONL (one object per line), so stream-filter
         # rather than map (which needs an array). Structured .scope field match,
         # Only a RECENT carveout (last 24h) counts: a historical one from a
@@ -427,7 +427,7 @@ if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
         touch "$ORPHAN_LATCH" 2>/dev/null || true
         emit_event "king_orphan_block" \
             "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
-        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE} and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS}). A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review."
+        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE} and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS}). A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno backlog carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review."
         if [[ -n "$REASON" ]]; then
             REASON="${REASON}  ||  ${ORPHAN_REASON}"
         else
@@ -481,7 +481,7 @@ if [[ "$FIRE_FLUSH" -eq 1 ]]; then
     touch "$FLUSH_LATCH" 2>/dev/null || true
     emit_event "context_flush_nudge" \
         "{\"dirty_files\":${FLUSH_DIRTY},\"static_stops\":${FLUSH_STATIC},\"session_id\":\"${SESSION_ID}\"}"
-    FLUSH_REASON="flush: ${FLUSH_DIRTY} files have uncommitted changes and the tree has not moved in ${FLUSH_STATIC} turn-ends, so this work exists only in this session's volatile state - a compact or a crashed pane loses it. Fix what you found if it is small: commit it now, in this PR, as its own atomic commit. File a carveout ONLY for what is genuinely separable: 'fno carveout add -k deferred \"...\"'. A session that never reaches the end of a unit of work records nothing."
+    FLUSH_REASON="flush: ${FLUSH_DIRTY} files have uncommitted changes and the tree has not moved in ${FLUSH_STATIC} turn-ends, so this work exists only in this session's volatile state - a compact or a crashed pane loses it. Fix what you found if it is small: commit it now, in this PR, as its own atomic commit. File a carveout ONLY for what is genuinely separable: 'fno backlog carveout add -k deferred \"...\"'. A session that never reaches the end of a unit of work records nothing."
     if [[ -n "$REASON" ]]; then
         REASON="${REASON}  ||  ${FLUSH_REASON}"
     else

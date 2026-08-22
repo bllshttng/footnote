@@ -24,7 +24,7 @@ anywhere in the verb.
 - The PR is already merged (this runs *after* merge, by hand or from a watcher).
 - `.fno/config.toml` sets `config.post_merge.parking_lot_path`. Check before a
   merge with `fno config doctor --post-merge`; scaffold it with
-  `fno setup post-merge`. Without it the verb's judgment leg reports
+  `fno config setup post-merge`. Without it the verb's judgment leg reports
   `parking_lot=unset` and prose is skipped (never guessed).
 - `config.post_merge.maintainer_marker` (optional, default empty) is the
   discriminator tag for maintainer-only items (decisions, sign-offs, manual
@@ -251,7 +251,7 @@ rule), never as `backlog idea` nodes.
 - **Empty diff (merge commit with no file changes)** - the verb reports
   `bar=below`; treat as below the bar (no capture work), never an error.
 - **Run from inside the merged PR's own worktree** - the archive leg defers to
-  `fno worktree cleanup --merged --apply` (run from canonical); it never
+  `fno workspace worktree cleanup --merged --apply` (run from canonical); it never
   self-removes.
 
 ## See also
@@ -262,5 +262,5 @@ rule), never as `backlog idea` nodes.
   `internal/fno/plans/20260723-post-merge-mechanical-core-x-bbde.md`.
 - Design + locked decisions (original ritual):
   `internal/fno/design/2026-05-30-auto-post-merge-ritual.md`.
-- Reused verbs: `fno backlog reconcile`, `fno retro run`, `fno backlog advance`, `fno doctor skill-diff reconcile`, `fno do pr sync-canonical`, `fno backlog find`, `fno backlog capture add`, `fno carveout`, `fno agents spawn`.
+- Reused verbs: `fno backlog reconcile`, `fno backlog retro run`, `fno backlog advance`, `fno doctor skill-diff reconcile`, `fno do pr sync-canonical`, `fno backlog find`, `fno backlog capture add`, `fno backlog carveout`, `fno agents spawn`.
 - The cross-project message bus (different thing): `skills/mail/SKILL.md`.

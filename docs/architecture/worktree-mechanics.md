@@ -12,7 +12,7 @@ When you edit the hook, remove or prune a worktree, or trace why a location gate
 ## The refusal shape
 
 Both creation paths honor `policy = "never"`.
-The `WorktreeCreate` hook resolves the policy through `fno worktree policy`, so there is one resolver and no second precedence implementation.
+The `WorktreeCreate` hook resolves the policy through `fno workspace worktree policy`, so there is one resolver and no second precedence implementation.
 
 The refusal SHAPE is load-bearing and counter-intuitive.
 It differs by payload shape.
@@ -35,7 +35,7 @@ An in-session `claude --worktree` spawn is a child (`CLAUDE_CODE_CHILD_SESSION`)
 Test with a top-level run.
 
 When `worktrees_base` is set, the two paths still diverge on WHERE.
-Autonomous dispatch (`fno worktree ensure`) stays harness-native unless `policy = "external"`.
+Autonomous dispatch (`fno workspace worktree ensure`) stays harness-native unless `policy = "external"`.
 The hook relocates off `worktrees_base` directly.
 
 ## The harness-native fallback
@@ -43,7 +43,7 @@ The hook relocates off `worktrees_base` directly.
 A harness or Codex substrate with no native worktree transition degrades to the Footnote-owned `<state_dir>/worktrees` fallback, normally `~/.fno/worktrees`.
 That fallback is Footnote's own allocation.
 It does not inherit an external allocator configured by `worktrees_base`, so a repo that sets the base still lands there under `harness-native`.
-For that reason `fno worktree ensure` requires `--harness` and never guesses the substrate.
+For that reason `fno workspace worktree ensure` requires `--harness` and never guesses the substrate.
 
 ## Removal
 
@@ -56,7 +56,7 @@ Or use `git worktree remove <path>`.
 NEVER `rm -rf` a worktree, which leaves dangling refs.
 
 Post-merge pruning is automated.
-`/fno:pr merged` archives the PR's worktree, and `fno worktree cleanup --merged --apply` sweeps landed ones.
+`/fno:pr merged` archives the PR's worktree, and `fno workspace worktree cleanup --merged --apply` sweeps landed ones.
 
 ## Enforcement
 

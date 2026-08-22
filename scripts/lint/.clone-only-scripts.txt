@@ -47,7 +47,7 @@ scripts/lint-flock-pattern.sh :: lint flock-pattern
 # repo-root script. No allowlist entry remains; the drift guard now passes
 # without flagging the pr paths.
 
-# fno worktree {status,cleanup,archive} - git worktree lifecycle bookkeeping
+# fno workspace worktree {status,cleanup,archive} - git worktree lifecycle bookkeeping
 # over the repo's worktree-lifecycle script.
 scripts/lib/worktree-lifecycle.sh :: worktree status
 
