@@ -264,6 +264,30 @@ def test_the_gate_asks_about_the_recipients_own_harness(monkeypatch, harness):
     assert asked[0]["harness"] == harness
 
 
+def test_the_pane_drive_envelope_carries_an_id_to_reply_to(monkeypatch):
+    """A sender with no reply handle closes three of the four defects, not four.
+
+    A bare pane drive writes no bus row, and it does not need one:
+    `resolve_live_sender` recovers a sender off the transcript for an id the bus
+    never saw, and it reads `from_session` first, so what comes back is the
+    collision-safe address rather than the head-8.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(monkeypatch, [])
+
+    dispatch._mux_pane_send(_entry(), "status?", guarded=False)
+
+    pasted = _pasted(calls)
+    assert 'id="msg-' in pasted, pasted
+    # The id has to be quotable, so it must survive into what is actually typed.
+    import re
+
+    msg_id = re.search(r'id="(msg-[^"]+)"', pasted).group(1)
+    assert msg_id in pasted
+
+
 def test_a_blocked_pane_with_no_answer_grammar_is_still_refused(monkeypatch, capsys):
     """`answerable` is a SUBSET of blocked, and the wrong half to gate on.
 

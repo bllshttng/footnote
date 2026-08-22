@@ -608,7 +608,9 @@ def _is_job_name(name: Optional[str]) -> bool:
     return bool(is_job_token(name))
 
 
-def _refuse_unsafe_short_address(token: Optional[str]) -> None:
+def _refuse_unsafe_short_address(
+    token: Optional[str], *, self_addressed: bool = False
+) -> None:
     """Refuse a codex head-8 supplied as a mail ADDRESS, naming what to use.
 
     Registry names and claude handles pass through untouched. A codex head-8 is
@@ -619,6 +621,12 @@ def _refuse_unsafe_short_address(token: Optional[str]) -> None:
     the reply has already become impossible.
     """
     if not token:
+        return
+    if self_addressed:
+        # A self-address resolves to exactly one session by construction: the
+        # one running this process. The ambiguity this rule guards against
+        # cannot arise, so refusing here only blocks a caller from reaching
+        # itself.
         return
     from fno.agents.registry import load_registry
     from fno.harness_identity import (
@@ -683,6 +691,38 @@ def _reply_to_name_handle(
     replies back to and that drain-self scans, NOT a project name."""
     from fno.agents import discover as discover_mod
 
+    if sender_session:
+        # BEFORE the resolver gets a vote, and before any early return. An
+        # explicitly named session is the ADDRESS, not a tie-breaker for the
+        # ambiguous case: read later, a sibling exiting between a refused reply
+        # and its retry made the handle resolve uniquely and the flag was
+        # discarded in silence, sending the reply to the survivor instead of to
+        # the session the operator named. Every reply path funnels through here,
+        # so this is the one place it can be honored without a second copy.
+        from fno.harness_identity import canonical_handle, session_identity_key
+
+        named_handle = canonical_handle(sender_session)
+        if named_handle != session_identity_key(target)[:8]:
+            # The help's promise: a value that is not one of the candidates
+            # sends nothing. A session whose own handle differs from the one
+            # being answered was never a candidate, so a typo or a stale id
+            # refuses here instead of landing a threaded reply in an unrelated
+            # worker's prompt.
+            raise typer.BadParameter(
+                f"--sender-session {sender_session!r} is not one of the sessions "
+                f"{target!r} could name; its handle is {named_handle!r}. "
+                f"Nothing was sent."
+            )
+        _name_lane_send(
+            body_text,
+            from_name=from_project,
+            resolved=None,
+            token=sender_session,
+            reply_to=to_msg,
+            style_exception=style_exception,
+        )
+        return
+
     resolved, suggestions = discover_mod.resolve_or_suggest(target)
     if resolved is not None:
         _name_lane_send(
@@ -731,34 +771,6 @@ def _reply_to_name_handle(
                 file=sys.stderr,
             )
             reachable, ambiguous = None, []
-        if sender_session and not ambiguous:
-            # An explicitly named session is an ADDRESS, not a tie-breaker. It
-            # was read only inside the ambiguous branch below, so a sibling
-            # exiting between the refused reply and the retry made the handle
-            # resolve uniquely, and the flag was dropped without a word: the
-            # reply then went to whichever session survived, which is not
-            # necessarily the one the operator named. Honor it, and refuse on a
-            # disagreement rather than picking one of the two silently.
-            from fno.harness_identity import session_identity_key
-
-            resolved_id = getattr(reachable, "session_id", None)
-            if resolved_id and session_identity_key(resolved_id) != session_identity_key(
-                sender_session
-            ):
-                raise typer.BadParameter(
-                    f"--sender-session {sender_session!r} does not name the "
-                    f"session {target!r} now resolves to ({resolved_id}). "
-                    f"Nothing was sent."
-                )
-            _name_lane_send(
-                body_text,
-                from_name=from_project,
-                resolved=None,
-                token=sender_session,
-                reply_to=to_msg,
-                style_exception=style_exception,
-            )
-            return
         if ambiguous:
             # The collision escape hatch. A
             # threaded reply that cannot be sent is worse than an unthreaded
@@ -3403,7 +3415,15 @@ def cmd_send(
     # job-address returns, so `send 01a025f8 '/verb' --raw` still fired a verb at
     # whichever colliding session discovery happened to list. An address rule
     # that only covers the lanes reached last is not an address rule.
-    _refuse_unsafe_short_address(name)
+    #
+    # Never for --to-self. The rule exists because a head-8 cannot pick between
+    # two sessions in one clock bucket, and self-addressing has nothing to pick
+    # between: --to-self DERIVED this handle from the running session twelve
+    # lines up. Refusing it killed `mail send --to-self --raw '/<verb>'` on
+    # codex, which is the documented self-invocation path and the one the
+    # --force refusal text recommends, and the caller cannot even comply because
+    # --to-self rejects a positional address.
+    _refuse_unsafe_short_address(name, self_addressed=to_self)
 
     # --force ABOVE every lane that returns without reading it. Four lanes below
     # end the command on their own, so a guard placed after any of them leaves

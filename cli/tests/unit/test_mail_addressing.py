@@ -14,6 +14,8 @@ address a codex worker" should find the answer in one place.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from fno.harness_identity import (
@@ -170,3 +172,123 @@ def test_the_short_address_refusal_covers_the_lanes_that_return_early(
 
     assert result.exit_code == 2, result.output
     assert "addresses codex" in (result.stderr or result.output)
+
+
+def test_to_self_is_not_refused_as_an_ambiguous_codex_handle(tmp_path, monkeypatch):
+    """Self-addressing has nothing to be ambiguous between.
+
+    `--to-self` DERIVES the address from the running session, then the shape
+    refusal rejected that head-8 on a codex worker. So
+    `mail send --to-self --raw '/<verb>'` was dead on codex: the documented
+    self-invocation path, and the one the --force refusal recommends. The caller
+    could not even work around it, because `--to-self` rejects a positional
+    address. The rule guards a slice that cannot pick between two sessions, and
+    there is only ever one session running this process.
+    """
+    from typer.testing import CliRunner
+
+    from fno.mail.cli import mail_app
+    from fno.paths_testing import use_tmpdir
+
+    import fno.agents.registry as registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.require_self_identity",
+        lambda *_a, **_k: SimpleNamespace(session_id=V7_A, harness="codex"),
+    )
+    # The registry row is what proves the head-8 is codex's, so without it the
+    # refusal never fires and this test would pass against the broken code.
+    monkeypatch.setattr(
+        registry,
+        "load_registry",
+        lambda *_a, **_k: [
+            SimpleNamespace(
+                name="me", harness="codex",
+                harness_session_id=V7_A, session_id=V7_A,
+                mux={"session": "main", "pane_id": 1}, cwd="/w", status="live",
+            )
+        ],
+    )
+    fired: dict = {}
+    monkeypatch.setattr(
+        "fno.mail.cli._raw_send",
+        lambda name, message, **kw: fired.update(name=name, message=message, **kw),
+    )
+
+    result = CliRunner().invoke(
+        mail_app, ["send", "/fno:review", "--to-self", "--raw"]
+    )
+
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert fired.get("name") == canonical_handle(V7_A), fired
+    assert fired.get("self_ok") is True, "the raw lane needs its own self permission"
+
+
+def _reply_capture(monkeypatch):
+    """Record where a reply is routed without sending it."""
+    seen: dict = {}
+
+    def _capture(body, *, from_name, resolved, token=None, reply_to=None, **_k):
+        seen["token"] = token
+        seen["resolved"] = resolved
+        seen["reply_to"] = reply_to
+
+    monkeypatch.setattr("fno.mail.cli._name_lane_send", _capture)
+    return seen
+
+
+def test_sender_session_wins_even_when_the_handle_now_resolves(monkeypatch):
+    """The flag is an ADDRESS, not a tie-breaker for the ambiguous case.
+
+    Read only after the resolver, a sibling exiting between a refused reply and
+    its retry made the head-8 resolve uniquely, and the flag was discarded in
+    silence: the reply went to the survivor rather than to the session the
+    operator named. Both siblings share the head-8, so the resolver having an
+    answer says nothing about which one was meant.
+    """
+    from types import SimpleNamespace
+
+    import fno.agents.discover as discover_mod
+    from fno.mail.cli import _reply_to_name_handle
+
+    # The resolver DOES answer, and with the sibling that was not named.
+    monkeypatch.setattr(
+        discover_mod,
+        "resolve_or_suggest",
+        lambda _t, **_k: (SimpleNamespace(session_id=V7_B, agent="codex"), []),
+    )
+    seen = _reply_capture(monkeypatch)
+
+    _reply_to_name_handle(
+        "got it", from_project=None, target=V7_A[:8], to_msg="msg-1",
+        sender_session=V7_A,
+    )
+
+    assert seen["token"] == V7_A, seen
+    assert seen["resolved"] is None, "the resolver's answer must not win here"
+    assert seen["reply_to"] == "msg-1", "the thread has to survive the override"
+
+
+def test_a_sender_session_outside_the_candidates_sends_nothing(monkeypatch):
+    """The help's exact promise, which the unresolved arm skipped.
+
+    With no store knowing the handle there was nothing to disagree with, so a
+    typo or a stale id sailed through and landed a threaded reply in an
+    unrelated worker's prompt. A session whose own handle differs from the one
+    being answered was never a candidate.
+    """
+    import fno.agents.discover as discover_mod
+    from fno.mail.cli import _reply_to_name_handle
+
+    monkeypatch.setattr(discover_mod, "resolve_or_suggest", lambda _t, **_k: (None, []))
+    seen = _reply_capture(monkeypatch)
+
+    with pytest.raises(Exception) as exc:
+        _reply_to_name_handle(
+            "got it", from_project=None, target=V7_A[:8], to_msg="msg-1",
+            sender_session="01ffffff-0000-7000-8000-000000000000",
+        )
+
+    assert "Nothing was sent" in str(exc.value)
+    assert not seen, "a refused address must not send"

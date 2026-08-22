@@ -175,6 +175,7 @@ def wrap(text: str, *, sender: Optional[str] = None, to: Optional[str] = None) -
         stamp_from,
     )
     from fno.dispatch_flags import infer_invoking_harness
+    from fno.inbox.store import generate_msg_id
     from fno.mail.envelope import (
         ForgedEnvelopeError,
         harness_for_provider,
@@ -194,6 +195,15 @@ def wrap(text: str, *, sender: Optional[str] = None, to: Optional[str] = None) -
             # The collision-safe reply address rides the typed envelope too: a
             # pane drive is exactly the message a recipient most needs to answer.
             from_session=resolve_self_session_id(),
+            # And an id to quote. Without one the recipient has a sender but no
+            # `reply --to`, so three of the four defects the envelope closes came
+            # back and the fourth did not. A bare pane drive writes no bus row,
+            # but it does not need to: `resolve_live_sender` recovers a sender
+            # off the transcript for an id the bus never saw, and it reads
+            # `from_session` first, so the recovered address is the collision-safe
+            # one. The mail lane never reaches here -- it mints its own id and
+            # hands this function an already-wrapped body.
+            id=generate_msg_id(),
         )
     except ForgedEnvelopeError as exc:
         raise PaneSendRefused(str(exc)) from exc
