@@ -251,6 +251,7 @@ do pr logs	T1	do pr logs	1
 do pr merge	T1	do pr merge	55
 do pr next-receipt-generation	T1	do pr next-receipt-generation	0
 do pr rebase	T1	do pr rebase	21
+do pr review-hold	T1	do pr review-hold	0
 do pr ritual	T1	do pr ritual	24
 do pr status	T1	do pr status	19
 do pr stub-manifest reconcile-finalize	T1	do pr stub-manifest reconcile-finalize	1
@@ -412,6 +413,7 @@ pr logs	T1	pr logs	1
 pr merge	KEEP	pr merge	55	deliberate readability slack for a high-traffic distinct operation
 pr next-receipt-generation	T1	pr next-receipt-generation	0
 pr rebase	T1	pr rebase	21
+pr review-hold	T1	pr review-hold	0
 pr ritual	T1	pr ritual	24
 pr status	T1	pr status	19
 pr sync-canonical	T1	pr sync-canonical	2
