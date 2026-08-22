@@ -43,7 +43,7 @@ path = "~/code/marketing"
 board_scope = "workspace:main"
 ```
 
-A scope that cannot resolve narrows to the unscoped lane. It does not fall back to every project. Widening on failure turns "I could not tell which project this is" into "here is all of it", which is the complaint the scope exists to answer.
+A scope that cannot resolve does not narrow the board. It falls back to every project. That is the historical board, and what an operator who configured nothing already has. Narrowing there is worse. Every node in the graph carries a project tag. An unresolved scope then leaves a board of the few unscoped cards, with no visible cause. So the fallback is loud, not silent. `fno mux doctor` reports it as a `warn` with the remedy. The server logs the same line at startup. Both name the board they produce, not the one they wanted.
 
 Cards with no project are never hidden under any scope. A node with no project is not another project's work. Filtering it out makes work disappear rather than filter it.
 
@@ -69,7 +69,7 @@ Three failures on one machine in one day, all on the layer-2 vector:
 
 None of these is exotic. Each is an environment variable outliving the process that set it, which is what environment variables do. A receipt reading "isolated environment" rules all three out to anyone who reads it. `fno project init` prints what moved and what did not, so the next person reads a true sentence instead of a reassuring one.
 
-The remedy for layer 2 is provenance, not isolation. `resolve_owned_identity` (`cli/src/fno/harness_identity.py`) proves ownership from the process tree instead of picking by precedence order. When it cannot prove one, it refuses rather than guessing. Every durable stamp site reaches it through `cli/src/fno/identity_stamp.py`, which wires the prover and the collider once.
+The remedy for layer 2 is provenance, not isolation. `resolve_owned_identity` (`cli/src/fno/harness_identity.py`) proves ownership from the process tree instead of picking by precedence order. When it cannot prove one, it refuses rather than guessing. Durable stamp sites reach it through `resolve_self_identity` (`cli/src/fno/claims/self_identity.py`). That function supplies the process-tree prover and nothing else. The registry collider stays at the one init-time verb that owns a registry row. Hoisting it into the shared resolver broke that: a session then refused its own row whenever the walk failed.
 
 The discriminator is the raw primitive's own docstring. If the resolved harness or session id ends up WRITTEN to a durable record, it is a stamp and uses the owned path. Those records: a claim, a mail record, an event, an agent-state row, a registry row, a crown grant, a decision record, a graph session record. A caller that only reads to display or branch keeps the precedence primitive.
 
