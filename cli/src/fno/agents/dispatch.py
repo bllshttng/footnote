@@ -6930,7 +6930,27 @@ def _deliver_live(
         return False
 
     if entry.mux:
-        mux_delivered = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
+        # `mail is None` means this is NOT a2a mail: it is an operational
+        # payload that has to land verbatim (a post-merge ritual command, a
+        # busy-hold digest). Enveloping it by default did three separate wrongs.
+        # A digest EMBEDS `<fno_mail>` bodies, and `wrap_fno_mail` refuses a body
+        # holding one, so every hold release to a pane raised and the cursor
+        # never advanced. A ritual arrived dressed as chat and the caller's
+        # `True` suppressed its cold-dispatch fallback, losing it silently. And
+        # the auto-wrap stamped this process's own handle rather than the
+        # declared `from_name`, so the envelope named the wrong peer.
+        #
+        # `sender` is passed for the wrapped case too. It costs nothing there
+        # (the body is already enveloped, so `prepare` passes it through) and it
+        # stops this call site from depending on that staying true.
+        mux_delivered = _mux_pane_send(
+            entry,
+            wrapped,
+            guarded=False,
+            confirm=True,
+            raw=mail is None,
+            sender=from_name or None,
+        )
         if not mux_delivered:
             _record("mux-send-failed")
         return mux_delivered

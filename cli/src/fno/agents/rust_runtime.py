@@ -393,7 +393,7 @@ RUST_ONLY_ADVERTISED: frozenset[str] = frozenset({"status"})
 #: pointers for a raw ``fno-agents <verb>`` / forced-rust call.
 RETIRED_VERB_POINTERS: dict[str, str] = {
     "grid": "agent panes now live in the mux. Open `fno mux`, or script panes with `fno mux pane ls|read|run|send|wait|kill`.",
-    "drive": "drive an agent pane in the mux. Use `fno mux pane send <pane> ...`, or open `fno mux` and type into the pane.",
+    "drive": "drive an agent pane in the mux. Use `fno mux pane send <pane> --raw ...` for keystrokes (without --raw the payload is wrapped in an <fno_mail> envelope), or open `fno mux` and type into the pane.",
     "host": "spawn a mux-hosted agent pane with `fno agents spawn --name <n> --substrate pane`.",
     "promote": "the mux hosts agent panes; spawn one with `fno agents spawn --name <n> --substrate pane`.",
 }

@@ -109,7 +109,7 @@ See [mail-live-inject](mail-live-inject.md) for what it resolves and why the Sto
 
 `fno agents mail send --raw` routes to the right transport per recipient, and that transport is not always the same binary.
 
-A mux-hosted session injects via `fno mux pane send`, regardless of harness. A mux-hosted Codex session is therefore a real prompt-line lane. It can fire `/compact`, `/review`, or any other TUI verb the Codex parser accepts.
+A mux-hosted session injects via `fno mux pane send --raw`, regardless of harness. A mux-hosted Codex session is therefore a real prompt-line lane. It can fire `/compact`, `/review`, or any other TUI verb the Codex parser accepts. `--raw` is required here: a bare send now wraps the payload in an `<fno_mail>` envelope, and an enveloped slash verb is text rather than a command.
 
 A Claude daemon session injects via the `fno-agents mail-inject` Rust binary (`cli/src/fno/agents/dispatch.py`).
 

@@ -312,3 +312,41 @@ def test_a_blocked_pane_with_no_answer_grammar_is_still_refused(monkeypatch, cap
     err = capsys.readouterr().err
     assert "auth_wall" in err
     assert "blocking prompt" in err
+
+
+def test_a_non_mail_payload_reaches_the_pane_verbatim(monkeypatch):
+    """`mail=None` means this is NOT a2a mail, so it must land unwrapped.
+
+    Three separate failures came out of enveloping it. A busy-hold digest
+    EMBEDS `<fno_mail>` bodies and `wrap_fno_mail` refuses a body holding one,
+    so every hold release to a pane raised and the cursor never advanced. A
+    post-merge ritual arrived dressed as chat, and the caller's True suppressed
+    the cold-dispatch fallback, losing it silently. And the auto-wrap stamped
+    the dispatching process's handle instead of the declared `from_name`, so the
+    envelope named the wrong peer.
+
+    Driven through `_deliver_live` rather than `_mux_pane_send`, because the
+    defect was in what that caller passes, and a test that calls the inner
+    function directly cannot see it.
+    """
+    # A digest-shaped body: it CONTAINS an envelope rather than being one.
+    body = 'held for you:\n<fno_mail from="peer" harness="claude" model="m">hi</fno_mail>'
+    calls: list[dict] = []
+    # The read-back that CONFIRMS the paste has to see the payload on screen.
+    monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls, screen=body))
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(monkeypatch, [])
+    monkeypatch.setattr(
+        dispatch, "_delivery_policy_refusal", lambda _e: None, raising=False
+    )
+
+    # The return value does NOT discriminate: the enveloped bug also reported
+    # success, which is precisely how a lost ritual went unnoticed. What the
+    # pane actually received is the evidence.
+    dispatch._deliver_live(_entry(), body, "fno-mail-hold")
+
+    pasted = _pasted(calls)
+    assert body in pasted, pasted
+    # No SECOND envelope wrapped around the digest, and nothing stamped with
+    # this process's handle in place of the declared sender.
+    assert not pasted.lstrip().startswith("<fno_mail from="), pasted

@@ -1309,7 +1309,7 @@ fn retired_verb_pointer(verb: &str) -> Option<&'static str> {
         ),
         "drive" => Some(
             "fno agents drive was retired at G4: drive an agent pane in the mux. \
-             Use `fno mux pane send <pane> ...`, or open `fno mux` and type into the pane.",
+             Use `fno mux pane send <pane> --raw ...` for keystrokes (without --raw the payload is wrapped in an <fno_mail> envelope), or open `fno mux` and type into the pane.",
         ),
         "host" => Some(
             "fno agents host was retired at G4: spawn a mux-hosted agent pane with \
