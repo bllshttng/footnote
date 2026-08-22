@@ -659,7 +659,7 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
 }
 
 def provider_subagent_budget(
-    provider: Optional[str], settings: Optional["Settings"] = None
+    provider: Optional[str], settings: Optional["SettingsModel"] = None
 ) -> Optional[int]:
     """The in-session fan-out width one provider's account tolerates, or None.
 
