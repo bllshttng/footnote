@@ -4357,7 +4357,9 @@ def _seed_script(monkeypatch, *states: str) -> list[tuple]:
     calls: list[tuple] = []
     seq = iter(states)
 
-    def fake_submit(provider, session, pane_id, seed, runner):
+    # **_kw absorbs seed_in_argv: the real _submit_spawn_seed takes it as a
+    # keyword-only argument, and this stub stands in for it.
+    def fake_submit(provider, session, pane_id, seed, runner, **_kw):
         calls.append((provider, session, pane_id, seed))
         state = next(seq)
         detail = {
