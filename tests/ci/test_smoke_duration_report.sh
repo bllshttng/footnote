@@ -118,6 +118,68 @@ check "$([[ $rc -eq 0 ]] && echo 1)" \
       "a passing command under the reporter's trap still exits 0" \
       "exit status was $rc, not 0 - the reporter reddened a green run"
 
+
+# --- the cap in the trap must match the job's real ceiling ----------------
+# The cap now lives in two places per shard: `timeout-minutes` on the job, and
+# the third argument to the reporter, because GitHub does not expose
+# timeout-minutes to a step. A raise applied to only one would move the warning
+# threshold away from the real ceiling and nothing would say so.
+echo ""
+echo "== cap agreement between timeout-minutes and the reporter argument =="
+python3 - <<'PY'
+import re
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("SKIP-AS-FAIL: PyYAML not installed (pip install pyyaml); "
+             "this guard must not silently pass")
+
+jobs = yaml.safe_load(open(".github/workflows/cli-ci.yml"))["jobs"]
+needs = jobs["smoke"].get("needs") or []
+if isinstance(needs, str):
+    needs = [needs]
+
+bad = 0
+if not needs:
+    print("  FAIL: the smoke gate needs no shard jobs; nothing to check")
+    bad += 1
+
+checked = 0
+for name in needs:
+    job = jobs.get(name, {})
+    run = "\n".join(st.get("run", "") for st in job.get("steps", []))
+    # The cap is the integer immediately before the trap's `|| true`; the
+    # arithmetic expansion in between rules out a positional match.
+    m = re.search(r"smoke-duration-report\.sh\s+\S+\s+.*?(\d+)\s*\|\|\s*true", run)
+    if not m:
+        print(f"  FAIL: {name} never calls the duration reporter")
+        bad += 1
+        continue
+    arg_cap, job_cap = int(m.group(1)), job.get("timeout-minutes")
+    if job_cap != arg_cap:
+        print(f"  FAIL: {name} timeout-minutes={job_cap} but reporter cap={arg_cap}")
+        bad += 1
+    else:
+        print(f"  ok: {name} cap agrees ({job_cap}m in both places)")
+        checked += 1
+    # A trap that can redden a green suite defeats the reporter's contract.
+    if "|| true" not in run:
+        print(f"  FAIL: {name} calls the reporter without '|| true'")
+        bad += 1
+
+# Assert a positive count, not merely the absence of failures: an empty needs
+# list or a renamed job would otherwise report a clean pass having read nothing.
+if checked == 0:
+    print("  FAIL: no shard job was actually checked")
+    bad += 1
+
+sys.exit(1 if bad else 0)
+PY
+if [[ $? -ne 0 ]]; then
+    fails=$((fails + 1))
+fi
 echo ""
 if [[ $fails -eq 0 ]]; then
   echo "test_smoke_duration_report: ALL PASS"
