@@ -2660,6 +2660,32 @@ _ARGV_SEED_RECEIPT = (
 )
 
 
+def _reprobe_pane_observation(
+    session: str,
+    pane_id: int,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    current: str,
+) -> str:
+    """Look at the pane once more, and report ONLY what the second look saw.
+
+    Read-only by construction: it never sends, so it cannot double-seed a pane
+    already running a payload committed at exec time. That is the difference
+    from the seed retry, which re-enters the submit path.
+
+    A second failure keeps `current`. Downgrading a successful first look on a
+    failed second one is not this function's job - it is called only when the
+    first look already failed.
+    """
+    try:
+        screen = _run_mux(
+            ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
+            runner,
+        )
+    except DispatchAskError:
+        return current
+    return _pane_observation(screen)
+
+
 def _pane_observation(screen: "subprocess.CompletedProcess[str]") -> str:
     """What the last pane read saw, as a fact about the INSTRUMENT alone.
 
@@ -3470,15 +3496,22 @@ def dispatch_spawn_pane(
             elif seed_state == "unattempted":
                 readiness_detail = seed_detail or readiness_detail
             if seed_state == "submitted" and seed_pane == "unreadable":
-                # The pair this split creates, and it must not read as a clean
-                # spawn. The seed is settled - it rode in the argv - but nothing
-                # here proves a pane is left to run it, and the detail is what a
-                # human acts on. `unconfirmed` above already reaps; this one
-                # keeps the row and says which half is in doubt.
-                readiness_detail = (
-                    "seed delivered in the harness argv, but the pane frame "
-                    "could not be read, so this pane's liveness is unproven"
-                )
+                # One read-only RE-PROBE, and the read-only part is the whole
+                # reason this is not the retry above. That retry re-enters
+                # `_submit_spawn_seed`, which sends a submit keystroke once the
+                # frame paints - safe from `unattempted`, where nothing was ever
+                # typed, and a double-seed here, where the payload rode in at
+                # exec time and the pane may already be running it.
+                #
+                # Without this, a single timed-out read on a loaded machine turns
+                # a perfectly healthy claude spawn into a permanent exit 22. That
+                # path used to self-heal within a second via the retry, and
+                # machine load is exactly the condition that produced this
+                # family's original specimens. So the probe is restored, minus
+                # the keystroke: it can only ever upgrade the OBSERVATION, and it
+                # never touches the seed, which was already settled.
+                time.sleep(_SEED_RETRY_DELAY_S)
+                seed_pane = _reprobe_pane_observation(session, pane_id, runner, seed_pane)
         if readiness == "failed" or (recovered and readiness != "ready"):
             if recovered and readiness != "failed":
                 readiness_detail = (

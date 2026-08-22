@@ -2265,8 +2265,15 @@ fn dispatch_notice(stdout: &str) -> String {
         // re-submit a payload the pane may already be running, which is the
         // duplicate this whole split exists to stop.
         Some("launched") if v.get("seed_verified").and_then(|b| b.as_bool()) == Some(false) => {
-            let doubt = match v.get("pane_observation").and_then(|p| p.as_str()) {
-                Some("unreadable") => "seed delivered, pane unreadable",
+            // BOTH fields, never the pane one alone. An unreadable pane says
+            // nothing about whether a seed was sent, so keying on it by itself
+            // tells an agy operator "seed delivered" for a pane-send spawn where
+            // nothing was ever typed - and then tells them not to re-seed the one
+            // pane that needs it. `submitted` is what makes "delivered" true.
+            let seed = v.get("seed").and_then(|s| s.as_str());
+            let pane = v.get("pane_observation").and_then(|p| p.as_str());
+            let doubt = match (seed, pane) {
+                (Some("submitted"), Some("unreadable")) => "seed delivered, pane unreadable",
                 _ => "seed unverified",
             };
             if label.is_empty() {
@@ -18659,6 +18666,16 @@ mod tests {
         assert_eq!(
             dispatch_notice(
                 r#"{"outcome":"launched","node":"x-1","slug":"feat","seed_verified":false,"pane_observation":"blank"}"#
+            ),
+            "dispatched feat, seed unverified"
+        );
+        // The pane-send path (agy) on an unreadable frame: the pane is equally
+        // unreadable, but NOTHING was typed into it. "seed delivered" there is
+        // false, and its advice - re-probe, never re-seed - is backwards for the
+        // one case that genuinely needs re-seeding.
+        assert_eq!(
+            dispatch_notice(
+                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed":"unattempted","seed_verified":false,"pane_observation":"unreadable"}"#
             ),
             "dispatched feat, seed unverified"
         );
