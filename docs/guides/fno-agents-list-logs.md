@@ -90,16 +90,15 @@ Returns a canonical object suitable for scripts:
   "count": 1,
   "discovered_sessions": [],
   "discovered_count": 0,
-  "filters_applied": { "cwd": null, "provider": null, "status": null },
+  "filters_applied": { "cwd": null, "provider": null, "status": null, "progress": null },
+  "fields_omitted": ["model", "provider"],
   "schema_version": 2
 }
 ```
 
 The row's key set is pinned by [`schemas/agents-list-row.json`](../../schemas/agents-list-row.json), which both serializers are tested against; edit that file first when adding a key. Every entry carries the same keys regardless of harness, so a consumer never branches on harness to find a field. JSON is the default whenever stdout is a pipe, so `fno agents list | jq .` Just Works without an explicit `--json`.
 
-`harness` is the sole identity axis, and it names the CLI the worker runs under, never the model vendor.
-There used to be a `provider` alias beside it carrying the same harness value, so a worker routed to z.ai still listed `provider: claude`; an operator read that as proof the route had silently fallen back and nearly killed three healthy workers over it.
-That key is gone. `harness_session_id` is the worker's own session id in its harness's store.
+`harness` names the CLI, not the model vendor. An old `provider` alias duplicated the harness value. A z.ai-routed worker therefore reported `provider: claude`, which falsely looked like an Anthropic fallback. Row-level `provider` and `model` are omitted because those stored values describe intended routing, not observed runtime truth. The envelope reports that choice as `fields_omitted: ["model", "provider"]`. A consumer can now distinguish projection omission from a null registry value. `harness_session_id` is the worker's own session id in its harness's store.
 
 `observed_model` answers the question `provider` looked like it answered: which model the worker is ACTUALLY running.
 It is derived from the worker's own transcript at read time, never recorded at spawn, because a spawn records intent and would report the intended model in exactly the case you suspect a fallback.

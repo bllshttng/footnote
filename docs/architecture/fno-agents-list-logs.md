@@ -117,8 +117,9 @@ Without these checks, the loop would hang silently on every common log-rotation 
     }
   ],
   "count": 1,
-  "filters_applied": { "cwd": null, "provider": null, "status": null },
-  "schema_version": 1
+  "filters_applied": { "cwd": null, "provider": null, "status": null, "progress": null },
+  "fields_omitted": ["model", "provider"],
+  "schema_version": 2
 }
 ```
 
@@ -126,7 +127,7 @@ The schema version is owned by `format.py::JSON_SCHEMA_VERSION` and is intention
 
 All entries have the same key set regardless of harness. Consumers that grep for keys can rely on `short_id == null` for non-Claude entries rather than checking for key presence.
 
-`harness` names the CLI; `observed_model` names the model the worker is actually answering as, derived per row from its own transcript by `session_truth.observed_model`. The two list emitters reach that one resolver rather than each reading transcripts: Python calls it directly at `read.py`, and the Rust daemon gets it back from the `fno agents truth --json` probe it already runs once per row for `status`. There is deliberately no `provider` key: it was an alias carrying the harness value, and it read as evidence that a routed worker had fallen back to Anthropic.
+`harness` names the CLI. `observed_model` names the model that answered, derived from each worker's transcript by `session_truth.observed_model`. Both list emitters use that resolver. Python calls it directly in `read.py`. Rust reads it from the existing `fno agents truth --json` probe. Row-level `provider` and `model` are omitted because registry storage records intended vendor and model configuration, not what answered. The top-level `fields_omitted` array makes that projection choice explicit instead of letting a consumer interpret missing keys as null storage.
 
 ## Format selection
 

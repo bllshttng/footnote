@@ -99,6 +99,7 @@ def test_list_agents_empty_registry_json_shape(tmp_path, monkeypatch, _patch_cla
         "discovered_sessions": [],
         "discovered_count": 0,
         "filters_applied": {"cwd": None, "provider": None, "status": None, "progress": None},
+        "fields_omitted": ["model", "provider"],
         "schema_version": 2,
     }
     assert result.exit_code == 0

@@ -171,14 +171,14 @@ def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None
     assert fake.calls[1][0][fake.calls[1][0].index("--text") + 1] == "\r"
 
 
-@pytest.mark.parametrize("harness", ["gemini", "agy", "opencode"])
+@pytest.mark.parametrize("harness", ["gemini", "opencode"])
 def test_mux_pane_send_refuses_unpinned_submit_contract_without_writing(
     harness: str, monkeypatch
 ) -> None:
     """A harness with no pinned submit contract is refused BEFORE any pane bytes.
 
     codex used to stand in for "unpinned" here and no longer can: its contract is
-    pinned to ["enter"], measured against 0.148.0. The three that remain are
+    pinned to ["enter"], measured against 0.148.0. The two that remain are
     unpinned because nothing has been measured for them, not because their panes
     are known to be unreachable.
     """
@@ -207,6 +207,21 @@ def test_mux_pane_send_delivers_to_a_codex_pane(monkeypatch, capsys) -> None:
     # "tab to queue message" and sits there unsent.
     written = "".join((call[1] or "") + " ".join(call[0]) for call in fake.calls)
     assert "\r" in written
+
+
+def test_mux_pane_send_delivers_to_an_agy_pane(monkeypatch) -> None:
+    """Measured agy pane behavior uses an Enter submit after the pasted text."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    assert _mux_pane_send(_mux_entry("muxed", "agy"), "hi") is True
+
+    assert [call[0][3] for call in fake.calls] == ["send", "send"]
+    paste, submit = fake.calls
+    assert "--stdin" in paste[0]
+    assert paste[1] == "hi"
+    assert submit[0][submit[0].index("--text") + 1] == "\r"
 
 
 def test_control_socket_inject_passes_the_same_contract_delay(monkeypatch) -> None:

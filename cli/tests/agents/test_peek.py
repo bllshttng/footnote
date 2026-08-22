@@ -183,6 +183,51 @@ def test_peek_mux_pane_no_row_falls_through_to_not_found(tmp_path):
     assert "someone-else" in err.getvalue()
 
 
+def test_peek_live_row_without_harness_session_id_reports_identity_defect(
+    tmp_path, monkeypatch
+):
+    """AC3-ERR: an existing incomplete row is not misreported as a typo."""
+    from fno import paths
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry_path = tmp_path / "registry.json"
+    log_path = tmp_path / "incomplete-worker.log"
+    log_path.touch()
+    write_registry(
+        [
+            AgentEntry(
+                name="incomplete-worker",
+                harness="claude",
+                harness_session_id=None,
+                status="live",
+                cwd=str(tmp_path),
+                log_path=str(log_path),
+                short_id="7c5dcf5d",
+            )
+        ],
+        path=registry_path,
+    )
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry_path)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "incomplete-worker",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, ["complete-worker"]),
+        projects_root=tmp_path,
+        mux_lookup=lambda h: None,
+    )
+
+    assert rc != 0
+    message = err.getvalue()
+    assert "registry row incomplete-worker exists" in message
+    assert "harness_session_id" in message
+    assert "status=live" in message
+    assert "peer not found" not in message
+    assert "did you mean" not in message
+
+
 def test_peek_mux_pane_json_shape(tmp_path):
     """--json on a pane worker emits a parseable row carrying the pane identity."""
     out, err = io.StringIO(), io.StringIO()

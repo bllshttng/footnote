@@ -261,13 +261,13 @@ def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
     assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
 
 
-@pytest.mark.parametrize("harness", ["gemini", "agy", "opencode"])
+@pytest.mark.parametrize("harness", ["gemini", "opencode"])
 def test_non_claude_recipient_refuses_unpinned_submit_contract(harness, monkeypatch):
     """A successful byte write is not delivery when the harness-specific
     submit sequence is unknown. Refuse before touching that pane.
 
     codex used to be this test's example and no longer can: its contract is
-    pinned to ["enter"], measured against 0.148.0. The three left are unpinned
+    pinned to ["enter"], measured against 0.148.0. The two left are unpinned
     because nothing has been measured for them.
     """
 
@@ -280,3 +280,20 @@ def test_non_claude_recipient_refuses_unpinned_submit_contract(harness, monkeypa
     entry = _entry(harness=harness)
     assert dispatch._mux_pane_send(entry, "hi", guarded=False, confirm=True) is False
     assert _verbs(calls) == []
+
+
+def test_agy_recipient_uses_measured_enter_submit_contract(monkeypatch):
+    """agy has measured pane delivery, so mail writes text plus Enter."""
+
+    def _boom(_entry):
+        raise AssertionError("agy confirmation must not require a Claude transcript")
+
+    monkeypatch.setattr(dispatch, "_mux_recipient_transcript", _boom)
+    calls = _install_fake_run(monkeypatch, [0, 0, 0, 0])
+
+    entry = _entry(harness="agy")
+    assert dispatch._mux_pane_send(entry, "hi", guarded=False, confirm=True) is True
+    assert _verbs(calls) == ["claim", "send", "send", "release"]
+    assert "--stdin" in _paste_call(calls)
+    submit = next(call for call in calls if "--text" in call)
+    assert submit[submit.index("--text") + 1] == "\r"
