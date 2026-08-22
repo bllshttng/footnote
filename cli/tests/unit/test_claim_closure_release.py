@@ -377,7 +377,7 @@ def _held_inputs(node: dict, holder: str) -> BoardInputs:
         claimed_nodes=SourceRead(payload=[node]),
         holder_activity={holder: {"state": "stalled", "age_s": 9000}},
         prs=SourceRead(payload=[]),
-        questions=SourceRead(payload=[]),
+        outstanding=SourceRead(payload={}),
         needs=SourceRead(payload=[]),
         lane=SourceRead(payload=[]),
     )
