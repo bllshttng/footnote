@@ -169,31 +169,36 @@ def test_pane_spawn_gates_as_pane_and_releases_on_success(
     calls, FakeGuard = gate_calls
     from fno.agents import mux_spawn as mux_mod
 
-    class PaneResult:
-        name = "w1"
-        provider = "claude"
-        session = "mux-s"
-        pane_id = "%1"
-        short_id = "abcd1234"  # US8: the pane receipt now carries the jobId
-        status = "live"
-        session_uuid = None
-        placement = None  # x-6928: exact-placement receipt (absent on legacy)
-        # A duck-typed stub of MuxSpawnResult drifts from the real dataclass the
-        # moment a receipt field is added, and the drift surfaces as an
-        # AttributeError inside the CLI rather than as a missing receipt field.
-        bound = True
-        pane_alive = True
-        unbound_reason = None
-        seed = "submitted"
-        seed_source = "delivered"
-        fno_id = "abcd1234"
-        log_path = ""
-        recovered = False
-        readiness = "ready"
-        readiness_rule = "live_prompt_box"
+    # The REAL dataclass, not a duck-typed stand-in. The stand-in that used to
+    # live here carried a comment predicting its own failure: it drifts from
+    # MuxSpawnResult the moment a receipt field is added, and the drift surfaces
+    # as an AttributeError inside the CLI rather than as a missing receipt field.
+    # `pane_observation` is the field that finally proved it. Every field the CLI
+    # reads has a default on the real dataclass, so this cannot drift again.
+    pane_result = mux_mod.MuxSpawnResult(
+        name="w1",
+        provider="claude",
+        session="mux-s",
+        pane_id="%1",
+        child_pid=None,
+        session_uuid=None,
+        short_id="abcd1234",  # US8: the pane receipt now carries the jobId
+        status="live",
+        placement=None,  # x-6928: exact-placement receipt (absent on legacy)
+        bound=True,
+        pane_alive=True,
+        unbound_reason=None,
+        seed="submitted",
+        seed_source="delivered",
+        fno_id="abcd1234",
+        log_path="",
+        recovered=False,
+        readiness="ready",
+        readiness_rule="live_prompt_box",
+    )
 
     monkeypatch.setattr(
-        mux_mod, "dispatch_spawn_pane", lambda **kw: PaneResult()
+        mux_mod, "dispatch_spawn_pane", lambda **kw: pane_result
     )
     monkeypatch.setattr(mux_mod, "resolve_provenance", lambda *a: None)
     from fno.agents.cli import agents_app
