@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -76,6 +76,35 @@ const BYE_FLUSH: Duration = Duration::from_millis(250);
 
 /// The droppable outbound path: newest unsent frame per pane, per client.
 type DirtyMap = Arc<Mutex<HashMap<u64, Frame>>>;
+
+/// Per-pane monotonic counters, the mux's share of fleet cost attribution.
+/// All five are totals since pane birth, NEVER rates: every rate read during
+/// the measurement session that motivated them was wrong or inside the noise
+/// floor, and the correct answers all came from differencing two snapshots.
+/// `frames_composited` increments only PAST the `broadcast_pane` visible-gate,
+/// so a fed-but-unviewed pane stays flat; composited > emitted is the
+/// newest-wins dirty map dropping a frame before the wire. That pair decides
+/// whether feeding or display is the cost. `cpu_ns` is wall-clock around
+/// core-loop work (VT feed + frame build/fan-out): every pane shares the one
+/// loop thread, so per-thread CPU cannot attribute it, and writer-task
+/// serialization stays unattributed by design (visible only in the process
+/// total). Relaxed ordering throughout - nothing synchronizes on a counter.
+#[derive(Default)]
+struct PaneCounters {
+    bytes_in: AtomicU64,
+    grid_updates: AtomicU64,
+    frames_composited: AtomicU64,
+    frames_emitted: AtomicU64,
+    cpu_ns: AtomicU64,
+}
+
+/// pane id -> live counters. Shared with the per-client writer tasks, which
+/// know only the pane id at write time; the core loop reaches its counters
+/// through `PaneEntry::stats` and never takes this lock. Rows live exactly as
+/// long as the pane (born in `register_pane`, dropped in `reap_pane`) - a
+/// reaped pane's final partial window is lost, which is the accepted cost of
+/// not growing a second store.
+type PaneStats = Arc<RwLock<HashMap<u64, Arc<PaneCounters>>>>;
 
 /// Lines a single wheel notch scrolls a mux-interpreted pane. ONE, because the
 /// host terminal already did the accumulation and a notch here IS one cell of
@@ -668,6 +697,9 @@ struct PaneEntry {
     /// for a mux-spawned pane; a durable pane fact (survives reattach), never
     /// the registry schema (Locked Decision 5).
     account: Option<String>,
+    /// This pane's monotonic counters. Same `Arc` as the registry row, so the
+    /// core loop increments without touching the registry lock.
+    stats: Arc<PaneCounters>,
 }
 
 /// Extract the `FNO_NODE` value from a pane-run `argv`. The `_mesh_env_wrapper`
@@ -1248,6 +1280,10 @@ struct Core {
     /// reaped. Kept in lockstep with `panes` via [`Core::register_pane`] /
     /// [`Core::reap_pane`].
     pane_watch: HashMap<u64, watch::Sender<WaitTick>>,
+    /// Live per-pane counters, shared with the writer tasks for the
+    /// `frames_emitted` leg. Kept in lockstep with `panes` in
+    /// [`Core::register_pane`] / [`Core::reap_pane`], same as `pane_watch`.
+    pane_stats: PaneStats,
     clients: Vec<Client>,
     /// Monotonic, never reused (Locked Decision 6).
     next_pane_id: u64,
@@ -2414,6 +2450,7 @@ impl Core {
     ) {
         self.next_pane_id += 1;
         e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
+        let stats = Arc::new(PaneCounters::default());
         self.panes.insert(
             id,
             PaneEntry {
@@ -2424,8 +2461,10 @@ impl Core {
                 cwd,
                 cmd,
                 account,
+                stats: Arc::clone(&stats),
             },
         );
+        self.pane_stats.write().unwrap().insert(id, stats);
         let (tx, _rx) = watch::channel(WaitTick::default());
         self.pane_watch.insert(id, tx);
     }
@@ -2443,6 +2482,7 @@ impl Core {
         self.claim_eligible.remove(&pid);
         self.touch_last_emit.remove(&pid);
         self.wheel_gate.remove(&pid);
+        self.pane_stats.write().unwrap().remove(&pid);
         // (x-0090) Drop any attach mapping onto the dead pane so a re-attach
         // spawns fresh rather than focusing a corpse (the lazy `panes` check in
         // `agent_rows()` is the belt to this eager suspenders - Discretion 3).
@@ -5458,6 +5498,10 @@ impl Core {
             let mut d = c.dirty.lock().unwrap();
             for pid in pids {
                 if let Some(entry) = self.panes.get(&pid) {
+                    entry
+                        .stats
+                        .frames_composited
+                        .fetch_add(1, Ordering::Relaxed);
                     let sent = c
                         .reliable_tx
                         .try_send(ServerMsg::Frame {
@@ -6416,13 +6460,22 @@ impl Core {
         let Some(entry) = self.panes.get(&pid) else {
             return;
         };
+        let t0 = Instant::now();
         let frame = entry.vt.frame();
+        entry
+            .stats
+            .frames_composited
+            .fetch_add(1, Ordering::Relaxed);
         for c in &self.clients {
             if c.visible.contains(&pid) {
                 c.dirty.lock().unwrap().insert(pid, frame.clone());
                 c.notify.notify_one();
             }
         }
+        entry
+            .stats
+            .cpu_ns
+            .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     /// The line delta an interpreted wheel-scroll applies, or `None` when the
@@ -9324,7 +9377,17 @@ fn drain_pty_output(
                 ));
             }
             if let Some(entry) = core.panes.get_mut(&pid) {
+                let t0 = Instant::now();
                 entry.vt.feed(&bytes);
+                entry
+                    .stats
+                    .bytes_in
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                entry.stats.grid_updates.fetch_add(1, Ordering::Relaxed);
+                entry
+                    .stats
+                    .cpu_ns
+                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 touched.insert(pid);
             }
         };
@@ -9376,6 +9439,7 @@ async fn serve(
         session: Session::default(),
         panes: HashMap::new(),
         pane_watch: HashMap::new(),
+        pane_stats: Arc::new(RwLock::new(HashMap::new())),
         clients: Vec::new(),
         next_pane_id: 1,
         next_squad_id: 1,
@@ -17550,6 +17614,7 @@ mod tests {
             session: Session::default(),
             panes: HashMap::new(),
             pane_watch: HashMap::new(),
+            pane_stats: Arc::new(RwLock::new(HashMap::new())),
             clients: Vec::new(),
             next_pane_id: 1,
             next_squad_id: 1,
