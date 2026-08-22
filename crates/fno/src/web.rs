@@ -695,24 +695,38 @@ const eq = (got, want, what) => {
   if (got !== want) { console.error(`FAIL ${what}: got ${got}, want ${want}`); process.exit(1); }
 };
 const g = (...rows) => rows;
+
+// --- proven scrolls: a non-negative row count ---
 // An unmoved grid evicts nothing, so redrawing one frame stays idempotent.
 eq(evictedRowCount(g("a","b","c"), g("a","b","c")), 0, "identical");
 // Scrolled up by one: the top row left, a new row arrived at the bottom.
 eq(evictedRowCount(g("a","b","c"), g("b","c","d")), 1, "shift by 1");
+eq(evictedRowCount(g("a","b","c","d"), g("c","d","e","f")), 2, "shift by 2");
 eq(evictedRowCount(g("a","b","c","d"), g("d","w","x","y")), 3, "shift by 3");
-// A whole new screen shares nothing: a break, not a shift.
-eq(evictedRowCount(g("a","b","c"), g("x","y","z")), 3, "no overlap");
-// Geometry changed under us; there is no meaningful shift to report.
-eq(evictedRowCount(g("a","b"), g("a","b","c")), 3, "row count changed");
-eq(evictedRowCount(null, g("a","b","c")), 3, "no previous frame");
 // A blank screen staying blank is unmoved, never a screenful of evictions.
 eq(evictedRowCount(g("","",""), g("","","")), 0, "blank stays blank");
 // Repeated rows leave the shift ambiguous. The smallest fit wins, which is
 // the conservative read: an ambiguous shift retains fewer rows rather than
 // inventing evictions that never happened.
 eq(evictedRowCount(g("x","x","x","p"), g("x","x","p","q")), 1, "ambiguous shift takes the smallest fit");
-eq(evictedRowCount(g("a","b","c","d"), g("c","d","e","f")), 2, "shift by 2");
-console.log("evictedRowCount: 9 cases ok");
+
+// --- not a scroll: -1, and the caller must retain NOTHING ---
+// A terminal edits rows in place constantly, and none of it is a scroll. These
+// are the cases that made an earlier version dump a duplicate of the visible
+// screen into the retained region on every single frame.
+eq(evictedRowCount(g("hdr","body","* work"), g("hdr","body","- work")), -1, "spinner tick on the last row");
+eq(evictedRowCount(g("$ ls","a.txt","",""), g("$ ls","a.txt","$ ","")), -1, "prompt appears on an unfilled screen");
+eq(evictedRowCount(g("t=1","a","b"), g("t=2","b","c")), -1, "body scrolls under a live header");
+// A whole new screen shares nothing: a repaint, or output outrunning the
+// frame rate. Unprovable either way, so it is never treated as a shift.
+eq(evictedRowCount(g("a","b","c"), g("x","y","z")), -1, "no overlap");
+// Geometry changed under us. Note this is the SHRINK direction, which an
+// earlier version silently concatenated because it compared the shift against
+// the old row count rather than the new one.
+eq(evictedRowCount(g("a","b","c","d","e"), g("c","d","e")), -1, "terminal shrank");
+eq(evictedRowCount(g("a","b"), g("a","b","c")), -1, "terminal grew");
+eq(evictedRowCount(null, g("a","b","c")), -1, "no previous frame");
+console.log("evictedRowCount: 13 cases ok");
 "#;
         let src = format!("{}\n{}", lift_js_fn("evictedRowCount"), asserts);
         let path = std::env::temp_dir().join(format!("fno-evicted-{}.mjs", std::process::id()));
@@ -741,7 +755,7 @@ console.log("evictedRowCount: 9 cases ok");
                 // running all fail the same way, with both streams shown.
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 assert!(
-                    stdout.contains("evictedRowCount: 9 cases ok"),
+                    stdout.contains("evictedRowCount: 13 cases ok"),
                     "the shipped evictedRowCount did not clear every case:\n{}{}",
                     stdout,
                     String::from_utf8_lossy(&o.stderr)

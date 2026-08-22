@@ -17,19 +17,28 @@
   strictly weaker than scrollback and the UI says so. Its ceiling:
     - it starts empty; history begins when you select the pane, never before
     - it is per-selected-pane; switching panes clears it
+    - ONLY a whole-screen scroll is detectable. A pane with a fixed header, or
+      one driving its own scrolling region, retains nothing at all
     - a burst larger than one screenful between two frames is lost
     - any full-screen repaint (alternate screen, clear, resize) breaks continuity
-  The last one is made VISIBLE rather than hidden: two consecutive frames that
-  share no overlapping rows get a break rule, never silent concatenation.
+  The last three are made VISIBLE rather than hidden: a frame we cannot prove
+  continuity across retains nothing, and the next rows that ARE retained get a
+  break rule above them. Never silent concatenation, and never a guess.
 
-  The correct fix is a protocol history request answered from the vt layer's
-  existing scrollback. It is unreachable from here: web.rs:381 calls
-  `writer.forget()` on the socket write half, and that call IS Locked Decision 5
-  (read-only is structural). Restoring a write path to carry a history request
-  reverses the decision read-only rests on, which is a live operator question and
-  deliberately out of scope. Per-viewer history would also need a new server-side
-  read path, since `Frame.scroll_offset` is SHARED state broadcast to every
-  viewer - a browser-driven scroll would move the TUI user's viewport.
+  Real history is a PROTOCOL change, and the shape matters. A history REQUEST is
+  unreachable from here: web.rs:381 calls `writer.forget()` on the socket write
+  half, and that call IS Locked Decision 5 (read-only is structural), so nothing
+  in this process can ask the server for anything. Reaching history through the
+  existing scroll is worse than unreachable - `Frame.scroll_offset` is SHARED
+  state broadcast to every viewer, so a browser-driven scroll would move the TUI
+  user's viewport.
+
+  The open path is a PUSH, not a pull, and it costs read-only nothing: the server
+  already knows an observer from a driver (`server.rs`, `rows == 0 && cols == 0`)
+  and the vt layer already reads history (`Pane::read_tail`), so it can volunteer
+  a pane's history to a passive client unprompted. The browser still asks for
+  nothing and `writer.forget()` stays exactly where it is. That is filed; this
+  page keeps retention until it lands.
 -->
 <html lang="en">
 <head>
@@ -114,6 +123,7 @@
   const MAX_KEPT_ROWS = 1000; // hard cap; the oldest row is dropped past it
   let keptFor = null;         // the pane the retained region belongs to
   let prevRows = null;        // last drawn rows, for the overlap diff
+  let gapPending = false;     // a frame we could not prove continuity across
   const KEPT_NOTE = "recent output kept by this browser since you opened this pane, not terminal scrollback";
   const BREAK_RULE = "─".repeat(8) + " break in output " + "─".repeat(8);
 
@@ -181,25 +191,38 @@
     return html + "\n";
   }
 
-  // How far the grid scrolled between two frames: the smallest k where the old
-  // frame's rows [k..] equal the new frame's rows [0..n-k]. k === 0 means the
-  // grid did not move, so nothing was evicted and redrawing the same frame
-  // retains nothing - this must stay idempotent, because a Layout redraw calls
-  // draw() with an unchanged frame. k === n means the two frames share no
-  // overlap at all: a full-screen repaint, or a burst taller than the grid.
+  // How far the grid scrolled between two frames, or -1 when that is not
+  // provable. A scroll of k means the old frame's rows [k..] equal the new
+  // frame's rows [0..n-k] EXACTLY. k === 0 means the grid did not move, so a
+  // redraw of an unchanged frame retains nothing - that idempotence is
+  // load-bearing, because a Layout redraw calls draw() with the same frame.
+  //
+  // -1 is the honest answer to everything else, and it must NOT be read as "the
+  // whole screen scrolled off". An earlier version returned n there and evicted
+  // the entire previous screen. A terminal changes rows in place constantly - a
+  // spinner tick, a status line, a progress bar, a prompt appearing on an
+  // unfilled screen - and none of that is a scroll. Every such frame dumped a
+  // duplicate of the visible screen into the retained region, filling the cap in
+  // about twenty frames with copies of what was already on screen and trimming
+  // the real scrolled-off output away from the top.
+  //
+  // So this is deliberately conservative: it retains on a PROVEN whole-screen
+  // scroll and never guesses. A pane with a fixed header, or one driving its own
+  // scrolling region, retains nothing rather than something wrong.
+  //
   // Row strings are compared, not cells, because draw() already built them.
   // ponytail: O(n^2) row-string compares, n = rows. At a phone's ~50 rows that
   // is 2.5k compares per frame; a suffix automaton is the upgrade if it ever
   // shows up in a profile.
   function evictedRowCount(prev, next) {
     const n = next.length;
-    if (!prev || prev.length !== n) return n; // geometry changed: a break
+    if (!prev || prev.length !== n) return -1; // no previous frame, or resized
     for (let k = 0; k < n; k++) {
       let ok = true;
       for (let i = k; i < n; i++) if (prev[i] !== next[i - k]) { ok = false; break; }
       if (ok) return k;
     }
-    return n;
+    return -1;
   }
 
   // ---- fit to width (x-ce65), CLIENT SIDE ONLY ----
@@ -273,6 +296,7 @@
     keptEl.textContent = "";
     keptNoteEl.textContent = "";
     prevRows = null;
+    gapPending = false;
   }
 
   function draw() {
@@ -295,14 +319,21 @@
     for (let r = 0; r < fr.rows; r++) rows.push(renderRow(fr, r, false));
 
     const evicted = evictedRowCount(prevRows, rows);
-    if (prevRows && evicted > 0) {
-      if (evicted >= prevRows.length) {
-        // No overlap: the screen was repainted, or output outran the frame rate.
-        // Say so in the output rather than butting unrelated text together.
-        pushKept(`<span class="kept-break">${esc(BREAK_RULE)}</span>\n`);
+    if (prevRows) {
+      if (evicted < 0) {
+        // Continuity is not provable across this frame. Retain nothing - most of
+        // the previous screen is usually still visible below. Just remember the
+        // gap, and draw the rule only if something is ever retained after it, so
+        // an idle pane never accrues break rules.
+        gapPending = true;
+      } else if (evicted > 0) {
+        if (gapPending) {
+          pushKept(`<span class="kept-break">${esc(BREAK_RULE)}</span>\n`);
+          gapPending = false;
+        }
+        for (let i = 0; i < evicted; i++) pushKept(prevRows[i]);
+        if (!keptNoteEl.textContent) keptNoteEl.textContent = KEPT_NOTE + "\n";
       }
-      for (let i = 0; i < Math.min(evicted, prevRows.length); i++) pushKept(prevRows[i]);
-      if (!keptNoteEl.textContent) keptNoteEl.textContent = KEPT_NOTE + "\n";
     }
     prevRows = rows;
 
