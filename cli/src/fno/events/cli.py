@@ -127,16 +127,16 @@ def _stamp_protocol_envelope(
         "outcome": outcome,
         "project": project,
     }
-    # Identity: session producers only, and OWNED rather than by precedence
-    # (x-20f1) - an event is a durable record and its actor must be a marker
-    # this process can prove is its own. Both stay unset for cron / CI / a bare
-    # shell, and for an ambiguous resolve.
+    # Identity: session producers only. resolve_harness_identity() returns no
+    # session for cron / CI / a bare shell, so from/model stay unset there.
     try:
         from fno.agents.self_stamp import resolve_self_model
-        from fno.harness_identity import canonical_handle
-        from fno.claims.self_identity import resolve_self_identity
+        from fno.harness_identity import (
+            canonical_handle,
+            resolve_harness_identity,
+        )
 
-        ident = resolve_self_identity()
+        ident = resolve_harness_identity()
         if ident.session_id and ident.harness:
             env["from"] = canonical_handle(ident.session_id)
             env["model"] = resolve_self_model()
@@ -163,13 +163,12 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
         return explicit
     try:
         from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
-        from fno.harness_identity import canonical_handle
-        from fno.claims.self_identity import resolve_self_identity
+        from fno.harness_identity import (
+            canonical_handle,
+            resolve_harness_identity,
+        )
 
-        # OWNED (x-20f1): the resolved id selects the row whose spawn edge is
-        # stamped as this event's `parent`, so a foreign marker names a
-        # stranger's parent on a durable record.
-        ident = resolve_self_identity()
+        ident = resolve_harness_identity()
         if not (ident.session_id and ident.harness):
             return None
         # Match this session's row by STORED IDENTITY, not by name==handle: a

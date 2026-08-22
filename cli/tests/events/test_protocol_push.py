@@ -72,7 +72,7 @@ def test_blocked_pushes_to_parent(runner, tmp_path, monkeypatch) -> None:
 
 def test_resolve_parent_by_identity_not_display_name(monkeypatch) -> None:
     from fno.events import cli as clim
-    from fno.harness_identity import OwnedHarnessIdentity
+    from fno.harness_identity import HarnessIdentity
 
     class FakeEntry:
         name = "tgt-prj0001-claude-g1"  # caller-provided display name, NOT the handle
@@ -81,13 +81,9 @@ def test_resolve_parent_by_identity_not_display_name(monkeypatch) -> None:
         spawned_by_session = "parentsess123"
         spawned_by_harness = "claude"
 
-    # `parent` lands on a durable event, so the identity that selects this
-    # session's row resolves through the owned path.
     monkeypatch.setattr(
-        "fno.claims.self_identity.resolve_self_identity",
-        lambda *a, **k: OwnedHarnessIdentity(
-            "03401fb3-92b2-cafe", "claude", (), "single"
-        ),
+        "fno.harness_identity.resolve_harness_identity",
+        lambda *a, **k: HarnessIdentity(session_id="03401fb3-92b2-cafe", harness="claude"),
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda *a, **k: [FakeEntry()])
     # canonical_handle("parentsess123") -> "parentse" (first-eight)

@@ -22,9 +22,11 @@ ROOT = Path(__file__).resolve().parents[3]
 # Every site whose resolved harness or session id lands on a record that
 # outlives the process: a claim, an event, an agent-state row, a spawn lineage
 # edge, a question event, a claim holder string.
+# `events/cli.py` is deliberately absent: it is L0 platform and the owned
+# resolver lives in L1 core, so the import is a prohibited layer edge.
+# `scripts/ci/identity-stamp-sites-baseline.txt` records that with the reason.
 STAMP_SITES = (
     "cli/src/fno/claims/core.py",
-    "cli/src/fno/events/cli.py",
     "cli/src/fno/agent/state.py",
     "cli/src/fno/agents/dispatch.py",
     "cli/src/fno/outstanding/cli.py",
