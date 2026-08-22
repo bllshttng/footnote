@@ -576,7 +576,7 @@ def test_every_claude_sessionstart_recorder_declares_the_exact_same_inventory() 
         for command in commands
     ]
 
-    assert len(commands) == 14
+    assert len(commands) == 15
     assert len(set(inventories)) == 1
     assert inventories[0].split(",") == source_ids
 

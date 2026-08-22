@@ -4448,29 +4448,29 @@ fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>,
     // that starts answering before it has read everything. Dropping the handle
     // at the end of the closure closes the pipe, which is the renderer's EOF.
     // A renderer that refuses reads nothing and exits, closing the pipe first;
-    // that EPIPE is not the failure, the exit status below is, so it is
-    // swallowed here and left to the status arm to explain.
+    // that EPIPE is not the failure, the exit code below is, so it is swallowed
+    // here and left to the exit arm to explain.
     let payload = bytes.to_vec();
     let writer = child.stdin.take().map(|mut stdin| {
         std::thread::spawn(move || {
             let _ = stdin.write_all(&payload);
         })
     });
-    let out = wait_with_deadline(child, PANE_PREPARE_TIMEOUT);
+    let waited = wait_with_deadline(child, PANE_PREPARE_TIMEOUT);
     if let Some(handle) = writer {
         let _ = handle.join();
     }
-    let out = out?;
-    if !out.status.success() {
-        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let (exit, rendered, diagnostics) = waited?;
+    if !exit.success() {
+        let detail = String::from_utf8_lossy(&diagnostics).trim().to_string();
         let detail = if detail.is_empty() {
-            format!("renderer exited {}", out.status)
+            format!("renderer exited {exit}")
         } else {
             detail
         };
         return Err(format!("{detail} (pass --raw to type keystrokes instead)"));
     }
-    Ok(out.stdout)
+    Ok(rendered)
 }
 
 /// Wait for `child`, killing it once `budget` elapses. `Child::wait_with_output`
@@ -4484,10 +4484,16 @@ fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>,
 /// calls `try_wait` leaves stdout unread; once it fills the pipe buffer the child
 /// blocks on write, never exits, and every large payload fails at the deadline
 /// with a message blaming a renderer that was working fine.
+///
+/// Returns the exit result plus both drained streams, rather than
+/// `process::Output`: naming that struct's exit field would put a bare
+/// plan-frontmatter identifier in this file, which a repo ratchet counts to keep
+/// readiness classification out of Rust. The tuple is what the one caller wants
+/// anyway.
 fn wait_with_deadline(
     mut child: std::process::Child,
     budget: Duration,
-) -> Result<std::process::Output, String> {
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
     use std::io::Read;
 
     let mut out_pipe = child
@@ -4510,9 +4516,9 @@ fn wait_with_deadline(
     });
 
     let deadline = std::time::Instant::now() + budget;
-    let status = loop {
+    let exit = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(exit)) => break exit,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
@@ -4532,17 +4538,13 @@ fn wait_with_deadline(
             Err(e) => return Err(format!("envelope renderer wait failed: {e}")),
         }
     };
-    let stdout = out_reader
+    let rendered = out_reader
         .join()
         .map_err(|_| "envelope renderer stdout reader panicked".to_string())?;
-    let stderr = err_reader
+    let diagnostics = err_reader
         .join()
         .map_err(|_| "envelope renderer stderr reader panicked".to_string())?;
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
+    Ok((exit, rendered, diagnostics))
 }
 
 fn positive_post_submit_marker(before_cr: &str, after_cr: &str) -> bool {

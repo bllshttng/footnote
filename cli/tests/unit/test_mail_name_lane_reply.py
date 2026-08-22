@@ -145,7 +145,13 @@ def test_session_lane_reply_uses_full_sender_provenance(
     assert result.exit_code == 0, result.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == canonical_handle(sender_id)
+    # The FULL id, not its head-8. Truncating here threw away the one address
+    # that survives a collision: under UUIDv7 the first eight hex are a
+    # truncated millisecond timestamp, so two sessions from one bucket share a
+    # handle and the reply refuses as ambiguous. `_name_lane_send` addresses a
+    # durable copy by the full id on purpose, and `drain-self` reads it.
+    assert replies[0].to == sender_id
+    assert replies[0].to != canonical_handle(sender_id)
     assert replies[0].to != "mutable-alias"
 
 

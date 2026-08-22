@@ -370,6 +370,7 @@ def test_reply_to_node_message_routes_to_sender(runner, isolated, monkeypatch):
         to_msg,
         require_resolution=False,
         style_exception=None,
+        sender_session=None,
     ):
         captured.append(target)
         print(f"replied to {target}")
