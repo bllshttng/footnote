@@ -12318,6 +12318,7 @@ async fn execute_row_menu_action(
                         tab: None,
                         at: None,
                         fallback: PlacementFallback::NewTab,
+                        max_panes: None,
                     },
                 }),
             )
@@ -14097,6 +14098,7 @@ async fn attach_place_keys(
                     tab: None,
                     at: None,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
             }),
         )
@@ -25578,6 +25580,7 @@ mod tests {
                     split: Some(Dir::Left),
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
             })
         );
@@ -25946,6 +25949,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
             })
         );
@@ -25995,6 +25999,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
             }),
             "Enter must attach to the marked workspace, not here"

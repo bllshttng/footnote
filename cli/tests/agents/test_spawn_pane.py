@@ -2313,6 +2313,9 @@ def test_exact_at_current_forwards_token_runs_json_and_reads_receipt(
     synthesized from the requested flags. A painted, alive pane writes the row.
     """
     from fno.agents.registry import load_registry
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
 
     placement = {
         "anchor": 4,
@@ -2332,6 +2335,7 @@ def test_exact_at_current_forwards_token_runs_json_and_reads_receipt(
     assert run_call[1:4] == ["mux", "pane", "run"]
     assert "at" in run_call and "current" in run_call, "token forwarded verbatim"
     assert "--json" in run_call, "exact placement requests the server receipt"
+    assert run_call[run_call.index("--max-panes") + 1] == "4"
     assert run_call.index("at") < run_call.index("--"), "token rides before the argv fence"
     assert result.placement == placement, "receipt is server-authored, not synthesized"
     # The readiness gate probes the spawn's own session, not the default.
