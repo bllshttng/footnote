@@ -1504,6 +1504,24 @@ def test_injected_model_matching_the_lane_is_silent():
     assert err.getvalue() == "" or "implies vendor" not in err.getvalue()
 
 
+def test_account_in_play_downgrades_the_refusal_to_a_warning():
+    """An account can carry its own vendor credential, and `resolve_lane_vendor`
+    never reads the `--account` axis.
+
+    So a zai account beside a glm model on a claude harness is a spawn that
+    WORKS, which this check sees as a mismatch. Refusing it would stop the
+    fleet spawning to prevent a failure that was not going to happen, and the
+    `-P` escape the refusal suggests composes a different credential and bill.
+    """
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "hi"], err=err, model="glm-5.2", account="zai-main"
+    )
+    assert "refusing to spawn" not in err.getvalue()
+    assert "implies vendor" in err.getvalue()
+    assert out[0] == "spawn"
+
+
 def test_injected_cross_vendor_model_with_explicit_route_proceeds():
     # --route names the lane, so the caller chose both halves even though the
     # model arrived by injection. Refusing here would break a legal override.

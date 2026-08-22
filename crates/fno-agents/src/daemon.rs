@@ -353,29 +353,28 @@ pub fn recover(
     Ok(report)
 }
 
-/// A live process's start time in EPOCH MICROSECONDS, used to distinguish "our
-/// worker" from a recycled PID (ab-d19e6458). `None` if the process is gone or
-/// the lookup is unsupported/failed.
+/// A live process's start time, used to distinguish "our worker" from a recycled
+/// PID (ab-d19e6458). `None` if the process is gone or the lookup is
+/// unsupported/failed. The value is a per-host, per-boot quantity compared only
+/// for equality against a value captured for the SAME pid, so the differing
+/// units across platforms (Linux ticks vs macOS microseconds) do not matter.
 ///
-/// This used to return raw clock ticks since boot on Linux, and its own comment
-/// argued the unit did not matter because the value was compared only for
-/// equality against a capture for the SAME pid. That invariant held until
-/// `liveness_origin` began comparing the token to `created_at` as a wall clock.
-/// A tick count is a small integer, `row_timestamp` refuses anything at or below
-/// the epoch-micros floor, and so the field read null on every Linux row while a
-/// reader took null to mean the process had no recorded start.
-///
-/// Both platforms now return the same unit, so a later consumer cannot inherit
-/// that trap. One-time cost on Linux: a row stamped with ticks before this
-/// change compares unequal to a fresh probe, so it reads as a recycled pid once
-/// and is re-probed. That is the fail-closed direction.
+/// DO NOT read this as a wall clock. At least three writers fill the column it
+/// lands in, in at least three conventions: this function (Linux ticks / macOS
+/// micros), `_process_start_time` in cli/src/fno/agents/spawn_gate.py, and
+/// `claude_adopt.rs`, which passes through whatever claude's own roster wrote.
+/// Converting one of them to epoch time makes the equality comparisons in
+/// `pid_is_ours` and `_pid_alive` fail across writers, which reaps live workers.
+/// A consumer that needs a real start time needs its own field, not this token.
 #[cfg(target_os = "linux")]
 pub fn process_start_time(pid: u32) -> Option<u64> {
-    // Delegate rather than re-derive: claims.rs already folds `/proc/stat`
-    // btime with the tick count exactly as psutil does, and a second copy of
-    // that arithmetic in this file is how the units drifted apart to begin with.
-    let ms = crate::claims::process_create_time_ms(i32::try_from(pid).ok()?)?;
-    u64::try_from(ms).ok()?.checked_mul(1_000)
+    // /proc/<pid>/stat field 22 (1-based) is `starttime` in clock ticks since
+    // boot. The comm field (2) can contain spaces and parens, so split on the
+    // LAST ')' and index from there. After "comm)" the space-separated fields are
+    // [state, ppid, ...], with starttime the 20th (0-based index 19).
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(')')?.1;
+    after.split_whitespace().nth(19)?.parse::<u64>().ok()
 }
 
 /// macOS: `proc_pidinfo(PROC_PIDTBSDINFO)` fills a `proc_bsdinfo` whose

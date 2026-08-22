@@ -48,11 +48,15 @@ Every liveness word the fleet renders is one of two things. A measurement, which
 
 That corpus is worth reading before trusting any parity claim here. It existed and drove both languages while the two producers still disagreed, because none of its cases carried the one row shape that separated them. A corpus blind to a divergence reads exactly like a corpus proving there is none. Add the case that fails before you add the rule that passes.
 
-### `pid_start_time` is epoch microseconds on every platform
+### `pid_start_time` is an opaque token, not a clock
 
-Both producers of this token now return epoch microseconds. The Linux path returned raw clock ticks since boot until it was changed. A tick count is a small integer. Both row parsers refuse anything at or below the epoch-micros floor. So the field read null on every Linux row while a reader took null to mean no start time was recorded.
+Do not read this field as a wall clock. At least three writers fill it, in at least three conventions. `daemon.rs::process_start_time` writes Linux clock ticks and macOS microseconds. `spawn_gate.py::_process_start_time` does the same split. `claude_adopt.rs` passes through whatever claude's own roster recorded.
 
-The unit was defensible while the value was only compared for equality against a capture for the same pid. `liveness_origin` broke that by comparing it to `created_at` as a wall clock. A later consumer cannot see an invariant that lives in a comment, which is why both platforms now agree rather than the comment being reworded.
+The column is compared only for equality, against a value captured for the same pid, which is why the mismatched units never mattered. `pid_is_ours` and `_pid_alive` both do that. Converting one writer to epoch time breaks those comparisons across writers, and a failed comparison reaps a live worker.
+
+`liveness_origin` does read it as a clock, and that is why it reports null on Linux. A tick count sits below the epoch-micros floor the row parsers accept. The basis says `pid-start-unreadable` there, which is the true answer. A consumer that needs a real start time needs its own field.
+
+One sharp edge in that floor. It separates a token below roughly 1e12 from one above, which sorts ticks from microseconds. It does not sort microseconds from milliseconds. A millisecond stamp parses as a date in 1970 and can yield a confident `survivor` with a null basis.
 
 ## Read-side dispositions
 

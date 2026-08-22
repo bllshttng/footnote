@@ -48,6 +48,35 @@ def _codex_entry(**overrides) -> AgentEntry:
     return AgentEntry(**base)
 
 
+def test_serialize_entry_reaches_a_real_liveness_origin() -> None:
+    """The shared rule gates on `pid`, and this serializer must supply it.
+
+    The shared corpus cannot catch this. Every case there hands `pid` in by
+    hand, so it proves the RULE and says nothing about whether the caller
+    feeds it. This row is the one `fno agents list` serves, and without the
+    pid it read `null` / `pid-absent` forever while the corpus stayed green.
+    """
+    entry = _claude_entry(pid=4321, pid_start_time="2026-05-20T17:05:00Z")
+
+    row = serialize_entry(entry, live_status="Working")
+
+    assert row["liveness_origin"] == "survivor"
+    assert row["liveness_origin_basis"] is None
+    # pid is rust-only on the wire (schemas/agents-list-row.json), so the
+    # internal input must not leak into the serialized row.
+    assert "pid" not in row
+    assert "pid_start_time" not in row
+
+
+def test_serialize_entry_pidless_row_says_why_it_has_no_origin() -> None:
+    entry = _claude_entry(pid=None, pid_start_time="2026-05-20T17:05:00Z")
+
+    row = serialize_entry(entry, live_status="Working")
+
+    assert row["liveness_origin"] is None
+    assert row["liveness_origin_basis"] == "pid-absent"
+
+
 def test_serialize_entry_claude_includes_short_id_and_live_status() -> None:
     entry = _claude_entry()
 

@@ -976,6 +976,10 @@ def _check_model_vendor_mismatch(
     lane = resolve_lane_vendor(argv, env=env)
     if not lane or lane == implied:
         return
+    # One predicate, read once. Deriving the event's `outcome` separately
+    # from the branch below is how a measurement starts disagreeing with
+    # the thing it measures.
+    refusing = bool(model_source) and _flag_value(toks, "--account") is None
     from fno.agents import events
 
     events.emit(
@@ -984,9 +988,19 @@ def _check_model_vendor_mismatch(
         implied_vendor=implied,
         resolved_vendor=lane,
         model_source=model_source or "explicit",
-        outcome="refused" if model_source else "warned",
+        outcome="refused" if refusing else "warned",
     )
-    if model_source:
+    if refusing:
+        # THE ACCOUNT AXIS IS INVISIBLE HERE, so its presence downgrades the
+        # refusal back to a warning. `resolve_lane_vendor` reads route, then
+        # provider, then harness; it never consults `--account`, and an account
+        # can carry its own vendor credential. So a zai account paired with a
+        # glm model under a claude harness is a WORKING spawn this check reads
+        # as a mismatch. Refusing it stops the fleet spawning to prevent a
+        # failure that was not going to happen, and the `-P` escape the message
+        # suggests would compose a different credential and a different bill.
+        # Refuse only where nothing could have chosen the pairing.
+        #
         # Fail closed with empty stdout, the posture `fno workspace worktree
         # ensure` takes on an out-of-enum policy value: a caller holding a
         # refusal is better off than one holding a live-looking worker.
@@ -995,8 +1009,8 @@ def _check_model_vendor_mismatch(
             f"--model {model!r}, which implies vendor {implied}, but this spawn "
             f"resolves the {lane} lane. Nothing typed this pairing, and the "
             f"worker would start, report live, and fail on its first inference. "
-            f"Set a {lane} model at {model_source}, or name the vendor on this "
-            f"spawn with -P {implied}.",
+            f"Set a model for the {lane} lane at {model_source}, or name the vendor "
+            f"on this spawn with -P {implied}.",
             file=err,
         )
         raise SystemExit(2)
