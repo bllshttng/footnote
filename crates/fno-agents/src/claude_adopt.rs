@@ -63,6 +63,10 @@ pub fn transcript_activity(session_id: &str) -> Option<(String, u64)> {
 /// storage move does not affect claim/control.sock routing.
 pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
     let short = w.short_id().to_string();
+    // The adopting session's ambient identity (x-132c): adoption runs in the
+    // session that found the worker, and that session is the best answer the
+    // registry can hold for "who is responsible for this row".
+    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
         name: adopted_name(&short),
         // Birth marker: a claude worker found in the roster, not one footnote
@@ -109,6 +113,9 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         fno_id: None,
         delivery_policy: None,
         spawn_trigger: None,
+        spawned_by_session: parent_session,
+        spawned_by_harness: parent_harness,
+        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
     }
 }

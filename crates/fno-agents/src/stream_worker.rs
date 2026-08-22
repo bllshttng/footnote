@@ -1986,6 +1986,9 @@ done
         let sid = short_id.to_string();
         state::update_registry(&reg_path, |r| {
             r.entries.push(state::RegistryEntry {
+                spawned_by_session: None,
+                spawned_by_harness: None,
+                spawned_by_cwd: None,
                 name: sid.clone(),
                 short_id: sid.clone(),
                 // Fixture: makes no claim about what created the row.

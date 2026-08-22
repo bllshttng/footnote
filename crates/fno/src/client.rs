@@ -25,6 +25,7 @@ use crossterm::style::Color as CtColor;
 use crossterm::{cursor, queue, style, terminal};
 use tokio::sync::mpsc;
 
+use crate::agents_view::lineage_layout;
 use crate::chrome;
 use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
@@ -6948,12 +6949,6 @@ impl View {
             let view = self.section_view(&key);
             if view != SectionView::Collapsed {
                 let section_base = section_project_base(&s.canonical_cwd);
-                // (US9 crown) Order coordinators above leaves within the squad,
-                // higher altitude first. Stable by crown_rank ONLY, never
-                // (rank, name): the squad's existing order (pane-tree, then
-                // name-sorted watch-only) is the tiebreak, so an all-un-crowned
-                // squad keeps its bytes. The name-sort in the derive/merge
-                // change-gate is a separate concern and stays untouched.
                 let mut squad_agents: Vec<&AgentRow> = self
                     .layout
                     .agents
@@ -6961,7 +6956,20 @@ impl View {
                     .filter(|a| a.squad == Some(s.id))
                     .filter(|a| view == SectionView::Expanded || !a.exited)
                     .collect();
-                squad_agents.sort_by_key(|a| crown_rank(a.crown_level));
+                // (x-132c) Order by lineage: children render beneath their
+                // parent, pre-order, over the SAME visible set that paints. A
+                // squad with no parent edges lays out in input order (the
+                // pane-tree, then name-sorted watch-only order crown-sort
+                // preserved), so it keeps its bytes. Siblings keep input order.
+                squad_agents = lineage_layout(
+                    &squad_agents,
+                    |a| a.name.as_str(),
+                    |a| a.harness_session_id.as_deref(),
+                    |a| a.spawned_by_session.as_deref(),
+                )
+                .into_iter()
+                .filter_map(|(name, _)| squad_agents.iter().find(|a| a.name == name).copied())
+                .collect();
                 // (x-c5ee) Top-K idle cap: attention rows (live, non-idle) always
                 // render; idle rows fill to SQUAD_ROW_CAP live rows total; the
                 // idle overflow folds into one `+N idle` row. Dead rows (present
@@ -7078,9 +7086,23 @@ impl View {
             // foreign by definition); a Sub row would double it, so the
             // `~ elsewhere` section emits no sublines (x-6851 US3).
             if view != SectionView::Collapsed {
-                for a in orphans
-                    .into_iter()
+                let visible: Vec<&AgentRow> = orphans
+                    .iter()
                     .filter(|a| view == SectionView::Expanded || !a.exited)
+                    .copied()
+                    .collect();
+                // (x-132c) Same lineage ordering as the squad sections, over
+                // this section's own visible set: an orphan spawned by another
+                // orphan nests beneath it.
+                let ordered = lineage_layout(
+                    &visible,
+                    |a| a.name.as_str(),
+                    |a| a.harness_session_id.as_deref(),
+                    |a| a.spawned_by_session.as_deref(),
+                );
+                for a in ordered
+                    .into_iter()
+                    .filter_map(|(name, _)| visible.iter().find(|a| a.name == name).copied())
                 {
                     out.push(DisplayRow::Agent(a));
                 }
@@ -7141,36 +7163,33 @@ impl View {
         out
     }
 
-    /// (US9 crown) Hierarchy indent for a row within its squad: the count of
-    /// DISTINCT crown ranks strictly above this row's rank among the rows that
-    /// actually RENDER. Zero when no higher-ranked visible row exists, so an
-    /// all-un-crowned squad indents by 0 and paints byte-identical to before. It
-    /// mirrors `tree_rows`' own visibility filter (an exited coordinator hidden
-    /// by a LiveOnly squad must not contribute a phantom indent step), so the
-    /// indent never references a row that is off-screen. The max is bounded by
-    /// the number of distinct ranks (<= 3 steps), so it never runs off-screen.
-    fn crown_indent(&self, a: &AgentRow) -> usize {
-        // The `~ elsewhere` catch-all is a FLAT cross-project section that
-        // tree_rows never crown-sorts, so a squadless row must take no
-        // squad-derived indent - otherwise an unrelated crowned orphan would
-        // nest an un-crowned one it was never ordered above.
-        if a.squad.is_none() {
-            return 0;
-        }
-        let mine = crown_rank(a.crown_level);
+    /// (x-132c) Lineage indent for one row: its depth in the parent/child
+    /// forest over the rows that actually RENDER in its section (its squad,
+    /// or the `~ elsewhere` set for a squadless row - a squadless row now
+    /// nests under its own section's parent, where crown_indent flattened it).
+    /// Mirrors `tree_rows`' visibility filter exactly (an exited parent hidden
+    /// by a LiveOnly section is ABSENT, so its children root rather than
+    /// indenting under a row that never paints). Depth is bounded by the
+    /// layout's own cap, so it never runs off-screen.
+    fn lineage_indent(&self, a: &AgentRow) -> usize {
         let expanded = self.squad_section_view(a.squad) == SectionView::Expanded;
-        let mut above: Vec<u8> = self
+        let set: Vec<&AgentRow> = self
             .layout
             .agents
             .iter()
             .filter(|o| o.squad == a.squad)
             .filter(|o| expanded || !o.exited)
-            .map(|o| crown_rank(o.crown_level))
-            .filter(|&r| r < mine)
             .collect();
-        above.sort_unstable();
-        above.dedup();
-        above.len()
+        lineage_layout(
+            &set,
+            |r| r.name.as_str(),
+            |r| r.harness_session_id.as_deref(),
+            |r| r.spawned_by_session.as_deref(),
+        )
+        .into_iter()
+        .find(|(name, _)| name.as_str() == a.name.as_str())
+        .map(|(_, depth)| depth)
+        .unwrap_or(0)
     }
 
     /// The section-view state (Expanded / LiveOnly / Collapsed) of the section a
@@ -7342,10 +7361,10 @@ impl View {
                         Some(acct) => format!(" {mark}{glyph} @{acct} {}", a.name),
                         None => format!(" {mark}{glyph} {}", a.name),
                     };
-                    // (US9 crown) Indent the row under any higher-altitude
-                    // coordinators in its squad. Zero steps -> no prefix -> a
-                    // squad with no coordinator stays byte-identical.
-                    let steps = self.crown_indent(a);
+                    // (x-132c) Indent the row under its lineage parent: one
+                    // step per depth. Zero steps -> no prefix -> a section
+                    // with no parent edges stays byte-identical.
+                    let steps = self.lineage_indent(a);
                     if steps > 0 {
                         text = format!("{}{text}", "  ".repeat(steps));
                     }
@@ -15304,6 +15323,8 @@ mod tests {
         // The shared seam (x-653d): a keyboard goto and a mouse click resolve an
         // agent to the SAME ChromeHit. pane > attach > notice.
         let hosted = AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: "a".into(),
             pane_id: Some(7),
@@ -15370,6 +15391,8 @@ mod tests {
         // placement picker carrying its owning squad, instead of a hardcoded
         // split/tab - the operator picks the direction in the picker.
         let row = AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: "sib".into(),
             pane_id: None,
@@ -15627,6 +15650,8 @@ mod tests {
     // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
     fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: "worker".into(),
             pane_id: Some(1),
@@ -16061,6 +16086,8 @@ mod tests {
     // An agent row hosting a given pane, under squad 1.
     fn focus_agent(pane: u64) -> AgentRow {
         AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: "worker".into(),
             pane_id: Some(pane),
@@ -17821,6 +17848,8 @@ mod tests {
     // (squad, exited) matter; badge/seen round out a plausible row.
     fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(squad),
             name: name.into(),
             pane_id: None,
@@ -18487,6 +18516,8 @@ mod tests {
     // tri-state filtering tests below.
     fn view_with_dead_interleaved() -> View {
         let row = |name: &str, exited: bool| AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: name.into(),
             pane_id: None,
@@ -18672,6 +18703,8 @@ mod tests {
     #[test]
     fn section_header_is_clickable_but_never_selector_selectable() {
         let view = view_with_agents(vec![AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(99), // no such squad -> orphan -> `~ elsewhere`
             name: "stray".into(),
             pane_id: None,
@@ -18983,6 +19016,8 @@ mod tests {
     #[test]
     fn elsewhere_section_live_only_hides_exited_orphans() {
         let orphan = |name: &str, exited: bool| AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(99), // no such squad -> orphan
             name: name.into(),
             pane_id: None,
@@ -19035,6 +19070,8 @@ mod tests {
     #[test]
     fn section_header_caret_tracks_all_three_states() {
         let orphan = |name: &str, exited: bool| AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(99),
             name: name.into(),
             pane_id: None,
@@ -19145,6 +19182,8 @@ mod tests {
     #[test]
     fn chrome_hit_agent_rows_focus_or_hint() {
         let hosted = AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: "worker".into(),
             pane_id: Some(10),
@@ -19172,6 +19211,8 @@ mod tests {
         // A watch-only bg row with a claude jobId: a click opens the placement
         // picker (x-9c5f) so the operator chooses the split direction.
         let bg_attach = AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: None,
             name: "bg-claude".into(),
             pane_id: None,
@@ -19198,6 +19239,8 @@ mod tests {
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: None,
             name: "bg-other".into(),
             pane_id: None,
@@ -19255,6 +19298,8 @@ mod tests {
         // top-K cap, so all 40 render and the list still reaches the bottom.
         let agents: Vec<AgentRow> = (0..40)
             .map(|i| AgentRow {
+                spawned_by_session: None,
+                harness_session_id: None,
                 squad: Some(1),
                 name: format!("a{i}"),
                 pane_id: Some(100 + i),
@@ -19746,6 +19791,8 @@ mod tests {
         // row gets focus and NO splits (already placed); an exited row gets
         // remove and no stop.
         let mk = |name: &str, pane_id: Option<u64>, attach: Option<&str>, exited: bool| AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: None,
             name: name.into(),
             pane_id,
@@ -20520,6 +20567,8 @@ mod tests {
         // identity (pane_id/attach_id) so Focus acts on the row it was opened on,
         // never the other same-named row.
         let mk = |name: &str, pane_id: Option<u64>| AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: name.into(),
             pane_id,
@@ -21978,6 +22027,8 @@ mod tests {
     /// A pane-hosted sideline row, the shape the move/break-out menu acts on.
     fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: name.into(),
             pane_id: Some(pane_id),
@@ -22698,6 +22749,8 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
+                    spawned_by_session: None,
+                    harness_session_id: None,
                     squad: Some(1),
                     name: "peer".into(),
                     pane_id: Some(10),
@@ -22723,6 +22776,8 @@ mod tests {
                     last_activity_age_s: None,
                 },
                 AgentRow {
+                    spawned_by_session: None,
+                    harness_session_id: None,
                     squad: Some(1),
                     name: "dead".into(),
                     pane_id: Some(99),
@@ -22748,6 +22803,8 @@ mod tests {
                     last_activity_age_s: None,
                 },
                 AgentRow {
+                    spawned_by_session: None,
+                    harness_session_id: None,
                     squad: None,
                     name: "bg-watch".into(),
                     pane_id: None,
@@ -22829,6 +22886,8 @@ mod tests {
         // all-exited squad keeps its ✗ count so dead agents stay discoverable.
         fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
             AgentRow {
+                spawned_by_session: None,
+                harness_session_id: None,
                 squad: Some(squad),
                 name: name.into(),
                 pane_id: None,
@@ -23237,6 +23296,8 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
+                    spawned_by_session: None,
+                    harness_session_id: None,
                     squad: None,
                     name: "z-exited".into(),
                     pane_id: None,
@@ -23262,6 +23323,8 @@ mod tests {
                     last_activity_age_s: None,
                 },
                 AgentRow {
+                    spawned_by_session: None,
+                    harness_session_id: None,
                     squad: None,
                     name: "z-external".into(),
                     pane_id: None,
@@ -23287,6 +23350,8 @@ mod tests {
                     last_activity_age_s: None,
                 },
                 AgentRow {
+                    spawned_by_session: None,
+                    harness_session_id: None,
                     squad: None,
                     name: "z-fnolive".into(),
                     pane_id: None,
@@ -23315,6 +23380,8 @@ mod tests {
                 // load-bearing "attention is never dimmed" branch. The accent
                 // must win over the external DIM modifier.
                 AgentRow {
+                    spawned_by_session: None,
+                    harness_session_id: None,
                     squad: None,
                     name: "z-extblocked".into(),
                     pane_id: None,
@@ -23806,6 +23873,8 @@ mod tests {
     /// 10 "~ backlog" · 11 ready card · 12 blocked card · 13 in-flight card.
     fn unified_rows_view() -> View {
         let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad,
             name: name.into(),
             pane_id,
@@ -24531,6 +24600,8 @@ mod tests {
     #[test]
     fn peek_overlay_renders_loading_transcript_and_answerable() {
         let row = AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: None,
             name: "w".into(),
             pane_id: Some(3),
@@ -24965,6 +25036,8 @@ mod tests {
         // AC4-EDGE (client half): x on a tombstone member row sends
         // DismissMember for its squad + attach_id (not a squad remove).
         let tomb = AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: "cc-deadbeef".into(),
             pane_id: None,
@@ -25011,6 +25084,8 @@ mod tests {
     /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
     fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
         AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: name.into(),
             pane_id: None,
@@ -26032,6 +26107,8 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
+                spawned_by_session: None,
+                harness_session_id: None,
                 squad: Some(1),
                 name: "build".into(),
                 pane_id: Some(10),
@@ -26057,6 +26134,8 @@ mod tests {
                 last_activity_age_s: None,
             },
             AgentRow {
+                spawned_by_session: None,
+                harness_session_id: None,
                 squad: Some(1),
                 name: "watcher".into(),
                 pane_id: None,
@@ -26118,6 +26197,8 @@ mod tests {
         // pane (badge None) folds to Idle so it never overrides a blocked
         // sibling in the x-d140 collapsed-squad rollup (Ord-min over states).
         let row = |name: &str, pane, badge| AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: name.into(),
             pane_id: Some(pane),
@@ -26183,6 +26264,8 @@ mod tests {
         // so a [blocked] chip leaves only the blocked agent.
         let mut v = two_pane_view();
         v.layout.agents = vec![AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(2),
             name: "stuck".into(),
             pane_id: Some(9),
@@ -26237,6 +26320,8 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
+                spawned_by_session: None,
+                harness_session_id: None,
                 squad: Some(2),
                 name: "finished-seen".into(),
                 pane_id: Some(9),
@@ -26262,6 +26347,8 @@ mod tests {
                 last_activity_age_s: None,
             },
             AgentRow {
+                spawned_by_session: None,
+                harness_session_id: None,
                 squad: Some(2),
                 name: "finished-unseen".into(),
                 pane_id: Some(10),
@@ -26351,6 +26438,8 @@ mod tests {
         // SelectSquad then FocusPane in order, and closes the navigator.
         let mut v = two_pane_view(); // active squad = 1 (footnote)
         v.layout.agents = vec![AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(2),
             name: "stuck".into(),
             pane_id: Some(9),
@@ -26767,6 +26856,8 @@ mod tests {
             },
         ];
         v.layout.agents = vec![AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: "worker".into(),
             pane_id: Some(10),
@@ -26930,6 +27021,8 @@ mod tests {
 
     fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
         AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: name.into(),
             pane_id: Some(pane),
@@ -27733,7 +27826,16 @@ mod tests {
         r
     }
 
-    /// The rendered order of agent-row names (post crown sort).
+    /// A crowned_row carrying a lineage edge: `parent` names another row's
+    /// harness_session_id (None = a root). The row's own id is "sid-<name>".
+    fn lineage_row(name: &str, pane: u64, parent: Option<&str>) -> AgentRow {
+        let mut r = crowned_row(name, pane, None, None);
+        r.harness_session_id = Some(format!("sid-{name}"));
+        r.spawned_by_session = parent.map(str::to_string);
+        r
+    }
+
+    /// The rendered order of agent-row names (post lineage layout).
     fn agent_order(v: &View) -> Vec<String> {
         v.display_rows()
             .iter()
@@ -27756,27 +27858,32 @@ mod tests {
     }
 
     #[test]
-    fn crown_coordinator_sorts_above_ics_within_squad() {
+    fn lineage_child_sorts_beneath_its_parent_within_squad() {
         let v = view_with_agents(vec![
-            crowned_row("ic-a", 2, None, None),
-            crowned_row("dir", 3, Some(1), Some("epic-x")),
-            crowned_row("ic-b", 4, None, None),
+            lineage_row("worker-a", 2, Some("sid-king")),
+            lineage_row("king", 3, None),
+            lineage_row("worker-b", 4, Some("sid-king")),
         ]);
-        let order = agent_order(&v);
-        assert_eq!(order.first().map(String::as_str), Some("dir"));
-        // The un-crowned rows follow, keeping their existing (input) order -
-        // a stable crown-rank sort, never a name re-sort (byte-identity).
-        assert_eq!(order, vec!["dir", "ic-a", "ic-b"]);
+        // Pre-order: the parent first, its children beneath it keeping input
+        // order among siblings. Authority rank (crown_level) no longer moves a
+        // row; lineage does.
+        assert_eq!(agent_order(&v), vec!["king", "worker-a", "worker-b"]);
     }
 
     #[test]
-    fn crown_multiple_altitudes_order_highest_first() {
+    fn lineage_grandchild_renders_between_parent_and_later_sibling() {
         let v = view_with_agents(vec![
-            crowned_row("node-ic", 2, Some(2), Some("n")),
-            crowned_row("vp", 3, Some(0), Some("proj")),
-            crowned_row("director", 4, Some(1), Some("epic")),
+            lineage_row("king", 2, None),
+            lineage_row("child-a", 3, Some("sid-king")),
+            lineage_row("child-b", 4, Some("sid-king")),
+            lineage_row("grandchild", 5, Some("sid-child-a")),
         ]);
-        assert_eq!(agent_order(&v), vec!["vp", "director", "node-ic"]);
+        // Pre-order nests the grandchild under ITS parent, ahead of the
+        // parent's later sibling.
+        assert_eq!(
+            agent_order(&v),
+            vec!["king", "child-a", "grandchild", "child-b"]
+        );
     }
 
     #[test]
@@ -27802,73 +27909,83 @@ mod tests {
     }
 
     #[test]
-    fn crown_indent_is_dense_rank_within_squad() {
+    fn lineage_indent_is_depth_within_squad() {
         let v = view_with_agents(vec![
-            crowned_row("vp", 2, Some(0), Some("p")),
-            crowned_row("dir", 3, Some(1), Some("e")),
-            crowned_row("ic", 4, None, None),
+            lineage_row("king", 2, None),
+            lineage_row("dir", 3, Some("sid-king")),
+            lineage_row("ic", 4, Some("sid-dir")),
         ]);
         let steps = |name: &str| {
             let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
-            v.crown_indent(a)
+            v.lineage_indent(a)
         };
-        assert_eq!(steps("vp"), 0);
+        assert_eq!(steps("king"), 0);
         assert_eq!(steps("dir"), 1);
         assert_eq!(steps("ic"), 2);
 
-        // One coordinator + a leaf: dense rank means the leaf is exactly one
-        // step below, though the raw ranks are 1 and 3.
+        // A parent and a stranger leaf: the leaf is a ROOT (absent parent),
+        // never nested under a row it has no edge to.
         let v2 = view_with_agents(vec![
-            crowned_row("dir", 2, Some(1), Some("e")),
-            crowned_row("leaf", 3, None, None),
+            lineage_row("king", 2, None),
+            lineage_row("stranger", 3, None),
         ]);
         let steps2 = |name: &str| {
             let a = v2.layout.agents.iter().find(|a| a.name == name).unwrap();
-            v2.crown_indent(a)
+            v2.lineage_indent(a)
         };
-        assert_eq!(steps2("dir"), 0);
-        assert_eq!(steps2("leaf"), 1);
+        assert_eq!(steps2("king"), 0);
+        assert_eq!(steps2("stranger"), 0);
     }
 
     #[test]
-    fn crown_indent_ignores_exited_coordinator_hidden_by_liveonly() {
-        // The indent must reference only rows that render: an exited coordinator
-        // dropped by a LiveOnly squad must not leave its leaves indented under a
-        // phantom.
-        let mut vp = crowned_row("vp", 2, Some(0), Some("p"));
-        vp.exited = true;
-        let leaf = crowned_row("leaf", 3, None, None);
-        let mut v = view_with_agents(vec![vp, leaf]);
+    fn lineage_indent_ignores_exited_parent_hidden_by_liveonly() {
+        // The indent must reference only rows that render: an exited parent
+        // dropped by a LiveOnly squad is ABSENT from the set, so its child
+        // roots rather than indenting under a phantom.
+        let mut parent = lineage_row("parent", 2, None);
+        parent.exited = true;
+        let child = lineage_row("child", 3, Some("sid-parent"));
+        let mut v = view_with_agents(vec![parent, child]);
         let indent = |v: &View, name: &str| {
             let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
-            v.crown_indent(a)
+            v.lineage_indent(a)
         };
-        // Expanded: the exited VP still renders, so the leaf indents under it.
-        assert_eq!(indent(&v, "leaf"), 1);
-        // LiveOnly hides the exited VP -> no coordinator on screen -> no indent.
+        // Expanded: the exited parent still renders, so the child indents.
+        assert_eq!(indent(&v, "child"), 1);
+        // LiveOnly hides the exited parent -> absent from the rendered set ->
+        // the child is a root.
         v.cycle_squad(1);
         assert_eq!(v.squad_view(1), SectionView::LiveOnly);
-        assert_eq!(indent(&v, "leaf"), 0, "no phantom indent under a hidden VP");
+        assert_eq!(
+            indent(&v, "child"),
+            0,
+            "no phantom indent under a hidden parent"
+        );
     }
 
     #[test]
-    fn crown_indent_zero_for_squadless_orphan_rows() {
-        // Orphans (`~ elsewhere`) are a flat cross-project section, never
-        // crown-sorted; a crowned orphan must not indent an unrelated one.
-        let mut coord = crowned_row("orphan-dir", 2, Some(1), Some("epic"));
-        coord.squad = None;
-        let mut leaf = crowned_row("orphan-leaf", 3, None, None);
-        leaf.squad = None;
-        let v = view_with_agents(vec![coord, leaf]);
+    fn lineage_nests_within_elsewhere_and_roots_strangers() {
+        // `~ elsewhere` now carries the same lineage join as the squads: an
+        // orphan spawned by another orphan nests beneath it, while an unrelated
+        // orphan stays flat (absent parent = root, never nested under a
+        // stranger).
+        let mut parent = lineage_row("orphan-parent", 2, None);
+        parent.squad = None;
+        let mut child = lineage_row("orphan-child", 3, Some("sid-orphan-parent"));
+        child.squad = None;
+        let mut stranger = lineage_row("orphan-stranger", 4, None);
+        stranger.squad = None;
+        let v = view_with_agents(vec![parent, child, stranger]);
         let indent = |name: &str| {
             let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
-            v.crown_indent(a)
+            v.lineage_indent(a)
         };
-        assert_eq!(indent("orphan-dir"), 0, "squadless coordinator: no indent");
+        assert_eq!(indent("orphan-parent"), 0);
+        assert_eq!(indent("orphan-child"), 1, "a child nests under its parent");
         assert_eq!(
-            indent("orphan-leaf"),
+            indent("orphan-stranger"),
             0,
-            "squadless leaf: not nested under a stranger"
+            "no edge to either row: a root, not nested under a stranger"
         );
     }
 
