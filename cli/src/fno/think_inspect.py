@@ -16,6 +16,10 @@ from typing import Any, Callable
 Run = Callable[..., subprocess.CompletedProcess[str]]
 _UNSET = object()
 _DB_ENV_KEYS = re.compile(r"^\s*(DATABASE_URL|SUPABASE_DB_URL|POSTGRES_URL|DIRECT_URL)\s*=", re.MULTILINE)
+# x-38d3 (a done node) carries six live rulings; a cap keeps the receipt small
+# without silently dropping an old one off the end unannounced (decisions_truncated).
+_DECISIONS_CAP = 20
+_DECISIONS_TEXT_WIDTH = 200
 
 
 def _default_run(argv: list[str], *, cwd: Path, timeout: int = 10) -> subprocess.CompletedProcess[str]:
@@ -105,6 +109,65 @@ def _node_summary(entry: dict[str, Any], *, archived: bool = False) -> dict[str,
     } | ({"archived": True} if archived else {})
 
 
+_NO_DECISIONS: dict[str, Any] = {
+    "decisions": [],
+    "decisions_status": "ok",
+    "decisions_truncated": False,
+    "decisions_detail": None,
+}
+
+
+def _decisions_section(node_id: str | None) -> dict[str, Any]:
+    """The resolved node's own live rulings, newest first.
+
+    A ruling withdrawn via ``--supersedes`` is dropped by the derived
+    ``superseded_by`` field ``list_decisions`` computes across the whole
+    index - never by scanning a ruling's own prose. A specimen already fooled
+    one session this way: a decision's text said "SUPERSEDES d-85352ee7" while
+    its `supersedes` field stayed empty, so the withdrawn ruling still read as
+    live until a later decision restated it with the field set.
+
+    Mirrors ``archive_status``/``detail`` below: an unreadable index is a
+    fact the halt-evidence consumer needs, never silently folded into "[]".
+    """
+    if not node_id:
+        return dict(_NO_DECISIONS)
+    try:
+        from fno.decide import list_decisions
+        from fno.tracker.metadata import ExternalMetadataUnavailable
+
+        _label, rows, _damaged = list_decisions(node_id, limit=None)
+    except (OSError, ValueError, ExternalMetadataUnavailable) as exc:
+        return {
+            "decisions": [],
+            "decisions_status": "error",
+            "decisions_truncated": False,
+            "decisions_detail": f"decision index unreadable: {exc}",
+        }
+    live = [row for row in rows if not row.get("superseded_by")]
+    capped = live[:_DECISIONS_CAP]
+    out = []
+    for row in capped:
+        text = str(row.get("decision") or "")
+        if len(text) > _DECISIONS_TEXT_WIDTH:
+            text = text[: _DECISIONS_TEXT_WIDTH - 1] + "…"
+        out.append(
+            {
+                "decision_id": row.get("decision_id"),
+                "ts": row.get("ts"),
+                "lane": row.get("lane"),
+                "subject": row.get("subject"),
+                "text": text,
+            }
+        )
+    return {
+        "decisions": out,
+        "decisions_status": "ok",
+        "decisions_truncated": len(live) > len(capped),
+        "decisions_detail": None,
+    }
+
+
 def _graph_section(
     seed: str,
     entries: list[dict[str, Any]] | None,
@@ -122,7 +185,7 @@ def _graph_section(
             "epic_candidates": [],
             "archive_status": "error" if archive_error else "ok",
             "detail": error or "graph unavailable",
-        }
+        } | _NO_DECISIONS
 
     from fno.graph.fuzzy import resolve_node
     from fno.graph.relatedness import _MIN_SCORE, epic_candidates, similar_nodes
@@ -204,7 +267,7 @@ def _graph_section(
         "epic_candidates": rollups,
         "archive_status": "error" if archive_error else "ok",
         "detail": f"archive unreadable: {archive_error}" if archive_error else None,
-    }
+    } | _decisions_section(resolved.get("id") if resolved else None)
 
 
 def _pull_requests(seed: str, repo: Path, run: Run) -> dict[str, Any]:
