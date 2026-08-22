@@ -264,7 +264,14 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     from fno.paths import global_events_json
 
     path = events_path if events_path is not None else global_events_json()
-    empty = {"status": "insufficient-samples", "rows": [], "born": [], "gone": [], "session": None, "window_s": None}
+    empty: dict = {
+        "status": "insufficient-samples",
+        "rows": [],
+        "born": [],
+        "gone": [],
+        "session": None,
+        "window_s": None,
+    }
     try:
         size = path.stat().st_size
         with path.open("rb") as fh:
