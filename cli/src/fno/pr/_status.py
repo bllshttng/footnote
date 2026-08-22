@@ -274,6 +274,78 @@ def coverage_recompute_note(coverage: dict) -> None:
         sys.stderr.write(f"note: coverage recompute: {note}\n")
 
 
+def verdict_line(payload: dict) -> str:
+    """One human line for the payload `fno do pr status` prints as JSON.
+
+    The conclusion goes LAST and every slot before it is a fact, so a reader
+    who stops early holds facts and no verdict - never a verdict about a
+    different question. Each of the four misreadings this retires read a
+    subset of the JSON and answered confidently anyway: a state slot that is
+    always present cannot be omitted by the reader either, `verdict` and
+    `settled` now sit adjacent, a head mismatch carries both commits in one
+    line, and the mergeable slot states its own meaning instead of handing
+    the reader a word to interpret. Slots are fixed, always present, in one
+    order; a wrong value renders LOUD (capitals, parentheticals) so scanning
+    for trouble is a real reading strategy.
+
+    Keyed on the payload dict, never on run_status locals: `_cache._serve`
+    degrades a stale row IN PLACE, so a payload-keyed renderer tells the
+    degraded truth with no second code path.
+    """
+    checks = payload.get("checks") or {}
+    unsettled = checks.get("unsettled")
+    if payload.get("settled"):
+        settled_slot = "settled"
+    elif isinstance(unsettled, int):
+        settled_slot = f"unsettled({unsettled})"
+    else:
+        settled_slot = "unsettled"
+    # `_map_mergeable` turns GitHub's null (still computing) into the string
+    # UNKNOWN before it reaches the payload; the parenthetical replaces the
+    # reader's interpretation with the meaning, which was the fourth
+    # misreading.
+    raw_mergeable = str(payload.get("mergeable") or "")
+    if raw_mergeable == "MERGEABLE":
+        mergeable_slot = "mergeable"
+    elif raw_mergeable == "CONFLICTING":
+        mergeable_slot = "CONFLICTING"
+    else:
+        mergeable_slot = "mergeable-unknown(not-yet-computed)"
+    head = str(payload.get("head") or "")
+    coverage = payload.get("review_coverage") or {}
+    cov_head = str(coverage.get("head_sha") or "")
+    # Printed only on a mismatch: its presence is itself the signal, and a
+    # matching coverage head is a fact nobody needs to check by eye.
+    coverage_at = (
+        f" (coverage at {cov_head[:12]})" if cov_head and cov_head != head else ""
+    )
+    blockers = [str(b) for b in (payload.get("ready_blockers") or [])]
+    if payload.get("stale_reason"):
+        # The stale serve rewrites `ready` to False without touching
+        # `ready_blockers`, so without this the line would read NOT-ready
+        # beside "no blockers" - a contradiction the clause exists to make
+        # impossible.
+        blockers.append(f"stale_serve: {payload['stale_reason']}")
+    if payload.get("verdict") == "error" and payload.get("reason"):
+        # The error payload carries no ready fields; the reason IS the
+        # blocker, and a bare "no blockers" beside verdict error is the
+        # same contradiction.
+        blockers.append(f"error: {payload['reason']}")
+    if blockers:
+        clause = f"{len(blockers)} blockers: {', '.join(blockers)}"
+    else:
+        clause = "no blockers"
+    return (
+        f"{payload.get('pr')} "
+        f"{str(payload.get('pr_state') or 'UNKNOWN').upper()} "
+        f"{payload.get('verdict')} "
+        f"{settled_slot} "
+        f"{mergeable_slot} "
+        f"{'ready' if payload.get('ready') else 'NOT-ready'} "
+        f"@ {head[:12] or 'unknown'}{coverage_at} - {clause}"
+    )
+
+
 def _review_lane(pr: str, cwd: Optional[str]) -> bool:
     """Whether the merge gate's coverage guard engages for this PR.
 
@@ -458,6 +530,18 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
 
     pr_json, reason = _fetch(pr, cwd)
     if pr_json is None:
+        sys.stderr.write(
+            verdict_line(
+                {
+                    "pr": pr,
+                    "verdict": "error",
+                    "settled": False,
+                    "green": False,
+                    "reason": reason,
+                }
+            )
+            + "\n"
+        )
         sys.stdout.write(
             json.dumps(
                 {
@@ -654,6 +738,11 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     }
     if coverage_status_repost is not None:
         payload["coverage_status_repost"] = coverage_status_repost
+    # The human line precedes the JSON write on stderr: stdout is a machine
+    # contract the fleet's watchers grep (`loopcheck.rs` prescribes
+    # `2>/dev/null | grep '"settled": true'`), and stderr is already the
+    # note channel this function uses below.
+    sys.stderr.write(verdict_line(payload) + "\n")
     sys.stdout.write(
         json.dumps(payload) + "\n"
     )
