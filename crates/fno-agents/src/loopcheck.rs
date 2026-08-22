@@ -13440,6 +13440,122 @@ mod tests {
         assert!(payload_is_code(&["docs/a.md".into(), "src/lib.rs".into()]));
     }
 
+    /// Shared fixture for the head_is_shipped cases: a PR recording `pr_head`.
+    fn shipped_pr(pr_head: &str, state: PrState) -> PrInfo {
+        PrInfo {
+            head_oid: pr_head.to_string(),
+            state,
+            ..reviewers_gate_pr()
+        }
+    }
+
+    /// A git stub that answers the base probe and then decides `--is-ancestor`
+    /// from `ancestor`. Mirrors the classify_payload stubs above.
+    fn git_stub_ancestor(dir: &Path, ancestor: bool) -> std::path::PathBuf {
+        let verdict = if ancestor { "exit 0" } else { "exit 1" };
+        write_exec(
+            dir,
+            "git",
+            &format!(
+                "#!/bin/sh\ncase \"$*\" in\n  rev-parse*origin/main*) exit 0 ;;\n  *is-ancestor*) {verdict} ;;\n  *) exit 1 ;;\nesac\n"
+            ),
+        )
+    }
+
+    #[test]
+    fn head_is_shipped_takes_equality_without_touching_git() {
+        // The common path costs no subprocess: a git that would panic the test
+        // if invoked is never invoked, because equality answers first.
+        let pr = shipped_pr("abc", PrState::Open);
+        assert!(head_is_shipped(
+            &pr,
+            "abc",
+            "definitely-not-a-real-git-binary",
+            Path::new(".")
+        ));
+    }
+
+    #[test]
+    fn head_is_shipped_accepts_a_head_already_on_the_base() {
+        // The 2026-07-30 and 2026-08-22 repros: a merged PR, a local HEAD that
+        // differs because the branch moved past its own merge, and nothing left
+        // to ship.
+        let dir = tempfile::tempdir().unwrap();
+        let git = git_stub_ancestor(dir.path(), true);
+        let pr = shipped_pr("23480a0e", PrState::Merged);
+        assert!(head_is_shipped(
+            &pr,
+            "fe407c3b",
+            git.to_str().unwrap(),
+            Path::new(".")
+        ));
+    }
+
+    /// THE #447 REGRESSION TEST. A change that makes this case pass as shipped
+    /// re-opens the defect the guard exists for: unpushed work terminating as
+    /// DonePRGreen without ever shipping. If this assertion is ever inverted to
+    /// make a wedge go away, the wedge was the wrong thing to fix.
+    #[test]
+    fn head_is_shipped_still_refuses_a_commit_stacked_on_a_merged_pr() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = git_stub_ancestor(dir.path(), false);
+        let pr = shipped_pr("23480a0e", PrState::Merged);
+        assert!(!head_is_shipped(
+            &pr,
+            "deadbeef",
+            git.to_str().unwrap(),
+            Path::new(".")
+        ));
+    }
+
+    #[test]
+    fn head_is_shipped_falls_back_to_equality_when_git_cannot_answer() {
+        // A broken git leaves today's behavior exactly as it was, rather than
+        // failing open and letting unpushed work terminate.
+        let pr = shipped_pr("23480a0e", PrState::Merged);
+        assert!(!head_is_shipped(
+            &pr,
+            "fe407c3b",
+            "definitely-not-a-real-git-binary",
+            Path::new(".")
+        ));
+    }
+
+    #[test]
+    fn head_is_shipped_refuses_a_pr_with_no_recorded_head() {
+        let pr = shipped_pr("", PrState::Open);
+        assert!(!head_is_shipped(
+            &pr,
+            "abc",
+            "definitely-not-a-real-git-binary",
+            Path::new(".")
+        ));
+    }
+
+    #[test]
+    fn block_reason_stops_demanding_a_push_for_a_shipped_head() {
+        // The wedge, end to end. Positive marker AND absence: a panicking
+        // renderer would also fail to print the push message.
+        let pr = shipped_pr("23480a0e", PrState::Merged);
+        let reason = build_block_reason(&pr, "fe407c3b", true, true);
+        assert!(
+            !reason.contains("push the latest commits"),
+            "shipped head must not be told to push: {reason}"
+        );
+        assert!(!reason.is_empty(), "a reason is still rendered: {reason}");
+    }
+
+    #[test]
+    fn block_reason_still_demands_a_push_for_unshipped_work() {
+        // The half that proves the fix did not just delete the guard.
+        let pr = shipped_pr("23480a0e", PrState::Open);
+        let reason = build_block_reason(&pr, "deadbeef", true, false);
+        assert!(
+            reason.contains("push the latest commits before completing"),
+            "unpushed work must still block: {reason}"
+        );
+    }
+
     #[test]
     fn self_review_gate_classifies_unreadable_diff_as_code() {
         // AC4-ERR: a git that cannot produce a diff fails CLOSED - code with
