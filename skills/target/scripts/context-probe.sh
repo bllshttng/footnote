@@ -41,7 +41,7 @@ fi
 # `<door> context` exits 3 on unreadable; normalize ANY nonzero (incl. a
 # transient error) to exit 3 so the shim's failure contract is identical to the
 # old shell probe's. stdout passes through verbatim on success.
-_out="$("$_ctx_door" context --transcript "$1" --json 2>/dev/null)"
+_out="$("$_ctx_door" whoami context --transcript "$1" --json 2>/dev/null)"
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
   exit "$_EXIT_UNREADABLE"

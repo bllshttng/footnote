@@ -179,7 +179,7 @@ fi
 PROSE_OUT="$(printf '{"trigger":"manual","custom_instructions":"focus on the auth module"}' \
   | env -u CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SESSION_ID="$SID" PATH="/usr/bin:/bin" bash "$HOOK" 2>/dev/null)"
 PROSE_RC=$?
-# Prose is not a .md path -> falls back to `fno paths handoff`, which is absent
+# Prose is not a .md path -> falls back to `fno config paths handoff`, which is absent
 # on this restricted PATH -> DOC_PATH empty -> emit nothing, exit 0.
 if [[ "$PROSE_RC" == "0" && -z "$PROSE_OUT" ]]; then
   pass "prose custom_instructions not treated as a path (degrades clean)"

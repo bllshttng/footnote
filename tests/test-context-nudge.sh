@@ -247,21 +247,21 @@ events_has king_orphan_block && ok "AC14: king_orphan_block event emitted" || ba
 # === AC15: a carveout carrying the scope suppresses the orphan block ==========
 rm -f "$LATCHES"/.context-nudge-ctx-* 2>/dev/null      # keep ctx latch; clear orphan latch
 rm -f "$LATCHES"/.context-nudge-orphan-* 2>/dev/null
-fno carveout add -k deferred --scope "$SCOPE" "workers review-orphaned; advisory self-review" >/dev/null 2>&1
+fno backlog carveout add -k deferred --scope "$SCOPE" "workers review-orphaned; advisory self-review" >/dev/null 2>&1
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "AC15: carveout suppresses orphan block" "$OUT" 'cannot be a pure pass'
 
 # a carveout for a DIFFERENT scope does NOT suppress
 rm -f "$LATCHES"/.context-nudge-orphan-* 2>/dev/null
 printf '' > "$SBX/.fno/carveouts.jsonl" 2>/dev/null || true   # drop the matching-scope carveout from above
-fno carveout add -k deferred --scope "other-scope" "unrelated" >/dev/null 2>&1
+fno backlog carveout add -k deferred --scope "other-scope" "unrelated" >/dev/null 2>&1
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_contains "AC15: wrong-scope carveout does not suppress" "$OUT" 'cannot be a pure pass'
 
 # === AC16: both checks fire in one output; orphan resolved does not kill ctx ===
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 # remove the matching carveout so orphans are unresolved again; keep king + children
-fno carveout list --json >/dev/null 2>&1   # (carveouts persist; clear by truncating)
+fno backlog carveout list --json >/dev/null 2>&1   # (carveouts persist; clear by truncating)
 printf '' > "$SBX/.fno/carveouts.jsonl" 2>/dev/null || true
 write_transcript "$SBX/t.jsonl" 500000     # past trigger AND has orphans
 run_hook "$(payload "$SBX/t.jsonl")"
@@ -525,7 +525,7 @@ home_count=$(find "$SBX/.fno/latches" -maxdepth 1 -type f -name '.context-nudge-
   || bad "latch: nothing under the overridden state_dir (found $alt_count)"
 assert_eq "latch: overridden state_dir writes nothing under \$HOME/.fno" "$home_count" "0"
 
-assert_contains "latch: resolves through the shell stub" "$HOOK_SRC" 'fno paths shell-stub'
+assert_contains "latch: resolves through the shell stub" "$HOOK_SRC" 'fno config paths shell-stub'
 assert_contains "latch: has a deleter" "$HOOK_SRC" '-mtime +2 -delete'
 
 # latches/ absent at fire time must not error.

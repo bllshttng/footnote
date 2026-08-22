@@ -98,7 +98,7 @@ grep -q -- "--dry-run" "$FNO_CALL_LOG" \
 grep -q "ab-faketest" "$RESULT1" || fail "fire: result json missing reconcile output"
 pass "fire: absent stamp fires mutate reconcile, publishes result, writes stamp"
 
-# AC3-HP: the same fired job chains `fno retro run` AFTER reconcile (the
+# AC3-HP: the same fired job chains `fno backlog retro run` AFTER reconcile (the
 # web-merge harvest backstop), so a merge that dropped no local event still gets
 # its retro/carveout harvest within one throttle window.
 grep -q "^retro run$" "$FNO_CALL_LOG" \

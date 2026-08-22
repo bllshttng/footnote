@@ -227,7 +227,7 @@ esac
 SH
     chmod +x "$never_bindir/fno"
     # run_hook spawns a subshell that inherits exported PATH, so the fno shim
-    # is visible inside the hook's `command -v fno` and `fno worktree policy`.
+    # is visible inside the hook's `command -v fno` and `fno workspace worktree policy`.
     _saved_path="$PATH"
     export PATH="$never_bindir:$PATH"
     output=$(run_hook "$sandbox" "$hook" "$stdin_json")

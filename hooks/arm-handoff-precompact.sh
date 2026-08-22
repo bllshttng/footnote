@@ -69,7 +69,7 @@ elif command -v fno >/dev/null 2>&1; then
 else
   exit 0   # no CLI on PATH -> fail-safe (no pressure)
 fi
-PROBE_OUT="$("$_ctx_door" context --transcript "$TRANSCRIPT" --json 2>/dev/null)" || exit 0
+PROBE_OUT="$("$_ctx_door" whoami context --transcript "$TRANSCRIPT" --json 2>/dev/null)" || exit 0
 USED_PCT="$(printf '%s' "$PROBE_OUT" | jq -r '.used_pct // 0' 2>/dev/null || echo 0)"
 [[ "$USED_PCT" =~ ^[0-9]+$ ]] || exit 0
 

@@ -365,9 +365,9 @@ case "$subcmd1 $subcmd2" in
   "agents rm")
     exit 0
     ;;
-  context*)
+  whoami*)
     # Delegate to the REAL implementation. The context-probe shim resolves to
-    # `fno context`, so a stub that silently no-ops it via the *) catch-all
+    # `fno whoami context`, so a stub that silently no-ops it via the *) catch-all
     # would hand every pressure scenario an empty reading and let the suite
     # pass vacuously - the x-f804 hazard through a different door. The probe's
     # contract IS reading real context, so a stub that fakes a reading tests the
@@ -381,6 +381,17 @@ case "$subcmd1 $subcmd2" in
 esac
 STUBEOF
   chmod +x "$sbx/stub-bin/fno"
+
+  # The probe prefers `fno-py`, and an ambient deployed fno-py predating the
+  # verb fold does not know `fno whoami context`, so scenarios 7/7b would read
+  # empty and park without the measurement. Delegate to the same FNO_PYTHON
+  # the stub's doors use, keeping the suite hermetic against the machine.
+  cat > "$sbx/stub-bin/fno-py" <<'PYSHIM'
+#!/usr/bin/env bash
+exec env PYTHONPATH="__FNO_SRC__" "__FNO_PYTHON__" -m fno.cli "$@"
+PYSHIM
+  sed -i "" "s|__FNO_SRC__|$FNO_SRC|; s|__FNO_PYTHON__|$FNO_PYTHON|" "$sbx/stub-bin/fno-py"
+  chmod +x "$sbx/stub-bin/fno-py"
 
   echo "$sbx"
 }

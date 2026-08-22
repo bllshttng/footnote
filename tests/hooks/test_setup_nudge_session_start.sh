@@ -19,9 +19,9 @@ GLOBAL_CONFIG="$HOME_DIR/.fno/config.toml"
 mkdir -p "$HOME_DIR" "$PROJECT"
 
 OUTPUT="$(cd "$PROJECT" && HOME="$HOME_DIR" bash "$HOOK")"
-if [[ "$OUTPUT" == *'fno setup wizard'* \
+if [[ "$OUTPUT" == *'fno config setup wizard'* \
     && "$OUTPUT" == *'/fno:setup'* \
-    && "$OUTPUT" == *'fno setup cli-hooks'* ]]; then
+    && "$OUTPUT" == *'fno config setup cli-hooks'* ]]; then
     pass "unconfigured nudge names setup and CLI hook wiring"
 else
     fail "unconfigured nudge is incomplete: $OUTPUT"
