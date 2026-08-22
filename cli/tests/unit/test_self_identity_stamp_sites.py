@@ -61,10 +61,13 @@ def test_a_single_marker_resolves_exactly_as_precedence_would(monkeypatch):
     assert ident.disposition == "single"
 
 
-def test_an_inherited_foreign_marker_loses_to_the_proven_one(monkeypatch):
-    # The incident, reproduced: a claude session carrying a CODEX_THREAD_ID it
-    # inherited from its spawner. CODEX_THREAD_ID OUTRANKS the claude marker, so
-    # precedence order answers with the stranger's id; the process tree does not.
+def test_a_mixed_env_the_tree_can_decide_resolves_rather_than_refusing(monkeypatch):
+    # The incident: a claude session carrying a CODEX_THREAD_ID it inherited
+    # from its spawner. The raw primitive no longer launders that into the
+    # stranger's id - it refuses the whole mixed env - so nothing is stamped
+    # wrong either way. What the owned path adds is the RIGHT answer: the
+    # process tree proves which marker this session minted, so a real worker
+    # stamps its own identity instead of going unstamped.
     monkeypatch.setattr(
         "fno.claims.session_pid.resolve_session_harness", lambda *a, **k: "claude"
     )
@@ -72,7 +75,7 @@ def test_an_inherited_foreign_marker_loses_to_the_proven_one(monkeypatch):
 
     from fno.harness_identity import resolve_harness_identity
 
-    assert resolve_harness_identity(env).session_id == "foreign-thread"
+    assert resolve_harness_identity(env).session_id is None
 
     ident = resolve_self_identity(env)
     assert (ident.session_id, ident.harness) == ("mine", "claude")
