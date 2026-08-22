@@ -194,7 +194,7 @@ The get-shit-done project uses install-time transformation (4,479-line installer
 
 `inject-project-vision.sh` outputs Claude Code-specific JSON (`hookSpecificOutput`). Rather than modifying it (breaking existing Claude Code behavior), `session-start.sh` wraps it and re-formats output per platform. This preserves backward compatibility.
 
-**SessionStart output contract (current).** Claude Code, Gemini CLI, and Codex CLI have all converged on the same SessionStart hook output: `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}` (camelCase). Verified against Gemini's hook reference and Codex's `SessionStartHookSpecificOutputWire` schema. `session-start.sh` emits this shape for all three; the earlier non-Claude `additional_context` (snake_case) branch was stale and is retained only for Cursor/generic. Claude Code wires the individual SessionStart sub-hooks via the plugin manifest; Gemini and Codex wire this single `session-start.sh` wrapper into user-level config (`~/.gemini/settings.json` and `~/.codex/config.toml`) via `fno config setup cli-hooks`, which `fno config setup wizard` offers as a default-No capstone. Codex additionally requires the user to trust the hook before it runs.
+**SessionStart output contract (current).** Claude Code, Gemini CLI, and Codex CLI have all converged on the same SessionStart hook output: `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}` (camelCase). Verified against Gemini's hook reference and Codex's `SessionStartHookSpecificOutputWire` schema. `session-start.sh` emits this shape for all three. The earlier non-Claude `additional_context` (snake_case) branch was stale. It is retained only for Cursor/generic. Claude Code wires the individual SessionStart sub-hooks via the plugin manifest. Gemini and Codex wire this single `session-start.sh` wrapper into user-level config (`~/.gemini/settings.json` and `~/.codex/config.toml`) via `fno config setup cli-hooks`. `fno config setup wizard` offers that as a default-No capstone. Codex additionally requires the user to trust the hook before it runs.
 
 ### Why `transcript_path` guard is platform-aware
 
@@ -217,7 +217,7 @@ Because agy's transcript would be skipped by loop-check's `role=="assistant"` fi
 - `fullyIdle == false` → always `continue` (never allow a terminal stop while agy's background tasks are live).
 - a **missing** `fno-agents` binary allows the stop (a never-installed checker can't be fixed mid-session, and an unstoppable `continue`-loop is worse), while a **transient** failure of a present binary returns `continue` and retries on the next firing.
 
-`fno config setup` registers the adapter in agy's `hooks.json` (`~/.gemini/config/hooks.json`, the global customization dir) under the `footnote` namespace key, referencing the plugin-shipped adapter path; a CLI-only install with no `hooks/` degrades to a manual finish.
+`fno config setup` registers the adapter in agy's `hooks.json` (`~/.gemini/config/hooks.json`, the global customization dir) under the `footnote` namespace key, referencing the plugin-shipped adapter path. A CLI-only install with no `hooks/` degrades to a manual finish.
 
 The remaining build-time unknown is agy's exact `transcript.jsonl` line schema; the synthesizer handles the documented-likely shapes and skips anything it can't parse (safe: no promise detected → keep working). A captured sample will tighten the filter.
 

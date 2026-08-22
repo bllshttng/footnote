@@ -78,7 +78,7 @@ Projects that haven't declared an id fall through to the git remote basename aut
 
 `legacy_worktree_path(name, repo_root)` returns `<repo_root>/.claude/worktrees/{name}/`. Both `_shared.create_worktree` and `runtime.create_worktree` probe this path before calling `git worktree add`; if it exists, they short-circuit with `status: "already-exists"` and return the legacy path so an operator's in-flight legacy worktree keeps working.
 
-`runtime.list_worktrees` accepts worktrees under either the canonical base or the legacy base through the transition window, so `fno workspace worktree status` keeps surfacing legacy entries until they are torn down.
+`runtime.list_worktrees` accepts worktrees under either the canonical base or the legacy base through the transition window. `fno workspace worktree status` keeps surfacing legacy entries until they are torn down.
 
 `runtime.remove_worktree` picks the canonical path when it exists, otherwise falls back to the legacy path, so `--action remove --name foo` keeps working regardless of which shape the worktree lives under.
 

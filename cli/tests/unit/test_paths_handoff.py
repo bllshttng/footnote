@@ -52,7 +52,7 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
 
 
 def test_name_only_uses_canonical_handle_first_eight() -> None:
-    result = runner.invoke(app, ["paths", "handoff", "--session-id", SID, "--name-only"], env=_ENV)
+    result = runner.invoke(app, ["config", "paths", "handoff", "--session-id", SID, "--name-only"], env=_ENV)
     assert result.exit_code == 0, result.output
     name = result.output.strip()
     # Date prefix + first-8 handle. Guards the both-ends truncation hazard: the key must be the
@@ -62,17 +62,17 @@ def test_name_only_uses_canonical_handle_first_eight() -> None:
 
 
 def test_full_path_is_handoffs_dir_joined_with_filename() -> None:
-    result = runner.invoke(app, ["paths", "handoff", "--session-id", SID], env=_ENV)
+    result = runner.invoke(app, ["config", "paths", "handoff", "--session-id", SID], env=_ENV)
     assert result.exit_code == 0, result.output
     full = Path(result.output.strip())
-    name_only = runner.invoke(app, ["paths", "handoff", "--session-id", SID, "--name-only"], env=_ENV).output.strip()
+    name_only = runner.invoke(app, ["config", "paths", "handoff", "--session-id", SID, "--name-only"], env=_ENV).output.strip()
     assert full.name == name_only
     assert full.parent == handoffs_dir()
 
 
 def test_slug_overrides_handle_key() -> None:
     result = runner.invoke(
-        app, ["paths", "handoff", "--session-id", SID, "--slug", "my-feature", "--name-only"], env=_ENV
+        app, ["config", "paths", "handoff", "--session-id", SID, "--slug", "my-feature", "--name-only"], env=_ENV
     )
     assert result.exit_code == 0, result.output
     assert result.output.strip().endswith("-my-feature.md")
@@ -81,6 +81,6 @@ def test_slug_overrides_handle_key() -> None:
 def test_deprecated_session_alias_still_resolves() -> None:
     # --session is the hidden deprecated alias for --session-id; old call sites
     # (and the plan's original spec) keep working.
-    result = runner.invoke(app, ["paths", "handoff", "--session", SID, "--name-only"], env=_ENV)
+    result = runner.invoke(app, ["config", "paths", "handoff", "--session", SID, "--name-only"], env=_ENV)
     assert result.exit_code == 0, result.output
     assert result.output.strip().endswith(f"-{HANDLE}.md")

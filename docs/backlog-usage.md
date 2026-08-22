@@ -195,9 +195,7 @@ human merge); only the graph close waits for the merge, so the "done" state mean
 (CLOSED-unmerged / no evidence), 4 gh outage (retryable), 5 awaiting merge.
 
 `fno backlog update` cannot close a node.
-It once carried a `--completed` flag that applied completion with no gh evidence check and emitted no event; that silence is what let a ledger append close nodes hours before their PRs merged, so the flag is removed.
-The only closers are `fno backlog done` (merge-gated, with `--force --reason TEXT` for the un-cross-checked case), its deprecated one-release `done` spelling (merge-gated, no bypass), and `reconcile`.
-Both surfaces resolve merge evidence through one shared helper and share the exit codes: 0 closed, 3 refusal, 4 gh outage (retryable), 5 awaiting merge.
+It once carried a `--completed` flag that applied completion with no gh evidence check and emitted no event; that silence is what let a ledger append close nodes hours before their PRs merged, so the flag is removed. The only closers are `fno backlog done` (merge-gated, with `--force --reason TEXT` for the un-cross-checked case), its deprecated one-release `done` spelling (merge-gated, no bypass), and `reconcile`. Both surfaces resolve merge evidence through one shared helper and share the exit codes: 0 closed, 3 refusal, 4 gh outage (retryable), 5 awaiting merge.
 
 ## Priority tiers
 
@@ -291,15 +289,10 @@ fno backlog lanes                  # rollup: live lanes vs the cap, per-node sta
 
 ## Worktree isolation policy
 
-Every code payload launched from a repo main checkout is auto-isolated into a
-worktree by `fno workspace worktree ensure`. `config.worktree.policy` opts a project out
-of that. Values (`never | harness-native | external`):
+Every code payload launched from a repo main checkout is auto-isolated into a worktree by `fno workspace worktree ensure`. `config.worktree.policy` opts a project out of that. Values (`never | harness-native | external`):
 
-- `never` - launch in place, no worktree. For a checkout whose working tree IS
-  the product (e.g. an Obsidian vault attached live, committing straight to
-  main). `ensure` prints the repo root and exits 0 (not a failure, so dispatch
-  lanes are never skipped).
-- `harness-native` (default) - the harness's own worktree lifecycle (claude -> `<repo>/.claude/worktrees/<name>`; Codex Desktop -> same-thread `/worktree` or **Hand off -> Worktree** under `$CODEX_HOME/worktrees`).
+- `never` - launch in place, no worktree. For a checkout whose working tree IS the product (e.g. an Obsidian vault attached live, committing straight to main). `ensure` prints the repo root and exits 0 (not a failure, so dispatch lanes are never skipped).
+- `harness-native` (default) - the harness's own worktree lifecycle. Claude -> `<repo>/.claude/worktrees/<name>`. Codex Desktop -> same-thread `/worktree` or **Hand off -> Worktree** under `$CODEX_HOME/worktrees`.
   A substrate with no native transition degrades to the Footnote-owned `<state_dir>/worktrees` fallback, normally `~/.fno/worktrees`, without inheriting an external allocator from `paths.worktrees_base`.
 - `external` - `<config.paths.worktrees_base>/<repo>/<name>` (the maintainer's
   `~/conductor/workspaces` when that knob is set).
@@ -333,7 +326,7 @@ fno workspace worktree policy --repo <path> [--harness claude]
 ## Public roadmap
 
 A curated, leak-free view for advertising an OSS project's roadmap. Opt in
-per node; nothing is published unless flagged.
+per node. Nothing is published unless flagged.
 
 ```bash
 fno backlog update <id> --public                              # flag a node

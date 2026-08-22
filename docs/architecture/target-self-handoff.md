@@ -47,7 +47,7 @@ The `session_satisfied(trigger=delegated)` event written at step 8 is the audit 
 
 ## Context probe contract
 
-`fno whoami context --transcript <path> --json` reads ground truth from the session transcript JSONL: one implementation in the repo (ported out of the skill-local probe so a codex/agy/opencode worker and every hook reach the same arithmetic). `handoff.sh` calls it at pressure boundaries, `fno whoami` prints the `context:` line so the model reads its own window without reverse-engineering a hook, and the bundled skill's local probe is now a shim over the verb.
+`fno whoami context --transcript <path> --json` reads ground truth from the session transcript JSONL. One implementation in the repo (ported out of the skill-local probe so a codex/agy/opencode worker and every hook reach the same arithmetic). `handoff.sh` calls it at pressure boundaries. `fno whoami` prints the `context:` line so the model reads its own window without reverse-engineering a hook. The bundled skill's local probe is now a shim over the verb.
 
 - Input: path to the session transcript JSONL (resolved from the session manifest's `claude_transcript_id` field)
 - Selects the last assistant message carrying a `usage` block

@@ -33,7 +33,8 @@ def test_help_root_matches_dashdash_help():
     assert via_help.exit_code == 0
     assert via_dashdash.exit_code == 0
     # Advertised verbs appear in both curated catalogs (x-71b6 tiering).
-    for needle in ("backlog", "agents", "config", "setup"):
+    # `setup` moved under `config` (unit 6, x-9d6c) and left the menu.
+    for needle in ("backlog", "agents", "config", "doctor"):
         assert needle in via_help.output, f"missing {needle} in `fno help` output"
         assert needle in via_dashdash.output, f"missing {needle} in `fno --help` output"
     # Hidden verbs are reachable only through the full-surface door.

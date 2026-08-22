@@ -22,16 +22,7 @@ anywhere in the verb.
 ## Prerequisites
 
 - The PR is already merged (this runs *after* merge, by hand or from a watcher).
-- `.fno/config.toml` sets `config.post_merge.parking_lot_path`. Check before a
-  merge with `fno config doctor --post-merge`; scaffold it with
-  `fno config setup post-merge`. Without it the verb's judgment leg reports
-  `parking_lot=unset` and prose is skipped (never guessed).
-- `config.post_merge.maintainer_marker` (optional, default empty) is the
-  discriminator tag for maintainer-only items (decisions, sign-offs, manual
-  setups). Leave it empty unless the parking-lot destination is a SHARED vault
-  where maintainer items would otherwise drown in unrelated checkboxes; an empty
-  default ships no one's initials. The capture parser honors the same key, so
-  `fno backlog capture list --by-type` and `tidy` recognize the tag too.
+- `.fno/config.toml` sets `config.post_merge.parking_lot_path`. Check before a merge with `fno config doctor --post-merge`; scaffold it with `fno config setup post-merge`. Without it the verb's judgment leg reports `parking_lot=unset` and prose is skipped (never guessed). - `config.post_merge.maintainer_marker` (optional, default empty) is the discriminator tag for maintainer-only items (decisions, sign-offs, manual setups). Leave it empty unless the parking-lot destination is a SHARED vault where maintainer items can otherwise drown in unrelated checkboxes. An empty default ships no one's initials. The capture parser honors the same key, so `fno backlog capture list --by-type` and `tidy` recognize the tag too.
 - `gh` is authenticated for reading the merged diff.
 
 ## Autonomous mode (no operator present)
@@ -253,10 +244,7 @@ rule), never as `backlog idea` nodes.
 - **Run from inside the merged PR's own worktree** - the archive leg defers to
   `fno workspace worktree cleanup --merged --apply` (run from canonical); it never
   self-removes.
-
-## See also
-
-- The verb: `fno do pr ritual` (`cli/src/fno/pr/_ritual.py`) and its command in
+ ## See also  - The verb: `fno do pr ritual` (`cli/src/fno/pr/_ritual.py`) and its command in
   `cli/src/fno/pr/cli.py`.
 - Plan + locked decisions:
   `internal/fno/plans/20260723-post-merge-mechanical-core-x-bbde.md`.

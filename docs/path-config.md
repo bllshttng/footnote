@@ -190,7 +190,7 @@ This rewrites `config.toml` from the built-in defaults. Any custom values are ov
 
 ## Deprecation pathway
 
-Before the path-config substrate was introduced, hardcoded `~/.fno/` references were scattered across shell scripts and Python code. The resolver layer (`fno.paths`) is the migration target. Shell scripts use `fno config paths emit-shell` to source path variables; Python code imports `from fno import paths`.
+Before the path-config substrate was introduced, hardcoded `~/.fno/` references were scattered across shell scripts and Python code. The resolver layer (`fno.paths`) is the migration target. Shell scripts use `fno config paths emit-shell` to source path variables. Python code imports `from fno import paths`.
 
 If you find a script that still hardcodes `~/.fno/`, file an issue or use `FNO_CONFIG` to point it at the right file while the migration is underway.
 

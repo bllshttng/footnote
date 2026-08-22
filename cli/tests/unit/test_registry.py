@@ -120,14 +120,14 @@ def test_ac2_hp_register_worker_multiple_appends(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_register_worker_cli(tmp_path):
-    """fno runtime register-worker --id X appends to workers.jsonl."""
+    """fno workspace register-worker --id X appends to workers.jsonl."""
     workers_file = tmp_path / "workers.jsonl"
     worker_id = str(uuid.uuid4())
 
     result = runner.invoke(
         app,
         [
-            "runtime", "register-worker",
+            "workspace", "register-worker",
             "--id", worker_id,
             "--task", "some task",
             "--workers-file", str(workers_file),

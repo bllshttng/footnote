@@ -149,7 +149,7 @@ def test_neither_layer_warns_with_setup_action(tmp_path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert "fno doctor: codex hooks: warn" in result.stdout
     assert "layers=neither" in result.stdout
-    assert "`fno setup cli-hooks-codex`" in result.stdout
+    assert "`fno config setup cli-hooks-codex`" in result.stdout
 
 
 def test_json_output_is_one_parseable_object(tmp_path, monkeypatch) -> None:
@@ -202,7 +202,7 @@ def test_owned_json_gets_narrow_migration_action(tmp_path, monkeypatch) -> None:
     result = runner.invoke(app, ["doctor", "--codex-hooks"])
 
     assert result.exit_code == 0
-    assert "`fno setup cli-hooks-codex --migrate-legacy-hooks-json`" in result.stdout
+    assert "`fno config setup cli-hooks-codex --migrate-legacy-hooks-json`" in result.stdout
     assert "remove only footnote-owned legacy JSON hooks" in result.stdout
 
 

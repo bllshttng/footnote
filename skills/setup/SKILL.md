@@ -59,9 +59,7 @@ Parse the JSON. For each field, ask the user using its `question` text. Use the
 - `readme`     -> infer a one-line vision from the README's first paragraph.
 - `auto-detect`-> detect from the repo (vault name, workspace topology).
 
-The `always` set today is roughly: Obsidian on/off (+ vault name), project
-vision, backlog id_prefix, external reviewer(s), auto-merge on/off. Ask only
-what `fno config setup plan` returns; do not invent extra questions.
+The `always` set today is roughly: Obsidian on/off (+ vault name), project vision, backlog id_prefix, external reviewer(s), auto-merge on/off. Ask only what `fno config setup plan` returns; do not invent extra questions.
 
 ## Step 2: Write each answer through `fno config set`
 
@@ -99,9 +97,9 @@ fno config set config.auto_merge.enabled false
 
 ## Step 2b: Review gate (how a PR is allowed to go green)
 
-`fno config setup plan` asks about `config.review.external_reviewers` (which logins to *request* and *recognize*), but the GATE - what `fno-agents loop-check` REQUIRES before `/target` promises - lives in three `advanced`-tier keys the default plan does not surface, so most users never learn the bot-less options exist. Offer the choice explicitly (ask; default = none / PR + CI only). These are additive - a repo can require both a bot AND a local sigma pass:
+`fno config setup plan` asks about `config.review.external_reviewers` (which logins to *request* and *recognize*). The GATE - what `fno-agents loop-check` REQUIRES before `/target` promises - lives in three `advanced`-tier keys the default plan does not surface. Most users never learn the bot-less options exist. Offer the choice explicitly (ask; default = none / PR + CI only). These are additive - a repo can require both a bot AND a local sigma pass:
 
-> "How should review gate a PR before `/target` considers it done?
+> "How does review gate a PR before `/target` considers it done?
 >  1. **GitHub App bots** - a bot login (e.g. `chatgpt-codex-connector`, `gemini-code-assist`) must post a review. Needs the bot installed on the repo.
 >  2. **Local attestation** - `/target` runs a `/review sigma` panel in-session and attests on a clean pass; no GitHub bot needed. Best for a solo / claude-only harness. (`declare` is a bare 'I looked' self-cert, not a review - offer it only as an escape hatch.)
 >  3. **CLI peers** - a codex/gemini CLI posts a real PR review under a distinct machine account.
@@ -124,9 +122,7 @@ Leaving all three empty keeps today's PR + CI-only behavior.
 
 ## Step 3: Workspace / project topology (`config.work.workspaces`)
 
-The `config.work` map (workspace -> projects[]) is topology, not a scalar leaf,
-so it is not asked via `fno config setup plan`. When setting up a workspace,
-auto-detect the current project and confirm it:
+The `config.work` map (workspace -> projects[]) is topology, not a scalar leaf, so it is not asked via `fno config setup plan`. When setting up a workspace, auto-detect the current project and confirm it:
 
 ```bash
 NAME=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")

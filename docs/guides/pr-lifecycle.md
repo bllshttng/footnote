@@ -42,7 +42,7 @@ Merging is a human action (or `auto_merge`, if you opted in). Once the PR is mer
 
 It reconciles the backlog (closes the node whose PR merged, even if you merged from the GitHub UI), runs the retro to capture follow-up work, reads the merged diff, and appends a dated prose section to the project's parking-lot file. It then files any triage-worthy work it found as backlog ideas.
 
-`pr merged` needs `config.post_merge.parking_lot_path` set for this repo (the vault area is often named differently from the project, so it's never guessed). Set it with `fno config setup post-merge`, or it tells you what's missing and skips the prose step.
+`pr merged` needs `config.post_merge.parking_lot_path` set for this repo (the vault area is often named differently from the project, so it is never guessed). Set it with `fno config setup post-merge`. Without it the verb names what is missing and skips the prose step.
 
 ## How this maps to `target`
 

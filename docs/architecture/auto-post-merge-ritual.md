@@ -8,7 +8,7 @@ Extends the retro / auto-triage feature ([retro-auto-triage.md](retro-auto-triag
 
 The existing machinery covered ~70% of the ritual but left two gaps:
 
-1. **Prose todos were 100% manual.** `fno backlog reconcile` *explicitly* never writes inbox lines, and `fno backlog retro run` files graph nodes, not the per-project vault markdown at `internal/<area>/backlog/inbox.md`. Writing those prose next-steps requires reading the merged diff and applying judgment, so it stayed a re-pasted prompt.
+1. **Prose todos were 100% manual.** `fno backlog reconcile` *explicitly* never writes inbox lines. `fno backlog retro run` files graph nodes, not the per-project vault markdown at `internal/<area>/backlog/inbox.md`. Writing those prose next-steps requires reading the merged diff and applying judgment, so it stayed a re-pasted prompt.
 2. **No trigger fires at merge.** `reconcile` runs on the *next* footnote session in the repo or a megawalk iteration; a GitHub web-button self-merge produces no local event at all. (Phase 2 below; deferred.)
 
 > **Two different "inbox"es.** This skill writes the per-project **vault markdown** `internal/<area>/backlog/inbox.md` (a human reading queue). That is NOT the cross-project message bus `fno agents mail` (`config.paths.inbox_dir`, thread-per-file). The vault-area name does not equal the project name (`example-pipeline -> internal/etl`, `acme-web -> internal/web`), which is exactly why the path must be explicit config and is never derived.
@@ -43,7 +43,7 @@ config:
 
 ### Idempotency
 
-Each prose section starts with an HTML-comment marker `<!-- post-merge:pr-<N> -->`. `skills/pr/scripts/inbox-has-pr.sh` greps for that marker (fno-free, so it is deterministic across CLI versions); exit 0 means "already written, skip". This marker guard is the *sole* idempotency barrier for the judgment half: `fno backlog reconcile` and `fno backlog retro run` are independently idempotent, but `fno backlog idea` is not (it appends a fresh node every call), so Step 5 must never run once Step 4 short-circuits.
+Each prose section starts with an HTML-comment marker, spelled post-merge:pr-<N> inside comment brackets, just above the section. `skills/pr/scripts/inbox-has-pr.sh` greps for it. The grep is fno-free, so it is deterministic across CLI versions. Exit 0 means "already written, skip". This marker guard is the *sole* idempotency barrier for the judgment half. `fno backlog reconcile` and `fno backlog retro run` are independently idempotent. `fno backlog idea` is not (it appends a fresh node every call), so Step 5 must never run once Step 4 short-circuits.
 
 ### No new mutation primitives
 
