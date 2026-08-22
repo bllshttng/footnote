@@ -691,7 +691,11 @@ def prepare_batch(
         # harness-native: forward --harness claude to land it at .claude/worktrees/.
         # The explicit --branch means a `never` project refuses (cannot isolate a
         # branch in place) and degrades to solo below - never launches on canonical.
-        we = run([*_subprocess_util.fno_py_cmd(), "workspace", "worktree", "ensure",
+        # Deliberately the PRE-FOLD spelling: fno_py_cmd() resolves the INSTALLED
+        # fno-py, and the shim only forwards old to new, so `worktree ensure` runs
+        # on an install from either side of the fold. A cross-process caller
+        # migrates LAST, once the deprecation window closes.
+        we = run([*_subprocess_util.fno_py_cmd(), "worktree", "ensure",
                   "--repo", repo, "--name", name, "--branch", branch, "--harness", "claude"])
         worktree = (we.stdout or "").strip()
         if we.returncode != 0 or not worktree:
