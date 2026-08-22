@@ -16,6 +16,18 @@ It is not `--envelope` to opt in. An opt-in flag leaves every existing caller un
 
 An earlier ruling said "an envelope typed as keystrokes is still keystrokes" and dismissed this. That ruling is withdrawn. The envelope is metadata, not a security boundary, and typed metadata is still metadata. A worker reading `<fno_mail from="119e3c52" ...>` knows it is reading a peer, whichever transport typed it.
 
+**Every caller, and what each one wants.** Making the envelope a default puts a decision on every existing call site. The one missed here shipped a misattributed sender. So the set is written down:
+
+| Caller | Wants | Why |
+|--------|-------|-----|
+| `_forced_pane_send` (`mail/cli.py`) | passthrough | the body is already enveloped by `_name_lane_send` |
+| name-lane pane rung (`mail/cli.py`) | passthrough | same, already enveloped |
+| `_raw_send` (`mail/cli.py`) | `raw=True` | the REPL slash parser must fire, and an envelope defeats it |
+| peer follow-up (`dispatch.py`) | passthrough | carries a `<cross-session-message>` container of its own |
+| `_deliver_live` (`dispatch.py`) | `raw` when `mail is None` | that argument is what says whether this is mail at all |
+
+The three passthroughs rely on `_already_wrapped`, which tests the FIRST tag of the body. A digest that merely CONTAINS an envelope fails that test. `wrap_fno_mail` then refuses it, because a body must not hold an envelope. So a caller whose payload EMBEDS mail says `raw` rather than trusting the passthrough.
+
 **One renderer.** `cli/src/fno/mail/envelope.py` is the sole `<fno_mail>` renderer. A prior node deleted the Rust mirror as dead code. If the Rust verb cannot reach `fno mail pane-prepare`, it **fails closed**. There is no bare-paste fallback. A silent one rebuilds the exact defect this closes, and it fires exactly at the moment something is already wrong.
 
 ## The read-back gate
