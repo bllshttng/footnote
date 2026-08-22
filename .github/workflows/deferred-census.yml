@@ -11,9 +11,9 @@ name: deferred-census
 # was never deleted.
 #
 # WEEKLY, not per-PR: the census costs ~4 minutes to police a list that changes
-# a few times a month, and the smoke job has only ~8 minutes of headroom under
-# its 20-minute cap. Weekly, not nightly: an entry sitting quarantined for six
-# days is not an incident, and a nightly red inbox gets muted.
+# a few times a month, and that is 4 minutes charged to every PR to catch a
+# change that lands a few times a month. Weekly, not nightly: an entry six
+# days quarantined is not an incident, and a nightly red inbox gets muted.
 #
 # IF THIS FIRES RED FOR SEVERAL WEEKS RUNNING WITH NOBODY DRAINING, DELETE THE
 # WORKFLOW. A gate everyone has learned to ignore is worse than no gate: it

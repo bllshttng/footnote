@@ -8,7 +8,7 @@ This is a different thing from the environment preflight (`fno do target` Step 3
 
 ### `fno doctor test smoke` - the step registry
 
-One ordered list of the cli-ci smoke job's test and lint steps is code-owned in `cli/src/fno/test_cmd.py` (`_STRUCTURAL_STEPS`) plus auto-discovered owned shell harnesses. The workflow calls `uv run --project cli fno-py doctor test smoke`. `fno doctor test smoke` is the same runner locally, so there is no second list to drift. Environment provisioning (checkout, Python/uv setup, the Rust toolchain install, the cargo cache, the system PyYAML install) stays in the workflow yaml. Those are CI-runner concerns, and that divergence is deliberate. Everything a test needs at run time (the `uv sync` / `uv build`, the `fno-agents` debug build) lives in the runner.
+One ordered list of the cli-ci smoke job's test and lint steps is code-owned in `cli/src/fno/test_cmd.py` (`_STRUCTURAL_STEPS`) plus auto-discovered owned shell harnesses. The workflow calls `uv run --project cli fno-py doctor test smoke` from each of its two shard jobs, `smoke-pytest` and `smoke-rest`, which a third job named `smoke` aggregates into the required check. `fno doctor test smoke` is the same runner locally, so there is no second list to drift. Environment provisioning (checkout, Python/uv setup, the Rust toolchain install, the cargo cache, the system PyYAML install) stays in the workflow yaml. Those are CI-runner concerns, and that divergence is deliberate. Everything a test needs at run time (the `uv sync` / `uv build`, the `fno-agents` debug build) lives in the runner.
 
 Modes:
 
@@ -16,14 +16,15 @@ Modes:
 |---|---|
 | `fno doctor test smoke` | Fail-fast. Exactly the pre-extraction CI semantics. |
 | `fno doctor test smoke --keep-going` | Run every step, print a summary table, record failures, exit non-zero if any failed. |
-| `fno doctor test smoke --only '<glob>'` | Run only steps whose name matches the shell glob. |
+| `fno doctor test smoke --only '<globs>'` | Run only steps whose name matches. Takes one glob, or a comma-separated list. The whole value is tried before the split, so a step whose own name has a comma still selects exactly. |
+| `fno doctor test smoke --skip '<globs>'` | The exact complement of `--only`: run every step matching none of the globs. This is how CI shards the suite; the two selections must cover the registry, which `cli/tests/unit/test_smoke_shards.py` reads out of the workflow and asserts. |
 | `fno doctor test smoke --retry-failed` | Re-run only the steps recorded by the last `--keep-going` run; full run if the record is missing or corrupt. |
 | `fno doctor test smoke --list [--verbose]` | Print the registry (names; with `--verbose`, working dir + command) and exit. |
 | `fno doctor test smoke --changed [--base REV --head REV]` | Run only the work the changed paths map to. Explicitly partial: see below. |
 
-The three subset modes (`--changed`, `--only`, `--retry-failed`) are mutually exclusive. The runner refuses combinations instead of silently mislabeling evidence.
+The four subset modes (`--changed`, `--only`, `--skip`, `--retry-failed`) are mutually exclusive. The runner refuses combinations instead of silently mislabeling evidence.
 
-Prerequisites are asserted up front and named on failure with exit 2. They include `uv`, `python3` with `yaml`, and `cargo` for selected steps. The runner never installs system packages. Install PyYAML once by hand for local runs. A subset run (`--only` / `--retry-failed`) labels itself, so a partial green cannot look full. Preflight records `mode=FULL verdict=green` only after a full, all-green run. A subset pass cannot mint or satisfy that attestation. A zero-step run exits non-zero instead of reading as green.
+Prerequisites are asserted up front and named on failure with exit 2. They include `uv`, `python3` with `yaml`, and `cargo` for selected steps. The runner never installs system packages. Install PyYAML once by hand for local runs. A subset run (`--only` / `--skip` / `--retry-failed`) labels itself in both the header and the summary, so a partial green cannot look full. Preflight records `mode=FULL verdict=green` only after a full, all-green run. A subset pass cannot mint or satisfy that attestation. A zero-step run exits non-zero instead of reading as green.
 
 ### `--changed` - the changed-surface packet
 

@@ -498,12 +498,17 @@ def test_smoke_discovered_steps_excludes_deferred(tmp_path: Path) -> None:
 
 
 def test_run_smoke_routes_through_the_discovered_steps_helper() -> None:
-    """_run_smoke builds its discovered steps via _smoke_discovered_steps (the
-    helper test_smoke_discovered_steps_excludes_deferred covers), so a regression
-    that re-inlines the comprehension and drops the _DISCOVERY_DEFERRED clause
-    cannot pass while the full gate silently re-admits a drained harness."""
+    """The real registry is built via _smoke_discovered_steps (the helper
+    test_smoke_discovered_steps_excludes_deferred covers), so a regression that
+    re-inlines the comprehension and drops the _DISCOVERY_DEFERRED clause
+    cannot pass while the full gate silently re-admits a drained harness.
+
+    The assembly lives in smoke_steps and _run_smoke calls it, so both links of
+    that chain are asserted: breaking either one re-admits the drained harness.
+    """
     import inspect
 
     import fno.test_cmd as tc
 
-    assert "_smoke_discovered_steps" in inspect.getsource(tc._run_smoke)
+    assert "smoke_steps" in inspect.getsource(tc._run_smoke)
+    assert "_smoke_discovered_steps" in inspect.getsource(tc.smoke_steps)

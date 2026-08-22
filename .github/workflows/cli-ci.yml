@@ -141,27 +141,42 @@ jobs:
           fi
           exit $rc
 
-  smoke:
+  # The suite outgrew one runner, so it now runs as two. Read this before
+  # raising a ceiling again.
+  #
+  # History: 20 left no margin and cancelled green runs. Measured 2026-08-06,
+  # the test step alone was 16m35s on a warm main run and about 19m on the cold
+  # uv/cargo cache that is the normal state for a new branch, which hit the cap
+  # with every test passing. Raised to 30. On 2026-08-21 it hit 30 too, and the
+  # comment then standing said that at 30 the suite is the thing to fix. It was
+  # raised to 45 anyway, as an unblock for a stalled fleet, on the condition
+  # that the suite got fixed. This is that fix, and it is why the ceiling is
+  # back at 30 rather than climbing to a third number.
+  #
+  # What was measured, so the next reader can re-measure rather than guess. One
+  # main-push job ran 2095 seconds: 64s of runner setup, 1036s in the single
+  # pytest step, and 995s in every step after it. Pytest already runs with
+  # `-n auto --maxprocesses=4` and this runner has 4 vCPU, so it was not short
+  # of workers. The 995s tail was simply serial behind it on the same machine.
+  # Splitting at that boundary gives two near-even halves and roughly halves
+  # wall clock, and 1036 against 995 is why the seam is here and not elsewhere.
+  #
+  # The seam is also the only clean cut in the registry. `fno doctor test smoke`
+  # deletes the fno-agents debug binary when pytest is selected, so the
+  # @requires_rust parity tests skip; a later step rebuilds it for the rust
+  # journey steps. So pytest belongs in the shard without the build step, and
+  # every rust step belongs in the shard with it.
+  #
+  # The two selections below must keep COVERING the registry. They are exact
+  # complements over one glob, so a step added later lands in smoke-rest on its
+  # own, and cli/tests/unit/test_smoke_shards.py fails if that ever stops being
+  # true. `Sync + build` deliberately runs in both: it costs about 3s and it
+  # removes any question of whether pytest can rely on `uv build`.
+  #
+  # If a shard approaches 30, split again or cut work. Do not raise this.
+  smoke-pytest:
     runs-on: ubuntu-latest
-    # 20 left no margin and cancelled green runs. Measured 2026-08-06: the test
-    # step alone is 16m35s on a warm main run, and a branch with a cold uv/cargo
-    # cache - the normal state for a new branch - runs ~19m and hit the cap with
-    # every test passing. A cancelled job reports as `smoke fail`, so the tax was
-    # paid as phantom red PRs and re-run cycles, not as a visible timeout.
-    # Raise the ceiling rather than the suite: if this step approaches 30, the
-    # suite is the thing to fix.
-    #
-    # 2026-08-21: it approached 30. The step measured 29m01s and the cap fired
-    # one second later, cancelling a trailing 6s guard on a suite that had
-    # already passed. That is 16m35s -> 29m01s in fifteen days. At a sub-minute
-    # margin a re-run is a coin flip: the same commit went green and cancelled
-    # on consecutive attempts, which reads as flake and is not one. Raised to 45
-    # because cold cache is the normal state for a new branch.
-    #
-    # This raise is the unblock, NOT the fix - the line above already ruled on
-    # that and x-5b73 owns it. The step below emits its own duration so the next
-    # reading of this trend is a log line rather than API archaeology.
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -169,25 +184,41 @@ jobs:
       - name: Provision the smoke runner
         uses: ./.github/actions/smoke-setup
 
-      - name: Smoke (test + lint registry)
-        # The test/lint steps live in the code-owned `fno doctor test smoke` runner
-        # (cli/src/fno/test_cmd.py) so "run what CI runs" is one command and
-        # local/CI parity is structural. Default (no flag) = fail-fast, the
-        # pre-extraction semantics; ::group:: markers keep per-step folding in
-        # the CI log. Bootstrapped via `uv run --project cli` (no repo-root
-        # pyproject, no global fno-py in a fresh checkout); uv auto-syncs.
-        # Emit the duration on every exit path (trap, not a trailing echo:
-        # the runner's bash is -e, so a failing suite would skip a plain echo
-        # and the slow runs - the only ones worth trending - would be the ones
-        # that never reported). A hard timeout SIGKILLs the job and no trap
-        # runs, which is itself the signal: no duration line means the cap ate
-        # the run.
+      - name: "Smoke shard: pytest"
+        # The test/lint steps live in the code-owned `fno doctor test smoke`
+        # runner (cli/src/fno/test_cmd.py) so "run what CI runs" is one command
+        # and local/CI parity is structural. A bare `fno doctor test smoke` with
+        # no selector still runs every step; the shards are a CI concern only.
+        #
+        # Emit the duration on every exit path (trap, not a trailing echo: the
+        # runner's bash is -e, so a failing suite would skip a plain echo and
+        # the slow runs - the only ones worth trending - would be the ones that
+        # never reported). A hard timeout SIGKILLs the job and no trap runs,
+        # which is itself the signal: no duration line means the cap ate the
+        # run. The key names the shard so two numbers are never read as one.
         run: |
           start=$SECONDS
-          trap 'printf "smoke-duration-seconds=%s\n" "$(( SECONDS - start ))"' EXIT
-          uv run --project cli fno-py doctor test smoke
+          trap 'printf "smoke-pytest-duration-seconds=%s\n" "$(( SECONDS - start ))"' EXIT
+          uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*'
 
-      # Static dead-import guard (x-ac5f): a module move down a layer can leave
+  smoke-rest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Provision the smoke runner
+        uses: ./.github/actions/smoke-setup
+
+      - name: "Smoke shard: everything except pytest"
+        # Same trap, same reason as the pytest shard above.
+        run: |
+          start=$SECONDS
+          trap 'printf "smoke-rest-duration-seconds=%s\n" "$(( SECONDS - start ))"' EXIT
+          uv run --project cli fno-py doctor test smoke --skip 'Pytest*'
+
+      # Static dead-import guard: a module move down a layer can leave
       # test-only callers on the old `from fno.agents import moved` path that
       # fail at collection. changed-smoke selects tests from changed files and a
       # module move does not change the importing test, so the fast gate ran
@@ -195,6 +226,29 @@ jobs:
       # independent of test selection (and faster than full collection).
       - name: Dead import paths (module-move guard)
         run: bash scripts/ci/check-import-paths.sh
+
+  # Keeps the required check named `smoke`. Branch protection and the review
+  # gate key on that exact name, so publishing only `smoke-pytest` and
+  # `smoke-rest` would make the required check stop appearing rather than fail
+  # loudly. `if: always()` is load-bearing: without it this job is SKIPPED when
+  # a shard fails, and a skipped required check is not a red one. The assertion
+  # is positive per shard, because `cancelled` and `skipped` are neither
+  # success nor failure and both must block.
+  smoke:
+    needs: [smoke-pytest, smoke-rest]
+    if: always()
+    runs-on: ubuntu-latest
+    # Two string compares. A cap this tight is a real alarm on a job that can
+    # only ever hang, and this whole change exists because a job outran its
+    # cap unnoticed; the required check itself must not be the one job with no
+    # cap at all.
+    timeout-minutes: 5
+    steps:
+      - name: Both shards passed
+        run: |
+          echo "smoke-pytest=${{ needs.smoke-pytest.result }} smoke-rest=${{ needs.smoke-rest.result }}"
+          [ "${{ needs.smoke-pytest.result }}" = "success" ] || exit 1
+          [ "${{ needs.smoke-rest.result }}" = "success" ] || exit 1
 
   # TODO: graduate to blocking in the next release - remove continue-on-error
   prompt-drift:
