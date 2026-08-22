@@ -255,6 +255,19 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-no-skill-local-evals.sh
 
+      # The growth-studio pack declares two bash scenarios in its plugin.yaml,
+      # and pack verification only checks that the command is runnable - it
+      # never executes it. So the pack's own behavior assertions ran nowhere,
+      # and a verb rename in SKILL.md left the activation gate asserting a
+      # string that no longer existed while every check stayed green.
+      - name: growth-studio pack scenarios
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 -m pip install --quiet pyyaml
+          bash plugins/growth-studio/scenarios/launch-smoke.sh
+          bash plugins/growth-studio/scenarios/launch-evals.sh
+
       # From tracker-partition.yml.
       - name: Tracker partition gate + self-test
         if: ${{ !cancelled() }}
