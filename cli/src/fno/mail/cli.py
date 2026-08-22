@@ -1741,6 +1741,31 @@ def _forced_pane_send(
     return True
 
 
+def _reply_session_for(from_name: Optional[str]) -> Optional[str]:
+    """This session's full id, or None when ``--from-name`` set another address.
+
+    `cmd_reply` prefers a record's `from_session` over its compact `from` handle
+    on every lane, so stamping the ambient id unconditionally let it OUTRANK an
+    explicit override: `--from-name web` sent the answer back to this session
+    instead of to web, and the flag went quiet rather than erroring.
+
+    `--from-self` is not that case. It derives `from_name` from this very
+    session, so the handle matches here and the collision-safe id still rides,
+    which is the whole point of the flag.
+    """
+    from fno.agents.self_stamp import resolve_self_session_id
+
+    session = resolve_self_session_id()
+    if not session or from_name is None:
+        return session
+    from fno.harness_identity import session_identity_key
+
+    key = session_identity_key(session)
+    # A caller may name itself by short handle or by full id; both are this
+    # session, and only a THIRD address means "route the reply elsewhere".
+    return session if from_name in (key[:8], key, session) else None
+
+
 def _name_lane_send(
     message: str,
     *,
@@ -1779,11 +1804,7 @@ def _name_lane_send(
         _mux_pane_send,
     )
     from fno.agents.registry import AgentResolutionError, resolve_agent
-    from fno.agents.self_stamp import (
-        resolve_self_model,
-        resolve_self_session_id,
-        stamp_from,
-    )
+    from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.agents.store_fallback import is_full_session_id, is_session_shaped
     from fno.dispatch_flags import infer_invoking_harness
     from fno.harness_identity import canonical_handle, session_identity_key
@@ -1871,7 +1892,7 @@ def _name_lane_send(
     # recipient can answer when two workers share a head-8 clock bucket. None
     # when this session's identity is unprovable, and then the attribute is
     # omitted rather than guessed.
-    sender_session = resolve_self_session_id()
+    sender_session = _reply_session_for(from_name)
     wrapped = wrap_fno_mail(
         message,
         from_=sender,
@@ -2231,11 +2252,7 @@ def _job_lane_send(
         _mail_inject_claude,
         _mail_inject_codex,
     )
-    from fno.agents.self_stamp import (
-        resolve_self_model,
-        resolve_self_session_id,
-        stamp_from,
-    )
+    from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.dispatch_flags import infer_invoking_harness
     from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
@@ -2278,6 +2295,12 @@ def _job_lane_send(
     )
     sender_harness = infer_invoking_harness()
     sender_model = resolve_self_model()
+    # Same collision-safe reply address the name lane carries: a job address
+    # routes the message IN, and the holder still answers the sender, so the
+    # sender needs an id that survives a head-8 collision. Bound to a local
+    # because the wire is not the only place it has to land -- both durable
+    # records below read it too, and a reply consults THOSE, not the envelope.
+    sender_session = _reply_session_for(from_name)
     wrapped = wrap_fno_mail(
         message,
         from_=sender,
@@ -2286,10 +2309,7 @@ def _job_lane_send(
         to=recipient,
         node=job.node_id,
         id=msg_id,
-        # Same collision-safe reply address the name lane carries (node x-3a64):
-        # a job address routes the message IN, and the holder still answers the
-        # sender, so the sender needs an id that survives a head-8 collision.
-        from_session=resolve_self_session_id(),
+        from_session=sender_session,
     )
 
     # Live-inject to the current holder's session. Inject targets the session id
@@ -2317,6 +2337,7 @@ def _job_lane_send(
                 body=wrapped,
                 provider_from=sender_harness,
                 provider_to=provider,
+                from_session=sender_session,
                 from_model=sender_model,
                 to_kind="node",
                 word_count=authored_words,
@@ -2348,6 +2369,7 @@ def _job_lane_send(
             provider_to=provider,
             to_kind="node",
             owner=owner.value,
+            from_session=sender_session,
             word_count=authored_words,
         )
     except (OSError, ValueError, RuntimeError) as exc:

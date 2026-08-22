@@ -184,6 +184,37 @@ def test_an_unrunnable_detector_refuses_rather_than_typing_blind(monkeypatch, ca
     assert "refusing to type blind" in err
 
 
+def test_an_oserror_reading_the_pane_refuses_instead_of_raising(monkeypatch, capsys):
+    """A frame read can fail with an OSError the mux helper does not translate.
+
+    `_run_mux` converts FileNotFoundError and TimeoutExpired into a
+    DispatchAskError and nothing else, so a PermissionError on a bad FNO_BIN
+    (or ENOEXEC, or EMFILE) came back raw. The only caller catches
+    PaneSendRefused, so that killed the send with a traceback where an
+    unreadable frame demotes to the durable bus. Both facts are identical:
+    nothing looked at the pane.
+    """
+    calls: list[dict] = []
+
+    def run(argv, **kwargs):
+        calls.append({"argv": list(argv), "input": kwargs.get("input")})
+        if argv[1:4] == ["mux", "pane", "read"]:
+            raise PermissionError(13, "Permission denied")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(monkeypatch, [])
+
+    # Returns False rather than propagating: the assertion is the absence of a
+    # raised PermissionError as much as the value.
+    assert dispatch._mux_pane_send(_entry(), "hello", guarded=False) is False
+    assert "send" not in _verbs(calls)
+    err = capsys.readouterr().err
+    assert "Permission denied" in err
+    assert "refusing to type blind" in err
+
+
 def test_an_already_wrapped_body_is_not_wrapped_twice(monkeypatch):
     """The mail lane hands this function an already-enveloped body. Re-wrapping
     would nest one attribution inside another, and the renderer refuses a body

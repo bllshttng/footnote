@@ -106,21 +106,33 @@ def test_an_operator_spawn_carries_no_sidecar(monkeypatch):
     assert build_env(SEED) == {}
 
 
-def test_an_oversized_seed_refuses_rather_than_truncating(monkeypatch):
-    """A sidecar that claims to quote the seed verbatim and silently drops its
-    tail is worse than no sidecar."""
+def test_an_oversized_seed_drops_the_sidecar_and_still_launches(monkeypatch, capsys):
+    """Length is not dishonesty.
+
+    A sidecar that quotes the seed verbatim must quote all of it, so an
+    oversized seed gets no sidecar. It must NOT get a dead spawn: the callers
+    turn a raise into exit 2, which would mean a pasted plan over the cap can no
+    longer be spawned at all. Unprovable identity above takes exactly this
+    answer, and an over-long seed has strictly less wrong with it.
+    """
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_session_id",
         lambda *_a, **_k: SENDER_SESSION,
     )
-    with pytest.raises(SeedProvenanceRefused):
-        build_env("x" * (MAX_SEED_BYTES + 1))
+    assert build_env("x" * (MAX_SEED_BYTES + 1)) == {}
+    # The drop is stated, not silent: a spawn that quietly loses its attribution
+    # is the failure this module exists to make visible.
+    assert "provenance cap" in capsys.readouterr().err
 
 
 def test_a_seed_carrying_an_envelope_tag_refuses(monkeypatch):
-    """The renderer refuses a forged tag, and it should keep being the only
-    place that decides. Catching it at build time turns a silent no-sidecar into
-    a refused spawn."""
+    """The one arm that still kills the spawn, and the reason it differs.
+
+    A forged tag reaches the worker's prompt whether or not a sidecar renders,
+    so dropping the sidecar would not contain it -- only refusing the spawn
+    does. That is what separates this from the size cap, which has nothing to
+    contain and therefore launches.
+    """
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_session_id",
         lambda *_a, **_k: SENDER_SESSION,

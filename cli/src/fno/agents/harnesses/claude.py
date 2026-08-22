@@ -655,9 +655,10 @@ def bg_create(
             _seed_provenance_env(message, node=os.environ.get("FNO_NODE"))
         )
     except SeedProvenanceRefused as exc:
-        # Fail closed. Launching the one message this node promises to identify,
-        # while its attribution silently did not render, is the exact gap this
-        # closes.
+        # Only a seed carrying an <fno_mail> tag reaches here, and it is a
+        # forgery boundary rather than a rendering limit: the tag lands in the
+        # worker's prompt whether or not a sidecar renders, so the spawn is what
+        # has to stop. An oversized seed launches unattributed instead.
         raise ProviderSubprocessError(
             exit_code=2,
             stderr=(

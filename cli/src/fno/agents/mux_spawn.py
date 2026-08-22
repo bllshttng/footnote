@@ -1511,11 +1511,12 @@ def _seed_provenance_env(
     ``fno agents spawn`` in a shell authored the seed, and stamping a peer
     envelope on it would name an agent sender that does not exist.
 
-    Raises :class:`DispatchAskError` when the seed exists but cannot be honestly
-    attributed (over the size cap, or already carrying an ``<fno_mail>`` tag).
-    Fail closed: an attributed spawn whose attribution silently did not render
-    is the exact gap this node exists to close, so refuse the spawn instead of
-    launching the one message it promises to identify.
+    Raises :class:`DispatchAskError` for the one seed that cannot be launched at
+    all: one already carrying an ``<fno_mail>`` tag. The tag reaches the worker
+    whether or not a sidecar renders, so refusing the spawn is what keeps a body
+    from claiming an envelope of its own. A merely oversized seed does not come
+    through here -- ``build_env`` drops its sidecar and launches unattributed,
+    because length is not dishonesty.
     """
     from fno.mail.seed_provenance import SeedProvenanceRefused, build_env
 

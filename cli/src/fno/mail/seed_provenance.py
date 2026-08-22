@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import sys
 from typing import Mapping, Optional
 
 #: The child-environment contract. One producer per field, read back in exactly
@@ -83,10 +84,16 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
     ``resolve_harness_identity`` and never ``--from-self``: both stamp the shared
     ambient id.
 
-    Raises :class:`SeedProvenanceRefused` when the seed cannot be honestly
-    quoted -- it is over :data:`MAX_SEED_BYTES`, or it already contains an
-    ``<fno_mail>`` tag, which the renderer refuses so a body can never forge an
-    envelope boundary.
+    Raises :class:`SeedProvenanceRefused` only for a seed already carrying an
+    ``<fno_mail>`` tag. That one is a forgery boundary, not a rendering limit:
+    the tag reaches the child either way, and refusing the spawn is what stops
+    a body from claiming an envelope of its own.
+
+    A seed over :data:`MAX_SEED_BYTES` is NOT that. Nothing about it is
+    dishonest, it is only too long to quote, so it takes the same answer as an
+    unprovable identity above -- return empty and launch unattributed. Killing
+    a spawn because a pasted plan is long would make this helper a gatekeeper
+    over work it has no stake in.
     """
     from fno.agents.self_stamp import (
         resolve_self_model,
@@ -102,10 +109,13 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
 
     raw = seed.encode("utf-8")
     if len(raw) > MAX_SEED_BYTES:
-        raise SeedProvenanceRefused(
-            f"seed is {len(raw)} bytes, over the {MAX_SEED_BYTES}-byte provenance "
-            f"cap; a sidecar that quotes it must quote all of it"
+        print(
+            f"note: seed is {len(raw)} bytes, over the {MAX_SEED_BYTES}-byte "
+            f"provenance cap; spawning without a provenance sidecar. A sidecar "
+            f"that quotes the seed must quote all of it.",
+            file=sys.stderr,
         )
+        return {}
     if contains_fno_mail_tag(seed):
         raise SeedProvenanceRefused(
             "seed contains an <fno_mail> tag; the envelope frames peer mail and "

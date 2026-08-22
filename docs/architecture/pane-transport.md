@@ -78,6 +78,8 @@ The group is cleared as a whole at the shared env floor every adapter's child cr
 
 An operator spawn emits nothing. A person typing `fno agents spawn` in a shell authored the seed themselves. Stamping a peer envelope on it names an agent sender that does not exist.
 
+Two seeds get no sidecar, and only one of them also loses its spawn. A seed over the 16 KiB cap launches unattributed. A sidecar must quote the seed in full, and a pasted plan is long rather than dishonest, so there is nothing here to contain. A seed already carrying an `<fno_mail>` tag refuses the spawn. That tag reaches the worker prompt whether or not a sidecar renders, so dropping the sidecar contains nothing and only the refusal does.
+
 Note what this does and does not cover. Because the seed usually rides in on argv, `_send_source` (`cli/src/fno/agents/mux_spawn.py`) returns `preloaded` for an empty payload, and the `pane send --text payload --submit` arm is the RECOVERY path. So enveloping `pane send` covers every pane drive and the seed's recovery arm. The sidecar is what covers the common seed path.
 
 ## Out of scope

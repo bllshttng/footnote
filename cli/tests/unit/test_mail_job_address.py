@@ -387,6 +387,99 @@ def test_reply_to_node_message_routes_to_sender(runner, isolated, monkeypatch):
 
 
 
+SELF_SESSION = "01924f2a-7c31-7000-8000-0123456789ab"
+
+
+def _stub_self_session(monkeypatch, session=SELF_SESSION):
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_session_id", lambda *_a, **_k: session
+    )
+
+
+def test_job_lane_record_carries_the_full_reply_address(runner, isolated, monkeypatch):
+    """A reply reads the RECORD, so the wire stamp alone was not enough.
+
+    The job lane put `from_session` in the envelope but neither durable record
+    carried it, and `cmd_reply` consults the bus first. So a reply to a
+    `node:<id>` message fell back to the head-8 display handle -- which under
+    UUIDv7 is a truncated millisecond timestamp, shared by every worker from the
+    same ~65-second bucket, and therefore refused as ambiguous. That is the exact
+    defect this closes for the name lane.
+
+    Asserted through where the reply ROUTES rather than through the field alone:
+    a present-but-unread field would satisfy the weaker check.
+    """
+    _acquire_node("full-abcd", "33333333-3333-3333-3333-333333333333")
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
+    _stub_self_session(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True
+    )
+
+    res = runner.invoke(
+        app,
+        ["mail", "send", "node:full-abcd", "ship it", "--from-name", SELF_SESSION[:8]],
+    )
+    assert res.exit_code == 0, res.output
+    rows = _bus_to("node:full-abcd")
+    assert len(rows) == 1
+    assert rows[0].from_session == SELF_SESSION
+    # `from` stays the compact display handle; the full id is the addressable one.
+    assert rows[0].from_ == SELF_SESSION[:8]
+
+    captured: list[str] = []
+
+    def _capture(body, *, target, **_k):
+        captured.append(target)
+        return None
+
+    monkeypatch.setattr("fno.mail.cli._reply_to_name_handle", _capture)
+    reply = runner.invoke(
+        app, ["mail", "reply", "--to", rows[0].id, "--body", "got it"]
+    )
+    assert reply.exit_code == 0, reply.output
+    assert captured == [SELF_SESSION]
+
+
+def test_an_explicit_from_name_keeps_the_reply_address_it_named(
+    runner, isolated, monkeypatch
+):
+    """`--from-name` is an override, and the ambient session must not outrank it.
+
+    `cmd_reply` prefers `from_session` over `from` on every lane, so stamping
+    this session's id unconditionally routed a reply back HERE instead of to the
+    address the sender named. The flag did not error, it just went quiet, which
+    is the worse failure of the two.
+    """
+    _acquire_node("named-abc", "44444444-4444-4444-4444-444444444444")
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
+    _stub_self_session(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True
+    )
+
+    res = runner.invoke(
+        app, ["mail", "send", "node:named-abc", "ship it", "--from-name", "king"]
+    )
+    assert res.exit_code == 0, res.output
+    rows = _bus_to("node:named-abc")
+    assert len(rows) == 1
+    # Omitted, not this session's: an id here would silently win over "king".
+    assert rows[0].from_session is None
+    assert rows[0].from_ == "king"
+
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "fno.mail.cli._reply_to_name_handle",
+        lambda body, *, target, **_k: captured.append(target),
+    )
+    reply = runner.invoke(
+        app, ["mail", "reply", "--to", rows[0].id, "--body", "got it"]
+    )
+    assert reply.exit_code == 0, reply.output
+    assert captured == ["king"]
+
+
 # ---------------------------------------------------------------------------
 # Drain: a holding session surfaces job mail; a non-holder does not
 # ---------------------------------------------------------------------------

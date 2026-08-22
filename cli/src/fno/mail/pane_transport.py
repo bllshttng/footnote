@@ -106,7 +106,13 @@ def prompt_refusal(
             ],
             runner,
         )
-    except DispatchAskError as exc:
+    except (DispatchAskError, OSError) as exc:
+        # OSError too: `_run_mux` only translates FileNotFoundError and
+        # TimeoutExpired, so a PermissionError on a bad FNO_BIN (or ENOEXEC, or
+        # EMFILE) escapes it raw. The one caller catches PaneSendRefused alone,
+        # so an untranslated OSError killed the send with a traceback where an
+        # unreadable frame demotes to the durable bus. Both are the same fact:
+        # nothing looked at the pane.
         return f"pane {pane_id} frame unreadable ({exc}); refusing to type blind"
     if frame.returncode != 0:
         detail = (frame.stderr or frame.stdout or "").strip() or "no detail"
@@ -117,7 +123,10 @@ def prompt_refusal(
     if error:
         return (
             f"prompt detector unavailable ({error}); refusing to type blind. "
-            f"An instrument that never ran is not an idle pane."
+            f"An instrument that never ran is not an idle pane. The message "
+            f"still reaches the durable bus; --raw types it at the pane "
+            f"unattributed. A source checkout hits this because the detector "
+            f"resolves an INSTALLED fno-agents and skips the cargo dev target."
         )
     answerable = verdict.get("answerable") or {}
     if answerable:
