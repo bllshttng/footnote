@@ -56,6 +56,14 @@ ENVELOPE="$("$FNO_BIN" mail seed-provenance 2>/dev/null)" || {
 }
 [[ -n "$ENVELOPE" ]] || { echo '{}'; exit 0; }
 
+# Drop the C0 controls the escaper below does not cover, keeping TAB, LF and CR
+# because it does. A seed pasted from a terminal capture carries ESC, and one
+# raw control byte makes the emitted object invalid JSON, at which point the
+# harness discards the WHOLE payload. The sidecar would not degrade, it would
+# vanish, and silently. Stripping is right rather than escaping: this text is
+# rendered into a prompt, where a control byte has nothing to say.
+ENVELOPE="$(printf '%s' "$ENVELOPE" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177')"
+
 # JSON-escape via bash parameter substitution, the same single-pass pattern
 # session-start-using-fno.sh uses.
 escape_for_json() {

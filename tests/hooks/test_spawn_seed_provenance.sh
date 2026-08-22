@@ -113,4 +113,27 @@ check "corrupt seed emits no envelope" "" "$(printf '%s' "$out" | grep -o '</fno
 out="$(printf 'not json' | env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" FNO_BIN="$FNO_BIN" "${seed_env[@]}" bash "$HOOK" 2>/dev/null)"
 check "unreadable source emits no envelope" "" "$(printf '%s' "$out" | grep -o '</fno_mail>' || true)"
 
+# 7. a seed carrying a control byte still emits VALID JSON. The escaper covers
+#    backslash, quote, LF, CR and TAB and nothing else, so an ESC from a pasted
+#    terminal capture used to make the emitted object unparseable. The harness
+#    then discards the WHOLE payload, which means the sidecar does not degrade,
+#    it vanishes. Asserted by parsing the output rather than by grepping it: a
+#    grep for the envelope passes on malformed JSON, which is the failure.
+ESC_SEED="$("$PY" -c 'import base64; print(base64.b64encode(b"/fno:target x-1234 \x1b[31mred\x1b[0m").decode())')"
+out="$(run_hook startup "FNO_SEED_PROV_SEED_B64=$ESC_SEED" \
+    "FNO_SEED_PROV_FROM=119e3c52" \
+    "FNO_SEED_PROV_FROM_SESSION=119e3c52-0000-7000-8000-000000000000" \
+    "FNO_SEED_PROV_HARNESS=claude-code" \
+    "FNO_SEED_PROV_MODEL=claude-opus-5" \
+    "FNO_SEED_PROV_MSG_ID=msg-abc123")"
+check "a control byte in the seed still emits parseable JSON" "ok" \
+    "$(printf '%s' "$out" | "$PY" -c 'import json,sys
+try:
+    json.load(sys.stdin)
+    print("ok")
+except Exception as exc:
+    print(f"unparseable: {exc}")')"
+check "the envelope survives the strip" "1" \
+    "$(printf '%s' "$out" | grep -c '</fno_mail>' || true)"
+
 exit "$fail"

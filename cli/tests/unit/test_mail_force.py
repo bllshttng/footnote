@@ -213,3 +213,74 @@ def test_force_to_an_unknown_token_refuses_with_a_message(_tmp_state, monkeypatc
     assert result.exit_code != 0
     assert "totally-unknown-worker" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_force_refuses_a_row_that_is_not_live(_tmp_state, monkeypatch):
+    """A stale row's pane id may belong to somebody else by now.
+
+    The resolved lane already gates the identical call on `status == "live"`,
+    because an exited row keeps its mux ref and pane ids are reused across a mux
+    restart. `--force` needs that MORE, not less: it is reached after the ladder
+    missed, which is exactly the shape a dead recipient makes. Forcing overrides
+    the transport, never the fact that nobody is there.
+    """
+    entry, sent = _install(monkeypatch)
+    entry.status = "exited"
+
+    result = runner.invoke(
+        mail_app,
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+    )
+
+    assert result.exit_code == 1
+    assert "exited" in (result.stderr or "")
+    assert not sent, "nothing may be typed into a pane a dead row still names"
+
+
+def test_force_refuses_a_send_to_this_session(_tmp_state, monkeypatch):
+    """The ladder parks a self-send durable and `--force` returned before it.
+
+    Typing a wrapped envelope into this session's own composer, with the turn
+    interlock skipped, is what that bar exists to stop. Self-injection has its
+    own lane and it is the raw one.
+    """
+    entry, sent = _install(monkeypatch)
+    monkeypatch.setattr(
+        "fno.mail.cli._self_recipient",
+        lambda token, **_k: "0199aaaa",
+    )
+
+    result = runner.invoke(
+        mail_app,
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "note to self", "--force"],
+    )
+
+    assert result.exit_code == 2
+    assert "--to-self --raw" in (result.stderr or "")
+    assert not sent
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["send", "node:x-1234", "ship it", "--force"],
+        ["send", "--to-project", "footnote", "ship it", "--force"],
+    ],
+    ids=["job-address", "project"],
+)
+def test_force_refuses_the_lanes_that_have_no_pane(_tmp_state, monkeypatch, argv):
+    """A dropped transport flag is worse than a refused one.
+
+    Neither lane names a pane: a project note addresses a repo, and a job
+    address addresses work that outlives whatever session holds it. Both used to
+    return without ever reading the flag, so the send printed `queued (durable)`
+    while the sender believed it had been typed at a prompt.
+    """
+    _entry_row, sent = _install(monkeypatch)
+
+    result = runner.invoke(mail_app, argv)
+
+    assert result.exit_code == 2
+    assert "--force" in (result.stderr or "")
+    assert not sent
+    assert "queued (durable)" not in result.output

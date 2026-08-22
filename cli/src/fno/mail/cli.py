@@ -599,6 +599,15 @@ def _collect_refs(
 # Commands
 # ---------------------------------------------------------------------------
 
+def _is_job_name(name: Optional[str]) -> bool:
+    """True when ``name`` is a ``node:<id>`` / ``pr:<n>`` job address."""
+    if not name:
+        return False
+    from fno.mail.job_address import is_job_token
+
+    return bool(is_job_token(name))
+
+
 def _refuse_unsafe_short_address(token: Optional[str]) -> None:
     """Refuse a codex head-8 supplied as a mail ADDRESS, naming what to use.
 
@@ -1696,6 +1705,22 @@ def _forced_pane_send(
     mux = getattr(entry, "mux", None) or {}
     pane_id = mux.get("pane_id")
     mux_session = mux.get("session")
+    # Liveness, on the same rule the resolved lane states: an exited row keeps
+    # its mux ref, and pane ids are reused across a mux restart, so a stale ref
+    # types into whatever pane now holds that number. --force needs this MORE
+    # than the ladder does, because it is reached after the ladder missed, which
+    # is exactly the shape a dead recipient makes. --force overrides the
+    # transport, never the fact that nobody is there.
+    if getattr(entry, "status", None) != "live":
+        _release_budget(reservation)
+        print(
+            f"error: --force types at a live prompt and {recipient} is "
+            f"{getattr(entry, 'status', None) or 'unknown'}. Its pane id may "
+            f"already belong to another session. Send without --force to reach "
+            f"the durable bus.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
     if pane_id is None:
         _release_budget(reservation)
         print(
@@ -1916,6 +1941,21 @@ def _name_lane_send(
     # permission from nothing, so a caller must opt into a transport that cannot
     # refuse.
     if force:
+        if self_send:
+            # The ladder parks a self-send durable because a self-inject is a
+            # deadlock, and --force returned before ever reaching that. Typing a
+            # wrapped envelope into this session's own composer (guarded=False,
+            # so the turn interlock is skipped too) is what that bar exists to
+            # stop. Self-injection has its own supported lane, and it is the raw
+            # one: it carries a `self_ok` of its own and never wraps.
+            _release_budget(reservation)
+            print(
+                "error: --force cannot type into this session's own prompt. "
+                "Use --to-self --raw to self-inject a verb, or send without "
+                "--force to leave yourself a durable note.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
         entry = _resolve_pane_entry(resolved, recipient, token)
         if entry is None:
             _release_budget(reservation)
@@ -3553,6 +3593,22 @@ def cmd_send(
             verb = "appended (durable) to" if res.appended else "queued (durable) for"
             print(f"{res.msg_id} {verb} {recipient} [param-forced: --kind {kind}]")
         return
+
+    # --force types at ONE named pane, and neither lane below has one to name: a
+    # project note addresses a repo, and a job address addresses work that
+    # outlives whatever session holds it. Both returned without ever reading the
+    # flag, so the send printed `queued (durable)` while the sender believed it
+    # had been typed at a prompt. A dropped transport flag is worse than a
+    # refused one, because the receipt looks like a success.
+    if force and (to_project or (name and _is_job_name(name))):
+        addressed = "a project" if to_project else "a job address"
+        print(
+            f"error: --force types into a named pane and {addressed} has none. "
+            f"Send it to the agent by name to force a pane, or drop --force to "
+            f"queue it durable.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
 
     # Project mode: the message is the sole positional, so `send --to-project X
     # "msg"` parks "msg" in the `name` slot - accept it from either slot.

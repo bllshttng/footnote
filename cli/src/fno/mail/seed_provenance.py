@@ -103,6 +103,18 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
     from fno.dispatch_flags import infer_invoking_harness
     from fno.mail.envelope import contains_fno_mail_tag, harness_for_provider
 
+    # FIRST, ahead of every early return. This one is a fact about the SEED, not
+    # about who is spawning or how long the text is, so any check that can exit
+    # before it becomes a way to carry a forged tag past it. Both of the returns
+    # below were once reachable first: padding a tagged seed over the cap, or
+    # spawning one from a shell with no provable identity, each launched it
+    # unrefused. Order is the whole guard here.
+    if contains_fno_mail_tag(seed):
+        raise SeedProvenanceRefused(
+            "seed contains an <fno_mail> tag; the envelope frames peer mail and "
+            "a body cannot contain one"
+        )
+
     from_session = resolve_self_session_id()
     if not from_session:
         return {}
@@ -116,11 +128,6 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
             file=sys.stderr,
         )
         return {}
-    if contains_fno_mail_tag(seed):
-        raise SeedProvenanceRefused(
-            "seed contains an <fno_mail> tag; the envelope frames peer mail and "
-            "a body cannot contain one"
-        )
 
     from fno.inbox.store import generate_msg_id
 
