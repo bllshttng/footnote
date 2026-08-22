@@ -127,6 +127,99 @@ def test_unverified_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner):
     assert receipt["fno_id"] == "w1"
 
 
+def _pane_receipt(monkeypatch, **fields):
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **kwargs: mux_spawn.MuxSpawnResult(
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            session="sess-1",
+            pane_id=7,
+            child_pid=42,
+            session_uuid=None,
+            fno_id=kwargs["name"],
+            **fields,
+        ),
+    )
+
+
+def test_an_unobservable_pane_exits_nonzero_without_denying_the_seed(
+    monkeypatch, runner
+):
+    """AC4-EDGE. The clause that makes the two-field split real rather than
+    decorative.
+
+    A seed that rode in the argv onto a pane whose frame could not be read now
+    reports `submitted`, which is honest. If the exit branch still keyed only on
+    the seed word, that pane would exit 0 and its row would hold a slot against
+    max_live - the phantom-live-slot bug x-ba39 closed, reintroduced by the fix
+    for the opposite lie. The protection is kept; only the reason given for it
+    changes, and the receipt now names which half is in doubt."""
+    _stub_pane_path(monkeypatch)
+    from fno.agents.cli import agents_app
+
+    _pane_receipt(
+        monkeypatch,
+        seed="submitted",
+        seed_source="argv",
+        pane_observation="unreadable",
+    )
+
+    result = runner.invoke(
+        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"]
+    )
+
+    assert result.exit_code == 22, "a pane nobody could see must not certify a spawn"
+    receipt = json.loads(result.stdout.strip().splitlines()[-1])
+    assert receipt["seed"] == "submitted"
+    assert receipt["seed_source"] == "argv"
+    assert receipt["pane_observation"] == "unreadable"
+
+
+def test_an_observed_pane_with_a_delivered_seed_exits_clean(monkeypatch, runner):
+    """The positive control on the clause above.
+
+    Without it, a branch that exited 22 unconditionally would pass the AC4 test
+    and fail every real spawn - an absence-shaped assertion certifying itself.
+    An unpainted pane is `blank`, not `unreadable`: the read worked, the TUI
+    simply had not drawn, and that is a live worker."""
+    _stub_pane_path(monkeypatch)
+    from fno.agents.cli import agents_app
+
+    _pane_receipt(
+        monkeypatch, seed="submitted", seed_source="argv", pane_observation="blank"
+    )
+
+    result = runner.invoke(
+        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"]
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout.strip().splitlines()[-1])
+    assert receipt["pane_observation"] == "blank"
+
+
+def test_the_pane_observation_is_absent_when_no_seed_was_requested(monkeypatch, runner):
+    """A field whose job is to carry doubt must not appear asserting none.
+
+    Same only-when-set rule `seed_source` follows: a spawn with no seed never
+    looked at a pane on the seed's behalf, so it has nothing to report and says
+    nothing, rather than printing a reassuring word."""
+    _stub_pane_path(monkeypatch)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"]
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "pane_observation" not in receipt
+
+
 def test_spawn_infers_claude_from_harness(monkeypatch, runner):
     """AC2-HP: inside a claude-code session, no -p infers provider=claude."""
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-abc")

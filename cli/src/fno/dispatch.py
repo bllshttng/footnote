@@ -716,7 +716,16 @@ def _dispatch_one(
     # whole branch exists to prevent. Whether an unverified seed should also
     # release is a behaviour question with a live pane on the other side of it,
     # and it is not answered here.
+    #
+    # `seed == "submitted"` is NOT sufficient on its own, and the day the seed
+    # word stopped carrying pane doubt is the day that became true. An argv seed
+    # onto a pane whose frame could not be read now reports `submitted`, which is
+    # honest about the payload and says nothing about whether anything is left to
+    # run it. Certifying that as verified would hand every dispatcher a false
+    # `seed_verified: true` - a worse lie than the `unattempted` this change
+    # removed, because it reads as proof rather than as an absence.
     seed = getattr(result, "seed", None)
+    observation = getattr(result, "pane_observation", None)
     return {
         "outcome": "launched",
         "node": node_id,
@@ -724,5 +733,6 @@ def _dispatch_one(
         "pane_id": result.pane_id,
         "bound": result.bound,
         "seed": seed,
-        "seed_verified": seed == "submitted",
+        "pane_observation": observation,
+        "seed_verified": seed == "submitted" and observation != "unreadable",
     }

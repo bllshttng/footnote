@@ -4406,6 +4406,44 @@ def test_a_seed_that_submits_on_the_retry_still_spawns_one_worker(
     assert runner.kill_calls == []
 
 
+def test_a_delivered_seed_on_an_unreadable_pane_keeps_its_row_and_its_doubt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The pair the two-field split creates, threaded end to end.
+
+    `submitted` + `unreadable` is the receipt an argv seed earns when the pane
+    could not be read. Three things have to hold together, and each was a
+    separate way to make the split decorative: the observation must survive onto
+    `MuxSpawnResult` (every downstream reader branches on it), the retry must
+    NOT fire (it fires only from `unattempted`, and re-seeding a pane already
+    running the payload is the duplicate this family keeps producing), and the
+    pane must keep its row rather than being reaped on a doubt.
+
+    The detail is the human-facing half: a spawn nobody could observe must not
+    read as clean, so it names which half is unproven.
+    """
+    from fno.agents import mux_spawn
+    from fno.agents.registry import load_registry
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(mux_spawn, "_SEED_RETRY_DELAY_S", 0)
+
+    def fake_submit(provider, session, pane_id, seed, runner, **_kw):
+        calls.append((provider, session, pane_id, seed))
+        return (*mux_spawn._ARGV_SEED_RECEIPT, "unreadable")
+
+    monkeypatch.setattr(mux_spawn, "_submit_spawn_seed", fake_submit)
+
+    result, runner = _spawn(monkeypatch, tmp_path)
+
+    assert result.seed == "submitted"
+    assert result.seed_source == "argv"
+    assert result.pane_observation == "unreadable"
+    assert len(calls) == 1, "a delivered seed must never be re-submitted"
+    assert len(load_registry()) == 1
+    assert runner.kill_calls == [], "an unreadable frame is a doubt, not a death"
+
+
 def test_an_unconfirmed_send_is_never_retried(tmp_path: Path, monkeypatch) -> None:
     """`unconfirmed` means text was delivered and the submission was not
     confirmed, so the pane's buffer may already hold the seed. A retry there
@@ -4471,13 +4509,16 @@ def test_an_agy_trust_timeout_fails_the_spawn_rather_than_holding_a_slot():
         raise DispatchAskError("mux did not answer", exit_code=1)
 
     calls: list = []
-    state, detail, source = _submit_spawn_seed(
+    state, detail, source, pane = _submit_spawn_seed(
         "agy", "sess", 3, "seed", runner_that_times_out_after_the_modal
     )
 
     assert state == "unconfirmed", "a pane behind a live modal must not keep a row"
     assert source != "trust-cleared", "nothing read back that the gate cleared"
     assert "modal may still be up" in detail
+    # The modal WAS read on the first call, so the instrument worked. The doubt
+    # here is about the gate, which is what `unconfirmed` already says.
+    assert pane == "painted"
 
 
 def test_a_timed_out_submit_keeps_the_row_and_never_retries(

@@ -34,10 +34,12 @@ from fno.agents.spawn_defaults import resolve_lane_vendor
 #: Covers the spawner's post-`mux pane run` tail with room to spare: child-pid
 #: lookup, the <=1s readiness probe, the seed submission, the registry lock.
 #:
-#: The seed can now cost a second round: one `_SEED_RETRY_DELAY_S` sleep plus a
-#: second `_submit_spawn_seed` and its mux RPCs. That retry fires exactly on a
-#: slow-painting pane, which is where those RPCs are slowest too, so the two
-#: delays arrive together rather than independently. A miss costs
+#: The seed can cost a second round: one `_SEED_RETRY_DELAY_S` sleep plus a
+#: second `_submit_spawn_seed` and its mux RPCs. That retry fires only from
+#: `unattempted`, which an argv seed no longer reaches at all, so the worst case
+#: is now the pane-send path (agy) rather than every slow-painting pane. Keep the
+#: budget sized for it anyway: that path is slowest exactly when panes paint
+#: slowest, so the two delays arrive together rather than independently. A miss costs
 #: addressability, never the session: the hook exits 0 regardless. It leaves the
 #: row on the spawn-time session id, which the watchdog ghost lane then reports
 #: as `no transcript for <id>`, so widen this before trimming it.
