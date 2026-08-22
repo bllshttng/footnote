@@ -321,6 +321,36 @@ pub fn auto_merge_grant(cwd: &Path) -> bool {
     .unwrap_or(false)
 }
 
+/// Resolve the live `auto_merge.enabled` master switch.
+///
+/// This value is read at the irreversible native-auto-merge arm, so only a
+/// real TOML `true` grants consent. Missing candidates fall through according
+/// to normal precedence, but a present unreadable or malformed candidate is a
+/// veto: lower-precedence configuration cannot resurrect merge authority.
+pub fn auto_merge_enabled(cwd: &Path) -> bool {
+    for path in config_candidates(cwd) {
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return false,
+        };
+        let Some(table) = parse_config(&content) else {
+            return false;
+        };
+        let Some(auto_merge) = table.get("auto_merge") else {
+            continue;
+        };
+        let Some(auto_merge) = auto_merge.as_table() else {
+            return false;
+        };
+        let Some(enabled) = auto_merge.get("enabled") else {
+            continue;
+        };
+        return enabled.as_bool().unwrap_or(false);
+    }
+    false
+}
+
 /// Resolve `review.optional_apps`, the GitHub App logins whose findings are
 /// honored when present but whose absence never blocks `DonePRGreen`.
 ///
@@ -836,6 +866,80 @@ mod tests {
         assert!(!got);
     }
 
+    // --- auto_merge.enabled live master switch ----------------------------
+
+    #[test]
+    fn auto_merge_enabled_accepts_only_real_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (name, body, want) in [
+            ("ame-true", "[auto_merge]\nenabled = true\n", true),
+            ("ame-false", "[auto_merge]\nenabled = false\n", false),
+            ("ame-string", "[auto_merge]\nenabled = \"true\"\n", false),
+            ("ame-integer", "[auto_merge]\nenabled = 1\n", false),
+        ] {
+            clear_config_env();
+            let cwd = write_project_settings(name, body);
+            assert_eq!(auto_merge_enabled(&cwd), want, "fixture {name}");
+        }
+        clear_config_env();
+    }
+
+    #[test]
+    fn auto_merge_enabled_absent_is_false() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("ame-absent", "schema_version = 1\n");
+        std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+        let got = auto_merge_enabled(&cwd);
+        clear_config_env();
+        assert!(!got);
+    }
+
+    #[test]
+    fn auto_merge_enabled_malformed_project_value_masks_global_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("ame-malformed", "[auto_merge]\nenabled = \"yes\"\n");
+        let global = write_file("ame-global-true", "[auto_merge]\nenabled = true\n");
+        std::env::set_var(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            global.with_file_name("settings.json"),
+        );
+        let got = auto_merge_enabled(&cwd);
+        clear_config_env();
+        assert!(!got, "malformed project consent must veto global true");
+    }
+
+    #[test]
+    fn auto_merge_enabled_unreadable_or_invalid_project_masks_global_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (name, make_project) in [("unreadable", true), ("invalid-toml", false)] {
+            clear_config_env();
+            let cwd =
+                write_project_settings(&format!("ame-bad-file-{name}"), "schema_version = 1\n");
+            let project = cwd.join(".fno/config.toml");
+            if make_project {
+                std::fs::remove_file(&project).unwrap();
+                std::fs::create_dir(&project).unwrap();
+            } else {
+                std::fs::write(&project, "[auto_merge\nenabled = true\n").unwrap();
+            }
+            let global = write_file(
+                &format!("ame-global-true-{name}"),
+                "[auto_merge]\nenabled = true\n",
+            );
+            std::env::set_var(
+                "FNO_GLOBAL_SETTINGS_PATH",
+                global.with_file_name("settings.json"),
+            );
+            assert!(
+                !auto_merge_enabled(&cwd),
+                "{name} project consent must veto global true"
+            );
+        }
+        clear_config_env();
+    }
+
     // --- review.optional_apps reader ---------------------------------------
 
     #[test]
@@ -984,6 +1088,19 @@ mod tests {
             return;
         };
         assert_eq!(auto_merge_strategy(&linked), "squash");
+    }
+
+    #[test]
+    fn auto_merge_enabled_reads_canonical_config_from_linked_worktree() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let Some(linked) = linked_worktree_with_canonical_config(
+            "auto-merge-enabled",
+            "[auto_merge]\nenabled = true\n",
+        ) else {
+            return;
+        };
+        assert!(auto_merge_enabled(&linked));
     }
 
     #[test]

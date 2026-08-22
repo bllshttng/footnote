@@ -239,3 +239,17 @@ def test_rust_auto_merge_grant_reads_both_spellings() -> None:
         "Rust reader lost the legacy dispatch.auto_merge arm"
     )
     assert '"dispatch"' in body, "Rust reader does not compare against the grant literal"
+
+
+def test_rust_auto_merge_enabled_matches_model_default() -> None:
+    """The irreversible Rust arm reads the model's master switch and default."""
+    rs = _repo_root() / "crates" / "fno-agents" / "src" / "agents_config.rs"
+    src = rs.read_text(encoding="utf-8")
+    m = re.search(r"pub fn auto_merge_enabled.*?\n\}", src, re.DOTALL)
+    assert m, f"auto_merge_enabled not found in {rs.name} (guard inert?)"
+    body = m.group(0)
+    assert 'get("auto_merge")' in body and 'get("enabled")' in body, (
+        "Rust reader lost the canonical auto_merge.enabled spelling"
+    )
+    assert "unwrap_or(false)" in body, "Rust reader no longer fails closed"
+    assert AutoMergeBlock.model_fields["enabled"].default is False
