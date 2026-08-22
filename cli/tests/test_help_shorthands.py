@@ -11,6 +11,10 @@ and ``fno backlog done -p pr-number (-l link, -m note)`` (that flag surface
 belongs to the deprecated root ``fno done``). A substring of prose passes
 whether or not the flag is real, so the row-level checks at the bottom read
 the live command tree instead.
+
+Those checks force ``FNO_AGENTS_RUNTIME=python``. Under the default ``auto``
+runtime an ``agents`` verb can exec the fno-agents Rust front, and an exec
+replaces the pytest worker rather than failing a test.
 """
 from __future__ import annotations
 
@@ -73,9 +77,16 @@ _SHORT_BESIDE_LONG = re.compile(
 )
 
 
+# Under the default `auto` runtime some `agents` verbs exec the fno-agents Rust
+# front, which replaces this process: the pytest worker dies mid-run instead of
+# a test failing. Forcing the python runtime keeps the mature Python dispatch
+# in-process, so every legend row can be read the same way.
+_IN_PROCESS = {"FNO_AGENTS_RUNTIME": "python"}
+
+
 def _shorts_on(path: str) -> set[str]:
     """Short options click reports for a command path, read off its own --help."""
-    result = runner.invoke(app, [*path.split(), "--help"])
+    result = runner.invoke(app, [*path.split(), "--help"], env=_IN_PROCESS)
     assert result.exit_code == 0, f"`fno {path} --help` exited {result.exit_code}"
     return {
         short
@@ -100,12 +111,18 @@ def test_backlog_done_row_matches_the_command() -> None:
     assert "fno backlog done  " not in SHORTHAND_LEGEND
 
 
-# `fno agents ask` execs the fno-agents Rust front for --help, replacing this
-# process. Probing it in-process does not fail the test, it terminates the
-# pytest worker mid-run, so the row is checked by hand instead: the Python
-# command carries -H/-Y/-c/-t and no -p, and client.rs refuses `-p` off `spawn`
-# with a tombstone message.
-_EXEC_SHIM_ROWS = {"agents ask"}
+def test_agents_ask_row_matches_the_command() -> None:
+    """`fno agents ask` takes -H, not the -p the legend used to advertise.
+
+    `-p` there is a loud tombstone: client.rs refuses it off `spawn` because the
+    harness axis became --harness/-H at the axis rename. The row is checked
+    explicitly because it is the one this test file previously excluded, on the
+    grounds that probing it kills the pytest worker; the python runtime removes
+    that reason.
+    """
+    shorts = _shorts_on("agents ask")
+    assert "-H" in shorts
+    assert "-p" not in shorts
 
 
 def test_legend_names_no_dead_command() -> None:
@@ -125,7 +142,5 @@ def test_legend_names_no_dead_command() -> None:
         leaves = parts[-1].split("/") if "/" in parts[-1] else [parts[-1]]
         for leaf in leaves:
             path = " ".join(parts[:-1] + [leaf])
-            if path in _EXEC_SHIM_ROWS:
-                continue
-            result = runner.invoke(app, [*path.split(), "--help"])
+            result = runner.invoke(app, [*path.split(), "--help"], env=_IN_PROCESS)
             assert result.exit_code == 0, f"legend names `fno {path}`, which does not resolve"
