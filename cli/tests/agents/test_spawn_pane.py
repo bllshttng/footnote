@@ -4060,22 +4060,10 @@ def test_ac7_cli_refuses_passthrough_off_pane(
 
 
 def _patch_process_create_time_far_future(monkeypatch) -> None:
-    """`_pid_started_at_or_after` calls ``psutil.Process(pid).create_time()``
-    directly (wall-clock epoch seconds) - NOT `spawn_gate._process_start_time`,
-    whose opaque per-platform incarnation-token units (boot-relative clock
-    ticks on Linux, epoch microseconds on macOS) are not comparable to
-    ``spawn_started_ms`` at all. Patch the real seam so the fake pid always
-    reads as "after" any `spawn_started_ms` sampled during the test."""
-    import psutil
+    """Make a fake pane child read as newer without changing liveness reads."""
+    import fno.agents.mux_spawn as mux_spawn
 
-    class _FakeProc:
-        def __init__(self, _pid: int) -> None:
-            pass
-
-        def create_time(self) -> float:
-            return 9_999_999_999.0
-
-    monkeypatch.setattr(psutil, "Process", _FakeProc)
+    monkeypatch.setattr(mux_spawn, "_pid_started_at_or_after", lambda *_args: True)
 
 
 def test_unanswered_run_recovers_the_single_matching_pane(
@@ -4085,7 +4073,15 @@ def test_unanswered_run_recovers_the_single_matching_pane(
 
     _patch_process_create_time_far_future(monkeypatch)
     ls_stdout = json.dumps(
-        [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
+        [
+            {
+                "pane_id": 9,
+                "squad_id": 1,
+                "tab_id": 1,
+                "cwd": str(tmp_path),
+                "child_pid": 2_000_000_000,
+            }
+        ]
     )
     runner = FakeRunner(
         run_returncode=_MUX_CONTROL_UNANSWERED,
@@ -4250,7 +4246,15 @@ def test_unanswered_run_recovered_pane_without_session_id_is_reaped(
 
     _patch_process_create_time_far_future(monkeypatch)
     ls_stdout = json.dumps(
-        [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
+        [
+            {
+                "pane_id": 9,
+                "squad_id": 1,
+                "tab_id": 1,
+                "cwd": str(tmp_path),
+                "child_pid": 2_000_000_000,
+            }
+        ]
     )
     runner = FakeRunner(
         run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout, read_stdout=""
@@ -4451,7 +4455,6 @@ def test_an_agy_trust_timeout_fails_the_spawn_rather_than_holding_a_slot():
     The source must not say `trust-cleared` either. Nothing read back that the
     gate cleared, and claiming it makes a wedged pane and a healthy one produce
     identical receipts."""
-    from fno.agents import mux_spawn
     from fno.agents.mux_spawn import DispatchAskError, _submit_spawn_seed
 
     modal = "Do you trust this folder?"
