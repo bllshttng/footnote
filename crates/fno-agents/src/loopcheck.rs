@@ -1620,12 +1620,37 @@ fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
     }
 }
 
+/// True when the working tree has no uncommitted change.
+///
+/// `merge-base --is-ancestor` sees committed history only, so without this a
+/// rebase onto a base that already holds the merge would read as shipped while
+/// uncommitted follow-up edits sat in the tree. Uncommitted work IS unshipped
+/// work, which is the same charter the #447 guard was written under.
+///
+/// A git that cannot answer reads as DIRTY, so an unreadable tree never
+/// widens what counts as shipped.
+fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
+    let out = Command::new(git_bin)
+        .args(["status", "--porcelain"])
+        .current_dir(cwd)
+        .output();
+    matches!(out, Ok(o) if o.status.success() && o.stdout.is_empty())
+}
+
 /// True when local HEAD carries nothing the base does not already have.
 ///
 /// Resolves the base the same way [`classify_payload`] does, so the two cannot
-/// disagree about which remote branch is the mainline. A base that does not
-/// resolve, a git that errors, and a HEAD that is genuinely ahead all answer
-/// false, which is the conservative direction: see [`head_is_shipped`].
+/// disagree about which remote branch is the mainline. That heuristic is
+/// `origin/main` then `origin/master` and nothing else: on a repo whose
+/// mainline is named anything else, NEITHER ref resolves and this returns
+/// false, so the post-merge wedge simply stays unfixed there rather than
+/// misfiring. The PR's own `baseRefName` would answer exactly, but it is a
+/// local in `read_pr_info` rather than a field on [`PrInfo`], and threading it
+/// through is unwarranted for a repo shape this project does not have.
+///
+/// A base that does not resolve, a git that errors, and a HEAD that is
+/// genuinely ahead all answer false, which is the conservative direction: see
+/// [`head_is_shipped`].
 fn git_head_on_base(git_bin: &str, cwd: &Path) -> bool {
     for base in ["origin/main", "origin/master"] {
         let verify = Command::new(git_bin)
@@ -1675,7 +1700,11 @@ fn head_is_shipped(pr: &PrInfo, local_head: &str, git_bin: &str, cwd: &Path) -> 
     if pr.head_oid == local_head {
         return true;
     }
-    git_head_on_base(git_bin, cwd)
+    // The clean-tree condition applies to THIS arm only, deliberately. The
+    // equality arm above has always terminated on a dirty tree and changing
+    // that is a different decision with its own blast radius; the rule here is
+    // only that the new arm must not WIDEN what counts as shipped.
+    git_tree_clean(git_bin, cwd) && git_head_on_base(git_bin, cwd)
 }
 
 fn git_head_branch(git_bin: &str, cwd: &Path) -> Option<String> {
@@ -7716,11 +7745,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         author_harness.as_deref(),
                         std::env::var("FNO_DRIVER_LIB").is_ok(),
                     ) {
-                        async_wait_class(
-                            &pr_info,
-                            open_findings.is_empty(),
-                            head_is_shipped(&pr_info, &head_sha, git_bin, &cwd),
-                        )
+                        async_wait_class(&pr_info, open_findings.is_empty(), head_shipped)
                     } else {
                         None
                     };
@@ -7909,7 +7934,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                                 &pr_info,
                                 &head_sha,
                                 open_findings.is_empty(),
-                                head_is_shipped(&pr_info, &head_sha, git_bin, &cwd),
+                                head_shipped,
                             )
                         }),
                     &cwd,
@@ -9132,7 +9157,13 @@ fn build_block_reason(
     // different head and nothing to push, and this message told two such
     // sessions to push anyway. The message itself is unchanged for the case it
     // is right about: a genuinely unpushed commit.
-    if !head_shipped {
+    // The `is_empty` half is load-bearing and was nearly dropped in the
+    // refactor. `head_is_shipped` answers false for an EMPTY recorded head, so
+    // a bare `!head_shipped` would render this message with a blank sha for a
+    // `gh pr view` that returned an open PR without `headRefOid`, hiding the
+    // real CI or review blocker behind an unactionable push instruction. That
+    // is the same wedge class this whole change exists to remove.
+    if !pr.head_oid.is_empty() && !head_shipped {
         return format!(
             "PR #{} head {} != local HEAD {}: push the latest commits before completing",
             pr.number,
@@ -13449,15 +13480,22 @@ mod tests {
         }
     }
 
-    /// A git stub that answers the base probe and then decides `--is-ancestor`
-    /// from `ancestor`. Mirrors the classify_payload stubs above.
-    fn git_stub_ancestor(dir: &Path, ancestor: bool) -> std::path::PathBuf {
+    /// A git stub answering the three probes `head_is_shipped` can make: the
+    /// working-tree status, the base resolution, and `--is-ancestor`.
+    /// Mirrors the classify_payload stubs above.
+    fn git_stub(dir: &Path, ancestor: bool, clean: bool) -> std::path::PathBuf {
         let verdict = if ancestor { "exit 0" } else { "exit 1" };
+        // A clean tree is empty stdout with exit 0; a dirty one names a file.
+        let status = if clean {
+            "exit 0"
+        } else {
+            "printf ' M src/lib.rs\\n'"
+        };
         write_exec(
             dir,
             "git",
             &format!(
-                "#!/bin/sh\ncase \"$*\" in\n  rev-parse*origin/main*) exit 0 ;;\n  *is-ancestor*) {verdict} ;;\n  *) exit 1 ;;\nesac\n"
+                "#!/bin/sh\ncase \"$*\" in\n  status*) {status} ;;\n  rev-parse*origin/main*) exit 0 ;;\n  *is-ancestor*) {verdict} ;;\n  *) exit 1 ;;\nesac\n"
             ),
         )
     }
@@ -13481,7 +13519,7 @@ mod tests {
         // differs because the branch moved past its own merge, and nothing left
         // to ship.
         let dir = tempfile::tempdir().unwrap();
-        let git = git_stub_ancestor(dir.path(), true);
+        let git = git_stub(dir.path(), true, true);
         let pr = shipped_pr("23480a0e", PrState::Merged);
         assert!(head_is_shipped(
             &pr,
@@ -13498,7 +13536,7 @@ mod tests {
     #[test]
     fn head_is_shipped_still_refuses_a_commit_stacked_on_a_merged_pr() {
         let dir = tempfile::tempdir().unwrap();
-        let git = git_stub_ancestor(dir.path(), false);
+        let git = git_stub(dir.path(), false, true);
         let pr = shipped_pr("23480a0e", PrState::Merged);
         assert!(!head_is_shipped(
             &pr,
@@ -13506,6 +13544,40 @@ mod tests {
             git.to_str().unwrap(),
             Path::new(".")
         ));
+    }
+
+    /// `--is-ancestor` sees committed history only. Without the clean-tree
+    /// condition, a rebase onto a base that already holds the merge would read
+    /// as shipped while uncommitted follow-up edits sat in the tree, and the
+    /// run would terminate DonePRGreen on work nobody had committed. The old
+    /// equality predicate blocked that state incidentally; this keeps it
+    /// blocked deliberately.
+    #[test]
+    fn head_is_shipped_refuses_a_dirty_tree_on_the_ancestor_arm() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = git_stub(dir.path(), true, false);
+        let pr = shipped_pr("23480a0e", PrState::Merged);
+        assert!(!head_is_shipped(
+            &pr,
+            "fe407c3b",
+            git.to_str().unwrap(),
+            Path::new(".")
+        ));
+    }
+
+    /// A degraded `gh pr view` can return an open PR with no `headRefOid`.
+    /// `head_is_shipped` answers false for that, so a bare `!head_shipped`
+    /// would render the push message with a blank sha and hide the real
+    /// blocker. The `is_empty` guard in front of it is what prevents that.
+    #[test]
+    fn block_reason_never_demands_a_push_for_a_pr_with_no_recorded_head() {
+        let pr = shipped_pr("", PrState::Open);
+        let reason = build_block_reason(&pr, "fe407c3b", true, false);
+        assert!(
+            !reason.contains("push the latest commits"),
+            "an empty recorded head must fall through to the real blocker: {reason}"
+        );
+        assert!(!reason.is_empty(), "a reason is still rendered: {reason}");
     }
 
     #[test]
