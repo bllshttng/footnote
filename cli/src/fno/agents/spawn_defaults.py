@@ -934,17 +934,35 @@ def resolve_lane_vendor(
     return None
 
 
-def _warn_model_vendor_mismatch(
-    argv: Sequence[str], err: IO[str], env: Optional[Mapping[str, str]] = None
+def _check_model_vendor_mismatch(
+    argv: Sequence[str],
+    err: IO[str],
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    model_source: Optional[str] = None,
 ) -> None:
-    """Advisory warning when a model string implies a vendor the resolved lane
-    does not match (a glm-* model with no zai route, a gpt-* under a claude
-    harness). Warn, never refuse: the pairing is legal and passthrough is
-    deliberate. Names BOTH sides, because a warning naming only the mismatch
-    does not tell the caller which half to change. Runs on the FINAL argv so
-    explicit flags and injected defaults are judged together. An explicit
-    --route suppresses the warning: the caller named the lane AND the model,
-    which is a deliberate override, not the misroute this catches."""
+    """Judge a model string whose implied vendor the resolved lane does not
+    match (a glm-* model with no zai route, a gpt-* under a claude harness).
+
+    WHAT THE CALLER TYPED AND WHAT CONFIG SUPPLIED ARE DIFFERENT FACTS, and
+    ``model_source`` is the only thing that separates them. It carries the
+    config path when this model was INJECTED, and None when the caller named it.
+
+    A typed model still warns and proceeds, unchanged: that pairing is legal
+    and the passthrough is deliberate. An INJECTED model that cannot run on the
+    resolved lane REFUSES, because nobody chose that pairing. The worker it
+    would otherwise start accepts a seed, reports live, and dies on its first
+    inference, so the receipt reads healthy for a session that cannot work.
+
+    This ran on the FINAL argv alone for exactly the reason it could not tell
+    the two apart: by then an injected default and an explicit flag look the
+    same. Both messages name BOTH sides, because naming only the mismatch does
+    not tell the caller which half to change; the refusal also names the config
+    key, which is the half a caller who typed nothing has to edit.
+
+    An explicit --route suppresses both: the caller named the lane AND the
+    model, which is a deliberate override, not the misroute this catches.
+    """
     toks = list(argv[1:])
     model = _flag_value(toks, "--model", "-m")
     implied = _implied_vendor(model)
@@ -958,6 +976,10 @@ def _warn_model_vendor_mismatch(
     lane = resolve_lane_vendor(argv, env=env)
     if not lane or lane == implied:
         return
+    # One predicate, read once. Deriving the event's `outcome` separately
+    # from the branch below is how a measurement starts disagreeing with
+    # the thing it measures.
+    refusing = bool(model_source) and _flag_value(toks, "--account") is None
     from fno.agents import events
 
     events.emit(
@@ -965,7 +987,33 @@ def _warn_model_vendor_mismatch(
         model=model,
         implied_vendor=implied,
         resolved_vendor=lane,
+        model_source=model_source or "explicit",
+        outcome="refused" if refusing else "warned",
     )
+    if refusing:
+        # THE ACCOUNT AXIS IS INVISIBLE HERE, so its presence downgrades the
+        # refusal back to a warning. `resolve_lane_vendor` reads route, then
+        # provider, then harness; it never consults `--account`, and an account
+        # can carry its own vendor credential. So a zai account paired with a
+        # glm model under a claude harness is a WORKING spawn this check reads
+        # as a mismatch. Refusing it stops the fleet spawning to prevent a
+        # failure that was not going to happen, and the `-P` escape the message
+        # suggests would compose a different credential and a different bill.
+        # Refuse only where nothing could have chosen the pairing.
+        #
+        # Fail closed with empty stdout, the posture `fno workspace worktree
+        # ensure` takes on an out-of-enum policy value: a caller holding a
+        # refusal is better off than one holding a live-looking worker.
+        print(
+            f"fno agents spawn: refusing to spawn. {model_source} supplies "
+            f"--model {model!r}, which implies vendor {implied}, but this spawn "
+            f"resolves the {lane} lane. Nothing typed this pairing, and the "
+            f"worker would start, report live, and fail on its first inference. "
+            f"Set a model for the {lane} lane at {model_source}, or name the vendor "
+            f"on this spawn with -P {implied}.",
+            file=err,
+        )
+        raise SystemExit(2)
     print(
         f"fno agents spawn: --model {model!r} implies vendor {implied}, but the "
         f"resolved lane is {lane}; the model rides that lane's CLI as-is. Name "
@@ -1099,7 +1147,8 @@ def inject_spawn_defaults(
         cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
         or cfg_route or cfg_account or cfg_pane_group
     ):
-        _warn_model_vendor_mismatch(out, err, env)
+        # No config field resolved at all, so any --model here was typed.
+        _check_model_vendor_mismatch(out, err, env)
         return out
 
     # A spawn carrying --role whose lane resolves to a real route is billed on
@@ -1492,7 +1541,14 @@ def inject_spawn_defaults(
         # the off-pane passthrough gate re-runs on the final argv, not just the
         # operator's.
         _refuse_off_pane_passthrough(out[1:], err)
-    _warn_model_vendor_mismatch(out, err, env)
+    # `from_config` is the record of what was actually INJECTED, so it is the
+    # only honest answer to "did anyone choose this model?". Reading the config
+    # value instead would refuse a typed model that merely happens to sit
+    # beside a configured one.
+    model_source = next(
+        (source for axis, _value, source in from_config if axis == "model"), None
+    )
+    _check_model_vendor_mismatch(out, err, env, model_source=model_source)
     return out
 
 

@@ -250,12 +250,18 @@ def serialize_entry(
         # reading is never a fresh one.
         "last_event_at": last_event_at,
         "last_message": last_message,
-        # Internal input to the shared projection rule; it is removed before
+        # Internal inputs to the shared projection rule; both are removed before
         # the row reaches the wire because pid identity is not a row verdict.
+        # `pid` has to be here even though this serializer never publishes it:
+        # the shared rule gates on it FIRST, so a row that omits it reads
+        # `liveness_origin: null` with basis `pid-absent` forever, and the field
+        # is dead on the very path `fno agents list` serves.
+        "pid": entry.pid,
         "pid_start_time": entry.pid_start_time,
     }
     row = project_row(row)
     row.pop("pid_start_time", None)
+    row.pop("pid", None)
     return row
 
 

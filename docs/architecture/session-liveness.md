@@ -24,6 +24,40 @@ It never establishes death, orphaning, work ownership, or completion, and it is 
 
 Verify the writer and reader contracts with `bash tests/hooks/test_claim_heartbeat.sh` and `bash tests/hooks/test_worktree_live_peers.sh`.
 
+## What is proved and what is assumed
+
+Every liveness word the fleet renders is one of two things. A measurement, which some code actually took. Or an inference, which some code drew from evidence that does not entail it. The words look identical in a row, so this table says which is which.
+
+| Record | What a reader takes it to assert | What the code probed | Proved? |
+|---|---|---|---|
+| claim `live` | the holder process is running | pid exists on this host, and its create time predates the claim | yes |
+| claim `stale` | the holder is dead | the TTL lapsed and the pid is not live | yes |
+| claim `suspect` | something is wrong with the holder | one bit: `is_live` returned false | no, five causes share the word |
+| `liveness_origin` `survivor` or `resumed` | the pid started with, or after, the session | `created_at` and `pid_start_time` inside a 600 second band | yes |
+| `liveness_origin: null` | no origin could be established | one of five named causes, in `liveness_origin_basis` | yes, since the basis names it |
+| roster `live` from a spawn receipt | the worker can do work | a process started and a seed was accepted | no, it cannot show the model runs |
+| roster `orphaned` | the worker died | a family-1 `done` or `stalled` verdict | yes for `stalled`, an inference for `done` |
+
+`claim suspect` is the one row where a reader cannot recover the cause. `cli/src/fno/claims/staleness.py::is_live` returns false for five distinct situations. The claim is on another machine. The OS does not report the pid. The pid was reused. Permissions refused the inspection. Or the holder was never a long-lived process. `claim_status` returns the raw inputs but no basis, so every caller reads one word for all five. A PreToolUse hook exits immediately, so every hook-registered hold sits in this state permanently and looks the same as a crashed worker.
+
+### The claim classifier is duplicated and only partly guarded
+
+`cli/src/fno/claims/staleness.py::classify` and `crates/fno-agents/src/claims.rs::classify` are two implementations of one rule, including the hybrid and suspect arms. Each says in a comment that it mirrors the other. No test drives both, so the comment is the only thing holding them together. They agree today, read line by line.
+
+`liveness_origin` is the same shape and now has the guard the classifier lacks. Both producers read one corpus, `schemas/agents-row-contradiction.json`, asserted from Python in `cli/tests/agents/test_row_contradiction.py` and from Rust in `row_contradiction_fixture_matches_python_projection`.
+
+That corpus is worth reading before trusting any parity claim here. It existed and drove both languages while the two producers still disagreed, because none of its cases carried the one row shape that separated them. A corpus blind to a divergence reads exactly like a corpus proving there is none. Add the case that fails before you add the rule that passes.
+
+### `pid_start_time` is an opaque token, not a clock
+
+Do not read this field as a wall clock. At least three writers fill it, in at least three conventions. `daemon.rs::process_start_time` writes Linux clock ticks and macOS microseconds. `spawn_gate.py::_process_start_time` does the same split. `claude_adopt.rs` passes through whatever claude's own roster recorded.
+
+The column is compared only for equality, against a value captured for the same pid, which is why the mismatched units never mattered. `pid_is_ours` and `_pid_alive` both do that. Converting one writer to epoch time breaks those comparisons across writers, and a failed comparison reaps a live worker.
+
+`liveness_origin` does read it as a clock, and that is why it reports null on Linux. A tick count sits below the epoch-micros floor the row parsers accept. The basis says `pid-start-unreadable` there, which is the true answer. A consumer that needs a real start time needs its own field.
+
+One sharp edge in that floor. It separates a token below roughly 1e12 from one above, which sorts ticks from microseconds. It does not sort microseconds from milliseconds. A millisecond stamp parses as a date in 1970 and can yield a confident `survivor` with a null basis.
+
 ## Read-side dispositions
 
 | Surface | Disposition |

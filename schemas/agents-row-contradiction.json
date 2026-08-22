@@ -62,7 +62,8 @@
         "pid_start_time": "2026-08-21T00:31:40Z"
       },
       "expected": {
-        "liveness_origin": "resumed"
+        "liveness_origin": "resumed",
+        "liveness_origin_basis": null
       }
     },
     {
@@ -73,7 +74,8 @@
         "pid_start_time": "2026-08-20T23:00:50Z"
       },
       "expected": {
-        "liveness_origin": "survivor"
+        "liveness_origin": "survivor",
+        "liveness_origin_basis": null
       }
     },
     {
@@ -84,7 +86,78 @@
         "pid_start_time": null
       },
       "expected": {
-        "liveness_origin": null
+        "liveness_origin": null,
+        "liveness_origin_basis": "pid-start-absent"
+      }
+    },
+    {
+      "name": "pidless row is not origin evidence",
+      "row": {
+        "created_at": "2026-08-20T23:00:00Z",
+        "pid_start_time": "2026-08-20T23:00:50Z"
+      },
+      "expected": {
+        "liveness_origin": null,
+        "liveness_origin_basis": "pid-absent"
+      }
+    },
+    {
+      "name": "created_at absent is its own cause",
+      "row": {
+        "pid": 123,
+        "pid_start_time": "2026-08-20T23:00:50Z"
+      },
+      "expected": {
+        "liveness_origin": null,
+        "liveness_origin_basis": "created-at-absent"
+      }
+    },
+    {
+      "name": "epoch micros token is a readable start time",
+      "row": {
+        "created_at": "2026-08-20T23:00:00Z",
+        "pid": 123,
+        "pid_start_time": 1787266850000000
+      },
+      "expected": {
+        "liveness_origin": "survivor",
+        "liveness_origin_basis": null
+      }
+    },
+    {
+      "name": "boot relative tick token is unreadable not absent",
+      "row": {
+        "created_at": "2026-08-20T23:00:00Z",
+        "pid": 123,
+        "pid_start_time": 4523891
+      },
+      "expected": {
+        "liveness_origin": null,
+        "liveness_origin_basis": "pid-start-unreadable"
+      }
+    },
+    {
+      "name": "created_at present but unreadable is not created_at absent",
+      "row": {
+        "created_at": "not-a-timestamp",
+        "pid": 123,
+        "pid_start_time": "2026-08-20T23:00:50Z"
+      },
+      "expected": {
+        "liveness_origin": null,
+        "liveness_origin_basis": "created-at-unreadable"
+      }
+    },
+    {
+      "name": "a start time before created_at falls through to survivor",
+      "row": {
+        "created_at": "2026-08-20T23:00:00Z",
+        "pid": 123,
+        "pid_start_time": "2025-08-20T23:00:00Z"
+      },
+      "expected": {
+        "liveness_origin": "survivor",
+        "liveness_origin_basis": null
       }
     }
   ]

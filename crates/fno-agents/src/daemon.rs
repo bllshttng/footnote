@@ -358,6 +358,14 @@ pub fn recover(
 /// unsupported/failed. The value is a per-host, per-boot quantity compared only
 /// for equality against a value captured for the SAME pid, so the differing
 /// units across platforms (Linux ticks vs macOS microseconds) do not matter.
+///
+/// DO NOT read this as a wall clock. At least three writers fill the column it
+/// lands in, in at least three conventions: this function (Linux ticks / macOS
+/// micros), `_process_start_time` in cli/src/fno/agents/spawn_gate.py, and
+/// `claude_adopt.rs`, which passes through whatever claude's own roster wrote.
+/// Converting one of them to epoch time makes the equality comparisons in
+/// `pid_is_ours` and `_pid_alive` fail across writers, which reaps live workers.
+/// A consumer that needs a real start time needs its own field, not this token.
 #[cfg(target_os = "linux")]
 pub fn process_start_time(pid: u32) -> Option<u64> {
     // /proc/<pid>/stat field 22 (1-based) is `starttime` in clock ticks since
@@ -4720,22 +4728,63 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
         );
     }
 
-    let has_pid = row.get("pid").is_some_and(|value| !value.is_null());
-    let liveness_origin = if !has_pid {
-        Value::Null
-    } else if let (Some(created_at), Some(pid_started_at)) = (
-        row_timestamp(row.get("created_at")),
-        row_timestamp(row.get("pid_start_time")),
-    ) {
-        if (pid_started_at - created_at).num_seconds() > 600 {
-            json!("resumed")
-        } else {
-            json!("survivor")
-        }
-    } else {
-        Value::Null
+    // Both keys ALWAYS ride the row, as `reachability`/`basis` and
+    // `progress`/`progress_basis` already do on this same row. A conditional
+    // key cannot be told apart from a producer that forgot to set one, and the
+    // list-row contract in schemas/agents-list-row.json is an exact key set.
+    let (origin, origin_basis) = liveness_origin(row);
+    row.insert("liveness_origin".into(), origin);
+    row.insert(
+        "liveness_origin_basis".into(),
+        origin_basis.map_or(Value::Null, |basis| json!(basis)),
+    );
+}
+
+/// Parse one row timestamp into `(value, basis)`, separating absent from
+/// unreadable. Mirrors `_read_field` in cli/src/fno/agents/row_contradiction.py.
+///
+/// Folding the two together is what let `liveness_origin: null` mean five
+/// different things at once, so a reader holding one null could not tell
+/// "nothing was recorded" from "something this parser cannot read".
+fn row_field_with_basis(
+    row: &Map<String, Value>,
+    key: &str,
+    label: &str,
+) -> (Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
+    match row.get(key) {
+        None | Some(Value::Null) => (None, Some(format!("{label}-absent"))),
+        raw => match row_timestamp(raw) {
+            Some(parsed) => (Some(parsed), None),
+            None => (None, Some(format!("{label}-unreadable"))),
+        },
+    }
+}
+
+/// Return `(liveness_origin, basis)` for one row. Mirrors `_liveness_origin`
+/// in cli/src/fno/agents/row_contradiction.py, and the shared fixture at
+/// schemas/agents-row-contradiction.json drives both.
+///
+/// THE PID GATE COMES FIRST. This producer already checked it and the Python
+/// one did not, so a pidless row read `survivor` there and null here: one
+/// field, two reachable implementations, one guard. A non-null origin carries
+/// no basis, because the value is its own evidence.
+fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
+    if !row.get("pid").is_some_and(|value| !value.is_null()) {
+        return (Value::Null, Some("pid-absent".to_string()));
+    }
+    let (created_at, basis) = row_field_with_basis(row, "created_at", "created-at");
+    let Some(created_at) = created_at else {
+        return (Value::Null, basis);
     };
-    row.insert("liveness_origin".into(), liveness_origin);
+    let (pid_started_at, basis) = row_field_with_basis(row, "pid_start_time", "pid-start");
+    let Some(pid_started_at) = pid_started_at else {
+        return (Value::Null, basis);
+    };
+    if (pid_started_at - created_at).num_seconds() > 600 {
+        (json!("resumed"), None)
+    } else {
+        (json!("survivor"), None)
+    }
 }
 
 fn rendered_status_from_truth(
