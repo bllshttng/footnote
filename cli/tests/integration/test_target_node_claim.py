@@ -201,7 +201,6 @@ def test_held_by_other_refuses(tmp_path):
         "exit 1 must touch the cancel sentinel"
     assert "target_claim_blocked_reason: claim_held_by_other" in state
     assert f"graph_node_id: {NODE_ID}" in state
-    assert "graph_node_claim_refused: held_by_other" in state
     assert f'target_claim_key: "node:{NODE_ID}"' not in state
 
 

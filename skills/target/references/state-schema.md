@@ -130,7 +130,6 @@ mission_from_msg_id: ""
 
 ```yaml
 graph_node_id: ""                    # backlog node ID associated with this session
-graph_node_claim_refused: false      # true if claim acquisition failed
 target_claim_key: ""                 # claim key (node:<id>)
 target_claim_holder: "target-session:<claim-owner-id>"
 target_claim_ttl: ""

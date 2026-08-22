@@ -218,7 +218,7 @@ Sessions with `no_ship: true` OR `advisory: true` in the manifest:
 
 **Mission fields:** `mission_id`, `mission_wave`, `mission_slug`, `mission_from_msg_id`
 
-**Graph node** (appended when a node is found): `graph_node_id`, `graph_node_claim_refused`, `target_claim_key`, `target_claim_holder`, `target_claim_ttl`, `target_claim_blocked_reason`
+**Graph node** (appended when a node is found): `graph_node_id`, `target_claim_key`, `target_claim_holder`, `target_claim_ttl`, `target_claim_blocked_reason`
 
 **Write-once enforcement:**
 - Detection: manifest is immutable iff frontmatter has no `status:` key.

@@ -1536,7 +1536,6 @@ PYEOF
           else
             touch "$STATE_DIR/.target-cancelled"
             echo "target_claim_blocked_reason: claim_held_by_other" >> "$STATE_FILE"
-            echo "graph_node_claim_refused: held_by_other" >> "$STATE_FILE"
           fi
         else
           echo "target_claim_blocked_reason: acquire_error_rc_${_acq_rc}" >> "$STATE_FILE"
@@ -1581,11 +1580,9 @@ PYEOF
     # the graph. The grep this replaced could not tell a real node from an id
     # merely referenced in some other node's blocked_by, so it stamped
     # graph_node_id for nodes that do not exist.
-    if [[ -n "$_NODE_ID" ]]; then
-      echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
-    else
-      echo "graph_node_id: null" >> "$STATE_FILE"
-    fi
+    # Unconditional: this whole block is already inside `-n "$_NODE_ID"`, so the
+    # null arm that used to sit here could never run.
+    echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
   else
     echo "graph_node_id: null" >> "$STATE_FILE"
   fi
