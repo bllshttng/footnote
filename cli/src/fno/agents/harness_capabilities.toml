@@ -165,7 +165,7 @@ ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = []
 send_keys_enter_delay_ms = 0
-submit_keys = ["unsupported"]
+submit_keys = ["enter"]
 stop_strategy = "registry-noop"
 remove_strategy = "registry-only"
 session_binding = { strategy = "unsupported", required = false, timeout_ms = 0 }
