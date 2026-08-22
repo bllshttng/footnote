@@ -475,6 +475,56 @@ This records WHOSE process rendered a verdict; the role-routing note in
 and states the claim this makes measurable: keep the reviewer off the authoring
 worker; a role table cannot enforce it.
 
+## The in-flight review hold
+
+Every gate above answers one question: what verdict EXISTS for this head. None of them can answer the other one. A review that is RUNNING has produced no verdict yet, so it is invisible to `review_coverage`, to `required_bots`, and to `ready`.
+
+Three PRs on 2026-08-22 read green, settled, mergeable and `ready: true` with an empty `ready_blockers` while a review of that exact head was mid-flight. PR 1068 had a code-review fork writing to the worktree. PR 1071's worker was mid-sentence, "Committing the review fixes". PR 1072's worker had already counted five findings and named the two files. All three were caught by a human holding on judgment, and that judgment was encoded nowhere.
+
+The window is the default ordering rather than a race. A review is dispatched when a head is pushed. CI runs against that same head in parallel. CI is bounded, roughly nineteen minutes in this repo, and a review is not. Green therefore arrives FIRST, reliably, so any merge decision taken the moment a PR turns green lands inside the window.
+
+Config makes this worse rather than better. With `required_bots` unset, `reviewers` empty and `self_review_required` false, `_review_lane_configured` short-circuits the coverage gate to COVERED, so `ready: true` is correct against the configured policy and wrong against the world. The hold is therefore config-independent: a review that is running blocks whether or not any review was ever required.
+
+### Two layers
+
+The **registered hold** is a TTL claim on `review:branch:<branch>`, taken where a review is DISPATCHED rather than by the reviewer itself, so a reviewer that crashes still leaves behind the hold its dispatcher took. It is a claim rather than a new state file because `fno.claims` already owns atomic acquisition, TTL bounds, the LIVE / SUSPECT / STALE / CORRUPTED classification, and a reaper. `review:` is not a global-id prefix, so the key routes to the canonical repo root and every worktree of the project shares one hold.
+
+The **worktree probe** is derived and needs no cooperation: tracked modifications on the branch, or a local HEAD that is not what the PR would merge. It covers every review footnote never dispatched.
+
+Neither layer covers the specimens alone. The probe is blind to the window between "review dispatched" and "first edit", which is where PR 1072 sat when it went green. The hold is blind to any review nothing registered.
+
+### Where the hold is taken and cleared
+
+| Site | Registers | Why it is the one that matters |
+|---|---|---|
+| `PreToolUse` on the Skill tool (`hooks/review-hold.sh acquire`) | yes | all three specimens were reviews the worker self-invoked through this tool, which is not footnote code and cannot register on its own |
+| `PostToolUse` on the Skill tool (`hooks/review-hold.sh release`) | releases | the tool call returned |
+| `skills/review/scripts/emit-attestation.sh` | releases | the positive completion marker: a verdict now exists for this head, so the release and the proof are one event |
+| a human or an unhooked harness | no | the named residual gap, covered only by the worktree probe |
+
+Registration NEVER blocks a review from starting. A review that runs unheld is covered by the probe; a review that refuses to start because a lockfile write failed is strictly worse.
+
+### Who reads it
+
+| Surface | Behavior |
+|---|---|
+| `fno do pr status <n>` | `ready` goes false, `ready_blockers` names the layer, and `review_activity` reports both probes whether or not they blocked |
+| `fno do pr merge <n>` | refuses beside the plan hold and BEFORE the `auto_merge` gate |
+| the auto-merge lane | the same refusal: it is not a separate caller, it is `run_merge` with `auto_merge.enabled`, and it is the caller with no judgment to fall back on |
+| a bare `gh pr merge` via `hooks/git-protection.py` | denies coarsely, reading the claims directory directly |
+
+The hook reads files rather than shelling a third `fno` probe. The two vetoes above it already spend 25s each against a 60s harness budget with under 6s of margin, and a hook that gets killed emits no verdict at all. That coarseness is deliberate in the safe direction: any review hold in the repo denies, without mapping the PR to its branch, which would need the network call the hook path exists to avoid. It also does not judge expiry, because hybrid liveness can keep a TTL-lapsed hold LIVE, so a TTL-only read there could ALLOW what the guard refuses. A wrong deny costs one command.
+
+### Failing safe in both directions
+
+A missing hold is never by itself the clear answer. It clears only when the worktree enumeration also RAN and answered. A corrupted lockfile, an unreadable claims root, a failed `git worktree list`, or a PR whose head branch cannot be resolved all block, because an unprobed PR is not a clear one.
+
+A hold that outlives a crashed reviewer would wedge the merge lane permanently, which is worse than the defect it prevents, so it ages out on `config.review.hold_ttl_minutes` (default 90). It never ages out silently: the surface that clears past a lapsed hold prints a line naming the holder and the expiry, and emits `review_hold_expired`. A lane that clears with no receipt is indistinguishable from one that was never held.
+
+There is no self-exemption. An author who merges over its own uncommitted fixes loses them as surely as a stranger does, and a caller-relative `ready` would mean two readers of one payload get different answers.
+
+To clear a hold by hand: `fno do pr review-hold release --branch <b> --holder <h>`. To read one: `fno do pr review-hold check <pr>`, exit 0 clear, 3 held, 4 a dead instrument.
+
 ## Producer reachability: every path that reaches the gate
 
 `fno do pr merge` refuses a PR whose `review_coverage` event says uncovered, unknown, stale, or missing. For most of the gate's life exactly one writer existed: `read_pr_info` under `run_done`, which `decide()` reaches only past a streak counter. A session with no `.fno/target-state.md` runs no stop hook at all, so no row will ever exist. The gate was unsatisfiable for that session shape, not strict. This is the decorative-guard pitfalls entry inverted: a PRODUCER on one of N paths.
