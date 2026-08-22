@@ -1949,8 +1949,73 @@ def digest_text(payload: dict, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
+def _send_machine_report(
+    to: str, body: str, *, runner: Callable | None = None
+) -> tuple[bool, str]:
+    """Send a generated watchdog report through the transport layer.
+
+    The authored-prose gate belongs to operator-written relay mail. Watchdog
+    reports use the existing dispatch transport directly, so their measured
+    rows can exceed that prose budget without adding a caller-facing bypass.
+    ``runner`` remains an injectable subprocess seam for the legacy unit tests.
+    """
+    if runner is not None:
+        argv = [*_fno(), "agents", "mail", "send"]
+        if to.startswith("project:"):
+            argv += ["--to-project", to[len("project:"):]]
+        else:
+            argv.append(to)
+        argv.append(body)
+        try:
+            proc = runner(argv, capture_output=True, text=True, timeout=60, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"mail send failed: {exc}"
+        return proc.returncode == 0, (proc.stdout or proc.stderr or "").strip()
+
+    from fno.agents.dispatch import (
+        DispatchAskError,
+        dispatch_send,
+        dispatch_send_to_project,
+    )
+    from fno.inbox.store import ProjectIdentificationError, resolve_project
+
+    try:
+        sender = resolve_project(cwd=Path.cwd(), flag_hint="--from-name")
+    except ProjectIdentificationError:
+        # A watchdog daemon can run outside any checkout. Let dispatch use its
+        # existing neutral sender instead of dropping the alert at resolution.
+        sender = None
+
+    dispatch_kwargs: dict[str, object] = {"budget_enforce": False}
+    if sender is not None:
+        dispatch_kwargs["from_name"] = sender
+
+    try:
+        if to.startswith("project:"):
+            result = dispatch_send_to_project(
+                to[len("project:"):],
+                body,
+                cwd=Path.cwd(),
+                **dispatch_kwargs,
+            )
+        else:
+            result = dispatch_send(
+                name=to,
+                message=body,
+                provider=None,
+                cwd=Path.cwd(),
+                **dispatch_kwargs,
+            )
+    except DispatchAskError as exc:
+        return False, str(exc)
+
+    if result.delivery == "hosted":
+        return True, f"{result.msg_id} delivered (hosted)"
+    return True, f"{result.msg_id} queued (durable) [{result.reason or 'live-miss'}]"
+
+
 def mail_digest(
-    payload: dict, to: str, *, runner: Callable = subprocess.run
+    payload: dict, to: str, *, runner: Callable | None = None
 ) -> tuple[bool, str]:
     """Push the verdict to a mail handle (push, not pull: a verdict the king
     has to remember to fetch goes unread). Skipped without comment when the
@@ -1967,22 +2032,11 @@ def mail_digest(
         return True, "all rows leave, nothing to say"
     if verdict_signature(payload) == _last_signature():
         return True, "unchanged since the last sweep, not mailed"
-    argv = [*_fno(), "agents", "mail", "send"]
-    if to.startswith("project:"):
-        argv += ["--to-project", to[len("project:"):]]
-    else:
-        argv.append(to)
-    argv.append(digest_text(payload))
-    try:
-        proc = runner(argv, capture_output=True, text=True, timeout=60, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"mail send failed: {exc}"
-    ok = proc.returncode == 0
-    return ok, (proc.stdout or proc.stderr or "").strip()
+    return _send_machine_report(to, digest_text(payload), runner=runner)
 
 
 def mail_gate(
-    payload: dict, to: str, *, runner: Callable = subprocess.run
+    payload: dict, to: str, *, runner: Callable | None = None
 ) -> tuple[bool, str, str]:
     """``(ok, receipt, signature_to_stamp)``: run the mail lane and hand back
     the signature the sweep file should carry, so a caller cannot stamp a

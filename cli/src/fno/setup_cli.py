@@ -669,7 +669,8 @@ def wizard_cmd(
 
     typer.echo(
         f"\nwizard complete: {n} key(s) written. "
-        "`fno config doctor` checks your paths. `fno doctor --blockers` checks this machine."
+        "`fno config doctor` checks your paths. `fno doctor --blockers` checks this machine. "
+        "See what runs without you: `fno agents autonomy status`."
     )
 
     # Optional capstone: install footnote's recommended claude-code rules into

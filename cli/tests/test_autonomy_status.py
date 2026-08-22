@@ -76,6 +76,18 @@ def test_ac1_hp_every_known_spawner_appears(
         assert r.rank in {"env", "config", "default", "autonomy"}
 
 
+def test_first_run_surfaces_name_autonomy_status_and_default_merge_posture() -> None:
+    readme = Path(__file__).parents[2] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+
+    from fno.config import SettingsModel
+
+    assert SettingsModel().auto_merge.enabled is False
+    assert "fno agents autonomy status" in text
+    assert "green" in text
+    assert "opt in" in text
+
+
 def test_ac1_hp_env_override_rank_is_visible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
