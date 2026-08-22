@@ -38,7 +38,7 @@ def _read_field(
     """Parse one timestamp field into ``(value, basis)``.
 
     Absent and unreadable are separated deliberately. Folding them together is
-    what made ``liveness_origin: null`` mean four different things, and a reader
+    what made ``liveness_origin: null`` mean five different things, and a reader
     holding one null could not tell "nothing was recorded" from "something was
     recorded that this parser cannot read".
     """
@@ -96,8 +96,11 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
         projected["last_message_at"] = None
         projected["last_message_at_basis"] = "refused-newer-than-transcript"
 
+    # Both keys ALWAYS ride the row, as `reachability`/`basis` and
+    # `progress`/`progress_basis` already do on this same row. A conditional
+    # key cannot be told apart from a producer that forgot to set one, and the
+    # list-row contract in schemas/agents-list-row.json is an exact key set.
     origin, origin_basis = _liveness_origin(row)
     projected["liveness_origin"] = origin
-    if origin_basis is not None:
-        projected["liveness_origin_basis"] = origin_basis
+    projected["liveness_origin_basis"] = origin_basis
     return projected

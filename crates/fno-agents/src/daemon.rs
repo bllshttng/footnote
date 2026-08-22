@@ -4729,11 +4729,16 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
         );
     }
 
-    let (liveness_origin, liveness_origin_basis) = liveness_origin(row);
-    row.insert("liveness_origin".into(), liveness_origin);
-    if let Some(basis) = liveness_origin_basis {
-        row.insert("liveness_origin_basis".into(), json!(basis));
-    }
+    // Both keys ALWAYS ride the row, as `reachability`/`basis` and
+    // `progress`/`progress_basis` already do on this same row. A conditional
+    // key cannot be told apart from a producer that forgot to set one, and the
+    // list-row contract in schemas/agents-list-row.json is an exact key set.
+    let (origin, origin_basis) = liveness_origin(row);
+    row.insert("liveness_origin".into(), origin);
+    row.insert(
+        "liveness_origin_basis".into(),
+        origin_basis.map_or(Value::Null, |basis| json!(basis)),
+    );
 }
 
 /// Parse one row timestamp into `(value, basis)`, separating absent from
