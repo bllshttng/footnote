@@ -2267,14 +2267,24 @@ fn format_success(
                     .get("harness_row_id")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
+                // Prefer the FULL session id over `harness_row_id`: that field
+                // falls back to this id's first eight chars, which is not a
+                // unique adopt key for a codex row (time-prefixed ids collide
+                // across same-window sessions) and is not even hex for a
+                // non-uuid id. Only name a handle that resolves back.
+                let adopt_key = result
+                    .get("harness_session_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or(row_id);
                 match result.get("harness_removed").and_then(Value::as_bool) {
                     Some(true) => {
                         removed.push(harness);
-                        if row_id != "unknown" {
+                        if adopt_key != "unknown" {
                             adopt_hint = Some(format!(
                                 "\nthe {harness} session record was the resume handle; \
                                  the transcript stays on disk.\nreverse it with: \
-                                 fno agents adopt {row_id}"
+                                 fno agents adopt {adopt_key}"
                             ));
                         }
                     }
@@ -3249,6 +3259,29 @@ mod tests {
     /// A reap that really removed a harness row names the verb that puts it
     /// back. Asserted on the literal `fno agents adopt` string, not merely on
     /// the receipt being longer: an absence has two explanations.
+    /// A codex row carries no short_id, so `harness_row_id` degrades to the
+    /// first eight chars of a time-prefixed id -- which collides across
+    /// same-window sessions. The hint must name the full id instead, or it
+    /// points an operator at a sibling session.
+    #[test]
+    fn format_success_rm_adopt_hint_prefers_the_full_session_id() {
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "codex",
+            "harness_row_id": "01a02125",
+            "harness_session_id": "01a02125-4eb4-7bf1-b74e-d238887eb092",
+            "harness_removed": true
+        });
+        let out = format_success("rm", "bar-agent", &result, false, true, false)
+            .expect("rm renders a receipt");
+        assert!(
+            out.contains("fno agents adopt 01a02125-4eb4-7bf1-b74e-d238887eb092"),
+            "{out}"
+        );
+        assert!(!out.contains("adopt 01a02125\n"), "{out}");
+    }
+
     #[test]
     fn format_success_rm_names_the_adopt_reversal() {
         let result = json!({

@@ -512,11 +512,23 @@ def _resume_claude_wake(
         # caller and risks a second writer on one transcript.
         relaunch = ""
         if before.lower() == "unknown" and session_id:
+            # `--name` is load-bearing, not cosmetic. spawn's revive branch is
+            # gated on finding an existing row with THIS name; without it spawn
+            # mints a fresh slug, `revive` stays False, and the operator gets a
+            # SECOND row while the dead one they were trying to resume stays in
+            # the registry -- the exact state this hint exists to break them out
+            # of. It is also what makes spawn print its own old-to-new handle
+            # line, which is likewise gated on `revive`.
+            #
+            # `--cwd` is appended only when there is one to name: an empty value
+            # renders a bare `--cwd ` that fails on paste with "requires an
+            # argument". Never print a command that cannot run.
+            where = f" --cwd {cwd}" if cwd else ""
             relaunch = (
                 f"\nNo process answered for {short_id}. A wake cannot reach a "
                 "session that has exited.\n"
-                "Relaunch the conversation instead: fno agents spawn --resume "
-                f"{session_id} --cwd {cwd}\n"
+                "Relaunch the conversation instead: fno agents spawn --name "
+                f"{name} --resume {session_id}{where}\n"
             )
         return ResumeResult(
             exit_code=16,

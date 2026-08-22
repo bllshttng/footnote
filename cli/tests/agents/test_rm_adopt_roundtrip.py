@@ -140,9 +140,14 @@ def test_rm_notice_omits_a_row_with_no_handle(isolated_state):
     assert rm_notice.resume_handle_for(entry) is None
 
 
-def test_rm_notice_prefers_short_id_then_session_id():
-    """The id adopt takes back, in the order adopt resolves them."""
-    with_short = AgentEntry(
+def test_rm_notice_prefers_the_full_session_id():
+    """adopt takes either form, but only the full id is collision-free.
+
+    A codex session id is time-prefixed, so its first eight collide across
+    same-window sessions. Naming the short one could hand the operator a
+    sibling session, which is worse than naming nothing.
+    """
+    with_both = AgentEntry(
         name="a",
         harness="claude",
         cwd="/tmp",
@@ -150,16 +155,16 @@ def test_rm_notice_prefers_short_id_then_session_id():
         harness_session_id=SESSION_ID,
         short_id=SHORT_ID,
     )
-    assert rm_notice.resume_handle_for(with_short) == SHORT_ID
+    assert rm_notice.resume_handle_for(with_both) == SESSION_ID
 
-    session_only = AgentEntry(
+    short_only = AgentEntry(
         name="b",
-        harness="codex",
+        harness="claude",
         cwd="/tmp",
         log_path="/tmp/b.log",
-        harness_session_id=SESSION_ID,
+        short_id=SHORT_ID,
     )
-    assert rm_notice.resume_handle_for(session_only) == SESSION_ID
+    assert rm_notice.resume_handle_for(short_only) == SHORT_ID
 
 
 # --------------------------------------------------------------------------
@@ -214,6 +219,99 @@ def test_non_tty_proceeds_without_blocking(isolated_state):
     ) is True
     assert "fno agents adopt" in err.getvalue()
     assert "anyway?" not in err.getvalue()
+
+
+def test_no_notice_for_a_harness_that_tears_nothing_down(isolated_state):
+    """opencode is registry-only and gemini has no teardown arm at all.
+
+    Warning that their reap "forfeits the resume handle" would report a loss
+    that does not happen, which is this module's own defect pointed the other
+    way. The row still carries a session id, so the guard cannot be the handle
+    lookup: it has to be the harness.
+    """
+    for harness in ("opencode", "gemini"):
+        entry = AgentEntry(
+            name=f"{harness}-row",
+            harness=harness,
+            cwd="/tmp",
+            log_path="/tmp/x.log",
+            harness_session_id=SESSION_ID,
+        )
+        assert rm_notice.resume_handle_for(entry) is not None
+        assert rm_notice.forfeits_resume_handle(entry) is False, harness
+
+    for harness in ("claude", "codex"):
+        entry = AgentEntry(
+            name=f"{harness}-row",
+            harness=harness,
+            cwd="/tmp",
+            log_path="/tmp/x.log",
+            harness_session_id=SESSION_ID,
+        )
+        assert rm_notice.forfeits_resume_handle(entry) is True, harness
+
+
+def test_the_gate_resolves_a_short_id_not_just_an_exact_name(isolated_state):
+    """`rm` accepts a name, a full id, or a short handle; so must the gate.
+
+    An exact-name lookup left the guard silent for `fno agents rm 0a6e775f` --
+    the short-id spelling this change teaches operators to use, and therefore
+    the most likely one to reach the reap unwarned.
+    """
+    _seed_row(name="reaped-worker")
+    for token in ("reaped-worker", SHORT_ID, SESSION_ID):
+        row = rm_notice.lookup_row(token)
+        assert row is not None, f"gate went silent for {token!r}"
+        assert row.name == "reaped-worker", token
+
+
+def test_the_notice_is_written_once_across_the_seam_and_dispatch(
+    isolated_state, monkeypatch
+):
+    """The seam warns, then the Python route falls through to rm_agent.
+
+    Both would write the same block, which is the double-print hazard the seam
+    already documents for the env-scrub spawn warning.
+    """
+    _seed_row()
+    seam_err = _FakeTTY()
+    env: dict = {}
+    assert rm_notice.warn_and_confirm(
+        "reaped-worker", force=True, stderr=seam_err, stdin=_FakeTTY(""), env=env
+    ) is True
+    assert env.get(rm_notice.NOTICE_SHOWN_ENV) == "1"
+
+    monkeypatch.setenv(rm_notice.NOTICE_SHOWN_ENV, "1")
+    from fno.agents.harnesses import claude as claude_mod
+
+    dispatch_err: list[str] = []
+    monkeypatch.setattr(claude_mod, "claude_rm", lambda sid, *, timeout=30.0: (0, ""))
+    monkeypatch.setattr("fno.agents.dispatch.is_provider_available", lambda _p: True)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.sys.stderr",
+        type("W", (), {"write": lambda _s, t: dispatch_err.append(t)})(),
+    )
+    rm_agent("reaped-worker", force=True)
+    assert not any("resume handle" in t for t in dispatch_err), dispatch_err
+
+
+def test_assume_yes_env_silences_the_prompt_without_forcing(isolated_state):
+    """Stopping the questions and opting into orphan-leaving are two decisions.
+
+    `--force` also drops a LIVE row and leaves a named orphan when teardown
+    fails. An operator batch-reaping who only wants quiet must not have to take
+    that on, so the quiet opt-out is its own switch.
+    """
+    _seed_row()
+    err = _FakeTTY()
+    assert rm_notice.warn_and_confirm(
+        "reaped-worker",
+        stderr=err,
+        stdin=_FakeTTY(""),  # a read here would return "" and refuse
+        env={rm_notice.ASSUME_YES_ENV: "1"},
+    ) is True
+    assert "anyway?" not in err.getvalue()
+    assert "fno agents adopt" in err.getvalue()
 
 
 def test_a_prompt_nobody_can_read_is_never_asked(isolated_state):

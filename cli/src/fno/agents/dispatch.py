@@ -3677,8 +3677,20 @@ def rm_agent(
             # runtimes pass through; this is the warning half only, so the
             # documented wedged-daemon escape hatch (`python -c "... rm_agent
             # (...)"` in the king brief's CLI reference) is not silent either.
+            #
+            # Gated on the harness actually HAVING a teardown arm: opencode is
+            # registry-only by design and gemini has none, so warning about a
+            # forfeited handle there would report a loss that does not happen.
+            #
+            # Skipped when the seam already wrote it in this process, or the
+            # Python route prints the same block twice -- the hazard the seam's
+            # own comments record for the env-scrub spawn warning.
             handle = rm_notice.resume_handle_for(existing)
-            if handle is not None:
+            if (
+                handle is not None
+                and rm_notice.forfeits_resume_handle(existing)
+                and not os.environ.get(rm_notice.NOTICE_SHOWN_ENV)
+            ):
                 sys.stderr.write(
                     rm_notice.resume_handle_notice(name, existing.harness, handle)
                 )

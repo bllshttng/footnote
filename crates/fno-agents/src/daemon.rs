@@ -6292,6 +6292,12 @@ async fn handle_rm_with(
         "registry_removed": true,
         "harness": entry.harness_name(),
         "harness_row_id": harness_row_id,
+        // The FULL session id, distinct from harness_row_id above: that one
+        // falls back to the first eight chars of this, which is not a valid
+        // adopt key for a codex row (time-prefixed ids collide across
+        // same-window sessions) and is not even hex for a non-uuid id. The
+        // client's adopt hint needs a handle that resolves uniquely.
+        "harness_session_id": entry.harness_session_id,
         "harness_removed": harness_outcome.removed_json(),
         "harness_reason": harness_outcome.reason(),
         "pane_session": pane_session,
