@@ -250,7 +250,13 @@ fn default_true() -> bool {
 /// - the CLI door onto the focus trunk the TUI already owns. New variants, not
 /// additive fields, so a v45 server cannot deserialize a `PaneFocus`; the
 /// handshake is what stops the skew.
-pub const PROTO_VERSION: u32 = 48;
+///
+/// v49 (x-132c): `AgentRow.{spawned_by_session, harness_session_id}` - the
+/// lineage pair the sideline joins into a parent/child forest. Additive and
+/// `#[serde(default)]`, so an unbumped client would merely keep rendering
+/// flat; the bump names the skew so the handshake restarts an old server
+/// instead.
+pub const PROTO_VERSION: u32 = 49;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -997,6 +1003,17 @@ pub struct AgentRow {
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
+    /// (v49, x-132c) The session id this row was spawned by; `None` = no
+    /// recorded parent (a lineage root). Joined against
+    /// [`AgentRow::harness_session_id`] to nest children beneath their parent
+    /// in the sideline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_session: Option<String>,
+    /// (v49, x-132c) The row's own harness session id (claude/codex uuid),
+    /// the join key for `spawned_by_session`. Same value the registry row
+    /// carries; `None` for a row the registry wrote without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_id: Option<String>,
     /// (v48) Which question the row's reachability evidence answered: the
     /// basis half of the reachability triple (`transcript`, `silent`,
     /// `no-evidence`, or a falsifier name like `process-gone`). The verdict
@@ -3003,15 +3020,17 @@ mod tests {
         // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
         // 42 -> 43; the anchored-layout node (x-6928) bumped it 43 -> 44;
         // clickable links (x-a2d0) bumped it 44 -> 45; pane focus (x-3e17) 45 ->
-        // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47. The
-        // additive crown fields, and now `unmeasured`, stay skew-tolerant both
-        // ways regardless of the version number.
+        // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47; the
+        // reachability-evidence pair took it to 48; the lineage pair (x-132c)
+        // bumped it 48 -> 49. The additive crown fields, `unmeasured`, and now
+        // the lineage pair, stay skew-tolerant both ways regardless of the
+        // version number.
         //
         // This is the ONE canonical pin, as this test's name says. Two sibling
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 48);
+        assert_eq!(PROTO_VERSION, 49);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -3259,6 +3278,8 @@ mod tests {
                 area: (24, 80),
                 agents: vec![
                     AgentRow {
+                        spawned_by_session: None,
+                        harness_session_id: None,
                         squad: Some(1),
                         name: "peer".into(),
                         pane_id: Some(4),
@@ -3300,6 +3321,8 @@ mod tests {
                         last_activity_age_s: None,
                     },
                     AgentRow {
+                        spawned_by_session: None,
+                        harness_session_id: None,
                         squad: None,
                         name: "bg-watch".into(),
                         pane_id: None,
