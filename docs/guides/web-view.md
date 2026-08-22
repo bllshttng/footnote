@@ -36,7 +36,7 @@ The resolver tries three tiers and takes the first tier that matches:
 
 Ambiguity inside the winning tier refuses. The command exits `21` and prints one line for each candidate: name, pane, and seconds since the last activity. It never guesses, and it never falls through to a looser tier.
 
-This refusal is what makes a short id safe to type. A claude session id is a UUIDv4, so the first eight characters are unlikely to collide. A codex session id is a UUIDv7, where the first eight characters are a clock bucket of about 65 seconds, so two agents from the same minute do collide. The first case resolves. The second case refuses and shows you both agents.
+This refusal is what makes a short id safe to type. A claude session id is a UUIDv4, so the first eight characters are unlikely to collide. A codex session id is a UUIDv7. Its first eight characters are a clock bucket of about 65 seconds, so two agents from one minute do collide. The first case resolves. The second case refuses and shows you both agents.
 
 Two rows that share one identity are one candidate, not an ambiguity. A pane-hosted row wins over a paneless duplicate.
 
@@ -68,5 +68,5 @@ The kept output covers only the pane you view. The browser can follow a whole-sc
 
 - You cannot type. The read-only paragraph at the start of this page gives the reason.
 - There is no history from before you open the page. A frame carries the current visible grid, and the bridge keeps only the latest frame for each pane.
-- An agent pane leaves the picker when the agent exits. A plain pane has no exit signal on the wire. The list removes it after a time instead.
+- When an agent exits, its pane leaves the picker. A plain pane has no exit signal on the wire. The list removes it after a time instead.
 - The page loads no external resource. `fno` serves it inline under a strict content-security policy, so it works offline and on an airgapped host.
