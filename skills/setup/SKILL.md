@@ -58,7 +58,7 @@ Parse the JSON. For each field, ask the user using its `question` text. Use the 
 - `readme`     -> infer a one-line vision from the README's first paragraph.
 - `auto-detect`-> detect from the repo (vault name, workspace topology).
 
-The `always` set today is roughly Obsidian on/off (plus vault name), project vision, backlog id_prefix, external reviewer(s), and auto-merge on/off. Ask only what `fno config setup plan` returns; do not invent extra questions.
+Today the `always` set is small. It covers Obsidian on/off (plus vault name), project vision, backlog id_prefix, external reviewer(s), and auto-merge on/off. Ask only what `fno config setup plan` returns. Do not invent extra questions.
 
 ## Step 2: Write each answer through `fno config set`
 

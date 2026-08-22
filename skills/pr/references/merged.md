@@ -70,9 +70,12 @@ step=reap-rows status=ok detail=no lingering rows
 
 **Read the receipts.** Each `status=failed` names a real failure, with an exit code and a tail line. The verb exits non-zero, so a partial run is never readable as success. Four statuses exist, and `deferred` is the one that is easy to misread. `ok` means done, `skipped` means nothing was owed, and `failed` means it broke. `deferred` means the work is still owed and a later sweep does it. The archive leg defers whenever the ritual runs from inside the worktree it targets for removal, which is the usual case. A re-run is resume-safe: completed legs no-op, failed legs retry, no leg double-applies (reconcile/retro/advance/sync/skill-diff each dedup on their own markers and claims).
 
-The verb absorbed four prior ritual bugs (each verified by a test in `cli/tests/`): **x-c4ff** (only real verbs are called - `skill-diff reconcile`, `pr sync-canonical` both exist; no dangling references), **x-fb99** (`parking_lot_path` resolved against the canonical root, never a worktree cwd),
-**x-adf9** (canonical-sync pipes closed + timeouted so a trailing `fno agents restart`
-daemon cannot wedge it), **x-0d66** (the advance leg bounded + streamed).
+The verb absorbed four prior ritual bugs (each verified by a test in `cli/tests/`):
+
+- **x-c4ff** - only real verbs are called. `skill-diff reconcile` and `pr sync-canonical` both exist. No dangling references.
+- **x-fb99** - `parking_lot_path` resolved against the canonical root, never a worktree cwd.
+- **x-adf9** - canonical-sync pipes closed + timeouted, so a trailing `fno agents restart` daemon cannot wedge it.
+- **x-0d66** - the advance leg bounded + streamed.
 
 ## Step 3: Judgment residue (attended only)
 
@@ -234,11 +237,9 @@ rule), never as `backlog idea` nodes.
 ## Edge cases
 
 - **PR maps to no node** - `reconcile` closes nothing; still do 3b. Not an error.
-- **Re-run for the same PR** - the verb's legs are individually idempotent, and
-  the `<!-- post-merge:pr-<N> -->` marker guards the judgment prose/triage. Do
-  not re-run 3b if the marker already exists.
-- **Empty diff (merge commit with no file changes)** - the verb reports `bar=below`; treat as below the bar (no capture work), never an error.
-- **Run from inside the merged PR's own worktree** - the archive leg defers to `fno workspace worktree cleanup --merged --apply` (run from canonical) and never self-removes.
+- **Re-run for the same PR** - the verb's legs are individually idempotent. The `post-merge:pr-<N>` comment marker guards the judgment prose/triage, so skip 3b on a re-run once the marker exists.
+- **Empty diff (merge commit with no file changes)** - the verb reports `bar=below`. Treat it as below the bar (no capture work), never an error.
+- **Run from inside the merged PR's own worktree** - the archive leg defers to `fno workspace worktree cleanup --merged --apply` (run from canonical). It never self-removes.
 ## See also
 - The verb: `fno do pr ritual` (`cli/src/fno/pr/_ritual.py`) and its command in `cli/src/fno/pr/cli.py`.
 - Plan + locked decisions: `internal/fno/plans/20260723-post-merge-mechanical-core-x-bbde.md`.
