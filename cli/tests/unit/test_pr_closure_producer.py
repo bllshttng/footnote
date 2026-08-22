@@ -677,3 +677,76 @@ def test_hook_main_gates_gh_behind_a_repo_flag(node_branch_repo):
     # is what keeps this from being a one-spelling guard.
     payload = _hook_main('gh --repo o/r pr create --body "$BODY"', node_branch_repo)
     assert payload["permissionDecision"] == "deny"
+
+
+def _pending(node_id: str, successor: str, surfaces: list[str]) -> dict:
+    return {
+        "id": node_id,
+        "superseded_by": successor,
+        "supersession": {
+            "successor": successor,
+            "cause": "c",
+            "surfaces": surfaces,
+            "verified_at": None,
+        },
+    }
+
+
+def test_dotfile_surface_does_not_match_a_dot_stripped_lookalike():
+    """lstrip('./') ate the leading dot, so `github/ci.yml` matched `.github/ci.yml`."""
+    from fno.graph._reconcile import verify_pending_supersessions
+
+    entries = [_pending("x-old", "x-new", ["github/ci.yml"])]
+    receipts = verify_pending_supersessions(
+        entries, successor="x-new", changed_files=[".github/ci.yml"], evidence_pr=1
+    )
+    assert [r["kind"] for r in receipts] == ["supersession_unverified"]
+    assert entries[0]["supersession"]["verified_at"] is None
+
+
+def test_leading_dot_slash_is_still_stripped_on_both_sides():
+    from fno.graph._reconcile import verify_pending_supersessions
+
+    entries = [_pending("x-old", "x-new", ["./cli/a.py"])]
+    receipts = verify_pending_supersessions(
+        entries, successor="x-new", changed_files=["cli/a.py"], evidence_pr=1
+    )
+    assert receipts == []
+    assert entries[0]["supersession"]["verified_at"]
+
+
+def test_truncated_evidence_blames_the_truncation_not_the_surface():
+    """A miss against a short file list is an absence with two explanations."""
+    from fno.graph._reconcile import verify_pending_supersessions
+
+    entries = [_pending("x-old", "x-new", ["cli/untouched.py"])]
+    receipts = verify_pending_supersessions(
+        entries,
+        successor="x-new",
+        changed_files=["cli/a.py"],
+        evidence_pr=1,
+        evidence_complete=False,
+    )
+    assert [r["kind"] for r in receipts] == ["supersession_evidence_truncated"]
+    assert entries[0]["supersession"]["verified_at"] is None
+
+
+def test_page_sized_file_list_reads_as_truncated():
+    from fno.graph._reconcile import query_pr_merge_state
+
+    payload = {
+        "number": 5,
+        "state": "MERGED",
+        "url": "u",
+        "mergedAt": "t",
+        "mergeCommit": {"oid": "sha"},
+        "files": [{"path": f"f{i}.py"} for i in range(100)],
+    }
+
+    def runner(*args, **kwargs):
+        import subprocess, json
+
+        return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+    state = query_pr_merge_state(5, runner=runner)
+    assert state.files_truncated is True

@@ -9279,6 +9279,7 @@ def cmd_reconcile(
                             ),
                             evidence_pr=record.pr_number,
                             verified_at=record.merged_at,
+                            evidence_complete=not record.files_truncated,
                         )
                     )
                     if record.node_id in reconcile_rollups:

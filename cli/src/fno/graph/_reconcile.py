@@ -205,6 +205,7 @@ class PrMergeState:
     # (x-47be). Optional: absent on a non-merged PR or when gh omits it.
     merge_sha: Optional[str] = None
     changed_files: list[str] = field(default_factory=list)
+    files_truncated: bool = False
 
 
 @dataclass
@@ -235,10 +236,24 @@ class MergeDriftRecord:
     # key there.
     merge_sha: Optional[str] = None
     changed_files: list[str] = field(default_factory=list)
+    files_truncated: bool = False
 
     @property
     def closeable(self) -> bool:
         return self.error is None and self.pr_state == "MERGED"
+
+
+_GH_FILES_PAGE_SIZE = 100
+
+
+def _normalize_surface(path: object) -> str:
+    """One spelling for a repo-relative path on both sides of the match.
+
+    ``removeprefix`` and not ``lstrip("./")``: lstrip strips a character SET, so
+    it ate the leading dot of every dotfile path and let a declared
+    ``github/ci.yml`` falsely match a changed ``.github/ci.yml``.
+    """
+    return str(path).strip().replace("\\", "/").removeprefix("./")
 
 
 def verify_pending_supersessions(
@@ -248,6 +263,7 @@ def verify_pending_supersessions(
     changed_files: Iterable[str],
     evidence_pr: int,
     verified_at: Optional[str] = None,
+    evidence_complete: bool = True,
 ) -> list[dict]:
     """Verify predecessor cause surfaces against one merged PR's file set.
 
@@ -255,9 +271,14 @@ def verify_pending_supersessions(
     predecessor never becomes terminal from the relationship alone: every
     declared repo-relative surface must appear in the merged PR's changed-file
     evidence.
+
+    ``evidence_complete=False`` says the file list is known to be short of the
+    PR's real one. A surface missing from a truncated list is an absence with
+    two explanations, so neither verdict is available: nothing verifies and the
+    receipt names the truncation rather than blaming the surface.
     """
     changed = {
-        str(path).strip().replace("\\", "/").lstrip("./")
+        _normalize_surface(path)
         for path in changed_files
         if isinstance(path, str) and path.strip()
     }
@@ -270,12 +291,22 @@ def verify_pending_supersessions(
         if not isinstance(record, dict) or record.get("verified_at"):
             continue
         surfaces = [
-            str(surface).strip().replace("\\", "/").lstrip("./")
+            _normalize_surface(surface)
             for surface in record.get("surfaces") or []
             if isinstance(surface, str) and surface.strip()
         ]
         matched = [surface for surface in surfaces if surface in changed]
         uncovered = [surface for surface in surfaces if surface not in changed]
+        if uncovered and not evidence_complete:
+            receipts.append({
+                "kind": "supersession_evidence_truncated",
+                "predecessor": entry.get("id"),
+                "successor": successor,
+                "cause": record.get("cause"),
+                "uncovered_surfaces": uncovered,
+                "evidence_pr": evidence_pr,
+            })
+            continue
         if uncovered:
             receipts.append({
                 "kind": "supersession_unverified",
@@ -1030,6 +1061,11 @@ def query_pr_merge_state(
         merged_at=row.get("mergedAt"),
         merge_sha=(row.get("mergeCommit") or {}).get("oid"),
         changed_files=[path for path in changed_files if isinstance(path, str) and path],
+        # `gh pr view --json files` returns the first page only and does not
+        # paginate, so a list at the cap is evidence of more, not of exactly
+        # this many. Treat it as short and let the caller refuse to read an
+        # absence out of it.
+        files_truncated=len(raw_files) >= _GH_FILES_PAGE_SIZE,
     )
 
 
@@ -1445,6 +1481,7 @@ def scan_merge_drift(
                     cwd=cwd,
                     merge_sha=merged.merge_sha,
                     changed_files=list(merged.changed_files),
+                    files_truncated=merged.files_truncated,
                 )
             )
         elif first_error is not None:
