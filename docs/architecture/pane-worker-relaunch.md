@@ -28,7 +28,7 @@ Claude attach members restore exactly as before: `claude attach` in the recorded
 
 ## The resume gesture
 
-Selecting an idle row sends `Command::ResumeAgent { name }`. The server joins the name to its registry row, then spawns the harness's own form in a pane at the row's recorded cwd (falling back to the sender's squad cwd, with a notice, when the recorded directory is gone):
+Selecting an idle row sends `Command::ResumeAgent { name }`. The server joins the name to its registry row, then spawns the harness's own form in a pane at the row's recorded cwd. When the recorded directory is gone, the pane lands in the sender's squad cwd and a notice names both paths:
 
 | Harness | Resume argv |
 |---------|-------------|
