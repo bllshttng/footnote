@@ -4,7 +4,7 @@
 
 I got tired of watching coding agents stop at "looks done." Claude, Codex, Gemini, all of them[^1]: they write the code, the diff looks right, they hand it back, and then it's on me to find out at 11pm that the tests were never green. So I said f[no].
 
-I built the loop that doesn't stop there. It keeps going until the PR is merged and CI is actually green, and when it isn't sure what to build next it walks the backlog and works it out.
+I built the loop that doesn't stop there. It keeps going until CI is actually green; merging happens when you opt in to auto-merge, and when it isn't sure what to build next it walks the backlog and works it out.
 
 Claude Code is my hammer, and I see a shit ton of nails. So I kept swinging: I got it running across providers, then got a Claude agent and a Codex agent mailing each other across terminal panels while they worked.
 
@@ -59,9 +59,14 @@ fno config setup wizard              # asks the few real per-project decisions, 
 
 Read or edit any setting directly: `fno config get|set|unset <key>` (atomic and schema-checked). Defaults are sensible; you can skip straight to running.
 
+## Autonomy
+
+See what can run without you, including each gate and its resolved value:
+`fno agents autonomy status`
+
 ## Run it
 
-Two ways to ship a feature; both end in a merged PR. Then scale up.
+Two ways to ship a feature; both end in a green PR. Merging requires the existing auto-merge opt-in. Then scale up.
 
 **Autopilot.** Point the `target` skill at a feature description or a backlog node, then walk away:
 

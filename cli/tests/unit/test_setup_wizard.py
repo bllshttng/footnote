@@ -273,6 +273,31 @@ def test_cli_wizard_smoke_accepts_defaults(tmp_path, monkeypatch):
     assert "wizard" in res.output.lower()
 
 
+def test_cli_wizard_completion_receipt_names_autonomy_status(tmp_path, monkeypatch):
+    _global_path(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    import fno.setup_cli as setup_cli
+
+    monkeypatch.setattr(
+        setup_cli,
+        "run_wizard",
+        lambda *args, **kwargs: {"cancelled": False, "written": []},
+    )
+    monkeypatch.setattr(setup_cli, "offer_recommended_rules", lambda **kwargs: None)
+    monkeypatch.setattr(setup_cli, "offer_prompt_provenance", lambda **kwargs: None)
+    monkeypatch.setattr(setup_cli, "offer_cli_hooks", lambda **kwargs: None)
+    monkeypatch.setattr(setup_cli, "report_machine_blockers", lambda **kwargs: [])
+    from fno.setup import integration, managed_block
+
+    monkeypatch.setattr(integration, "run_cli_integration", lambda **kwargs: None)
+    monkeypatch.setattr(managed_block, "offer_managed_block", lambda *args, **kwargs: None)
+
+    res = CliRunner().invoke(setup_cli.app, ["wizard"], input="")
+
+    assert res.exit_code == 0, res.output
+    assert "fno agents autonomy status" in res.output
+
+
 def test_cli_wizard_advanced_surfaces_more_fields(tmp_path, monkeypatch):
     _global_path(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
