@@ -260,7 +260,35 @@ def _has_terminal_marker(entry: dict, field: str) -> bool:
     return bool(entry.get(field))
 
 
-def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
+def _epics_with_child_progress(id_to_entry: dict[str, dict]) -> frozenset[str]:
+    """Epic ids having at least one child that has started or finished.
+
+    Computed ONCE per board render and passed down. It used to be an `any()`
+    over every entry inside `_live_epic_for`, which is called from a sort key -
+    an O(n) scan per comparison over an O(n) sort, so a 2000-row graph paid
+    millions of dict reads to answer a question with one shape.
+    """
+    progressing: set[str] = set()
+    for child in id_to_entry.values():
+        if not isinstance(child, dict):
+            continue
+        parent_id = child.get("parent")
+        if not isinstance(parent_id, str) or parent_id in progressing:
+            continue
+        if (
+            child.get("completed_at")
+            or child.get("status") in ("done", "in_progress")
+            or child.get("session_id")
+        ):
+            progressing.add(parent_id)
+    return frozenset(progressing)
+
+
+def _live_epic_for(
+    node: object,
+    id_to_entry: dict[str, dict],
+    child_progress_epics: frozenset[str] | None = None,
+) -> dict | None:
     """Return the node's live epic parent, or None when it has none."""
     if not isinstance(node, dict):
         return None
@@ -288,16 +316,9 @@ def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
         or _has_terminal_marker(epic, "superseded_by")
         or _has_terminal_marker(epic, "deferred_at")
     )
-    child_progress = any(
-        isinstance(child, dict)
-        and child.get("parent") == epic.get("id")
-        and (
-            child.get("completed_at")
-            or child.get("status") in ("done", "in_progress")
-            or child.get("session_id")
-        )
-        for child in id_to_entry.values()
-    )
+    if child_progress_epics is None:
+        child_progress_epics = _epics_with_child_progress(id_to_entry)
+    child_progress = epic.get("id") in child_progress_epics
     status_terminal = isinstance(status, str) and (
         status in _TERMINAL_EPIC_STATUSES - {"done"}
         or (status == "done" and not child_progress)
@@ -317,6 +338,7 @@ def in_progress_epic_ids(
         for entry in entries
         if isinstance(entry, dict) and isinstance(entry.get("id"), str)
     }
+    child_progress_epics = _epics_with_child_progress(id_to_entry)
     result: set[str] = set()
     for child in entries:
         if not isinstance(child, dict):
@@ -329,7 +351,7 @@ def in_progress_epic_ids(
             or (isinstance(child_id, str) and child_id in live_claimed)
         ):
             continue
-        epic = _live_epic_for(child, id_to_entry)
+        epic = _live_epic_for(child, id_to_entry, child_progress_epics)
         if epic is not None:
             result.add(epic["id"])
     return frozenset(result)
@@ -347,12 +369,13 @@ def make_effective_priority(entries: list[dict]):
         for e in entries
         if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
+    child_progress_epics = _epics_with_child_progress(id_to_entry)
 
     def priority_for(node: object) -> str:
         if not isinstance(node, dict):
             return "p2"
         child_priority = _priority_name(node)
-        epic = _live_epic_for(node, id_to_entry)
+        epic = _live_epic_for(node, id_to_entry, child_progress_epics)
         if epic is None:
             return child_priority
         epic_priority = _priority_name(epic)
@@ -401,6 +424,9 @@ def make_selection_sort_key(
         for e in entries
         if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
+    # Once per sort, not once per comparison: the key below runs O(n log n)
+    # times and this answer does not change while it does.
+    child_progress_epics = _epics_with_child_progress(id_to_entry)
     # Board == work order: `next` must demote orphans exactly where the board
     # does, or the board shows one order and the walker works another. Computed
     # here (not passed by every caller) so no call site can forget it; fails
@@ -433,7 +459,7 @@ def make_selection_sort_key(
         child_orphan = isinstance(node_id, str) and node_id in orphans
         child_created = _sort_text(node.get("created_at"))
         pid = node.get("parent")
-        epic = _live_epic_for(node, id_to_entry)
+        epic = _live_epic_for(node, id_to_entry, child_progress_epics)
         if epic is not None:
             in_progress_rank = 0 if pid in epic_in_progress else 1
             return lane + (
