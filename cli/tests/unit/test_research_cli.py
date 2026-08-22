@@ -75,6 +75,78 @@ def test_cli_no_deliver_keeps_retrieve_only(tmp_path: Path, monkeypatch: pytest.
     assert "DoneAdvisory" not in res.output
 
 
+def test_cli_passes_fno_node_through_to_deliver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """x-953b: FNO_NODE (the established spawn-time node var, not CLAIMS_ID -
+    a shell-local variable that never reaches a child process env) becomes
+    deliver(node=...), so a research run in a node's scope binds its brief."""
+    _stub_round(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    monkeypatch.setattr(research_cli, "_output_dir", lambda: str(out))
+    monkeypatch.setenv("FNO_NODE", "x-abcd")
+    captured: dict = {}
+
+    def fake_deliver(*args, **kwargs):
+        captured.update(kwargs)
+        from fno.research.deliverable import DeliverResult
+
+        return DeliverResult(
+            topic="topic words here", slug="topic-words-here",
+            brief_path=str(out / "topic-words-here.md"), sidecar_path=str(out / "topic-words-here.sources.jsonl"),
+            found=1, verified=1,
+        )
+
+    monkeypatch.setattr(research_cli, "deliver", fake_deliver)
+    (out).mkdir(parents=True, exist_ok=True)
+    (out / "topic-words-here.md").write_text("# stub\n")
+    (out / "topic-words-here.sources.jsonl").write_text("")
+
+    res = CliRunner().invoke(_app(), ["topic words here", "--no-claim"])
+    assert res.exit_code == 0, res.output
+    assert captured.get("node") == "x-abcd"
+
+
+def test_cli_with_no_fno_node_binds_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No FNO_NODE in the environment: deliver(node=None), unchanged behavior."""
+    _stub_round(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    monkeypatch.setattr(research_cli, "_output_dir", lambda: str(out))
+    monkeypatch.delenv("FNO_NODE", raising=False)
+    captured: dict = {}
+    real_deliver = research_cli.deliver
+
+    def spying_deliver(*args, **kwargs):
+        captured.update(kwargs)
+        return real_deliver(*args, **kwargs)
+
+    monkeypatch.setattr(research_cli, "deliver", spying_deliver)
+
+    res = CliRunner().invoke(_app(), ["topic words here", "--no-claim"])
+    assert res.exit_code == 0, res.output
+    assert captured.get("node") is None
+
+
+def test_cli_explicit_node_flag_wins_over_fno_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """codex finding: FNO_NODE is not reliably set on the normal /ship doc
+    invoking path, so an explicit --node (the reliable channel, passed the
+    same way /blueprint passes --node "$CLAIMS_ID") must take precedence."""
+    _stub_round(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    monkeypatch.setattr(research_cli, "_output_dir", lambda: str(out))
+    monkeypatch.setenv("FNO_NODE", "x-wrong")
+    captured: dict = {}
+    real_deliver = research_cli.deliver
+
+    def spying_deliver(*args, **kwargs):
+        captured.update(kwargs)
+        return real_deliver(*args, **kwargs)
+
+    monkeypatch.setattr(research_cli, "deliver", spying_deliver)
+
+    res = CliRunner().invoke(_app(), ["topic words here", "--no-claim", "--node", "x-right"])
+    assert res.exit_code == 0, res.output
+    assert captured.get("node") == "x-right"
+
+
 def test_cli_no_sources_still_ships(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """AC3: a no-sources round still ships a stamped brief, DoneAdvisory."""
     _stub_round(tmp_path, monkeypatch, note="no sources found")

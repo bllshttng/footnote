@@ -53,6 +53,11 @@ def research_command(
         "declared", "--stopped",
         help='Why the investigation stopped, stamped in the brief ("declared" or "cap N").',
     ),
+    node: "str | None" = typer.Option(
+        None, "--node",
+        help="Graph node this deliverable finishes; binds the shipped brief as its "
+        "plan_path (best-effort). Falls back to $FNO_NODE when omitted.",
+    ),
 ) -> None:
     """Retrieve sources for TOPIC, store them, and ship a cited brief.
 
@@ -86,16 +91,22 @@ def research_command(
         return
 
     # Ship step: turn the cache into the doc deliverable (AC1/AC3/AC5).
-    # CLAIMS_ID is the established node-seeded env var (AGENTS.md: the same
-    # one /blueprint reads for its own --node pass-through) - the ambient
-    # signal for "which node is this spike answering", not a new flag.
+    # An explicit --node wins (the reliable path: /ship doc's own bash
+    # session holds $CLAIMS_ID and can pass it through directly, the same
+    # way /blueprint passes --node "$CLAIMS_ID"). $FNO_NODE, the spawn-time
+    # provenance env var (mux_spawn.py PROVENANCE_KEYS, read the same way at
+    # graph/cli.py:860), is the fallback for a spawned worker's own process
+    # environment. Neither is CLAIMS_ID: that is a shell-LOCAL variable a
+    # skill's own bash session sets via `eval "$(parse-claims-arg.sh ...)"`;
+    # it never reaches a child process environment on its own.
+    resolved_node = (node or "").strip() or (os.environ.get("FNO_NODE") or "").strip() or None
     try:
         delivered = deliver(
             result.topic,
             sources_path=Path(result.sources_path),
             stopped=stopped,
             output_dir=_output_dir(),
-            node=os.environ.get("CLAIMS_ID") or None,
+            node=resolved_node,
         )
     except OutputDirUnset as e:
         typer.echo(str(e), err=True)

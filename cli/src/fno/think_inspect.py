@@ -109,12 +109,17 @@ def _node_summary(entry: dict[str, Any], *, archived: bool = False) -> dict[str,
     } | ({"archived": True} if archived else {})
 
 
-_NO_DECISIONS: dict[str, Any] = {
-    "decisions": [],
-    "decisions_status": "ok",
-    "decisions_truncated": False,
-    "decisions_detail": None,
-}
+def _no_decisions() -> dict[str, Any]:
+    # A factory, not a module-level dict: a shared constant's "decisions": []
+    # is one list object handed to every caller, so an in-place append by any
+    # one of them would silently poison every receipt after it (including
+    # this "empty" answer itself). Each call gets its own fresh list.
+    return {
+        "decisions": [],
+        "decisions_status": "ok",
+        "decisions_truncated": False,
+        "decisions_detail": None,
+    }
 
 
 def _decisions_section(node_id: str | None) -> dict[str, Any]:
@@ -131,11 +136,11 @@ def _decisions_section(node_id: str | None) -> dict[str, Any]:
     fact the halt-evidence consumer needs, never silently folded into "[]".
     """
     if not node_id:
-        return dict(_NO_DECISIONS)
-    try:
-        from fno.decide import list_decisions
-        from fno.tracker.metadata import ExternalMetadataUnavailable
+        return _no_decisions()
+    from fno.decide import list_decisions
+    from fno.tracker.metadata import ExternalMetadataUnavailable
 
+    try:
         _label, rows, _damaged = list_decisions(node_id, limit=None)
     except (OSError, ValueError, ExternalMetadataUnavailable) as exc:
         return {
@@ -185,7 +190,7 @@ def _graph_section(
             "epic_candidates": [],
             "archive_status": "error" if archive_error else "ok",
             "detail": error or "graph unavailable",
-        } | _NO_DECISIONS
+        } | _no_decisions()
 
     from fno.graph.fuzzy import resolve_node
     from fno.graph.relatedness import _MIN_SCORE, epic_candidates, similar_nodes

@@ -141,3 +141,36 @@ def test_decisions_list_is_capped_and_says_so(monkeypatch, tmp_path: Path) -> No
 
     assert len(receipt["graph"]["decisions"]) == think_inspect._DECISIONS_CAP
     assert receipt["graph"]["decisions_truncated"] is True
+
+
+def test_no_decisions_result_is_not_a_shared_mutable_list(monkeypatch, tmp_path: Path) -> None:
+    """x-953b review finding: a module-level constant's "decisions": [] was
+    the SAME list object handed to every "no node" / "no decisions" receipt.
+    Mutating one must never poison another (or the module constant itself)."""
+    from fno.think_inspect import build_receipt
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def run(argv, cwd=None, timeout=10):
+        import subprocess
+
+        return subprocess.CompletedProcess(argv, 1, "", "unavailable")
+
+    def fake(subject, limit=None, lane=None):
+        return subject, [], 0
+
+    monkeypatch.setattr("fno.decide.list_decisions", fake)
+
+    first = build_receipt(
+        "no-such-node", repo=repo, graph_entries=[], archive_entries=[],
+        plans_path=tmp_path / "plans", home=tmp_path, run=run,
+    )
+    first["graph"]["decisions"].append({"poison": True})
+
+    second = build_receipt(
+        "no-such-node", repo=repo, graph_entries=[], archive_entries=[],
+        plans_path=tmp_path / "plans", home=tmp_path, run=run,
+    )
+
+    assert second["graph"]["decisions"] == []

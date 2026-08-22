@@ -1017,27 +1017,59 @@ sys.stdout.write("O\t%s\n" % validated.outcome)
 # no access to the decision index), so it runs here rather than in
 # ConsolidationBlock: the model stays a pure shape authority, this stays the
 # one place that reads live data.
-node_id = (loaded or {}).get("claims") if isinstance(loaded, dict) else None
+#
+# node -> claims -> graph_node_id, same order and same one-element-list
+# unwrap as fno.plan.reconcile_status._plan_link_id (imported, not
+# re-spelled): `claims` alone missed every plan using the canonical `node:`
+# key - the field quick-template.md actually ships, `claims:` being commented
+# out there as the ab-id-input special case.
+node_id = None
+if isinstance(loaded, dict):
+    try:
+        from fno.plan.reconcile_status import _plan_link_id
+
+        node_id = _plan_link_id(loaded)
+    except Exception:  # noqa: BLE001 - a resolver import failure must not fail the shape check
+        node_id = None
 if isinstance(node_id, str) and node_id.strip():
     try:
         from fno.decide import list_decisions
 
-        _subj, rows, _damaged = list_decisions(node_id.strip(), limit=None)
-    except Exception as exc:  # noqa: BLE001 - unreadable index must not fail the shape check
+        _subj, rows, damaged = list_decisions(node_id.strip(), limit=None)
+    except Exception as exc:  # noqa: BLE001 - reported as W below, never a bare crash
         sys.stdout.write("W\t" + " ".join(str(exc).split())[:160] + "\n")
     else:
-        # Drop rows the derived superseded_by map marks withdrawn - a
-        # withdrawn ruling must not demand acknowledgment. Never scan the
-        # ruling's own prose for this (see DecisionAcknowledgment's sibling
-        # note in ConsolidationBlock's docstring).
-        live = [r for r in rows if not r.get("superseded_by")]
-        acked = {e.decision_id for e in validated.decisions_acknowledged}
-        for row in live:
-            did = str(row.get("decision_id") or "")
-            if did and did not in acked:
-                text = " ".join(str(row.get("decision") or "").split())[:80]
-                sys.stdout.write("M\t%s\t%s\n" % (did, text))
-        sys.stdout.write("D\t%d\n" % len(live))
+        if damaged:
+            # A damaged row could have held the closing verdict this whole
+            # gate exists to catch - reading the surviving rows as complete
+            # would be exactly the silent-pass failure the gate polices, one
+            # layer down. `fno backlog decide-reindex` is the recovery (same
+            # as _read_index's own operator-facing message).
+            sys.stdout.write(
+                "W\t%d damaged row(s) in the decision index - run "
+                "`fno backlog decide-reindex` and re-validate\n" % damaged
+            )
+        else:
+            # Drop rows the derived superseded_by map marks withdrawn - a
+            # withdrawn ruling must not demand acknowledgment. Never scan the
+            # ruling's own prose for this (see DecisionAcknowledgment's
+            # sibling note in ConsolidationBlock's docstring).
+            live = [r for r in rows if not r.get("superseded_by")]
+            # casefold both sides: DecisionAcknowledgment accepts
+            # d-ABCD1234 (the id regex is case-insensitive, matching
+            # looks_like_decision_id), and a real minted id is always
+            # lowercase hex - but a hand-typed one in a plan need not be, and
+            # this is the only decision-id comparison in the codebase that is
+            # not already casefolded (list_decisions itself casefolds
+            # subject matches).
+            acked = {e.decision_id.casefold() for e in validated.decisions_acknowledged}
+            for row in live:
+                did = str(row.get("decision_id") or "")
+                if did and did.casefold() not in acked:
+                    text = " ".join(str(row.get("decision") or "").split())[:80]
+                    ts = str(row.get("ts") or "")
+                    sys.stdout.write("M\t%s\t%s\t%s\n" % (did, ts, text))
+            sys.stdout.write("D\t%d\n" % len(live))
 PYEOF
     )
     # Same ladder _semantic_validate walks: the checkout's own interpreter
@@ -1070,7 +1102,10 @@ PYEOF
             U) warn "$label: consolidation block NOT CHECKED ($payload) - not a pass"; return 0 ;;
             M) missing_decisions+=("$payload") ;;
             D) decisions_checked="$payload" ;;
-            W) warn "$label: decisions_acknowledged NOT CHECKED (decision index unreadable: $payload) - not a pass" ;;
+            # Fail closed, not NOT-CHECKED-and-pass: an unreadable index could
+            # be hiding the closing verdict this whole gate exists to catch,
+            # so an inability to check is not evidence of a clean node.
+            W) c_error "$label: decisions_acknowledged could not be checked ($payload) - fix the decision index and re-validate" ;;
         esac
     done <<< "$delegate_out"
 
@@ -1089,12 +1124,22 @@ PYEOF
     if [[ ${#missing_decisions[@]} -gt 0 ]]; then
         local decisions_gate_date="2026-08-22" d_created
         d_created=$(_plan_created_date "$file")
-        local entry did dtext
+        local entry did rest ts_date dtext
         for entry in "${missing_decisions[@]}"; do
             did="${entry%%$'\t'*}"
-            dtext="${entry#*$'\t'}"
+            rest="${entry#*$'\t'}"
+            ts_date="${rest%%$'\t'*}"
+            ts_date="${ts_date:0:10}"
+            dtext="${rest#*$'\t'}"
             if [[ ! "$d_created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
                 c_error "$label: decisions_acknowledged is missing $did ($dtext) - no readable created: date to grandfather against, add both"
+            elif [[ "$ts_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$ts_date" > "$d_created" ]]; then
+                # This ruling postdates the plan's own created: date, so the
+                # plan could not have acknowledged it when it was written - an
+                # approved, in-execution plan must not be retroactively
+                # blocked by a decision recorded mid-flight. Always a warn,
+                # regardless of the decisions_gate_date below.
+                warn "$label: decisions_acknowledged is missing $did ($dtext) - recorded $ts_date, after this plan's created: $d_created date"
             elif [[ "$d_created" > "$decisions_gate_date" ]]; then
                 c_error "$label: decisions_acknowledged is missing $did ($dtext) - every row in graph.decisions needs a matching entry naming why it does not close this work"
             else
@@ -1104,7 +1149,18 @@ PYEOF
     fi
 
     if [[ $c_errors -eq 0 ]]; then
-        ok "$label: consolidation outcome is ${outcome:-<missing>} (step 2d gate), ${decisions_checked:-0} decision(s) acknowledged"
+        # decisions_checked is unset (not "0") when no node resolved or the
+        # index read failed (the W branch) - only claim a count when a check
+        # genuinely ran, and report acknowledged-vs-checked rather than just
+        # checked: a grandfathered WARN for a missing entry must not read as
+        # a pass on that entry (the receipt-can-lie shape this whole gate
+        # exists to police, applied to its own success line).
+        if [[ -n "$decisions_checked" ]]; then
+            local acked=$((decisions_checked - ${#missing_decisions[@]}))
+            ok "$label: consolidation outcome is ${outcome:-<missing>} (step 2d gate), $acked/$decisions_checked decision(s) acknowledged"
+        else
+            ok "$label: consolidation outcome is ${outcome:-<missing>} (step 2d gate)"
+        fi
     fi
 }
 

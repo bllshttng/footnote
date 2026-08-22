@@ -70,7 +70,12 @@ class DecisionAcknowledgment(BaseModel):
 
         if not looks_like_decision_id(v):
             raise ValueError("is not a decision id (expected d-<hex>, e.g. d-a4b6e1c8)")
-        return v
+        # Normalize to casefold: the regex accepts d-ABCD1234 (case-insensitive,
+        # matching looks_like_decision_id itself), but a real minted id
+        # (mint_decision_id) is always lowercase hex. Without this, the
+        # validator's own comparison against the (always-lowercase) live index
+        # would refuse a plan that named the right ruling in the wrong case.
+        return v.strip().casefold()
 
 
 class ConsolidationBlock(BaseModel):
