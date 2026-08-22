@@ -563,6 +563,9 @@ def test_format_names_the_mention_escape_for_word_rules():
 
     rule4_msg = style.format_violations(style.check("don't run it."))
     assert "A quoted word is a mention, not a use." in rule4_msg
+    # The demonstration word is the one the reader actually wrote, never a
+    # hardcoded modal: a rule 4 refusal demonstrates on the contraction.
+    assert 'Wrap "don\'t" in double quotes or backticks' in rule4_msg
 
 
 def test_format_adds_the_mention_escape_only_for_word_rules():

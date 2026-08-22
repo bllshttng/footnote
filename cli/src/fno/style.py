@@ -326,11 +326,23 @@ def format_violations(violations: list[Violation]) -> str:
         # and the reader looking at this refusal is looking at a working
         # demonstration of the fix. Say so, gated like the rule 7 recipe so
         # an advisory that fires on every refusal trains the reader to skip
-        # the paragraph where the answer is.
+        # the paragraph where the answer is. The demonstration word is read
+        # back out of the first word-level violation's detail - which already
+        # carries it double-quoted - so a rule 4 refusal demonstrates on the
+        # contraction the reader wrote, never on a hardcoded modal.
+        first_word_rule = next(
+            (v for r in (3, 4) for v in by_rule.get(r, [])), None
+        )
+        quoted = (
+            re.search(r'"([^"]+)"', first_word_rule.detail)
+            if first_word_rule is not None
+            else None
+        )
+        demo = quoted.group(1) if quoted else "the refused word"
         lines.extend(
             [
                 "A quoted word is a mention, not a use.",
-                'Wrap "should" in double quotes or backticks to name it.',
+                f'Wrap "{demo}" in double quotes or backticks to name it.',
                 "This refusal does that with every word it names.",
             ]
         )
