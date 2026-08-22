@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import typer
 
@@ -23,7 +23,7 @@ from fno._lazy_group import make_lazy_group_cls
 # provider loader (~68ms), and `fno config get` is called from shell dozens of
 # times per phase. `providers` used to be a top-level LAZY_SUBCOMMANDS entry, so
 # mounting it eagerly here would have moved that cost onto every `fno config`.
-_LAZY_SUBCOMMANDS = {
+_LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] = {
     "accounts": ("fno.adapters.providers.cli:cli", "Manage account records."),
     # Folded under config (unit 6, x-9d6c). The old top-level spellings stay
     # one-release shims (fno.verb_moves); these mounts are the canonical
