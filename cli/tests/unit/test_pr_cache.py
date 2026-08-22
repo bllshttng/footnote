@@ -258,6 +258,51 @@ def test_secondary_limit_failure_sets_backoff_and_serves_degraded(cache_env, mon
     assert out["cached"] is True
 
 
+def test_ttl_hit_serves_the_human_verdict_line(cache_env, monkeypatch, capsys):
+    """AC5-EDGE: the serve is the second path a reader arrives on, so it
+    prints the same human line the live read prints, rendered from the
+    SERVED payload - asserted against the serve output, not run_status, or
+    the second path stays unproven."""
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
+    assert _cache.cached_status("42") == 0
+    assert calls["n"] == 1, "the serve under test is a TTL hit, not a live read"
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)
+    assert out["cached"] is True
+    assert cap.err.split("\n", 1)[0] == _status.verdict_line(out)
+
+
+def test_stale_serve_renders_the_degraded_line(cache_env, monkeypatch, capsys):
+    """AC5-EDGE: a degraded serve renders unknown, unsettled and NOT-ready,
+    and the blockers clause carries stale_reason - the stale arm rewrites
+    `ready` without touching `ready_blockers`, so without the reason in the
+    clause the line would read NOT-ready beside `no blockers`."""
+    cache_dir, head = cache_env
+    err = (None, "HTTP 403: You have exceeded a secondary rate limit | back off")
+    fetch, calls = _fetch_spy([_GREEN, err])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    row = json.loads(_row_path(cache_dir).read_text())
+    row["ts"] -= 3600
+    _row_path(cache_dir).write_text(json.dumps(row))
+    assert _cache.cached_status("42") == 4
+    capsys.readouterr()
+    assert _cache.cached_status("42") == 3
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)
+    line = cap.err.split("\n", 1)[0]
+    assert line == _status.verdict_line(out)
+    assert " unknown " in line
+    assert "unsettled" in line
+    assert "NOT-ready" in line
+    assert "stale_serve" in line
+    assert "secondary rate limit" in line
+
+
 def test_head_unreadable_serves_newest_row_degraded(cache_env, monkeypatch, capsys):
     """Head read failing (secondary window / network): fail CLOSED. The newest
     existing row is served degraded with zero network, never its green."""

@@ -249,7 +249,9 @@ def test_ac2_all_concluded_passes_stay_settled(monkeypatch, capsys):
     assert code == 0
     assert out["settled"] is True
     assert out["checks"]["unsettled"] == 0
-    assert err == ""
+    # The human verdict line is the only stderr; no note fires on a
+    # settled green PR.
+    assert err == _status.verdict_line(out) + "\n"
 
 
 def test_ac3_empty_rollup_is_never_settled(monkeypatch, capsys):
@@ -260,7 +262,9 @@ def test_ac3_empty_rollup_is_never_settled(monkeypatch, capsys):
     assert code == 3
     assert out["verdict"] == "unknown"
     assert out["settled"] is False
-    assert err == ""
+    # The human verdict line is the only stderr; an empty rollup has no
+    # check to advise about.
+    assert err == _status.verdict_line(out) + "\n"
 
 
 def test_ac4_superseded_cancelled_settles_green(monkeypatch, capsys):
@@ -334,7 +338,10 @@ def test_pending_and_cancelled_get_their_own_distinct_notes(monkeypatch, capsys)
     assert out["checks"]["unsettled"] == 2
     assert "cancelled or stale" in err
     assert "still queued or running" in err
-    cancelled_note, pending_note = err.split("\n", 1)
+    # The verdict line is always the first stderr line; the notes follow it.
+    assert err.split("\n", 1)[0] == _status.verdict_line(out)
+    notes = err.split("\n", 1)[1]
+    cancelled_note, pending_note = notes.split("\n", 1)
     assert "ci" in cancelled_note and "smoke" not in cancelled_note
     assert "smoke" in pending_note and "ci" not in pending_note
 
@@ -528,7 +535,152 @@ def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     _status.run_status("42")
-    assert capsys.readouterr().err == ""
+    cap = capsys.readouterr()
+    # The human verdict line is the only stderr a clean PR prints; every
+    # note is advice for a state this PR is not in.
+    assert cap.err == _status.verdict_line(_json.loads(cap.out)) + "\n"
+
+
+# ---- the human verdict line: one line, fixed slots, conclusion last ----
+
+
+def _line_payload(**over):
+    """A clean payload as run_status emits it, overridable per variant."""
+    head = "3e3b45d4bc24" + "0" * 28
+    payload = {
+        "pr": "1043",
+        "head": head,
+        "verdict": "green",
+        "settled": True,
+        "green": True,
+        "pr_state": "OPEN",
+        "mergeable": "MERGEABLE",
+        "checks": {"unsettled": 0, "total": 2},
+        "ready": True,
+        "ready_blockers": [],
+        "review_coverage": {"coverage": "covered", "head_sha": head},
+    }
+    payload.update(over)
+    return payload
+
+
+def test_verdict_line_clean_pr_is_one_quiet_line():
+    """AC1-HP: every slot of a clean PR reads as a quiet lowercase word and
+    the conclusion clause comes last, so the lazy read is the complete read."""
+    assert _status.verdict_line(_line_payload()) == (
+        "1043 OPEN green settled mergeable ready @ 3e3b45d4bc24 - no blockers"
+    )
+
+
+def test_verdict_line_every_slot_matters():
+    """AC3-ERR: changing any one of the slots a misreader omitted must change
+    the line, and no two varied payloads may render the same line - a slot
+    that never changes the output is a decorative field, and the reader who
+    budgets for it is worse off than one who never saw it."""
+    base = _line_payload()
+    variants = [
+        _line_payload(pr_state="CLOSED"),
+        _line_payload(verdict="red", green=False, ready=False,
+                      ready_blockers=["ci_cancelled_retrigger"]),
+        _line_payload(settled=False, checks={"unsettled": 2, "total": 2}),
+        _line_payload(mergeable="UNKNOWN"),
+        _line_payload(ready=False, ready_blockers=["optional_reviews_unresolved"]),
+    ]
+    base_line = _status.verdict_line(base)
+    for payload in variants:
+        assert _status.verdict_line(payload) != base_line
+    lines = [base_line] + [_status.verdict_line(p) for p in variants]
+    assert len(set(lines)) == len(lines)
+
+
+def test_verdict_line_marks_every_wrong_value_loud():
+    """AC3-ERR: a non-clean value renders a visibly marked token - capitals
+    or a parenthetical - so scanning for trouble is a real strategy."""
+    line = _status.verdict_line(_line_payload(
+        pr_state="CLOSED",
+        verdict="red",
+        green=False,
+        settled=False,
+        checks={"unsettled": 2, "total": 2},
+        mergeable="CONFLICTING",
+        ready=False,
+        ready_blockers=["not_mergeable_conflicting", "ci_red"],
+    ))
+    assert "CLOSED" in line
+    assert "unsettled(2)" in line
+    assert "CONFLICTING" in line
+    assert "NOT-ready" in line
+    assert line.endswith("- 2 blockers: not_mergeable_conflicting, ci_red")
+
+
+def test_verdict_line_spells_out_mergeable_unknown():
+    """The fourth misreading: a not-yet-computed answer arrives as the string
+    UNKNOWN, and the line states its meaning instead of asking the reader to
+    interpret a word - or worse, a null."""
+    assert "mergeable-unknown(not-yet-computed)" in _status.verdict_line(
+        _line_payload(mergeable="UNKNOWN")
+    )
+
+
+def test_verdict_line_carries_a_head_mismatch_without_arithmetic():
+    """AC4-ERR: coverage computed at another commit renders both commits at
+    12 characters in one line. A matching coverage head renders nothing, so
+    the parenthetical's presence is itself the signal."""
+    mismatched = _line_payload()
+    mismatched["review_coverage"] = {
+        "coverage": "covered", "head_sha": "1a2b3c4d5e6f" + "0" * 28,
+    }
+    assert (
+        "@ 3e3b45d4bc24 (coverage at 1a2b3c4d5e6f) - "
+        in _status.verdict_line(mismatched)
+    )
+    assert "(coverage at" not in _status.verdict_line(_line_payload())
+
+
+def test_run_status_keeps_stdout_a_pure_json_contract(monkeypatch, capsys):
+    """AC2-HP: stdout carries exactly one JSON object with the pre-change
+    keys, and the human line lands on stderr - the fleet's watcher greps
+    stdout with stderr discarded, so the two streams must never trade."""
+    monkeypatch.setattr(
+        _status, "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "headRefOid": "3e3b45d4bc24" + "0" * 28,
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+            ],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status, "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    monkeypatch.setattr(
+        _status, "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "unknown",
+            "reviewed_count": None,
+            "head_sha": "3e3b45d4bc24" + "0" * 28,
+        },
+    )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    code = _status.run_status("1043")
+    cap = capsys.readouterr()
+    assert code == 0
+    # Stdout: exactly one JSON object, the machine contract untouched.
+    assert cap.out.count("\n") == 1
+    payload = _json.loads(cap.out)
+    assert set(payload) >= {
+        "pr", "head", "verdict", "settled", "green", "pr_state", "mergeable",
+        "checks", "optional_reviews", "optional_reviews_unresolved",
+        "review_coverage", "review_activity", "dispatch_hold", "ready",
+        "ready_blockers",
+    }
+    # Stderr: the human line first, rendered from exactly that payload (the
+    # coverage note may follow it). The clean line itself is pinned by the
+    # pure test above; this one pins that the two streams never trade.
+    assert cap.err.split("\n", 1)[0] == _status.verdict_line(payload)
 
 
 def test_run_status_emits_json_and_code(monkeypatch, capsys):
