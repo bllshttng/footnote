@@ -67,10 +67,6 @@ SEED_PROVENANCE_KEYS: tuple[str, ...] = (
 MAX_SEED_BYTES = 16 * 1024
 
 
-class SeedProvenanceRefused(Exception):
-    """The seed cannot be attributed; the caller must refuse the spawn."""
-
-
 def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
     """The child-environment fields carrying this seed's provenance.
 
@@ -84,16 +80,15 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
     ``resolve_harness_identity`` and never ``--from-self``: both stamp the shared
     ambient id.
 
-    Raises :class:`SeedProvenanceRefused` only for a seed already carrying an
-    ``<fno_mail>`` tag. That one is a forgery boundary, not a rendering limit:
-    the tag reaches the child either way, and refusing the spawn is what stops
-    a body from claiming an envelope of its own.
+    Never raises. Three cases return empty and launch unattributed: an
+    unprovable identity (the operator case), a seed too long to quote in full,
+    and a seed that already carries an ``<fno_mail>`` envelope. That last one is
+    load-bearing: ``wake_and_deliver``'s fork rung seeds a worker with the
+    wrapped message itself, so refusing it killed every mail send to an
+    asleep-but-resumable peer that reached that rung.
 
-    A seed over :data:`MAX_SEED_BYTES` is NOT that. Nothing about it is
-    dishonest, it is only too long to quote, so it takes the same answer as an
-    unprovable identity above -- return empty and launch unattributed. Killing
-    a spawn because a pasted plan is long would make this helper a gatekeeper
-    over work it has no stake in.
+    Killing a spawn was never this helper's job. It owes the caller an honest
+    sidecar or none, and it has no stake in the work being launched.
     """
     from fno.agents.self_stamp import (
         resolve_self_model,
@@ -103,17 +98,22 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
     from fno.dispatch_flags import infer_invoking_harness
     from fno.mail.envelope import contains_fno_mail_tag, harness_for_provider
 
-    # FIRST, ahead of every early return. This one is a fact about the SEED, not
-    # about who is spawning or how long the text is, so any check that can exit
-    # before it becomes a way to carry a forged tag past it. Both of the returns
-    # below were once reachable first: padding a tagged seed over the cap, or
-    # spawning one from a shell with no provable identity, each launched it
-    # unrefused. Order is the whole guard here.
+    # A seed carrying an envelope gets NO sidecar, and still launches.
+    #
+    # This refused the spawn until it turned out that a legitimate seed carries
+    # an envelope by construction: `wake_and_deliver`'s fork rung spawns with a
+    # lineage prefix followed by the wrapped message itself, so every mail send
+    # to an asleep-but-resumable peer that reached that rung died here and
+    # demoted to durable, blaming a spawn failure that never happened.
+    #
+    # Refusing was the wrong instrument anyway. The tag reaches the worker's
+    # prompt whether or not a sidecar renders, so a refusal only ever helped by
+    # killing the launch, and killing the launch is what broke the wake path.
+    # What this function owes the caller is an honest sidecar or none, and a
+    # seed that already carries an envelope needs none: it is either
+    # self-attributing, as the wake seed is, or not ours to vouch for.
     if contains_fno_mail_tag(seed):
-        raise SeedProvenanceRefused(
-            "seed contains an <fno_mail> tag; the envelope frames peer mail and "
-            "a body cannot contain one"
-        )
+        return {}
 
     from_session = resolve_self_session_id()
     if not from_session:

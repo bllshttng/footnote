@@ -1511,23 +1511,16 @@ def _seed_provenance_env(
     ``fno agents spawn`` in a shell authored the seed, and stamping a peer
     envelope on it would name an agent sender that does not exist.
 
-    Raises :class:`DispatchAskError` for the one seed that cannot be launched at
-    all: one already carrying an ``<fno_mail>`` tag. The tag reaches the worker
-    whether or not a sidecar renders, so refusing the spawn is what keeps a body
-    from claiming an envelope of its own. A merely oversized seed does not come
-    through here -- ``build_env`` drops its sidecar and launches unattributed,
-    because length is not dishonesty.
+    Never refuses a spawn. `build_env` returns empty whenever it cannot honestly
+    attribute the seed -- an operator spawn, an over-long seed, or one that
+    already carries its own envelope -- and an unattributed launch is the right
+    outcome for all three. It briefly raised on that last case, which killed the
+    mail wake-fork rung: that rung seeds a worker with the wrapped message
+    itself, so its seed carries an envelope by construction.
     """
-    from fno.mail.seed_provenance import SeedProvenanceRefused, build_env
+    from fno.mail.seed_provenance import build_env
 
-    try:
-        return build_env(message, node=(provenance or {}).get("FNO_NODE"))
-    except SeedProvenanceRefused as exc:
-        raise DispatchAskError(
-            f"seed provenance refused: {exc}. The seed would reach the worker "
-            f"unattributed; shorten it or remove the envelope tag and spawn again.",
-            exit_code=2,
-        ) from exc
+    return build_env(message, node=(provenance or {}).get("FNO_NODE"))
 
 
 def resolve_provenance(

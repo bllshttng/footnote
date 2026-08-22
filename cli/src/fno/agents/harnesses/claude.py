@@ -132,20 +132,8 @@ class ProviderSubprocessError(RuntimeError):
     surface them unwrapped (AC1-FR subprocess non-zero / auth-quota).
     """
 
-    #: Set True by a raiser that refused BEFORE the subprocess ran. The exit
-    #: code cannot carry this: 127 already means "the binary was not found",
-    #: and a refusal is not that. The dispatcher reads it to decide whether a
-    #: supervisor may exist, and a wrong answer there anchors a multi-minute
-    #: writer claim on a transcript that has no writer.
-    no_child: bool
-
     def __init__(
-        self,
-        exit_code: int,
-        stderr: str,
-        *,
-        summary: Optional[str] = None,
-        no_child: bool = False,
+        self, exit_code: int, stderr: str, *, summary: Optional[str] = None
     ) -> None:
         # `summary` is for a refusal raised BEFORE claude is invoked. The default
         # names a process exit, and a caller that never started one would report
@@ -154,7 +142,6 @@ class ProviderSubprocessError(RuntimeError):
         super().__init__(summary or f"claude --bg exited {exit_code}: {stderr!r}")
         self.exit_code = exit_code
         self.stderr = stderr
-        self.no_child = no_child
 
 
 def parse_short_id(stdout: str) -> str:
@@ -675,31 +662,15 @@ def bg_create(
     # Reaching a daemon-forked worker needs a carrier that survives the fork,
     # the way `materialize_model_scrub_settings` floats a settings file for the
     # model vars. Do not read the update below as proof the bg lane is covered.
-    from fno.mail.seed_provenance import SeedProvenanceRefused
     from fno.mail.seed_provenance import build_env as _seed_provenance_env
 
-    try:
-        spawn_env.update(
-            _seed_provenance_env(message, node=os.environ.get("FNO_NODE"))
-        )
-    except SeedProvenanceRefused as exc:
-        # Only a seed carrying an <fno_mail> tag reaches here, and it is a
-        # forgery boundary rather than a rendering limit: the tag lands in the
-        # worker's prompt whether or not a sidecar renders, so the spawn is what
-        # has to stop. An oversized seed launches unattributed instead.
-        raise ProviderSubprocessError(
-            exit_code=2,
-            stderr=(
-                f"seed provenance refused: {exc}. The seed would reach the "
-                f"worker unattributed."
-            ),
-            summary=f"spawn refused before claude was invoked: {exc}",
-            # Nothing was executed, so no supervisor can exist and the writer
-            # claim is safe to free. Without this the dispatcher read the
-            # non-127 exit as "a supervisor may be running" and anchored a
-            # five-minute claim on a transcript with no writer.
-            no_child=True,
-        ) from exc
+    # Cannot refuse. `build_env` returns empty when it cannot honestly attribute
+    # the seed, and an unattributed launch is the right outcome every time it
+    # does. It briefly raised for a seed carrying an envelope, which killed the
+    # mail wake-fork rung: that rung seeds a worker with the wrapped message
+    # itself, so every send to an asleep-but-resumable peer reaching it died
+    # here and demoted to durable, blaming a spawn failure that never happened.
+    spawn_env.update(_seed_provenance_env(message, node=os.environ.get("FNO_NODE")))
 
     start = time.monotonic()
     try:

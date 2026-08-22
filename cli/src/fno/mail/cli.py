@@ -1786,6 +1786,14 @@ def _forced_pane_send(
     from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
     from fno.agents.registry import TERMINAL_STATUSES
 
+    # The ROW is the truth about which harness occupies this pane. `provider`
+    # arrives from the caller's optional -H flag, which is normally unset, and
+    # the name lane then floors it to a literal "claude". For a full codex
+    # session id whose discovery listing missed -- the case --force exists for
+    # -- that labelled a codex pane as claude on the one row whose entire
+    # purpose is auditability.
+    provider = getattr(entry, "harness", None) or provider
+
     # Bus-only FIRST, and up front, because it is a policy on the row rather
     # than an outcome of trying. `_mux_pane_send` returns False for it without
     # printing anything, which every other caller reads correctly as "demote to
