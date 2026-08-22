@@ -5800,6 +5800,10 @@ impl Core {
                 d.clear();
                 for pid in &frame_ids {
                     if let Some(entry) = self.panes.get(pid) {
+                        entry
+                            .stats
+                            .frames_composited
+                            .fetch_add(1, Ordering::Relaxed);
                         d.insert(*pid, entry.vt.frame());
                     }
                 }

@@ -14,6 +14,7 @@ addressable. See docs/architecture/coordination.md.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Optional
 
 from fno.agents.discover import (
@@ -241,7 +242,7 @@ _PANE_COUNTER_FIELDS = (
 )
 
 
-def pane_counter_rows(events_path: "Optional[object]" = None) -> dict:
+def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     """Difference the last two ``mux_pane_counters`` snapshots in the journal.
 
     THE one reader for per-pane mux counters: ``fno agents top --pane-stats``
@@ -258,11 +259,9 @@ def pane_counter_rows(events_path: "Optional[object]" = None) -> dict:
     resets pane ids and totals, so a session change reports every pane as
     born/gone instead of differencing across the reset.
     """
-    from pathlib import Path
-
     from fno.paths import global_events_json
 
-    path = Path(events_path) if events_path is not None else global_events_json()
+    path = events_path if events_path is not None else global_events_json()
     empty = {"status": "insufficient-samples", "rows": [], "born": [], "gone": [], "session": None, "window_s": None}
     try:
         size = path.stat().st_size
