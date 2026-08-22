@@ -15,7 +15,7 @@ config doctor
 update
 restart
 # L2 your first shipped PR
-whoami
+whoami status
 status
 target start
 target status

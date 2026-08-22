@@ -310,7 +310,7 @@ def test_remove_worktree_falls_back_to_legacy_path_when_canonical_missing(tmp_gi
 
 # CLI integration via typer runner
 def test_ac1_hp_worktree_cli_create(tmp_git_repo, monkeypatch):
-    """fno runtime worktree --action create --name X works end-to-end."""
+    """fno runtime worktree --action create (deprecated shim) works end-to-end."""
     monkeypatch.chdir(tmp_git_repo)
 
     name = _unique_name()
@@ -320,7 +320,11 @@ def test_ac1_hp_worktree_cli_create(tmp_git_repo, monkeypatch):
             ["runtime", "worktree", "--action", "create", "--name", name, "--json"],
         )
         assert result.exit_code == 0, f"Output: {result.output}"
-        data = json.loads(result.output)
+        # The shim prints its deprecation notice to stderr; the runner merges
+        # streams, so the JSON payload is the first line that opens an object.
+        data = json.loads(
+            next(l for l in result.output.splitlines() if l.startswith("{"))
+        )
         assert data["status"] in ("created", "already-exists")
         assert "worktree_path" in data
     finally:
