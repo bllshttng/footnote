@@ -206,12 +206,17 @@ def _serve(row: dict, *, stale: bool) -> int:
         out["cached_at"] = None
         ts = 0.0
     out["cached_age_seconds"] = int(max(0.0, time.time() - ts)) if ts else None
-    sys.stdout.write(json.dumps(out) + "\n")
-    # A degraded-coverage note must survive the coalescing this module exists
-    # to do: without this, the note reaches only the one session whose live
-    # read produced the row and none of the serves that follow it.
-    from fno.pr._status import coverage_recompute_note
+    # The serve is the second path a reader arrives on, so it prints the
+    # same human line the live read does, from the served payload: the
+    # degraded arm above rewrote the row in place, and a payload-keyed
+    # renderer tells that degraded truth with no second implementation.
+    # A degraded-coverage note must survive the coalescing this module
+    # exists to do: without this, the note reaches only the one session
+    # whose live read produced the row and none of the serves that follow.
+    from fno.pr._status import coverage_recompute_note, verdict_line
 
+    sys.stderr.write(verdict_line(out) + "\n")
+    sys.stdout.write(json.dumps(out) + "\n")
     coverage_recompute_note(out.get("review_coverage") or {})
     return code
 
