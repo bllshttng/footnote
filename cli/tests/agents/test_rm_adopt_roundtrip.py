@@ -178,7 +178,7 @@ class _FakeTTY(io.StringIO):
 def test_declining_at_the_prompt_stops_the_reap(isolated_state):
     """AC1-ERR: anything but a yes is a no, and nothing is torn down."""
     _seed_row()
-    err = io.StringIO()
+    err = _FakeTTY()
     assert rm_notice.warn_and_confirm(
         "reaped-worker", stderr=err, stdin=_FakeTTY("n\n")
     ) is False
@@ -187,7 +187,7 @@ def test_declining_at_the_prompt_stops_the_reap(isolated_state):
 
 def test_accepting_at_the_prompt_proceeds(isolated_state):
     _seed_row()
-    err = io.StringIO()
+    err = _FakeTTY()
     assert rm_notice.warn_and_confirm(
         "reaped-worker", stderr=err, stdin=_FakeTTY("y\n")
     ) is True
@@ -196,7 +196,7 @@ def test_accepting_at_the_prompt_proceeds(isolated_state):
 def test_force_never_prompts_but_still_warns(isolated_state):
     """AC2-ERR: --force skips the question, never the notice."""
     _seed_row()
-    err = io.StringIO()
+    err = _FakeTTY()
     stdin = _FakeTTY("")  # a read here would return "" and refuse
     assert rm_notice.warn_and_confirm(
         "reaped-worker", force=True, stderr=err, stdin=stdin
@@ -213,6 +213,23 @@ def test_non_tty_proceeds_without_blocking(isolated_state):
         "reaped-worker", stderr=err, stdin=io.StringIO("")
     ) is True
     assert "fno agents adopt" in err.getvalue()
+    assert "anyway?" not in err.getvalue()
+
+
+def test_a_prompt_nobody_can_read_is_never_asked(isolated_state):
+    """The silent-hang guard: stdin is a TTY but stderr is redirected away.
+
+    `dispatch-node.sh` and `spawn.sh` both run `fno agents rm ... >/dev/null
+    2>&1` with stdin inherited. Prompting there would block forever on a
+    question sent to /dev/null -- a silent hang produced by the guard meant to
+    prevent a silent loss. The read below would return "" and refuse, so a
+    regression here fails as a False, not as a timeout.
+    """
+    _seed_row()
+    err = io.StringIO()  # NOT a tty: the prompt would be invisible
+    assert rm_notice.warn_and_confirm(
+        "reaped-worker", stderr=err, stdin=_FakeTTY("")
+    ) is True
     assert "anyway?" not in err.getvalue()
 
 

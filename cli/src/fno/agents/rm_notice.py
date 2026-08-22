@@ -82,11 +82,19 @@ def warn_and_confirm(
     Returns True to proceed, False only when an operator answered no at an
     interactive prompt.
 
-    The prompt is offered ONLY when stdin is a TTY and ``force`` is unset. A
-    non-interactive caller is warned and proceeds: ``fno agents watchdog
-    --apply-all`` and ``fno backlog groom`` reap rows unattended, and a blocking
-    prompt there wedges the fleet sweep. The receipt is what carries the
-    reversal in that case.
+    The prompt is offered ONLY when BOTH stdin and stderr are a TTY and
+    ``force`` is unset. A non-interactive caller is warned and proceeds: ``fno
+    agents watchdog --apply-all`` and ``fno backlog groom`` reap rows
+    unattended, and a blocking prompt there wedges the fleet sweep. The receipt
+    is what carries the reversal in that case.
+
+    Requiring stderr too is not belt-and-braces. ``dispatch-node.sh`` and
+    ``spawn.sh`` both call ``fno agents rm ... >/dev/null 2>&1`` with stdin
+    inherited, so on an interactive terminal a stdin-only check would block on
+    a question whose text went to /dev/null -- a silent hang, from a guard
+    meant to prevent a silent loss. A prompt nobody can read is not consent to
+    ask for. Same idiom the dispatch layer already uses for its own interactive
+    check.
     """
     err = stderr if stderr is not None else sys.stderr
     stream = stdin if stdin is not None else sys.stdin
@@ -101,7 +109,10 @@ def warn_and_confirm(
     err.write(resume_handle_notice(name, getattr(entry, "harness", "?"), handle))
     err.flush()
 
-    if force or not bool(getattr(stream, "isatty", lambda: False)()):
+    interactive = bool(getattr(stream, "isatty", lambda: False)()) and bool(
+        getattr(err, "isatty", lambda: False)()
+    )
+    if force or not interactive:
         return True
 
     err.write(f"Remove {name} anyway? [y/N] ")
