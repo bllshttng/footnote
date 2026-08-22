@@ -8088,6 +8088,10 @@ def dispatch_send_to_project(
 
     if res.recipient is not None:
         # Exactly one live peer (or --any winner): deliver live by name.
+        # Omit the default kwarg so existing in-process adapters that implement
+        # the pre-budget dispatch signature keep working. The exception lane
+        # passes False explicitly because it changes enforcement.
+        budget_kwargs = {} if budget_enforce else {"budget_enforce": False}
         result = dispatch_send(
             name=res.recipient,
             message=message,
@@ -8095,7 +8099,7 @@ def dispatch_send_to_project(
             cwd=cwd,
             lock_timeout=lock_timeout,
             from_name=from_name,
-            budget_enforce=budget_enforce,
+            **budget_kwargs,
         )
         return replace(result, recipient=res.recipient, to_project=project)
 
