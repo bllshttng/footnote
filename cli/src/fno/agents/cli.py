@@ -3359,6 +3359,13 @@ def cmd_top(
         help="Also list harness-native subagents (sidechain limbs) the census "
         "cannot see: read-only, claude-only, not slot-counted.",
     ),
+    show_pane_stats: bool = typer.Option(
+        False,
+        "--pane-stats",
+        help="Append per-pane mux server counters, differenced over the last "
+        "two 30s snapshots in the global events journal (bytes_in, "
+        "grid_updates, frames_composited, frames_emitted, cpu_ns).",
+    ),
 ) -> None:
     """Show every live worker process - fno-spawned and foreign claude bg
     alike - with pid, RSS (MB), and status (x-c5cc US4).
@@ -3370,7 +3377,13 @@ def cmd_top(
     """
     from fno.agents.top import render_top
 
-    print(render_top(as_json=as_json, include_subagents=show_subagents))
+    print(
+        render_top(
+            as_json=as_json,
+            include_subagents=show_subagents,
+            include_pane_stats=show_pane_stats,
+        )
+    )
 
 
 @agents_app.command("orphans", hidden=True)

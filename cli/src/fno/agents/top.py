@@ -226,15 +226,156 @@ def _render_subagent_lines(section: dict) -> list[str]:
     return out
 
 
-def render_top(as_json: bool = False, include_subagents: bool = False) -> str:
+# How much of the global journal `pane_counter_rows` reads: enough tail to
+# hold several cadence snapshots of a busy day (the mux emits every 30s, so
+# two samples sit within ~1 KB of each other) without slurping a multi-MB log.
+_PANE_COUNTERS_TAIL_BYTES = 512 * 1024
+
+# The five monotonic totals the mux emits per pane. Differenced per field.
+_PANE_COUNTER_FIELDS = (
+    "bytes_in",
+    "grid_updates",
+    "frames_composited",
+    "frames_emitted",
+    "cpu_ns",
+)
+
+
+def pane_counter_rows(events_path: "Optional[object]" = None) -> dict:
+    """Difference the last two ``mux_pane_counters`` snapshots in the journal.
+
+    THE one reader for per-pane mux counters: ``fno agents top --pane-stats``
+    renders it here, and the spawn gate's pane-vs-bg-session pricing imports
+    this same function rather than growing a second implementation. The mux
+    emits monotonic TOTALS, never rates - the delta over the window between
+    two samples is computed here, per pane.
+
+    Returns ``{status, rows, born, gone, session, window_s}``. ``status`` is
+    ``ok`` | ``insufficient-samples`` | ``unreadable``; an honest message is
+    always renderable because a missing second sample or a broken journal must
+    never read as "no cost" (the empty-table trap). Panes are matched across
+    samples only when BOTH carry the same mux session name - a server restart
+    resets pane ids and totals, so a session change reports every pane as
+    born/gone instead of differencing across the reset.
+    """
+    from pathlib import Path
+
+    from fno.paths import global_events_json
+
+    path = Path(events_path) if events_path is not None else global_events_json()
+    empty = {"status": "insufficient-samples", "rows": [], "born": [], "gone": [], "session": None, "window_s": None}
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > _PANE_COUNTERS_TAIL_BYTES:
+                fh.seek(size - _PANE_COUNTERS_TAIL_BYTES)
+                fh.readline()  # drop the partial line the seek landed in
+            tail = fh.read().decode("utf-8", errors="replace")
+        samples = []
+        for line in tail.splitlines():
+            if '"mux_pane_counters"' not in line:
+                continue  # cheap pre-filter: the journal carries many types
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") == "mux_pane_counters":
+                samples.append(ev)
+    except FileNotFoundError:
+        return empty  # no journal at all = no samples, not a broken read
+    except OSError as exc:
+        return {**empty, "status": "unreadable", "error": f"{type(exc).__name__}: {exc}"}
+
+    if len(samples) < 2:
+        return empty
+
+    older, newer = samples[-2], samples[-1]
+    older_panes = {p["pane_id"]: p for p in older.get("data", {}).get("panes", [])}
+    newer_panes = {p["pane_id"]: p for p in newer.get("data", {}).get("panes", [])}
+    session = newer.get("data", {}).get("session")
+    restart = older.get("data", {}).get("session") != session
+
+    def _ts_seconds(ev: dict) -> Optional[float]:
+        try:
+            from datetime import datetime
+
+            return datetime.fromisoformat(ev["ts"].replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None
+
+    t0, t1 = _ts_seconds(older), _ts_seconds(newer)
+    window_s = round(t1 - t0, 1) if t0 is not None and t1 is not None else None
+
+    rows = []
+    for pid, p in sorted(newer_panes.items()):
+        q = older_panes.get(pid)
+        if q is None or restart:
+            # Only in the newer sample (or ids reset across a restart): a
+            # birth, not a delta - one sample cannot be differenced.
+            continue
+        row = {"pane_id": pid, "node": p.get("node"), "name": p.get("name"), "cmd": p.get("cmd")}
+        row.update({f: p.get(f, 0) - q.get(f, 0) for f in _PANE_COUNTER_FIELDS})
+        rows.append(row)
+    born = sorted(set(newer_panes) - set(older_panes)) if not restart else sorted(newer_panes)
+    gone = sorted(set(older_panes) - set(newer_panes)) if not restart else sorted(older_panes)
+    return {
+        "status": "ok",
+        "rows": rows,
+        "born": born,
+        "gone": gone,
+        "session": session,
+        "window_s": window_s,
+    }
+
+
+def _render_pane_stats_lines(section: dict) -> list[str]:
+    """The human-readable per-pane counter block. Scope-stated even when the
+    news is "cannot say": one sample or an unreadable journal prints its
+    status line, never an empty table that reads as 'no cost'."""
+    out = ["pane counters (mux server; monotonic totals differenced over the window)"]
+    if section["status"] != "ok":
+        reason = {
+            "insufficient-samples": "insufficient samples: need two mux_pane_counters "
+            "events in the journal (the mux emits one per 30s while panes live)",
+            "unreadable": f"journal unreadable: {section.get('error', 'unknown error')}",
+        }.get(section["status"], section["status"])
+        out.append(reason)
+        return out
+    if section.get("window_s") is not None:
+        out.append(f"session {section['session']} | window {section['window_s']}s")
+    out.append(
+        f"{'PANE':>5} {'NODE':<11} {'NAME':<16} {'BYTES_IN':>10} "
+        f"{'GRIDS':>8} {'COMPOSITED':>10} {'EMITTED':>8} {'CPU_MS':>9}"
+    )
+    if not section["rows"]:
+        out.append("no pane appeared in both samples")
+    for r in section["rows"]:
+        out.append(
+            f"{r['pane_id']:>5} {str(r['node'] or '-'):<11} {str(r['name'] or '-'):<16} "
+            f"{r['bytes_in']:>10} {r['grid_updates']:>8} {r['frames_composited']:>10} "
+            f"{r['frames_emitted']:>8} {r['cpu_ns'] / 1_000_000:>9.1f}"
+        )
+    if section["born"]:
+        out.append(f"born this window: {', '.join(map(str, section['born']))}")
+    if section["gone"]:
+        out.append(f"gone this window: {', '.join(map(str, section['gone']))}")
+    return out
+
+
+def render_top(
+    as_json: bool = False, include_subagents: bool = False, include_pane_stats: bool = False
+) -> str:
     """Render the union table (or its JSON mirror - same rows, LD: parity).
 
     ``include_subagents`` appends a read-only sidechain section (x-af92); in
     JSON it adds a ``subagents`` key and folds the scan warnings in.
+    ``include_pane_stats`` appends the per-pane mux counter deltas (one reader,
+    :func:`pane_counter_rows`).
     """
     c = census()
     rows = _rows(c.workers, _crown_map())
     subagents = _subagent_section() if include_subagents else None
+    pane_stats = pane_counter_rows() if include_pane_stats else None
     if as_json:
         payload: dict = {
             "workers": rows,
@@ -244,6 +385,8 @@ def render_top(as_json: bool = False, include_subagents: bool = False) -> str:
         if subagents is not None:
             payload["subagents"] = subagents["rows"]
             payload["warnings"] = c.warnings + subagents["warnings"]
+        if pane_stats is not None:
+            payload["pane_stats"] = pane_stats
         return json.dumps(payload, indent=2)
 
     out: list[str] = []
@@ -275,4 +418,7 @@ def render_top(as_json: bool = False, include_subagents: bool = False) -> str:
         out.append("")
         out.extend(subagents["warnings"])
         out.extend(_render_subagent_lines(subagents))
+    if pane_stats is not None:
+        out.append("")
+        out.extend(_render_pane_stats_lines(pane_stats))
     return "\n".join(out)
