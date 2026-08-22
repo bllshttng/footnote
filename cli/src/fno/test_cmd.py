@@ -778,7 +778,15 @@ def _name_matches(name: str, globs: str) -> bool:
     selector keeps and the steps the other keeps, with nothing in neither.
     That is the property CI's two shards rely on, so a step added to the
     registry later cannot fall through the crack.
+
+    The whole value is tried BEFORE the split, because three registry steps
+    have a comma in their own name ("... fails loudly, never skips here").
+    Splitting first would turn `--only '<that exact name>'` into two globs
+    that match nothing, and running one step by its exact name is the
+    documented way to reproduce a CI step locally.
     """
+    if fnmatch.fnmatch(name, globs.strip()):
+        return True
     return any(fnmatch.fnmatch(name, g.strip()) for g in globs.split(",") if g.strip())
 
 
@@ -1471,7 +1479,8 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         return 1
 
     print("", flush=True)
-    kind = ("retry-subset" if retry_failed else "only-subset" if only_glob else "full")
+    kind = ("retry-subset" if retry_failed else "only-subset" if only_glob
+            else "skip-subset" if skip_glob else "full")
     print(f"smoke: summary ({kind}, {len(results)} steps)", flush=True)
     for n, s, d in results:
         print(f"  {s:6} {d:4.0f}s  {n}", flush=True)

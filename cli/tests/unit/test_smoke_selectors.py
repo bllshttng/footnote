@@ -49,6 +49,20 @@ def test_name_matches_tolerates_spacing_and_empty_entries() -> None:
     assert not _name_matches("anything", ",")
 
 
+def test_a_step_name_containing_a_comma_still_selects_exactly() -> None:
+    """Three registry steps have a comma in their own name.
+
+    Splitting the value before trying it whole turned `--only '<exact name>'`
+    into two globs matching nothing, so the documented way to reproduce one CI
+    step locally exited 1 for those three. The whole value is tried first.
+    """
+    commad = "Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)"
+    assert _name_matches(commad, commad)
+    assert not _name_matches("Sync + build", commad)
+    # The list form still works beside it.
+    assert _name_matches("Sync + build", "Sync + build,Pytest*")
+
+
 def test_only_and_skip_partition_any_name_list() -> None:
     """The property CI depends on: every name lands in exactly one selector."""
     names = ["Sync + build", "Pytest (unit + integration)", "ruff + mypy",
