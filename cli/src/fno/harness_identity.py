@@ -59,6 +59,31 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Markers a harness binary writes about ITSELF at startup, rather than session
+# ids that name a specific run. The claude binary sets CLAUDECODE=1.
+#
+# NOT an identity resolver input, and the reason is worth stating because the
+# opposite reads as obvious. A shell that never ran claude cannot produce
+# CLAUDECODE, which sounds like proof of a claude self. It is not: the variable
+# survives a fork, so a codex session started from a shell that HAD run claude
+# inherits it. Treating it as proof there contradicts that session's own
+# CODEX_THREAD_ID and degrades a cleanly resolving codex session to ambiguous.
+# The poisoned-claude case and the codex-under-claude case carry the identical
+# name set, so environment alone cannot separate them; only the process-tree
+# walk in claims/session_pid.py can, and it is the sole prover
+# (resolve_self_identity).
+#
+# What the table IS for: the setup doctor's remedy line reads it, so that
+# mapping has one home instead of a private literal, and AMBIENT_IDENTITY_ENV
+# below scrubs it so a spawned child does not inherit its parent's marker and
+# send `fno doctor` to the wrong settings file. The doctor's own
+# CLAUDE_CONFIG_DIR / CODEX_HOME entries stay local to it: those name where
+# config lives, not which binary is running.
+SELF_SET_HARNESS_MARKERS: tuple[tuple[str, str], ...] = (
+    ("CLAUDECODE", "claude"),
+)
+
+
 # Ambient session-identity env names that a HERMETIC run must not see. This is
 # deliberately WIDER than the two tuples above: those define what
 # resolve_harness_identity() consults, in precedence order, while this defines
@@ -100,6 +125,13 @@ _EXTRA_IDENTITY_NAMES: tuple[tuple[str, str], ...] = (
 AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
     *(marker for marker, _ in HARNESS_SESSION_MARKERS),
     *(marker for marker, _ in LEGACY_HARNESS_SESSION_MARKERS),
+    # The self-set markers scrub too. CLAUDECODE survives a fork, so a codex
+    # child spawned by a claude parent inherits it and carries claude's marker
+    # for its whole life, which sends `fno doctor` to claude's settings file for
+    # a codex session. Each harness re-mints its own at startup, so the scrub is
+    # lossless. It changes what a CHILD sees; nothing here resolves identity
+    # from it (see SELF_SET_HARNESS_MARKERS above).
+    *(marker for marker, _ in SELF_SET_HARNESS_MARKERS),
     *(name for name, _ in _EXTRA_IDENTITY_NAMES),
 )
 
@@ -111,6 +143,7 @@ AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
 AMBIENT_IDENTITY_FAMILY: dict[str, str] = {
     **{marker: family for marker, family in HARNESS_SESSION_MARKERS},
     **{marker: family for marker, family in LEGACY_HARNESS_SESSION_MARKERS},
+    **dict(SELF_SET_HARNESS_MARKERS),
     **dict(_EXTRA_IDENTITY_NAMES),
 }
 
@@ -146,6 +179,19 @@ def ambient_identity_env_unset_args() -> list[str]:
     return flags
 
 
+# Families a strip suggestion never names, whatever session is asking.
+#
+#   fno     - TARGET_SESSION_ID is this run's own claim linkage. The resolver
+#             never consults it, so stripping it cannot cure an ambiguity, and
+#             dropping it would mis-key the retried command's claims.
+#   hermes  - HERMES_SESSION_ID is a fail-closed guard, not a session identity:
+#             HermesCliAdapter reads it as "we are inside a CLI agent session,
+#             shell spawn is FORBIDDEN" (adapters/hermes.py). It is never a
+#             keep_family, so without this entry every remedy line offered to
+#             delete it, which turns that refusal into a real spawn.
+_NEVER_STRIPPED_FAMILIES: frozenset[str] = frozenset({"fno", "hermes"})
+
+
 def ambient_identity_strip_flags(
     keep_family: str, env: Optional[Mapping[str, str]] = None
 ) -> list[str]:
@@ -157,15 +203,20 @@ def ambient_identity_strip_flags(
     harness it is (that is the ambiguity), but the operator reading the
     refusal knows, and stripping the foreign family restores self-resolution
     while keeping the session's own markers. Names not in
-    :data:`AMBIENT_IDENTITY_FAMILY` are never stripped here. The ``fno``
-    family is kept too: TARGET_SESSION_ID is this run's own claim linkage
-    (the resolver never consults it, so stripping it cannot cure the
-    ambiguity) and dropping it would mis-key the retried command's claims.
+    :data:`AMBIENT_IDENTITY_FAMILY` are never stripped here, and neither is any
+    family in :data:`_NEVER_STRIPPED_FAMILIES`.
     """
     environ = os.environ if env is None else env
     flags: list[str] = []
     for name in AMBIENT_IDENTITY_ENV:
-        if AMBIENT_IDENTITY_FAMILY.get(name) in (keep_family, "fno"):
+        family = AMBIENT_IDENTITY_FAMILY.get(name)
+        # An unmapped name is skipped, which is what the docstring has always
+        # said and what the code did not do: `.get(name) in (...)` compares None
+        # against the keep list, finds no match, and strips it. So a name added
+        # to AMBIENT_IDENTITY_ENV without a family entry landed in the remedy
+        # line by default. Fail closed instead - never suggest deleting a
+        # variable nobody has classified.
+        if family is None or family == keep_family or family in _NEVER_STRIPPED_FAMILIES:
             continue
         if (environ.get(name) or "").strip():
             flags += ["-u", name]
