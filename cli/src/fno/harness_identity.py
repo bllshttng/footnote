@@ -59,6 +59,43 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Markers a harness binary writes about ITSELF at startup, rather than session
+# ids that name a specific run. The claude binary sets CLAUDECODE=1, so a shell
+# that never ran claude cannot produce it.
+#
+# Read the ceiling before using one. A self-set marker survives a fork: a codex
+# session hand-started from a shell that had run claude inherits CLAUDECODE, so
+# this is evidence of claude ANCESTRY, not proof of a claude SELF. That is why
+# it never outranks the process-tree walk in claims/session_pid.py, which
+# answers the stronger question (the NEAREST harness ancestor). It earns its
+# place only where the walk has no answer at all - psutil denied, no harness
+# ancestor, a container that hides the parent chain - where the alternative is
+# resolving a live session to nothing.
+#
+# The setup doctor reads this same table for its remedy line, so the mapping
+# lives here once. Its own CLAUDE_CONFIG_DIR / CODEX_HOME entries stay local to
+# it: those name where config lives, not which binary is running.
+SELF_SET_HARNESS_MARKERS: tuple[tuple[str, str], ...] = (
+    ("CLAUDECODE", "claude"),
+)
+
+
+def self_set_harness(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """The harness family whose self-set marker is present, or None.
+
+    None when no marker is present AND when two families both are: two running
+    binaries cannot both be this process, so a tie is no evidence rather than a
+    precedence contest.
+    """
+    environ = os.environ if env is None else env
+    families = {
+        harness
+        for marker, harness in SELF_SET_HARNESS_MARKERS
+        if (environ.get(marker) or "").strip()
+    }
+    return next(iter(families)) if len(families) == 1 else None
+
+
 # Ambient session-identity env names that a HERMETIC run must not see. This is
 # deliberately WIDER than the two tuples above: those define what
 # resolve_harness_identity() consults, in precedence order, while this defines
@@ -100,6 +137,13 @@ _EXTRA_IDENTITY_NAMES: tuple[tuple[str, str], ...] = (
 AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
     *(marker for marker, _ in HARNESS_SESSION_MARKERS),
     *(marker for marker, _ in LEGACY_HARNESS_SESSION_MARKERS),
+    # The self-set markers scrub too, and for a sharper reason than the rest.
+    # CLAUDECODE survives a fork, so a codex child spawned by a claude parent
+    # inherits it and would carry claude's self-set marker for its whole life.
+    # Scrubbing at spawn is what keeps the marker meaning "the binary that wrote
+    # this is the one running" for every child footnote launches; each harness
+    # re-mints its own at startup, so the scrub is lossless.
+    *(marker for marker, _ in SELF_SET_HARNESS_MARKERS),
     *(name for name, _ in _EXTRA_IDENTITY_NAMES),
 )
 
@@ -111,6 +155,7 @@ AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
 AMBIENT_IDENTITY_FAMILY: dict[str, str] = {
     **{marker: family for marker, family in HARNESS_SESSION_MARKERS},
     **{marker: family for marker, family in LEGACY_HARNESS_SESSION_MARKERS},
+    **dict(SELF_SET_HARNESS_MARKERS),
     **dict(_EXTRA_IDENTITY_NAMES),
 }
 

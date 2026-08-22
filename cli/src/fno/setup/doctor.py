@@ -233,16 +233,23 @@ def _detected_harness() -> str:
     from fno.harness_identity import (
         HARNESS_SESSION_MARKERS,
         LEGACY_HARNESS_SESSION_MARKERS,
+        SELF_SET_HARNESS_MARKERS,
     )
 
+    # CLAUDECODE used to be a literal here. It is a marker the claude binary
+    # writes about itself, so it belongs in the shared table with the rest of
+    # the identity mapping; a second copy of that fact is what let the crown
+    # grantor resolve identity differently from whoami. What stays local is
+    # genuinely local: CLAUDE_CONFIG_DIR and CODEX_HOME name where config lives,
+    # not which binary is running.
     ambient = (
-        ("CLAUDECODE", "claude"),
         ("CLAUDE_CONFIG_DIR", "claude"),
         ("CODEX_HOME", "codex"),
     )
     for env, name in (
         *HARNESS_SESSION_MARKERS,
         *LEGACY_HARNESS_SESSION_MARKERS,
+        *SELF_SET_HARNESS_MARKERS,
         *ambient,
     ):
         if os.environ.get(env):
