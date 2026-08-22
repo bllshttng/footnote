@@ -124,9 +124,9 @@ echo "--- never policy flips protected -> ok ---"
 mk_fno_stub() { # <dir> <policy-line-or-'error'>
     mkdir -p "$1"
     if [[ "$2" == "error" ]]; then
-        printf '#!/usr/bin/env bash\n[[ "$1 $2" == "worktree policy" ]] && exit 1\nexit 0\n' > "$1/fno"
+        printf '#!/usr/bin/env bash\n[[ "$1 $2 $3" == "workspace worktree policy" ]] && exit 1\nexit 0\n' > "$1/fno"
     else
-        printf '#!/usr/bin/env bash\n[[ "$1 $2" == "worktree policy" ]] && { printf %s\\\\n "%s"; exit 0; }\nexit 0\n' "$2" > "$1/fno"
+        printf '#!/usr/bin/env bash\n[[ "$1 $2 $3" == "workspace worktree policy" ]] && { printf %s\\\\n "%s"; exit 0; }\nexit 0\n' "$2" > "$1/fno"
     fi
     chmod +x "$1/fno"
 }
