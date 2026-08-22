@@ -33,7 +33,7 @@ to retrieve sources without shipping, use `fno do research <topic> --no-deliver`
 
 ## Step 1: deliver the brief
 
-Run, with delivery on (the default; never pass `--no-deliver`). When this run has a node in scope (`$CLAIMS_ID` set, the node-seeded path), pass `--node "$CLAIMS_ID"` - it binds the shipped brief to that node's `plan_path` (best-effort; a bind failure warns but never loses the document). `$CLAIMS_ID` is a shell-local variable this skill's own bash session holds; it does not reach `fno do research`'s process environment on its own, so the flag is the reliable channel:
+Run, with delivery on (the default). Never pass `--no-deliver`. When this run has a node in scope (`$CLAIMS_ID` set, the node-seeded path), pass `--node "$CLAIMS_ID"`. It binds the shipped brief to that node's `plan_path`, best-effort. A bind failure warns but never loses the document. `$CLAIMS_ID` is a shell-local variable this skill's own bash session holds. It does not reach `fno do research`'s process environment on its own. The flag is the reliable channel:
 
 ```bash
 fno do research "<topic>" [--node "$CLAIMS_ID"] [other allowed flags]
