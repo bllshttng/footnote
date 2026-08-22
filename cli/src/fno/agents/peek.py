@@ -686,6 +686,76 @@ def _lookup_mux_pane(
         return None
 
 
+def _adoptable_sessions(
+    handle: str,
+    *,
+    projects_root: Optional[Path] = None,
+    codex_sessions_dir: Optional[Path] = None,
+    opencode_storage_dir: Optional[Path] = None,
+) -> list[tuple[str, str]]:
+    """``(harness, session_id)`` for every harness store that still holds ``handle``.
+
+    The registry and the harness stores are two different surfaces, and a
+    reaped row leaves its transcript behind. This is what lets the miss below
+    say which one it actually measured instead of reporting an absence as a
+    death.
+
+    Deliberately ``probe_stores`` and not ``resolve_transcript``: this is the
+    exact function ``adopt``'s third resolution step runs, so a positive answer
+    here is evidence the printed ``fno agents adopt`` will really work rather
+    than a second search that could disagree with it. It also needs no cwd,
+    which a reaped row no longer has, and it covers every harness rather than
+    claude alone.
+
+    A non-session-shaped handle (a plain agent name) answers empty by design,
+    and ``probe_stores`` returns on that check BEFORE any filesystem read -- so
+    the common miss, a name that is simply not registered, costs no I/O at all.
+    Only a session-shaped handle pays for the scan, which is exactly when the
+    answer is worth having.
+
+    The caller's injected store roots are honored. ``probe_stores`` reads the
+    ambient defaults through the ``FNO_*_DIR`` overrides, so without this an
+    explicitly-scoped ``peek`` could report "the registry is not the
+    transcript" while the scoped root held it.
+
+    Every failure degrades to empty and never raises, matching how
+    ``_lookup_mux_pane`` swallows a torn registry.
+    """
+    import os
+
+    from fno.agents.discover import (
+        CODEX_SESSIONS_DIR_ENV,
+        OPENCODE_STORAGE_DIR_ENV,
+        PROJECTS_DIR_ENV,
+    )
+
+    overrides = {
+        PROJECTS_DIR_ENV: projects_root,
+        CODEX_SESSIONS_DIR_ENV: codex_sessions_dir,
+        OPENCODE_STORAGE_DIR_ENV: opencode_storage_dir,
+    }
+    previous = {k: os.environ.get(k) for k, v in overrides.items() if v is not None}
+    try:
+        from fno.agents.store_fallback import probe_stores
+
+        for key, value in overrides.items():
+            if value is not None:
+                os.environ[key] = str(value)
+        # require_complete=False: this is an advisory hint, so a partially
+        # unreadable store should still surface the hits it CAN see rather
+        # than refusing. The refusal contract belongs to identity selection.
+        hits = probe_stores(handle, require_complete=False)
+    except Exception:  # noqa: BLE001 - an advisory locator never raises
+        return []
+    finally:
+        for key, old in previous.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+    return [(h.harness, h.session_id) for h in hits]
+
+
 def _read_mux_pane(
     session: str, pane_id: int, n: int, *, runner: Optional[Callable] = None
 ) -> tuple[int, str]:
@@ -804,7 +874,31 @@ def peek(
         )
         if mux_rc is not None:
             return mux_rc
-        err.write(f"peer not found: {handle}\n")
+        # Name the instrument. Both reads above (the live-session resolver and
+        # the mux-pane fallback) are registry-shaped, and the registry is not
+        # the transcript: a reaped row leaves 4.9M of conversation on disk
+        # while this line used to answer a bare "peer not found". A king read
+        # that as destroyed and nearly spawned fresh over a green PR.
+        err.write(f"peer not found in the registry: {handle}\n")
+        adoptable = _adoptable_sessions(
+            handle,
+            projects_root=projects_root,
+            codex_sessions_dir=codex_sessions_dir,
+            opencode_storage_dir=opencode_storage_dir,
+        )
+        if adoptable:
+            for harness_name, sid in adoptable:
+                err.write(
+                    f"the {harness_name} transcript IS on disk: {sid}\n"
+                    "the registry row is gone; the conversation is not.\n"
+                )
+                err.write(f"try: fno agents adopt {sid}\n")
+        else:
+            err.write(
+                "the registry is not the transcript. A reaped row leaves its "
+                "transcript on disk.\n"
+            )
+            err.write(f"try: fno agents adopt {handle}\n")
         if suggestions:
             err.write(f"did you mean: {', '.join(suggestions)}\n")
         return EXIT_NOT_FOUND
@@ -816,7 +910,13 @@ def peek(
 
     if not json_out:
         out.write(
-            f"peer {handle}: agent={agent} short_id={short_id} cwd={cwd}\n"
+            # `recorded_cwd`, not `cwd`: this is the registry's launch-time
+            # snapshot, never a live pwd. Unlabelled, it reported two recovered
+            # sessions as sitting in canonical main; one of them then named its
+            # own pwd inside its feature worktree. Do not read the live pwd
+            # here - that costs a pid resolution per call on a hot verb, and
+            # the label removes the ambiguity for free.
+            f"peer {handle}: agent={agent} short_id={short_id} recorded_cwd={cwd}\n"
         )
 
     # Fast-path: prefer normalized status events when present.

@@ -706,6 +706,24 @@ struct TraceArgs {
     since: Option<String>,
 }
 
+/// How much of an unexpected extra argument a refusal echoes back.
+const ECHO_CAP: usize = 40;
+
+/// Quote and cap an unexpected positional so a refusal stays readable.
+///
+/// A pasted prompt echoed in full makes the failure read like success to a
+/// human: on 2026-08-21 a king reported three failed resumes as working
+/// because the refusal ended in the prompt text. Quoting shows where the
+/// argument starts and stops; capping keeps the remedy on screen. Truncation
+/// is on char boundaries, so a multi-byte argument cannot panic here.
+fn echo_extra(arg: &str) -> String {
+    let mut out: String = arg.chars().take(ECHO_CAP).collect();
+    if arg.chars().count() > ECHO_CAP {
+        out.push_str("...");
+    }
+    format!("\"{out}\"")
+}
+
 fn parse_trace_args(rest: &[String]) -> Result<TraceArgs, String> {
     let mut a = TraceArgs {
         name: None,
@@ -741,7 +759,8 @@ fn parse_trace_args(rest: &[String]) -> Result<TraceArgs, String> {
             positional => {
                 if a.name.is_some() {
                     return Err(format!(
-                        "fno-agents: trace takes one NAME (got extra: {positional})"
+                        "fno-agents: trace takes one NAME (got extra: {}).",
+                        echo_extra(positional)
                     ));
                 }
                 a.name = Some(positional.to_string());
@@ -2387,7 +2406,19 @@ fn parse_resume_args(rest: &[String]) -> Result<(String, bool, Option<String>), 
             }
             other => {
                 if name.is_some() {
-                    eprintln!("fno-agents: resume takes one NAME (got extra: {other})");
+                    // The remedy, not just the refusal: `resume` reattaches a
+                    // session and carries no message, so the operator who
+                    // typed a prompt wanted `ask`. Matches the sibling
+                    // refusal for a live pane worker, which already ends in
+                    // the command to run instead.
+                    eprintln!(
+                        "fno-agents: resume takes one NAME and no prompt (got extra: {}).",
+                        echo_extra(other)
+                    );
+                    eprintln!(
+                        "resume reattaches a session; it does not carry a message. \
+                         Send one with: fno agents ask <name> \"<prompt>\""
+                    );
                     return Err(2);
                 }
                 name = Some(other.to_string());
@@ -2773,7 +2804,10 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
             }
             other => {
                 if session_id.is_some() {
-                    eprintln!("fno-agents: adopt takes one SESSION_ID (got extra: {other})");
+                    eprintln!(
+                        "fno-agents: adopt takes one SESSION_ID (got extra: {}).",
+                        echo_extra(other)
+                    );
                     return 2;
                 }
                 session_id = Some(other.to_string());
@@ -2783,9 +2817,14 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
     let session_id = match session_id {
         Some(s) => s,
         None => {
-            eprintln!("fno-agents: adopt needs a <session-id>");
+            // Name the short id too. The store probe matches an 8-hex prefix
+            // against surviving transcripts, so a reap reversed by short id is
+            // the common recovery -- and it is the form `rm` and `peek` now
+            // print. A usage line that omits it sends an operator looking for
+            // a full uuid they do not have.
+            eprintln!("fno-agents: usage: fno-agents adopt <session-id | 8-hex short id>");
             eprintln!(
-                "fno agents adopt: accepts a harness session id; resolves the registry, .fno/target-state.md, then harness stores."
+                "fno agents adopt: accepts a harness session id or its 8-hex short id; resolves the registry, .fno/target-state.md, then harness stores."
             );
             return 2;
         }
@@ -2887,7 +2926,10 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
             }
             other => {
                 if name.is_some() {
-                    eprintln!("fno-agents: attach takes one NAME (got extra: {other})");
+                    eprintln!(
+                        "fno-agents: attach takes one NAME (got extra: {}).",
+                        echo_extra(other)
+                    );
                     return 2;
                 }
                 name = Some(other.to_string());
@@ -3086,7 +3128,10 @@ fn parse_logs_args(rest: &[String]) -> Result<LogsArgs, (i32, String)> {
                 if name.is_some() {
                     return Err((
                         2,
-                        format!("fno-agents: logs takes one NAME (got extra: {positional})"),
+                        format!(
+                            "fno-agents: logs takes one NAME (got extra: {}).",
+                            echo_extra(positional)
+                        ),
                     ));
                 }
                 name = Some(positional.to_string());

@@ -90,7 +90,10 @@ def test_peek_resolve_miss_exits_13_with_suggestions(tmp_path):
         projects_root=tmp_path,
     )
     assert rc == 13
-    assert "peer not found: nope" in err.getvalue()
+    # The miss names the surface it read. A bare "peer not found" reported a
+    # registry absence as a death and nearly cost a live session.
+    assert "peer not found in the registry: nope" in err.getvalue()
+    assert "fno agents adopt" in err.getvalue()
     assert "worker-a" in err.getvalue()
 
 
@@ -175,7 +178,8 @@ def test_peek_mux_pane_no_row_falls_through_to_not_found(tmp_path):
         mux_reader=lambda sess, pane, n: (0, "irrelevant"),
     )
     assert rc == 13
-    assert "peer not found: ghost" in err.getvalue()
+    assert "peer not found in the registry: ghost" in err.getvalue()
+    assert "fno agents adopt" in err.getvalue()
     assert "someone-else" in err.getvalue()
 
 

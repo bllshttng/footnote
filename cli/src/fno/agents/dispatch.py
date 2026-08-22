@@ -39,6 +39,7 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Optional
 
 from fno import paths
 from fno.agents import events
+from fno.agents import rm_notice
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
@@ -1568,6 +1569,21 @@ def _claude_create_path(
     session_uuid = (
         resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
     )
+
+    # A revival continues one conversation under a NEW handle, which is the
+    # invariant directly above -- but it was never printed, so an operator
+    # watching the old handle heard nothing while the new one did the work.
+    # The sibling mail-revive fork already prints its lineage under "a fork is
+    # never silent"; this is the same event on a different door. Same rule as
+    # the rest of this node: never hand back a value without naming what it
+    # continues.
+    if revive and resume_session_id:
+        print(
+            f"fno agents spawn: resumed {canonical_handle(resume_session_id)} as "
+            f"{short_id} (same conversation, new handle).\n"
+            f"Watch the new one: fno agents peek {short_id}",
+            file=sys.stderr,
+        )
 
     # Capture the spawning session's ambient identity (Task 2.2, x-30f6).
     # Best-effort: never raises, degrades to (None, None, None) when absent.
@@ -3653,6 +3669,31 @@ def rm_agent(
             # Non-None only when --force swallowed a teardown failure; rides
             # the terminal event so the forensic stream stays single and true.
             teardown_error: Optional[str] = None
+
+            # The teardown below destroys the harness session record, which IS
+            # the resume handle. Name it and name the verb that reverses it,
+            # before anything is torn down. The interactive prompt lives at the
+            # `rust_runtime` seam instead, because that is the one place both
+            # runtimes pass through; this is the warning half only, so the
+            # documented wedged-daemon escape hatch (`python -c "... rm_agent
+            # (...)"` in the king brief's CLI reference) is not silent either.
+            #
+            # Gated on the harness actually HAVING a teardown arm: opencode is
+            # registry-only by design and gemini has none, so warning about a
+            # forfeited handle there would report a loss that does not happen.
+            #
+            # Skipped when the seam already wrote it in this process, or the
+            # Python route prints the same block twice -- the hazard the seam's
+            # own comments record for the env-scrub spawn warning.
+            handle = rm_notice.resume_handle_for(existing)
+            if (
+                handle is not None
+                and rm_notice.forfeits_resume_handle(existing)
+                and not os.environ.get(rm_notice.NOTICE_SHOWN_ENV)
+            ):
+                sys.stderr.write(
+                    rm_notice.resume_handle_notice(name, existing.harness, handle)
+                )
 
             if existing.harness == "claude":
                 short_id = existing.short_id

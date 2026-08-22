@@ -49,6 +49,10 @@ RUNTIME_ENV = "FNO_AGENTS_RUNTIME"
 #: Exit code when the runtime is requested but the binary is absent. Distinct
 #: from the daemon's own codes (1/2/13/14/15/18) so the failure is legible.
 BIN_NOT_FOUND_EXIT = 127
+#: Exit code when an operator answered no to ``rm``'s resume-handle prompt.
+#: Distinct from every daemon code so "you declined" never reads as "it failed";
+#: nothing was removed and nothing needs retrying.
+RM_DECLINED_EXIT = 3
 
 FOLDED_AGENT_SUBCOMMANDS = {
     "autonomy": (
@@ -541,6 +545,32 @@ def _has_flag(
         if any(a == lng or a.startswith(lng + "=") for lng in longs):
             return True
     return False
+
+
+def _gate_rm_at_seam(args: Sequence[str]) -> bool:
+    """Warn that ``rm`` forfeits a resume handle; return False only on a declined prompt.
+
+    Runs at the routing seam so the ONE implementation covers both runtimes:
+    ``rm`` is in :data:`AUTO_ROUTE_VERBS`, so an installed binary serves it and
+    a notice living only in ``dispatch.rm_agent`` would be dead code for every
+    installed user.
+
+    A ``--help`` on the verb, or a call with no name, is left entirely alone:
+    the real parser owns those, and warning about a reap that is not about to
+    happen would be noise. Any failure inside the notice degrades to True -- an
+    advisory must never be what stops a reap.
+    """
+    name = next(
+        (a for a in _args_before_argv(args[1:]) if not a.startswith("-")), None
+    )
+    if name is None or _has_flag(args[1:], "", ("--help",)) or "-h" in args[1:]:
+        return True
+    try:
+        from fno.agents.rm_notice import warn_and_confirm
+
+        return warn_and_confirm(name, force=_has_flag(args[1:], "-F", ("--force",)))
+    except Exception:
+        return True
 
 
 def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -1192,6 +1222,20 @@ def make_agents_group_cls() -> type:
                     # and a seam-level scrub would empty it before that read;
                     # the Rust client's own spawn arms scrub their child env
                     # and float the same floor themselves.
+                elif verb == "rm":
+                    # Same seam, same reason as the account handling and the
+                    # writable-dir grant above: the resume-handle notice must
+                    # cover BOTH runtimes. `rm` is in AUTO_ROUTE_VERBS, so an
+                    # installed binary serves it and a notice placed only in
+                    # `dispatch.rm_agent` would never fire for an installed
+                    # user -- a gate on one of two reachable paths is
+                    # decorative. Gating here is the single implementation that
+                    # both the Rust exec and the Python dispatch pass through.
+                    # A refusal exits before either runs, so neither registry
+                    # is touched.
+                    if not _gate_rm_at_seam(args):
+                        raise SystemExit(RM_DECLINED_EXIT)
+
                 mode = runtime_mode()
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any
