@@ -254,10 +254,12 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     Returns ``{status, rows, born, gone, session, window_s}``. ``status`` is
     ``ok`` | ``insufficient-samples`` | ``unreadable``; an honest message is
     always renderable because a missing second sample or a broken journal must
-    never read as "no cost" (the empty-table trap). Panes are matched across
-    samples only when BOTH carry the same mux session name - a server restart
-    resets pane ids and totals, so a session change reports every pane as
-    born/gone instead of differencing across the reset.
+    never read as "no cost" (the empty-table trap). Samples are grouped by mux
+    session first (the journal interleaves sessions) and differenced within
+    the session whose newest sample is journal-latest. Totals only go up
+    within one server incarnation: a DECREASE on any field means the server
+    restarted on the same socket name and pane ids reset, so that pane is
+    reported born-and-gone rather than differenced into a negative delta.
     """
     from fno.paths import global_events_json
 
@@ -288,11 +290,31 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     if len(samples) < 2:
         return empty
 
-    older, newer = samples[-2], samples[-1]
-    older_panes = {p["pane_id"]: p for p in older.get("data", {}).get("panes", [])}
-    newer_panes = {p["pane_id"]: p for p in newer.get("data", {}).get("panes", [])}
+    # Group by mux session before differencing: the global journal interleaves
+    # every live session's 30s rows, so "the last two samples journal-wide"
+    # commonly crosses sessions and reads one session's restart as another's
+    # data. The session whose newest sample is journal-latest is the one shown.
+    by_session: dict = {}
+    for ev in samples:
+        by_session.setdefault(ev.get("data", {}).get("session"), []).append(ev)
+    session_events = max(by_session.values(), key=lambda evs: evs[-1]["ts"])
+    if len(session_events) < 2:
+        return empty
+    older, newer = session_events[-2], session_events[-1]
+
+    def _pane_map(ev: dict) -> dict:
+        # A row without an integer pane_id is journal noise (the schema makes
+        # pane_id required, but a debug view must never crash on it): skip it
+        # rather than KeyError the whole table.
+        return {
+            p["pane_id"]: p
+            for p in ev.get("data", {}).get("panes", [])
+            if isinstance(p, dict) and isinstance(p.get("pane_id"), int)
+        }
+
+    older_panes = _pane_map(older)
+    newer_panes = _pane_map(newer)
     session = newer.get("data", {}).get("session")
-    restart = older.get("data", {}).get("session") != session
 
     def _ts_seconds(ev: dict) -> Optional[float]:
         try:
@@ -306,22 +328,31 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     window_s = round(t1 - t0, 1) if t0 is not None and t1 is not None else None
 
     rows = []
+    born: list = []
+    gone: list = []
     for pid, p in sorted(newer_panes.items()):
         q = older_panes.get(pid)
-        if q is None or restart:
-            # Only in the newer sample (or ids reset across a restart): a
-            # birth, not a delta - one sample cannot be differenced.
+        if q is None:
+            born.append(pid)  # first sample this pane appears in
+            continue
+        if any(p.get(f, 0) < q.get(f, 0) for f in _PANE_COUNTER_FIELDS):
+            # Totals only go up within one server incarnation; a decrease
+            # means the server restarted on the SAME socket name (the session
+            # label is the socket stem, so it did not change) and this pane id
+            # belongs to the NEW incarnation. Report the reset, never a
+            # negative delta.
+            born.append(pid)
+            gone.append(pid)
             continue
         row = {"pane_id": pid, "node": p.get("node"), "name": p.get("name"), "cmd": p.get("cmd")}
         row.update({f: p.get(f, 0) - q.get(f, 0) for f in _PANE_COUNTER_FIELDS})
         rows.append(row)
-    born = sorted(set(newer_panes) - set(older_panes)) if not restart else sorted(newer_panes)
-    gone = sorted(set(older_panes) - set(newer_panes)) if not restart else sorted(older_panes)
+    gone.extend(sorted(set(older_panes) - set(newer_panes)))
     return {
         "status": "ok",
         "rows": rows,
-        "born": born,
-        "gone": gone,
+        "born": sorted(born),
+        "gone": sorted(gone),
         "session": session,
         "window_s": window_s,
     }

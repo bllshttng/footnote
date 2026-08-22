@@ -85,10 +85,13 @@ const PANE_STATS_CADENCE: Duration = Duration::from_secs(30);
 /// All five are totals since pane birth, NEVER rates: every rate read during
 /// the measurement session that motivated them was wrong or inside the noise
 /// floor, and the correct answers all came from differencing two snapshots.
-/// `frames_composited` increments only PAST the `broadcast_pane` visible-gate,
-/// so a fed-but-unviewed pane stays flat; composited > emitted is the
-/// newest-wins dirty map dropping a frame before the wire. That pair decides
-/// whether feeding or display is the cost. `cpu_ns` is wall-clock around
+/// `frames_composited` counts PER-VIEWING-CLIENT frame enqueues (a shared
+/// `Frame` fanned out to two clients is 2), increments only PAST the
+/// `broadcast_pane` visible-gate so a fed-but-unviewed pane stays flat, and
+/// pairs one-for-one with `frames_emitted`'s per-client wire writes:
+/// composited > emitted is the newest-wins dirty map dropping a frame copy
+/// before the wire. That pair decides whether feeding or display is the
+/// cost. `cpu_ns` is wall-clock around
 /// core-loop work (VT feed + frame build/fan-out): every pane shares the one
 /// loop thread, so per-thread CPU cannot attribute it, and writer-task
 /// serialization stays unattributed by design (visible only in the process
@@ -6479,12 +6482,18 @@ impl Core {
         };
         let t0 = Instant::now();
         let frame = entry.vt.frame();
-        entry
-            .stats
-            .frames_composited
-            .fetch_add(1, Ordering::Relaxed);
         for c in &self.clients {
             if c.visible.contains(&pid) {
+                // Per-VIEWING-CLIENT enqueue, matching frames_emitted's
+                // per-client wire write one-for-one (a shared frame fanned
+                // out to two clients is 2 composites and 2 emits when
+                // nothing drops). Counting the shared build once would make
+                // composited > emitted meaningless exactly when several
+                // clients watch one pane.
+                entry
+                    .stats
+                    .frames_composited
+                    .fetch_add(1, Ordering::Relaxed);
                 c.dirty.lock().unwrap().insert(pid, frame.clone());
                 c.notify.notify_one();
             }
