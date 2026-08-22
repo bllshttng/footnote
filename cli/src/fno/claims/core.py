@@ -224,11 +224,11 @@ def _make_claim(
         # Rust make_claim resolver via the shared harness_identity markers.
         # An explicit `harness` wins over ambient resolution so callers can pin
         # the owning harness deterministically.
-        # OWNED, not precedence: this tag is read back by the dispatch guard to
-        # decide a foreign owner, so laundering an inherited marker here fences
-        # the wrong fleet. An ambiguous resolve leaves the tag unset rather than
-        # guessing (x-20f1).
-        harness=harness if harness is not None else resolve_self_identity().harness,
+        #
+        # Resolution happens in the CALLER, before the recovery mutex, never
+        # here: the owned path walks the process tree, and this function runs
+        # inside the critical section every other acquirer waits on (x-20f1).
+        harness=harness,
         metadata=metadata or {},
     )
 
@@ -313,6 +313,15 @@ def acquire_claim(
             release_dir_mutex(recovery_lock, recovery_token)
             acquired_lock = False
         return _retry()
+
+    # Resolve the harness ONCE, here, outside every mutex below. The owned path
+    # walks the process tree, and `_make_claim` is called from inside the
+    # recovery critical section that other acquirers are polling on: doing it
+    # there put a process walk in every waiter's path. Resolving up front also
+    # makes the first write and any refresh agree on one value rather than
+    # re-resolving under contention (x-20f1).
+    if harness is None:
+        harness = resolve_self_identity().harness
 
     new_claim = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
     payload = serialize_claim(new_claim)
@@ -602,6 +611,12 @@ def compare_and_rebind(
     _validate_inputs(key, expected_holder, ttl_ms)
     path = claim_path(key, root=root)
     npid = new_pid if new_pid is not None else os.getpid()
+    # Resolved BEFORE the recovery mutex below, for the same reason as
+    # `acquire_claim`: the owned path walks the process tree, and everything
+    # after the lock runs while other callers poll on it (x-20f1).
+    resolved_harness = (
+        new_harness if new_harness is not None else resolve_self_identity().harness
+    )
     recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
@@ -693,15 +708,7 @@ def compare_and_rebind(
         # codex king reading as codex for the life of the claim, and that tag
         # flows on into the do provenance row. The init hook omits --harness
         # whenever its owned-identity probe fails, so this is not a rare path.
-        effective_new_harness = (
-            (
-                new_harness
-                if new_harness is not None
-                else resolve_self_identity().harness
-            )
-            if handover_allowed
-            else None
-        )
+        effective_new_harness = resolved_harness if handover_allowed else None
         if state == ClaimState.LIVE and handover_allowed:
             # A HANDOVER, and a live prior pid does not refuse it. The
             # concurrent-writer rule below protects one symbolic owner from two
