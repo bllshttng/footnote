@@ -100,19 +100,22 @@ def compute_readiness(entry: dict, id_to_entry: dict[str, dict]) -> tuple[str, s
 _OVERLAY_TERMINAL_STATUSES = frozenset({"done", "superseded", "deferred", "in_review"})
 
 
-def readiness_status(entry: dict, id_to_entry: dict[str, dict]) -> tuple[str, str | None]:
+def readiness_status(entry: dict, id_to_entry: dict[str, dict]) -> tuple[str | None, str | None]:
     """The one overlay wrapper every status consumer shares.
 
     Returns ``(status, blocked_reason)`` under the same precedence
     ``_apply_graph_defaults`` applies at read time: terminal statuses pass
     through untouched; everything else overlays ``compute_readiness`` so an
     open blocker reads ``blocked`` with its reason and a ready entry keeps
-    its cascade status. Both the graph read seam
-    (``store._apply_readiness_overlay``) and the parent children summaries
-    (``store._compute_children``) call this, so a parent's snapshot can never
-    speak a stored ``ready`` that a live read derives into ``blocked`` - a
-    second caller-side implementation of the precedence is the defect this
-    function exists to make impossible.
+    its cascade status. The status slot is ``str | None`` because the
+    passthrough branches return the row's stored field verbatim, and a
+    hand-mangled row may carry no status (or a non-str one) - the wrapper
+    derives, it never fabricates a value the row did not have. Both the
+    graph read seam (``store._apply_readiness_overlay``) and the parent
+    children summaries (``store._compute_children``) call this, so a
+    parent's snapshot can never speak a stored ``ready`` that a live read
+    derives into ``blocked`` - a second caller-side implementation of the
+    precedence is the defect this function exists to make impossible.
     """
     status = entry.get("status")
     # isinstance-first: a hand-mangled unhashable status value ({"nope": 1})
