@@ -1135,8 +1135,8 @@ pub fn resolve_harness() -> Option<String> {
 /// `None` for the ambiguous case rather than guessing; the authoritative proven
 /// harness is stamped on the manifest by the init hook via that resolver.
 ///
-/// That resolver is `cli/src/fno/identity_stamp.py`, which wires the prover and
-/// the registry collider onto `resolve_owned_identity`. The two writers agree on
+/// That resolver is `resolve_self_identity` in `cli/src/fno/claims/self_identity.py`,
+/// which supplies a process-tree prover to `resolve_owned_identity`. The two writers agree on
 /// direction and differ in reach: Python proves an inherited marker foreign and
 /// stamps the real one, while this side only knows the families disagree. Both
 /// refuse rather than launder, so a claim written here is never WRONG, only
