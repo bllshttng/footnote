@@ -24,6 +24,8 @@ on:
       - scripts/ci/check-registry-schema-parity.sh
       - scripts/ci/check-provider-vocabulary-parity.sh
       - tests/ci/test_provider_vocabulary_parity.sh
+      - scripts/ci/check-session-identity-parity.sh
+      - tests/ci/test_session_identity_parity.sh
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - scripts/ci/check-review-app-parity.sh
@@ -32,6 +34,7 @@ on:
       - cli/src/fno/review_capability.py
       - cli/src/fno/agents/spawn_defaults.py
       - cli/src/fno/agents/spawn_gate.py
+      - cli/src/fno/agents/registry.py
       - .github/workflows/rust-ci.yml
   pull_request:
     paths:
@@ -42,6 +45,8 @@ on:
       - scripts/ci/check-registry-schema-parity.sh
       - scripts/ci/check-provider-vocabulary-parity.sh
       - tests/ci/test_provider_vocabulary_parity.sh
+      - scripts/ci/check-session-identity-parity.sh
+      - tests/ci/test_session_identity_parity.sh
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - scripts/ci/check-review-app-parity.sh
@@ -50,6 +55,7 @@ on:
       - cli/src/fno/review_capability.py
       - cli/src/fno/agents/spawn_defaults.py
       - cli/src/fno/agents/spawn_gate.py
+      - cli/src/fno/agents/registry.py
       - .github/workflows/rust-ci.yml
 
 jobs:
@@ -222,6 +228,13 @@ jobs:
         run: |
           bash tests/ci/test_provider_vocabulary_parity.sh
           bash scripts/ci/check-provider-vocabulary-parity.sh
+
+      - name: Session identity parity check
+        # Installed-user birth writers must persist the canonical full session
+        # identity before their rows become addressable across harnesses.
+        run: |
+          bash tests/ci/test_session_identity_parity.sh
+          bash scripts/ci/check-session-identity-parity.sh
 
   audit:
     name: cargo audit (RUSTSEC advisories)

@@ -686,6 +686,25 @@ def _lookup_mux_pane(
         return None
 
 
+def _lookup_registry_row_exact(handle: str):
+    """Return the registry row whose stored name exactly matches ``handle``.
+
+    This diagnostic runs only after transcript and mux resolution both miss.
+    It deliberately does not resolve aliases: the message must name the exact
+    requested row, and an unreadable registry contributes no diagnosis.
+    """
+    from fno.agents.registry import load_registry
+
+    try:
+        entries = load_registry()
+    except Exception:  # noqa: BLE001 - the existing not-found path owns read failures
+        return None
+    return next(
+        (entry for entry in entries if getattr(entry, "name", None) == handle),
+        None,
+    )
+
+
 def _adoptable_sessions(
     handle: str,
     *,
@@ -874,6 +893,19 @@ def peek(
         )
         if mux_rc is not None:
             return mux_rc
+        row = _lookup_registry_row_exact(handle)
+        row_status = getattr(row, "status", None) if row is not None else None
+        if (
+            row is not None
+            and row_status
+            in {"spawning", "ready", "idle", "busy", "live", "restarting"}
+            and not getattr(row, "harness_session_id", None)
+        ):
+            err.write(
+                f"registry row {handle} exists with status={row_status} but "
+                "harness_session_id is missing; worker identity is incomplete\n"
+            )
+            return EXIT_UNSUPPORTED
         # Name the instrument. Both reads above (the live-session resolver and
         # the mux-pane fallback) are registry-shaped, and the registry is not
         # the transcript: a reaped row leaves 4.9M of conversation on disk

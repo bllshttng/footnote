@@ -54,8 +54,7 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(10);
 /// (mirrors `harnesses.claude._SPAWN_UUID_RETRY_*`). The happy path resolves on
 /// the first probe (claude writes `~/.claude/sessions/<pid>.json` before
 /// `claude --bg` returns the short-id); the retry only covers the rare write-lag
-/// window. `resolve_session_uuid_at_spawn` short-circuits when the sessions dir
-/// is absent, so a fresh-HOME test never sleeps here.
+/// window, including the directory itself appearing after the short-id receipt.
 const SPAWN_UUID_RETRY_ATTEMPTS: u32 = 6;
 const SPAWN_UUID_RETRY_BACKOFF: Duration = Duration::from_millis(300);
 
@@ -1527,13 +1526,12 @@ pub fn resolve_session_uuid(home: &ClaudeHome, short_id: &str) -> Option<String>
 
 /// Best-effort full session-UUID resolution at spawn
 /// (`resolve_session_uuid_at_spawn`). Returns the full `sessionId` for
-/// `short_id`, or `None` within the bounded retry window. NEVER blocks the
-/// short-id report past that window: an unresolved UUID is a tolerated miss (the
-/// live `chat` lane then opens a fresh pipe rather than adopting a guessed
-/// UUID). Short-circuits when the sessions dir is absent (claude never wrote
-/// one), so there is no point retrying — and a fresh-HOME test never sleeps.
+/// `short_id`, or `None` within the bounded retry window. The sessions directory
+/// can appear after `claude --bg` prints its receipt, so an absent directory is
+/// retried like an absent file. The caller records a still-unresolved identity
+/// explicitly rather than guessing a full UUID from the short id.
 pub fn resolve_session_uuid_at_spawn(home: &ClaudeHome, short_id: &str) -> Option<String> {
-    if short_id.is_empty() || !home.sessions_dir().exists() {
+    if short_id.is_empty() {
         return None;
     }
     for attempt in 0..SPAWN_UUID_RETRY_ATTEMPTS {
@@ -2530,8 +2528,9 @@ pub fn dispatch_claude_ask(
 /// and return a compact JSON receipt.  The `create` helper machinery is
 /// reused directly; only the output shape differs from `dispatch_claude_ask`.
 ///
-/// Receipt (byte-parity with Python `cmd_spawn`):
-/// `{"name": "<name>", "short_id": "<8hex>", "harness": "claude", "status": "live"}\n`
+/// Receipt (byte-parity with Python `cmd_spawn` on the complete path):
+/// `{"name": "<name>", "short_id": "<8hex>", "harness": "claude", "status": "live"}\n`.
+/// A bounded identity miss reports `status: "spawning"` and carries a warning.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_claude_spawn(
     home: &AgentsHome,
@@ -2653,6 +2652,41 @@ pub fn dispatch_claude_spawn(
     // Escape `"` in the name so the receipt stays valid JSON for jq consumers
     // (name validation blocks backslash already; Python cmd_spawn parity).
     let safe_name = name.replace('"', "\\\"");
+    let receipt_status = match load_registry(&registry_path) {
+        Ok(registry) => match registry.find(name).map(|entry| entry.status) {
+            Some(AgentStatus::Spawning) => "spawning",
+            Some(AgentStatus::Live) => "live",
+            Some(other) => {
+                return AskOutcome::err(
+                    format!(
+                        "registry row {} has unexpected post-spawn status {:?}",
+                        py_repr(name),
+                        other
+                    ),
+                    12,
+                );
+            }
+            None => {
+                return AskOutcome::err(
+                    format!(
+                        "spawned agent {} but its registry row is missing",
+                        py_repr(name)
+                    ),
+                    12,
+                );
+            }
+        },
+        Err(e) => {
+            return AskOutcome::err(
+                format!(
+                    "spawned agent {} but its registry row is unreadable: {}",
+                    py_repr(name),
+                    e
+                ),
+                12,
+            );
+        }
+    };
     // Locked Decision 5: name the applied mode (flag or yolo-derived) so an audit
     // of "why did this worker have edit rights" has a durable answer. Only when
     // set, so the unset receipt is byte-identical (AC7). Values are exact
@@ -2678,7 +2712,7 @@ pub fn dispatch_claude_spawn(
     };
     AskOutcome {
         stdout: format!(
-            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude", "status": "live"{perm_field}{cwd_field}}}"#
+            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude", "status": "{receipt_status}"{perm_field}{cwd_field}}}"#
         ) + "\n",
         stderr: inner.stderr,
         exit_code: 0,
@@ -3232,12 +3266,14 @@ fn create(
     };
 
     let short_id = result.short_id.clone();
-    // Best-effort full session-UUID capture (ab-f1b0ccd1, AC1-HP): persist the
+    // Bounded full session-UUID capture (ab-f1b0ccd1, AC1-HP): persist the
     // stream-json `--resume` target alongside the 8-hex short-id so the worker
     // is adoptable by the live `chat` lane. Runs after the receipt is captured;
-    // a miss leaves the field None and never gates the launch. This is the Rust
-    // (default installed) path's parity with harnesses/claude.py's resolution.
+    // a miss leaves the field None but is made visible in both row and receipt.
+    // This is the Rust (default installed) path's parity with
+    // harnesses/claude.py's resolution.
     let session_uuid = resolve_session_uuid_at_spawn(claude_home, &short_id);
+    let identity_complete = session_uuid.is_some();
     // Create the file the row records (x-7bcd AC4): a log_path pointing at
     // nothing is a claim, not evidence, and the resolvable-handle guard only
     // checks the field is non-empty, not that the file exists. Record the
@@ -3264,7 +3300,7 @@ fn create(
         model: None,
         effort: None,
         // Canonical identity at birth (x-ec59); harness_session_id mirrors the
-        // (possibly None-on-race) resolved uuid, healed later like the legacy field.
+        // resolved uuid. A bounded miss stays a named spawning row below.
         harness: Some("claude".to_string()),
         harness_session_id: session_uuid.clone(),
         cwd: cwd.to_string_lossy().to_string(),
@@ -3277,7 +3313,11 @@ fn create(
         mcp_channel_id: None,
         host_mode: None, // claude ask = exec/shellout (not an interactive host)
         cc_session_id: None,
-        status: AgentStatus::Live,
+        status: if identity_complete {
+            AgentStatus::Live
+        } else {
+            AgentStatus::Spawning
+        },
         last_message_at: None,
         created_at: now_iso(),
         pid: None,
@@ -3375,10 +3415,19 @@ fn create(
             ("yolo", yolo.into()),
         ],
     );
+    let identity_warning = if identity_complete {
+        String::new()
+    } else {
+        format!(
+            "fno agents: warning: registry row {} is tracked as spawning because harness_session_id is unresolved; short_id {} was not expanded or guessed\n",
+            py_repr(name),
+            short_id
+        )
+    };
     // AC1-UI: stdout is exactly `<short_id>\n`.
     AskOutcome {
         stdout: format!("{}\n", short_id),
-        stderr: pre_stderr,
+        stderr: format!("{}{}", pre_stderr, identity_warning),
         exit_code: 0,
     }
 }
@@ -4083,7 +4132,7 @@ mod tests {
         );
         // empty short-id short-circuits (no probe)
         assert!(resolve_session_uuid_at_spawn(&ch, "").is_none());
-        // absent sessions dir short-circuits without retrying (no sleep)
+        // An absent sessions dir stays unresolved after the bounded retry.
         let empty = tmpdir();
         let empty_ch = ClaudeHome::at(&empty);
         assert!(resolve_session_uuid_at_spawn(&empty_ch, "7c5dcf5d").is_none());

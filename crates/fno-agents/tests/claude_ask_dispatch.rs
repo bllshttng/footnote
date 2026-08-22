@@ -35,6 +35,17 @@ for a in "$@"; do
   prev="$a"
 done
 if [ -n "$FAKE_CLAUDE_ARGV" ]; then printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGV"; fi
+write_session() {
+  mkdir -p "$FAKE_CLAUDE_SESSIONS"
+  printf '%s\n' '{"jobId":"7c5dcf5d","kind":"bg","messagingSocketPath":"/tmp/fake-claude.sock","sessionId":"12345678-1234-4234-8234-123456789abc"}' > "$FAKE_CLAUDE_SESSIONS/999.json"
+}
+if [ -n "$FAKE_CLAUDE_SESSIONS" ]; then
+  if [ -n "$FAKE_CLAUDE_SESSION_DELAY" ]; then
+    (sleep "$FAKE_CLAUDE_SESSION_DELAY"; write_session) >/dev/null 2>&1 &
+  else
+    write_session
+  fi
+fi
 printf 'backgrounded · 7c5dcf5d · %s\n' "$name"
 exit 0
 "#;
@@ -157,6 +168,7 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     let bin = tmpdir("create-bin");
     install_fake_claude(&bin);
     let path = path_with(&bin);
+    let sessions = ch.sessions_dir();
 
     let out = dispatch_claude_spawn(
         &home,
@@ -167,7 +179,10 @@ fn spawn_writes_python_readable_row_and_emits_done() {
         &cwd,
         false,
         None,
-        &[("PATH", path.as_str())],
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_SESSIONS", sessions.to_str().unwrap()),
+        ],
         None,
         None,
         None,
@@ -195,6 +210,10 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     assert_eq!(row["short_id"], "7c5dcf5d");
     assert_eq!(row["harness"], "claude");
     assert_eq!(row["provider"], "anthropic");
+    assert_eq!(
+        row["harness_session_id"],
+        "12345678-1234-4234-8234-123456789abc"
+    );
     assert_eq!(row["status"], "live");
     assert_eq!(
         row["log_path"],
@@ -217,6 +236,91 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     assert!(events.contains("\"kind\":\"agent_ask_done\""), "{}", events);
 }
 
+#[test]
+fn spawn_waits_for_a_delayed_session_file_before_publishing_live() {
+    let home = AgentsHome::at(tmpdir("delayed-identity-home"));
+    let ch = ClaudeHome::at(tmpdir("delayed-identity-claude"));
+    let cwd = tmpdir("delayed-identity-cwd");
+    let bin = tmpdir("delayed-identity-bin");
+    install_fake_claude(&bin);
+    let path = path_with(&bin);
+    let sessions = ch.sessions_dir();
+
+    let out = dispatch_claude_spawn(
+        &home,
+        &ch,
+        "delayed-identity",
+        "hello",
+        "fno",
+        &cwd,
+        false,
+        None,
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_SESSIONS", sessions.to_str().unwrap()),
+            ("FAKE_CLAUDE_SESSION_DELAY", "0.1"),
+        ],
+        None,
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+        false,
+    );
+
+    assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+    let receipt: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(receipt["status"], "live", "{}", out.stdout);
+    let registry: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+    assert_eq!(
+        registry["agents"][0]["harness_session_id"],
+        "12345678-1234-4234-8234-123456789abc"
+    );
+}
+
+#[test]
+fn spawn_tracks_an_unresolved_identity_without_guessing_a_uuid() {
+    let home = AgentsHome::at(tmpdir("unresolved-identity-home"));
+    let ch = ClaudeHome::at(tmpdir("unresolved-identity-claude"));
+    let cwd = tmpdir("unresolved-identity-cwd");
+    let bin = tmpdir("unresolved-identity-bin");
+    install_fake_claude(&bin);
+    let path = path_with(&bin);
+
+    let out = dispatch_claude_spawn(
+        &home,
+        &ch,
+        "unresolved-identity",
+        "hello",
+        "fno",
+        &cwd,
+        false,
+        None,
+        &[("PATH", path.as_str())],
+        None,
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+        false,
+    );
+
+    assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("harness_session_id"), "{}", out.stderr);
+    assert!(out.stderr.contains("unresolved"), "{}", out.stderr);
+    let receipt: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(receipt["status"], "spawning", "{}", out.stdout);
+    let registry: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+    let row = &registry["agents"][0];
+    assert_eq!(row["name"], "unresolved-identity");
+    assert_eq!(row["short_id"], "7c5dcf5d");
+    assert_eq!(row["status"], "spawning");
+    assert!(
+        row.get("harness_session_id").is_none(),
+        "must not guess a full UUID from the short id: {row}"
+    );
+}
+
 // x-dfa4: --yolo is no longer a claude no-op - it maps to
 // --permission-mode bypassPermissions (AC4-HP for the bg lane) and the
 // misleading "no effect" note is gone. The applied mode is named in the receipt.
@@ -229,6 +333,7 @@ fn spawn_yolo_maps_to_bypass_permissions() {
     install_fake_claude(&bin);
     let path = path_with(&bin);
     let argv_file = cwd.join("argv.txt");
+    let sessions = ch.sessions_dir();
 
     let out = dispatch_claude_spawn(
         &home,
@@ -242,6 +347,7 @@ fn spawn_yolo_maps_to_bypass_permissions() {
         &[
             ("PATH", path.as_str()),
             ("FAKE_CLAUDE_ARGV", argv_file.to_str().unwrap()),
+            ("FAKE_CLAUDE_SESSIONS", sessions.to_str().unwrap()),
         ],
         None,
         None,
