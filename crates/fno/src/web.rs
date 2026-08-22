@@ -734,7 +734,7 @@ eq(evictedRowCount(g("a","b"), g("a","b","c")), -1, "terminal grew");
 eq(evictedRowCount(null, g("a","b","c")), -1, "no previous frame");
 
 // --- a pinned bottom region: the pane an operator actually opens this for ---
-// An agent pane keeps an input box or status footer on its last rows. Requiring
+// An agent pane keeps an input box or a footer line on its last rows. Requiring
 // the WHOLE grid to shift made retention permanently inert on every one of them,
 // and silently, because the note only appears once a row is retained.
 // A static footer, body scrolled by one.
