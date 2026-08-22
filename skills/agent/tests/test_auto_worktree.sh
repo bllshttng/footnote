@@ -40,17 +40,17 @@ no()  { if printf '%s' "$2" | grep -qF "$3"; then FAIL=$((FAIL+1)); printf 'FAIL
 STUBDIR="$TMP/bin"; mkdir -p "$STUBDIR"
 cat > "$STUBDIR/fno" <<'STUB'
 #!/usr/bin/env bash
-case "$1 $2" in
-  "agents spawn-guard")  printf '{"verdict":"dispatchable"}\n'; exit 0 ;;
-  "agents list")         printf '{"agents":[]}\n'; exit 0 ;;
-  "agents spawn"|"agents host")
+case "$1 $2 $3" in
+  "agents spawn-guard"*)  printf '{"verdict":"dispatchable"}\n'; exit 0 ;;
+  "agents list "*)         printf '{"agents":[]}\n'; exit 0 ;;
+  "agents spawn "*|"agents host "*)
     # Record the arg vector so a test can assert the --cwd the worker launches
     # at (the whole point of the delegation path: repo root, not a worktree).
     printf '%s\n' "$*" >> "${SPAWN_ARGS_LOG:-/dev/null}"
     printf '{"short_id":"deadbeef"}\n'; exit 0 ;;
-  "claim release")       exit 0 ;;
-  "worktree ensure")
-    shift 2  # drop "worktree ensure"; parse "--repo R --name N [--harness H]"
+  "claim release "*)       exit 0 ;;
+  "workspace worktree ensure")
+    shift 3  # drop "workspace worktree ensure"; parse "--repo R --name N [--harness H]"
     # Record the full arg vector so a test can assert --harness forwarding.
     printf '%s\n' "$*" >> "${ENSURE_ARGS_LOG:-/dev/null}"
     repo=""; wtname=""; harness=""
