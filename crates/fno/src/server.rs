@@ -1450,6 +1450,15 @@ struct Core {
     /// teardown; `agent_rows()` also checks `panes` liveness lazily so a stale
     /// entry can never present a dead pane.
     attached: HashMap<String, u64>,
+    /// (x-5f7f) Live resumed worker panes: `registry name -> pane`. The
+    /// worker twin of [`Self::attached`]: a resume spawn cannot go through
+    /// the porcelain (`fno agents spawn --resume` is claude-bg-only), so the
+    /// server binds the row to its new pane HERE - a second Resume for a
+    /// mapped name focuses the existing pane instead of minting a second
+    /// session on the same rollout, and `agent_rows()` presents the row
+    /// pane-hosted while it lives. Lifetime = pane lifetime, swept on reap,
+    /// never persisted.
+    worker_pane: HashMap<String, u64>,
     /// The one live diff pane, as `(source cwd, pane id)`. One at a
     /// time by construction, so the "at most one pane per source" invariant
     /// needs no per-source map and no GC: a stale id (the pane was closed by
@@ -2532,6 +2541,9 @@ impl Core {
         // spawns fresh rather than focusing a corpse (the lazy `panes` check in
         // `agent_rows()` is the belt to this eager suspenders - Discretion 3).
         self.attached.retain(|_, p| *p != pid);
+        // (x-5f7f) Same for the worker resume map: the pane died, so the row
+        // returns to idle and resumable - never a mapping at a corpse.
+        self.worker_pane.retain(|_, p| *p != pid);
         if let Some(tx) = self.pane_watch.remove(&pid) {
             // Last observable tick before the sender drops: a watcher that
             // reads it sees `exited`; one blocked in `changed()` sees the
@@ -6338,6 +6350,7 @@ impl Core {
                                 .and_then(|id| self.attached.get(id))
                                 .copied()
                                 == Some(pid)
+                                || self.worker_pane.get(a.name.as_str()).copied() == Some(pid)
                         }
                     });
                     // One lookup: liveness AND the bare-pane label read the same
@@ -8130,6 +8143,27 @@ impl Core {
                 // resumability (the client's Layout can be stale) - a row that
                 // gained a live pane between publish and click is refused
                 // here, never double-spawned.
+                // (x-5f7f) A resume already mapped to a LIVE pane focuses
+                // it - a second session on the same rollout would be a
+                // second writer. A stale mapping (the pane died) is dropped
+                // and falls through to a fresh resume. Same reconcile-first
+                // shape as AttachAgent.
+                if let Some(&mapped) = self.worker_pane.get(&name) {
+                    if self.panes.contains_key(&mapped) {
+                        if let Some((sid, ti)) = self.session.find_pane(mapped) {
+                            let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
+                            self.set_view(client_id, sid, tid);
+                            if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
+                                tab.focus = mapped;
+                            }
+                            self.notice(client_id, "already resumed; focused existing pane");
+                            self.push_layout(true);
+                            return Flow::Continue;
+                        }
+                    } else {
+                        self.worker_pane.remove(&name);
+                    }
+                }
                 // Gather the row's facts into owned locals, then release the
                 // `self.agents` borrow - the spawn below needs `&mut self`.
                 let facts = {
@@ -8196,10 +8230,13 @@ impl Core {
                     }
                 };
                 // Title the pane from the registry row so the fresh pane
-                // matches the worker's own name in the sideline.
+                // matches the worker's own name in the sideline, and bind the
+                // row to its new pane so the panel presents it pane-hosted
+                // and a second Resume focuses instead of duplicating.
                 if let Some(entry) = self.panes.get_mut(&pid) {
                     entry.name = Some(name.clone());
                 }
+                self.worker_pane.insert(name.clone(), pid);
                 // Place the resumed worker where it belonged: the squad that
                 // holds its recorded membership FIRST (cwd ownership is only
                 // a fallback - a worker placed by name into a squad whose
@@ -9840,6 +9877,7 @@ async fn serve(
         client_count: client_count_tx,
         seen: HashSet::new(),
         attached: HashMap::new(),
+        worker_pane: HashMap::new(),
         diff_pane: None,
         squad_members: HashMap::new(),
         template_specs: HashMap::new(),
@@ -14834,6 +14872,95 @@ mod tests {
     }
 
     #[test]
+    fn resume_agent_twice_focuses_the_existing_pane() {
+        // The external-review P1: the resume argv carries no registry binding,
+        // so before the worker_pane map a second Resume for the same row
+        // launched a SECOND session on the same rollout. The map binds row to
+        // pane for the pane's lifetime; a second gesture focuses, and the
+        // panel presents the row pane-hosted while it lives.
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-resume-cwd2");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-codex-one".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Dead,
+        }];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::ResumeAgent {
+                name: "t-codex-one".into(),
+            },
+        );
+        drain_notices(&mut rx);
+        let first: Vec<u64> = core.panes.keys().copied().filter(|&p| p != shell).collect();
+        assert_eq!(first.len(), 1, "the first resume spawns one pane");
+        core.command(
+            1,
+            Command::ResumeAgent {
+                name: "t-codex-one".into(),
+            },
+        );
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("already resumed; focused existing pane"),
+            "{notices}"
+        );
+        let second: Vec<u64> = core.panes.keys().copied().filter(|&p| p != shell).collect();
+        assert_eq!(second, first, "the second resume spawns nothing");
+        // The panel presents the row pane-hosted through the same map.
+        let rows = core.agent_rows();
+        let row = rows.iter().find(|r| r.name == "t-codex-one").unwrap();
+        assert_eq!(
+            row.pane_id,
+            Some(first[0]),
+            "the row is pane-hosted, not idle"
+        );
+        // Pane death releases the binding: the row returns to idle.
+        core.reap_pane(first[0]);
+        let rows = core.agent_rows();
+        let row = rows.iter().find(|r| r.name == "t-codex-one").unwrap();
+        assert_eq!(
+            row.pane_id, None,
+            "the row returns to idle when the pane dies"
+        );
+    }
+
+    #[test]
     fn resume_agent_refusals_name_the_reason() {
         // Fail-closed catalog gates, same posture as AttachAgent: an unknown
         // name, and a row whose pane is still live (focus, never a second
@@ -18616,6 +18743,7 @@ mod tests {
             client_count: watch::channel(0).0,
             seen: HashSet::new(),
             attached: HashMap::new(),
+            worker_pane: HashMap::new(),
             diff_pane: None,
             squad_members: HashMap::new(),
             template_specs: HashMap::new(),
