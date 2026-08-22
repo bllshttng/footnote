@@ -48,11 +48,11 @@ The bridge binds to loopback by default. This default is deliberate. It does not
 
 To reach the view from a phone, use one of these three methods.
 
-- **A private network such as tailscale.** Run `fno mux serve --web --bind 0.0.0.0`. Then open the URL at the private address of the host. The private network authenticates the connection.
-- **An SSH tunnel.** Leave the bind address on loopback. Forward the port with `ssh -L 8722:127.0.0.1:8722 <host>`. Then open `http://127.0.0.1:8722` on the local machine.
+- **A private network such as tailscale.** Bind to the private address of the host, not to every interface: `fno mux serve --web --bind <tailscale-ip>`. Then open the printed URL. Only the private network can reach the port, and it authenticates the connection.
+- **An SSH tunnel.** Leave the bind address on loopback. Forward the port with `ssh -L 8722:127.0.0.1:8722 <host>`. Then open `http://127.0.0.1:8722/?t=<token>` on the local machine. Keep the token: a URL without it fails the check and shows no pane.
 - **A reverse proxy you already run.** Terminate TLS at the proxy. The bridge does no TLS of its own.
 
-CAUTION: Do not put `--bind 0.0.0.0` on a public interface. The token is the only guard, and the URL carries it.
+CAUTION: Do not use `--bind 0.0.0.0`. It opens the port on every interface, including your LAN, where no private network authenticates the caller. The token is the only guard, and the URL carries it.
 
 ## What you see
 
@@ -68,5 +68,5 @@ The kept output covers only the pane you view. The browser can follow a whole-sc
 
 - You cannot type. The read-only paragraph at the start of this page gives the reason.
 - There is no history from before you open the page. A frame carries the current visible grid, and the bridge keeps only the latest frame for each pane.
-- When an agent exits, its pane leaves the picker. A plain pane has no exit signal on the wire. The list removes it after a time instead.
+- When an agent exits, its pane leaves the picker. A plain pane has no exit signal on the wire, and no timer removes it. Its entry stays until 128 panes push it out.
 - The page loads no external resource. `fno` serves it inline under a strict content-security policy, so it works offline and on an airgapped host.
