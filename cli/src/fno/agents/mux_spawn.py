@@ -150,6 +150,12 @@ class MuxSpawnResult:
     readiness_rule: Optional[str] = None
     seed: Optional[str] = None
     seed_source: Optional[str] = None
+    # Could the pane be SEEN when the seed was classified? A separate axis from
+    # `seed`, which answers whether the payload was delivered. One word carrying
+    # both is what let a delivered argv seed report `unattempted`: that word is
+    # about the seed, and it was transporting doubt about the pane.
+    # `painted` / `blank` / `unreadable`; None when no seed was requested.
+    pane_observation: Optional[str] = None
     fno_id: Optional[str] = None
 
 
@@ -2712,6 +2718,46 @@ _ARGV_SEED_RECEIPT = (
 )
 
 
+def _reprobe_pane_observation(
+    session: str,
+    pane_id: int,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> str:
+    """Look at the pane once more, and report ONLY what the second look saw.
+
+    Read-only by construction: it never sends, so it cannot double-seed a pane
+    already running a payload committed at exec time. That is the difference
+    from the seed retry, which re-enters the submit path.
+
+    It takes no "current" value to fall back to, because it answers about the
+    second look and nothing else. A raised read is `unreadable` for the same
+    reason a raised first read is. Carrying a prior verdict in would let this
+    function silently downgrade a good observation on a bad probe, and a
+    parameter the body does not honor is a contract that reads as kept.
+    """
+    try:
+        screen = _run_mux(
+            ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
+            runner,
+        )
+    except DispatchAskError:
+        return "unreadable"
+    return _pane_observation(screen)
+
+
+def _pane_observation(screen: "subprocess.CompletedProcess[str]") -> str:
+    """What the last pane read saw, as a fact about the INSTRUMENT alone.
+
+    `_run_mux` does not raise on a non-zero exit, so a read against a pane that
+    has GONE returns cleanly with empty stdout and is byte-identical to a live
+    pane that has not painted. The return code is the only thing separating
+    them, so it is checked first and both failure shapes land on `unreadable`.
+    """
+    if screen.returncode != 0:
+        return "unreadable"
+    return "painted" if (screen.stdout or "").strip() else "blank"
+
+
 def seed_rode_in_argv(message: str, argv: Sequence[str]) -> bool:
     """Did this spawn commit the seed into the process argv it built?
 
@@ -2741,8 +2787,15 @@ def _submit_spawn_seed(
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
     *,
     seed_in_argv: bool = False,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     """Submit a spawn seed after the shared readiness probe has painted.
+
+    Returns ``(state, detail, source, pane_observation)``. The last value is a
+    separate axis on purpose: ``state`` answers whether the PAYLOAD was
+    delivered, ``pane_observation`` answers whether the PANE could be seen when
+    we looked. One field carrying both questions is the defect this signature
+    exists to prevent - it is what let a seed committed at exec time report
+    ``unattempted`` because a frame read failed.
 
     Four states, and every split between them is load-bearing:
 
@@ -2750,13 +2803,18 @@ def _submit_spawn_seed(
     ``unconfirmed``  a send WAS attempted and did not land, or cannot be shown
                      to have landed into a pane that can run it. A fact about
                      the seed, so the caller may fail the spawn on it.
-    ``unattempted``  the pane frame could not be read, so no send was tried.
-                     That is a fact about the INSTRUMENT, not about the seed,
-                     and an alive-but-unpainted child is still a live worker.
-                     Folding it into ``unconfirmed`` would reap a healthy pane
-                     for the crime of not having painted yet. It is also the
-                     only state the caller retries, because it is the only one
-                     where nothing can already be sitting in the pane's buffer.
+    ``unattempted``  no send was tried, so nothing was ever put in the pane's
+                     buffer. A fact about the SEED and only about it. The
+                     instrument's own failure is ``pane_observation``'s job now,
+                     and this word used to carry both - which is the fusion this
+                     signature exists to end, so do not reintroduce it here.
+                     It is reached on a blank frame that read back CLEANLY (an
+                     unpainted TUI), and on an unreadable one for a provider
+                     whose argv carries no seed. Folding it into ``unconfirmed``
+                     would reap a healthy pane for the crime of not having
+                     painted yet. It is also the only state the caller retries,
+                     because it is the only one where nothing can already be
+                     sitting in the pane's buffer.
                      UNREACHABLE when ``seed_in_argv`` is set: there the seed
                      was committed at exec time, so something IS already in
                      flight and the retry's premise would not hold.
@@ -2782,6 +2840,21 @@ def _submit_spawn_seed(
     modal is a pane that executes NOTHING while holding a slot. Calling any of
     them ``unattempted`` or ``unknown`` would write a live registry row for a
     wedged pane, which is the slot leak this whole change exists to close.
+
+    ``pane_observation`` is a fact about the INSTRUMENT and nothing else:
+
+    ``painted``      a read came back clean with content on it.
+    ``blank``        a read came back clean with nothing on it - an unpainted
+                     TUI, which is a live pane that has not drawn yet.
+    ``unreadable``   the read raised, or mux answered with a non-zero code.
+                     ``_run_mux`` does not raise on a non-zero exit, so those
+                     are the two ways the same failure arrives and they must
+                     land on the same word.
+
+    It is only ever as good as a frame read. It does NOT answer whether the
+    pane is alive; ``unreadable`` says we could not tell, which is why a caller
+    must still refuse to certify a spawn on it. An honest liveness signal is a
+    separate job, and this field is the carrier it can later fill.
     """
     try:
         screen = _run_mux(
@@ -2789,19 +2862,28 @@ def _submit_spawn_seed(
             runner,
         )
     except DispatchAskError:
-        # NOT short-circuited on `seed_in_argv`, unlike the blank-frame arm
-        # below. A read that raised leaves the pane's liveness unknown, and the
-        # `unattempted` path is what carries that doubt to the caller: it is the
-        # only state the retry probes again and the only one `cmd_spawn` turns
-        # into exit 22. Reporting `submitted` here would write a live registry
-        # row for a pane that may already be gone, holding a slot against
-        # max_live, which is the leak `_await_interactive_readiness` fails a
-        # non-zero read to prevent. Delivery really did happen; the point is
-        # that this arm cannot say the pane is still there to run it.
-        # source is "", not "delivered": nothing was typed into the pane, and
-        # `delivered` is the word the send arms use for text that WAS. A receipt
-        # reading seed=unattempted with seed_source=delivered contradicts itself.
-        return "unattempted", "pane frame unreadable, seed submission not attempted", ""
+        # A read that raised says nothing about the seed and everything about
+        # the instrument, so the two answers separate here. Delivery really did
+        # happen when the seed rode in the argv, and the receipt now says so;
+        # the doubt about whether the pane is still there to run it rides on
+        # `pane_observation` instead of on the seed word. That doubt still has
+        # to reach the caller - a live registry row for a pane that may be gone
+        # holds a slot against max_live, the leak `_await_interactive_readiness`
+        # fails a non-zero read to prevent - and `cmd_spawn` keeps exiting
+        # non-zero, now reading the pane field rather than the seed one.
+        #
+        # source is "", not "delivered", on the pane-send path: nothing was
+        # typed into the pane, and `delivered` is the word the send arms use for
+        # text that WAS.
+        if seed_in_argv:
+            return (*_ARGV_SEED_RECEIPT, "unreadable")
+        return (
+            "unattempted",
+            "pane frame unreadable, seed submission not attempted",
+            "",
+            "unreadable",
+        )
+    observation = _pane_observation(screen)
     frame = screen.stdout or ""
     if provider == "agy" and re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
         try:
@@ -2823,14 +2905,19 @@ def _submit_spawn_seed(
             # The source is "" for the same reason: nothing read back that the
             # gate cleared, and `trust-cleared` would make a wedged pane and a
             # healthy one produce identical receipts.
-            return "unconfirmed", "mux did not answer the agy trust submit; the modal may still be up", ""
+            return (
+                "unconfirmed",
+                "mux did not answer the agy trust submit; the modal may still be up",
+                "",
+                observation,
+            )
         if cleared.returncode != 0:
             # A refused submit is STRONGER evidence the gate did not clear than
             # the timeouts above it, which already stopped claiming it. Harmless
             # today only because `unconfirmed` fails the spawn before a receipt
             # exists, and "harmless until the caller changes" is how the other
             # two got written.
-            return "unconfirmed", "agy trust gate submit refused", ""
+            return "unconfirmed", "agy trust gate submit refused", "", observation
         try:
             screen = _run_mux(
                 ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
@@ -2842,29 +2929,42 @@ def _submit_spawn_seed(
             # unanswered modal is a pane that executes nothing, so this fails
             # the spawn rather than writing a row for it, and it must not claim
             # `trust-cleared` for a read that never came back.
-            return "unconfirmed", "mux did not answer the agy trust read-back; the modal may still be up", ""
+            return (
+                "unconfirmed",
+                "mux did not answer the agy trust read-back; the modal may still be up",
+                "",
+                "unreadable",
+            )
+        observation = _pane_observation(screen)
         frame = screen.stdout or ""
         if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
-            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit. Grant the directory in ~/.gemini/trustedFolders.json and spawn again - this pane is reaped, so there is no modal left to answer", "trust-cleared"
+            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit. Grant the directory in ~/.gemini/trustedFolders.json and spawn again - this pane is reaped, so there is no modal left to answer", "trust-cleared", observation
         trust_source = "trust-cleared"
     else:
         trust_source = ""
     if not frame.strip():
-        # `screen.returncode == 0` is load-bearing and is the whole narrowing.
-        # `_run_mux` does not raise on a non-zero exit, so a `mux pane read`
-        # against a pane that has GONE returns cleanly with empty stdout and is
-        # byte-identical here to a live pane that has not painted. Only the
-        # return code separates them, and `_await_interactive_readiness` already
-        # fails the same read on it. Without this gate a dead pane would earn a
-        # clean `submitted` receipt and a registry row.
-        if seed_in_argv and screen.returncode == 0:
+        if seed_in_argv:
             # An unpainted TUI cannot witness a delivery that happened at exec
             # time. Reporting the frame's silence as a fact about the seed is
             # what made one word cover both a live worker and an empty pane.
-            return _ARGV_SEED_RECEIPT
+            #
+            # `screen.returncode` is NOT tested here any more, and that is the
+            # point of the split. A dead pane and an unpainted one still have to
+            # be told apart - `_run_mux` does not raise on a non-zero exit, so
+            # they are byte-identical but for the code - and `observation` is
+            # now what tells them apart (`unreadable` vs `blank`). The dead pane
+            # keeps its non-zero exit from `cmd_spawn`, which reads that field;
+            # what it no longer gets is a receipt denying a delivery that
+            # happened.
+            return (*_ARGV_SEED_RECEIPT, observation)
         # A blank frame is an unpainted TUI, not a refused seed: nothing was
         # sent, so there is nothing to call unconfirmed.
-        return "unattempted", "pane frame blank, seed submission not attempted", trust_source
+        return (
+            "unattempted",
+            "pane frame blank, seed submission not attempted",
+            trust_source,
+            observation,
+        )
     if seed_in_argv and seed not in frame:
         # `seed_in_argv`, not `provider != "agy"`. This arm is the dominant
         # path in practice - the enriched seed is multi-line and will not appear
@@ -2872,7 +2972,7 @@ def _submit_spawn_seed(
         # here would let the frame heuristic quietly outvote the argv fact the
         # moment the two disagree, which is exactly the drift the predicate's
         # docstring forbids.
-        return "submitted", "", "argv"
+        return "submitted", "", "argv", observation
     payload = "" if seed in frame else seed
     try:
         submitted = _run_mux(
@@ -2898,10 +2998,16 @@ def _submit_spawn_seed(
             "unknown",
             "mux did not answer the submit; the keystroke may have landed",
             trust_source or _send_source(payload),
+            observation,
         )
     if submitted.returncode != 0:
-        return "unconfirmed", "submission refused", trust_source or _send_source(payload)
-    return "submitted", "", trust_source or _send_source(payload)
+        return (
+            "unconfirmed",
+            "submission refused",
+            trust_source or _send_source(payload),
+            observation,
+        )
+    return "submitted", "", trust_source or _send_source(payload), observation
 
 
 def dispatch_spawn_pane(
@@ -3420,9 +3526,10 @@ def dispatch_spawn_pane(
         )
         seed_state: Optional[str] = None
         seed_source: Optional[str] = None
+        seed_pane: Optional[str] = None
         seed_in_argv = seed_rode_in_argv(message, argv)
         if message and readiness != "failed":
-            seed_state, seed_detail, seed_source = _submit_spawn_seed(
+            seed_state, seed_detail, seed_source, seed_pane = _submit_spawn_seed(
                 provider, session, pane_id, message, runner, seed_in_argv=seed_in_argv
             )
             if seed_state == "unattempted":
@@ -3449,7 +3556,7 @@ def dispatch_spawn_pane(
                 # same blank frame and the retry recovers nothing it was written
                 # to recover.
                 time.sleep(_SEED_RETRY_DELAY_S)
-                seed_state, seed_detail, seed_source = _submit_spawn_seed(
+                seed_state, seed_detail, seed_source, seed_pane = _submit_spawn_seed(
                     provider, session, pane_id, message, runner, seed_in_argv=seed_in_argv
                 )
             if seed_state == "unconfirmed":
@@ -3478,6 +3585,23 @@ def dispatch_spawn_pane(
                 readiness_detail = seed_detail or readiness_detail
             elif seed_state == "unattempted":
                 readiness_detail = seed_detail or readiness_detail
+            if seed_state == "submitted" and seed_pane == "unreadable":
+                # One read-only RE-PROBE, and the read-only part is the whole
+                # reason this is not the retry above. That retry re-enters
+                # `_submit_spawn_seed`, which sends a submit keystroke once the
+                # frame paints - safe from `unattempted`, where nothing was ever
+                # typed, and a double-seed here, where the payload rode in at
+                # exec time and the pane may already be running it.
+                #
+                # Without this, a single timed-out read on a loaded machine turns
+                # a perfectly healthy claude spawn into a permanent exit 22. That
+                # path used to self-heal within a second via the retry, and
+                # machine load is exactly the condition that produced this
+                # family's original specimens. So the probe is restored, minus
+                # the keystroke: it can only ever upgrade the OBSERVATION, and it
+                # never touches the seed, which was already settled.
+                time.sleep(_SEED_RETRY_DELAY_S)
+                seed_pane = _reprobe_pane_observation(session, pane_id, runner)
         if readiness == "failed" or (recovered and readiness != "ready"):
             if recovered and readiness != "failed":
                 readiness_detail = (
@@ -4167,5 +4291,6 @@ def dispatch_spawn_pane(
         ),
         seed=seed_state,
         seed_source=seed_source,
+        pane_observation=seed_pane,
         fno_id=session_uuid or name,
     )

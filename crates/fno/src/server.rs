@@ -2253,15 +2253,33 @@ fn dispatch_notice(stdout: &str) -> String {
     let slug = v.get("slug").and_then(|s| s.as_str()).unwrap_or("");
     let label = if slug.is_empty() { node } else { slug };
     match v.get("outcome").and_then(|o| o.as_str()) {
-        // `seed_verified: false` means the pane was created but the command may
-        // never have been submitted. A bare "dispatched" told the operator the
-        // work started, which is the one thing this case cannot promise.
-        // Absent field == an older porcelain, and unknown does not accuse.
+        // `seed_verified: false` means the pane was created but this dispatch
+        // cannot promise the work started. A bare "dispatched" promises exactly
+        // that. Absent field == an older porcelain, and unknown does not accuse.
+        //
+        // Two different things fail that check and the operator acts on them
+        // differently, so they are NOT rendered with one phrase. An unreadable
+        // pane means the seed WAS delivered (it rode in the harness argv) and
+        // nobody could see whether a pane is left to run it: re-probe or reap,
+        // never re-seed. "seed unverified" there would send a reader to
+        // re-submit a payload the pane may already be running, which is the
+        // duplicate this whole split exists to stop.
         Some("launched") if v.get("seed_verified").and_then(|b| b.as_bool()) == Some(false) => {
+            // BOTH fields, never the pane one alone. An unreadable pane says
+            // nothing about whether a seed was sent, so keying on it by itself
+            // tells an agy operator "seed delivered" for a pane-send spawn where
+            // nothing was ever typed - and then tells them not to re-seed the one
+            // pane that needs it. `submitted` is what makes "delivered" true.
+            let seed = v.get("seed").and_then(|s| s.as_str());
+            let pane = v.get("pane_observation").and_then(|p| p.as_str());
+            let doubt = match (seed, pane) {
+                (Some("submitted"), Some("unreadable")) => "seed delivered, pane unreadable",
+                _ => "seed unverified",
+            };
             if label.is_empty() {
-                "dispatched, seed unverified".to_string()
+                format!("dispatched, {doubt}")
             } else {
-                format!("dispatched {label}, seed unverified")
+                format!("dispatched {label}, {doubt}")
             }
         }
         Some("launched") if label.is_empty() => String::new(),
@@ -18632,6 +18650,34 @@ mod tests {
         assert_eq!(
             dispatch_notice(r#"{"outcome":"launched","node":"","slug":"","seed_verified":false}"#),
             "dispatched, seed unverified"
+        );
+        // An unreadable pane is the OTHER way to fail that check, and it earns
+        // its own phrase: the seed rode in the argv, so it was delivered, and
+        // telling an operator it is unverified sends them to re-seed a pane that
+        // may already be running it.
+        assert_eq!(
+            dispatch_notice(
+                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed":"submitted","seed_verified":false,"pane_observation":"unreadable"}"#
+            ),
+            "dispatched feat, seed delivered, pane unreadable"
+        );
+        // A pane that WAS observed keeps the original phrase: the doubt there is
+        // about the seed, which is what the words say.
+        assert_eq!(
+            dispatch_notice(
+                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed_verified":false,"pane_observation":"blank"}"#
+            ),
+            "dispatched feat, seed unverified"
+        );
+        // The pane-send path (agy) on an unreadable frame: the pane is equally
+        // unreadable, but NOTHING was typed into it. "seed delivered" there is
+        // false, and its advice - re-probe, never re-seed - is backwards for the
+        // one case that genuinely needs re-seeding.
+        assert_eq!(
+            dispatch_notice(
+                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed":"unattempted","seed_verified":false,"pane_observation":"unreadable"}"#
+            ),
+            "dispatched feat, seed unverified"
         );
         // No slug -> fall back to the node id.
         assert_eq!(

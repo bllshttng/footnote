@@ -4366,7 +4366,7 @@ def _seed_script(monkeypatch, *states: str) -> list[tuple]:
             "submitted": "",
             "unknown": "mux did not answer the submit; the keystroke may have landed",
         }.get(state, "text delivered, submission unconfirmed")
-        return state, detail, "delivered"
+        return state, detail, "delivered", "painted"
 
     monkeypatch.setattr(mux_spawn, "_submit_spawn_seed", fake_submit)
     return calls
@@ -4404,6 +4404,87 @@ def test_a_seed_that_submits_on_the_retry_still_spawns_one_worker(
     assert len(calls) == 2, "the retry must actually re-submit"
     assert len(load_registry()) == 1
     assert runner.kill_calls == []
+
+
+def test_a_transient_read_failure_on_an_argv_seed_is_re_probed_not_condemned(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One timed-out read must not permanently condemn a healthy pane.
+
+    Before the two-field split this case self-healed: the raised read reported
+    `unattempted`, the seed retry fired, and a pane that answered a second later
+    produced a clean receipt. The split correctly stops that retry for an argv
+    seed, because it re-enters the SUBMIT path and can type a payload the pane is
+    already running. What it must not also drop is the second LOOK. Machine load
+    is exactly when a read times out, and it is the condition that produced this
+    family's original specimens.
+
+    So the re-probe is read-only. It upgrades the observation and never touches
+    the seed, which was settled at exec time."""
+    from fno.agents import mux_spawn
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_SEED_RETRY_DELAY_S", 0)
+    submits: list = []
+
+    def fake_submit(provider, session, pane_id, seed, runner, **_kw):
+        submits.append(seed)
+        return (*mux_spawn._ARGV_SEED_RECEIPT, "unreadable")
+
+    monkeypatch.setattr(mux_spawn, "_submit_spawn_seed", fake_submit)
+
+    result, runner = _spawn(monkeypatch, tmp_path)
+
+    assert result.seed == "submitted"
+    assert result.pane_observation == "painted", (
+        "the second look succeeded, so the doubt it was carrying is resolved"
+    )
+    assert len(submits) == 1, "the re-probe must NOT re-enter the submit path"
+    assert len(load_registry()) == 1
+    assert runner.kill_calls == []
+
+
+def test_a_pane_that_stays_unreadable_keeps_its_doubt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The negative control on the re-probe, and the rest of the pair's contract.
+
+    A re-probe that always upgraded would pass the test above and quietly delete
+    the dead-pane protection, which is the whole reason this clause exists. So
+    the observation must survive as `unreadable` onto `MuxSpawnResult`, where
+    every downstream reader branches on it. The pane also keeps its row: an
+    unreadable frame is a doubt, not a death."""
+    from fno.agents import mux_spawn
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_SEED_RETRY_DELAY_S", 0)
+    submits: list = []
+
+    def fake_submit(provider, session, pane_id, seed, runner, **_kw):
+        submits.append(seed)
+        return (*mux_spawn._ARGV_SEED_RECEIPT, "unreadable")
+
+    monkeypatch.setattr(mux_spawn, "_submit_spawn_seed", fake_submit)
+    # The re-probe keeps failing. `_run_mux` turns a non-zero code into a clean
+    # return, so it comes back `unreadable` rather than raising. Readiness is
+    # stubbed because it fails the SAME read, and this test is about what happens
+    # after readiness has already passed.
+    monkeypatch.setattr(
+        mux_spawn,
+        "_await_interactive_readiness",
+        lambda *a, **k: ("ready", "ready-marker=x"),
+    )
+
+    result, runner = _spawn(
+        monkeypatch, tmp_path, runner=FakeRunner(read_returncode=1, read_stdout="")
+    )
+
+    assert result.seed == "submitted"
+    assert result.seed_source == "argv"
+    assert result.pane_observation == "unreadable"
+    assert len(submits) == 1, "a delivered seed must never be re-submitted"
+    assert len(load_registry()) == 1
+    assert runner.kill_calls == [], "an unreadable frame is a doubt, not a death"
 
 
 def test_an_unconfirmed_send_is_never_retried(tmp_path: Path, monkeypatch) -> None:
@@ -4471,13 +4552,16 @@ def test_an_agy_trust_timeout_fails_the_spawn_rather_than_holding_a_slot():
         raise DispatchAskError("mux did not answer", exit_code=1)
 
     calls: list = []
-    state, detail, source = _submit_spawn_seed(
+    state, detail, source, pane = _submit_spawn_seed(
         "agy", "sess", 3, "seed", runner_that_times_out_after_the_modal
     )
 
     assert state == "unconfirmed", "a pane behind a live modal must not keep a row"
     assert source != "trust-cleared", "nothing read back that the gate cleared"
     assert "modal may still be up" in detail
+    # The modal WAS read on the first call, so the instrument worked. The doubt
+    # here is about the gate, which is what `unconfirmed` already says.
+    assert pane == "painted"
 
 
 def test_a_timed_out_submit_keeps_the_row_and_never_retries(

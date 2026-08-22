@@ -74,6 +74,74 @@ def test_launched_holds_a_lane(monkeypatch, tmp_path):
     assert active_lane_count() == 1  # slot held for the live lane
 
 
+def _real_result(**fields):
+    """A real `MuxSpawnResult`, never a SimpleNamespace.
+
+    `_dispatch_one` reads its fields with `getattr(..., None)`, so a stub with a
+    misspelled field name answers None and the test passes while measuring
+    nothing. The dataclass refuses the typo instead."""
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    return MuxSpawnResult(
+        name="w",
+        provider="claude",
+        session="main",
+        pane_id=7,
+        child_pid=None,
+        session_uuid=None,
+        bound=True,
+        **fields,
+    )
+
+
+def test_seed_verified_is_false_for_a_pane_nobody_could_see(monkeypatch, tmp_path):
+    """AC5-EDGE. The sharpest trap in the two-field split.
+
+    `seed == "submitted"` used to be the whole test, and it was correct while
+    the seed word also carried pane doubt. The moment an argv seed onto an
+    unreadable frame started reporting `submitted` - which is honest about the
+    payload - that expression began handing every dispatcher a false
+    `seed_verified: true`. That is a worse lie than the `unattempted` this
+    change removed, because it reads as proof rather than as an absence, and
+    `dispatch_notice` renders it straight to an operator."""
+    _wire(
+        monkeypatch,
+        tmp_path,
+        next_node={"id": "x-1", "slug": "feat", "cwd": str(tmp_path)},
+        spawn=lambda: _real_result(
+            seed="submitted", seed_source="argv", pane_observation="unreadable"
+        ),
+    )
+
+    v = dispatch._dispatch_one(session="work", node=None, project=None)
+
+    assert v["outcome"] == "launched"
+    assert v["seed"] == "submitted"
+    assert v["pane_observation"] == "unreadable"
+    assert v["seed_verified"] is False
+
+
+@pytest.mark.parametrize("observation", ["painted", "blank"])
+def test_seed_verified_survives_an_observed_pane(monkeypatch, tmp_path, observation):
+    """The positive control: the clause narrows, it does not refuse everything.
+
+    `blank` is included on purpose. An unpainted TUI is a live worker whose
+    frame simply has not drawn, and folding it in with `unreadable` would fail
+    every fast dispatch - the false negative this whole family started with."""
+    _wire(
+        monkeypatch,
+        tmp_path,
+        next_node={"id": "x-1", "slug": "feat", "cwd": str(tmp_path)},
+        spawn=lambda: _real_result(
+            seed="submitted", seed_source="argv", pane_observation=observation
+        ),
+    )
+
+    v = dispatch._dispatch_one(session="work", node=None, project=None)
+
+    assert v["seed_verified"] is True
+
+
 def test_lanes_full_when_cap_reached(monkeypatch, tmp_path):
     # max_lanes=1: the first dispatch takes the only slot, the second is refused
     # with no spawn and no new claim (AC-edge).

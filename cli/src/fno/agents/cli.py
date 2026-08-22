@@ -2095,14 +2095,22 @@ def cmd_spawn(
                 # pane about to bind and one already dead read identically.
                 "bound": pane_result.bound,
                 # Independent delivery fact. Null means no seed was requested.
-                # `unattempted` is printed before the command exits non-zero: the
-                # pane is live but its frame could not be read, so the seed is
-                # unverified. A genuine `unconfirmed` submit never reaches this
-                # receipt - it fails the spawn inside dispatch_spawn_pane.
+                # `unattempted` is printed before the command exits non-zero: no
+                # send was made and the frame could not say otherwise, so the
+                # seed is unverified. A genuine `unconfirmed` submit never
+                # reaches this receipt - it fails the spawn inside
+                # dispatch_spawn_pane.
                 "seed": pane_result.seed,
             }
             if pane_result.seed_source is not None:
                 receipt_obj["seed_source"] = pane_result.seed_source
+            # The other half of the same question, and the discriminator for the
+            # non-zero exit below. `seed: submitted` with
+            # `pane_observation: unreadable` is a delivered payload on a pane
+            # nobody could see; the two used to arrive fused as `unattempted`,
+            # which said the opposite about the seed.
+            if pane_result.pane_observation is not None:
+                receipt_obj["pane_observation"] = pane_result.pane_observation
             if getattr(pane_result, "claim_store_writable", None) is False:
                 from fno.claims.io import claims_dir, global_claims_root
 
@@ -2175,9 +2183,15 @@ def cmd_spawn(
             receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
-            # Exit 22 means one thing: a receipt WAS written and the seed on it
-            # is unverified. So it keys on every state that reaches this line
-            # without a confirmed submit, and there are two.
+            # Exit 22 means one thing: a receipt WAS written and something on it
+            # is unverified - the seed, or the pane the seed was handed to. Both
+            # leave a caller holding a row it cannot trust, which is what exit 22
+            # has always told it, so the code is REUSED rather than split.
+            # Splitting it would be the change that breaks readers: every script
+            # branching on 22 today already does the right thing here, and a new
+            # code reaches those scripts as an unrecognized failure. The receipt
+            # carries `seed` and `pane_observation` for a reader that wants to
+            # tell the two apart, which is the whole point of separating them.
             #
             # `unconfirmed` is deliberately absent, and not because it is
             # verified: it fails the spawn inside dispatch_spawn_pane and never
@@ -2193,7 +2207,18 @@ def cmd_spawn(
             # is the false alarm that had readers re-seeding or reaping live
             # workers. It still fires for the pane-send path, where an
             # unreadable frame really does leave the send unmade.
-            if pane_result.seed in ("unattempted", "unknown"):
+            #
+            # `pane_observation` is the third key, and dropping it here would
+            # make the whole split decorative: the argv arms that used to say
+            # `unattempted` on an unreadable frame now say `submitted`, so
+            # without this clause a pane that may already be gone would exit 0
+            # and its row would hold a slot against max_live. That protection is
+            # the reason those arms lied in the first place; it is kept, and
+            # only the reason given for it changes.
+            if (
+                pane_result.seed in ("unattempted", "unknown")
+                or pane_result.pane_observation == "unreadable"
+            ):
                 raise typer.Exit(code=22)
             return
         if substrate == "headless":
