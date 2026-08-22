@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Optional, cast
 
 import typer
 
@@ -20,7 +21,6 @@ def _default_max_rows() -> int:
     return DEFAULT_MAX_ROWS
 
 
-KING_STATE_PATH = ".fno/king-state.md"
 EVENTS_PATH = ".fno/events.jsonl"
 
 
@@ -37,14 +37,19 @@ def init_cmd(
         False, "--force", "-F", help="Replace an existing manifest."
     ),
 ) -> None:
-    """Write ``.fno/king-state.md``, the manifest the king loop arms read.
+    """Write this crown scope's manifest, which the king loop arms read.
 
     Write-once, like the target manifest. Without it the stop hook allows exit
     silently, which is the correct posture for a session nobody crowned.
     Re-crowning an ended king needs --force until a crown lifecycle exists to
     expire the manifest on its own.
     """
-    from fno.king.state import KingManifestExists, king_loop_enabled, write_manifest
+    from fno.king.state import (
+        KingManifestExists,
+        king_loop_enabled,
+        king_manifest_path,
+        write_manifest,
+    )
 
     # The ONE chokepoint for `config.king.enabled`. Every arm - this hook shim,
     # `loop-check --driver king`, and `KingQueue` - arms on the manifest's
@@ -73,8 +78,9 @@ def init_cmd(
         raise typer.Exit(2)
 
     try:
+        manifest_path = king_manifest_path(scope)
         fields = write_manifest(
-            Path(KING_STATE_PATH),
+            manifest_path,
             scope=scope,
             harness_session_id=harness_session_id,
             max_iterations=max_iterations,
@@ -83,9 +89,28 @@ def init_cmd(
     except KingManifestExists as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"king: manifest written: {KING_STATE_PATH}")
+    typer.echo(f"king: manifest written: {manifest_path}")
     typer.echo(f"fno_id: {fields['fno_id']}")
     typer.echo(f"scope:  {fields['scope']}")
+
+
+@king_app.command("manifest-path", hidden=True)
+def manifest_path_cmd(
+    harness_session_id: str = typer.Option(..., "--harness-session-id"),
+    harness: str = typer.Option("", "--harness"),
+    state_root: Path = typer.Option(Path(".fno"), "--state-root"),
+) -> None:
+    """Print this live crowned session's existing scope manifest path."""
+    from fno.king.state import resolve_king_manifest_path
+
+    path = resolve_king_manifest_path(
+        harness_session_id,
+        harness or None,
+        state_root=state_root,
+    )
+    if path is None:
+        raise typer.Exit(1)
+    typer.echo(path)
 
 
 @king_app.command("board")
@@ -100,6 +125,9 @@ def board_cmd(
         help="Instead of reading the board, ask whether a king walk terminated recently.",
     ),
     since: str = typer.Option("24h", "--since", help="Window for --last-run (e.g. 24h, 90m, 7d)."),
+    state: Optional[Path] = typer.Option(
+        None, "--state", hidden=True, help="King manifest whose scope bounds the board."
+    ),
 ) -> None:
     """Report every queue that would keep a king working.
 
@@ -121,12 +149,39 @@ def board_cmd(
         typer.echo(f"last king walk within {since}: {'yes' if fresh else 'no'}")
         raise typer.Exit(0 if fresh else 1)
 
-    board = read_board()
+    scope = None
+    if state is not None:
+        from fno.king.state import parse_manifest
+
+        scope = parse_manifest(state).get("scope")
+        if not scope:
+            board = {
+                "actionable": 1,
+                "unreadable": 1,
+                "queues": [
+                    {
+                        "name": "scope",
+                        "source": str(state),
+                        "status": "unreadable",
+                        "error": "king manifest has no scope",
+                        "count": None,
+                        "rows": [],
+                        "actionable": True,
+                        "note": "",
+                    }
+                ],
+                "warnings": [],
+                "exit_code": 1,
+            }
+        else:
+            board = read_board(scope=scope)
+    else:
+        board = read_board()
     if as_json:
         typer.echo(json.dumps(board, indent=2))
     else:
         _render(board, max_rows)
-    raise typer.Exit(board["exit_code"])
+    raise typer.Exit(cast(int, board["exit_code"]))
 
 
 @king_app.command("escalate")

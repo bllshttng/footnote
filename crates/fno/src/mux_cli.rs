@@ -2188,6 +2188,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut tab = None;
         let mut at = None;
         let mut at_current = false;
+        let mut max_panes = None;
         let mut i = 1;
         while i < args.len() {
             let tok = args[i]
@@ -2228,6 +2229,16 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     } else {
                         at = Some(parse_u64(&v, "--at")?);
                     }
+                }
+                "--max-panes" => {
+                    let value = flag_value(args, &mut i, "--max-panes")?;
+                    let parsed = value.parse::<usize>().map_err(|_| {
+                        format!("--max-panes needs a positive integer, got {value:?}")
+                    })?;
+                    if parsed == 0 {
+                        return Err("--max-panes needs a positive integer, got 0".into());
+                    }
+                    max_panes = Some(parsed);
                 }
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
@@ -2283,6 +2294,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     tab,
                     at,
                     fallback,
+                    max_panes,
                 },
             },
         });
@@ -5857,6 +5869,24 @@ mod tests {
         assert_eq!(placement.tab, Some(TabSel::Id(10)));
         assert_eq!(placement.at, Some(2));
         assert_eq!(placement.split, Some(Dir::Down));
+        let capped = parse_pane_args(&os(&[
+            "run",
+            "--at",
+            "2",
+            "--split",
+            "down",
+            "--max-panes",
+            "4",
+            "--",
+            "/bin/cat",
+        ]))
+        .unwrap();
+        let PaneCmd::Run { placement, .. } = capped.cmd else {
+            panic!("expected Run");
+        };
+        assert!(serde_json::to_string(&placement)
+            .unwrap()
+            .contains(r#""max_panes":4"#));
     }
 
     #[test]

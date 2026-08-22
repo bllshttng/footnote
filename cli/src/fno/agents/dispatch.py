@@ -1642,13 +1642,14 @@ def _claude_create_path(
 
     crown_declined = False
     crown_succeeded = False
+    king_loop_armed: Optional[bool] = None
 
     # x-9844 Fix 3: a revival REPLACES the existing exited same-name row in place
     # (never appends a duplicate name). The load-modify-write is atomic under
     # update_registry's own lock, so a concurrent reader sees the old exited row
     # or the new live row, never a torn/absent state.
     def _write(entries: list) -> list:
-        nonlocal crown_declined, crown_succeeded
+        nonlocal crown_declined, crown_succeeded, king_loop_armed
         entry = new_entry
         # One-live-crown guard (x-7685), inside the write lock so the check and
         # the stamp are atomic against a racing spawn. If a non-terminal row
@@ -1702,6 +1703,15 @@ def _claude_create_path(
                     new_entry, crown_level=None, crown_scope=None, crown_grantor=None
                 )
                 crown_declined = True
+        if entry.crown_level is not None and entry.crown_scope:
+            from fno.king.state import arm_king_manifest
+
+            king_loop_armed = arm_king_manifest(
+                entry.crown_scope,
+                entry.harness_session_id or entry.short_id or "",
+                owner_pid=entry.pid,
+                owner_cwd=entry.cwd,
+            ) is not None
         if revive:
             return [entry if e.name == name else e for e in entries]
         return entries + [entry]
@@ -1718,6 +1728,12 @@ def _claude_create_path(
             print(
                 f"spawn: crown over {crown_scope!r} transferred from this session "
                 f"to {name} (succession). You no longer hold it.",
+                file=sys.stderr,
+            )
+        if crown_scope and not crown_declined and king_loop_armed is False:
+            print(
+                f"spawn: crown over {crown_scope!r} recorded, but king loop disabled; "
+                "no scope manifest armed",
                 file=sys.stderr,
             )
     except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
@@ -3877,6 +3893,20 @@ def rm_agent(
                     "removed, and any replacement row was retained. Re-read it "
                     "with `fno agents list --json` and rm by the exact `name` field.",
                     exit_code=12,
+                )
+
+            if existing.crown_scope:
+                from fno.king.state import remove_king_manifest
+
+                remove_king_manifest(
+                    existing.crown_scope,
+                    owner_cwd=existing.cwd,
+                    expected_harness_session_id=(
+                        existing.harness_session_id
+                        or existing.cc_session_id
+                        or existing.short_id
+                        or ""
+                    ),
                 )
 
             # Stdout "removed:" prints come AFTER update_registry succeeds so

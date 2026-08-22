@@ -3378,6 +3378,7 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
+            placement_args += ["--max-panes", str(_pane_group_max())]
         # Same reasoning as the spawn-clock stamp below, snapshotted first: a
         # sibling pane starting during the lock-wait or argv-build above would
         # otherwise widen the daemon oracle's candidate set. Gated to codex
@@ -3866,9 +3867,10 @@ def dispatch_spawn_pane(
         row_status: AgentStatus = "live"
         crown_declined = False
         crown_succeeded = False
+        king_loop_armed: Optional[bool] = None
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
-            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded
+            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded, king_loop_armed
             # Reclaiming a dead row's name: drop the corpse in the SAME
             # transaction that appends its replacement, so the registry never
             # holds two rows under one name. Re-checked here, under the write
@@ -4005,8 +4007,7 @@ def dispatch_spawn_pane(
             ):
                 touched_log_path = _touch_log_path(name)
                 final_log_path = str(touched_log_path) if touched_log_path is not None else ""
-            rows.append(
-                AgentEntry(
+            entry = AgentEntry(
                     name=name,
                     harness=provider,
                     provider=resolved_lane_provider,
@@ -4038,7 +4039,16 @@ def dispatch_spawn_pane(
                     route_settings_path=route_settings_path,
                     fno_id=stored_session_uuid or name,
                 )
-            )
+            if entry.crown_level is not None and entry.crown_scope:
+                from fno.king.state import arm_king_manifest
+
+                king_loop_armed = arm_king_manifest(
+                    entry.crown_scope,
+                    entry.harness_session_id or entry.short_id or entry.name,
+                    owner_pid=entry.pid,
+                    owner_cwd=entry.cwd,
+                ) is not None
+            rows.append(entry)
             return rows
 
         try:
@@ -4058,6 +4068,12 @@ def dispatch_spawn_pane(
                 print(
                     f"spawn: crown declined (scope {_declined_scope!r} already held "
                     "by a live row); spawned uncrowned. The worker launched without a crown.",
+                    file=sys.stderr,
+                )
+            elif _declined_scope and king_loop_armed is False:
+                print(
+                    f"spawn: crown over {_declined_scope!r} recorded, but king loop "
+                    "disabled; no scope manifest armed",
                     file=sys.stderr,
                 )
             elif crown_succeeded and _declined_scope:

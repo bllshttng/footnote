@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/hooks/test_king_stop_hook.sh
 #
-# Both reachable stop paths, driven over ONE king manifest, in one file.
+# Both reachable stop paths, driven over scope-keyed king state, in one file.
 #
 # A guard placed on one of N reachable paths is decorative: it reads as
 # protection and ships green while the others stay broken. The king loop ships
@@ -18,6 +18,7 @@
 #   K7  claude shim, manifest names ANOTHER session -> exit 0, never gates
 #   K8  agy adapter, repeated king refusals         -> bounded, then allows
 #   K6  agy adapter, no manifest              -> allow (the refusal is scoped)
+#   K9  conflicting ambient markers omit harness narrowing
 
 set -uo pipefail
 
@@ -36,16 +37,18 @@ command -v jq >/dev/null 2>&1 || { printf '[king-hook] SKIP: jq not on PATH\n' >
 
 # Write a king manifest that names `$1` as the session it crowned.
 king_manifest_naming() {
-    cat > "${TMP_DIR}/.fno/king-state.md" <<MANIFEST
+    mkdir -p "${TMP_DIR}/.fno/kings"
+    cat > "${TMP_DIR}/.fno/kings/x-f3d0.md" <<MANIFEST
 ---
 fno_id: king-test-001
 created_at: 2026-08-18T00:00:00Z
-scope: board drain
+scope: x-f3d0
 harness: claude
 harness_session_id: $1
 budget_max_iterations: 40
 ---
 MANIFEST
+    printf '%s\n' "$1" > "${TMP_DIR}/.fno/live-crown-session"
 }
 
 # A tmp project with a king manifest and a transcript. Sets TMP_DIR, HOME_DIR,
@@ -62,6 +65,28 @@ setup_king() {
     king_manifest_naming "transcript"
     ARGS_LOG="${TMP_DIR}/fno-agents.args"
     BIN="${TMP_DIR}/bin/fno-agents"
+    cat > "${TMP_DIR}/bin/fno" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > .fno/fno.args
+if [[ "$1 $2" != "king manifest-path" ]]; then
+    exit 1
+fi
+session=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--harness-session-id" ]]; then
+        session="${2:-}"
+        break
+    fi
+    shift
+done
+expected=$(cat .fno/live-crown-session 2>/dev/null || true)
+if [[ -n "$session" && "$session" == "$expected" && -f .fno/kings/x-f3d0.md ]]; then
+    printf '%s\n' "$PWD/.fno/kings/x-f3d0.md"
+    exit 0
+fi
+exit 1
+STUB
+    chmod +x "${TMP_DIR}/bin/fno"
 }
 
 # A stub fno-agents that records its argv and prints $1 for loop-check.
@@ -87,17 +112,39 @@ run_claude_hook() {
     CLAUDE_ERR="${TMP_DIR}/claude.err"
     (
         cd "$TMP_DIR" || exit 1
-        env HOME="$HOME_DIR" FNO_AGENTS_BIN="$BIN" \
+        env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_HARNESS=claude \
+            FNO_AGENTS_BIN="$BIN" \
             bash "$CLAUDE_HOOK" <<< "$input" >/dev/null 2>"$CLAUDE_ERR"
     ) || CLAUDE_RC=$?
 }
 
 cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
 
+# ── K9: conflicting markers keep the session-id lookup harness-neutral ───────
+{
+    setup_king
+    stub_binary '{"decision":"block","message":"scoped board has work"}'
+    CLAUDE_RC=0
+    (
+        cd "$TMP_DIR" || exit 1
+        env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_HARNESS="" \
+            CODEX_THREAD_ID="foreign-codex" CLAUDE_CODE_SESSION_ID="transcript" \
+            FNO_AGENTS_BIN="$BIN" bash "$CLAUDE_HOOK" \
+            <<< "{\"transcript_path\":\"${TRANSCRIPT}\"}" >/dev/null 2>/dev/null
+    ) || CLAUDE_RC=$?
+    FNO_ARGS="$(cat "${TMP_DIR}/.fno/fno.args" 2>/dev/null)"
+    if [[ "$CLAUDE_RC" -eq 2 ]] && ! tr ' ' '\n' <<< "$FNO_ARGS" | grep -qx -- "--harness"; then
+        pass "K9: conflicting markers omit harness narrowing"
+    else
+        fail "K9: rc=$CLAUDE_RC fno_args=$FNO_ARGS"
+    fi
+    cleanup
+}
+
 # ── K1: no manifest at all -> silent allow, binary never called ───────────────
 {
     setup_king
-    rm -f "${TMP_DIR}/.fno/king-state.md"
+    rm -f "${TMP_DIR}/.fno/kings/x-f3d0.md" "${TMP_DIR}/.fno/live-crown-session"
     stub_binary '{"decision":"block","message":"should never run"}'
     run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
     if [[ "$CLAUDE_RC" -eq 0 && ! -f "$ARGS_LOG" ]]; then
@@ -116,7 +163,7 @@ cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
     ARGS="$(cat "$ARGS_LOG" 2>/dev/null)"
     if [[ "$CLAUDE_RC" -eq 2 ]] \
         && grep -q -- "--driver king" <<< "$ARGS" \
-        && grep -q -- "king-state.md" <<< "$ARGS"; then
+        && grep -q -- ".fno/kings/x-f3d0.md" <<< "$ARGS"; then
         pass "K2: a king manifest blocks and routes to the king driver"
     else
         fail "K2: rc=$CLAUDE_RC (want 2) args=$ARGS"
@@ -153,7 +200,7 @@ MANIFEST
     stub_binary '{"decision":"allow","message":"nothing to do"}'
     run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
     ARGS="$(cat "$ARGS_LOG" 2>/dev/null)"
-    if grep -q -- "--driver target" <<< "$ARGS" && ! grep -q "king-state.md" <<< "$ARGS"; then
+    if grep -q -- "--driver target" <<< "$ARGS" && ! grep -q ".fno/kings/" <<< "$ARGS"; then
         pass "K4: a target manifest outranks a king manifest beside it"
     else
         fail "K4: args=$ARGS"
@@ -164,17 +211,18 @@ MANIFEST
 # ── K5: the agy adapter refuses by name rather than allowing ─────────────────
 {
     setup_king
+    king_manifest_naming "c1"
     AGY_TRANSCRIPT="${TMP_DIR}/agy.jsonl"
     printf '{"role":"model","parts":[{"text":"x"}]}\n' > "$AGY_TRANSCRIPT"
     INPUT="{\"transcriptPath\":\"${AGY_TRANSCRIPT}\",\"fullyIdle\":true,\"conversationId\":\"c1\"}"
     AGY_ERR="${TMP_DIR}/agy.err"
     AGY_OUT=$(
         cd "$TMP_DIR" || exit 1
-        env HOME="$HOME_DIR" FNO_AGENTS_BIN="$BIN" \
+        env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_AGENTS_BIN="$BIN" \
             bash "$AGY_HOOK" <<< "$INPUT" 2>"$AGY_ERR"
     )
     DECISION="$(printf '%s' "$AGY_OUT" | jq -r '.decision // "<none>"' 2>/dev/null)"
-    if [[ "$DECISION" == "continue" ]] && grep -q "king-state.md" "$AGY_ERR"; then
+    if [[ "$DECISION" == "continue" ]] && grep -q ".fno/kings/x-f3d0.md" "$AGY_ERR"; then
         pass "K5: agy names the king manifest and refuses to allow the stop"
     else
         fail "K5: decision=$DECISION stderr=$(cat "$AGY_ERR")"
@@ -185,13 +233,13 @@ MANIFEST
 # ── K6: the agy refusal is scoped to a king manifest ─────────────────────────
 {
     setup_king
-    rm -f "${TMP_DIR}/.fno/king-state.md"
+    rm -f "${TMP_DIR}/.fno/kings/x-f3d0.md" "${TMP_DIR}/.fno/live-crown-session"
     AGY_TRANSCRIPT="${TMP_DIR}/agy.jsonl"
     printf '{"role":"model","parts":[{"text":"x"}]}\n' > "$AGY_TRANSCRIPT"
     INPUT="{\"transcriptPath\":\"${AGY_TRANSCRIPT}\",\"fullyIdle\":true,\"conversationId\":\"c1\"}"
     AGY_OUT=$(
         cd "$TMP_DIR" || exit 1
-        env HOME="$HOME_DIR" bash "$AGY_HOOK" <<< "$INPUT" 2>/dev/null
+        env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" bash "$AGY_HOOK" <<< "$INPUT" 2>/dev/null
     )
     if [[ "$(printf '%s' "$AGY_OUT" | jq -r '.decision // "<none>"')" == "<none>" ]]; then
         pass "K6: with no king manifest agy allows as before"
@@ -225,17 +273,18 @@ MANIFEST
 # ── K8: the agy refusal gives up rather than holding a session forever ───────
 {
     setup_king
+    king_manifest_naming "c1"
     AGY_TRANSCRIPT="${TMP_DIR}/agy.jsonl"
     printf '{"role":"model","parts":[{"text":"x"}]}\n' > "$AGY_TRANSCRIPT"
     INPUT="{\"transcriptPath\":\"${AGY_TRANSCRIPT}\",\"fullyIdle\":true,\"conversationId\":\"c1\"}"
-    # Nothing deletes a king manifest, so an unbounded refusal is permanent for
-    # every agy session in the repo. Fire past the ceiling and require a real
-    # allow, mirroring how the checker-unavailable path already gives up.
+    # Cleanup is best-effort, so a live crown's refusal is still bounded. Fire
+    # past the ceiling and require a real allow, mirroring how the
+    # checker-unavailable path already gives up.
     LAST_DECISION=""
     for _ in 1 2 3 4 5; do
         LAST_DECISION=$(
             cd "$TMP_DIR" || exit 1
-            env HOME="$HOME_DIR" FNO_AGENTS_BIN="$BIN" \
+            env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_AGENTS_BIN="$BIN" \
                 bash "$AGY_HOOK" <<< "$INPUT" 2>/dev/null \
                 | jq -r '.decision // "<none>"' 2>/dev/null
         )

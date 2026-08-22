@@ -89,7 +89,7 @@ trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 # and the target manifest wins when both are present: a session holding one is
 # a worker, whatever else is on disk beside it. Checked only after the target
 # search comes up empty, so nothing about a worker's path changes.
-KING_STATE_FILE=".fno/king-state.md"
+KING_STATE_FILE=""
 DRIVER="target"
 if [[ ! -f "$STATE_FILE" ]]; then
     # Presence is NOT ownership. Kings run in the canonical checkout, which is
@@ -103,14 +103,20 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # the session go: a stale manifest outliving its king must not capture a
     # stranger. `fno agents king init` refuses to write an unattributable manifest, so
     # a real king always has an id to match.
-    KING_HARNESS_ID=""
-    if [[ -f "$KING_STATE_FILE" ]]; then
-        KING_HARNESS_ID=$(grep -E '^harness_session_id:' "$KING_STATE_FILE" 2>/dev/null \
-            | sed -E 's/^harness_session_id:[[:space:]]*//' \
-            | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
+    HOOK_HARNESS="${FNO_HARNESS:-}"
+    if [[ -z "$HOOK_HARNESS" ]]; then
+        MARKER_COUNT=0
+        [[ -n "${CODEX_THREAD_ID:-}" ]] && { HOOK_HARNESS="codex"; MARKER_COUNT=$((MARKER_COUNT + 1)); }
+        [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] && { HOOK_HARNESS="claude"; MARKER_COUNT=$((MARKER_COUNT + 1)); }
+        [[ -n "${GEMINI_SESSION_ID:-}" ]] && { HOOK_HARNESS="gemini"; MARKER_COUNT=$((MARKER_COUNT + 1)); }
+        [[ $MARKER_COUNT -gt 1 ]] && HOOK_HARNESS=""
     fi
-    if [[ -n "$KING_HARNESS_ID" && -n "$HOOK_HARNESS_ID" \
-        && "$KING_HARNESS_ID" == "$HOOK_HARNESS_ID" ]]; then
+    if [[ -n "$HOOK_HARNESS_ID" ]] && command -v fno >/dev/null 2>&1; then
+        MANIFEST_ARGS=(king manifest-path --harness-session-id "$HOOK_HARNESS_ID" --state-root "$REPO_ROOT/.fno")
+        [[ -n "$HOOK_HARNESS" ]] && MANIFEST_ARGS+=(--harness "$HOOK_HARNESS")
+        KING_STATE_FILE=$(fno "${MANIFEST_ARGS[@]}" 2>/dev/null || true)
+    fi
+    if [[ -n "$KING_STATE_FILE" && -f "$KING_STATE_FILE" ]]; then
         STATE_FILE="$KING_STATE_FILE"
         DRIVER="king"
     else

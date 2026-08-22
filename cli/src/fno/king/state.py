@@ -1,4 +1,4 @@
-"""``.fno/king-state.md`` - the king session manifest, and the freshness read.
+"""Scope-keyed king manifests and the freshness read.
 
 Why a separate file rather than a ``driver: king`` field on the target manifest.
 A king runs in the canonical checkout, where a target manifest may also exist,
@@ -6,8 +6,9 @@ and a manifest whose name says target while its contents say king is how two
 sessions come to share one discriminator. The stop-hook shim already searches a
 candidate list, so a second candidate is the smaller real cost.
 
-The manifest is write-once, exactly like the target manifest. A second init
-refuses rather than rewriting identity under a running loop.
+Each crown scope owns ``.fno/kings/<scope>.md``. The registry row is authority:
+a leftover file with no live crown is inert, while a resumed session finds the
+same file through its current registry row instead of an unstable session id.
 
 ``last_run_is_fresh`` is the second done-probe. A file test would be vacuous: it
 would pass the moment the manifest existed and say nothing about whether a walk
@@ -17,10 +18,13 @@ about the world rather than about a file.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import secrets
+import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -61,6 +65,133 @@ class KingManifestExists(RuntimeError):
     """Raised when init would overwrite a manifest that is already there."""
 
 
+def king_manifest_path(scope: str, *, state_root: Path = Path(".fno")) -> Path:
+    """Return the manifest path for one canonical crown scope.
+
+    Scope is registry data, but it becomes a filename here. Refuse path syntax
+    instead of normalizing it: two spellings of one scope must never select two
+    files, and no scope may escape the state root.
+    """
+    scope = scope.strip()
+    if not scope or ".." in scope or "/" in scope or "\\" in scope or "\0" in scope:
+        raise ValueError(f"unsafe king scope for manifest path: {scope!r}")
+    return Path(state_root) / "kings" / f"{scope}.md"
+
+
+def resolve_king_manifest_path(
+    harness_session_id: str,
+    harness: Optional[str],
+    *,
+    state_root: Path = Path(".fno"),
+    registry=None,
+) -> Optional[Path]:
+    """Resolve this live session's crowned scope to its existing manifest.
+
+    The row, not file presence, proves authority. Any unreadable, missing,
+    terminal, uncrowned, or unsafe reading returns ``None`` so stale state can
+    never capture an unrelated session.
+    """
+    if not harness_session_id:
+        return None
+    try:
+        from fno.agents.registry import TERMINAL_STATUSES, load_registry
+        from fno.agents.whoami import _find_by_session
+
+        rows = load_registry() if registry is None else registry
+        row = _find_by_session(rows, harness_session_id, harness or None)
+    except Exception:  # noqa: BLE001 - an unproved crown has no authority
+        return None
+    if row is None or getattr(row, "status", None) in TERMINAL_STATUSES:
+        return None
+    scope = getattr(row, "crown_scope", None)
+    if not isinstance(scope, str) or not scope.strip():
+        return None
+    try:
+        path = king_manifest_path(scope, state_root=state_root)
+    except ValueError:
+        return None
+    return path if path.is_file() else None
+
+
+def arm_king_manifest(
+    scope: str,
+    harness_session_id: str,
+    *,
+    state_root: Optional[Path] = None,
+    owner_pid: Optional[int] = None,
+    owner_cwd: Optional[str] = None,
+) -> Optional[Path]:
+    """Refresh loop state at the moment a crown becomes authoritative."""
+    if state_root is None:
+        state_root = _owner_state_root(owner_cwd)
+    if not king_loop_enabled():
+        remove_king_manifest(scope, state_root=state_root)
+        return None
+    if not harness_session_id.strip():
+        raise ValueError("a crowned king manifest needs a harness session id")
+    path = king_manifest_path(scope, state_root=state_root)
+    with _manifest_lock(path):
+        write_manifest(
+            path,
+            scope=scope,
+            harness_session_id=harness_session_id,
+            force=True,
+            owner_pid=owner_pid,
+            owner_cwd=owner_cwd,
+        )
+    return path
+
+
+def _owner_state_root(owner_cwd: Optional[str]) -> Path:
+    cwd = Path(owner_cwd).resolve() if owner_cwd else Path.cwd().resolve()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        root = Path(proc.stdout.strip()).resolve() if proc.returncode == 0 else cwd
+    except OSError:
+        root = cwd
+    return root / ".fno"
+
+
+@contextmanager
+def _manifest_lock(path: Path):
+    lock = path.with_suffix(path.suffix + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def remove_king_manifest(
+    scope: str,
+    *,
+    state_root: Optional[Path] = None,
+    owner_cwd: Optional[str] = None,
+    expected_harness_session_id: Optional[str] = None,
+) -> bool:
+    """Best-effort cleanup; live registry authority never depends on this."""
+    try:
+        if state_root is None:
+            state_root = _owner_state_root(owner_cwd)
+        path = king_manifest_path(scope, state_root=state_root)
+        with _manifest_lock(path):
+            if expected_harness_session_id:
+                current = parse_manifest(path).get("harness_session_id")
+                if current != expected_harness_session_id:
+                    return False
+            path.unlink(missing_ok=True)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -84,6 +215,8 @@ def write_manifest(
     harness_session_id: str = "",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     force: bool = False,
+    owner_pid: Optional[int] = None,
+    owner_cwd: Optional[str] = None,
 ) -> dict[str, str]:
     """Write the manifest once. Raises :class:`KingManifestExists` if it is there."""
     path = Path(path)
@@ -98,8 +231,8 @@ def write_manifest(
         "scope": scope,
         "harness": os.environ.get("FNO_HARNESS", "claude"),
         "harness_session_id": harness_session_id,
-        "owner_pid": str(os.getpid()),
-        "owner_cwd": str(Path.cwd()),
+        "owner_pid": str(owner_pid or os.getpid()),
+        "owner_cwd": owner_cwd or str(Path.cwd()),
         "budget_max_iterations": str(max_iterations),
     }
     body = "---\n" + "".join(f"{k}: {_dump(v)}\n" for k, v in fields.items()) + "---\n"

@@ -159,6 +159,32 @@ def _holder_is_active(activity: Optional[dict]) -> bool:
     return age <= STALLED_AFTER_S
 
 
+def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[str]:
+    """Compile a canonical crown scope into the graph node ids it contains."""
+    from fno.agents.crown import _canonical_project, resolve_crown, split_scope
+
+    resolver = resolve or resolve_crown
+    level, canonical = resolver(split_scope(scope))
+    if level == 2:
+        from fno.graph._intake import descendants_of
+
+        by_id = {row.get("id"): row for row in entries if isinstance(row, dict)}
+        root = by_id.get(canonical)
+        if not root or root.get("type") != "epic":
+            raise ValueError(f"crown scope {canonical!r} is not an epic in the graph")
+        return {canonical, *descendants_of(entries, canonical)}
+
+    projects = set(split_scope(canonical))
+    return {
+        str(row["id"])
+        for row in entries
+        if isinstance(row, dict)
+        and row.get("id")
+        and (_canonical_project(str(row.get("project") or "")) or row.get("project"))
+        in projects
+    }
+
+
 def _queue(
     name: str,
     source: str,
@@ -209,8 +235,27 @@ def build_board(
     inputs: BoardInputs,
     *,
     autonomous_merge: bool = False,
+    crown_scope: Optional[str] = None,
+    scope_ids: Optional[set[str]] = None,
 ) -> dict:
     """Turn fetched sources into the board payload. Pure; does no I/O."""
+    out_of_scope: list[dict] = []
+
+    def in_scope(queue: str, node_id: object, row: dict) -> bool:
+        if scope_ids is None or not node_id:
+            return True
+        node_id = str(node_id)
+        if node_id in scope_ids:
+            return True
+        out_of_scope.append(
+            {
+                "queue": queue,
+                "id": node_id,
+                **({"title": row.get("title")} if row.get("title") else {}),
+            }
+        )
+        return False
+
     claim_by_node: dict[str, dict] = {}
     for row in inputs.claims.rows():
         key = str(row.get("key") or "")
@@ -231,6 +276,8 @@ def build_board(
         # without the duplicate.
         claim = claim_by_node.get(str(node.get("id")))
         if claim is not None and claim.get("state") in _DEAD_CLAIM_STATES:
+            continue
+        if not in_scope("undispatched", node.get("id"), node):
             continue
         undispatched.append(
             {
@@ -265,6 +312,8 @@ def build_board(
         holder = str(claim.get("holder") or "")
         if _holder_is_active(inputs.holder_activity.get(holder)):
             continue
+        if not in_scope("stalled_holder", node.get("id"), node):
+            continue
         stalled.append(
             {
                 "id": node.get("id"),
@@ -278,11 +327,17 @@ def build_board(
     # A corrupted lockfile is as much a lock nobody will reap as a stale one,
     # and it carries no holder, so leaving it out points the king at a wake it
     # cannot perform instead of the reap it can.
-    stale_claims = [
-        {"key": r.get("key"), "holder": r.get("holder"), "state": r.get("state")}
-        for r in inputs.claims.rows()
-        if r.get("state") in _DEAD_CLAIM_STATES
-    ]
+    stale_claims: list[dict] = []
+    for row in inputs.claims.rows():
+        if row.get("state") not in _DEAD_CLAIM_STATES:
+            continue
+        key = str(row.get("key") or "")
+        node_id = key[len("node:") :] if key.startswith("node:") else ""
+        if not in_scope("stale_claim", node_id, row):
+            continue
+        stale_claims.append(
+            {"key": row.get("key"), "holder": row.get("holder"), "state": row.get("state")}
+        )
 
     lane_items = [LaneItem(**r) for r in inputs.lane.rows()] if inputs.lane.ok else []
     lane_open = open_items(LaneRead(items=lane_items)) if inputs.lane.ok else []
@@ -341,11 +396,15 @@ def build_board(
     # `fno agents needs` emits operator questions in the same list. They are the
     # queue above, read from its own verb; counting them here would report one
     # human queue twice.
-    needs_rows = [
-        {"kind": r.get("kind"), "name": r.get("name"), "node": r.get("node")}
-        for r in inputs.needs.rows()
-        if r.get("kind") != "operator_question"
-    ]
+    needs_rows: list[dict] = []
+    for row in inputs.needs.rows():
+        if row.get("kind") == "operator_question":
+            continue
+        if not in_scope("unreachable_worker", row.get("node"), row):
+            continue
+        needs_rows.append(
+            {"kind": row.get("kind"), "name": row.get("name"), "node": row.get("node")}
+        )
 
     queues = [
         _queue(
@@ -431,6 +490,17 @@ def build_board(
             "exist yet",
         ),
     ]
+    if scope_ids is not None:
+        queues.append(
+            _queue(
+                "out_of_scope",
+                f"king manifest scope {crown_scope}",
+                SourceRead(payload=out_of_scope),
+                out_of_scope,
+                actionable=False,
+                note=f"report-only: outside crown scope {crown_scope}",
+            )
+        )
 
     actionable = 0
     unreadable = 0
@@ -754,9 +824,33 @@ def _board_timeout() -> int:
     return value
 
 
-def read_board() -> dict:
+def read_board(*, scope: Optional[str] = None) -> dict:
     timeout = _board_timeout()
+    scope_ids = None
+    if scope is not None:
+        try:
+            from fno.tracker.metadata import read_entries
+
+            scope_ids = compile_scope_ids(scope, read_entries("king.board.scope"))
+        except Exception as exc:  # noqa: BLE001 - blind scope is actionable work
+            return {
+                "actionable": 1,
+                "unreadable": 1,
+                "queues": [
+                    _queue(
+                        "scope",
+                        f"king manifest scope {scope}",
+                        SourceRead(error=str(exc)),
+                        [],
+                        actionable=True,
+                    )
+                ],
+                "warnings": [],
+                "exit_code": 1,
+            }
     return build_board(
         collect_inputs(timeout=timeout),
         autonomous_merge=autonomous_merge_enabled(),
+        crown_scope=scope,
+        scope_ids=scope_ids,
     )

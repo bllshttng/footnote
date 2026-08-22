@@ -161,8 +161,10 @@ def _spawn_crowned(monkeypatch, tmp_path, *, grantor_env: Optional[str], **crown
 
 def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.registry import AgentEntry, load_registry, update_registry
+    import fno.king.state as king_state
 
     use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
     # Seat the grantor as a registered king over epic-x; the spawn is then a
     # succession. An agent identity with no registry row is now refused at the
     # grantor check, so the agent must be seated - the corrected opposite of the
@@ -196,9 +198,13 @@ def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypat
     # Provenance, not self-declared: the grantor is who actually spawned it.
     assert heir.crown_grantor == "parent-sess-abc"
     assert heir.crown_label == "L1 epic-x"
+    manifest = tmp_path / ".fno" / "kings" / "epic-x.md"
+    assert king_state.parse_manifest(manifest)["harness_session_id"] == heir.harness_session_id
 
 
-def test_crown_grantor_defaults_to_human_for_a_direct_spawn(tmp_path: Path, monkeypatch) -> None:
+def test_crown_grantor_defaults_to_human_for_a_direct_spawn(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     from fno.agents.registry import load_registry
 
     _spawn_crowned(
@@ -209,6 +215,7 @@ def test_crown_grantor_defaults_to_human_for_a_direct_spawn(tmp_path: Path, monk
     row = load_registry()[0]
     assert row.crown_grantor == "human"
     assert row.crown_level == 0
+    assert "king loop disabled" in capsys.readouterr().err
 
 
 def test_pane_spawn_clears_a_terminal_holder_before_reclaiming_its_scope(
@@ -411,7 +418,7 @@ def _prepare_crown_cli(monkeypatch, tmp_path, rows) -> None:
     from fno.harness_identity import AMBIENT_IDENTITY_ENV
     from fno.projects import resolve as proj_resolve
 
-    _seed(monkeypatch, tmp_path, rows)
+    _seed(monkeypatch, tmp_path, [replace(row, cwd=str(tmp_path)) for row in rows])
     for name in AMBIENT_IDENTITY_ENV:
         monkeypatch.delenv(name, raising=False)
     config = tmp_path / "config.toml"
@@ -432,6 +439,7 @@ def _invoke_crown(*args: str):
 
 def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.registry import load_registry
+    import fno.king.state as king_state
 
     _prepare_crown_cli(
         monkeypatch,
@@ -445,6 +453,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
             )
         ],
     )
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
     result = _invoke_crown("worker", "--scope", "alpha")
 
     assert result.exit_code == 0, result.output
@@ -456,6 +465,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "vacated_scope": None,
         "vacated_level": None,
         "stranded_subordinates": [],
+        "king_loop_armed": True,
     }
     row = load_registry()[0]
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
@@ -463,6 +473,47 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "alpha",
         "human",
     )
+    manifest = tmp_path / ".fno" / "kings" / "alpha.md"
+    assert king_state.parse_manifest(manifest)["harness_session_id"] == "session-worker"
+
+
+def test_in_place_crown_receipt_names_a_disabled_king_loop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="session-worker", status="idle")],
+    )
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["king_loop_armed"] is False
+
+
+def test_in_place_crown_aborts_before_registry_publish_when_manifest_write_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.king.state as king_state
+    from fno.agents.crown import CrownPromotionError, promote_existing_session
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="session-worker", status="idle")],
+    )
+    monkeypatch.setattr(
+        king_state,
+        "arm_king_manifest",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+        raising=False,
+    )
+
+    with pytest.raises(CrownPromotionError, match="manifest"):
+        promote_existing_session("worker", ["alpha"])
+    assert load_registry()[0].crown_scope is None
 
 
 def test_in_place_crown_preserves_every_non_crown_field(tmp_path: Path, monkeypatch) -> None:
@@ -785,6 +836,7 @@ def test_in_place_crown_rescopes_an_already_crowned_target(
     tmp_path: Path, monkeypatch
 ) -> None:
     from fno.agents.registry import load_registry
+    import fno.king.state as king_state
 
     _prepare_crown_cli(
         monkeypatch,
@@ -800,6 +852,11 @@ def test_in_place_crown_rescopes_an_already_crowned_target(
             )
         ],
     )
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    old_manifest = king_state.king_manifest_path("beta", state_root=tmp_path / ".fno")
+    king_state.write_manifest(
+        old_manifest, scope="beta", harness_session_id="worker-session"
+    )
 
     result = _invoke_crown("worker", "--scope", "alpha")
 
@@ -811,6 +868,52 @@ def test_in_place_crown_rescopes_an_already_crowned_target(
         1,
         "alpha",
         "human",
+    )
+    assert not old_manifest.exists()
+    assert (tmp_path / ".fno" / "kings" / "alpha.md").exists()
+
+
+def test_in_place_rescope_does_not_delete_a_successor_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import registry
+    import fno.king.state as king_state
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="worker-session",
+                status="idle",
+                crown_level=1,
+                crown_scope="beta",
+                crown_grantor="human",
+            )
+        ],
+    )
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    old_manifest = king_state.king_manifest_path("beta", state_root=tmp_path / ".fno")
+    king_state.write_manifest(
+        old_manifest, scope="beta", harness_session_id="worker-session"
+    )
+    real_update_registry = registry.update_registry
+
+    def update_then_refresh_successor(mutator):
+        rows = real_update_registry(mutator)
+        king_state.write_manifest(
+            old_manifest, scope="beta", harness_session_id="successor-session", force=True
+        )
+        return rows
+
+    monkeypatch.setattr(registry, "update_registry", update_then_refresh_successor)
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    assert king_state.parse_manifest(old_manifest)["harness_session_id"] == (
+        "successor-session"
     )
 
 
@@ -1484,3 +1587,4 @@ def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkey
     inc = next(r for r in rows if r.name == "incumbent")
     assert inc.crown_level == 1
     assert inc.crown_scope == "epic-x"
+    assert not (tmp_path / ".fno" / "kings" / "epic-x.md").exists()

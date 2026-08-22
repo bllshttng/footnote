@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,165 @@ from fno.king.state import (
     parse_manifest,
     write_manifest,
 )
+
+
+def test_scope_keyed_manifest_paths_are_independent(tmp_path):
+    import fno.king.state as state
+
+    path_for = getattr(state, "king_manifest_path", None)
+    assert path_for is not None, "scope-keyed king manifest path is missing"
+
+    epic = path_for("x-f3d0", state_root=tmp_path / ".fno")
+    project = path_for("fno", state_root=tmp_path / ".fno")
+    write_manifest(epic, scope="x-f3d0", harness_session_id="epic-session")
+    write_manifest(project, scope="fno", harness_session_id="project-session")
+
+    assert epic == tmp_path / ".fno" / "kings" / "x-f3d0.md"
+    assert project == tmp_path / ".fno" / "kings" / "fno.md"
+    assert parse_manifest(epic)["harness_session_id"] == "epic-session"
+    assert parse_manifest(project)["harness_session_id"] == "project-session"
+
+
+@pytest.mark.parametrize("scope", ["../escape", "a/b", r"a\b", ".."])
+def test_scope_keyed_manifest_path_refuses_escape_spellings(tmp_path, scope):
+    import fno.king.state as state
+
+    path_for = getattr(state, "king_manifest_path", None)
+    assert path_for is not None, "scope-keyed king manifest path is missing"
+    with pytest.raises(ValueError, match="scope"):
+        path_for(scope, state_root=tmp_path / ".fno")
+
+
+def test_live_registry_crown_resolves_scope_path_after_session_id_changes(tmp_path):
+    import fno.king.state as state
+
+    resolve = getattr(state, "resolve_king_manifest_path", None)
+    assert resolve is not None, "live crown manifest resolver is missing"
+    row = SimpleNamespace(
+        status="live",
+        crown_scope="x-f3d0",
+        harness="codex",
+        harness_session_id="new-session",
+        cc_session_id=None,
+        short_id=None,
+    )
+    path = state.king_manifest_path("x-f3d0", state_root=tmp_path / ".fno")
+    write_manifest(path, scope="x-f3d0", harness_session_id="old-session")
+
+    assert resolve(
+        "new-session",
+        "codex",
+        state_root=tmp_path / ".fno",
+        registry=[row],
+    ) == path
+
+
+def test_stale_scope_file_without_a_live_crown_resolves_nothing(tmp_path):
+    import fno.king.state as state
+
+    resolve = getattr(state, "resolve_king_manifest_path", None)
+    assert resolve is not None, "live crown manifest resolver is missing"
+    path = tmp_path / ".fno" / "kings" / "x-f3d0.md"
+    write_manifest(path, scope="x-f3d0", harness_session_id="old-session")
+    row = SimpleNamespace(
+        status="exited",
+        crown_scope="x-f3d0",
+        harness="codex",
+        harness_session_id="old-session",
+        cc_session_id=None,
+        short_id=None,
+    )
+
+    assert resolve(
+        "old-session",
+        "codex",
+        state_root=tmp_path / ".fno",
+        registry=[row],
+    ) is None
+
+
+def test_coronation_refreshes_scope_manifest_for_a_successor(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    arm = getattr(state, "arm_king_manifest", None)
+    assert arm is not None, "coronation manifest arming is missing"
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
+    state_root = tmp_path / ".fno"
+
+    first = arm("x-f3d0", "old-session", state_root=state_root)
+    first_id = parse_manifest(first)["fno_id"]
+    second = arm("x-f3d0", "new-session", state_root=state_root)
+
+    assert second == first
+    fields = parse_manifest(second)
+    assert fields["harness_session_id"] == "new-session"
+    assert fields["fno_id"] != first_id
+
+
+def test_disabled_king_loop_arms_no_manifest(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    arm = getattr(state, "arm_king_manifest", None)
+    assert arm is not None, "coronation manifest arming is missing"
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: False)
+
+    assert arm("x-f3d0", "session", state_root=tmp_path / ".fno") is None
+    assert not (tmp_path / ".fno" / "kings" / "x-f3d0.md").exists()
+
+
+def test_disabled_coronation_neutralizes_stale_scope_state(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    root = tmp_path / "repo" / ".fno"
+    stale = state.king_manifest_path("x-f3d0", state_root=root)
+    write_manifest(stale, scope="x-f3d0", harness_session_id="old-session")
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: False)
+
+    assert state.arm_king_manifest(
+        "x-f3d0", "new-session", owner_cwd=str(tmp_path / "repo")
+    ) is None
+    assert not stale.exists()
+
+
+def test_coronation_defaults_to_the_owner_repositories_state_root(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    owner = tmp_path / "repo"
+    owner.mkdir()
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
+
+    path = state.arm_king_manifest("x-f3d0", "session", owner_cwd=str(owner))
+
+    assert path == owner / ".fno" / "kings" / "x-f3d0.md"
+
+
+def test_cleanup_does_not_delete_a_successors_refreshed_manifest(tmp_path):
+    import fno.king.state as state
+
+    root = tmp_path / ".fno"
+    path = state.king_manifest_path("alpha", state_root=root)
+    write_manifest(path, scope="alpha", harness_session_id="successor")
+
+    assert state.remove_king_manifest(
+        "alpha", state_root=root, expected_harness_session_id="vacating-owner"
+    ) is False
+    assert parse_manifest(path)["harness_session_id"] == "successor"
+
+
+def test_best_effort_cleanup_removes_only_the_named_scope(tmp_path):
+    import fno.king.state as state
+
+    cleanup = getattr(state, "remove_king_manifest", None)
+    assert cleanup is not None, "best-effort crown cleanup is missing"
+    root = tmp_path / ".fno"
+    first = state.king_manifest_path("alpha", state_root=root)
+    second = state.king_manifest_path("beta", state_root=root)
+    write_manifest(first, scope="alpha", harness_session_id="a")
+    write_manifest(second, scope="beta", harness_session_id="b")
+
+    assert cleanup("alpha", state_root=root) is True
+    assert not first.exists()
+    assert second.exists()
 
 
 def test_init_writes_a_manifest_carrying_the_fields_the_loop_reads(tmp_path):
@@ -199,7 +359,7 @@ def test_a_disabled_king_loop_writes_no_manifest(monkeypatch, tmp_path):
     code, _ = _init(monkeypatch, tmp_path, enabled=False)
 
     assert code == 3
-    assert not (tmp_path / ".fno" / "king-state.md").exists()
+    assert not (tmp_path / ".fno" / "kings" / "drain.md").exists()
 
 
 def test_a_manifest_that_names_nobody_is_refused(monkeypatch, tmp_path):
@@ -212,7 +372,7 @@ def test_a_manifest_that_names_nobody_is_refused(monkeypatch, tmp_path):
 
     assert code == 2
     assert "harness-session-id" in out
-    assert not (tmp_path / ".fno" / "king-state.md").exists()
+    assert not (tmp_path / ".fno" / "kings" / "drain.md").exists()
 
 
 def test_an_enabled_named_king_is_crowned(monkeypatch, tmp_path):
@@ -220,6 +380,6 @@ def test_an_enabled_named_king_is_crowned(monkeypatch, tmp_path):
     code, _ = _init(monkeypatch, tmp_path)
 
     assert code == 0
-    manifest = tmp_path / ".fno" / "king-state.md"
+    manifest = tmp_path / ".fno" / "kings" / "drain.md"
     assert manifest.exists()
     assert "harness_session_id: sess-1" in manifest.read_text()

@@ -58,6 +58,7 @@ class FakeRunner:
         kill_returncode: int = 0,
         kill_stderr: str = "",
         kill_exception: Optional[Exception] = None,
+        kill_removes_pane: bool = False,
     ) -> None:
         self.calls: list[list[str]] = []
         self.run_returncode = run_returncode
@@ -77,6 +78,7 @@ class FakeRunner:
         self.kill_returncode = kill_returncode
         self.kill_stderr = kill_stderr
         self.kill_exception = kill_exception
+        self.kill_removes_pane = kill_removes_pane
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
@@ -136,9 +138,12 @@ class FakeRunner:
             self.kill_calls.append(list(argv))
             if self.kill_exception is not None:
                 raise self.kill_exception
-            return subprocess.CompletedProcess(
+            result = subprocess.CompletedProcess(
                 argv, self.kill_returncode, "", self.kill_stderr
             )
+            if self.kill_returncode == 0 and self.kill_removes_pane:
+                self.ls_stdout = "[]"
+            return result
         raise AssertionError(f"unexpected fno invocation: {argv}")
 
 
@@ -2313,6 +2318,9 @@ def test_exact_at_current_forwards_token_runs_json_and_reads_receipt(
     synthesized from the requested flags. A painted, alive pane writes the row.
     """
     from fno.agents.registry import load_registry
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
 
     placement = {
         "anchor": 4,
@@ -2332,6 +2340,7 @@ def test_exact_at_current_forwards_token_runs_json_and_reads_receipt(
     assert run_call[1:4] == ["mux", "pane", "run"]
     assert "at" in run_call and "current" in run_call, "token forwarded verbatim"
     assert "--json" in run_call, "exact placement requests the server receipt"
+    assert run_call[run_call.index("--max-panes") + 1] == "4"
     assert run_call.index("at") < run_call.index("--"), "token rides before the argv fence"
     assert result.placement == placement, "receipt is server-authored, not synthesized"
     # The readiness gate probes the spawn's own session, not the default.
@@ -4257,7 +4266,17 @@ def test_unanswered_run_recovered_pane_without_session_id_is_reaped(
         ]
     )
     runner = FakeRunner(
-        run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout, read_stdout=""
+        run_returncode=_MUX_CONTROL_UNANSWERED,
+        ls_stdout=ls_stdout,
+        read_stdout="",
+        kill_removes_pane=True,
+    )
+    from fno.agents import spawn_gate
+
+    monkeypatch.setattr(
+        spawn_gate,
+        "_process_start_time",
+        lambda _pid: None if runner.kill_calls else "incarnation-before-kill",
     )
 
     with pytest.raises(DispatchAskError) as exc:

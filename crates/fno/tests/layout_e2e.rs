@@ -105,6 +105,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             split: Some(Dir::Left),
             here: false,
             fallback: PlacementFallback::NewTab,
+            max_panes: None,
         },
     )
     .unwrap();
@@ -143,6 +144,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             split: Some(Dir::Right),
             here: false,
             fallback: PlacementFallback::NewTab,
+            max_panes: None,
         },
     )
     .unwrap();
@@ -656,6 +658,7 @@ fn exact_placement(at: u64, split: Dir) -> PanePlacement {
         split: Some(split),
         here: false,
         fallback: PlacementFallback::Refuse,
+        max_panes: None,
     }
 }
 
@@ -679,6 +682,7 @@ fn exact_current_places_beside_anchor_not_focus() {
             split: Some(Dir::Right),
             here: false,
             fallback: PlacementFallback::NewTab,
+            max_panes: None,
         },
     )
     .unwrap();
@@ -723,6 +727,7 @@ fn exact_current_refuses_stale_anchor_selector_and_min_size() {
             split: Some(Dir::Right),
             here: false,
             fallback: PlacementFallback::NewTab,
+            max_panes: None,
         },
     )
     .unwrap();
@@ -786,6 +791,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             split: Some(Dir::Right),
             here: false,
             fallback: PlacementFallback::NewTab,
+            max_panes: None,
         },
     )
     .unwrap();
@@ -805,6 +811,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             split: Some(Dir::Down),
             here: false,
             fallback: PlacementFallback::NewTab,
+            max_panes: None,
         },
     )
     .unwrap();
@@ -831,6 +838,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             split: Some(Dir::Right),
             here: false,
             fallback: PlacementFallback::NewTab,
+            max_panes: None,
         },
     )
     .unwrap();
@@ -896,6 +904,7 @@ fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
             split: Some(Dir::Right),
             here: false,
             fallback: PlacementFallback::NewTab,
+            max_panes: None,
         },
     )
     .unwrap();
