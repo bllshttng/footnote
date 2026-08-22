@@ -424,6 +424,7 @@ enum CoreMsg {
         rows: Option<u16>,
         claim: bool,
         placement: PanePlacement,
+        worker: Option<String>,
         reply: ControlReply,
     },
     PaneSend {
@@ -811,6 +812,34 @@ fn attach_argv(
 #[cfg(test)]
 fn set_attach_program(argv: &[&str]) {
     ATTACH_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test override for the resume program (see [`resume_argv_for`]): points
+    /// unit tests at a benign binary so a resume spawn runs without launching
+    /// a real claude/codex, mirroring `ATTACH_PROGRAM` for the attach path.
+    static RESUME_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_resume_program(argv: &[&str]) {
+    RESUME_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
+}
+
+/// The argv resuming `session_id` through its harness's own form (x-5f7f).
+/// The session id is always a positional arg (never a shell string), and it
+/// arrives from a registry row the catalog gate matched, so it can only name
+/// a session. Tests override the program via `set_resume_program`, mirroring
+/// `set_attach_program`.
+fn resume_argv_for(bin: &str, token: &str, session_id: &str) -> Vec<String> {
+    #[cfg(test)]
+    if let Some(mut argv) = RESUME_PROGRAM.with(|p| p.borrow().clone()) {
+        argv.push(session_id.to_string());
+        return argv;
+    }
+    vec![bin.to_string(), token.to_string(), session_id.to_string()]
 }
 
 /// (x-c914) `short_id -> (account, config_dir)` for every isolated-account roster
@@ -2672,6 +2701,7 @@ impl Core {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn run_pane(
         &mut self,
         squad_key: String,
@@ -2681,6 +2711,7 @@ impl Core {
         cols: u16,
         claim: bool,
         placement: PanePlacement,
+        worker: Option<String>,
     ) -> Result<u64, (u32, String)> {
         // Create-if-absent lives ONLY here on the script path (Locked 7, x-9f75): a `pane run --squad
         // <name>` for a not-yet-existing squad mints one so lanes group by project; AttachAgent / UI targets
@@ -2738,13 +2769,19 @@ impl Core {
                 },
             );
             self.squad_members.insert(sid, Vec::new());
+            if let Some(worker) = &worker {
+                self.record_worker_member(sid, worker, pid, &cwd);
+            }
             self.persist_squad(sid);
         } else {
             // v41 (x-d865): place_with honors placement.tab / placement.at; it
             // falls through to place_spawned_pane on the pre-v41 no-tab/no-anchor
             // path, and reaps `pid` on any hard error so a bad anchor never
             // orphans a pane.
-            self.place_with(dest, &squad_key, pid, &placement)?;
+            let (sid, _tid, _) = self.place_with(dest, &squad_key, pid, &placement)?;
+            if let Some(worker) = &worker {
+                self.record_worker_member(sid, worker, pid, &cwd);
+            }
         }
         // Keep any attached client's view consistent; a script-only session
         // has no clients, so this is then a cheap no-op.
@@ -4307,6 +4344,41 @@ impl Core {
             .any(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id))
     }
 
+    /// (x-5f7f) The resume form a harness owns, as `(bin, token)`: what a
+    /// pane runs to bring a session back from that harness's own persisted
+    /// state. Mirrors the resume tokens in
+    /// `cli/src/fno/agents/harness_capabilities.toml`. Two mechanisms, one
+    /// result: a claude bg session whose daemon still owns it ATTACHES (the
+    /// existing `attach_id` path); everything here resumes from disk and
+    /// needs no live process. A harness with no entry (agy) offers no Resume
+    /// - an honest dead row beats a button that fails.
+    fn resume_form(harness: &str) -> Option<(&'static str, &'static str)> {
+        match harness {
+            "claude" => Some(("claude", "--resume")),
+            "codex" => Some(("codex", "resume")),
+            _ => None,
+        }
+    }
+
+    /// (x-5f7f) Can this registry row be resumed into a pane? Needs a harness
+    /// that owns a resume form plus the session id it resumes; a LIVE claude
+    /// bg row with a jobId is excluded because its daemon owns the session -
+    /// attach is the correct gesture there, and it already exists.
+    fn row_resumable(a: &RegistryAgent) -> bool {
+        let Some(h) = a.harness.as_deref() else {
+            return false;
+        };
+        if Self::resume_form(h).is_none() {
+            return false;
+        }
+        let has_sid = a
+            .harness_session_id
+            .as_deref()
+            .or(a.claude_session_uuid.as_deref())
+            .is_some_and(|s| !s.is_empty());
+        has_sid && !(h == "claude" && a.attach_id.is_some() && !a.exited)
+    }
+
     // ---- Persisted named squads (x-8f11) --------------------------------
 
     /// Whether `name` is already taken by a LIVE named squad or a PERSISTED
@@ -4515,7 +4587,58 @@ impl Core {
                 tombstone: false,
                 tab_name: None,
                 cwd: None,
+                worker: None,
             }),
+        }
+        self.persist_squad(sid);
+    }
+
+    /// (x-5f7f) Record a worker pane as a member of squad `sid`, keyed by its
+    /// registry NAME rather than a claude jobId - the capture funnel
+    /// `persist_attached_member` never covered, which is why squads full of
+    /// codex/agy workers persisted with `members: []`. Called from `run_pane`
+    /// on the `--worker` path, the one server-side operation every pane
+    /// producer crosses (mux_spawn.py's spawn lane and the TUI's dispatch
+    /// card both shell into it), so the guard cannot be bypassed by a caller.
+    /// Idempotent by name; a tombstoned prior membership is revived. Restore
+    /// never respawns this member - it renders idle and resumes through the
+    /// harness's own form (`Command::ResumeAgent`).
+    fn record_worker_member(&mut self, sid: u64, name: &str, pid: u64, cwd: &str) {
+        // The pane's hosting tab name at record time, the pid-based twin of
+        // `member_tab_name` (which joins through `attached`, a claude-id map a
+        // worker pane never enters). persist_squad's re-derivation misses
+        // worker members too, so this stored value is the durable one.
+        let tab_name = self
+            .session
+            .squad(sid)
+            .and_then(|sq| {
+                sq.tabs
+                    .iter()
+                    .find(|t| tree::leaves(&t.root).contains(&pid))
+                    .map(|t| t.name.clone())
+            })
+            .flatten();
+        let members = self.squad_members.entry(sid).or_default();
+        match members
+            .iter_mut()
+            .find(|m| m.worker.as_deref() == Some(name))
+        {
+            Some(m) if m.tombstone => {
+                m.tombstone = false;
+                m.tab_name = tab_name;
+                m.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+            }
+            Some(_) => return, // already a live member - no duplicate
+            None => {
+                let cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+                members.push(crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name,
+                    cwd,
+                    worker: Some(name.to_string()),
+                });
+            }
         }
         self.persist_squad(sid);
     }
@@ -4740,6 +4863,10 @@ impl Core {
         let home_cwd = std::env::var_os("HOME")
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // (x-5f7f) Worker members left idle across every restored squad, for
+        // the one post-restore notice. An operator who sees no resumed worker
+        // must be able to tell "zero were recorded" from "the code never ran".
+        let mut idle_workers_total = 0usize;
         for ps in squads {
             let cwd0 = ps
                 .origins
@@ -4747,6 +4874,9 @@ impl Core {
                 .cloned()
                 .unwrap_or_else(|| home_cwd.clone());
             let mut members: Vec<crate::squad_store::StoredMember> = Vec::new();
+            // (x-5f7f) Worker members left idle by this restore. Counted for
+            // the notice, never spawned.
+            let mut idle_workers = 0usize;
             // The tabs we build, in final order. Attach mappings are inserted at
             // spawn time (x-caef; the tree lane binds panes into trees before
             // any tab exists, so the mapping cannot ride the tab list).
@@ -4776,6 +4906,19 @@ impl Core {
                     members.push(m.clone()); // already dead - stays a tombstone
                     continue;
                 }
+                // (x-5f7f) A worker member is a registry NAME, not a claude
+                // jobId: its pty died with the previous server (a codex/agy
+                // pane is a direct child of the mux pid), so after a restart
+                // it is ALWAYS dead and no liveness probe is needed - probing
+                // an already-known answer is the receipt-can-lie shape. Never
+                // respawn it silently: keep the member as-is so the row
+                // renders idle, and let the operator resume it through the
+                // harness's own form from the agent panel.
+                if m.worker.is_some() {
+                    members.push(m.clone());
+                    idle_workers += 1;
+                    continue;
+                }
                 if !live.contains(&m.attach_id) {
                     // Dead now: tombstone it (AC1-EDGE dimmed row, persisted).
                     members.push(crate::squad_store::StoredMember {
@@ -4783,6 +4926,7 @@ impl Core {
                         tombstone: true,
                         tab_name: m.tab_name.clone(),
                         cwd: m.cwd.clone(),
+                        worker: None,
                     });
                     continue;
                 }
@@ -4821,6 +4965,7 @@ impl Core {
                             tombstone: false,
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
+                            worker: None,
                         });
                     }
                     Err(e) => {
@@ -4832,10 +4977,12 @@ impl Core {
                             tombstone: false,
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
+                            worker: None,
                         });
                     }
                 }
             }
+            idle_workers_total += idle_workers;
             // (x-caef) The tree lane: stored full topologies rebuild the exact
             // shape - hand splits, arbitrary weights, tab order, focus - instead
             // of one flat tab per member. Every slot is resolved BEFORE the tree
@@ -5042,6 +5189,14 @@ impl Core {
                     attempts: 0,
                 });
             }
+        }
+        // (x-5f7f) One notice for the whole restore, so "no worker came back"
+        // is distinguishable from "the counter never ran" (the positive-marker
+        // rule): a positive count names how many idle rows await a resume.
+        if idle_workers_total > 0 {
+            self.notice_all(format!(
+                "restore: {idle_workers_total} worker row(s) idle - resume them from the agent panel"
+            ));
         }
         // The restored squads must not steal the attaching client's view: its
         // per-client `view` is untouched, but add_squad flipped the global MRU
@@ -6117,6 +6272,7 @@ impl Core {
                                 crown_scope: a.crown_scope.clone(),
                                 basis: self.truth_basis(&a.name),
                                 last_activity_age_s: self.truth_age(&a.name),
+                                resumable: false,
                             }
                         }
                         None => {
@@ -6158,6 +6314,7 @@ impl Core {
                                 crown_scope: None,
                                 basis: None,
                                 last_activity_age_s: None,
+                                resumable: false,
                             }
                         }
                     };
@@ -6180,10 +6337,23 @@ impl Core {
                     // A same-session mux row whose pane left the tree entirely
                     // (fully reaped) is a dangling exited row - preserve the old
                     // behaviour (`find_pane` -> None squad, `exited`).
+                    // (x-5f7f) A same-session mux row whose pane left the
+                    // tree is DEAD: its worker's pty is gone (a pane child of
+                    // this server). Render it paneless rather than dangling -
+                    // there is no pane to focus, and a paneless dead row can
+                    // carry `resumable`, so tapping it resumes the session
+                    // through the harness's own form instead of dead-ending
+                    // on a focus at a pane that no longer exists.
+                    let resumable = Self::row_resumable(a);
                     out.push(AgentRow {
-                        squad: self.session.find_pane(*pane).map(|(sid, _)| sid),
+                        squad: self
+                            .session
+                            .squads
+                            .iter()
+                            .find(|s| s.owns_path(&a.cwd))
+                            .map(|s| s.id),
                         name: a.name.clone(),
-                        pane_id: Some(*pane),
+                        pane_id: None,
                         badge: None,
                         reason: None,
                         exited: true,
@@ -6205,6 +6375,7 @@ impl Core {
                         crown_scope: a.crown_scope.clone(),
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
+                        resumable,
                     })
                 }
                 None => {
@@ -6252,6 +6423,7 @@ impl Core {
                         crown_scope: a.crown_scope.clone(),
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
+                        resumable: Self::row_resumable(a),
                     })
                 }
             }
@@ -6299,6 +6471,7 @@ impl Core {
                     crown_scope: None,
                     basis: None,
                     last_activity_age_s: None,
+                    resumable: false,
                 })
             }
         }
@@ -6375,6 +6548,7 @@ impl Core {
                 crown_scope: None,
                 basis: None,
                 last_activity_age_s: None,
+                resumable: false,
             })
         }
         out
@@ -7814,6 +7988,117 @@ impl Core {
                 self.push_layout(true);
                 Flow::Continue
             }
+            Command::ResumeAgent { name } => {
+                // (x-5f7f) Resume a paneless row through its own harness.
+                // Catalog gate first, the same posture as AttachAgent: the
+                // name must match a surfaced row, and the SERVER re-derives
+                // resumability (the client's Layout can be stale) - a row that
+                // gained a live pane between publish and click is refused
+                // here, never double-spawned.
+                // Gather the row's facts into owned locals, then release the
+                // `self.agents` borrow - the spawn below needs `&mut self`.
+                let facts = {
+                    let Some(a) = self.agents.iter().find(|a| a.name == name) else {
+                        self.notice(client_id, "no such agent");
+                        return Flow::Continue;
+                    };
+                    let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
+                        self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
+                    });
+                    if live_pane || !Self::row_resumable(a) {
+                        None // refused; notice below
+                    } else {
+                        let session_id = a
+                            .harness_session_id
+                            .clone()
+                            .or_else(|| a.claude_session_uuid.clone());
+                        let form = Self::resume_form(a.harness.as_deref().unwrap_or_default());
+                        match (session_id, form) {
+                            (Some(sid), Some((bin, token))) => {
+                                Some((sid, bin, token, a.cwd.clone()))
+                            }
+                            _ => None,
+                        }
+                    }
+                };
+                let Some((session_id, bin, token, row_cwd)) = facts else {
+                    self.notice(client_id, "agent is not resumable");
+                    return Flow::Continue;
+                };
+                let argv = resume_argv_for(bin, token, &session_id);
+                // Resume in the row's recorded cwd when it still exists (a
+                // worktree worker's true home), else the sender's squad cwd -
+                // the same two-path rule restore uses for attach members.
+                let cwd0 = self
+                    .session
+                    .squad(view.0)
+                    .map(|s| s.canonical_cwd().to_string())
+                    .unwrap_or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(|h| h.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    });
+                let stored_cwd = (!row_cwd.is_empty()).then(|| row_cwd.as_str());
+                let (spawn_cwd, gone) =
+                    restore_member_cwd(stored_cwd, &cwd0, |p| std::path::Path::new(p).is_dir());
+                if let Some(gone) = gone {
+                    self.notice(
+                        client_id,
+                        format!("resume: {name}'s directory {gone} is gone; resuming at {cwd0}"),
+                    );
+                }
+                let (rows, cols) = self
+                    .clients
+                    .iter()
+                    .find(|c| c.id == client_id)
+                    .map(|c| c.dims)
+                    .unwrap_or((vp.rows, vp.cols));
+                let pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.notice(client_id, format!("resume failed: {e}"));
+                        return Flow::Continue;
+                    }
+                };
+                // Title the pane from the registry row so the fresh pane
+                // matches the worker's own name in the sideline.
+                if let Some(entry) = self.panes.get_mut(&pid) {
+                    entry.name = Some(name.clone());
+                }
+                // Place the resumed worker in the squad owning its cwd, else
+                // the sender's view squad, as its own tab; then switch the
+                // sender onto it, like AttachAgent's spawn arm.
+                let sid = self
+                    .session
+                    .squads
+                    .iter()
+                    .find(|s| s.owns_path(&row_cwd))
+                    .map(|s| s.id)
+                    .unwrap_or(view.0);
+                let tid = self.session.mint_tab_id();
+                if let Some(s) = self.session.squad_mut(sid) {
+                    s.tabs.push(Tab {
+                        name: None,
+                        id: tid,
+                        root: Node::Leaf(pid),
+                        focus: pid,
+                    });
+                } else {
+                    self.reap_pane(pid);
+                    self.notice(client_id, "resume: target squad vanished");
+                    return Flow::Continue;
+                }
+                // Persist the resumed pane as a worker member so it survives
+                // the NEXT restart pane-hosted, then show it.
+                self.record_worker_member(sid, &name, pid, &spawn_cwd);
+                self.set_view(client_id, sid, tid);
+                if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
+                    tab.focus = pid;
+                }
+                self.push_layout(true);
+                self.notice(client_id, format!("resumed {name}"));
+                Flow::Continue
+            }
             Command::DispatchNode { node, account } => {
                 // Targeted work-queue dispatch (a clicked card, x-a496). Reuses
                 // the prefix+g porcelain pinned to `--node`; the claim race
@@ -8255,6 +8540,7 @@ impl Core {
                             // and the pane cwd.
                             tab_name: None,
                             cwd: None,
+                            worker: None,
                         },
                     );
                     recruited += 1;
@@ -8812,6 +9098,7 @@ impl Core {
                 rows,
                 claim,
                 placement,
+                worker,
                 reply,
             } => {
                 let rows = rows.unwrap_or(vt::DEFAULT_ROWS);
@@ -8821,7 +9108,9 @@ impl Core {
                 let exact =
                     placement.at.is_some() && placement.fallback == PlacementFallback::Refuse;
                 let (anchor, direction) = (placement.at, placement.split);
-                let msg = match self.run_pane(squad_key, cwd, argv, rows, cols, claim, placement) {
+                let msg = match self
+                    .run_pane(squad_key, cwd, argv, rows, cols, claim, placement, worker)
+                {
                     Ok(pane_id) => {
                         let resolved = if exact {
                             // The new pane now sits beside the anchor in the
@@ -10186,6 +10475,7 @@ async fn handle_control(
             rows,
             claim,
             placement,
+            worker,
         } => {
             // Resolve the squad key off the core loop, exactly like Attach.
             let squad_key = resolve_squad_key(&resolver, &cwd).await;
@@ -10198,6 +10488,7 @@ async fn handle_control(
                     rows,
                     claim,
                     placement,
+                    worker,
                     reply: reply_tx,
                 })
                 .await
@@ -11292,6 +11583,7 @@ mod tests {
             } else {
                 agents_view::Liveness::Alive
             },
+            harness: None,
         }
     }
 
@@ -11330,6 +11622,7 @@ mod tests {
                 crown_level: None,
                 crown_scope: None,
                 liveness: agents_view::Liveness::Alive,
+                harness: None,
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
@@ -11351,6 +11644,7 @@ mod tests {
                 crown_level: None,
                 crown_scope: None,
                 liveness: agents_view::Liveness::Alive,
+                harness: None,
             },
         ];
         let rows = core.agent_rows();
@@ -11429,6 +11723,7 @@ mod tests {
                 crown_level: None,
                 crown_scope: None,
                 liveness: agents_view::Liveness::Alive,
+                harness: None,
             },
         ];
         let rows = core.agent_rows();
@@ -11504,6 +11799,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             liveness,
+            harness: None,
         };
         let mut core = empty_core();
         core.agents = vec![
@@ -11551,6 +11847,7 @@ mod tests {
                 crown_level: None,
                 crown_scope: None,
                 liveness: agents_view::Liveness::Alive,
+                harness: None,
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
@@ -11571,6 +11868,7 @@ mod tests {
                 crown_level: None,
                 crown_scope: None,
                 liveness: agents_view::Liveness::Dead,
+                harness: None,
             },
         ];
         assert!(
@@ -11625,6 +11923,7 @@ mod tests {
             updated_at: None,
             crown_level: None,
             crown_scope: None,
+            harness: None,
         }];
         let rows = core.agent_rows();
         let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
@@ -12711,6 +13010,7 @@ mod tests {
                     at: Some(2),
                     fallback: PlacementFallback::NewTab,
                 },
+                None,
             )
             .unwrap();
         let tab = core
@@ -12742,6 +13042,7 @@ mod tests {
                     at: Some(999),
                     fallback: PlacementFallback::NewTab,
                 },
+                None,
             )
             .unwrap_err();
         assert_eq!(err.0, err_code::BAD_REQUEST);
@@ -12776,6 +13077,7 @@ mod tests {
                     at: Some(1),
                     fallback: PlacementFallback::Refuse,
                 },
+                None,
             )
             .unwrap_err();
         assert_eq!(err.0, err_code::BAD_REQUEST);
@@ -13930,6 +14232,7 @@ mod tests {
             updated_at: None,
             crown_level: None,
             crown_scope: None,
+            harness: None,
         }
     }
 
@@ -13987,6 +14290,369 @@ mod tests {
         assert!(drain_notice(&mut rx)
             .unwrap()
             .contains("malformed session id"));
+    }
+
+    #[test]
+    fn run_pane_with_worker_records_a_resumable_member() {
+        // x-5f7f task 1, positive marker: a pane run carrying --worker records
+        // a StoredMember joined to that registry NAME, in the store, for the
+        // squad the pane landed in. This is the capture funnel the empty
+        // squads lacked - before the change the squad row lands with
+        // members: [].
+        let _s = StoreScratch::new("run-pane-worker");
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let pid = core
+            .run_pane(
+                "/repo/proj".into(),
+                "/repo/proj".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    tab: None,
+                    at: None,
+                    target: PaneTarget::SquadName("work".into()),
+                    split: None,
+                    here: false,
+                    fallback: PlacementFallback::NewTab,
+                },
+                Some("probe-x5f7f".into()),
+            )
+            .unwrap();
+        assert!(core.panes.contains_key(&pid));
+        let stored = crate::squad_store::load();
+        let sq = stored
+            .squads
+            .iter()
+            .find(|s| s.name == "work")
+            .expect("the named squad persisted");
+        let member = sq
+            .members
+            .iter()
+            .find(|m| m.worker.is_some())
+            .expect("a worker member was recorded");
+        assert_eq!(member.worker.as_deref(), Some("probe-x5f7f"));
+        assert_eq!(member.attach_id, "", "no claude jobId on a worker member");
+        assert_eq!(
+            member.cwd.as_deref(),
+            Some("/repo/proj"),
+            "the spawn cwd is captured for the resume"
+        );
+    }
+
+    #[test]
+    fn run_pane_without_worker_records_no_member() {
+        // x-5f7f task 1, the no-flag acceptance: a plain pane run stays
+        // byte-identical - the squad persists, membership stays empty.
+        let _s = StoreScratch::new("run-pane-plain");
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        core.run_pane(
+            "/repo/proj".into(),
+            "/repo/proj".into(),
+            vec!["/bin/cat".into()],
+            24,
+            80,
+            false,
+            PanePlacement {
+                tab: None,
+                at: None,
+                target: PaneTarget::SquadName("work".into()),
+                split: None,
+                here: false,
+                fallback: PlacementFallback::NewTab,
+            },
+            None,
+        )
+        .unwrap();
+        let stored = crate::squad_store::load();
+        let sq = stored
+            .squads
+            .iter()
+            .find(|s| s.name == "work")
+            .expect("the named squad persisted");
+        assert!(
+            sq.members.is_empty(),
+            "a plain run records no member: {:?}",
+            sq.members
+        );
+    }
+
+    #[test]
+    fn restore_leaves_worker_members_idle_and_names_the_count() {
+        // x-5f7f task 4: worker members are ALWAYS dead after a restart (their
+        // pty was a child of the previous server). Restore must not spawn
+        // them, must keep them as members so the rows stay idle, and must
+        // name the count (the positive-marker rule: an operator who sees no
+        // resumed worker can tell zero-recorded from never-ran).
+        let s = StoreScratch::new("restore-idle");
+        let origin = s.dir.join("repo");
+        std::fs::create_dir_all(&origin).unwrap();
+        crate::squad_store::upsert(
+            "",
+            &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
+            &[origin.to_string_lossy().into_owned()],
+            &[
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("t-codex-one".into()),
+                },
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("t-codex-two".into()),
+                },
+            ],
+        )
+        .unwrap();
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.restore_squads(24, 80, 999);
+        // Exactly one pane exists: the zero-live-member fallback shell. No
+        // codex process was spawned for either worker member.
+        assert_eq!(
+            core.panes.len(),
+            1,
+            "only the fallback shell; worker members never respawn"
+        );
+        assert!(
+            core.attached.is_empty(),
+            "no attach mapping for a worker member"
+        );
+        let members: Vec<String> = core
+            .squad_members
+            .values()
+            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
+            .collect();
+        assert_eq!(
+            members,
+            vec!["t-codex-one".to_string(), "t-codex-two".to_string()],
+            "both worker members stay as idle rows"
+        );
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("2 worker row(s) idle"),
+            "the count is named, not silence: {notices}"
+        );
+    }
+
+    #[test]
+    fn resume_agent_spawns_the_harness_form_and_records_the_member() {
+        // x-5f7f: a dead paneless codex row resumes through codex's own form
+        // in the recorded cwd. The program is overridden to /bin/cat so the
+        // test spawns no real codex; the session id still rides the argv.
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-resume-cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-codex-one".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Dead,
+        }];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::ResumeAgent {
+                name: "t-codex-one".into(),
+            },
+        );
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(notices.contains("resumed t-codex-one"), "{notices}");
+        // One NEW pane beyond the seed shell, running the overridden program,
+        // titled from the registry row, placed in the squad owning the cwd.
+        let new_panes: Vec<&u64> = core.panes.keys().filter(|&&p| p != shell).collect();
+        assert_eq!(new_panes.len(), 1, "exactly one resumed pane");
+        let entry = core.panes.get(new_panes[0]).unwrap();
+        assert_eq!(entry.cmd.as_deref(), Some("cat"), "the override ran");
+        assert_eq!(
+            entry.name.as_deref(),
+            Some("t-codex-one"),
+            "the pane is titled from the registry row"
+        );
+        let members = core.squad_members.get(&7).expect("member recorded");
+        assert!(
+            members
+                .iter()
+                .any(|m| m.worker.as_deref() == Some("t-codex-one")),
+            "the resumed pane persists as a worker member: {members:?}"
+        );
+    }
+
+    #[test]
+    fn resume_agent_refusals_name_the_reason() {
+        // Fail-closed catalog gates, same posture as AttachAgent: an unknown
+        // name, and a row whose pane is still live (focus, never a second
+        // spawn), never reach an argv.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let live = core.spawn_pane(24, 80, "/tmp").unwrap();
+        core.session.add_squad(
+            7,
+            vec!["/tmp".into()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(live),
+                focus: live,
+            },
+        );
+        let live_row = RegistryAgent {
+            session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "live-codex".into(),
+            cwd: "/tmp".into(),
+            exited: false,
+            badge: None,
+            reason: None,
+            mux: Some(("test".into(), live)),
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Alive,
+        };
+        core.agents = vec![live_row];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.command(
+            1,
+            Command::ResumeAgent {
+                name: "ghost".into(),
+            },
+        );
+        assert!(drain_notice(&mut rx).unwrap().contains("no such agent"));
+        core.command(
+            1,
+            Command::ResumeAgent {
+                name: "live-codex".into(),
+            },
+        );
+        assert!(
+            drain_notice(&mut rx).unwrap().contains("not resumable"),
+            "a row with a live pane is refused, never double-spawned"
+        );
+        assert_eq!(core.panes.len(), 1, "nothing was spawned by either refusal");
+    }
+
+    #[test]
+    fn resume_argv_matches_the_harness_capability_tokens() {
+        // The two forms mirror harness_capabilities.toml: claude --resume,
+        // codex resume. No override is installed, so this asserts the REAL
+        // argv shape the pane would run.
+        assert_eq!(
+            resume_argv_for("codex", "resume", "01a027ad"),
+            vec!["codex".to_string(), "resume".to_string(), "01a027ad".into()]
+        );
+        assert_eq!(
+            resume_argv_for("claude", "--resume", "119e3c52-uuid"),
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "119e3c52-uuid".into()
+            ]
+        );
+    }
+
+    #[test]
+    fn row_resumable_gates_on_harness_form_and_session_id() {
+        // The row-level predicate: needs a harness with a resume form plus
+        // the session id it resumes; a LIVE claude bg row with a jobId is
+        // excluded (attach owns that gesture); agy has no form here.
+        let base = || RegistryAgent {
+            session_id: None,
+            harness_session_id: Some("01a027ad".into()),
+            harness: Some("codex".into()),
+            name: "w".into(),
+            cwd: "/w".into(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Dead,
+        };
+        assert!(Core::row_resumable(&base()), "a dead codex row resumes");
+        let mut agy = base();
+        agy.harness = Some("agy".into());
+        agy.harness_session_id = None;
+        assert!(
+            !Core::row_resumable(&agy),
+            "no resume form and no session id: no Resume offered"
+        );
+        let mut live_claude = base();
+        live_claude.harness = Some("claude".into());
+        live_claude.exited = false;
+        live_claude.attach_id = Some("c19cd2c3".into());
+        assert!(
+            !Core::row_resumable(&live_claude),
+            "a live claude bg row attaches; its daemon owns the session"
+        );
+        let mut dead_claude = live_claude;
+        dead_claude.exited = true;
+        assert!(
+            Core::row_resumable(&dead_claude),
+            "a dead claude row resumes from its transcript"
+        );
+        let mut no_sid = base();
+        no_sid.harness_session_id = None;
+        assert!(
+            !Core::row_resumable(&no_sid),
+            "no session id means nothing to resume"
+        );
     }
 
     #[test]
@@ -15576,6 +16242,7 @@ mod tests {
             updated_at: None,
             crown_level: None,
             crown_scope: None,
+            harness: None,
         }
     }
 
@@ -16097,6 +16764,7 @@ mod tests {
                 tombstone: false,
                 tab_name: None,
                 cwd: None,
+                worker: None,
             }],
         );
         core.attached.insert(attach.into(), pid);
@@ -16108,6 +16776,7 @@ mod tests {
             tombstone,
             tab_name: None,
             cwd: None,
+            worker: None,
         }
     }
 
@@ -17022,6 +17691,7 @@ mod tests {
                 tombstone: false,
                 tab_name: Some("old".into()),
                 cwd: None,
+                worker: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -17146,6 +17816,7 @@ mod tests {
                 tombstone: false,
                 tab_name: Some("home".into()),
                 cwd: None,
+                worker: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -17204,6 +17875,7 @@ mod tests {
                 tombstone: false,
                 tab_name: Some("src".into()),
                 cwd: None,
+                worker: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -17764,6 +18436,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                 },
+                None,
             )
             .unwrap();
 
@@ -17818,6 +18491,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                 },
+                None,
             )
             .unwrap()
         };
@@ -17875,6 +18549,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                 },
+                None,
             )
             .unwrap_err();
         assert!(err.1.contains("blank"), "{err:?}");

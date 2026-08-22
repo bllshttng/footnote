@@ -69,6 +69,7 @@ fn run_pane(scratch: &Scratch, cwd: &Path, placement: PanePlacement) -> Result<u
                 rows: None,
                 claim: false,
                 placement,
+                worker: None,
             },
         },
     )
@@ -637,6 +638,7 @@ fn run_pane_receipt(
                 rows: None,
                 claim: false,
                 placement,
+                worker: None,
             },
         },
     )

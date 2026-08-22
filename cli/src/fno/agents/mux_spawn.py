@@ -3403,6 +3403,13 @@ def dispatch_spawn_pane(
             session,
             "--cwd",
             str(cwd),
+            # (x-5f7f) The registry name of the worker this pane hosts: the
+            # server records the pane as a squad member joined to that row by
+            # name, so it survives a mux restart as an idle, resumable row.
+            # Both pane producers cross this argv (this spawn lane and the
+            # dispatch porcelain that calls it), so one flag covers both.
+            "--worker",
+            name,
             *placement_args,
         ]
         # Exact placement answers --json so the server authors the receipt

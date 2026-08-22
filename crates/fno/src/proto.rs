@@ -250,7 +250,7 @@ fn default_true() -> bool {
 /// - the CLI door onto the focus trunk the TUI already owns. New variants, not
 /// additive fields, so a v45 server cannot deserialize a `PaneFocus`; the
 /// handshake is what stops the skew.
-pub const PROTO_VERSION: u32 = 48;
+pub const PROTO_VERSION: u32 = 49;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -566,6 +566,13 @@ pub enum ControlVerb {
         claim: bool,
         #[serde(default)]
         placement: PanePlacement,
+        /// (v49, x-5f7f) The registry name of the worker this pane hosts. The
+        /// server records the pane as a squad member joined to that registry
+        /// row by name, so a non-claude worker survives a mux restart as an
+        /// idle, resumable row instead of vanishing. `None` records nothing -
+        /// a plain `pane run` stays byte-identical.
+        #[serde(default)]
+        worker: Option<String>,
     },
     /// Write raw bytes to a pane's PTY (no focus change) -> [`ServerMsg::Ok`].
     /// `guarded` (v21) makes the send atomic against the target going busy:
@@ -1018,6 +1025,14 @@ pub struct AgentRow {
     /// `#[serde(default)]` keeps a v47 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_age_s: Option<u64>,
+    /// (v49, x-5f7f) True on a paneless row whose harness owns a resume form
+    /// and whose registry row carries the session id to resume: clicking it
+    /// sends `Command::ResumeAgent` instead of dead-ending on "agent has no
+    /// pane here". False on every pane-hosted row (click focuses the pane)
+    /// and on rows with no resumable identity. `#[serde(default)]` keeps a
+    /// v48 reader wire-tolerant (defaults false = today's behavior).
+    #[serde(default)]
+    pub resumable: bool,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -1275,6 +1290,17 @@ pub enum Command {
         node: String,
         #[serde(default)]
         account: Option<String>,
+    },
+    /// (v49, x-5f7f) Resume a paneless agent row through its own harness: the
+    /// server joins `name` to its registry row, then spawns the harness's
+    /// resume argv (`claude --resume <sid>` / `codex resume <sid>`) as a pane
+    /// in the recorded cwd. The operator's explicit gesture - restore never
+    /// sends this, so nothing respawns silently at start. `name` is matched
+    /// against the surfaced row set and refused fail-closed when the row is
+    /// not resumable (no registry row, no session id, or a harness with no
+    /// resume form).
+    ResumeAgent {
+        name: String,
     },
     /// (v16) Create a NAMED squad (a workspace) explicitly, bypassing the
     /// attach cwd-resolution path entirely (Unit 2). The server rejects a
@@ -3003,15 +3029,17 @@ mod tests {
         // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
         // 42 -> 43; the anchored-layout node (x-6928) bumped it 43 -> 44;
         // clickable links (x-a2d0) bumped it 44 -> 45; pane focus (x-3e17) 45 ->
-        // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47. The
-        // additive crown fields, and now `unmeasured`, stay skew-tolerant both
-        // ways regardless of the version number.
+        // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47; the
+        // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
+        // (x-5f7f) 48 -> 49. The additive crown fields, `unmeasured`, and now
+        // `resumable`, stay skew-tolerant both ways regardless of the version
+        // number.
         //
         // This is the ONE canonical pin, as this test's name says. Two sibling
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 48);
+        assert_eq!(PROTO_VERSION, 49);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -3298,6 +3326,7 @@ mod tests {
                         crown_scope: None,
                         basis: None,
                         last_activity_age_s: None,
+                        resumable: false,
                     },
                     AgentRow {
                         squad: None,
@@ -3323,6 +3352,7 @@ mod tests {
                         crown_scope: None,
                         basis: None,
                         last_activity_age_s: None,
+                        resumable: false,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
@@ -3410,6 +3440,7 @@ mod tests {
                 rows: None,
                 claim: true,
                 placement: PanePlacement::default(),
+                worker: None,
             },
             ControlVerb::PaneClaim {
                 pane: 5,
@@ -3463,6 +3494,7 @@ mod tests {
                     rows: None,
                     claim: false,
                     placement: placement.clone(),
+                    worker: None,
                 },
             },
             ClientMsg::Command(Command::AttachAgent {
