@@ -20,10 +20,13 @@
 /// submitted. Naming the submit key is the load-bearing half.
 const ASK_REFUSAL: &str = "fno-agents: opencode has no stateful 'ask' resume \
     (pane-hosted, no client-side dispatch); drive the pane directly with \
-    'fno mux pane send <pane> --session <session> --text <prompt>'. \
+    'fno mux pane send <pane> --raw --session <session> --text <prompt>'. \
+    --raw is required: without it the payload is wrapped in an <fno_mail> envelope, \
+    which makes a trailing submit key interior body text and refuses an empty one. \
     --text only fills the composer, it does not submit: append the TUI's submit key \
-    (a trailing \\r, or a SECOND send of $'\\t' once the payload is large enough to \
-    render as a pasted block) or the prompt sits there unsent.";
+    (a trailing \\r, or a SECOND send of 'fno mux pane send <pane> --raw --text $'\\t'' \
+    once the payload is large enough to render as a pasted block) or the prompt \
+    sits there unsent.";
 
 /// Returns `None` for a non-opencode target (fall through to the next
 /// provider's ask hook), or `Some(2)` after printing the refusal.

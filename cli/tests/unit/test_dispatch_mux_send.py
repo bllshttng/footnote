@@ -350,3 +350,29 @@ def test_a_non_mail_payload_reaches_the_pane_verbatim(monkeypatch):
     # No SECOND envelope wrapped around the digest, and nothing stamped with
     # this process's handle in place of the declared sender.
     assert not pasted.lstrip().startswith("<fno_mail from="), pasted
+
+
+def test_a_non_mail_payload_is_verbatim_but_still_gated(monkeypatch, capsys):
+    """Verbatim and ungated are DIFFERENT requests, and only one was asked for.
+
+    `prepare` does two jobs: it wraps, and it refuses a pane showing a prompt.
+    Skipping it wholesale to keep a ritual or a digest byte-exact also skipped
+    the gate. On a codex auth wall the CR then takes the wall's default, the
+    payload is discarded, and the bytes-written verdict still reads True, so a
+    hold release advances the cursor and retires every held message unread.
+
+    Only a keystroke ANSWERING a prompt wants the gate off.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(
+        monkeypatch, [], {"matched": True, "state": "blocked", "rule_id": "auth_wall"}
+    )
+    monkeypatch.setattr(
+        dispatch, "_delivery_policy_refusal", lambda _e: None, raising=False
+    )
+
+    assert dispatch._deliver_live(_entry(), "run the ritual", "fno") is False
+    assert "send" not in _verbs(calls), "a blocked pane must receive nothing"
+    assert "auth_wall" in capsys.readouterr().err

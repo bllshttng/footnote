@@ -218,9 +218,16 @@ def prepare(
     sender: Optional[str] = None,
     to: Optional[str] = None,
     gate: bool = True,
+    wrap_body: bool = True,
     runner: Optional[Callable[..., "subprocess.CompletedProcess[str]"]] = None,
 ) -> str:
     """Gate, then wrap. Returns the bytes an enveloped pane send should type.
+
+    The two are SEPARATE decisions and a caller can want either without the
+    other. An operational payload (a ritual command, a busy-hold digest) is not
+    mail and must land verbatim, so it takes ``wrap_body=False`` -- but a submit
+    into a showing prompt discards it exactly as it discards mail, so it still
+    wants the gate. Only a keystroke ANSWERING a prompt turns the gate off.
 
     Raises :class:`PaneSendRefused` when the pane is showing an option prompt,
     when the pane hosts no known agent, or when the body cannot be attributed.
@@ -237,4 +244,6 @@ def prepare(
         )
         if refusal:
             raise PaneSendRefused(refusal)
+    if not wrap_body:
+        return text
     return wrap(text, sender=sender, to=to)

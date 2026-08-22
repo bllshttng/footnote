@@ -1318,6 +1318,13 @@ def cmd_pane_prepare(
     # UnicodeDecodeError out of a read that has no handler, which the caller
     # reports as a renderer fault rather than as the bad input it is.
     raw = sys.stdin.buffer.read()
+    # The UNTRUSTED boundary. Internal callers import `prepare` directly, so
+    # everything arriving here came off a command line, and `wrap`'s
+    # already-wrapped passthrough is a PREFIX test: a body opening with a
+    # handcrafted `<fno_mail from="king" ...>` is returned verbatim, typed at a
+    # pane, and read as peer mail from whoever it names. The audit row is
+    # skipped too, because that check uses the same prefix test. Every other
+    # producer refuses a body carrying the tag; this one has to as well.
     try:
         body = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -1327,6 +1334,7 @@ def cmd_pane_prepare(
             file=sys.stderr,
         )
         raise typer.Exit(code=3) from exc
+    _refuse_forged_envelope(body)
     try:
         print(prepare(body, session=session, pane_id=pane, harness=harness), end="")
     except PaneSendRefused as exc:

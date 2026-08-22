@@ -42,6 +42,8 @@ The test is the BLOCKED state, not the parsed answer grammar. A rule can match a
 
 `--raw` is exempt. Answering a showing prompt with a digit is the legitimate raw case. Gating it breaks the one caller that needs the prompt to be there.
 
+There are THREE cases here and only two flags, which is how one of them got lost. Wrapping and gating are separate decisions. Default mail wants both. A genuine keystroke answering a prompt wants neither. A ritual command or a busy-hold digest wants the gate WITHOUT the envelope. It is not mail, so it must not be dressed as mail. But a submit into a showing prompt discards it exactly as it discards mail. Collapsing that middle case into the keystroke case sent a digest into an ungated pane. On an auth wall the CR takes the wall's default and the payload is gone. The bytes-written verdict still reads true, so the hold release advances the cursor and retires every held message unread.
+
 ## Receipt vocabulary
 
 Three words, and they are not interchangeable.

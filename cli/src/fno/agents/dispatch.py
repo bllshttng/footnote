@@ -5753,6 +5753,20 @@ def _mux_content_confirm(
     return False
 
 
+def _pane_recipient_handle(entry: "AgentEntry") -> Optional[str]:
+    """The canonical mail handle of a pane's occupant, or None.
+
+    None is not a failure: an unregistered pane has no handle to address, and
+    an envelope with no `to` is the honest rendering of that.
+    """
+    from fno.harness_identity import canonical_handle
+
+    session_id = getattr(entry, "harness_session_id", None) or getattr(
+        entry, "session_id", None
+    )
+    return canonical_handle(session_id) if session_id else None
+
+
 def _mux_pane_send(
     entry: "AgentEntry",
     text: str,
@@ -5761,6 +5775,7 @@ def _mux_pane_send(
     sender: Optional[str] = None,
     confirm: bool = False,
     raw: bool = False,
+    gate: Optional[bool] = None,
 ) -> bool:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
@@ -5859,7 +5874,24 @@ def _mux_pane_send(
     # selects the highlighted default). `raw=True` is the keystroke opt-out.
     # Already-wrapped text passes the wrap through, so the mail lane's own bodies
     # are byte-unchanged and only gain the gate.
-    if not raw:
+    # THREE cases, not two. `prepare` does two jobs -- it wraps, and it refuses
+    # a pane showing a prompt -- and a caller can want either without the other:
+    #
+    #   wrap + gate   default a2a mail
+    #   gate only     an operational payload that must land verbatim (a ritual
+    #                 command, a busy-hold digest). It is not mail, so it must
+    #                 not be dressed as mail, but a submit into a showing prompt
+    #                 discards it exactly the same way.
+    #   neither       a genuine keystroke ANSWERING a prompt (a digit, a control
+    #                 key). Gating this one breaks the caller that needs the
+    #                 prompt to be there.
+    #
+    # Collapsing the middle case into the last is what shipped a hold digest and
+    # a ritual into an ungated pane. `gate` defaults to `not raw`, so every
+    # existing caller keeps its behavior and the middle case says `gate=True`.
+    if gate is None:
+        gate = not raw
+    if not raw or gate:
         from fno.mail.pane_transport import PaneSendRefused, prepare
 
         try:
@@ -5869,6 +5901,15 @@ def _mux_pane_send(
                 pane_id=pane_id,
                 harness=harness or None,
                 sender=sender,
+                # The recipient's own handle. Without it the envelope renders
+                # with no `to`, and `_addressed_here` answers True for any tag
+                # carrying none, which turns the receipt check for this whole
+                # lane into a mention check. The entry is right here.
+                to=_pane_recipient_handle(entry),
+                gate=gate,
+                # `wrap=False` for the gate-only case: the body is already what
+                # has to land, byte for byte.
+                wrap_body=not raw,
             )
         except PaneSendRefused as exc:
             print(f"mux pane {pane_id} send refused: {exc}", file=sys.stderr)
@@ -6949,6 +6990,13 @@ def _deliver_live(
             guarded=False,
             confirm=True,
             raw=mail is None,
+            # Verbatim, but STILL GATED. `raw` alone skipped `prepare` whole,
+            # and `prepare` is where the read-back gate lives, so a digest or a
+            # ritual went into a pane nobody had looked at. On a codex auth wall
+            # the CR takes the wall's default, the payload is discarded, and the
+            # bytes-written verdict still reads True -- so the hold release then
+            # advances the cursor and retires every held message unread.
+            gate=True,
             sender=from_name or None,
         )
         if not mux_delivered:
