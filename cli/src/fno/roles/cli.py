@@ -352,7 +352,7 @@ def context_catalog(
     per entry: a real sha256 and byte size for a readable file, or
     ``readable=false`` with a naming reason for an unreadable one. Composes
     with ``resolve``: ``fno agents roles resolve --snapshot <rev> --context <(fno
-    roles context --json --snapshot <rev>) ...``.
+    agents roles context --json --snapshot <rev>) ...``.
     """
     settings = load_settings()
     artifacts = settings.context.artifacts

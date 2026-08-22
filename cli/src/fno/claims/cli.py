@@ -1086,7 +1086,7 @@ def list_cmd(
     """Enumerate claims under the claims directory.
 
     Both claims roots (global ~/.fno/claims and the cwd-local root) are
-    always read and merged in one run, --prefix or not - a bare `fno
+    always read and merged in one run, --prefix or not - a bare `fno agents
     claim list` used to resolve only whichever single root an empty
     prefix happened to fall to, silently missing the other store (measured:
     574 lockfiles in a root a bare `list` could never reach).
