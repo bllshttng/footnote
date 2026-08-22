@@ -6988,7 +6988,7 @@ def _deliver_live(
     When ``mail`` is set the body is wrapped in the paired ``<fno_mail>`` envelope
     so the recipient sees agent-to-agent structure and the delivered turn is
     self-recording (``grep <fno_mail>`` reconstructs a2a history). Every live
-    transport below carries the same wrapped turn.
+    transport below carries the same wrapped turn, ``agy`` mux entries included.
 
     For claude peers: the ``control.sock`` inject via the ``fno-agents
     mail-inject`` verb (G1, x-26df) is the live primitive for adopted
