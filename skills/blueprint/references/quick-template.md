@@ -44,7 +44,7 @@ consolidation:
   #  - id: x-0000
   #    reason: <why it is not the same work, in text a later reader can check>
   # outcome: absorb - the other node is a wave of THIS deliverable. After
-  # intake run: fno backlog supersede <this-node> --replaces <id> --reason "..."
+  # intake run: fno backlog supersede <this-node> --replaces <id> --cause "..." --surface <path>
   # absorbed:
   #   - id: x-0000
   #     reason: <why this node is a wave of this deliverable>

@@ -33,7 +33,7 @@ Each is reversible or additive, which is what makes an unattended daily pass saf
 
 | Lever | Use it for |
 |-------|-----------|
-| `fno backlog supersede <new-id> --replaces <old-id> --reason "..."` | A node genuinely replaced by another (dedup families, retitles) |
+| `fno backlog supersede <new-id> --replaces <old-id> --cause "..." --surface <path>` | A node genuinely replaced by another (dedup families, retitles). `--cause` and `--surface` are required: the old node stays open until a merged PR covers every surface |
 | `fno backlog defer <id>... --reason "..."` | Work that should stop being selected, with the why recorded |
 | `fno backlog undefer <id>...` | A deferred node whose blocker is demonstrably gone |
 | `fno backlog update <id> --priority <p0..p3>` | A priority the evidence contradicts |

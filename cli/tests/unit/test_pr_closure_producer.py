@@ -790,3 +790,41 @@ def test_unknown_manifest_id_falls_back_to_the_branch():
     )
     assert result.outcome == "bound"
     assert result.bound_ids == ["x-1a2b"]
+
+
+def test_supersede_keeps_the_human_reason(tmp_path, monkeypatch):
+    """--reason is accepted and documented, so it must land somewhere."""
+    import json
+    from typer.testing import CliRunner
+    from fno.graph.cli import cli
+
+    # The graph path is frozen at import time (see conftest), so point at the
+    # already-sandboxed location rather than a fresh env var.
+    from fno.graph._constants import GRAPH_JSON as graph
+
+    graph.parent.mkdir(parents=True, exist_ok=True)
+    graph.write_text(json.dumps({"entries": [
+        {"id": "x-1a2b", "title": "new"},
+        {"id": "x-9f0c", "title": "old"},
+    ]}))
+
+    result = CliRunner().invoke(cli, [
+        "supersede", "x-1a2b", "--replaces", "x-9f0c",
+        "--cause", "owned the parser", "--surface", "cli/p.py",
+        "--reason", "folded into the rewrite",
+    ])
+    assert result.exit_code == 0, result.output
+    rows = {e["id"]: e for e in json.loads(graph.read_text())["entries"]}
+    assert rows["x-9f0c"]["supersession"]["reason"] == "folded into the rewrite"
+
+
+def test_supersede_without_surface_names_a_runnable_example():
+    from typer.testing import CliRunner
+    from fno.graph.cli import cli
+
+    result = CliRunner().invoke(cli, [
+        "supersede", "x-1a2b", "--replaces", "x-9f0c", "--cause", "c",
+    ])
+    assert result.exit_code == 1
+    assert "--surface" in result.output
+    assert "fno backlog supersede" in result.output

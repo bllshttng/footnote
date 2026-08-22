@@ -12097,12 +12097,22 @@ cli.add_typer(collisions_app, name="collisions", hidden=True)
 # ---------------------------------------------------------------------------
 
 
+_SUPERSEDE_EXAMPLE = (
+    'fno backlog supersede <new> --replaces <old> '
+    '--cause "<what the old node was for>" --surface <path/it/owned>'
+)
+
+
 @cli.command("supersede", hidden=True)
 def cmd_supersede(
     new_id: str = typer.Argument(..., help="The new node ID that replaces the old"),
     replaces: str = typer.Option(..., "--replaces", help="The old node ID being superseded"),
-    cause: Optional[str] = typer.Option(None, "--cause", help="Inherited cause being replaced"),
-    surface: list[str] = typer.Option([], "--surface", help="Repo-relative cause surface; repeatable"),
+    cause: Optional[str] = typer.Option(
+        None, "--cause", help="REQUIRED. Inherited cause being replaced"
+    ),
+    surface: list[str] = typer.Option(
+        [], "--surface", help="REQUIRED, repeatable. Repo-relative cause surface"
+    ),
     reason: Optional[str] = typer.Option(None, "--reason", "-R", help="Optional human rationale"),
     force: bool = typer.Option(
         False, "--force", "-F", help="Supersede even if the target still has live children (orphaning them)"
@@ -12133,10 +12143,24 @@ def cmd_supersede(
 
     cleaned_cause = (cause or "").strip()
     if not cleaned_cause:
-        typer.echo("Error: --cause is required and cannot be blank", err=True)
+        typer.echo(
+            "Error: --cause is required and cannot be blank.\n"
+            "A supersede now carries the evidence that closes it: what the old\n"
+            "node was for, and which repo paths must change to prove the new one\n"
+            "replaced it. The old node stays open until a merged PR covers every\n"
+            "declared surface.\n"
+            f"  {_SUPERSEDE_EXAMPLE}",
+            err=True,
+        )
         raise typer.Exit(code=1)
     if not surface:
-        typer.echo("Error: at least one --surface is required", err=True)
+        typer.echo(
+            "Error: at least one --surface is required.\n"
+            "Name the repo-relative paths the old node owned; a merged PR\n"
+            "touching all of them is what verifies this supersede.\n"
+            f"  {_SUPERSEDE_EXAMPLE}",
+            err=True,
+        )
         raise typer.Exit(code=1)
     normalized_surfaces: list[str] = []
     for raw_surface in surface:
@@ -12234,6 +12258,10 @@ def cmd_supersede(
         old_node["supersession"] = {
             "successor": canonical_new,
             "cause": cleaned_cause,
+            # Kept, not dropped. --reason is accepted and documented as the
+            # human rationale, so discarding it silently lost the one field the
+            # operator wrote by hand.
+            "reason": (reason or "").strip() or None,
             "surfaces": normalized_surfaces,
             "verified_at": None,
             "evidence_pr": None,

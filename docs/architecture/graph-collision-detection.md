@@ -51,7 +51,7 @@ graph TD
     ASK -->|no| ADOPT["auto-intake"]
     ASK -->|yes| OPTIONS["AskUserQuestion:\nproceed / modify /\nsupersede / cancel"]
     OPTIONS --> ACK["fno backlog update\n--acknowledge-collisions"]
-    OPTIONS --> SUP["fno backlog supersede\n<new> --replaces <old>"]
+    OPTIONS --> SUP["fno backlog supersede\n<new> --replaces <old>\n--cause ... --surface ..."]
     OPTIONS --> ADOPT
 ```
 

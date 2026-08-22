@@ -110,7 +110,7 @@ For each open node, offer a one-touch decision (in autonomous mode: log each as
 - **promote** -> `fno backlog rank <id> --top`
 - **keep** as filed -> no-op
 - **defer** explicitly -> `fno backlog defer <id>`
-- **supersede** -> `fno backlog supersede <id> --by <other-id>`, or
+- **supersede** -> `fno backlog supersede <other-id> --replaces <id> --cause "..." --surface <path>`, or
   `fno backlog done <id>` if moot.
 
 ### 3b. Read the merged diff and apply judgment
