@@ -103,6 +103,11 @@ const FLOCK_SLEEP: Duration = Duration::from_millis(20);
 /// operator dismisses it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMember {
+    /// (x-5f7f) `#[serde(default)]` so a worker member can omit it: a
+    /// non-claude worker pane has no claude jobId, and its identity is the
+    /// `worker` registry name instead. Empty for those members; the load
+    /// gate accepts either shape.
+    #[serde(default)]
     pub attach_id: String,
     #[serde(default)]
     pub tombstone: bool,
@@ -121,6 +126,15 @@ pub struct StoredMember {
     /// does not. `#[serde(default)]`, same no-quarantine rule as `tab_name`.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// (x-5f7f) The registry name of a non-claude worker pane - the JOIN key.
+    /// Harness, harness session id, cwd and account live on the registry row,
+    /// which is the file that already owns them; restore never respawns this
+    /// member, it renders idle and resumes through the harness's own form.
+    /// Empty `attach_id` + `Some(worker)` is the worker shape; a claude
+    /// attach member keeps `attach_id` and leaves this `None`.
+    /// `#[serde(default)]`, same no-quarantine rule as `tab_name`.
+    #[serde(default)]
+    pub worker: Option<String>,
 }
 
 /// A durable per-squad identity for an UNNAMED squad, minted the first time it
@@ -337,6 +351,20 @@ pub fn valid_attach_id(id: &str) -> bool {
     id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// A worker name is a registry name, not a path or a shell token (x-5f7f).
+/// Same argv-safety posture as [`valid_attach_id`]: file content is untrusted
+/// and a worker name reaches a resume spawn keyed by name, so anything outside
+/// the slug charset (`fno agents spawn` itself refuses other shapes) is
+/// dropped at load. Non-empty, at most 64 chars, ascii `[A-Za-z0-9._-]` only -
+/// no separator, no whitespace, no metacharacter.
+pub fn valid_worker_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 /// Load the store for restore. A missing/empty file is a fresh store (no
 /// notice). An unreadable one also reads as empty, but says so. A corrupt file
 /// or unknown version is renamed aside (`squads.json.corrupt-<secs>`) and read
@@ -400,7 +428,13 @@ pub fn load() -> Loaded {
         .into_iter()
         .map(|mut sq| {
             let before = sq.members.len();
-            sq.members.retain(|m| valid_attach_id(&m.attach_id));
+            // (x-5f7f) A member is valid in either shape: a claude attach id,
+            // or a worker registry name. Anything else (including a worker
+            // name carrying a path separator or metacharacter) is dropped at
+            // load before a resume can key on it.
+            sq.members.retain(|m| {
+                valid_attach_id(&m.attach_id) || m.worker.as_deref().is_some_and(valid_worker_name)
+            });
             dropped += before - sq.members.len();
             sq
         })
@@ -1391,6 +1425,7 @@ mod tests {
             tombstone: false,
             tab_name: None,
             cwd: None,
+            worker: None,
         }
     }
 
@@ -1588,6 +1623,128 @@ mod tests {
         assert_eq!(second.squads.len(), 1, "upsert replaces, never dupes");
         assert_eq!(second.squads[0].members.len(), 2);
         assert_eq!(second.squads[0].created_at, created, "created_at preserved");
+    }
+
+    #[test]
+    fn valid_worker_name_gate() {
+        // x-5f7f: the worker field is a registry name that keys a resume, so
+        // the same argv-safety posture as valid_attach_id - a hostile value
+        // must never survive load. Registry names are slugs; anything else
+        // (separator, whitespace, metachar, overlong, non-ascii) is refused.
+        assert!(valid_worker_name("probe-x5f7f"));
+        assert!(valid_worker_name("t-xf730-sonnet"));
+        assert!(valid_worker_name("a.b_c"));
+        assert!(!valid_worker_name(""));
+        assert!(!valid_worker_name("a/b"), "path separator");
+        assert!(!valid_worker_name("a b"), "whitespace");
+        assert!(!valid_worker_name("a;rm"), "shell metacharacter");
+        assert!(!valid_worker_name("$(x)"), "command substitution");
+        assert!(!valid_worker_name(&"x".repeat(65)), "overlong");
+        assert!(!valid_worker_name("héllo"), "non-ascii");
+    }
+
+    #[test]
+    fn worker_member_roundtrips_without_a_jobid() {
+        // x-5f7f: a worker member carries a registry NAME and an EMPTY
+        // attach_id (a codex/agy pane has no claude jobId). It must round-trip
+        // through the store and survive the load gate, which previously
+        // dropped every member whose attach_id was not 8 hex digits - the
+        // measured reason a widened field alone would have shipped nothing.
+        let _s = Scratch::new("worker-roundtrip");
+        let worker = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: Some("lane".into()),
+            cwd: Some("/repo/wt".into()),
+            worker: Some("probe-x5f7f".into()),
+        };
+        upsert("work", "", &["/repo".into()], &[worker, m("c19cd2c3")]).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1, "no quarantine");
+        assert!(loaded.notice.is_none(), "{:?}", loaded.notice);
+        let members = &loaded.squads[0].members;
+        assert_eq!(members.len(), 2, "worker member survives the load gate");
+        let w = members
+            .iter()
+            .find(|m| m.worker.is_some())
+            .expect("worker member present");
+        assert_eq!(w.worker.as_deref(), Some("probe-x5f7f"));
+        assert_eq!(w.attach_id, "", "no claude jobId on a worker member");
+        assert_eq!(w.tab_name.as_deref(), Some("lane"), "tab name round-trips");
+        assert_eq!(w.cwd.as_deref(), Some("/repo/wt"));
+    }
+
+    #[test]
+    fn hostile_worker_name_is_dropped_at_load() {
+        // The load gate's argv-safety half: a worker name carrying a path
+        // separator or a metacharacter never reaches a resume, exactly like a
+        // malformed attach_id never reaches `claude attach`.
+        let _s = Scratch::new("worker-hostile");
+        let hostile = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("a;rm -rf".into()),
+        };
+        upsert("work", "", &["/repo".into()], &[hostile, m("c19cd2c3")]).unwrap();
+        let loaded = load();
+        assert_eq!(
+            loaded.squads[0].members.len(),
+            1,
+            "hostile worker member dropped at load"
+        );
+        assert_eq!(
+            loaded.squads[0].members[0].attach_id, "c19cd2c3",
+            "the healthy member is untouched"
+        );
+        assert!(loaded.notice.is_some(), "the drop is named, never silent");
+    }
+
+    #[test]
+    fn four_squad_store_on_disk_loads_whole() {
+        // x-5f7f: the exact store shape measured on the operator's disk -
+        // four squads, three holding ZERO members (the empty-squads defect:
+        // worker panes never entered the membership funnel) and one holding
+        // six claude attach members. The widened member must not quarantine or
+        // notice on any of them; the fourth squad exercises a named row.
+        let s = Scratch::new("four-squads");
+        let members = [
+            "119e3c52", "cbd219bd", "f5996a81", "3d9938aa", "a1b2c3d4", "e5f60718",
+        ]
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "attach_id": id,
+                "tombstone": false,
+                "tab_name": null,
+                "cwd": "/wt/a"
+            })
+        })
+        .collect::<Vec<_>>();
+        let raw = serde_json::json!({
+            "version": 1,
+            "squads": [
+                {"name": "", "key": "1111111111111111", "origins": ["/repo"],
+                 "members": members, "created_at": "2026-08-21T00:00:00Z"},
+                {"name": "", "key": "2222222222222222", "origins": ["/gone"],
+                 "members": [], "created_at": "2026-08-21T00:00:00Z"},
+                {"name": "", "key": "3333333333333333", "origins": ["/gone2"],
+                 "members": [], "created_at": "2026-08-21T00:00:00Z"},
+                {"name": "x-f3d0", "key": "", "origins": ["/repo"],
+                 "members": [], "created_at": "2026-08-21T00:00:00Z"}
+            ]
+        });
+        std::fs::write(s.file(), serde_json::to_string(&raw).unwrap()).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 4, "all four load");
+        assert!(loaded.notice.is_none(), "{:?}", loaded.notice);
+        assert_eq!(
+            loaded.squads[0].members.len(),
+            6,
+            "the six claude members survive"
+        );
+        assert!(loaded.squads.iter().any(|sq| sq.name == "x-f3d0"));
     }
 
     #[test]
@@ -2376,6 +2533,7 @@ mod tests {
                 tombstone: true,
                 tab_name: None,
                 cwd: None,
+                worker: None,
             }];
             assert_eq!(
                 prune_decision(&s, false, live_some, &no_cwds, &gone),
@@ -2569,6 +2727,7 @@ mod tests {
             tombstone: true,
             tab_name: None,
             cwd: None,
+            worker: None,
         }];
         assert_eq!(
             prune_decision_at(
@@ -2723,6 +2882,7 @@ mod tests {
             tombstone: true,
             tab_name: None,
             cwd: None,
+            worker: None,
         }
     }
 

@@ -69,6 +69,7 @@ def test_python_opencode_pane_submits_brevity_marker_after_exact_payload(
 
     def runner(argv: list[str], **_kwargs: Any) -> SimpleNamespace:
         if argv[1:4] == ["mux", "pane", "run"]:
+            captured["run_argv"] = argv
             return SimpleNamespace(returncode=0, stdout="7\n", stderr="")
         if argv[1:4] == ["mux", "pane", "ls"]:
             return SimpleNamespace(returncode=0, stdout="[]", stderr="")
@@ -107,6 +108,15 @@ def test_python_opencode_pane_submits_brevity_marker_after_exact_payload(
     delivered = captured["seed"]
     assert delivered.startswith(ORIGINAL_PAYLOAD + "\n\n")
     assert delivered.count(BREVITY_MARKER) == 1
+
+    # (x-5f7f) The pane run argv carries --worker <registry-name>: the server
+    # records the pane as a squad member joined to that row by name, so a
+    # non-claude worker survives a mux restart as an idle, resumable row. Both
+    # pane producers (this spawn lane and the dispatch porcelain that calls
+    # it) cross this one argv.
+    run_argv = captured["run_argv"]
+    assert "--worker" in run_argv, f"--worker rides the pane run argv: {run_argv}"
+    assert run_argv[run_argv.index("--worker") + 1] == "brief-opencode"
 
 
 def test_python_runtime_constants_match_shared_cross_language_fixture() -> None:
