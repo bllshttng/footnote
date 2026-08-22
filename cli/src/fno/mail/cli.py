@@ -691,38 +691,15 @@ def _reply_to_name_handle(
     replies back to and that drain-self scans, NOT a project name."""
     from fno.agents import discover as discover_mod
 
-    if sender_session:
-        # BEFORE the resolver gets a vote, and before any early return. An
-        # explicitly named session is the ADDRESS, not a tie-breaker for the
-        # ambiguous case: read later, a sibling exiting between a refused reply
-        # and its retry made the handle resolve uniquely and the flag was
-        # discarded in silence, sending the reply to the survivor instead of to
-        # the session the operator named. Every reply path funnels through here,
-        # so this is the one place it can be honored without a second copy.
-        from fno.harness_identity import canonical_handle, session_identity_key
-
-        named_handle = canonical_handle(sender_session)
-        if named_handle != session_identity_key(target)[:8]:
-            # The help's promise: a value that is not one of the candidates
-            # sends nothing. A session whose own handle differs from the one
-            # being answered was never a candidate, so a typo or a stale id
-            # refuses here instead of landing a threaded reply in an unrelated
-            # worker's prompt.
-            raise typer.BadParameter(
-                f"--sender-session {sender_session!r} is not one of the sessions "
-                f"{target!r} could name; its handle is {named_handle!r}. "
-                f"Nothing was sent."
-            )
-        _name_lane_send(
-            body_text,
-            from_name=from_project,
-            resolved=None,
-            token=sender_session,
-            reply_to=to_msg,
-            style_exception=style_exception,
-        )
-        return
-
+    # `sender_session` is deliberately NOT consulted here. It is validated
+    # against the real candidate set in `cmd_reply`, which is the only place
+    # that has one: discovery knows which sessions a handle can name, and this
+    # function does not. An attempt to honor it here compared its head-8 against
+    # the target's, which every candidate in a collision shares BY CONSTRUCTION,
+    # so it accepted any string with the right first eight characters (a
+    # one-character tail typo included) and then ran the ladder on it, raising
+    # UnreachableTokenError out of the command with the budget still reserved.
+    # A guard that cannot fail is worse than no guard: it reads as validation.
     resolved, suggestions = discover_mod.resolve_or_suggest(target)
     if resolved is not None:
         _name_lane_send(
@@ -772,11 +749,17 @@ def _reply_to_name_handle(
             )
             reachable, ambiguous = None, []
         if ambiguous:
-            # The collision escape hatch. A
-            # threaded reply that cannot be sent is worse than an unthreaded
-            # one, and before this the verb offered no disambiguator at all:
-            # the only route left was `send <name>`, which discards the thread.
-            # `--sender-session` keeps `reply_to`, so the correlation survives.
+            # The collision escape hatch, and the ONLY place `--sender-session`
+            # is read. A threaded reply that cannot be sent is worse than an
+            # unthreaded one, and before this the verb offered no disambiguator
+            # at all: the only route left was `send <name>`, which discards the
+            # thread. `--sender-session` keeps `reply_to`, so the correlation
+            # survives.
+            #
+            # It belongs here because `ambiguous` IS the candidate set. Validate
+            # membership anywhere else and there is nothing real to check
+            # against, which is how a version of this compared head-8s that
+            # every candidate shares by construction and validated nothing.
             if sender_session:
                 from fno.harness_identity import session_identity_key
 
@@ -3423,7 +3406,13 @@ def cmd_send(
     # codex, which is the documented self-invocation path and the one the
     # --force refusal text recommends, and the caller cannot even comply because
     # --to-self rejects a positional address.
-    _refuse_unsafe_short_address(name, self_addressed=to_self)
+    # Not on the --to-project lane, where `name` holds the message BODY rather
+    # than an address (the project is the address, and the positional parks the
+    # text). Hoisting the call without that exclusion made an eight-hex body
+    # refuse as an address whenever a live codex row happened to share those
+    # characters, which is a refusal aimed at content nobody was addressing.
+    if not to_project:
+        _refuse_unsafe_short_address(name, self_addressed=to_self)
 
     # --force ABOVE every lane that returns without reading it. Four lanes below
     # end the command on their own, so a guard placed after any of them leaves
