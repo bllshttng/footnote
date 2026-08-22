@@ -447,7 +447,8 @@ class PostMergeBlock(BaseModel):
         """Fail-safe to false on any non-boolean value.
 
         self_reap lets a finished /fno:pr merged background worker remove its
-        own agent-view row (``claude rm <id>``) at the end of the ritual.
+        own agent-view row (``fno agents rm <name>``, which the ritual calls
+        in-process) at the end of the ritual.
         Default off: the ritual prints the one-keystroke reap command instead,
         and only auto-removes when this is an explicit affirmative
         (``true``/``yes``/``on``/``1``). A scalar typo (``self_reap: banana``)

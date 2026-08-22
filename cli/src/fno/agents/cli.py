@@ -3927,7 +3927,7 @@ def cmd_stop(
 ) -> None:
     """Stop an agent's underlying session.
 
-    Claude agents: shells out to ``claude stop <short_id>`` and prints
+    Claude agents: shells out to ``claude stop`` on the short id and prints
     ``stopped: <name> (<short_id>)`` on success. Codex / gemini agents
     are synchronous between asks - the verb is a no-op with an
     explanatory stderr line.
@@ -3964,8 +3964,8 @@ def cmd_rm(
     Per-harness teardown:
 
     \b
-      claude    bg session: `claude rm <short_id>`; pane session:
-                `fno mux pane kill --session <session> <pane_id>`
+      claude    bg session: drops the claude session record; pane session:
+                kills the mux pane
       codex     drops the session's entry from ~/.codex/session_index.jsonl
       opencode  registry-only; `rm` will not delete an opencode session,
                 because that also deletes its child sessions and its whole
@@ -3989,10 +3989,10 @@ def cmd_rm(
     finding: this docstring is what a Python-fallback or
     ``FNO_AGENTS_RUNTIME=python`` invocation actually runs, so it must not
     claim a check only the other implementation makes, for a harness that
-    check does not even cover). If you tear a session down by hand instead,
-    ``claude rm`` (and ``claude stop``) take the harness's SHORT ID, never
-    the agent NAME this command takes -- passing the name to ``claude rm``
-    fails.
+    check does not even cover). Do not tear a session down by hand: the
+    harness session record IS the resume handle, and dropping it directly
+    spends that handle for nothing this command has not already done. If one
+    is already orphaned, ``fno agents adopt <short-id>`` brings it back.
 
     Worktrees are NOT removed here (the harness row does not prove that its
     cwd is disposable). Reap them with

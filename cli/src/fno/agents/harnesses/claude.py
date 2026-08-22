@@ -1707,7 +1707,7 @@ def logs(
 
 
 def claude_stop(short_id: str, *, timeout: float = 30.0) -> tuple[int, str]:
-    """Run ``claude stop <short_id>`` with a wall-clock timeout.
+    """Run ``claude stop`` on the short id, with a wall-clock timeout.
 
     Returns ``(exit_code, stderr_text)``. The caller decides whether to
     surface stderr verbatim and what exit code to translate to.
@@ -1728,7 +1728,7 @@ def claude_stop(short_id: str, *, timeout: float = 30.0) -> tuple[int, str]:
 
 
 def claude_rm(short_id: str, *, timeout: float = 30.0) -> tuple[int, str]:
-    """Run ``claude rm <short_id>`` with a wall-clock timeout.
+    """Run ``claude rm`` on the short id, with a wall-clock timeout.
 
     Returns ``(exit_code, stderr_text)``. Non-zero exits do NOT raise; the
     caller (``dispatch.rm_agent``) inspects exit_code to decide whether
