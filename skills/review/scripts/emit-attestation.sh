@@ -234,4 +234,19 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
 
+# The review has landed a verdict for this head, so the hold that said one was
+# RUNNING has nothing left to protect. Released HERE, at the positive completion
+# marker, so the release and the proof of completion are one event and cannot
+# drift: a release wired to a separate "the tool returned" signal can fire while
+# the review is still writing fixes, which is the whole defect.
+#
+# Best-effort in both directions. A release failure leaves a hold that ages out
+# on its TTL with a receipt, and an attestation must never fail because a
+# lockfile could not be removed.
+if [[ -n "${branch:-}" ]]; then
+  "${FNO:-fno}" do pr review-hold release \
+    --branch "$branch" --holder "review-session:${session_id:-unknown}" \
+    >/dev/null 2>&1 || true
+fi
+
 echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset}" >&2
