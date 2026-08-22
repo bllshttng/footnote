@@ -552,6 +552,29 @@ def test_the_refusal_message_passes_its_own_rules():
     assert style.check(msg, surface="pr-body") == [], msg
 
 
+def test_format_names_the_mention_escape_for_word_rules():
+    # A rule 3 or rule 4 refusal is looking straight at a working
+    # demonstration of the fix - every banned word the refusal names is
+    # quoted - so it must say so, on the exact word that was refused.
+    msg = style.format_violations(style.check("you should run it."))
+    assert "A quoted word is a mention, not a use." in msg
+    assert 'Wrap "should" in double quotes or backticks to name it.' in msg
+    assert "This refusal does that with every word it names." in msg
+
+    rule4_msg = style.format_violations(style.check("don't run it."))
+    assert "A quoted word is a mention, not a use." in rule4_msg
+
+
+def test_format_adds_the_mention_escape_only_for_word_rules():
+    # A length-only refusal carries no word-level confusion, so the escape
+    # line is absent: an advisory that fires on every refusal trains the
+    # reader to skip the paragraph where the answer is.
+    body = " ".join("word" for _ in range(81)) + "."
+    length_msg = style.format_violations(style.check(body))
+    assert "A quoted word is a mention" not in length_msg
+    assert "double quotes or backticks" not in length_msg
+
+
 def test_the_refusal_message_survives_a_rule_6_violation():
     # Rule 6 is the one rule whose refusal is multi-line by nature, so it is the
     # one most able to break the self-consistency invariant above.

@@ -321,6 +321,19 @@ def format_violations(violations: list[Violation]) -> str:
                 "Put findings on the node and link it.",
             ]
         )
+    if 3 in by_rule or 4 in by_rule:
+        # The word-level rules: use-versus-mention is a word-level confusion,
+        # and the reader looking at this refusal is looking at a working
+        # demonstration of the fix. Say so, gated like the rule 7 recipe so
+        # an advisory that fires on every refusal trains the reader to skip
+        # the paragraph where the answer is.
+        lines.extend(
+            [
+                "A quoted word is a mention, not a use.",
+                'Wrap "should" in double quotes or backticks to name it.',
+                "This refusal does that with every word it names.",
+            ]
+        )
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
     lines.append('run "fno doctor lint style --stdin" to check a rewrite before you send it.')
     return "\n\n".join(lines)
