@@ -3290,6 +3290,10 @@ fn create(
         .append(true)
         .open(&log_path)
         .is_ok();
+    // The spawning session's ambient identity (x-132c): create runs in the
+    // CLIENT process, which inherited the spawning session's env, so the
+    // markers read here name this row's true parent.
+    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let new_entry = RegistryEntry {
         name: name.to_string(),
         // v9: the claude jobId is the unified transport key (was claude_short_id);
@@ -3339,6 +3343,9 @@ fn create(
         // later reader has to guess at.
         origin: Some("spawn".to_string()),
         spawn_trigger: None,
+        spawned_by_session: parent_session,
+        spawned_by_harness: parent_harness,
+        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
     };
 

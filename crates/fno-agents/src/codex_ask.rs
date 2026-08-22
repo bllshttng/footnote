@@ -1156,6 +1156,9 @@ fn dispatch_create(
 
     // Build the registry entry.
     use crate::state::RegistryEntry;
+    // The spawning session's ambient identity (x-132c): dispatch_create runs
+    // in the CLIENT process that inherited the spawning session's env.
+    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let new_entry = RegistryEntry {
         name: name.to_string(),
         short_id: String::new(),
@@ -1173,6 +1176,9 @@ fn dispatch_create(
         // later reader has to guess at.
         origin: Some("spawn".to_string()),
         spawn_trigger: None,
+        spawned_by_session: parent_session,
+        spawned_by_harness: parent_harness,
+        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,

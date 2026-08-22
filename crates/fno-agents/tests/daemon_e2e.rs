@@ -141,6 +141,9 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // daemon is DOWN, status recorded `live` and never reconciled.
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(state::RegistryEntry {
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
             // Fixture: makes no claim about what created the row.
             origin: None,
             name: "stale-ask".into(),
@@ -662,6 +665,9 @@ async fn status_client_exits_13_when_daemon_down() {
 fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agents::AgentStatus) {
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(fno_agents::state::RegistryEntry {
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
             // Fixture: makes no claim about what created the row.
             origin: None,
             name: name.into(),
@@ -807,6 +813,9 @@ fn daemon_stays_resident_while_a_worker_socket_is_live() {
 fn seed_pane_row(home: &AgentsHome, name: &str) {
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(fno_agents::state::RegistryEntry {
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
             // Fixture: makes no claim about what created the row.
             origin: None,
             name: name.into(),

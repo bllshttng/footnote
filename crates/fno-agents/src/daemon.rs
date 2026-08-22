@@ -3316,6 +3316,11 @@ fn build_claude_stream_entry(
     log_path: PathBuf,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
+    // Ambient parent edge (x-132c), captured for shape parity with the other
+    // mint sites. This fn runs IN THE DAEMON, whose env carries no session
+    // markers, so it stamps None honestly: the daemon itself started this PTY
+    // worker and no session parent is claimable from here.
+    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
         name: name.into(),
         short_id: short_id.into(),
@@ -3332,6 +3337,9 @@ fn build_claude_stream_entry(
         project_root: cwd_s,
         session_id: None,
         spawn_trigger: None,
+        spawned_by_session: parent_session,
+        spawned_by_harness: parent_harness,
+        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
         claude_session_uuid: Some(uuid.into()),
         messaging_socket_path: None,
@@ -7800,6 +7808,9 @@ mod tests {
     // alone (owns no worktree). `exited_at` controls the grace clock.
     fn ask_row(name: &str, exited_at: Option<&str>) -> RegistryEntry {
         RegistryEntry {
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
             origin: None,
             name: name.into(),
             short_id: String::new(),
@@ -10024,6 +10035,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         // Registry entry + state.json with a stale active drive window.
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                spawned_by_session: None,
+                spawned_by_harness: None,
+                spawned_by_cwd: None,
                 origin: None,
                 name: "worker-A".into(),
                 short_id: "wkA".into(),
@@ -10102,6 +10116,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                spawned_by_session: None,
+                spawned_by_harness: None,
+                spawned_by_cwd: None,
                 origin: None,
                 name: "ghost".into(),
                 short_id: "ghost".into(),
@@ -10248,6 +10265,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                spawned_by_session: None,
+                spawned_by_harness: None,
+                spawned_by_cwd: None,
                 origin: None,
                 name: "dead".into(),
                 short_id: "dead".into(),
@@ -10711,6 +10731,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         }
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                spawned_by_session: None,
+                spawned_by_harness: None,
+                spawned_by_cwd: None,
                 origin: None,
                 name: "recycled".into(),
                 short_id: "recycled".into(),
@@ -10810,6 +10833,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         let mut reg = state::Registry::default();
         assert_eq!(derive_short_id("worker-A", &reg), "workerA");
         reg.entries.push(RegistryEntry {
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
             origin: None,
             name: "x".into(),
             short_id: "workerA".into(),
@@ -10856,6 +10882,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
     fn rentry(name: &str, status: AgentStatus, last_reconciled: Option<&str>) -> RegistryEntry {
         RegistryEntry {
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
             origin: None,
             name: name.into(),
             short_id: name.into(),
@@ -12278,6 +12307,9 @@ done
     fn seed_stream_row(home: &AgentsHome, name: &str, short_id: &str) {
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                spawned_by_session: None,
+                spawned_by_harness: None,
+                spawned_by_cwd: None,
                 origin: None,
                 name: name.into(),
                 short_id: short_id.into(),
@@ -12326,6 +12358,9 @@ done
     /// find, matching a pane-hosted codex row that never bound a session id.
     fn seed_bare_row(name: &str) -> RegistryEntry {
         RegistryEntry {
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
             origin: None,
             name: name.into(),
             short_id: String::new(),
