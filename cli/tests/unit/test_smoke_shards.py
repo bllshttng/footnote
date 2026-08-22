@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from fno.test_cmd import _name_matches, smoke_steps
+from fno.test_cmd import _RUST_BUILD_STEP, _name_matches, smoke_steps
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "cli-ci.yml"
@@ -129,3 +129,21 @@ def test_only_prerequisites_run_in_more_than_one_shard() -> None:
     duplicated = sorted(n for n, c in counts.items() if c > 1)
     assert duplicated == ["Sync + build"], (
         f"steps running in more than one shard: {duplicated}")
+
+
+def test_every_shard_clears_the_rust_binary_before_it_starts() -> None:
+    """The pre-build steps must see no fno-agents binary, in EVERY shard.
+
+    The runner deletes it up front when pytest or the rust build step is
+    selected. Keyed on pytest alone, the shard without pytest skipped the
+    deletion while smoke-setup had already built the binary, so the 17 steps
+    between pytest and the build step ran with it present where they had
+    always run without it. Assert the trigger fires per shard, by name.
+    """
+    names = _names()
+    triggers = {"Pytest (unit + integration)", _RUST_BUILD_STEP}
+    for job, flag, globs in _shard_selectors():
+        selected = set(_selected(names, flag, globs))
+        assert triggers & selected, (
+            f"{job} selects neither pytest nor the rust build, so it never "
+            "clears the binary and its pre-build steps run with it present")
