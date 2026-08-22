@@ -4039,11 +4039,11 @@ fn body_is_reviewer_refusal(body: &str) -> bool {
     if body_is_usage_limit(body) {
         return true;
     }
-    let lower = body.to_lowercase();
+    let lower = body.trim().to_lowercase();
     BOT_PROFILES
         .iter()
         .flat_map(|profile| profile.refusal_markers.iter())
-        .any(|marker| lower.contains(marker))
+        .any(|marker| lower.starts_with(marker))
 }
 
 /// The clean-pass markers for a CONFIGURED login (may differ from the comment
@@ -16261,7 +16261,11 @@ mod tests {
     #[test]
     fn bot_verdict_empty_or_unrecognized_comment_is_absent() {
         let fresh_at = fresh_at_head();
-        for body in ["", "Review request received"] {
+        for body in [
+            "",
+            "Review request received",
+            "Review finding: authentication failed handling lacks a regression test",
+        ] {
             let comment = serde_json::json!({
                 "author": {"login": "chatgpt-codex-connector[bot]"},
                 "body": body,
