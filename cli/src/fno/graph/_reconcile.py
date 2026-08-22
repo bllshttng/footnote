@@ -325,6 +325,42 @@ def verify_pending_supersessions(
     return receipts
 
 
+def successors_owing_verification(entries: list[dict]) -> dict[str, dict]:
+    """Successor id -> successor node, for pending predecessors already owed proof.
+
+    ``verify_pending_supersessions`` only ever runs while reconcile is CLOSING a
+    successor. A successor that closed at any other moment - an earlier sweep, a
+    hand-run ``fno backlog done``, or a supersede recorded against a node that
+    had already shipped - never passes through that path. Its predecessors stay
+    pending, pending reads as blocked, and nothing in the system ever revisits
+    them: the only escape was ``unsupersede``.
+
+    This finds those rows so the sweep can settle them against the evidence the
+    successor already carries.
+    """
+    by_id = {
+        entry.get("id"): entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    owed: dict[str, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        successor_id = entry.get("superseded_by")
+        record = entry.get("supersession")
+        if not successor_id or not isinstance(record, dict) or record.get("verified_at"):
+            continue
+        successor = by_id.get(successor_id)
+        # Only a CLOSED successor is owed here. An open one still has its
+        # ordinary close ahead of it, and that path already verifies.
+        if not isinstance(successor, dict) or not successor.get("completed_at"):
+            continue
+        if isinstance(successor.get("pr_number"), int):
+            owed[successor_id] = successor
+    return owed
+
+
 def node_is_open(node: dict) -> bool:
     """A node is open when it is neither done nor superseded.
 

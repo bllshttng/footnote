@@ -9208,6 +9208,30 @@ def cmd_reconcile(
     # already-merged owner strands the node permanently. Full sweep only, for
     # the same reason as the epic sweep above.
     strandable_contained = _strandable_contained_ids(entries) if _full_sweep else set()
+    # A pending supersession whose successor closed outside this sweep is owed a
+    # verdict nothing else will ever deliver. Gather its evidence BEFORE the
+    # lock: these are `gh` round trips, and the graph lock is not the place for
+    # them. Full sweep only, matching the other self-heal legs.
+    owed_evidence: dict[str, dict] = {}
+    if _full_sweep and not dry_run:
+        from fno.graph._reconcile import (
+            query_pr_merge_state,
+            successors_owing_verification,
+        )
+
+        for successor_id, successor in successors_owing_verification(entries).items():
+            try:
+                merged = query_pr_merge_state(successor["pr_number"])
+            except Exception:
+                continue
+            if merged.state != "MERGED":
+                continue
+            owed_evidence[successor_id] = {
+                "changed_files": list(merged.changed_files),
+                "files_truncated": merged.files_truncated,
+                "pr_number": successor["pr_number"],
+                "merged_at": merged.merged_at,
+            }
 
     closed: list[dict] = []
     healed_epics: list[str] = []
@@ -9219,7 +9243,7 @@ def cmd_reconcile(
     # preview `candidates`/`healed_epics` already report as would-close.
     _sim: Optional[list[dict]] = None
 
-    if not dry_run and (closeable or strandable or strandable_contained):
+    if not dry_run and (closeable or strandable or strandable_contained or owed_evidence):
         # Apply every close in ONE locked mutation rather than locking once
         # per node: locked_mutate_graph acquires a file lock and rewrites the
         # whole graph, so a per-node loop is O(N) lock+rewrite cycles. The
@@ -9261,6 +9285,8 @@ def cmd_reconcile(
         except Exception:
             reconcile_rollups = {}
 
+        from fno.graph._reconcile import verify_pending_supersessions
+
         def mutator(entries):
             actually_closed.clear()
             cascade_closed_acc.clear()
@@ -9269,7 +9295,6 @@ def cmd_reconcile(
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
                     _apply_completion_fields(node_obj, merge_status="merged")
-                    from fno.graph._reconcile import verify_pending_supersessions
                     supersession_unverified_acc.extend(
                         verify_pending_supersessions(
                             entries,
@@ -9392,6 +9417,27 @@ def cmd_reconcile(
                         err=True,
                     )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
+                # Same self-heal shape, and guarded the same way: a raise here
+                # would abort a sweep whose real job is closing merged PRs.
+                try:
+                    for successor_id, evidence in owed_evidence.items():
+                        supersession_unverified_acc.extend(
+                            verify_pending_supersessions(
+                                entries,
+                                successor=successor_id,
+                                changed_files=evidence["changed_files"],
+                                evidence_pr=evidence["pr_number"],
+                                verified_at=evidence["merged_at"],
+                                evidence_complete=not evidence["files_truncated"],
+                            )
+                        )
+                except Exception as _vs_exc:  # noqa: BLE001 - never abort the sweep
+                    typer.echo(
+                        "warning: the pending-supersession self-heal failed: "
+                        f"{_vs_exc}; predecessors whose successor already shipped "
+                        "stay blocked (`fno backlog reconcile` retries next run)",
+                        err=True,
+                    )
             return entries
 
         # Capture the POST-lock graph (codex P2): resolving a closed node's

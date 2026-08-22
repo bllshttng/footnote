@@ -828,3 +828,38 @@ def test_supersede_without_surface_names_a_runnable_example():
     assert result.exit_code == 1
     assert "--surface" in result.output
     assert "fno backlog supersede" in result.output
+
+
+def test_a_closed_successor_still_owes_its_predecessor_a_verdict():
+    """The close path is not the only way a successor reaches done."""
+    from fno.graph._reconcile import successors_owing_verification
+
+    entries = [
+        {"id": "x-9f0c", "superseded_by": "x-1a2b",
+         "supersession": {"successor": "x-1a2b", "surfaces": ["cli/p.py"], "verified_at": None}},
+        {"id": "x-1a2b", "completed_at": "2026-08-20T00:00:00Z", "pr_number": 7},
+    ]
+    assert list(successors_owing_verification(entries)) == ["x-1a2b"]
+
+
+def test_an_open_successor_is_not_owed_yet():
+    """Its ordinary close still lies ahead, and that path already verifies."""
+    from fno.graph._reconcile import successors_owing_verification
+
+    entries = [
+        {"id": "x-9f0c", "superseded_by": "x-1a2b",
+         "supersession": {"successor": "x-1a2b", "surfaces": ["cli/p.py"], "verified_at": None}},
+        {"id": "x-1a2b", "pr_number": 7},
+    ]
+    assert successors_owing_verification(entries) == {}
+
+
+def test_an_already_verified_predecessor_is_not_owed():
+    from fno.graph._reconcile import successors_owing_verification
+
+    entries = [
+        {"id": "x-9f0c", "superseded_by": "x-1a2b",
+         "supersession": {"successor": "x-1a2b", "surfaces": [], "verified_at": "t"}},
+        {"id": "x-1a2b", "completed_at": "t", "pr_number": 7},
+    ]
+    assert successors_owing_verification(entries) == {}
