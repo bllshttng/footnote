@@ -411,6 +411,30 @@ fn new_reader_sites_must_join_the_table() {
         reviews.contains("\"review-coverage\""),
         "the recompute helper no longer invokes the review-coverage verb"
     );
+
+    let adapter = fs::read_to_string(pr_dir.join("_internal_gh.py")).unwrap();
+    assert!(
+        adapter.contains("_coverage_reviews")
+            && adapter.contains("/pulls/{number}/reviews")
+            && adapter.contains("/issues/{number}/comments"),
+        "coverage producer no longer composes both REST evidence surfaces"
+    );
+    let finalize = fs::read_to_string(manifest_dir.join("src/finalize.rs")).unwrap();
+    assert!(
+        finalize.contains("fno-gh-coverage") && finalize.contains("bot_verdict"),
+        "finalize fallback stopped consuming the shared normalized evidence and predicate"
+    );
+    for consumer in ["_status.py", "_merge.py"] {
+        let source = fs::read_to_string(pr_dir.join(consumer)).unwrap();
+        assert!(
+            source.contains("reviewer_refused"),
+            "{consumer} does not consume the aggregate reviewer-refused state"
+        );
+        assert!(
+            !source.contains("usage limits for code reviews"),
+            "{consumer} grew a second body classifier instead of consuming review_state"
+        );
+    }
 }
 
 /// Row-to-path: a row may not name a path that does not exist. The other two

@@ -5868,28 +5868,18 @@ fn coverage_classify_local_pass_unconfigured_name_counts() {
     assert_eq!(local.name, "codex");
 }
 
-/// x-9ab2 (usage-limit gate): a required review bot that bounces on quota now
-/// fails the gate closed UNCONDITIONALLY - `all_required_passed` requires
-/// `usage_limited` to be empty, with no attestation exception. So even when a
-/// local /code-review attests at HEAD, a bounce terminates DoneAwaitingReview,
-/// not DonePRGreen. The local attestation is not wasted: it clears
-/// `unattested_reviewers` so `awaiting_review_only` holds, and the case exits
-/// cleanly at DoneAwaitingReview instead of wedging to budget death. What is
-/// given up is auto-SHIPPING on a bounce, not liveness.
-///
-/// This test was added by x-0eaf asserting DonePRGreen on the grounds that "a
-/// quota-dead bot cannot block the path while a local lane reviewed". x-9ab2
-/// supersedes that: when both apply, usage_limited wins (a bounce is an external
-/// cause the operator acts on, and the codex connector is permanently
-/// quota-exhausted, so a bounce is the steady state, not an anomaly). A flipped
-/// assertion under the old doc comment would read as a bug to the next reader;
-/// the comment and the rename carry the decision so it is not silently reverted.
-#[test]
-fn done_awaiting_review_when_required_bot_bounces_despite_local_attestation() {
+fn green_refusal_decision(optional_only: bool, local_review: bool) -> Decision {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
-    isolate_settings(cwd); // required_bots = [chatgpt-codex-connector]
+    isolate_settings(cwd);
+    if optional_only {
+        fs::write(
+            cwd.join(".fno/config.toml"),
+            "[review]\nrequired_bots = []\noptional_apps = [\"chatgpt-codex-connector\"]\n",
+        )
+        .unwrap();
+    }
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -5941,8 +5931,9 @@ exit 1
 esac"#,
     );
 
-    // A local /code-review pass attested at the current HEAD.
-    seed_code_review_attestation(cwd, "deadbeefdeadbeefdeadbeefdeadbeef00000001");
+    if local_review {
+        seed_code_review_attestation(cwd, "deadbeefdeadbeefdeadbeefdeadbeef00000001");
+    }
 
     let (_code, d) = fire(&[
         "loop-check",
@@ -5958,13 +5949,37 @@ esac"#,
         &format!("--git-bin={}", git.display()),
     ]);
 
+    d
+}
+
+#[test]
+fn done_pr_green_instead_of_awaiting_review_when_local_review_recovers_refusal() {
+    let d = green_refusal_decision(false, true);
+    assert_eq!(d.decision, "allow");
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "a fresh local review is positive evidence that recovers App refusal: {}",
+        d.message
+    );
+}
+
+#[test]
+fn done_awaiting_review_when_optional_app_refuses() {
+    let d = green_refusal_decision(true, false);
     assert_eq!(d.decision, "allow");
     assert_eq!(
         d.termination_reason.as_deref(),
         Some("DoneAwaitingReview"),
-        "a required-bot quota bounce fails closed even with a local attestation (x-9ab2): {}",
+        "an optional App refusal is neither silence nor review: {}",
         d.message
     );
+    assert!(
+        d.message.contains("chatgpt-codex-connector"),
+        "{}",
+        d.message
+    );
+    assert!(d.message.contains("refused"), "{}", d.message);
 }
 
 /// x-0eaf AC12-INV (negative): the coverage path must not read the `attended`

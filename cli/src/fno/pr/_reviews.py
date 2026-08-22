@@ -32,6 +32,7 @@ _COUNTED_FRESHNESS = {
 }
 _KNOWN_REVIEW_VERDICTS = {"reviewed", "stale", "refused", "errored", "absent"}
 _KNOWN_COVERAGE_PRODUCERS = {"github_app", "local_attestation"}
+_KNOWN_REVIEW_STATES = {"reviewed", "unreviewed", "reviewer_refused"}
 
 # The optional-reviewer bots the x-d996 drain paragraph names. config.review.peers
 # (resolved below) extends this; config.review.required_bots is the separate GATE
@@ -523,12 +524,42 @@ def _stale_verdicts(verdicts: list[dict]) -> list[dict]:
     ]
 
 
+def _derive_review_state(coverage: object, verdicts: object) -> str | None:
+    """Derive one known outcome from validated per-reviewer verdicts."""
+    if coverage == "unknown":
+        return None
+    if not isinstance(verdicts, list) or any(
+        not isinstance(verdict, dict)
+        or verdict.get("verdict") not in _KNOWN_REVIEW_VERDICTS
+        or verdict.get("producer") not in _KNOWN_COVERAGE_PRODUCERS
+        or not isinstance(verdict.get("name"), str)
+        or not verdict.get("name")
+        for verdict in verdicts
+    ):
+        return None
+    if any(
+        verdict.get("verdict") == "reviewed"
+        and not verdict.get("human_approval", False)
+        and verdict.get("freshness") in _COUNTED_FRESHNESS
+        for verdict in verdicts
+    ):
+        return "reviewed"
+    if any(verdict.get("verdict") == "refused" for verdict in verdicts):
+        return "reviewer_refused"
+    return "unreviewed"
+
+
 def _shape_review_coverage(data: dict, head: Optional[str], cwd: Optional[str]) -> dict:
     """Shape one event and invalidate any unproven covered verdict."""
     shaped = dict(data)
     verdicts = _verdicts_with_current_freshness(data, head, cwd)
     shaped["verdicts"] = verdicts
     shaped["stale_verdicts"] = _stale_verdicts(verdicts)
+    review_state = _derive_review_state(data.get("coverage"), verdicts)
+    if review_state in _KNOWN_REVIEW_STATES:
+        shaped["review_state"] = review_state
+    else:
+        shaped.pop("review_state", None)
     if data.get("coverage") != "covered":
         return shaped
 
@@ -600,6 +631,8 @@ def read_review_coverage(
         "head_sha": latest.get("head_sha"),
         "stale_verdicts": latest.get("stale_verdicts", []),
     }
+    if latest.get("review_state") in _KNOWN_REVIEW_STATES:
+        shaped["review_state"] = latest["review_state"]
     # The raw verdict list rides along when present (older events carry none):
     # the local-pass conjunct scans it, and dropping it here made `fno do pr
     # status` refuse forever on a row `fno do pr merge` accepted (round 3, PR 917).

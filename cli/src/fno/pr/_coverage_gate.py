@@ -101,14 +101,19 @@ def covered_conjuncts(
     partial copy of this predicate is exactly how it did). ``failed`` is
     empty when covered, else one of ``uncovered`` / ``no_local_pass`` /
     ``stale_head`` naming the conjunct that broke; callers map it to their
-    own blocker names. An empty ``head`` skips the staleness conjunct: the
+    own blocker names. ``reviewer_refused`` is distinct from generic
+    ``uncovered`` so consumers can prescribe reviewer recovery or a local
+    review instead of waiting for evidence that will not arrive. An empty
+    ``head`` skips the staleness conjunct: the
     gate always reaches here with a confirmed-live head, and a status read
     missing one degrades on staleness rather than guessing a mismatch.
     """
+    if cov is not None and cov.get("review_state") == "reviewer_refused":
+        return False, "reviewer_refused"
     if not (
         cov is not None
         and cov.get("coverage") == "covered"
-        and _merge._safe_int(cov.get("reviewed_count"), 0) > 0
+        and cov.get("review_state") == "reviewed"
     ):
         return False, "uncovered"
     if code_review_required and not _merge._coverage_has_local_pass(cov, "code-review"):
