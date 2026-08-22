@@ -319,6 +319,84 @@ def coverage_check(
     raise typer.Exit(code=_coverage_gate.run_coverage_check(pr_number, recompute=recompute))
 
 
+@pr_app.command(
+    "review-hold",
+    hidden=True,
+    help=(
+        "Register, clear, or read the hold that says a review of this PR's head "
+        "is RUNNING. Merge readiness only knows what verdicts EXIST for a head, "
+        "so a review still writing its fixes is invisible to it. Actions: "
+        "check <pr> (exit 0 clear, 3 held, 4 unanswered), acquire, release."
+    ),
+)
+def review_hold(
+    action: str = typer.Argument(..., help="check | acquire | release"),
+    pr_number: Optional[int] = typer.Argument(None, help="GitHub PR number (check)"),
+    branch: Optional[str] = typer.Option(None, "--branch", help="Head branch (acquire/release)."),
+    head: str = typer.Option("", "--head", help="The head sha being reviewed (acquire)."),
+    holder: Optional[str] = typer.Option(None, "--holder", help="Who holds the review."),
+    verb: Optional[str] = typer.Option(None, "--verb", help="Which review verb is running."),
+    ttl_minutes: Optional[float] = typer.Option(
+        None, "--ttl-minutes", help="Override config.review.hold_ttl_minutes."
+    ),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Repository working directory."),
+) -> None:
+    from fno.pr import _review_hold
+
+    cwd = repo or os.getcwd()
+    if action == "check":
+        if pr_number is None:
+            typer.echo("review-hold check needs a PR number", err=True)
+            raise typer.Exit(code=1)
+        from fno.pr._merge import _pr_head_ref_and_oid
+
+        refs = _pr_head_ref_and_oid(pr_number, cwd)
+        if refs is None:
+            # Exit 4 is the named-instrument-failure code `coverage-check` uses,
+            # and a caller that cannot import fno reads it the same way: the
+            # probe died, so this is not a verdict.
+            typer.echo(
+                f"PR {pr_number}: could not resolve the head branch; no in-flight "
+                "review could be ruled out",
+                err=True,
+            )
+            raise typer.Exit(code=4)
+        refusal = _review_hold.review_hold_refusal(refs[0], pr_head=refs[1], repo=cwd)
+        if refusal:
+            typer.echo(refusal, err=True)
+            raise typer.Exit(code=3)
+        typer.echo(f"PR {pr_number}: no review in flight on {refs[0]}")
+        raise typer.Exit(code=0)
+
+    if not branch or not holder:
+        typer.echo(f"review-hold {action} needs --branch and --holder", err=True)
+        raise typer.Exit(code=1)
+    if action == "acquire":
+        claim = _review_hold.acquire_review_hold(
+            branch,
+            head=head,
+            holder=holder,
+            verb=verb,
+            ttl_ms=(
+                _review_hold.resolve_ttl_ms(ttl_minutes) if ttl_minutes is not None else None
+            ),
+        )
+        if claim is None:
+            # Registration never blocks a review from starting: an unheld review
+            # is still covered by the worktree layer, and a review that refuses
+            # to start because a lockfile write failed is strictly worse.
+            typer.echo(f"review-hold: not registered on {branch}", err=True)
+            raise typer.Exit(code=0)
+        typer.echo(f"review-hold: holding {branch} at {head or 'an unrecorded head'}")
+        raise typer.Exit(code=0)
+    if action == "release":
+        _review_hold.release_review_hold(branch, holder=holder)
+        typer.echo(f"review-hold: released {branch}")
+        raise typer.Exit(code=0)
+    typer.echo(f"unknown review-hold action: {action}", err=True)
+    raise typer.Exit(code=1)
+
+
 @pr_app.command("hold-check", hidden=True)
 def hold_check(
     pr_number: int = typer.Argument(..., help="GitHub PR number"),
