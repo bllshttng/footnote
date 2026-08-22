@@ -2,7 +2,7 @@
 # test_config_global_precedence.sh - regression for ab-5d6c3d47.
 #
 # GLOBAL_SETTINGS must NEVER alias CONFIG_FILE. CONFIG_FILE (emitted by
-# `fno paths shell-stub`) is the ACTIVE config = the project-local
+# `fno config paths shell-stub`) is the ACTIVE config = the project-local
 # .fno/config.toml whenever one exists; aliasing it made both merge tiers
 # point at the local file, hiding every global-only key from bash consumers.
 #

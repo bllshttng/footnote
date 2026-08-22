@@ -507,7 +507,7 @@ def ship_batch(
         # Stale-base guard parity (x-9b87): the batch lane is the third
         # gh-pr-create site (x-712b), so it runs the same check_stale_base the
         # /pr create + worker/ship.py paths run. The batch worktree is born off
-        # origin/main by `fno worktree ensure`, so this is defense-in-depth for a
+        # origin/main by `fno workspace worktree ensure`, so this is defense-in-depth for a
         # future refactor - refuse via the EXISTING abandon path (never a wedged
         # `refuse`: a batch left open would re-hit the same stale worktree every
         # daemon tick). Guard precedes the push so a stale branch is never pushed.
@@ -527,7 +527,7 @@ def ship_batch(
                 reason=base_msg or "stale base: refused to open batch PR",
                 members=members,
             )
-        # Push the batch branch first. `fno worktree ensure` creates only a LOCAL
+        # Push the batch branch first. `fno workspace worktree ensure` creates only a LOCAL
         # branch and the batched worker commits locally, so `gh pr create --head`
         # (which does NOT push) would fail on an unpublished branch and abandon
         # the batch (codex P1). Push explicitly, then create.
@@ -696,7 +696,7 @@ def prepare_batch(
         worktree = (we.stdout or "").strip()
         if we.returncode != 0 or not worktree:
             return {"mode": "solo", "reason": f"worktree ensure failed: {(we.stderr or '').strip()[:160]}"}
-        # `fno worktree ensure` is mechanism-only: it does NOT link the shared
+        # `fno workspace worktree ensure` is mechanism-only: it does NOT link the shared
         # `.fno/` state a worktree needs. Without setup, the batched worker's
         # session state + events would live in an unlinked worktree-local `.fno`
         # while the daemon polls the canonical journal, so the member reads as

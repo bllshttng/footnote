@@ -1,4 +1,4 @@
-"""`fno scoreboard` - read-only telemetry fold. Never writes state.
+"""`fno whoami scoreboard` - read-only telemetry fold. Never writes state.
 
 Registered in fno.cli LAZY_SUBCOMMANDS as a plain-function command.
 """
@@ -253,7 +253,7 @@ def scoreboard_command(
 
 def _render_calibration(cal: dict) -> None:
     out = sys.stdout.write
-    out("fno scoreboard --calibration\n\n")
+    out("fno whoami scoreboard --calibration\n\n")
     excluded = cal.get("excluded") or {}
     excl_bits = [f"{n} {k}" for k, n in sorted(excluded.items())]
     if cal.get("unattributed"):
@@ -301,11 +301,11 @@ def _render_efficiency(eff: dict) -> None:
     out = sys.stdout.write
     win = eff["since_days"]
     if eff["state"] == "no_data":
-        out(f"fno scoreboard --efficiency (last {win}d)\n\n  no terminal sessions in window.\n")
+        out(f"fno whoami scoreboard --efficiency (last {win}d)\n\n  no terminal sessions in window.\n")
         return
 
     cov = eff["coverage"]
-    out(f"fno scoreboard --efficiency (last {win}d)\n\n")
+    out(f"fno whoami scoreboard --efficiency (last {win}d)\n\n")
     out("Coverage\n")
     out(f"  rows in window:      {cov['rows']}\n")
     out(f"  loop-check join:     {cov['loop_join_pct']}%")
@@ -349,10 +349,10 @@ def _render_plan_fidelity(pf: dict) -> None:
     out = sys.stdout.write
     win = pf["since_days"]
     if pf["state"] == "no_data":
-        out(f"fno scoreboard --plan-fidelity (last {win}d)\n\n  no terminal sessions in window.\n")
+        out(f"fno whoami scoreboard --plan-fidelity (last {win}d)\n\n  no terminal sessions in window.\n")
         return
     cov = pf["coverage"]
-    out(f"fno scoreboard --plan-fidelity (last {win}d)\n\n")
+    out(f"fno whoami scoreboard --plan-fidelity (last {win}d)\n\n")
     out(f"  {cov['planned_rows']} planned row(s), {cov['joined_pct']}% joined to a delivery.\n\n")
     for r in pf["results"]:
         if r["status"] == "unjoined":
@@ -385,11 +385,11 @@ def _render_by_skill(sb: dict) -> None:
     out = sys.stdout.write
     win = sb["since_days"]
     if sb["state"] == "no_data":
-        out(f"fno scoreboard --by-skill (last {win}d)\n\n  no terminal sessions in window.\n")
+        out(f"fno whoami scoreboard --by-skill (last {win}d)\n\n  no terminal sessions in window.\n")
         return
 
     cov = sb["coverage"]
-    out(f"fno scoreboard --by-skill (last {win}d)\n\n")
+    out(f"fno whoami scoreboard --by-skill (last {win}d)\n\n")
     out("Coverage\n")
     out(f"  rows in window:      {cov['rows']}\n")
     out(f"  attributed:          {cov['attributed_pct']}%\n")
@@ -413,11 +413,11 @@ def _render_by_provider(pb: dict) -> None:
     out = sys.stdout.write
     win = pb["since_days"]
     if pb["state"] == "no_data":
-        out(f"fno scoreboard --by-provider (last {win}d)\n\n  no terminal sessions in window.\n")
+        out(f"fno whoami scoreboard --by-provider (last {win}d)\n\n  no terminal sessions in window.\n")
         return
 
     cov = pb["coverage"]
-    out(f"fno scoreboard --by-provider (last {win}d)\n\n")
+    out(f"fno whoami scoreboard --by-provider (last {win}d)\n\n")
     out("Coverage\n")
     out(f"  rows in window:      {cov['rows']} execution rows\n")
     out(f"  attributed:          {cov['attributed_pct']}%\n")
@@ -444,7 +444,7 @@ def _render_by_provider(pb: dict) -> None:
 def _render_lanes(view: dict) -> None:
     out = sys.stdout.write
     win = view["since_days"]
-    out(f"fno scoreboard --lanes (last {win}d)\n\n")
+    out(f"fno whoami scoreboard --lanes (last {win}d)\n\n")
     cov = view["coverage"]
     out("Coverage\n")
     out(f"  rows in window:  {cov['rows']}\n")
@@ -486,11 +486,11 @@ def _render(sb: dict) -> None:
     win = sb["since_days"]
 
     if sb["state"] == "no_data":
-        out(f"fno scoreboard (last {win}d)\n\n  no terminal sessions in window.\n")
+        out(f"fno whoami scoreboard (last {win}d)\n\n  no terminal sessions in window.\n")
         return
 
     cov = sb["coverage"]
-    out(f"fno scoreboard (last {win}d)\n\n")
+    out(f"fno whoami scoreboard (last {win}d)\n\n")
     out("Coverage\n")
     out(f"  rows in window:      {cov['rows']}\n")
     out(f"  termination_reason:  {cov['termination_reason_pct']}%")

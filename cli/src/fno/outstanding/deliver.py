@@ -31,7 +31,7 @@ def _resolve_asker(asker: str) -> "tuple[Optional[Any], list[str]]":
 
 
 def _mail_send(argv: "list[str]") -> "tuple[int, str]":
-    """Run one ``fno mail send``. Every failure arrives as (code, detail)."""
+    """Run one ``fno agents mail send``. Every failure arrives as (code, detail)."""
     try:
         proc = subprocess.run(
             argv,
@@ -131,7 +131,7 @@ def _deliver_answer(
     if code != 0:
         return (
             f"outstanding: {qid} answered; delivery failed ({detail}). "
-            f'Retry: fno mail send {full_id} "<the answer>" '
+            f'Retry: fno agents mail send {full_id} "<the answer>" '
             f'--style-exception "operator answer verbatim"'
         )
     # Lead with the bus's own evidence, never a verdict word of ours: exit 0

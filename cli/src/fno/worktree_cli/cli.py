@@ -1,4 +1,4 @@
-"""fno worktree - thin lifecycle wrapper.
+"""fno workspace worktree - thin lifecycle wrapper.
 
 The actual git-worktree create/remove operations happen via Claude Code's
 native EnterWorktree/ExitWorktree tools (or `git worktree add` directly).
@@ -37,7 +37,7 @@ def _run_lifecycle(*args: str) -> int:
     try:
         # cwd=repo_root so the lifecycle script's relative paths (notably
         # .claude/worktrees/<name>) resolve against the git root even when
-        # the user invokes `fno worktree archive` from a subdirectory.
+        # the user invokes `fno workspace worktree archive` from a subdirectory.
         # Without this, valid worktrees were reported as missing (Codex P2).
         result = subprocess.run(["bash", str(script), *args], cwd=str(repo_root))
     except FileNotFoundError as exc:
@@ -222,7 +222,7 @@ def _worktree_ensure(
 
     On success prints the worktree path on stdout (exit 0). On ANY failure
     prints a reason on stderr and NOTHING on stdout (non-zero), so a caller's
-    `wt=$(fno worktree ensure ...)` reads empty and falls back to its prior
+    `wt=$(fno workspace worktree ensure ...)` reads empty and falls back to its prior
     cwd -- the dispatch is never blocked. Mechanism only: the caller owns the
     "is this a code payload / a main checkout" policy.
 

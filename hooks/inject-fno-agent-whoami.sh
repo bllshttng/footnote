@@ -34,5 +34,5 @@ cat <<EOF
 $OUTPUT
 \`\`\`
 
-Re-run \`fno whoami\` anytime to refresh; \`fno status\` for the gate/events deep dive.
+Re-run \`fno whoami\` anytime to refresh; \`fno whoami status\` for the gate/events deep dive.
 EOF

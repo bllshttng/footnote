@@ -134,6 +134,19 @@ test
 think
 update
 version
-whoami
+whoami context
+whoami cost
+whoami scoreboard
+whoami status
 worker
+workspace register-worker
+workspace worktree archive
+workspace worktree cleanup
+workspace worktree ensure
+workspace worktree overlap-record
+workspace worktree overlaps
+workspace worktree policy
+workspace worktree reapable
+workspace worktree status
+workspace worktree stranded
 worktree

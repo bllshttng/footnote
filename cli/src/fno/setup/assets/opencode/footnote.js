@@ -1,6 +1,6 @@
 // footnote <-> OpenCode bridge plugin (native first-class stop-hook).
 //
-// Installed by `fno setup` into ~/.config/opencode/plugins/footnote.js
+// Installed by `fno config setup` into ~/.config/opencode/plugins/footnote.js
 // (local-file load path; no npm publish required). Plain JS, zero deps, so
 // OpenCode/Bun loads it directly with no `bun install`.
 //

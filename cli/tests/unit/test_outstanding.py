@@ -131,7 +131,7 @@ def test_carveout_leg_names_the_verb_that_clears_it(root: Path):
     assert result.exit_code == 0
     # The whole fix for "nothing clears them": the ledger sat 29 days because
     # nobody was ever told what to run.
-    assert "fno retro sweep-carveouts" in result.output
+    assert "fno backlog retro sweep-carveouts" in result.output
 
 
 def test_carveout_leg_reports_the_age_of_the_oldest_row(root: Path):
@@ -1753,7 +1753,7 @@ def test_failed_mail_send_names_the_retry_and_never_raises(monkeypatch: pytest.M
 
     assert "delivery failed" in line
     assert "agent lock contention" in line
-    assert "fno mail send 89abcdef-full-session-id" in line, "the retry command is copy-pasteable"
+    assert "fno agents mail send 89abcdef-full-session-id" in line, "the retry command is copy-pasteable"
 
 
 def test_clear_with_answer_prints_the_delivery_posture(

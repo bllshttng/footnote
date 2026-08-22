@@ -61,8 +61,8 @@ agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
 agents report	T1	agents report	3
 agents restart	T1	agents restart	6
-agents review-coverage	T1	agents review-coverage	34
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
+agents review-coverage	T1	agents review-coverage	34
 agents rm	KEEP	agents rm	56	deliberate readability slack for a high-traffic distinct operation
 agents roles context	T1	agents roles context	2
 agents roles ls	T1	agents roles ls	1
@@ -72,14 +72,15 @@ agents spawn	KEEP	agents spawn	256	deliberate readability slack for a high-traff
 agents spawn-guard	T1	agents spawn-guard	5
 agents status	T1	agents status	5
 agents stop	T1	agents stop	22
-agents sweep	T1	agents sweep	1
 agents subscribe	T1	agents subscribe	2
+agents sweep	T1	agents sweep	1
 agents top	T1	agents top	20
 agents trace	T1	agents trace	14
 agents truth	T1	agents truth	16
 agents verify-evidence	T1	agents verify-evidence	7
 agents wait	T1	agents wait	10
 agents watch	T1	agents watch	5
+agents watchdog	T1	agents watchdog	4
 agents whoami	T1	agents whoami	9
 agents worker blueprint	T1	agents worker blueprint	0
 agents worker external	T1	agents worker external	0
@@ -95,6 +96,9 @@ approvals show	T1	approvals show	3
 backlog add	T1	backlog add	3
 backlog advance	KEEP	backlog advance	43	deliberate readability slack for a high-traffic distinct operation
 backlog album	T1	backlog album	0
+backlog annotate add	T1	backlog annotate add	7	
+backlog annotate list	T1	backlog annotate list	0	
+backlog annotate resolve	T1	backlog annotate resolve	5	
 backlog archive	T1	backlog archive	2
 backlog archive-dedupe-ids	T1	backlog archive-dedupe-ids	0
 backlog bases	T1	backlog bases	0
@@ -115,6 +119,10 @@ backlog capture list	T1	backlog capture list	3
 backlog capture promote	T1	backlog capture promote	1
 backlog capture scan	T1	backlog capture scan	1
 backlog capture tidy	T1	backlog capture tidy	3
+backlog carveout add	T1	backlog carveout add	22	
+backlog carveout list	T1	backlog carveout list	2	
+backlog carveout resolve	T1	backlog carveout resolve	1	
+backlog carveout update	T1	backlog carveout update	1	
 backlog collisions check	T1	backlog collisions check	11
 backlog cost	T1	backlog cost	1
 backlog decide	T1	backlog decide	13
@@ -151,6 +159,9 @@ backlog relatedness get	T1	backlog relatedness get	0
 backlog remove	T1	backlog remove	7
 backlog reopen	T1	backlog reopen	3
 backlog reprioritize	T1	backlog reprioritize	1
+backlog retro drain-postmortems	T1	backlog retro drain-postmortems	1	
+backlog retro run	T1	backlog retro run	16	
+backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7	
 backlog roadmap	T1	backlog roadmap	1
 backlog session add	T1	backlog session add	4
 backlog session reap-open	T1	backlog session reap-open	3
@@ -190,9 +201,13 @@ config accounts	KEEP	config accounts	71	deliberate readability slack for a high-
 config active-backlog	T1	config active-backlog	5
 config doctor	T1	config doctor	20
 config get	KEEP	config get	69	deliberate readability slack for a high-traffic distinct operation
+config paths	T1	config paths	36	
+config plugins	T1	config plugins	10	
 config rm	T1	config rm	0
+config route	T1	config route	16	
 config schema	T1	config schema	10
 config set	KEEP	config set	43	deliberate readability slack for a high-traffic distinct operation
+config setup	T1	config setup	38	
 config status-sinks	T1	config status-sinks	2
 config unset	T1	config unset	5
 context	KEEP	context	15	single-leaf group
@@ -201,6 +216,76 @@ delivery	KEEP	delivery	7	single-leaf group
 dispatch capabilities	T1	dispatch capabilities	0
 dispatch one	T1	dispatch one	9
 dispatch resolve	T1	dispatch resolve	23
+do delivery evaluate	T1	do delivery evaluate	7
+do loops ls	T1	do loops ls	1
+do loops pause-all	T1	do loops pause-all	1
+do loops resume-all	T1	do loops resume-all	0
+do loops status	T1	do loops status	3
+do phase kill-check	T1	do phase kill-check	16
+do plan brief	T1	do plan brief	4
+do plan fidelity	T1	do plan fidelity	5
+do plan folder-audit	T1	do plan folder-audit	0
+do plan graduate	T1	do plan graduate	2
+do plan migrate-keys	T1	do plan migrate-keys	1
+do plan path	T1	do plan path	28
+do plan reconcile-status	T1	do plan reconcile-status	5
+do plan rung	T1	do plan rung	26
+do plan set-expected	T1	do plan set-expected	1
+do plan stamp	T1	do plan stamp	5
+do plan sync	T1	do plan sync	3
+do plan validate	T1	do plan validate	14
+do pr base-check	T1	do pr base-check	0
+do pr base-lineage-check	T1	do pr base-lineage-check	6
+do pr bind-created	T1	do pr bind-created	0
+do pr closure-trailer	T1	do pr closure-trailer	0
+do pr coverage-check	T1	do pr coverage-check	1
+do pr coverage-publish	T1	do pr coverage-publish	0
+do pr evidence-check	T1	do pr evidence-check	1
+do pr evidence-required	T1	do pr evidence-required	1
+do pr global-receipt-events-path	T1	do pr global-receipt-events-path	0
+do pr graphql-exec	T1	do pr graphql-exec	1
+do pr hold-check	T1	do pr hold-check	0
+do pr info	T1	do pr info	10
+do pr list	T1	do pr list	3
+do pr logs	T1	do pr logs	1
+do pr merge	T1	do pr merge	55
+do pr next-receipt-generation	T1	do pr next-receipt-generation	0
+do pr rebase	T1	do pr rebase	21
+do pr ritual	T1	do pr ritual	24
+do pr status	T1	do pr status	19
+do pr stub-manifest reconcile-finalize	T1	do pr stub-manifest reconcile-finalize	1
+do pr stub-manifest reconcile-validate	T1	do pr stub-manifest reconcile-validate	2
+do pr stub-manifest write	T1	do pr stub-manifest write	2
+do pr sync-canonical	T1	do pr sync-canonical	2
+do pr verify	T1	do pr verify	13
+do pr watch heal	T1	do pr watch heal	3
+do pr watch install	T1	do pr watch install	3
+do pr watch refresh	T1	do pr watch refresh	1
+do pr watch status	T1	do pr watch status	3
+do pr watch tick	T1	do pr watch tick	2
+do pr watch uninstall	T1	do pr watch uninstall	1
+do research	T1	do research	18
+do resume receipt show	T1	do resume receipt show	1
+do resume receipt validate	T1	do resume receipt validate	3
+do resume receipt write	T1	do resume receipt write	2
+do review	T1	do review	27
+do state archive	T1	do state archive	1
+do state init	T1	do state init	3
+do state set	T1	do state set	20
+do state show	T1	do state show	7
+do target blast-check	T1	do target blast-check	3
+do target check-contained	T1	do target check-contained	4
+do target check-dispatch-hold	T1	do target check-dispatch-hold	2
+do target check-review-gate	T1	do target check-review-gate	4
+do target denominator-ratio	T1	do target denominator-ratio	2
+do target init	T1	do target init	90
+do target resolve-model	T1	do target resolve-model	2
+do target resolve-owned-identity	T1	do target resolve-owned-identity	3
+do target review-invocation	T1	do target review-invocation	4
+do target start	T1	do target start	31
+do target status	T1	do target status	8
+do think dispatch	T1	do think dispatch	4
+do think inspect	T1	do think inspect	7
 doctor bundle check	T1	doctor bundle check	8
 doctor bundle lint	T1	doctor bundle lint	1
 doctor codemap	T1	doctor codemap	18
@@ -228,8 +313,8 @@ evals report	T1	evals report	1
 evals run	T1	evals run	3
 event audit	T1	event audit	5
 event emit	KEEP	event emit	40	deliberate readability slack for a high-traffic distinct operation
-event gc	T1	event gc	5
 event gate-escape	T1	event gate-escape	3
+event gc	T1	event gc	5
 event push-parent	T1	event push-parent	3
 help	KEEP	help	37	single-leaf group
 lint	KEEP	lint	29	single-leaf group
@@ -393,7 +478,6 @@ think dispatch	T1	think dispatch	4
 think inspect	T1	think inspect	7
 update	KEEP	update	88	single-leaf group
 version	KEEP	version	15	single-leaf group
-whoami	KEEP	whoami	45	single-leaf group
 worker blueprint	T1	worker blueprint	0
 worker external	T1	worker external	0
 worker reconcile	T1	worker reconcile	0
@@ -408,74 +492,3 @@ worktree policy	T1	worktree policy	9
 worktree reapable	T1	worktree reapable	4
 worktree status	T1	worktree status	1
 worktree stranded	T1	worktree stranded	1
-agents watchdog	T1	agents watchdog	4
-do delivery evaluate	T1	do delivery evaluate	7
-do loops ls	T1	do loops ls	1
-do loops pause-all	T1	do loops pause-all	1
-do loops resume-all	T1	do loops resume-all	0
-do loops status	T1	do loops status	3
-do phase kill-check	T1	do phase kill-check	16
-do plan brief	T1	do plan brief	4
-do plan fidelity	T1	do plan fidelity	5
-do plan folder-audit	T1	do plan folder-audit	0
-do plan graduate	T1	do plan graduate	2
-do plan migrate-keys	T1	do plan migrate-keys	1
-do plan path	T1	do plan path	28
-do plan reconcile-status	T1	do plan reconcile-status	5
-do plan rung	T1	do plan rung	26
-do plan set-expected	T1	do plan set-expected	1
-do plan stamp	T1	do plan stamp	5
-do plan sync	T1	do plan sync	3
-do plan validate	T1	do plan validate	14
-do pr base-check	T1	do pr base-check	0
-do pr base-lineage-check	T1	do pr base-lineage-check	6
-do pr bind-created	T1	do pr bind-created	0
-do pr closure-trailer	T1	do pr closure-trailer	0
-do pr coverage-check	T1	do pr coverage-check	1
-do pr coverage-publish	T1	do pr coverage-publish	0
-do pr evidence-check	T1	do pr evidence-check	1
-do pr evidence-required	T1	do pr evidence-required	1
-do pr global-receipt-events-path	T1	do pr global-receipt-events-path	0
-do pr graphql-exec	T1	do pr graphql-exec	1
-do pr hold-check	T1	do pr hold-check	0
-do pr info	T1	do pr info	10
-do pr list	T1	do pr list	3
-do pr logs	T1	do pr logs	1
-do pr merge	T1	do pr merge	55
-do pr next-receipt-generation	T1	do pr next-receipt-generation	0
-do pr rebase	T1	do pr rebase	21
-do pr ritual	T1	do pr ritual	24
-do pr status	T1	do pr status	19
-do pr stub-manifest reconcile-finalize	T1	do pr stub-manifest reconcile-finalize	1
-do pr stub-manifest reconcile-validate	T1	do pr stub-manifest reconcile-validate	2
-do pr stub-manifest write	T1	do pr stub-manifest write	2
-do pr sync-canonical	T1	do pr sync-canonical	2
-do pr verify	T1	do pr verify	13
-do pr watch heal	T1	do pr watch heal	3
-do pr watch install	T1	do pr watch install	3
-do pr watch refresh	T1	do pr watch refresh	1
-do pr watch status	T1	do pr watch status	3
-do pr watch tick	T1	do pr watch tick	2
-do pr watch uninstall	T1	do pr watch uninstall	1
-do research	T1	do research	18
-do resume receipt show	T1	do resume receipt show	1
-do resume receipt validate	T1	do resume receipt validate	3
-do resume receipt write	T1	do resume receipt write	2
-do review	T1	do review	27
-do state archive	T1	do state archive	1
-do state init	T1	do state init	3
-do state set	T1	do state set	20
-do state show	T1	do state show	7
-do target blast-check	T1	do target blast-check	3
-do target check-contained	T1	do target check-contained	4
-do target check-dispatch-hold	T1	do target check-dispatch-hold	2
-do target check-review-gate	T1	do target check-review-gate	4
-do target denominator-ratio	T1	do target denominator-ratio	2
-do target init	T1	do target init	90
-do target resolve-model	T1	do target resolve-model	2
-do target resolve-owned-identity	T1	do target resolve-owned-identity	3
-do target review-invocation	T1	do target review-invocation	4
-do target start	T1	do target start	31
-do target status	T1	do target status	8
-do think dispatch	T1	do think dispatch	4
-do think inspect	T1	do think inspect	7

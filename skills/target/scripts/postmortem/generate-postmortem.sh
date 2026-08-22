@@ -51,7 +51,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 STATE_FILE="${STATE_FILE_ARG:-$REPO_ROOT/.fno/target-state.md}"
 # Use POSTMORTEMS_DIR from paths.sh if available; fall back to hardcoded default.
 if [[ -z "${POSTMORTEMS_DIR:-}" ]] && command -v fno >/dev/null 2>&1; then
-    _PATHS_SH="$(fno paths shell-stub 2>/dev/null || true)"
+    _PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
     [[ -f "$_PATHS_SH" ]] && source "$_PATHS_SH" 2>/dev/null || true
     unset _PATHS_SH
 fi

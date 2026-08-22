@@ -62,7 +62,7 @@ def _clean_line(text: str) -> str:
 def derive_title(item: RawItem) -> str:
     """One-line summary derived from the finding's own text (never a generic stub)."""
     if item.kind == KIND_CARVEOUT:
-        # The description first, NOT `need`. `fno carveout add --need` documents
+        # The description first, NOT `need`. `fno backlog carveout add --need` documents
         # itself as "the dependency the work is blocked on" - a blocker, not a
         # summary - so preferring it titled real rows "operator policy call" and
         # "unsaturated worker slots or an attended session". The description is

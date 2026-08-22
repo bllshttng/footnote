@@ -22,9 +22,9 @@ if ! command -v fno >/dev/null 2>&1; then
   exit 1
 fi
 
-PATHS_SH="$(fno paths shell-stub 2>/dev/null || true)"
+PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
 if [[ -z "$PATHS_SH" || ! -f "$PATHS_SH" ]]; then
-  echo "handoffs-migrate-to-vault: could not resolve live paths via 'fno paths shell-stub'" >&2
+  echo "handoffs-migrate-to-vault: could not resolve live paths via 'fno config paths shell-stub'" >&2
   exit 1
 fi
 # shellcheck source=/dev/null

@@ -25,7 +25,7 @@ if [[ -f "$RESULT" ]] && command -v jq >/dev/null 2>&1; then
     closed_n=$(jq '.closed | length' "$RESULT" 2>/dev/null || echo 0)
     if [[ "$closed_n" =~ ^[0-9]+$ ]] && (( closed_n > 0 )); then
         nodes=$(jq -r '.closed[].node_id' "$RESULT" 2>/dev/null | paste -sd, - 2>/dev/null)
-        echo "reconcile: last sweep closed ${closed_n} drifted node(s) whose PR merged outside the ship gate (${nodes}). Retro sentinels were written; the background harvest files follow-ups from them (or run \`fno retro run\` now)."
+        echo "reconcile: last sweep closed ${closed_n} drifted node(s) whose PR merged outside the ship gate (${nodes}). Retro sentinels were written; the background harvest files follow-ups from them (or run \`fno backlog retro run\` now)."
     fi
     # Canonical-sync catch-up outcome, surfaced independently of closed nodes:
     # the sweep that matters most is the one that found no drift yet could not
@@ -61,7 +61,7 @@ fi
 #     retains its sentinel, so the count re-surfaces next session.
 # ponytail: default state dir (env-injectable for tests); a
 # config.paths.retro_pending_dir override degrades this count, NOT the harvest -
-# `fno retro run` in step 2 resolves the dir via Python and honors the override.
+# `fno backlog retro run` in step 2 resolves the dir via Python and honors the override.
 RETRO_PENDING_DIR="${RETRO_PENDING_DIR:-$HOME/.fno/retro-pending}"
 if [[ -d "$RETRO_PENDING_DIR" ]]; then
     # Fail-open inside the substitution: under this hook's `set -euo pipefail`, a
@@ -70,7 +70,7 @@ if [[ -d "$RETRO_PENDING_DIR" ]]; then
     # A cosmetic advisory must never kill the reconcile trigger. (gemini review)
     pending_n=$( (find "$RETRO_PENDING_DIR" -maxdepth 1 -name '*.json' -type f 2>/dev/null || true) | wc -l | tr -d ' ')
     if [[ "$pending_n" =~ ^[0-9]+$ ]] && (( pending_n > 0 )); then
-        echo "retro: ${pending_n} sentinel(s) pending harvest; the background job harvests them, or run \`fno retro run\`."
+        echo "retro: ${pending_n} sentinel(s) pending harvest; the background job harvests them, or run \`fno backlog retro run\`."
     fi
 fi
 

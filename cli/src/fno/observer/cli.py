@@ -797,7 +797,7 @@ _PER_ITEM_CAP_USD = 3.0  # matches the old fixture default (never uncapped)
 
 
 def _write_workdir_settings(workdir: Path) -> None:
-    """Preventive isolation: redirect all mutable fno paths into *workdir*'s own
+    """Preventive isolation: redirect all mutable fno config paths into *workdir*'s own
     throwaway ``.fno/`` and stamp the migration sentinel so the first ``fno``
     call in the spawned session does not rewrite this fragment. Resurrected from
     ``evals/runner.py`` (675b24e~1); the ``.path-migration-done`` touch is

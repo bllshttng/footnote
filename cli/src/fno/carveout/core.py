@@ -1,4 +1,4 @@
-"""Core logic for `fno carveout add` - capture left-out work to a session ledger.
+"""Core logic for `fno backlog carveout add` - capture left-out work to a session ledger.
 
 A carve-out is a raw signal that the executor consciously left work undone
 mid-implementation: a deferred decision (blocked on an open question), an
@@ -6,7 +6,7 @@ out-of-scope bug found while building something else, or a data backfill the
 just-landed PR enables (blocked on a precondition). It is NOT a backlog node
 - the later retro-triage harvest reads these, dedups, classifies, and decides
 whether each becomes a node (active or queued) or an inbox line. Keeping the
-raw-signal/triaged-node line crisp is why this lives under `fno carveout`, not
+raw-signal/triaged-node line crisp is why this lives under `fno backlog carveout`, not
 `fno backlog` (Locked Decision #10).
 
 The ``backfill`` kind is special-cased downstream: the generic retro harvest

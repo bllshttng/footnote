@@ -1,4 +1,4 @@
-"""CLI surface for path introspection: fno paths emit-shell / fno paths verify."""
+"""CLI surface for path introspection: fno config paths emit-shell / fno config paths verify."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -48,7 +48,7 @@ def emit_shell(
 def shell_stub() -> None:
     """Generate a fresh paths.sh from current settings and print its path.
 
-    Bash callers use: source "$(fno paths shell-stub)".
+    Bash callers use: source "$(fno config paths shell-stub)".
 
     Each invocation regenerates a temp file from the current settings.yaml so
     shell hooks always reflect the user's current config rather than the

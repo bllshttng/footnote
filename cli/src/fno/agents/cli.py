@@ -3996,7 +3996,7 @@ def cmd_rm(
 
     Worktrees are NOT removed here (the harness row does not prove that its
     cwd is disposable). Reap them with
-    ``fno worktree cleanup --merged --apply``.
+    ``fno workspace worktree cleanup --merged --apply``.
     """
     from fno.agents.dispatch import DispatchAskError, rm_agent
 

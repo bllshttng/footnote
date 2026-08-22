@@ -167,7 +167,7 @@ def pr_url_for_repo(
     An absent ``cwd`` resolves against the invocation checkout - the caller is
     standing in the repo it is stamping. A ``cwd`` that IS recorded but no
     longer exists returns None instead: that is positive evidence the node
-    belongs to another repo, and `fno done`/`backlog update` can name any node
+    belongs to another repo, and `backlog done`/`backlog update` can name any node
     in the cross-project graph, so falling back would stamp the running repo's
     slug onto a foreign node.
     """
@@ -396,7 +396,7 @@ class PromiseVerdict:
 
     Sibling to :class:`MergeEvidence`: the merge gate asks "is a PR merged" (a
     fact about an artifact); this asks "did the plan's declared work all ship".
-    One verdict, three callers (``cmd_done``, ``cmd_reconcile``, ``fno done``)
+    One verdict, three callers (``cmd_done``, ``cmd_reconcile``, ``done_command``)
     so a node can never close through a second, ungated path. Fails open
     (``outcome="ok"``) on an absent/unreadable/unparseable plan so a stale
     ``plan_path`` never wedges a close; the warning names the path.
@@ -515,7 +515,7 @@ def resolve_promise_evidence(
          session must not hold this close open (x-40be - one unrelated
          carve-out was blocking every close in the repo). Unattributed rows
          (legacy, ambient shell, harness without a session id) block nothing
-         at close time; they stay visible via ``fno carveout list`` and the
+         at close time; they stay visible via ``fno backlog carveout list`` and the
          retro sweep, which are the repo-wide backstop.
       B. Outcome probes. Any ``close_probes`` entry exits non-zero. Probes are
          delegated to ``fno-agents probe-run`` (the same runner the loop uses for
@@ -622,7 +622,7 @@ def resolve_promise_evidence(
     if isinstance(expected, int) and expected >= 2:
         refs = node_pr_refs(node)
         # `extra_refs` carries an explicit ship the close verb is recording but
-        # has not yet persisted (e.g. `fno done --pr <new-final-pr>`): without it
+        # has not yet persisted (e.g. `done --pr <new-final-pr>`): without it
         # the second merged PR is counted as missing and exit 6 deadlocks the
         # command out of ever writing it.
         if extra_refs:
@@ -784,7 +784,7 @@ def _promise_refusal_d(node_id: str, deferred: list[dict]) -> str:
         f"  A `deferred` carve-out is declared scope that did not ship.\n"
         f"  carve-outs:\n" + "\n".join(rows) + f"{more}\n\n"
         f"  Two legal exits:\n"
-        f"    harvest them into nodes (`fno retro sweep-carveouts` previews;\n"
+        f"    harvest them into nodes (`fno backlog retro sweep-carveouts` previews;\n"
         f"      `--apply` files and consumes each), then close; or\n"
         f"    close with --force --reason \"deferred carve-out <id> filed as <node>\""
     )

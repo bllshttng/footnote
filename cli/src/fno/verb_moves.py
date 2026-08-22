@@ -39,11 +39,15 @@ class Move(NamedTuple):
 
 
 VERB_MOVES: dict[str, Move] = {
+    "annotate": Move(kind="deprecated", to="backlog annotate"),
     "approvals": Move(kind="deprecated", to="inbox approvals"),
     "autonomy": Move(kind="deprecated", to="agents autonomy"),
     "bundle": Move(kind="deprecated", to="doctor bundle"),
+    "carveout": Move(kind="deprecated", to="backlog carveout"),
     "codemap": Move(kind="deprecated", to="doctor codemap"),
     "claim": Move(kind="deprecated", to="agents claim"),
+    "context": Move(kind="deprecated", to="whoami context"),
+    "cost": Move(kind="deprecated", to="whoami cost"),
     "delivery": Move(kind="deprecated", to="do delivery"),
     "dispatch": Move(kind="deprecated", to="agents dispatch"),
     "evals": Move(kind="deprecated", to="doctor evals"),
@@ -60,7 +64,9 @@ VERB_MOVES: dict[str, Move] = {
     "notify": Move(kind="deprecated", to="inbox notify"),
     "observer": Move(kind="deprecated", to="doctor observer"),
     "outstanding": Move(kind="deprecated", to="inbox outstanding"),
+    "paths": Move(kind="deprecated", to="config paths"),
     "phase": Move(kind="deprecated", to="do phase"),
+    "plugins": Move(kind="deprecated", to="config plugins"),
     "plan": Move(kind="deprecated", to="do plan"),
     "pr": Move(
         kind="deprecated",
@@ -71,8 +77,13 @@ VERB_MOVES: dict[str, Move] = {
     "research": Move(kind="deprecated", to="do research"),
     "restart": Move(kind="deprecated", to="agents restart"),
     "resume": Move(kind="deprecated", to="do resume"),
+    "retro": Move(kind="deprecated", to="backlog retro"),
     "review": Move(kind="deprecated", to="do review"),
     "roles": Move(kind="deprecated", to="agents roles"),
+    "route": Move(kind="deprecated", to="config route"),
+    "scoreboard": Move(kind="deprecated", to="whoami scoreboard"),
+    "setup": Move(kind="deprecated", to="config setup"),
+    "status": Move(kind="deprecated", to="whoami status"),
     "state": Move(kind="deprecated", to="do state"),
     "status-fanout": Move(kind="deprecated", to="doctor event fanout"),
     "stub-manifest": Move(kind="deprecated", to="do pr stub-manifest"),
@@ -82,6 +93,7 @@ VERB_MOVES: dict[str, Move] = {
     "think": Move(kind="deprecated", to="do think"),
     "update": Move(kind="deprecated", to="doctor update"),
     "worker": Move(kind="deprecated", to="agents worker"),
+    "worktree": Move(kind="deprecated", to="workspace worktree"),
 }
 
 

@@ -193,7 +193,7 @@ def test_cargo_target_apply_refuses_to_delete_rooted_builder(repo: Path):
 
 def test_setup_worktree_runs_the_same_cargo_target_apply_path():
     text = SETUP_SRC.read_text()
-    assert "fno worktree cleanup --cargo-targets --apply" in text
+    assert "fno workspace worktree cleanup --cargo-targets --apply" in text
     assert "cargo target cleanup failed" in text
 
 

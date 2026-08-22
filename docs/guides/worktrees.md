@@ -23,7 +23,7 @@ The location depends on your worktree policy, which is config-driven.
 Check your resolved policy:
 
 ```bash
-fno worktree policy --repo . --harness claude
+fno workspace worktree policy --repo . --harness claude
 ```
 
 Pass your harness, or the result degrades to `external`.
@@ -36,7 +36,7 @@ You rarely need to.
 When you want a scratch branch outside a target run, reach for this.
 
 ```bash
-fno worktree ensure --repo . --name my-feature
+fno workspace worktree ensure --repo . --name my-feature
 ```
 
 It prints the worktree path and creates the branch `feature/my-feature`.
@@ -56,8 +56,8 @@ Leave a merged worktree around and the list grows fast.
 Two ways to remove one:
 
 ```bash
-fno worktree cleanup --merged --apply     # reap every landed worktree, with safety checks
-fno worktree archive <name>               # force-remove one worktree, keep its branch
+fno workspace worktree cleanup --merged --apply     # reap every landed worktree, with safety checks
+fno workspace worktree archive <name>               # force-remove one worktree, keep its branch
 ```
 
 Never remove a worktree with `rm -rf`.

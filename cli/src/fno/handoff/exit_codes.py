@@ -4,7 +4,7 @@ Every subcommand must choose one of these codes. Callers (skill shims,
 target loop, CI scripts) rely on the contract to branch correctly.
 
 Never add a new exit code without documenting it here AND in the
-affected subcommand's --help output. `fno setup`, `fno do review`
+affected subcommand's --help output. `fno config setup`, `fno do review`
 each advertise only the subset they actually raise.
 """
 

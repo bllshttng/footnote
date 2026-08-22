@@ -40,7 +40,7 @@ except Exception:
 case "$STATUS" in
     unconfigured)
         # AC1-HP / AC1-UI: one actionable line naming the key and the consequence.
-        echo "$NAME warn config.post_merge.parking_lot_path is unset - /fno:pr merged prose+triage will be skipped after a merge (set it: fno setup post-merge)"
+        echo "$NAME warn config.post_merge.parking_lot_path is unset - /fno:pr merged prose+triage will be skipped after a merge (set it: fno config setup post-merge)"
         ;;
     ready | opted_out | dormant)
         echo "$NAME pass post-merge config $STATUS"

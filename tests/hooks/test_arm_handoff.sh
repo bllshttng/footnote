@@ -18,7 +18,7 @@ REINJECT="$REPO_ROOT/hooks/target-postcompact-reinject.sh"
 export CLAUDE_PLUGIN_ROOT="$REPO_ROOT"
 
 # Discover a Python that can import fno.cli (for the stub's context delegation).
-# arm-handoff was repointed to `fno context` (x-7685); the stub must delegate it
+# arm-handoff was repointed to `fno whoami context` (x-7685); the stub must delegate it
 # to the real implementation, or the probe silently fails and the hook never arms.
 FNO_PYTHON=""
 for _cand in "$REPO_ROOT/cli/.venv/bin/python" "$(command -v python3 || true)"; do
@@ -29,6 +29,7 @@ for _cand in "$REPO_ROOT/cli/.venv/bin/python" "$(command -v python3 || true)"; 
 done
 export FNO_PYTHON
 
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -37,6 +38,17 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP + 1)); }
 
 TMP="$(mktemp -d -t arm-handoff-XXXXXX)"
+
+# Pin the probe's CLI door to the source under test. The hook prefers `fno-py`;
+# an ambient deployed `fno` predating the verb fold does not know
+# `fno whoami context`, so every arming scenario would silently decline. The
+# shim routes the door to the same FNO_PYTHON resolved above, in every backend.
+mkdir -p "$TMP/bin"
+printf '#!/usr/bin/env bash\nexec env PYTHONPATH="%s/cli/src" "%s" -m fno.cli "$@"\n' "$REPO_ROOT" "$FNO_PYTHON" \
+  > "$TMP/bin/fno-py"
+chmod +x "$TMP/bin/fno-py"
+PATH="$TMP/bin:$PATH"
+export PATH
 trap 'FNO_CLAIMS_ROOT="$TMP" fno agents claim release "node:x-test" >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 SID="sess-xyz"
 
@@ -61,11 +73,11 @@ setup_claim_backend() {  # $1 = the key that should read live
 #!/usr/bin/env bash
 # Minimal stand-in for \`fno agents claim status <key> -J\`. Any key other than the one
 # live fixture reads free, which is what a never-acquired claim really returns.
-# Delegate \`fno context\` to the real implementation (x-7685 repointed
-# arm-handoff to fno context; a stub that exits 1 on it makes the probe
+# Delegate \`fno whoami context\` to the real implementation (x-7685 repointed
+# arm-handoff to the context verb; a stub that exits 1 on it makes the probe
 # unreachable and the hook never arms - the same shape as test-handoff.sh's
 # context delegation).
-if [ "\$1" = "context" ] && [ -n "$FNO_PYTHON" ]; then
+if [ "\$1" = "whoami" ] && [ -n "$FNO_PYTHON" ]; then
   exec "$FNO_PYTHON" -m fno.cli "\$@"
 fi
 [ "\$1" = "agents" ] && [ "\$2" = "claim" ] && [ "\$3" = "status" ] || exit 1

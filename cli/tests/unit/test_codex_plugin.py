@@ -878,7 +878,7 @@ def test_freshness_detects_same_version_payload_drift(tmp_path: Path) -> None:
     assert report["issue"] == "payload-drift"
     assert report["source_version"] == report["cache_version"] == "0.3.0"
     assert report["source_digest"] != report["cache_digest"]
-    assert report["remedy"] == "fno setup codex-plugin --channel dev --refresh"
+    assert report["remedy"] == "fno config setup codex-plugin --channel dev --refresh"
 
 
 def test_freshness_refuses_legacy_duplicate_state_before_digest(tmp_path: Path) -> None:
@@ -1498,7 +1498,7 @@ def test_rollback_failure_remedy_preserves_requested_channel(tmp_path: Path) -> 
     )
 
     assert report["status"] == "error"
-    assert report["remedy"] == "fno setup codex-plugin --channel dev --refresh"
+    assert report["remedy"] == "fno config setup codex-plugin --channel dev --refresh"
 
 
 def test_legacy_plugin_restore_falls_back_to_exact_config(

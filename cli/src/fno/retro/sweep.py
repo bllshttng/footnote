@@ -6,7 +6,7 @@ or an explicit ``--pr-number``. Each of those scopes the read to the PR's owning
 session(s), and an unresolvable owner degrades to read-only. So a carve-out
 written with no session (``session_id: null``), or one whose PR merged without
 ever dropping a sentinel, is never harvested by any path - it accumulates in
-``.fno/carveouts.jsonl`` while ``fno retro run`` truthfully reports "no
+``.fno/carveouts.jsonl`` while ``fno backlog retro run`` truthfully reports "no
 retro-pending sentinels to triage". That gap is what this module closes: one
 sweep over the whole ledger, keyed off nothing but the ledger itself.
 

@@ -354,6 +354,36 @@ def test_agents_fold_move_table_matches_the_approved_work_order():
     assert {name: VERB_MOVES[name].to for name in expected} == expected
 
 
+def test_rest_fold_move_table_matches_the_approved_work_order():
+    """Unit 6 (x-9d6c): backlog, config, whoami, workspace.
+
+    ``done`` and ``runtime`` are deliberately ABSENT: they are merges whose
+    old flag surface is not arg-compatible with the destination, so they use
+    the decide-style module shim (a notice inside the old module) instead of
+    an argv-rewriting VERB_MOVES entry.
+    """
+    expected = {
+        "annotate": "backlog annotate",
+        "carveout": "backlog carveout",
+        "context": "whoami context",
+        "cost": "whoami cost",
+        "paths": "config paths",
+        "plugins": "config plugins",
+        "retro": "backlog retro",
+        "route": "config route",
+        "scoreboard": "whoami scoreboard",
+        "setup": "config setup",
+        "status": "whoami status",
+        "worktree": "workspace worktree",
+    }
+    assert {name: VERB_MOVES[name].to for name in expected} == expected
+    for merged in ("done", "runtime"):
+        assert merged not in VERB_MOVES, (
+            f"{merged} is a module-shim merge; a VERB_MOVES entry would "
+            "rewrite argv onto an incompatible flag surface"
+        )
+
+
 def test_help_all_lists_moved_spellings_under_their_own_heading():
     from fno.cli import app
 

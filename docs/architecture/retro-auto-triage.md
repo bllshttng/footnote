@@ -6,14 +6,14 @@ Work that is *decided but not done* during a PR used to evaporate: skipped revie
 ## Data flow
 
 ```
-in-session:  executor --fno carveout add--> .fno/carveouts.jsonl
+in-session:  executor --fno backlog carveout add--> .fno/carveouts.jsonl
                                                      |
 merge (ship gate):   pr-merge.sh --> .fno/.triage-pending  (fast-path, /target only)
 merge (outside):     reconcile  --> ~/.fno/retro-pending/<node>.json  (universal)
                                                      |
-no trigger at all:   `fno retro sweep-carveouts` reads the ledger directly
+no trigger at all:   `fno backlog retro sweep-carveouts` reads the ledger directly
                                                      |
-                              `fno retro run` (consumer)
+                              `fno backlog retro run` (consumer)
                                                      v
    shared routine (cli/src/fno/retro/routine.py::triage_pr):
      harvest (carveouts + declined reviews + COMPLETION deferred_findings)
@@ -35,15 +35,15 @@ no trigger at all:   `fno retro sweep-carveouts` reads the ledger directly
 
 Both source `scripts/lib/reconcile-throttle.sh` and share one throttle stamp (`.fno/.reconcile-stamp`, ~15 min, `RECONCILE_THROTTLE_SECONDS` override) so parallel sessions don't hammer `gh`. Reconcile always runs in mutate mode here — writing the retro sentinel is the point. AGENTS.md documents the `/loop 30m fno backlog reconcile` cadence for non-megawalk terminals.
 
-### Wave 2 — carve-out capture (`fno carveout add`)
+### Wave 2 — carve-out capture (`fno backlog carveout add`)
 
 A session-time capture primitive (NOT a backlog mutation — Locked Decision #10). The executor calls it the moment it leaves work undone:
 
 ```
-fno carveout add --kind deferred|oos-bug [--need "<open question>"] [--priority pN] "<what + why>"
+fno backlog carveout add --kind deferred|oos-bug [--need "<open question>"] [--priority pN] "<what + why>"
 ```
 
-To correct a row afterwards, use `fno carveout update <cv-id>`, not `resolve` then `add`.
+To correct a row afterwards, use `fno backlog carveout update <cv-id>`, not `resolve` then `add`.
 The refile path mints a new id, so any id already quoted in a PR body or a mail becomes a dead pointer.
 It is also lossy: two writes, and a failure between them leaves the ledger holding neither row.
 `update` is one rewrite under the same mutex and never touches `id`, `ts`, or `session_id`.
@@ -62,20 +62,20 @@ It appends one JSON line to `.fno/carveouts.jsonl` via the events.jsonl mkdir-mu
 | `land.py` | routes by mode — autonomous → active node; interactive → create + queue (adopt-stays-pure); low/nit → `backlog.inbox.add_item`. Mode from the trigger sentinel, absent → interactive (safe). Per-node failures recorded, not raised, so partial progress persists and a re-run dedups. |
 | `routine.py` | the one shared `triage_pr(...)` both triggers call. |
 | `sweep.py` | the PR-independent ledger sweep (see below): reads `.fno/carveouts.jsonl` with no trigger, dedups every row against the live graph, files only what nothing already tracks. `plan_sweep` is pure, so the dry run and the applied run cannot diverge. |
-| `cli.py` | `fno retro run` consumes `~/.fno/retro-pending/*.json` (universal) and `.fno/.triage-pending` (fast-path). Consume-then-remove: a sentinel is removed only on a clean land; a partial harvest (`gh_unavailable`) or land failure retains it for retry. Reloads live nodes per sentinel so dual triggers collapse to one node set. |
+| `cli.py` | `fno backlog retro run` consumes `~/.fno/retro-pending/*.json` (universal) and `.fno/.triage-pending` (fast-path). Consume-then-remove: a sentinel is removed only on a clean land; a partial harvest (`gh_unavailable`) or land failure retains it for retry. Reloads live nodes per sentinel so dual triggers collapse to one node set. |
 
-### The PR-independent sweep (`fno retro sweep-carveouts`)
+### The PR-independent sweep (`fno backlog retro sweep-carveouts`)
 
 Everything above is PER-PR: a trigger names a PR, and the carve-out read is scoped to that PR's owning session(s) from `ledger.json`.
 Two shapes of carve-out fall outside every one of those triggers.
 A carve-out written with no resolvable session (`session_id: null`) never matches a session scope, and an unresolvable owner degrades to read-only rather than filing.
-A PR that merged without ever dropping a sentinel leaves nothing to iterate, so `fno retro run` returns "no retro-pending sentinels to triage" and never opens the ledger.
+A PR that merged without ever dropping a sentinel leaves nothing to iterate, so `fno backlog retro run` returns "no retro-pending sentinels to triage" and never opens the ledger.
 
-Both shapes accumulate silently, and condition D no longer wedges unrelated nodes on them. The gate reads only the closing node's OWN rows, stamped on the `node` field at capture time. A row with no stamp blocks no close. The sweep, `fno carveout list`, and the harvest are the repo-wide backstop for those rows.
+Both shapes accumulate silently, and condition D no longer wedges unrelated nodes on them. The gate reads only the closing node's OWN rows, stamped on the `node` field at capture time. A row with no stamp blocks no close. The sweep, `fno backlog carveout list`, and the harvest are the repo-wide backstop for those rows.
 
-`fno retro sweep-carveouts` closes that gap by reading the ledger itself, keyed off nothing.
+`fno backlog retro sweep-carveouts` closes that gap by reading the ledger itself, keyed off nothing.
 It is a DRY RUN by default; `--apply` is the only path that writes.
-Bare `fno retro run` reports the pending count on every one of its callers (the SessionStart reconcile throttle, `/fno:pr check`, `/fno:pr merged`, direct CLI) but never applies, and neither does `fno backlog groom`.
+Bare `fno backlog retro run` reports the pending count on every one of its callers (the SessionStart reconcile throttle, `/fno:pr check`, `/fno:pr merged`, direct CLI) but never applies, and neither does `fno backlog groom`.
 
 **The harvest is manual by design, and that is the trade, not an oversight.**
 This paragraph used to rest on a false claim: "there is no `fno backlog delete`, so every filed node is permanent".
@@ -104,7 +104,7 @@ The kind with a gate cleared, and the kind without one did not.
 
 `fno inbox outstanding` is the missing half of this trade.
 It is a read-only fold over the ledger's size, its kind split, and the age of its oldest row.
-It names `fno retro sweep-carveouts` as the thing that clears them.
+It names `fno backlog retro sweep-carveouts` as the thing that clears them.
 `hooks/outstanding-session-start.sh` renders it where the operator already reads.
 That is its own hook, registered in `hooks/hooks.json`, because `hooks/session-start.sh` is the codex and gemini wrapper and Claude registers each session-start hook individually.
 A block living only in the wrapper reaches every harness except the operator's own.

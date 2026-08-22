@@ -1,4 +1,4 @@
-"""CLI surface for setup commands (`fno setup ...`).
+"""CLI surface for setup commands (`fno config setup ...`).
 
 Lives next to paths_cli.py for consistency; implementation lives in
 the setup/ package (setup/migrate_paths.py etc.).
@@ -17,7 +17,7 @@ app = typer.Typer(help="Setup commands (migration, doctor, etc.)")
 
 @app.callback(invoke_without_command=True)
 def setup_main(ctx: typer.Context) -> None:
-    """Setup helpers. Bare ``fno setup`` lists the available subcommands.
+    """Setup helpers. Bare ``fno config setup`` lists the available subcommands.
 
     (With more than one subcommand Typer no longer auto-runs a lone command,
     so show help instead of erroring on a bare invocation.)
@@ -412,7 +412,7 @@ def run_wizard(
     scope_fn: Callable[[str], str],
     echo_fn: Callable[[str], None] = lambda _m: None,
 ) -> dict:
-    """Interactive-agnostic core of ``fno setup wizard``.
+    """Interactive-agnostic core of ``fno config setup wizard``.
 
     For each field (from ``schema_gen.wizard_plan``) prompt for a value and
     write it through the validated ``set_config_value`` path. Defaults come from
@@ -636,7 +636,7 @@ def wizard_cmd(
     if not advanced:
         fields = [f for f in fields if f.get("tier") == "always"]
 
-    typer.echo("fno setup wizard - press Enter to accept each default.\n")
+    typer.echo("fno config setup wizard - press Enter to accept each default.\n")
 
     def prompt_fn(message: str, default: str) -> Optional[str]:
         try:

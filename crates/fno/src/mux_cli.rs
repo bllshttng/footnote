@@ -4631,7 +4631,7 @@ fn parse_block_annotate(args: &[OsString]) -> Result<ParsedBlockAnnotate, String
 
 /// `fno mux block annotate --from <pane> [--block last|<seq>] -m <text> --node
 /// <id> [--session]`: read a COMPLETED block from the source pane and record it
-/// as an operator review finding against `--node` via `fno annotate add`.
+/// as an operator review finding against `--node` via `fno backlog annotate add`.
 /// Unlike `block pipe` there is NO target-idle guard (nothing enters a
 /// recipient PTY - delivery is a mail inject the daemon queues); it reuses the
 /// same typed-block gate (an open/truncated/markerless block refuses) and caps
@@ -4699,20 +4699,21 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     //    review) and there is nothing to clean up.
     let excerpt = cap_excerpt(&text, ANNOTATE_EXCERPT_CAP);
 
-    // 2b. Resolve the --from pane's cwd so `fno annotate add` records the finding
+    // 2b. Resolve the --from pane's cwd so `fno backlog annotate add` records the finding
     //     into THAT worktree's .fno/events.jsonl - the one loop-check reads for
     //     the node - not the caller's cwd (codex P1: a mismatched cwd lands the
     //     durable finding in the wrong project and never gates). Best-effort: on
     //     a PaneLs miss inherit the caller cwd (the mail inject still lands).
     let pane_cwd = pane_cwd_via_ls(&sock, &session, parsed.from);
 
-    // 3. Shell the Python core (`fno annotate add`) via this binary's own `fno`
-    //    entrypoint (the Rust shim forwards `annotate` to the wheel CLI), so the
-    //    finding recording + claim-holder delivery ladder lives in one place. The
+    // 3. Shell the Python core (`fno backlog annotate add`) via this binary's own `fno`
+    //    entrypoint, so the finding recording + claim-holder delivery ladder
+    //    lives in one place. The
     //    excerpt rides stdin (`--block-excerpt-file -`), never a temp file.
     let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
     let mut cmd = std::process::Command::new(&fno);
     cmd.args([
+        OsString::from("backlog"),
         OsString::from("annotate"),
         OsString::from("add"),
         OsString::from("--node"),
@@ -4729,7 +4730,7 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fno mux block: cannot run `fno annotate add`: {e}");
+            eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");
             return EXIT_ERROR;
         }
     };
@@ -4742,7 +4743,7 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     match child.wait() {
         Ok(s) => s.code().unwrap_or(EXIT_ERROR),
         Err(e) => {
-            eprintln!("fno mux block: cannot run `fno annotate add`: {e}");
+            eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");
             EXIT_ERROR
         }
     }

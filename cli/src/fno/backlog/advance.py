@@ -1262,7 +1262,7 @@ def _spawn_worker(
 
 
 class WorktreeEnsureError(RuntimeError):
-    """`fno worktree ensure` failed; the lane cannot be isolated, so it is skipped."""
+    """`fno workspace worktree ensure` failed; the lane cannot be isolated, so it is skipped."""
 
 
 def _canonical_root() -> Path:
@@ -1307,7 +1307,7 @@ def _lane_harness(eff_provider: Optional[str]) -> str:
 def _run_setup_worktree(worktree: Path, canonical_root: Path) -> None:
     """Link shared `.fno`/`internal`/`.claude` state into a fresh lane worktree.
 
-    `fno worktree ensure` is git-mechanism-only (x-73ca) and deliberately leaves
+    `fno workspace worktree ensure` is git-mechanism-only (x-73ca) and deliberately leaves
     this to the caller; without it the lane has no symlinked settings.yaml and
     falls through to global config. Best-effort: a bare `pip install fno` ships
     no repo scripts, and a link failure must not abort an otherwise-launchable
@@ -1334,7 +1334,7 @@ def _ensure_lane_worktree(
 ) -> Path:
     """Idempotently isolate a lane worktree off origin/main; return its path.
 
-    Delegates to `fno worktree ensure` (x-73ca): a git-only, idempotent verb
+    Delegates to `fno workspace worktree ensure` (x-73ca): a git-only, idempotent verb
     that creates `<worktrees_base>/<repo>/<node_id>` on branch `feature/<node_id>`
     (base origin/main), or reuses it. Raises WorktreeEnsureError on failure (empty
     stdout / non-zero) so the caller releases the lane slot and skips this lane
@@ -1356,7 +1356,7 @@ def _ensure_lane_worktree(
     path = (proc.stdout or "").strip()
     if proc.returncode != 0 or not path:
         raise WorktreeEnsureError(
-            f"fno worktree ensure failed for {node_id}: "
+            f"fno workspace worktree ensure failed for {node_id}: "
             f"{(proc.stderr or proc.stdout or '').strip()[:200]}"
         )
     worktree = Path(path)

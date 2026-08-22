@@ -97,7 +97,7 @@ The auxiliary roles above are coordination work. `build` extends the same mechan
 `build` is **opt-in by config presence**: it ships unconfigured and routes nothing (fail-safe `None`, byte-identical to today). Writing the roles line IS the consent:
 
 ```bash
-fno route set build zai/glm-5.3[1m]        # atomic config write; effect: next spawn
+fno config route set build zai/glm-5.3[1m]        # atomic config write; effect: next spawn
 ```
 
 `dispatch-node.sh` passes `--role build` on every worker spawn unconditionally. The fail-safe makes that a no-op until the lane is configured, so there is no conditional plumbing. Each dispatch receipt carries a `route=` token. When the lane resolved, the token reads `route=zai/glm-5.3`. When it fell back, the token reads `route=primary`. A build that silently reverted to Anthropic - a keyless lane - is visible at the call site, not just in a buried stderr notice.
@@ -111,7 +111,7 @@ For a one-off "just this node on GLM" without flipping the lane default, `dispat
 `pr-create` is **opt-in by config presence**, exactly like `build`: it ships unconfigured and routes nothing (fail-safe `None`, so the worker runs on the invoking harness's primary model - no model literal in the skill). Writing the roles line IS the consent:
 
 ```bash
-fno route set pr-create zai/glm-4.7      # atomic config write; effect: next /pr create
+fno config route set pr-create zai/glm-4.7      # atomic config write; effect: next /pr create
 ```
 
 The `/pr create` dispatch declares `--role pr-create` (or omits any `model:` override) at the spawn boundary, so the fail-safe makes the role a no-op until the lane is configured. The worker keeps its fresh, minimal context - branch, base, a one-line summary, and merge posture only - regardless of which model the role resolved to, because the small-context property is what makes the worker cheap, not the tier name.
@@ -152,16 +152,16 @@ The two layers compose by design. The stage table picks the coordinate per verb;
 
 `fno config doctor` checks the resolved posture before a worker is launched. It reports a substrate/provider pair the spawn seam cannot honor. It also probes whether THIS session can write the claim store, by writing a real file there and removing it. A hand-started session cannot receive a per-spawn grant, so that probe is the only thing covering it. A spawned worker is covered instead by the computed `--add-dir` set (see [coordination.md](coordination.md)).
 
-## `fno route` - legibility + on-the-fly switching
+## `fno config route` - legibility + on-the-fly switching
 
 Four verbs over the same machinery (`model_routing.py` stays the single source of the env-var contract):
 
 | Verb | Purpose |
 |------|---------|
-| `fno route ls [-J]` | The effective merged table: role → `provider/model` → protocol → key status (which env var / file satisfied it, or MISSING) → auto-assigned-by. `-J` for scripts. |
-| `fno route set <role> <provider/model>` | Route a lane (atomic config write via `fno config set`). Refuses protected names + unknown providers pre-write. |
-| `fno route unset <role>` | Revert a lane to its built-in default (or unrouted); idempotent no-op if unconfigured. |
-| `fno route env <role \| provider/model>` | Print an eval-able export block for an interactive session: `eval "$(fno route env build)" && claude`. Fails closed on a missing key (no partial block). |
+| `fno config route ls [-J]` | The effective merged table: role → `provider/model` → protocol → key status (which env var / file satisfied it, or MISSING) → auto-assigned-by. `-J` for scripts. |
+| `fno config route set <role> <provider/model>` | Route a lane (atomic config write via `fno config set`). Refuses protected names + unknown providers pre-write. |
+| `fno config route unset <role>` | Revert a lane to its built-in default (or unrouted); idempotent no-op if unconfigured. |
+| `fno config route env <role \| provider/model>` | Print an eval-able export block for an interactive session: `eval "$(fno config route env build)" && claude`. Fails closed on a missing key (no partial block). |
 
 `route env` is the sanctioned interactive switch - never editing `~/.claude/settings.json` (global, restart-bound, races parallel sessions). The `ccz`-style alias becomes a one-liner over it.
 

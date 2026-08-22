@@ -1,6 +1,6 @@
-"""`fno annotate` - record an operator review finding against a node.
+"""`fno backlog annotate` - record an operator review finding against a node.
 
-Machine-first surface (mirrors `fno carveout`): the finding id prints to stdout,
+Machine-first surface (mirrors `fno backlog carveout`): the finding id prints to stdout,
 the receipt line distinguishes ``recorded + delivered`` from ``recorded;
 delivery deferred to bus`` (never a bare success - the one place a silent
 failure could hide is inject-after-record). Exit codes: 0 ok / 2 invalid args.

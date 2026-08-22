@@ -175,11 +175,11 @@ Pick variation N as the winner without re-running comparison.
 ### `--cleanup`
 Remove all speculate worktrees and branches:
 ```bash
-fno worktree cleanup --prefix speculate/
+fno workspace worktree cleanup --prefix speculate/
 ```
 
 ## See Also
 
-- `fno worktree` - Worktree status, cleanup, archive
+- `fno workspace worktree` - Worktree status, cleanup, archive
 - `/target fork` - Full pipeline in worktree
 - [references/variation-prompts.md](references/variation-prompts.md) - Creative direction catalog

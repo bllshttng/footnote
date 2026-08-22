@@ -164,7 +164,6 @@ _ADVERTISED_SUBCOMMANDS = [
     "backlog",
     "agents",
     "config",
-    "setup",
     "whoami",
     "doctor",
 ]

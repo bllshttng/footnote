@@ -74,7 +74,7 @@ Options:
 
 ## Session termination diagnostics
 
-The loop-check verb emits a `termination` event to `.fno/events.jsonl` with a `TerminationReason` when it stops the session. Use `fno status` to read the latest termination reason:
+When it stops the session, the loop-check verb emits a `termination` event to `.fno/events.jsonl` with a `TerminationReason`. Use `fno whoami status` to read the latest termination reason:
 
 | `TerminationReason` | Cause | Recovery |
 |---|---|---|

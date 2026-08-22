@@ -266,7 +266,7 @@ def test_shell_stub_regenerates_per_call(
 
     result1 = runner.invoke(
         app,
-        ["paths", "shell-stub"],
+        ["config", "paths", "shell-stub"],
         env={"FNO_REPO_ROOT": str(tmp_path), "COLUMNS": "240", "NO_COLOR": "1"},
         catch_exceptions=False,
     )
@@ -292,7 +292,7 @@ def test_shell_stub_regenerates_per_call(
 
     result2 = runner.invoke(
         app,
-        ["paths", "shell-stub"],
+        ["config", "paths", "shell-stub"],
         env={"FNO_REPO_ROOT": str(tmp_path), "COLUMNS": "240", "NO_COLOR": "1"},
         catch_exceptions=False,
     )

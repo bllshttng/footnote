@@ -2234,7 +2234,7 @@ fn build_findings_block_reason(open: &[OpenFinding], malformed: usize) -> String
         String::new()
     };
     format!(
-        "open review finding {}: {} - address it, then `fno annotate resolve {}`{}{}",
+        "open review finding {}: {} - address it, then `fno backlog annotate resolve {}`{}{}",
         f.id, f.first_line, f.id, more, notice
     )
 }
@@ -15176,7 +15176,7 @@ mod tests {
         let r = build_findings_block_reason(&open, 1);
         assert!(r.contains("aaa"));
         assert!(r.contains("the bug"));
-        assert!(r.contains("fno annotate resolve aaa"));
+        assert!(r.contains("fno backlog annotate resolve aaa"));
         assert!(r.contains("[+1 more]"));
         assert!(r.contains("1 malformed"));
     }

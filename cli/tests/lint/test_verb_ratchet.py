@@ -36,8 +36,10 @@ def test_python_surface_recurses_to_real_leaves():
     py = vr.enumerate_python_leaves()
     # a nested group leaf (recursion works, not just top-level names)
     assert "backlog done" in py
+    # a leaf one group deep (whoami folded status in, unit 6)
+    assert "whoami status" in py
     # a top-level single command
-    assert "whoami" in py
+    assert "update" in py
     # eager inline commands are counted
     assert "help" in py
     # a true alias is deduped (graph shares backlog's import target)

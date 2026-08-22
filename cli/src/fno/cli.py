@@ -46,9 +46,11 @@ from fno._lazy_group import make_lazy_group_cls
 
 # Tier discipline (x-71b6, "In-N-Out menu"): `fno --help` advertises a small
 # curated menu; everything else is hidden (invocable, just not listed). The
-# advertised set is `help`, `setup`, `backlog`, `agents`, `whoami`, `doctor`,
-# `config` (7). `help` / `cost` / `review` are eager inline
-# commands above; `cost` and `review` carry `hidden=True` on their decorators.
+# advertised set is `help`, `backlog`, `agents`, `whoami`, `doctor`, `config`
+# (6; `setup` moved under `config` in unit 6 of the x-9d6c reorg, and moved
+# spellings are excluded from the count by _HonestMenuGroup). `help` /
+# `review` are eager inline commands above and carry `hidden=True` on `review`;
+# `cost` moved under `whoami` and is a hidden lazy entry like its siblings.
 # Everything hidden here is one `fno help --all` away. New verbs default to
 # hidden; promotion to the menu is a deliberate, lint-gated act (see fno doctor lint).
 LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] = {
@@ -75,7 +77,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "The king's board and its session manifest.",
         {"hidden": True},
     ),
-    "runtime": ("fno.runtime.cli:cli", "manage runtime workers and worktrees", {"hidden": True}),
+    "runtime": (
+        "fno.runtime.cli:cli",
+        "Deprecated runtime shim; use fno workspace worktree / register-worker.",
+        {"hidden": True},
+    ),
     "worker": ("fno.worker.cli:cli", "manage delivery worker phases", {"hidden": True}),
     "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
     "inbox": (
@@ -185,9 +191,18 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         {"hidden": True},
     ),
     "paths": ("fno.paths_cli:app", "Path resolution helpers", {"hidden": True}),
-    "setup": ("fno.setup_cli:app", "Interactive settings.yaml wizard"),
+    "setup": (
+        "fno.setup_cli:app",
+        "Interactive settings.yaml wizard",
+        {"hidden": True},
+    ),
     "codemap": ("fno.codemap_cli:app", "Codebase map management", {"hidden": True}),
     "worktree": ("fno.worktree_cli:app", "Worktree management", {"hidden": True}),
+    "workspace": (
+        "fno.workspace.cli:cli",
+        "Worktree lifecycle and worker registration.",
+        {"hidden": True},
+    ),
     "route": (
         "fno.route_cli:route_app",
         "Provider route lanes: ls / set / unset / env (GLM build lane).",
@@ -220,7 +235,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     ),
     # Individual commands (plain functions wrapped as single-command apps) -
     "whoami": (
-        "fno.agent.cli:whoami_command",
+        "fno.agent.cli:whoami_app",
         "Operating-stack summary: project + fleet + walker + session + harness.",
     ),
     "status": (
@@ -233,11 +248,20 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Context-window usage for this session or a given transcript (hook door).",
         {"hidden": True},
     ),
+    "cost": (
+        "fno.agent.cli:cost_command",
+        "Cost + usage metrics from session transcripts and ledger.json.",
+        {"hidden": True},
+    ),
     "doctor": (
         "fno.doctor_cli:doctor_app",
         "Diagnose installed-vs-source fno skew (network-free).",
     ),
-    "done": ("fno.done.cli:done_command", "Mark a backlog node as done.", {"hidden": True}),
+    "done": (
+        "fno.done.cli:done_command",
+        "Deprecated done shim; use fno backlog done (same operation).",
+        {"hidden": True},
+    ),
     "research": (
         "fno.research:research_command",
         "Retrieve + store: ddgs backbone -> self-fetch -> sources.jsonl.",
@@ -366,7 +390,7 @@ def _check_migration() -> None:
 
     The try/except Exception: pass is intentional - this migration is a
     best-effort startup convenience, not load-bearing.  Hard-fail path
-    remains ``fno setup migrate-paths`` (called explicitly).
+    remains ``fno config setup migrate-paths`` (called explicitly).
 
     Guarded by FNO_SKIP_MIGRATION=1 (explicit opt-out) or PYTEST_CURRENT_TEST
     (pytest sets this automatically in all test processes) for isolation.
@@ -562,8 +586,8 @@ command is about" and differs by family:
   fno gate verify                       -p phase      (-s state, -x strict)
   fno doctor event emit                 -t type       (-d data, -s source)
   fno agents mail send                  -k kind       (-b body; --to-project long-only)
-  fno done                              -p pr-number  (-l link, -m note)
-  fno carveout add                      -k kind       (-p priority)
+  fno backlog done                      -p pr-number  (-l link, -m note)
+  fno backlog carveout add              -k kind       (-p priority)
 
 Unix-entrenched lowercase stays put: -h help, -n tail / -f follow
 (agents logs), -m note (done), -o output (codemap), -b blocked
@@ -585,7 +609,6 @@ SHORTHAND_POINTER = (
 # them never imports anything). `help --all` merges these with LAZY_SUBCOMMANDS.
 _EAGER_COMMAND_HELP: dict[str, str] = {
     "help": "Show help for the root command or any subcommand.",
-    "cost": "Cost + usage metrics from session transcripts and ledger.json.",
     "review": "Run the internal sigma-review panel on the current diff.",
 }
 
@@ -766,48 +789,6 @@ def help_command(ctx: typer.Context) -> None:
     from fno._subprocess_util import propagate_returncode
 
     raise typer.Exit(code=propagate_returncode(result.returncode))
-
-
-@app.command(
-    name="cost",
-    hidden=True,
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    help=(
-        "Cost + usage metrics from session transcripts and ledger.json "
-        "(in-package; the former scripts/metrics/session-cost.py, US2).\n\n"
-        "Usage:\n"
-        "  fno cost [SESSION_ID...]   per-session token/cost summary\n"
-        "  fno cost --branches       per-branch cost breakdown\n"
-        "  fno cost --by-provider    per-provider cost from ledger.json\n"
-        "  fno cost --backfill       recalculate ledger.json costs\n"
-        "  fno cost --render         re-render ledger.md from ledger.json\n\n"
-        "Also accepts --json / --branch / --since / --dry-run. Runs from the "
-        "installed wheel with no repo-root script."
-    ),
-)
-def cost(ctx: typer.Context) -> None:
-    """Forward all args to the in-package cost CLI (``fno.cost._session_cost``).
-
-    Eager (like ``help``/``review``) but the heavy ``_session_cost`` import is
-    deferred to call time, so ``fno --help`` never pays for it. argparse owns the
-    flag parsing; we bridge via ``sys.argv`` and translate its ``SystemExit``
-    into a ``typer.Exit`` so the exit code propagates cleanly.
-    """
-    from fno.cost import _session_cost
-
-    argv_backup = sys.argv
-    sys.argv = ["fno cost", *list(ctx.args)]
-    try:
-        _session_cost.main()
-    except SystemExit as exc:  # argparse exits on -h / parse error / explicit exit
-        code = exc.code
-        if code is None:
-            code = 0
-        elif not isinstance(code, int):
-            code = 1
-        raise typer.Exit(code=code)
-    finally:
-        sys.argv = argv_backup
 
 
 @app.command(

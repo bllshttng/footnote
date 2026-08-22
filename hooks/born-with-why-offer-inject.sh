@@ -241,7 +241,7 @@ Nodes born this gap, not offered: ${older_ids}.
 # $REPO_ROOT so resolution is deterministic even if graph_json is project-local.
 if command -v fno >/dev/null 2>&1; then
     # `cd` failure exits 1 -- the SAME code as an authoritative not-found -- so a
-    # deleted worktree (archive-worktree.sh / `fno worktree cleanup` can remove one
+    # deleted worktree (archive-worktree.sh / `fno workspace worktree cleanup` can remove one
     # under a live session) would read as "node absent" and destroy a live offer.
     # Map it to 99 so it lands in the degrade-to-surfacing branch below.
     node_json=$( cd "$REPO_ROOT" 2>/dev/null || exit 99; with_timeout 3 fno backlog get "$node_id" 2>/dev/null )

@@ -228,7 +228,7 @@ the obsidian vault, so no separate sync is needed.
 - Design doc: `~/your-vault/internal/fno/design/2026-05-04-cross-project-inbox-fleet.md`
 - Megawalk drain integration: `skills/megawalk/references/inbox-handlers.md`
 
-## `fno whoami` / `fno status` (self-introspection)
+## `fno whoami` / `fno whoami status` (self-introspection)
 
 Two read-only top-level commands that give an agent a curated view of its
 own operating context. Distinct from `fno agents mail` (cross-agent messaging) and
@@ -248,7 +248,7 @@ They detect three layers independently and report on all that are present:
 ### Commands
 
 - `fno whoami` - one-line per layer: project + fleet + walker + session + harness
-- `fno status` - session phase + status + bounded events tail + inconsistency flags. The immutable post-wedge manifest carries no gate booleans, so phase shows `n/a (collapsed)` and status is derived from the latest `termination` event in `events.jsonl`; a legacy manifest with `*_passed`-style keys still prints a per-gate section
+- `fno whoami status` - session phase + status + bounded events tail + inconsistency flags. The immutable post-wedge manifest carries no gate booleans, so phase shows `n/a (collapsed)` and status is derived from the latest `termination` event in `events.jsonl`; a legacy manifest with `*_passed`-style keys still prints a per-gate section
 
 ### Shared options
 

@@ -247,7 +247,7 @@ def test_cli_post_merge_human_line_is_distinguishable(
     assert result.exit_code == 0
     # AC1-UI: a single human line naming the key and the fix.
     assert "config.post_merge.parking_lot_path" in result.stdout
-    assert "fno setup post-merge" in result.stdout
+    assert "fno config setup post-merge" in result.stdout
 
 
 def test_unrelated_local_key_does_not_error(tmp_path: Path) -> None:

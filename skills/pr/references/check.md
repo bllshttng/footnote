@@ -577,10 +577,10 @@ PR number and the merge-time mode) on a successful merge. Consume it via the
 shared routine - the same one the universal retro-sentinel consumer uses:
 
 ```bash
-fno retro run   # consumes retro-pending/*.json AND the local .triage-pending
+fno backlog retro run   # consumes retro-pending/*.json AND the local .triage-pending
 ```
 
-`fno retro run` harvests, classifies, dedups, and lands left-out work, then
+`fno backlog retro run` harvests, classifies, dedups, and lands left-out work, then
 removes `.triage-pending` only on a clean run (a partial harvest or a land
 failure retains it for retry). It is idempotent: a finding already filed as a
 node is skipped, so both this fast-path and a later reconcile sweep firing for

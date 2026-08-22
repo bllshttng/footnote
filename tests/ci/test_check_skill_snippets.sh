@@ -46,7 +46,7 @@ echo "== the guarded empty-array form is itself a hazard =="
 # Measured: with an empty array, bash expands "${a[@]+"${a[@]}"}" to no args and
 # zsh to one EMPTY arg. The lint's own advice used to recommend this.
 ARR="$TMP/arr"
-fixture "$ARR/a.md" 'FLAG=()' 'fno retro run --pr-number "$PR" "${FLAG[@]+"${FLAG[@]}"}"'
+fixture "$ARR/a.md" 'FLAG=()' 'fno backlog retro run --pr-number "$PR" "${FLAG[@]+"${FLAG[@]}"}"'
 out="$(bash "$LINT" "$ARR" 2>&1)"
 echo "$out" | grep -q "guarded-empty-array-arg" && ok "guarded array expansion caught" \
     || fail "missed the guarded array expansion: $out"

@@ -13,7 +13,7 @@ A background `/target` cold-start has to isolate itself before building. Done by
 
 It does not reimplement worktree mechanics; it sequences pieces that already exist:
 
-1. **Create / reuse the worktree off `origin/main`** via `fno worktree ensure`. That verb branches off `origin/main` (never local HEAD), reuses an existing worktree idempotently, refuses to nest inside a linked worktree, and prints the worktree path on stdout.
+1. **Create / reuse the worktree off `origin/main`** via `fno workspace worktree ensure`. That verb branches off `origin/main` (never local HEAD) and reuses an existing worktree idempotently. It refuses to nest inside a linked worktree, and prints the worktree path on stdout.
 2. **Heal `.fno`** — if it arrived as a whole-dir symlink, `rm` + `mkdir` it — then link shared state via `worktree.py`'s `_run_setup_worktree_hook` (the setup-worktree.sh runner that the `shellout-drift` gate explicitly exempts).
 3. **Init the session from the worktree** via `fno do target init`, which writes the immutable manifest and claims the node exactly once. `start` re-uses that one-call claim rather than claiming separately.
 4. **Print a receipt:** `worktree=<path>  .fno=healed|ok  base=origin/main  node=claimed`.
@@ -29,4 +29,4 @@ It does not reimplement worktree mechanics; it sequences pieces that already exi
 
 ## Placement
 
-`fno worktree ensure` lands the worktree at the conductor location (`~/conductor/workspaces/<repo>/<name>`), so `start` inherits that placement. See [.claude/rules/worktrees.md](../../.claude/rules/worktrees.md) for the full worktree-location contract.
+`fno workspace worktree ensure` lands the worktree at the conductor location (`~/conductor/workspaces/<repo>/<name>`), so `start` inherits that placement. See [.claude/rules/worktrees.md](../../.claude/rules/worktrees.md) for the full worktree-location contract.

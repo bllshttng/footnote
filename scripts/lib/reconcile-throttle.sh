@@ -87,7 +87,7 @@ reconcile_maybe_fire() {
     # Detach fully: nohup + background + redirect so the reconcile outlives the
     # hook process and never blocks. Atomic result publish via tmp + mv.
     #
-    # `fno retro run` and `fno backlog capture tidy` co-fire within the SAME
+    # `fno backlog retro run` and `fno backlog capture tidy` co-fire within the SAME
     # throttle window (both share the stamp claimed above). Sequenced AFTER
     # reconcile: reconcile closes drifted nodes and writes their retro-pending
     # sentinels, then `retro run` consumes those (plus any older pending ones) so
@@ -100,7 +100,7 @@ reconcile_maybe_fire() {
     # affects the reconcile result publish and, per retro's own contract, a
     # failed harvest RETAINS the sentinel for the next window's retry.
     #
-    # `fno retro drain-postmortems` also co-fires here (x-42f6 US3): a stuck
+    # `fno backlog retro drain-postmortems` also co-fires here (x-42f6 US3): a stuck
     # session's postmortem is decoupled from the post-merge `retro run` trigger,
     # so it drains within one throttle window of the next session start instead
     # of waiting for an unrelated PR to merge. Best-effort, sequenced last; dedup

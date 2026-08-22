@@ -66,21 +66,9 @@ to `done`. Between the first and last sub-repo ships, the plan is genuinely
 
 ## The promise gate (node closure)
 
-A plan reaching `done` and a node closing are gated separately. The merge gate
-asks "is a PR merged" (a fact about an artifact); the promise gate asks "did
-the plan's declared work all ship". One verdict function,
-`resolve_promise_evidence`, is consulted by all three close verbs
-(`fno backlog done`, `fno backlog reconcile`, `fno done`) so a node can never
-close through a second, ungated path.
+A plan reaching `done` and a node closing are gated separately. The merge gate asks "is a PR merged" (a fact about an artifact). The promise gate asks "did the plan's declared work all ship". One verdict function, `resolve_promise_evidence`, is consulted by all three close verbs: `fno backlog done`, `fno backlog reconcile`, and the deprecated `done` spelling. A node can therefore never close through a second, ungated path.
 
-The gate fires ONLY on an explicit declaration. A plan that declares **neither
-`close_probes` nor `expected_url_count` closes exactly as it does today** -
-`## Wave N` headings are internal structure, not a promise (one .md == one PR ==
-one node is the house rule), so a multi-wave single-PR plan closes clean.
-Inferring "multi-wave" from headings was rejected because it false-positives on
-exactly that common case, parking every such node on autonomous `/target`. A
-gate that only fires on an explicit promise cannot false-positive. Two
-conditions, first refusal wins:
+The gate fires ONLY on an explicit declaration. A plan declaring **neither `close_probes` nor `expected_url_count`** closes exactly as it does today. `## Wave N` headings are internal structure, not a promise, so a multi-wave single-PR plan closes clean. One .md == one PR == one node is the house rule. Inferring "multi-wave" from headings was rejected because it false-positives on exactly that common case, parking every such node on autonomous `/target`. A gate that only fires on an explicit promise cannot false-positive. Two conditions, first refusal wins:
 
 - **Outcome probes.** Any declared `close_probes` entry exits non-zero. Probes
   run via `fno-agents probe-run` (the same runner `loop-check` uses for

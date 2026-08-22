@@ -15,7 +15,7 @@
 # cli/tests/unit/test_worktree_stranded.py, which drives them directly with
 # a monkeypatched subprocess.run rather than a live `fno` CLI subprocess:
 # `fno` on PATH resolves the deployed binary, not this worktree's source
-# (verified gotcha), so a real end-to-end `fno worktree stranded --apply`
+# (verified gotcha), so a real end-to-end `fno workspace worktree stranded --apply`
 # shell test would silently exercise the WRONG code.
 set -euo pipefail
 

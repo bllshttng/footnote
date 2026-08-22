@@ -804,7 +804,7 @@ def render(
         )
         if sweepable:
             lines.append(
-                "  Clear with: fno retro sweep-carveouts (preview), --apply to file and consume."
+                "  Clear with: fno backlog retro sweep-carveouts (preview), --apply to file and consume."
             )
         if outstanding.carveout_by_kind.get(BACKFILL_KIND):
             lines.append("  Backfill rows are handled by /fno:pr merged, not by the sweep.")

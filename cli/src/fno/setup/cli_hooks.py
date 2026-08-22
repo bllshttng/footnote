@@ -488,7 +488,7 @@ def install_claude_worktree_remove_hook(
     ``repair_only`` re-points an existing entry whose script has gone (a plugin
     upgrade moves the versioned install dir, so the persisted absolute path
     dies) but never adds one that is not there. Wiring a global hook stays an
-    explicit `fno setup` action; only keeping a wired one alive is automatic.
+    explicit `fno config setup` action; only keeping a wired one alive is automatic.
     """
     data, note = _load_settings_for_merge(settings_path)
     if note is not None:
@@ -575,7 +575,7 @@ def install_claude_worktree_remove_hook(
 # SessionStart matcher is omitted so the hook fires on every session start
 # (matching Codex's own SessionStart example, which carries no matcher).
 _CODEX_BLOCK_TEMPLATE = """\
-# Added by `fno setup cli-hooks` - footnote SessionStart context injection.
+# Added by `fno config setup cli-hooks` - footnote SessionStart context injection.
 # Codex treats this as an UNMANAGED hook: approve/trust it in Codex before it
 # runs. Remove this block to uninstall.
 [[hooks.SessionStart]]

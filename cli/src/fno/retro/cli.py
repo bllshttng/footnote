@@ -1,4 +1,4 @@
-"""`fno retro` - consume retro-triage triggers and file left-out work.
+"""`fno backlog retro` - consume retro-triage triggers and file left-out work.
 
 `run` is the PRIMARY/universal trigger consumer: it reads the retro-pending
 sentinels that `fno backlog reconcile` drops (for PRs merged outside the ship
@@ -87,7 +87,7 @@ def _resolve_pr_session_ids(
     Returns ``[]`` on any failure (missing/unreadable/malformed ledger, no repo
     scope, no match), so the caller treats "no owning session" as the read-only
     case (x-90b8) rather than crashing the harvest. The join itself lives in
-    :mod:`fno.ledger_join` (shared with ``fno carveout list --pr-number``); this
+    :mod:`fno.ledger_join` (shared with ``fno backlog carveout list --pr-number``); this
     wrapper keeps retro's flatten-to-empty contract.
     """
     from fno.ledger_join import reason_is_infra_failure, resolve_pr_sessions
@@ -106,7 +106,7 @@ def _completion_md_for(plan_path: Optional[str], repo_root: Path) -> Optional[Pa
 
     A relative ``plan_path`` (sentinels commonly store repo-relative paths) is
     resolved against ``repo_root``, NOT the process CWD - otherwise running
-    ``fno retro run`` from a subdirectory silently misses COMPLETION.md.
+    ``fno backlog retro run`` from a subdirectory silently misses COMPLETION.md.
     """
     if not plan_path:
         return None
@@ -191,7 +191,7 @@ def _current_repo_slug(gh_runner: Optional[Callable] = None) -> Optional[str]:
     except Exception:
         # Best-effort, per the docstring: the default runner already maps a
         # missing gh to rc=127, but a custom runner could raise - a slug lookup
-        # must never crash `fno retro run` (gemini MEDIUM on PR #405).
+        # must never crash `fno backlog retro run` (gemini MEDIUM on PR #405).
         return None
     slug = out.strip() if rc == 0 else ""
     return slug or None
@@ -794,7 +794,7 @@ def run(
         ]
 
     # W6 6.2 (x-f063): the postmortem source rides the PLAIN retro run - no
-    # new trigger (the post-merge ritual and on-demand `fno retro run` both
+    # new trigger (the post-merge ritual and on-demand `fno backlog retro run` both
     # land here). A --node/--pr-number run is a targeted harvest and skips it.
     # Same independence contract as the PR-scoped sources: its failure never
     # sinks the sentinel loop, and vice versa.
@@ -839,7 +839,7 @@ def run(
             typer.echo(
                 f"carve-outs: {pending} left unharvested on the ledger after "
                 f"this run (no trigger covers them); preview with "
-                f"`fno retro sweep-carveouts`"
+                f"`fno backlog retro sweep-carveouts`"
             )
 
     if not candidates and pr is None:

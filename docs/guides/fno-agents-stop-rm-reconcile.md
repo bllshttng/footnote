@@ -75,8 +75,7 @@ opencode session delete ses_7f3a9b2c1d
 
 A harness record that is already gone counts as success, so re-running `rm` after a manual cleanup will not wedge.
 
-Worktrees are not removed here for non-claude harnesses.
-Nothing on the registry row distinguishes an isolated worktree from the canonical checkout, so `rm` will not guess; reap them with `fno worktree cleanup --merged --apply`.
+Worktrees are not removed here for non-claude harnesses. Nothing on the registry row distinguishes an isolated worktree from the canonical checkout, so `rm` will not guess. Reap them with `fno workspace worktree cleanup --merged --apply`.
 
 **Common exit codes:**
 

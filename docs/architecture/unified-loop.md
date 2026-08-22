@@ -127,7 +127,7 @@ The method is named `append` (not `emit` or `emit_fields`) deliberately - see "T
 
 ## The typed-event contract
 
-The loop NEVER parses session stdout. The session's terminal state is communicated entirely through the project journal: the stop hook (`fno-agents loop-check`) emits a `termination` event when it decides to allow the session to exit. `Journal::find_termination` scans for the last matching event keyed on `unit.session_key` (= `session_id` from the manifest).
+The loop NEVER parses session stdout. The session's terminal state is communicated entirely through the project journal. When it decides to allow the session to exit, the stop hook (`fno-agents loop-check`) emits a `termination` event. `Journal::find_termination` scans for the last matching event keyed on `unit.session_key` (= `session_id` from the manifest).
 
 Envelope shape for all loop-runtime events:
 
@@ -262,7 +262,7 @@ That matters because the fail-closed path keys off "did a prior fire record prob
 `DoneAdvisory`, `DonePlanned`, and `DoneBatched` return earlier and do not consult probes.
 Those units ship no PR of their own, so there is no ship gate to hang evidence on; a recurring deliverable reaches its finish line through `DonePRGreen`.
 
-Every fire records its results in the `loop_check` event as `data.done_probes` (`{"<cmd>": "pass" \| "fail:<code>" \| "timeout"}`), which is what `fno scoreboard --plan-fidelity` joins against the declaration to report probes declared vs passed.
+Every fire records its results in the `loop_check` event as `data.done_probes` (`{"<cmd>": "pass" \| "fail:<code>" \| "timeout"}`). `fno whoami scoreboard --plan-fidelity` joins that against the declaration to report probes declared vs passed.
 
 ### Review coverage: `DoneUnreviewed`
 

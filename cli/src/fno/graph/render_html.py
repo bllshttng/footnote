@@ -380,7 +380,7 @@ def _card_html(
             elif extra_num is not None:
                 parts.append(f'<div class="meta pr">#{int(extra_num)}{note_html}</div>')
 
-    # artifact_url: the user-supplied design/doc link (fno done --link). Same
+    # artifact_url: the user-supplied design/doc link (done --link). Same
     # scheme-validation as pr_url so a javascript: URI cannot become an anchor.
     artifact_raw = str(entry.get("artifact_url") or "").strip()
     if artifact_raw:

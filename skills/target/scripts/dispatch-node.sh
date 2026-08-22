@@ -23,7 +23,7 @@
 #   to every worker spawn. Fails CLOSED in the spawn (unknown/non-anthropic/
 #   keyless refuses -> the node stays dispatchable). Wins over the build lane.
 #   A CLAUDE worker carries --role build (the build lane is a fail-safe no-op
-#   until `fno route set build ...` opts in). Non-claude workers do NOT: the
+#   until `fno config route set build ...` opts in). Non-claude workers do NOT: the
 #   build/route lane is claude-specific, and a role-bearing spawn is classified
 #   Python-owned by the runtime, which rejects opencode/agy (x-567d / codex P1).
 #
@@ -77,7 +77,7 @@ command -v jq  >/dev/null 2>&1 || { echo "failed: - reason=\"jq not on PATH\""  
 
 # Canonical MAIN checkout for deterministic --fresh isolation (x-73ca). The
 # git-common-dir's parent is the main checkout even when the dispatcher runs
-# from a linked worktree; `fno worktree ensure --repo <this>` then creates the
+# from a linked worktree; `fno workspace worktree ensure --repo <this>` then creates the
 # worker's conductor worktree off origin/main. Empty when not in a git repo
 # (the --fresh arm falls back to the Rust runtime's own --fresh resolution).
 CANONICAL_ROOT=""
@@ -537,7 +537,7 @@ for id in "${NODES[@]}"; do
   # `route set`/`unset` racing a bulk dispatch is stamped per worker, never
   # inferred from a stale run-start snapshot (codex P2; plan's per-worker
   # provenance invariant). Explicit --route wins. Otherwise the AUTHORITATIVE
-  # build-lane predicate is `fno route env build`: it runs the same
+  # build-lane predicate is `fno config route env build`: it runs the same
   # resolve_route('build') the worker's bg_create uses, so it catches every
   # fall-safe-to-primary reason (model_routing.enabled=false, a keyed but
   # non-anthropic provider) that a target+key table heuristic would miss. env
@@ -552,8 +552,8 @@ for id in "${NODES[@]}"; do
     route_val="$ROUTE"
   else
     route_val="primary"
-    if fno route env build >/dev/null 2>&1; then
-      _bpm="$(fno route ls -J 2>/dev/null | jq -r '.[] | select(.role=="build") | .provider_model' 2>/dev/null || true)"
+    if fno config route env build >/dev/null 2>&1; then
+      _bpm="$(fno config route ls -J 2>/dev/null | jq -r '.[] | select(.role=="build") | .provider_model' 2>/dev/null || true)"
       [[ -n "$_bpm" && "$_bpm" != "unconfigured" ]] && route_val="$_bpm"
     fi
   fi
@@ -784,7 +784,7 @@ for id in "${NODES[@]}"; do
     # cwd= must stay a real, space-free path so the receipt is machine-parseable
     # (the conductor worktree path is not known until ensure runs, so preview the
     # canonical root the --fresh fallback would use); the hint carries the intent.
-    cwd_hint="--cwd <fno worktree ensure> "
+    cwd_hint="--cwd <fno workspace worktree ensure> "
     dry_cwd="${CANONICAL_ROOT:-$(pwd)}"
   fi
 
@@ -879,7 +879,7 @@ for id in "${NODES[@]}"; do
     # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
     # so forward it as --harness: a claude bg dispatch lands harness-native at
     # <repo>/.claude/worktrees/, a non-native harness degrades to external.
-    [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null)"
+    [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno workspace worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null)"
     if [[ -n "$wt" ]]; then
       # policy=never returns the repo root: launch in place, but SKIP setup - it
       # links shared state INTO the canonical checkout (Locked Decision 4: guard

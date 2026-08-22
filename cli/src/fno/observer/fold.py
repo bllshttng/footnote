@@ -637,7 +637,7 @@ def build_run_summary(
     real, dimension-scoped verdict. ``corpus_size`` gates on
     :data:`MIN_ATTRIBUTABLE` (Locked Decision 11); ``scored_count`` (<=
     corpus_size) drives ``coverage_pct``, the honesty rule carried over from
-    ``fno scoreboard``.
+    ``fno whoami scoreboard``.
 
     The <10 gate is a *sweep* rule (a retrospective ranking under 10 attributable
     runs is fabricated confidence). A *replay* batch is a targeted before/after on

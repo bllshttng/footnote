@@ -15,7 +15,10 @@ import secrets
 from pathlib import Path
 from typing import Any, Optional
 
-import fno.events as _events
+# fno.events is imported inside the write paths, not at module level: it
+# costs ~148ms (the whole events tree) and is needed only by add/resolve.
+# annotate now mounts eagerly under `fno backlog`, the hottest verb in the
+# CLI, so a module-level import would tax every backlog call.
 
 # x-9ed6: node/operator free text embedded in an injected frame could carry a
 # literal delimiter and break out into the recipient's next prompt. Defang the
@@ -92,7 +95,7 @@ def _deliver(node: str, finding_id: str, text: str, excerpt: Optional[str]) -> s
     body = f"review finding {finding_id} on {node}:\n{defang(text)}"
     if excerpt:
         body += f"\n\n--- block ---\n{defang(excerpt)}"
-    body += f"\n\n(resolve with: fno annotate resolve {finding_id})"
+    body += f"\n\n(resolve with: fno backlog annotate resolve {finding_id})"
     frame = wrap_fno_mail(body, from_="annotate", harness="claude-code", model="operator", node=node)
 
     try:
@@ -140,6 +143,8 @@ def add_finding(
         data["block_cmd"] = block_cmd
     if block_excerpt:
         data["block_excerpt"] = block_excerpt
+
+    import fno.events as _events
 
     event = _events._build("review_finding", "observer", data)
     _events.append_event(event, _events_path(events_path))
@@ -233,6 +238,8 @@ def resolve_finding(
         return {"finding_id": finding_id, "resolved": False, "warning": "already resolved"}
 
     data = {"finding_id": finding_id, "node": f.get("node")}
+    import fno.events as _events
+
     event = _events._build("review_finding_resolved", "observer", data)
     _events.append_event(event, _events_path(events_path))
     return {"finding_id": finding_id, "resolved": True}

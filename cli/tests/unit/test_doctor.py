@@ -179,7 +179,7 @@ def test_doctor_reports_stale_opencode_plugin(monkeypatch: pytest.MonkeyPatch) -
     )
     result = runner.invoke(app, ["doctor"])
     assert "opencode footnote plugin is STALE" in result.stdout
-    assert "fno setup" in result.stdout
+    assert "fno config setup" in result.stdout
 
 
 def test_doctor_main_run_points_at_codex_hooks_dual(
@@ -246,7 +246,7 @@ def test_doctor_reports_plugin_drift_without_staling_cli(
         "source_digest": "a" * 64,
         "cache_digest": "b" * 64,
         "enabled_plugin_ids": ["fno@footnote"],
-        "remedy": "fno setup codex-plugin --channel dev --refresh",
+        "remedy": "fno config setup codex-plugin --channel dev --refresh",
     }
     monkeypatch.setattr(
         doctor, "_harness_surface_report", lambda: {"codex_plugin": plugin}
@@ -259,7 +259,7 @@ def test_doctor_reports_plugin_drift_without_staling_cli(
     assert payload["status"] == "fresh"
     assert payload["harness_surface"]["codex_plugin"] == plugin
     assert "codex plugin: STALE" in result.stderr
-    assert "fno setup codex-plugin --channel dev --refresh" in result.stderr
+    assert "fno config setup codex-plugin --channel dev --refresh" in result.stderr
 
 
 def test_doctor_reports_ambiguous_duplicate_state_without_freshness(
@@ -280,7 +280,7 @@ def test_doctor_reports_ambiguous_duplicate_state_without_freshness(
                 "status": "conflict",
                 "issue": "ambiguous-duplicate-state",
                 "enabled_plugin_ids": ["fno@footnote", "fno@footnote-dev"],
-                "remedy": "fno setup codex-plugin --channel dev --refresh",
+                "remedy": "fno config setup codex-plugin --channel dev --refresh",
             }
         },
     )

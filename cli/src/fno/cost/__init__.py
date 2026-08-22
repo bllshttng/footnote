@@ -1,4 +1,4 @@
-"""fno cost - ledger + budget integration.
+"""fno whoami cost - ledger + budget integration.
 
 Runs the in-package _session_cost module (the former
 scripts/metrics/session-cost.py) via `python3 -m fno.cost._session_cost`.
@@ -278,7 +278,7 @@ def upsert_cost_session(node: dict[str, Any], session_id: str, cost_usd: float) 
     """Record one session's cost on a graph node, replacing any prior row.
 
     A session's cost is a LEVEL that gets re-reported (a resumed run, a second
-    `fno cost` call for the same session), not an increment to accumulate.
+    `fno whoami cost` call for the same session), not an increment to accumulate.
     Appending and re-summing double-counts it, so the row for `session_id` is
     replaced in place when it already exists. `cost_usd` is then re-derived
     from the rows, never incremented.

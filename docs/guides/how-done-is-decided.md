@@ -53,7 +53,7 @@ fno agents claim status node:<id>
 For full run orientation:
 
 ```bash
-fno status
+fno whoami status
 ```
 
 ## What "still going" usually means

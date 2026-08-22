@@ -1,6 +1,6 @@
 """Install footnote's prompt-provenance renderers into the user's shell.
 
-Opt-in only (wired into ``fno setup wizard``, mirrors ``recommended_rules.py``).
+Opt-in only (wired into ``fno config setup wizard``, mirrors ``recommended_rules.py``).
 fno-spawned panes export ``FNO_NODE``/``FNO_SLUG``/``FNO_PLAN`` (x-84a8); those
 env vars are prompt-engine-agnostic. This module ships two renderers so the
 feature does not assume the user runs starship (it is OSS):

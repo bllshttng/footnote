@@ -79,7 +79,7 @@ fallback fail (offline, auth), do NOT silently skip it:
 
 1. Append the section anyway with a `(DEGRADED: diff unreachable - <reason>)`
    suffix in the heading body, listing what could not be verified.
-2. Record the gap: `fno carveout add --kind deferred --need "verify <blocker> landed shapes" "boundary reconcile for <blocker> ran degraded - diff unreachable"`.
+2. Record the gap: `fno backlog carveout add --kind deferred --need "verify <blocker> landed shapes" "boundary reconcile for <blocker> ran degraded - diff unreachable"`.
 
 The marker still lands (idempotence holds); the verification gap is surfaced at
 merge-time retro-triage instead of swallowed.

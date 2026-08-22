@@ -404,6 +404,15 @@ def done_command(
     With `--backfill`, runs the rollup without flipping status - useful for
     reconciling nodes that were marked done before the rollup logic existed.
     """
+    # One-release deprecation shim (unit 6, x-9d6c): `fno backlog done` is the
+    # same operation and the canonical spelling. The old root keeps its exact
+    # flag surface and behavior until the follow-up release removes it; only
+    # this stderr line is added, because callers parse stdout.
+    typer.echo(
+        "fno done is now fno backlog done (same operation; this spelling is "
+        "removed next release)",
+        err=True,
+    )
     graph_path = _path_graph()
     env_session = os.environ.get("CLAUDECODE_SESSION_ID") or None
 
