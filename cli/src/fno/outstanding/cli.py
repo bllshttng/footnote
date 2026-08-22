@@ -174,10 +174,16 @@ def ask(
     lands - and in a mail-driven mesh the very next turn is usually the agent
     answering some mail.
     """
-    from fno.events import operator_question
+    from fno.events import QUESTION_CAP, operator_question
     from fno.harness_identity import canonical_handle, resolve_harness_identity
     from fno.outstanding.core import QuestionIndexWriteError, append_question_event
 
+    if len(question) > QUESTION_CAP:
+        typer.echo(
+            f"outstanding: recorded truncated: the question is {len(question)} "
+            f"characters, the event stores {QUESTION_CAP}.",
+            err=True,
+        )
     qid = f"q-{secrets.token_hex(4)}"
     session_id = _session_id()
     ident = resolve_harness_identity()
@@ -239,12 +245,19 @@ def clear(
         RefusedAuthorityError,
         UnattributedAuthorityError,
     )
-    from fno.events import operator_question_closed
+    from fno.events import QUESTION_CAP, operator_question_closed
     from fno.outstanding.core import (
         QuestionIndexWriteError,
         append_question_event,
         read_open_questions,
     )
+
+    if answer is not None and len(answer) > QUESTION_CAP:
+        typer.echo(
+            f"outstanding: recorded truncated: the answer is {len(answer)} "
+            f"characters, the event stores {QUESTION_CAP}.",
+            err=True,
+        )
 
     # Answering a question the operator was formally asked is the canonical
     # law-producing act in this system. Without this flag `clear` had nothing
@@ -373,6 +386,15 @@ def clear(
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"outstanding: failed to close {qid}: {exc}", err=True)
             raise typer.Exit(1)
+
+        # The delivery edge: an answer that reaches nobody trains producers to
+        # stop asking through this queue. The close above is durable, so
+        # delivery is best-effort - one stated posture line per closed id,
+        # never a failed clear and never a re-record.
+        if answer is not None:
+            from fno.outstanding.deliver import deliver_answer
+
+            typer.echo(deliver_answer(open_by_id[qid], answer, recorded), err=True)
 
     if skipped:
         typer.echo(

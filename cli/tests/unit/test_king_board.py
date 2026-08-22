@@ -24,7 +24,7 @@ def _empty_inputs(**overrides) -> BoardInputs:
         claimed_nodes=_ok([]),
         holder_activity={},
         prs=_ok([]),
-        questions=_ok([]),
+        outstanding=_ok({}),
         needs=_ok([]),
         lane=_ok([]),
     )
@@ -84,7 +84,7 @@ def test_undispatched_row_names_the_node_and_carries_a_rerunnable_source():
 
 def test_every_queue_carries_a_source_command():
     board = build_board(_empty_inputs())
-    assert len(board["queues"]) == 7
+    assert len(board["queues"]) == 9
     for q in board["queues"]:
         assert q["source"], f"{q['name']} has no source command"
 
@@ -115,7 +115,7 @@ def test_a_claim_of_any_state_takes_a_node_out_of_undispatched():
 
 def test_human_gated_queues_report_their_count_without_gating_nowork():
     inputs = _empty_inputs(
-        questions=_ok([{"id": "q-1", "question": "which lane?"}]),
+        outstanding=_ok({"questions": [{"id": "q-1", "question": "which lane?"}]}),
         needs=_ok([{"kind": "unreachable", "name": "w-1"}]),
     )
     board = build_board(inputs)
@@ -306,7 +306,7 @@ def test_an_unreadable_report_only_queue_is_loud_but_still_never_gates_nowork():
     """`fno outstanding` has been measured timing out on this machine. Counting
     a blind human-gated queue as work would wedge the loop on the one queue the
     locked decision says must never wedge it."""
-    inputs = _empty_inputs(questions=SourceRead(error="timed out after 60s"))
+    inputs = _empty_inputs(outstanding=SourceRead(error="timed out after 60s"))
     board = build_board(inputs)
 
     assert _queue(board, "operator_question")["status"] == "unreadable"
@@ -560,3 +560,109 @@ def test_the_renderer_elides_and_says_so(capsys):
 
     out = capsys.readouterr().out
     assert "... 40 more not shown" in out, out
+
+
+# --- BREAK 2/3: the board reports every stream the outstanding verb returns ---
+
+
+def _outstanding(
+    *,
+    questions=(),
+    carveouts=None,
+    captures=None,
+    roots=None,
+):
+    """The whole `fno inbox outstanding --json` payload, defaulting to empty."""
+    return _ok(
+        {
+            "questions": list(questions),
+            "carveouts": carveouts or {"total": 0, "by_kind": {}, "oldest_ts": None},
+            "captures": captures or {"total": 0, "by_project": {}},
+            "roots": roots or {},
+        }
+    )
+
+
+def test_the_board_reports_carveouts_and_captures_not_questions_alone():
+    """The board kept one of four streams; 661 of 665 items were invisible."""
+    inputs = _empty_inputs(
+        outstanding=_outstanding(
+            questions=[{"id": "q-1", "question": "which lane?"}],
+            carveouts={
+                "total": 14,
+                "by_kind": {"oos-bug": 11, "deferred": 3},
+                "oldest_ts": None,
+            },
+            captures={"total": 647, "by_project": {"c3po": 400, "footnote": 247}},
+            roots={"carveouts": {"scope": "project", "root": "/repos/footnote"}},
+        )
+    )
+    board = build_board(inputs)
+
+    cq = _queue(board, "carveout_pending")
+    assert cq["count"] == 14
+    assert cq["actionable"] is False, "a human-gated stream never gates NoWork"
+    assert {"kind": "oos-bug", "n": 11} in cq["rows"]
+    assert "/repos/footnote" in cq["note"], "the queue names the root its count came from"
+
+    capq = _queue(board, "capture_pending")
+    assert capq["count"] == 647
+    assert capq["actionable"] is False
+    assert {"project": "footnote", "n": 247} in capq["rows"]
+
+    assert _queue(board, "operator_question")["count"] == 1
+    assert board["actionable"] == 0
+
+
+def test_capture_projects_beyond_the_row_cap_state_the_elision():
+    """A hundreds-row stream cannot be listed; the cut must be said out loud."""
+    projects = {f"p{i:02d}": i + 1 for i in range(12)}
+    inputs = _empty_inputs(
+        outstanding=_outstanding(captures={"total": 78, "by_project": projects})
+    )
+    board = build_board(inputs)
+
+    q = _queue(board, "capture_pending")
+    listed = [r for r in q["rows"] if "project" in r]
+    assert len(listed) == 8
+    assert any(r.get("elided_projects") == 4 for r in q["rows"]), (
+        "the elision row names how many projects were cut"
+    )
+
+
+def test_all_four_streams_are_visible_from_one_board_read():
+    inputs = _empty_inputs(
+        outstanding=_outstanding(
+            carveouts={"total": 2, "by_kind": {"oos-bug": 2}, "oldest_ts": None},
+            captures={"total": 3, "by_project": {"vault": 3}},
+        ),
+        lane=_ok([_lane_item("ship the thing")]),
+    )
+    board = build_board(inputs)
+
+    assert _queue(board, "operator_lane")["count"] == 1
+    assert _queue(board, "operator_question")["count"] == 0
+    assert _queue(board, "carveout_pending")["count"] == 2
+    assert _queue(board, "capture_pending")["count"] == 3
+
+
+def test_a_nested_shape_change_degrades_that_stream_not_the_whole_board():
+    """The board shells out through a PATH-resolved fno; a stale deployed CLI
+    can answer an older stream shape. The promise is degrade, never crash."""
+    inputs = _empty_inputs(
+        outstanding=_ok(
+            {
+                "questions": [],
+                "carveouts": ["not", "a", "dict"],
+                "captures": {"total": "many", "by_project": {"a": "x", "b": 2}},
+                "roots": None,
+            }
+        )
+    )
+    board = build_board(inputs)
+
+    assert _queue(board, "carveout_pending")["count"] == 0
+    cap = _queue(board, "capture_pending")
+    assert cap["count"] == 0, '"many" is not a count; zero, not a crash'
+    assert {"project": "b", "n": 2} in cap["rows"]
+    assert {"project": "a", "n": 0} in cap["rows"], "junk counts render as 0"

@@ -67,7 +67,7 @@ def test_undispatched_queue_carries_a_nonempty_note():
         claimed_nodes=_ok([]),
         holder_activity={},
         prs=_ok([]),
-        questions=_ok([]),
+        outstanding=_ok({}),
         needs=_ok([]),
         lane=_ok([]),
     )
