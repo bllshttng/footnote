@@ -77,6 +77,10 @@ const BYE_FLUSH: Duration = Duration::from_millis(250);
 /// The droppable outbound path: newest unsent frame per pane, per client.
 type DirtyMap = Arc<Mutex<HashMap<u64, Frame>>>;
 
+/// Cadence of the `mux_pane_counters` snapshot emit. 30s is far finer than
+/// any per-pane pricing window and keeps the global journal at ~2.9k rows/day.
+const PANE_STATS_CADENCE: Duration = Duration::from_secs(30);
+
 /// Per-pane monotonic counters, the mux's share of fleet cost attribution.
 /// All five are totals since pane birth, NEVER rates: every rate read during
 /// the measurement session that motivated them was wrong or inside the noise
@@ -605,6 +609,11 @@ enum CoreMsg {
         /// Active missions, from the same graph read as `cards`.
         missions: backlog_view::MissionMap,
     },
+    /// The per-pane counter snapshot cadence fired: snapshot every live pane's
+    /// monotonic totals and emit one event onto the machine-global events
+    /// journal. Sent by a 30s interval task; a no-op with no live panes (an
+    /// idle mux writes nothing).
+    PaneStatsTick,
 }
 
 /// The per-pane signal an off-loop `PaneWait` watcher observes. The core loop
@@ -1374,6 +1383,10 @@ struct Core {
     /// steering path. An inflated autonomy rate is the dangerous silent
     /// failure, so the count exists even before the scoreboard reads it.
     touch_emit_failures: Arc<AtomicU64>,
+    /// Failed per-pane counter emits, same discipline as
+    /// [`Core::touch_emit_failures`]: counted and logged, never raised to the
+    /// serving path.
+    pane_stats_emit_failures: Arc<AtomicU64>,
     /// Attached-client count for the periodic readers (x-4e30). Published
     /// from choke points (tail of `handle` + the main-loop tail), never
     /// per mutation site: `clients` mutates in six places and per-site
@@ -6989,6 +7002,95 @@ impl Core {
         });
     }
 
+    /// The `mux_pane_counters` event payload for the current live pane set:
+    /// every pane's monotonic totals plus its provenance (the join keys the
+    /// spawn gate prices a pane against a bg session with). `None` when no
+    /// pane is live - an idle mux writes nothing.
+    fn pane_stats_payload(&self) -> Option<String> {
+        let mut rows: Vec<(u64, &PaneEntry)> = self.panes.iter().map(|(&p, e)| (p, e)).collect();
+        if rows.is_empty() {
+            return None;
+        }
+        // Deterministic pane order: differencing is per-pane, but a stable
+        // layout keeps consecutive samples eyeball-diffable in the journal.
+        rows.sort_unstable_by_key(|(p, _)| *p);
+        let panes: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|(pid, e)| {
+                let c = &e.stats;
+                serde_json::json!({
+                    "pane_id": pid,
+                    "node": e.node,
+                    "name": e.name,
+                    "cmd": e.cmd,
+                    "bytes_in": c.bytes_in.load(Ordering::Relaxed),
+                    "grid_updates": c.grid_updates.load(Ordering::Relaxed),
+                    "frames_composited": c.frames_composited.load(Ordering::Relaxed),
+                    "frames_emitted": c.frames_emitted.load(Ordering::Relaxed),
+                    "cpu_ns": c.cpu_ns.load(Ordering::Relaxed),
+                })
+            })
+            .collect();
+        Some(
+            serde_json::json!({
+                "session": self.session_name,
+                "panes": panes,
+            })
+            .to_string(),
+        )
+    }
+
+    /// Snapshot every live pane's monotonic counters and emit one
+    /// `mux_pane_counters` event onto the machine-global events journal, so
+    /// `fno agents top` and the spawn gate read one stream from any cwd.
+    /// Totals, never rates (see [`PaneCounters`]): readers difference two
+    /// samples over a window. Same fire-and-forget shell-out contract as
+    /// [`Core::touch`]: a failure is counted, never raised to the serving
+    /// path.
+    fn emit_pane_stats(&self) {
+        // Same guards as `touch`: under cfg!(test) current_exe is the test
+        // binary, and FNO_PANE_STATS_EMIT=0 is the operator kill switch.
+        if cfg!(test) || std::env::var_os("FNO_PANE_STATS_EMIT").is_some_and(|v| v == "0") {
+            return;
+        }
+        let Some(data) = self.pane_stats_payload() else {
+            return;
+        };
+        let failures = Arc::clone(&self.pane_stats_emit_failures);
+        tokio::spawn(async move {
+            const PANE_STATS_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
+            let ok = matches!(
+                tokio::time::timeout(
+                    PANE_STATS_EMIT_TIMEOUT,
+                    tokio::process::Command::new(fno_bin())
+                        .args([
+                            "doctor",
+                            "event",
+                            "emit",
+                            "--type",
+                            "mux_pane_counters",
+                            "--source",
+                            "daemon",
+                            "--global",
+                            "--data",
+                            &data,
+                        ])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .kill_on_drop(true)
+                        .status(),
+                )
+                .await,
+                Ok(Ok(s)) if s.success()
+            );
+            if !ok {
+                let n = failures.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("fno mux: mux_pane_counters emit failed ({n} this session)");
+            }
+        });
+    }
+
     /// Live mode changes in a focused pane (vim toggling mouse reporting
     /// mid-session) must reach the terminals of that pane's VIEWERS now, not
     /// at the next focus change. Cheap: a flag read per output burst, bytes
@@ -9200,6 +9302,10 @@ impl Core {
                 self.push_layout(false);
                 Flow::Continue
             }
+            CoreMsg::PaneStatsTick => {
+                self.emit_pane_stats();
+                Flow::Continue
+            }
         }
     }
 
@@ -9440,6 +9546,7 @@ async fn serve(
         panes: HashMap::new(),
         pane_watch: HashMap::new(),
         pane_stats: Arc::new(RwLock::new(HashMap::new())),
+        pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
         clients: Vec::new(),
         next_pane_id: 1,
         next_squad_id: 1,
@@ -9817,6 +9924,23 @@ async fn serve(
                     {
                         return; // core loop gone; the server is shutting down
                     }
+                }
+            }
+        });
+    }
+
+    // The per-pane counter cadence: a fixed 30s tick telling the core to
+    // snapshot and emit. Delay (not Burst) on a missed tick - counters are
+    // monotonic totals, so one late sample costs nothing a difference needs.
+    {
+        let core_tx = core_tx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(PANE_STATS_CADENCE);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if core_tx.send(CoreMsg::PaneStatsTick).await.is_err() {
+                    return; // Core dropped; server shutting down
                 }
             }
         });
@@ -17640,6 +17764,7 @@ mod tests {
             panes: HashMap::new(),
             pane_watch: HashMap::new(),
             pane_stats: Arc::new(RwLock::new(HashMap::new())),
+            pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
             clients: Vec::new(),
             next_pane_id: 1,
             next_squad_id: 1,
@@ -18138,6 +18263,157 @@ mod tests {
                 );
                 assert!(dirty.lock().unwrap().is_empty());
             });
+    }
+
+    /// Rig: a Core with one live `/bin/cat` pane fed `bytes` through the real
+    /// pty-output drain path (our own channel stands in for the pty reader
+    /// thread). Returns the core and the pane id. The pane is tiny (2x4) on
+    /// purpose: a serialized Frame scales with cells, and a full-size grid
+    /// overflows the 4096-byte duplex the emission tests read only AFTER the
+    /// write returns, deadlocking the writer.
+    fn counter_core(bytes: &[u8]) -> (Core, u64) {
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let pid = core.spawn_pane(2, 4, "/tmp").expect("pane");
+        core.panes.get_mut(&pid).unwrap().node = Some("x-deadbeef".into());
+        core.panes.get_mut(&pid).unwrap().name = Some("peer".into());
+        core.panes.get_mut(&pid).unwrap().cmd = Some("claude".into());
+        let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+        tx.try_send((pid, bytes.to_vec())).unwrap();
+        drop(tx);
+        let mut first_out = HashSet::new();
+        drain_pty_output(&mut core, &mut rx, None, &mut first_out);
+        (core, pid)
+    }
+
+    #[test]
+    fn pane_counters_count_fed_bytes_bursts_and_cpu() {
+        let (core, pid) = counter_core(b"hello");
+        let c = &core.panes[&pid].stats;
+        assert_eq!(c.bytes_in.load(Ordering::Relaxed), 5);
+        assert_eq!(c.grid_updates.load(Ordering::Relaxed), 1);
+        assert!(
+            c.cpu_ns.load(Ordering::Relaxed) > 0,
+            "feeding one burst must attribute nonzero handling time"
+        );
+    }
+
+    #[test]
+    fn hidden_pane_is_fed_but_never_composites() {
+        // No client is attached, so broadcast_pane's visible-gate returns
+        // before vt.frame(): the counter set must show fed-but-never-
+        // composited, the exact reading that separates feeding from display.
+        let (core, pid) = counter_core(b"data");
+        let c = &core.panes[&pid].stats;
+        assert_eq!(c.frames_composited.load(Ordering::Relaxed), 0);
+        assert_eq!(c.bytes_in.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn dropped_dirty_frame_composites_but_never_emits() {
+        // Two broadcasts with no writer drain: the newest-wins map keeps one
+        // frame, so composited advances twice and emitted once - the gap is
+        // the measurement, never "fixed" by counting the dropped frame.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (mut core, pid) = counter_core(b"x");
+                core.panes.get_mut(&pid).unwrap().vt.feed(b"$ ");
+                let (tx, _rx) = mpsc::channel::<ServerMsg>(8);
+                let dirty: DirtyMap = Arc::default();
+                let notify = Arc::new(Notify::new());
+                core.clients.push(Client {
+                    id: 9,
+                    reliable_tx: tx,
+                    dirty: dirty.clone(),
+                    notify: notify.clone(),
+                    synced_modes: Modes::default(),
+                    view: (1, 1),
+                    visible: HashSet::from([pid]),
+                    dims: (24, 80),
+                    passive: false,
+                    last_press: None,
+                });
+                let base = core.panes[&pid]
+                    .stats
+                    .frames_composited
+                    .load(Ordering::Relaxed);
+                core.broadcast_pane(pid);
+                core.broadcast_pane(pid);
+                let c = &core.panes[&pid].stats;
+                assert_eq!(c.frames_composited.load(Ordering::Relaxed), base + 2);
+                assert_eq!(dirty.lock().unwrap().len(), 1, "newest-wins coalescing");
+
+                // The Bye flush is one wire path: one emitted frame.
+                let (mut writer, mut reader) = tokio::io::duplex(4096);
+                let stats = core.pane_stats.clone();
+                write_reliable(
+                    &mut writer,
+                    &ServerMsg::Bye { reason: "d".into() },
+                    &dirty,
+                    &stats,
+                )
+                .await
+                .unwrap();
+                let _ = read_msg::<_, ServerMsg>(&mut reader).await;
+                assert_eq!(c.frames_emitted.load(Ordering::Relaxed), 1);
+
+                // A reliable Frame (the cold-attach snapshot path) emits too.
+                write_reliable(
+                    &mut writer,
+                    &ServerMsg::Frame {
+                        pane_id: pid,
+                        frame: core.panes[&pid].vt.frame(),
+                    },
+                    &dirty,
+                    &stats,
+                )
+                .await
+                .unwrap();
+                let _ = read_msg::<_, ServerMsg>(&mut reader).await;
+                assert_eq!(c.frames_emitted.load(Ordering::Relaxed), 2);
+                // A pane with no registry row (reaped mid-drain) skips
+                // silently rather than counting a phantom emit.
+                count_frame_emitted(&stats, u64::MAX);
+                assert_eq!(c.frames_emitted.load(Ordering::Relaxed), 2);
+            });
+    }
+
+    #[test]
+    fn pane_stats_payload_carries_provenance_and_totals() {
+        let (core, pid) = counter_core(b"abc");
+        let payload = core.pane_stats_payload().expect("live pane -> payload");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["session"], "test");
+        let row = v["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["pane_id"].as_u64() == Some(pid))
+            .expect("the live pane's row");
+        assert_eq!(row["node"], "x-deadbeef");
+        assert_eq!(row["name"], "peer");
+        assert_eq!(row["cmd"], "claude");
+        assert_eq!(row["bytes_in"], 3);
+        for key in [
+            "grid_updates",
+            "frames_composited",
+            "frames_emitted",
+            "cpu_ns",
+        ] {
+            assert!(row[key].is_u64(), "{key} must be a number");
+        }
+        assert!(empty_core().pane_stats_payload().is_none());
+    }
+
+    #[test]
+    fn reaping_a_pane_drops_its_counter_row() {
+        let (mut core, pid) = counter_core(b"z");
+        assert!(core.pane_stats.read().unwrap().contains_key(&pid));
+        core.reap_pane(pid);
+        assert!(!core.pane_stats.read().unwrap().contains_key(&pid));
     }
 
     #[test]
