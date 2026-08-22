@@ -2701,7 +2701,6 @@ impl Core {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn run_pane(
         &mut self,
         squad_key: String,
@@ -2713,6 +2712,17 @@ impl Core {
         placement: PanePlacement,
         worker: Option<String>,
     ) -> Result<u64, (u32, String)> {
+        // (x-5f7f) The worker name reaches the store and later keys a resume,
+        // so the SERVER re-validates it before any pane exists - the CLI gate
+        // covers one caller, the control socket is reachable by any client.
+        if let Some(name) = &worker {
+            if !crate::squad_store::valid_worker_name(name) {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    "worker name must be a registry name ([A-Za-z0-9._-], <=64 chars)".into(),
+                ));
+            }
+        }
         // Create-if-absent lives ONLY here on the script path (Locked 7, x-9f75): a `pane run --squad
         // <name>` for a not-yet-existing squad mints one so lanes group by project; AttachAgent / UI targets
         // stay fail-closed. Only an UNKNOWN name is creatable (blank / unknown id still error). Resolved
@@ -14378,6 +14388,38 @@ mod tests {
             "a plain run records no member: {:?}",
             sq.members
         );
+    }
+
+    #[test]
+    fn run_pane_refuses_a_hostile_worker_name_before_spawning() {
+        // The server-side gate: the control socket is reachable by any client,
+        // so the CLI's own --worker validation is not the authority. A hostile
+        // name is refused with no pane spawned and no squad minted.
+        let _s = StoreScratch::new("run-pane-hostile");
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let err = core
+            .run_pane(
+                "/repo/proj".into(),
+                "/repo/proj".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                PanePlacement {
+                    tab: None,
+                    at: None,
+                    target: PaneTarget::SquadName("work".into()),
+                    split: None,
+                    here: false,
+                    fallback: PlacementFallback::NewTab,
+                },
+                Some("a;rm -rf".into()),
+            )
+            .unwrap_err();
+        assert_eq!(err.0, err_code::BAD_REQUEST);
+        assert!(core.panes.is_empty(), "no pane spawned");
+        assert!(core.session.squads.is_empty(), "no squad minted");
     }
 
     #[test]
