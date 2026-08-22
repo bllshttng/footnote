@@ -686,37 +686,35 @@ def _lookup_mux_pane(
         return None
 
 
-def _transcript_on_disk(
-    handle: str,
-    *,
-    projects_root: Optional[Path] = None,
-    codex_sessions_dir: Optional[Path] = None,
-) -> Optional[Path]:
-    """The transcript for ``handle`` if one is on disk, else None.
+def _adoptable_sessions(handle: str) -> list[tuple[str, str]]:
+    """``(harness, session_id)`` for every harness store that still holds ``handle``.
 
-    The registry and the transcript are two different surfaces, and a reaped
-    row leaves its transcript behind. This is what lets the miss below say
-    which one it actually measured instead of reporting an absence as a death.
+    The registry and the harness stores are two different surfaces, and a
+    reaped row leaves its transcript behind. This is what lets the miss below
+    say which one it actually measured instead of reporting an absence as a
+    death.
 
-    Reuses the locators already in this module rather than adding a third
-    search: ``resolve_transcript`` handles a claude full uuid AND an 8-hex
-    prefix (the form an operator peeks by), and ``_codex_rollout_path`` handles
-    a codex rollout. Every failure degrades to None and never raises, matching
-    ``_lookup_mux_pane`` on a torn registry.
+    Deliberately ``probe_stores`` and not ``resolve_transcript``: this is the
+    exact function ``adopt``'s third resolution step runs, so a positive answer
+    here is evidence the printed ``fno agents adopt`` will really work rather
+    than a second search that could disagree with it. It also needs no cwd,
+    which a reaped row no longer has, and it covers every harness rather than
+    claude alone.
+
+    A non-session-shaped handle (a plain agent name) answers empty by design.
+    Every failure degrades to empty and never raises, matching how
+    ``_lookup_mux_pane`` swallows a torn registry.
     """
     try:
-        from fno.provenance.resolver import resolve_transcript
+        from fno.agents.store_fallback import probe_stores
 
-        rt = resolve_transcript("claude", handle, "", projects_root=projects_root)
-        if getattr(rt, "resolved", False) and getattr(rt, "transcript_path", None):
-            return Path(rt.transcript_path)
+        # require_complete=False: this is an advisory hint, so a partially
+        # unreadable store should still surface the hits it CAN see rather
+        # than refusing. The refusal contract belongs to identity selection.
+        hits = probe_stores(handle, require_complete=False)
     except Exception:  # noqa: BLE001 - an advisory locator never raises
-        pass
-    try:
-        found = _codex_rollout_path(handle, codex_sessions_dir)
-    except Exception:  # noqa: BLE001 - same contract
-        return None
-    return found
+        return []
+    return [(h.harness, h.session_id) for h in hits]
 
 
 def _read_mux_pane(
@@ -843,22 +841,20 @@ def peek(
         # while this line used to answer a bare "peer not found". A king read
         # that as destroyed and nearly spawned fresh over a green PR.
         err.write(f"peer not found in the registry: {handle}\n")
-        transcript = _transcript_on_disk(
-            handle,
-            projects_root=projects_root,
-            codex_sessions_dir=codex_sessions_dir,
-        )
-        if transcript is not None:
-            err.write(
-                f"the transcript IS on disk: {transcript}\n"
-                "the registry row is gone; the conversation is not.\n"
-            )
+        adoptable = _adoptable_sessions(handle)
+        if adoptable:
+            for harness_name, sid in adoptable:
+                err.write(
+                    f"the {harness_name} transcript IS on disk: {sid}\n"
+                    "the registry row is gone; the conversation is not.\n"
+                )
+                err.write(f"try: fno agents adopt {sid}\n")
         else:
             err.write(
                 "the registry is not the transcript. A reaped row leaves its "
                 "transcript on disk.\n"
             )
-        err.write(f"try: fno agents adopt {handle}\n")
+            err.write(f"try: fno agents adopt {handle}\n")
         if suggestions:
             err.write(f"did you mean: {', '.join(suggestions)}\n")
         return EXIT_NOT_FOUND
