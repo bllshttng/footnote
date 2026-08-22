@@ -3560,6 +3560,33 @@ event_types:
           enum: [ok, failed]
           description: "ok when graph_node_id resolved (pane FNO_NODE provenance / graph pr_number match / reconcile record); failed otherwise."
 
+  - name: mux_pane_counters
+    retention: ephemeral
+    description: "Monotonic per-pane totals snapshot from the mux server core loop, one event per 30s cadence tick, written ONLY to the machine-global journal (emit --global) so any-cwd readers share one stream. Totals since pane birth, never rates: readers difference consecutive samples per pane, per session (the journal interleaves sessions). frames_composited counts per-viewing-client frame enqueues past the broadcast visible-gate (a fed-but-unviewed pane stays flat; a shared frame to two clients is 2) and frames_emitted counts only successful per-client wire writes, so composited > emitted is the newest-wins dirty map dropping a frame copy - the pair that separates feeding cost from display cost. Emit is fire-and-forget non-fatal, like human_touch."
+    sources: [daemon, test]
+    data:
+      required: [session, panes]
+      properties:
+        session:
+          type: string
+          description: "Mux session name (the socket's file stem)."
+        panes:
+          type: array
+          description: "One row per live pane at snapshot time, ascending pane_id. An idle mux emits nothing."
+          items:
+            type: object
+            required: [pane_id, bytes_in, grid_updates, frames_composited, frames_emitted, cpu_ns]
+            properties:
+              pane_id: { type: integer }
+              node: { type: [string, "null"] }
+              name: { type: [string, "null"] }
+              cmd: { type: [string, "null"] }
+              bytes_in: { type: integer }
+              grid_updates: { type: integer }
+              frames_composited: { type: integer }
+              frames_emitted: { type: integer }
+              cpu_ns: { type: integer }
+
   - name: verifier_verdict
     description: "Ship-gate verifier advisory verdict (W6 x-f063): the plan-AC check ran against the ship diff at finalize time. Advisory only - no code path may gate a ship on it (Locked Decision #6). One event per ship; `fno whoami scoreboard --calibration` joins these to per-node outcomes to measure the verifier's false-positive rate before anyone proposes flipping it to a gate. error = the verifier itself failed (spawn/timeout/parse); not_applicable = doc ship, no plan bound, or no ACs to check."
     sources: [target, test]
