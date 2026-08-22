@@ -1755,7 +1755,25 @@ def _forced_pane_send(
     # refused a pane that was alive and told the sender its id might belong to
     # somebody else. `TERMINAL_STATUSES` is shared for exactly this reason, and
     # a hand-rolled copy of the vocabulary is the drift its comment warns about.
+    from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
     from fno.agents.registry import TERMINAL_STATUSES
+
+    # Bus-only FIRST, and up front, because it is a policy on the row rather
+    # than an outcome of trying. `_mux_pane_send` returns False for it without
+    # printing anything, which every other caller reads correctly as "demote to
+    # durable". This one does not demote, so that silent False surfaced as an
+    # exit 1 blaming a refusal that was never printed and a composer that was
+    # never typed into, with no durable row written. The same send without
+    # --force queues durable and reports a turn-boundary delivery.
+    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+        _release_budget(reservation)
+        print(
+            f"error: {recipient} is bus-only by policy, so no pane paste is "
+            f"allowed and --force has nothing it may do. Send without --force: "
+            f"that queues durable and the recipient drains it.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
 
     status = getattr(entry, "status", None)
     if status in TERMINAL_STATUSES:
@@ -4144,6 +4162,13 @@ def cmd_sent(
                         "kind": m.kind, "ts": m.ts,
                         "delivery": m.delivery or "durable",
                         "claimed": claimed_flag[m.id],
+                        # A typed row is neither claimed nor claimABLE: it is
+                        # excluded from the unclaimed scan, withdraw refuses it,
+                        # and the recipient cannot drain it. Reporting only
+                        # `claimed: false` made it identical to an UNCLAIMED
+                        # durable row that can still clear, so this renderer and
+                        # `--unclaimed-only` disagreed about the same row.
+                        "claimable": m.delivery != TYPED_DELIVERY,
                     }
                     for m in msgs
                 ],

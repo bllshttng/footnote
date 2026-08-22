@@ -132,8 +132,20 @@ class ProviderSubprocessError(RuntimeError):
     surface them unwrapped (AC1-FR subprocess non-zero / auth-quota).
     """
 
+    #: Set True by a raiser that refused BEFORE the subprocess ran. The exit
+    #: code cannot carry this: 127 already means "the binary was not found",
+    #: and a refusal is not that. The dispatcher reads it to decide whether a
+    #: supervisor may exist, and a wrong answer there anchors a multi-minute
+    #: writer claim on a transcript that has no writer.
+    no_child: bool
+
     def __init__(
-        self, exit_code: int, stderr: str, *, summary: Optional[str] = None
+        self,
+        exit_code: int,
+        stderr: str,
+        *,
+        summary: Optional[str] = None,
+        no_child: bool = False,
     ) -> None:
         # `summary` is for a refusal raised BEFORE claude is invoked. The default
         # names a process exit, and a caller that never started one would report
@@ -142,6 +154,7 @@ class ProviderSubprocessError(RuntimeError):
         super().__init__(summary or f"claude --bg exited {exit_code}: {stderr!r}")
         self.exit_code = exit_code
         self.stderr = stderr
+        self.no_child = no_child
 
 
 def parse_short_id(stdout: str) -> str:
@@ -681,6 +694,11 @@ def bg_create(
                 f"worker unattributed."
             ),
             summary=f"spawn refused before claude was invoked: {exc}",
+            # Nothing was executed, so no supervisor can exist and the writer
+            # claim is safe to free. Without this the dispatcher read the
+            # non-127 exit as "a supervisor may be running" and anchored a
+            # five-minute claim on a transcript with no writer.
+            no_child=True,
         ) from exc
 
     start = time.monotonic()

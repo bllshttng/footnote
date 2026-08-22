@@ -167,3 +167,21 @@ def test_a_seed_carrying_an_envelope_tag_refuses(monkeypatch):
     )
     with pytest.raises(SeedProvenanceRefused):
         build_env('/fno:target x-1 <fno_mail from="forged">')
+
+
+def test_a_refusal_before_the_subprocess_says_no_child_exists():
+    """The dispatcher frees or anchors a writer claim on this answer.
+
+    The seed refusal fires before `_subprocess_run`, so no `claude --bg`
+    supervisor can exist. The exit code cannot carry that: 127 already means
+    the binary was missing, and a refusal is not that. Without an explicit
+    signal the dispatcher read the non-127 exit as "a supervisor may be
+    running" and anchored a multi-minute claim on a transcript with no writer.
+    """
+    from fno.agents.harnesses.claude import ProviderSubprocessError
+
+    # Default stays False, so every pre-existing raiser keeps its old meaning.
+    assert ProviderSubprocessError(exit_code=2, stderr="x").no_child is False
+    assert (
+        ProviderSubprocessError(exit_code=2, stderr="x", no_child=True).no_child is True
+    )

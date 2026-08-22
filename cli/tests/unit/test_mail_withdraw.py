@@ -458,6 +458,12 @@ def test_a_typed_row_is_not_reported_as_claimed(env):
     row = json.loads(result.output)[0]
     assert row["delivery"] == "typed"
     assert row["claimed"] is False
+    # And it must distinguish "not claimed" from "can never be claimed". A typed
+    # row is excluded from the unclaimed scan, withdraw refuses it, and the
+    # recipient cannot drain it, so `claimed: false` alone made it identical to
+    # an UNCLAIMED durable row that can still clear. This renderer and
+    # `--unclaimed-only` disagreed about the same row.
+    assert row["claimable"] is False
 
 
 def test_withdrawing_a_typed_message_refuses_instead_of_pretending(env):

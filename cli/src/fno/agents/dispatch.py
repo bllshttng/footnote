@@ -1523,7 +1523,12 @@ def _claude_create_path(
         # a non-zero exit may have left one running, and there is no short_id to
         # resolve its pid from - so the claim gets a TTL, which is the only thing
         # that keeps guarding it once this process exits.
-        if exc.exit_code == _NO_CHILD_POSSIBLE_EXIT:
+        # `no_child` is the explicit signal, checked first: a raiser that
+        # refused before the subprocess ran knows there is no supervisor, and
+        # it cannot say so through the exit code because 127 already means the
+        # binary was missing. Falling back to the code keeps every existing
+        # raiser working unchanged.
+        if getattr(exc, "no_child", False) or exc.exit_code == _NO_CHILD_POSSIBLE_EXIT:
             _release_writer_claim()
         else:
             _anchor_claim_for_unknown_orphan()

@@ -331,3 +331,28 @@ def test_force_reaches_a_registered_agent_by_name(_tmp_state, monkeypatch):
     # Addressed by the resolved session's handle, never by the friendly name:
     # the name is not a mail address and a row keyed on it strands the message.
     assert "0199aaaa" in result.output
+
+
+def test_force_refuses_a_bus_only_recipient_up_front(_tmp_state, monkeypatch):
+    """Bus-only is a POLICY on the row, so it is knowable before typing.
+
+    `_mux_pane_send` returns False for it and prints nothing, which every other
+    caller reads correctly as "demote to durable". `--force` is the one caller
+    that does not demote, so that silent False came out as an exit blaming a
+    refusal never printed and a composer never typed into, with no durable row
+    written. The same send without `--force` queues durable and gets drained.
+    """
+    entry, sent = _install(monkeypatch)
+    entry.delivery_policy = "bus-only"
+
+    result = runner.invoke(
+        mail_app,
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+    )
+
+    assert result.exit_code == 1
+    err = result.stderr or ""
+    assert "bus-only" in err
+    # It must name the working route, not just refuse.
+    assert "without --force" in err
+    assert not sent
