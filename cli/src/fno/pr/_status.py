@@ -732,14 +732,14 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     if coverage.get("review_state") == "reviewer_refused":
         raw_verdicts = coverage.get("verdicts")
         verdicts = raw_verdicts if isinstance(raw_verdicts, list) else []
-        names = [
+        refused_names = [
             str(verdict.get("name"))
             for verdict in verdicts
             if isinstance(verdict, dict)
             and verdict.get("verdict") == "refused"
             and verdict.get("name")
         ]
-        who = ", ".join(names) or "configured reviewer"
+        who = ", ".join(refused_names) or "configured reviewer"
         sys.stderr.write(
             f"note: reviewer_refused: {who} declined to review; run a local review at HEAD.\n"
         )
