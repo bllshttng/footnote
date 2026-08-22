@@ -175,7 +175,11 @@ impl BoardScope {
         match self {
             BoardScope::All => "all projects".to_string(),
             BoardScope::Projects(set) if set.is_empty() => {
-                "unscoped cards only (no project resolved; refusing to widen)".to_string()
+                // Reachable only from a wire value that names no project. The
+                // client's own refusal serializes to "", which the server reads
+                // as "nothing latched" and answers with All - so this line must
+                // not claim a resolution failure it cannot have observed.
+                "unscoped cards only (the scope names no project)".to_string()
             }
             BoardScope::Projects(set) => {
                 let mut names: Vec<&str> = set.iter().map(String::as_str).collect();
