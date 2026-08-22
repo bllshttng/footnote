@@ -113,6 +113,36 @@ _plan_name_date() {
     fi
 }
 
+# Resolve a plan's created: date (frontmatter, normalized, then the filename
+# fallback) for the decisions_acknowledged grandfather check. Duplicated from
+# the near-identical extraction in the "no consolidation: block" branch of
+# check_consolidation_file rather than shared with it: that branch also
+# handles an unclosed-frontmatter early return this call site does not need,
+# since by the time it runs the consolidation block has already parsed.
+_plan_created_date() {
+    local file="$1" created=""
+    created=$(awk '
+        /^---/ { c++; if (c==2) exit; next }
+        c==1 && /^created:/ {
+            line=$0
+            sub(/^[[:space:]]*created:[[:space:]]*/, "", line)
+            sub(/[[:space:]]#.*$/, "", line)
+            gsub(/["'"'"']/, "", line)
+            sub(/[[:space:]].*$/, "", line)
+            sub(/T.*$/, "", line)
+            print line
+            exit
+        }
+    ' "$file")
+    if [[ "$created" =~ ^[0-9]{8}$ ]]; then
+        created="${created:0:4}-${created:4:2}-${created:6:2}"
+    fi
+    if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        created=$(_plan_name_date "$file")
+    fi
+    printf '%s' "$created"
+}
+
 # Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
 # nothing. Shared by _plan_rung, _semantic_validate, and the consolidation gate
 # so the "which fno runs?" question has ONE answer here.
@@ -741,7 +771,9 @@ fi
 # only on a string the real outcome produces. It cannot live in skill prose
 # alone: a direct `fno` call or a non-claude worker skips the skill layer and
 # would ship green. Missing block, empty block, or out-of-enum outcome is an
-# ERROR, never a warn.
+# ERROR, never a warn. The same positive-marker discipline extends to
+# `decisions_acknowledged`: a live ruling on the node with no matching entry
+# is an ERROR too (own grandfather date, since it ships after the block gate).
 check_consolidation_file() {
     local file="$1"
     local label="$2"
@@ -913,8 +945,20 @@ def render(err, block):
                 "consolidation entry id `%s` (%s) is not a node id "
                 "(expected <prefix>-<hex>, e.g. x-3bd3)" % (raw, section)
             )
+        if field == "decision_id":
+            if kind == "missing":
+                return "consolidation section `%s` has an entry with no decision_id" % section
+            raw = entry.get("decision_id") if isinstance(entry, dict) else entry
+            return (
+                "consolidation entry decision_id `%s` (%s) is not a decision id "
+                "(expected d-<hex>, e.g. d-a4b6e1c8)" % (raw, section)
+            )
         if field == "reason":
-            named = entry.get("id") if isinstance(entry, dict) else entry
+            named = entry.get("id") if isinstance(entry, dict) else None
+            if named is None and isinstance(entry, dict):
+                named = entry.get("decision_id")
+            if named is None:
+                named = entry
             return (
                 "consolidation entry `%s` (%s) has an empty reason - the recorded "
                 "decision must be checkable by a later reader" % (named, section)
@@ -967,6 +1011,33 @@ except ValidationError as exc:
         sys.stdout.write("E\t" + " ".join(render(err, block).split()) + "\n")
     raise SystemExit(0)
 sys.stdout.write("O\t%s\n" % validated.outcome)
+
+# Which of the node's LIVE decisions has no decisions_acknowledged entry.
+# This is the one part of the check the shape model above cannot do (it has
+# no access to the decision index), so it runs here rather than in
+# ConsolidationBlock: the model stays a pure shape authority, this stays the
+# one place that reads live data.
+node_id = (loaded or {}).get("claims") if isinstance(loaded, dict) else None
+if isinstance(node_id, str) and node_id.strip():
+    try:
+        from fno.decide import list_decisions
+
+        _subj, rows, _damaged = list_decisions(node_id.strip(), limit=None)
+    except Exception as exc:  # noqa: BLE001 - unreadable index must not fail the shape check
+        sys.stdout.write("W\t" + " ".join(str(exc).split())[:160] + "\n")
+    else:
+        # Drop rows the derived superseded_by map marks withdrawn - a
+        # withdrawn ruling must not demand acknowledgment. Never scan the
+        # ruling's own prose for this (see DecisionAcknowledgment's sibling
+        # note in ConsolidationBlock's docstring).
+        live = [r for r in rows if not r.get("superseded_by")]
+        acked = {e.decision_id for e in validated.decisions_acknowledged}
+        for row in live:
+            did = str(row.get("decision_id") or "")
+            if did and did not in acked:
+                text = " ".join(str(row.get("decision") or "").split())[:80]
+                sys.stdout.write("M\t%s\t%s\n" % (did, text))
+        sys.stdout.write("D\t%d\n" % len(live))
 PYEOF
     )
     # Same ladder _semantic_validate walks: the checkout's own interpreter
@@ -987,7 +1058,7 @@ PYEOF
         return 0
     fi
 
-    local outcome="" line kind payload
+    local outcome="" line kind payload decisions_checked="" missing_decisions=()
     if [[ "$delegate_rc" -ne 0 ]]; then
         warn "$label: consolidation block NOT CHECKED (the shape check failed to run: ${delegate_out##*$'\n'}) - not a pass"
         return 0
@@ -997,6 +1068,9 @@ PYEOF
             E) c_error "$label: $payload" ;;
             O) outcome="$payload" ;;
             U) warn "$label: consolidation block NOT CHECKED ($payload) - not a pass"; return 0 ;;
+            M) missing_decisions+=("$payload") ;;
+            D) decisions_checked="$payload" ;;
+            W) warn "$label: decisions_acknowledged NOT CHECKED (decision index unreadable: $payload) - not a pass" ;;
         esac
     done <<< "$delegate_out"
 
@@ -1008,8 +1082,29 @@ PYEOF
         c_error "$label: consolidation outcome is append, but a plan file was written - append records that the content went onto the other node instead, so either delete this plan or record absorb / proceed_alone"
     fi
 
+    # decisions_acknowledged ships 2026-08-22, after the 2026-08-17 block gate
+    # itself: a plan mid-flight in that five-day window can carry a well-formed
+    # block with no acknowledgment section at all, so it needs its OWN
+    # grandfather date rather than reusing the block's.
+    if [[ ${#missing_decisions[@]} -gt 0 ]]; then
+        local decisions_gate_date="2026-08-22" d_created
+        d_created=$(_plan_created_date "$file")
+        local entry did dtext
+        for entry in "${missing_decisions[@]}"; do
+            did="${entry%%$'\t'*}"
+            dtext="${entry#*$'\t'}"
+            if [[ ! "$d_created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                c_error "$label: decisions_acknowledged is missing $did ($dtext) - no readable created: date to grandfather against, add both"
+            elif [[ "$d_created" > "$decisions_gate_date" ]]; then
+                c_error "$label: decisions_acknowledged is missing $did ($dtext) - every row in graph.decisions needs a matching entry naming why it does not close this work"
+            else
+                warn "$label: decisions_acknowledged is missing $did ($dtext) (created $d_created, not after the $decisions_gate_date gate) - backfill before the next blueprint of this node"
+            fi
+        done
+    fi
+
     if [[ $c_errors -eq 0 ]]; then
-        ok "$label: consolidation outcome is ${outcome:-<missing>} (step 2d gate)"
+        ok "$label: consolidation outcome is ${outcome:-<missing>} (step 2d gate), ${decisions_checked:-0} decision(s) acknowledged"
     fi
 }
 
