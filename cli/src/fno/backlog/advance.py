@@ -1347,7 +1347,7 @@ def _ensure_lane_worktree(
     root (guarded below) regardless of the harness.
     """
     proc = subprocess.run(
-        [*_subprocess_util.fno_py_cmd(), "worktree", "ensure",
+        [*_subprocess_util.fno_py_cmd(), "workspace", "worktree", "ensure",
          "--repo", str(canonical_root), "--name", node_id, "--harness", harness],
         capture_output=True,
         text=True,

@@ -2841,7 +2841,7 @@ def start(
     # READ-ONLY (x-20f1 LD5): selects a worktree LOCATION. Nothing durable
     # records this harness, and a wrong guess costs a path, not an identity.
     ambient_harness = resolve_harness_identity().harness
-    ensure_cmd = fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name]
+    ensure_cmd = fno + ["workspace", "worktree", "ensure", "--repo", str(repo_root), "--name", name]
     if ambient_harness:
         ensure_cmd += ["--harness", ambient_harness]
     ens = subprocess.run(ensure_cmd, capture_output=True, text=True)

@@ -257,7 +257,7 @@ def test_ship_stale_guard_failopen_still_creates_pr(tmp_path, graph, monkeypatch
 
 
 class PrepareGh:
-    """Runner double for prepare_batch: scripts `fno backlog get` + `fno worktree ensure`."""
+    """Runner double for prepare_batch: scripts `fno backlog get` + `fno workspace worktree ensure`."""
 
     def __init__(self, *, node: dict, worktree: str = "/wt/batch-code", we_rc: int = 0):
         self.node = node
@@ -269,7 +269,7 @@ class PrepareGh:
         self.calls.append(cmd)
         if cmd[:3] == ["fno-py", "backlog", "get"]:
             return _cp(0, json.dumps(self.node))
-        if cmd[:3] == ["fno-py", "worktree", "ensure"]:
+        if cmd[:4] == ["fno-py", "workspace", "worktree", "ensure"]:
             return _cp(self.we_rc, self.worktree if self.we_rc == 0 else "", "boom" if self.we_rc else "")
         return _cp(0, "")
 
@@ -316,8 +316,8 @@ def test_prepare_join_reuses_open_batch(tmp_path, batching_on):
     out = B.prepare_batch(node_id="x-2", repo=str(tmp_path), root=tmp_path, run=gh)
     assert out["mode"] == "batched"
     assert out["worktree"] == str(tmp_path / "shared")
-    # join path never calls `fno worktree ensure` (reuses the recorded one).
-    assert not any(c[:3] == ["fno-py", "worktree", "ensure"] for c in gh.calls)
+    # join path never calls `fno workspace worktree ensure` (reuses the recorded one).
+    assert not any(c[:4] == ["fno-py", "workspace", "worktree", "ensure"] for c in gh.calls)
 
 
 def test_prepare_solo_when_worktree_ensure_fails(tmp_path, batching_on):

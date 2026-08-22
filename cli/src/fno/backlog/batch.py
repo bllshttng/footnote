@@ -691,7 +691,7 @@ def prepare_batch(
         # harness-native: forward --harness claude to land it at .claude/worktrees/.
         # The explicit --branch means a `never` project refuses (cannot isolate a
         # branch in place) and degrades to solo below - never launches on canonical.
-        we = run([*_subprocess_util.fno_py_cmd(), "worktree", "ensure",
+        we = run([*_subprocess_util.fno_py_cmd(), "workspace", "worktree", "ensure",
                   "--repo", repo, "--name", name, "--branch", branch, "--harness", "claude"])
         worktree = (we.stdout or "").strip()
         if we.returncode != 0 or not worktree:
