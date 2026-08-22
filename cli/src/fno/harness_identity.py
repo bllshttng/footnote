@@ -60,40 +60,28 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 
 
 # Markers a harness binary writes about ITSELF at startup, rather than session
-# ids that name a specific run. The claude binary sets CLAUDECODE=1, so a shell
-# that never ran claude cannot produce it.
+# ids that name a specific run. The claude binary sets CLAUDECODE=1.
 #
-# Read the ceiling before using one. A self-set marker survives a fork: a codex
-# session hand-started from a shell that had run claude inherits CLAUDECODE, so
-# this is evidence of claude ANCESTRY, not proof of a claude SELF. That is why
-# it never outranks the process-tree walk in claims/session_pid.py, which
-# answers the stronger question (the NEAREST harness ancestor). It earns its
-# place only where the walk has no answer at all - psutil denied, no harness
-# ancestor, a container that hides the parent chain - where the alternative is
-# resolving a live session to nothing.
+# NOT an identity resolver input, and the reason is worth stating because the
+# opposite reads as obvious. A shell that never ran claude cannot produce
+# CLAUDECODE, which sounds like proof of a claude self. It is not: the variable
+# survives a fork, so a codex session started from a shell that HAD run claude
+# inherits it. Treating it as proof there contradicts that session's own
+# CODEX_THREAD_ID and degrades a cleanly resolving codex session to ambiguous.
+# The poisoned-claude case and the codex-under-claude case carry the identical
+# name set, so environment alone cannot separate them; only the process-tree
+# walk in claims/session_pid.py can, and it is the sole prover
+# (resolve_self_identity).
 #
-# The setup doctor reads this same table for its remedy line, so the mapping
-# lives here once. Its own CLAUDE_CONFIG_DIR / CODEX_HOME entries stay local to
-# it: those name where config lives, not which binary is running.
+# What the table IS for: the setup doctor's remedy line reads it, so that
+# mapping has one home instead of a private literal, and AMBIENT_IDENTITY_ENV
+# below scrubs it so a spawned child does not inherit its parent's marker and
+# send `fno doctor` to the wrong settings file. The doctor's own
+# CLAUDE_CONFIG_DIR / CODEX_HOME entries stay local to it: those name where
+# config lives, not which binary is running.
 SELF_SET_HARNESS_MARKERS: tuple[tuple[str, str], ...] = (
     ("CLAUDECODE", "claude"),
 )
-
-
-def self_set_harness(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
-    """The harness family whose self-set marker is present, or None.
-
-    None when no marker is present AND when two families both are: two running
-    binaries cannot both be this process, so a tie is no evidence rather than a
-    precedence contest.
-    """
-    environ = os.environ if env is None else env
-    families = {
-        harness
-        for marker, harness in SELF_SET_HARNESS_MARKERS
-        if (environ.get(marker) or "").strip()
-    }
-    return next(iter(families)) if len(families) == 1 else None
 
 
 # Ambient session-identity env names that a HERMETIC run must not see. This is
@@ -137,12 +125,12 @@ _EXTRA_IDENTITY_NAMES: tuple[tuple[str, str], ...] = (
 AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
     *(marker for marker, _ in HARNESS_SESSION_MARKERS),
     *(marker for marker, _ in LEGACY_HARNESS_SESSION_MARKERS),
-    # The self-set markers scrub too, and for a sharper reason than the rest.
-    # CLAUDECODE survives a fork, so a codex child spawned by a claude parent
-    # inherits it and would carry claude's self-set marker for its whole life.
-    # Scrubbing at spawn is what keeps the marker meaning "the binary that wrote
-    # this is the one running" for every child footnote launches; each harness
-    # re-mints its own at startup, so the scrub is lossless.
+    # The self-set markers scrub too. CLAUDECODE survives a fork, so a codex
+    # child spawned by a claude parent inherits it and carries claude's marker
+    # for its whole life, which sends `fno doctor` to claude's settings file for
+    # a codex session. Each harness re-mints its own at startup, so the scrub is
+    # lossless. It changes what a CHILD sees; nothing here resolves identity
+    # from it (see SELF_SET_HARNESS_MARKERS above).
     *(marker for marker, _ in SELF_SET_HARNESS_MARKERS),
     *(name for name, _ in _EXTRA_IDENTITY_NAMES),
 )

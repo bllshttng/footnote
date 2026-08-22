@@ -10,11 +10,11 @@ These tests hold the collapse. Every grantor derivation reaches
 ``resolve_self_identity``, so a second implementation added to any of them fails
 here rather than in review.
 
-The ordering rule the tests pin: proof this process minted a marker comes from
-the process-tree walk (the nearest harness ancestor), and the self-set marker
-the running binary wrote about itself (``CLAUDECODE``) answers only where the
-walk has none. That marker survives a fork, so it names ancestry rather than
-self and must never outrank a readable ancestry.
+The rule the tests pin: the process-tree walk is the ONLY prover. A self-set
+marker such as ``CLAUDECODE`` survives a fork, so it names ancestry rather than
+self and must never stand in for the walk - promoting it contradicts a codex
+session's own marker and loses a valid identity. With no walk, resolution
+refuses rather than guesses, and ``fno whoami`` names the inherited family.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fno.harness_identity import AMBIENT_IDENTITY_ENV, canonical_handle, self_set_harness
+from fno.harness_identity import AMBIENT_IDENTITY_ENV, canonical_handle
 
 CLAUDE_SID = "119e3c52-62bf-43b4-b3c4-3c7ce659f802"
 CODEX_TID = "01a02125-4eb4-7bf1-b74e-d238887eb092"
@@ -46,20 +46,36 @@ def _walk(monkeypatch, harness):
     )
 
 
-# --- the self-set marker ----------------------------------------------------
+# --- the self-set marker is not an identity input ---------------------------
 
 
-def test_self_set_harness_reads_the_running_binarys_own_marker(monkeypatch):
+def test_a_sole_codex_marker_survives_an_inherited_claude_marker(monkeypatch):
+    """The trap this file exists to keep shut.
+
+    CLAUDECODE looks like proof of a claude self: a shell that never ran claude
+    cannot produce it. But it survives a fork, so a codex session started from a
+    shell that HAD run claude carries it. Reading it as proof there contradicts
+    that session's own CODEX_THREAD_ID and turns a cleanly resolving codex
+    session into an ambiguous one, taking every identity consumer with it.
+    """
+    from fno.claims.self_identity import resolve_self_identity
+
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_TID)
     monkeypatch.setenv("CLAUDECODE", "1")
-    assert self_set_harness() == "claude"
+    _walk(monkeypatch, None)
 
-    monkeypatch.delenv("CLAUDECODE")
-    assert self_set_harness() is None
+    identity = resolve_self_identity()
+
+    assert identity.session_id == CODEX_TID
+    assert identity.harness == "codex"
 
 
-def test_a_blank_marker_is_not_a_marker(monkeypatch):
-    monkeypatch.setenv("CLAUDECODE", "  ")
-    assert self_set_harness() is None
+def test_the_marker_scrubs_so_a_child_never_inherits_it():
+    """It resolves nothing, and it still scrubs: a codex child carrying its
+    claude parent's CLAUDECODE sends `fno doctor` to the wrong settings file."""
+    assert "CLAUDECODE" in AMBIENT_IDENTITY_ENV
 
 
 # --- the grantor derivation -------------------------------------------------
@@ -87,25 +103,12 @@ def test_grantor_is_the_claude_session_never_the_inherited_codex_thread(
     assert grantor == CLAUDE_SID
 
 
-def test_an_unreadable_ancestry_still_resolves_the_running_claude_session(
+def test_the_walk_decides_which_family_owns_a_mixed_environment(
     poisoned_env, monkeypatch
 ):
-    """psutil denied, no harness ancestor, a container hiding the parent chain:
-    the walk answers nothing and the grant used to record "human" for a crown a
-    real session issued. The marker the claude binary wrote settles it."""
-    from fno.agents.dispatch import _capture_parent_edge
-
-    _walk(monkeypatch, None)
-    session_id, harness, _cwd = _capture_parent_edge()
-
-    assert session_id == CLAUDE_SID
-    assert harness == "claude"
-
-
-def test_a_readable_ancestry_outranks_the_self_set_marker(poisoned_env, monkeypatch):
-    """A codex session hand-started from a shell that had run claude inherits
-    CLAUDECODE. The walk knows what this process actually runs under, so it
-    wins; the fork-surviving marker never overrides it."""
+    """The same environment, two answers, and only ancestry separates them. A
+    genuine codex-hosted claude carries the identical name set, which is why
+    reordering the marker table cannot fix this and the walk has to."""
     from fno.agents.dispatch import _capture_parent_edge
 
     _walk(monkeypatch, "codex")
@@ -115,12 +118,17 @@ def test_a_readable_ancestry_outranks_the_self_set_marker(poisoned_env, monkeypa
     assert harness == "codex"
 
 
-def test_no_marker_and_no_walk_still_refuses_to_guess(poisoned_env, monkeypatch):
-    """Removing the self-set marker restores the honest refusal: two families,
-    nothing proven, so no lineage is stamped rather than a stranger's."""
+def test_no_walk_refuses_to_guess_rather_than_stamping_a_stranger(
+    poisoned_env, monkeypatch
+):
+    """psutil denied, no harness ancestor, a container hiding the parent chain.
+
+    Two families and nothing proven, so no lineage is stamped. The grant records
+    "human" and `fno whoami` names the family to clear; that is the honest
+    answer, because the environment alone cannot say which session this is.
+    """
     from fno.agents.dispatch import _capture_parent_edge
 
-    monkeypatch.delenv("CLAUDECODE")
     _walk(monkeypatch, None)
     session_id, harness, _cwd = _capture_parent_edge()
 
