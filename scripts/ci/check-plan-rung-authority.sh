@@ -181,7 +181,7 @@ crates/fno-agents/src/subprocess_ask.rs:6
 crates/fno-agents/src/verify_evidence.rs:8
 crates/fno-agents/src/wait.rs:4
 crates/fno/build.rs:2
-crates/fno/src/agents_view.rs:94
+crates/fno/src/agents_view.rs:96
 crates/fno/src/backlog_view.rs:108
 crates/fno/src/bootstrap.rs:11
 crates/fno/src/client.rs:54
