@@ -1754,8 +1754,9 @@ def _claude_create_path(
         )
         raise DispatchAskError(
             f"registry write failed: {exc}. "
-            f"orphaned supervisor session: claude rm {short_id} "
-            f"(registry not updated).{held_note}",
+            f"supervisor session {short_id} is orphaned (registry not updated). "
+            f"Adopt it with `fno agents adopt {short_id}`, then `fno agents rm` "
+            f"if you want it gone.{held_note}",
             exit_code=12,
         ) from exc
 
@@ -3326,7 +3327,7 @@ def stop_agent(
 ) -> StopResult:
     """Stop an agent's underlying session.
 
-    claude: shells out to ``claude stop <short_id>``; surface its stderr
+    claude: shells out to ``claude stop`` on the short id; surface its stderr
     verbatim on non-zero exit and propagate the exit code to the caller
     (AC1-ERR). On timeout, raise ``DispatchAskError(exit_code=15)``.
 
@@ -3496,6 +3497,7 @@ def stop_agent(
                     return escalated
                 _emit_shellout_stop()
                 raise DispatchAskError(
+                    # retired-ok: reports which shellout failed on which session.
                     f"claude stop {short_id} exited {exit_code}",
                     exit_code=1,
                 )
@@ -3778,6 +3780,7 @@ def rm_agent(
                                 short_id=short_id,
                             )
                             raise DispatchAskError(
+                                # retired-ok: reports which shellout failed on which session.
                                 f"claude rm {short_id} exited {claude_exit}",
                                 exit_code=1,
                             )
@@ -3785,8 +3788,9 @@ def rm_agent(
                         # proceed to drop the registry row.
                         sys.stderr.write(
                             "WARN: claude rm failed but --force given; removing "
-                            f"registry only. Orphan supervisor: claude rm "
-                            f"{short_id} to clean later.\n"
+                            f"registry only. Supervisor session {short_id} is "
+                            f"orphaned; `fno agents adopt {short_id}` brings it "
+                            f"back under management.\n"
                         )
 
             elif existing.harness in ("codex", "opencode"):

@@ -79,10 +79,12 @@ A bg or daemon worker is reaped stop first, then rm.
 
 `rm` alone never stops a running session. Removing a row and stopping a session are separate verbs by design.
 
+<!-- retired-ok: names the command in order to forbid it. -->
 Never follow `rm` with a bare `claude rm <id>`. `rm` already made that call itself, before it touched the registry. The second call buys nothing, and the first one already spent the resume handle. Step 2r is how you get it back.
 
 Measured on a live registry: `fno agents rm` lands the registry removal, then hangs on harness teardown. A timeout is not a failed removal. Re-read the registry before you believe the receipt.
 
+<!-- retired-ok: states why driving these directly fails, as the reason to reach for the fno verbs instead. -->
 Driven directly, the claude-native verbs key on the SHORT ID: `claude rm <short_id>`, `claude stop <short_id>`. A name does not match there, so a direct reap by name silently no-ops and leaves the row the operator sees.
 
 The `fno agents` verbs resolve the name to the short id for you. Reach for those.

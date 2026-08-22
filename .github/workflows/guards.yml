@@ -241,6 +241,13 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-review-invocation-single-source.sh
 
+      # A ruling that retires a command must reach the caller-facing strings
+      # that still name it, not only the decision record.
+      - name: Retired-command strings check
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-retired-command-strings.sh
+
       # Graduated from the AGENTS.md reachable-paths pitfall entry.
       - name: Reachable-paths lint + self-test
         if: ${{ !cancelled() }}

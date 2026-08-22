@@ -58,3 +58,8 @@ scripts/ci/check-no-stale-skill-refs.sh :: lint stale-skill-refs
 # fno doctor lint flock-pattern - lints the repo's own source for open-coded agent
 # flock + registry re-read patterns; only meaningful in a clone.
 scripts/lint-flock-pattern.sh :: lint flock-pattern
+
+# fno doctor lint retired-commands - fails a caller-facing string that shows a
+# ruling-retired command; scans the repo's own source tree, so it is only
+# meaningful in a clone.
+scripts/ci/check-retired-command-strings.sh :: lint retired-commands

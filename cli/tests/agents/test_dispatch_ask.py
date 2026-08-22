@@ -477,7 +477,11 @@ def test_dispatch_ask_preserves_lock_on_registry_failure(
     assert "registry write failed" in msg
     assert "No space left on device" in msg
     assert "7c5dcf5d" in msg  # orphan short-id surfaced
-    assert "claude rm 7c5dcf5d" in msg
+    # The message used to say `claude rm 7c5dcf5d`. Ruling d-1900e419 retired
+    # that: it destroys the very session the operator is being told about,
+    # while adopt registers it and keeps the resume handle.
+    assert "fno agents adopt 7c5dcf5d" in msg
+    assert "claude rm 7c5dcf5d" not in msg
 
     # lock_handle.detach() must have been called (AC1-FR lock semantics)
     assert detach_called, "lock_handle.detach() must be called on registry failure"

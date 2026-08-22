@@ -3332,9 +3332,10 @@ fn create(
             return AskOutcome {
                 stdout: String::new(),
                 stderr: format!(
-                    "{}agent {} already exists (registered concurrently); orphaned supervisor session: claude rm {} (registry not updated)\n",
+                    "{}agent {} already exists (registered concurrently); supervisor session {} is orphaned (registry not updated). Adopt it with `fno agents adopt {}`, then `fno agents rm` if you want it gone.\n",
                     pre_stderr,
                     py_repr(name),
+                    short_id,
                     short_id
                 ),
                 exit_code: 12,
@@ -3354,8 +3355,8 @@ fn create(
             return AskOutcome {
                 stdout: String::new(),
                 stderr: format!(
-                    "{}registry write failed. orphaned supervisor session: claude rm {} (registry not updated)\n",
-                    pre_stderr, short_id
+                    "{}registry write failed. supervisor session {} is orphaned (registry not updated). Adopt it with `fno agents adopt {}`, then `fno agents rm` if you want it gone.\n",
+                    pre_stderr, short_id, short_id
                 ),
                 exit_code: 12,
             };

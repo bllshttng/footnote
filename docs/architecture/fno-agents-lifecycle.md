@@ -26,8 +26,8 @@ Provider matrix:
 
 | Verb | claude | codex | gemini |
 |------|--------|-------|--------|
-| stop | `claude stop <id>` shellout (30s timeout) | no-op + info on stderr (synchronous between asks) | no-op + info on stderr |
-| rm | `claude rm <id>` then registry-row removal (atomicity invariant); `--force` overrides | registry-only; on-disk session files stay (operator cleans manually) | registry-only |
+| stop | `claude stop <id>` shellout (30s timeout) <!-- retired-ok: a reference table of what each harness teardown invokes, not steps to run. --> | no-op + info on stderr (synchronous between asks) | no-op + info on stderr |
+| rm | `claude rm <id>` then registry-row removal (atomicity invariant); `--force` overrides <!-- retired-ok: a reference table of what each harness teardown invokes, not steps to run. --> | registry-only; on-disk session files stay (operator cleans manually) | registry-only |
 | reconcile | `claude logs <id> --tail 1` exit-code (10s timeout) | presence in `~/.codex/session_index.jsonl` | tri-state reachability probe (see [fno-agents-gemini-commands.md](fno-agents-gemini-commands.md)) |
 | attach | `claude attach <id>` with inherited stdio | exit 13 (interactive attach not supported) | exit 13 (interactive attach not supported) |
 
@@ -120,7 +120,8 @@ fno agents attach worker    # drop into the TUI to check state
 ```bash
 fno agents rm worker-claude --force
 # stderr: WARN: claude rm failed but --force given; removing registry only.
-# Orphan supervisor: claude rm 7c5dcf5d to clean later.
+# Supervisor session 7c5dcf5d is orphaned; `fno agents adopt 7c5dcf5d`
+# brings it back under management.
 ```
 
 ## Phase 6 Wave 5 — Rust daemon lifecycle verbs
@@ -142,7 +143,7 @@ The sections above describe the original Python (US4) lifecycle for one-shot age
 
 `handle_stop` refuses with **exit 18** (`Busy`) while a controlling driver is active, unless `--force`. A watcher never blocks — only the single controlling driver does. With `--force`, the daemon force-closes the driver (the drive session loop emits `drive_detached{reason:"stop_force"}` and clears its `DriveTable` slot + `state.json` window in `cleanup`), waits up to 2s for the slot to clear (emitting `drive_force_close_timeout` if it does not), then stops the agent.
 
-Worker shutdown escalates: graceful `worker.shutdown` RPC → poll up to a 5s grace → `SIGTERM` the worker → another grace → `SIGKILL`. Killing the worker closes the PTY master, which `SIGHUP`s the child (Outcome B), so the whole PTY tree comes down. The registry flip to `Exited` is only reported after the worker is **confirmed** down, and a failed registry write surfaces as `Internal` (never a false "stopped: true"). Claude agents have no worker: `stop` shells out to `claude stop <short_id>`.
+Worker shutdown escalates: graceful `worker.shutdown` RPC → poll up to a 5s grace → `SIGTERM` the worker → another grace → `SIGKILL`. Killing the worker closes the PTY master, which `SIGHUP`s the child (Outcome B), so the whole PTY tree comes down. The registry flip to `Exited` is only reported after the worker is **confirmed** down. A failed registry write surfaces as `Internal`, never a false "stopped: true". Claude agents have no worker: `stop` shells out to `claude stop` on the short id.
 
 ### rm (US6.8)
 

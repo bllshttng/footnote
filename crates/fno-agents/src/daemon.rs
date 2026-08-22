@@ -872,6 +872,7 @@ fn cascade_harness_session_result_with(
             let after = read_claude_agents();
             if after.find(&short_id).is_some() {
                 return CascadeOutcome::Failed(format!(
+                    // retired-ok: reports a successful shellout that left the row behind.
                     "claude row {short_id} survives successful claude rm"
                 ));
             }
@@ -2116,6 +2117,7 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                 // exists to prevent.
                 let stopped = bounded_claude_stop(&short, Duration::from_secs(15)).await;
                 match stopped {
+                    // retired-ok: a daemon log line naming its own teardown call.
                     Err(_) => eprintln!("daemon: claude stop {short} timed out (retry next tick)"),
                     Ok(Ok(o)) if o.status.success() => {
                         let _ = emitter.emit(
@@ -2130,6 +2132,7 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                     }
                     // Non-fatal: leave the marker so the next tick retries.
                     Ok(Ok(o)) => eprintln!(
+                        // retired-ok: a daemon log line naming its own teardown call.
                         "daemon: claude stop {short} failed: {}",
                         String::from_utf8_lossy(&o.stderr).trim()
                     ),
@@ -5830,6 +5833,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
         Err(_) => Response::err(
             req.id,
             ErrorCode::Internal,
+            // retired-ok: reports which shellout timed out, not a step to run.
             format!("claude stop {short} timed out"),
         ),
         Ok(Ok(o)) if o.status.success() => {
@@ -5866,6 +5870,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
             req.id,
             ErrorCode::Internal,
             format!(
+                // retired-ok: reports which shellout failed, not a step to run.
                 "claude stop {short} failed: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
             ),
@@ -6108,10 +6113,10 @@ async fn handle_rm_with(
         } else if roster_known {
             format!(
                 "agent {name} is still live. Its harness row {row} is present in \
-                 `claude agents --json --all`. Stop it with `fno agents stop {name}`, or \
-                 by hand with `claude stop {row}` then `claude rm {row}` (claude takes the \
-                 SHORT ID {row}, never the agent name {name}). rm proceeds on its own \
-                 once that row is gone."
+                 `claude agents --json --all`. Stop it with `fno agents stop {name}`; rm \
+                 proceeds on its own once that row is gone. Do not tear the row down by \
+                 hand: that spends the resume handle for nothing, and `fno agents rm` \
+                 makes the same call itself."
             )
         } else {
             format!(
@@ -8454,8 +8459,16 @@ mod tests {
 
         let message = &response.error().unwrap().message;
         assert!(message.contains("claude agents --json --all"));
-        assert!(message.contains("claude stop bbbb8888"));
-        assert!(message.contains("claude rm bbbb8888"));
+        assert!(message.contains("fno agents stop"));
+        // This refusal used to offer `claude stop <row>` then `claude rm <row>`
+        // as a by-hand alternative, and this test required it. Ruling
+        // d-1900e419 retired that pair: the harness row IS the resume handle,
+        // and dropping it by hand spends the handle for nothing rm has not
+        // already done. The refusal must not teach it back.
+        // retired-ok: asserts the retired pair is ABSENT from the refusal.
+        assert!(!message.contains("claude stop bbbb8888"));
+        // retired-ok: asserts the retired pair is ABSENT from the refusal.
+        assert!(!message.contains("claude rm bbbb8888"));
         assert!(!message.contains("--force"));
         assert!(!message.contains("-F"));
         assert_eq!(

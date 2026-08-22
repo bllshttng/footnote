@@ -16,6 +16,7 @@ fno agents stop worker-claude
 # stopped: worker-claude (7c5dcf5d)
 ```
 
+<!-- retired-ok: names the shellout this verb performs. -->
 For **claude** agents, this shells out to `claude stop <short_id>` with a 30-second timeout. The supervisor session is paused but the conversation file stays on disk — a subsequent `claude attach <short_id>` (or `fno agents attach worker-claude`) wakes it back up.
 
 For **codex** and **gemini** agents, `stop` is a no-op with an informational stderr message: those providers are synchronous between asks, so there is no persistent process to stop. To interrupt an in-flight `ask`, send SIGINT to the fno process directly.
@@ -38,6 +39,7 @@ fno agents rm worker-claude
 # removed: worker-claude
 ```
 
+<!-- retired-ok: names the shellout this verb performs, in order. -->
 `rm` is the cleanup verb. For **claude** agents the sequence is strict: `claude rm <short_id>` runs first, and the registry row is dropped only after claude reports success. If `claude rm` refuses (e.g., the worktree has uncommitted changes), the registry stays intact so you can address the underlying issue and retry.
 
 To override claude's refusal:
@@ -45,17 +47,18 @@ To override claude's refusal:
 ```bash
 fno agents rm worker-claude --force
 # WARN: claude rm failed but --force given; removing registry only.
-# Orphan supervisor: claude rm 7c5dcf5d to clean later.
+# Supervisor session 7c5dcf5d is orphaned; `fno agents adopt 7c5dcf5d`
+# brings it back under management.
 # removed: worker-claude
 ```
 
-`--force` drops the registry row regardless of claude's exit code, leaving the supervisor session orphaned. You are responsible for the manual `claude rm 7c5dcf5d` (the stderr WARN spells it out).
+`--force` drops the registry row regardless of claude's exit code, leaving the supervisor session orphaned. Bring it back with `fno agents adopt 7c5dcf5d`, which the stderr WARN spells out. Do not reap it by hand: that spends the resume handle and buys nothing.
 
 The same ordering holds for **codex**, which tears down its own session record before the registry row is dropped:
 
 | Harness | What teardown removes |
 |---------|-----------------------|
-| claude | `claude rm <short_id>` (session record + worktree, via claude's own delegation contract) |
+| claude | the claude session record and its worktree, via claude's own delegation contract |
 | codex | the session's entry in `~/.codex/session_index.jsonl` |
 | opencode | nothing; registry-only (see below) |
 | gemini | nothing; registry-only (no teardown arm for a deprecated provider) |

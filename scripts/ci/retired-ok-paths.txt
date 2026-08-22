@@ -1,0 +1,23 @@
+# Paths whose caller-facing strings are declared descriptive OUT OF LINE,
+# read by scripts/ci/check-retired-command-strings.sh.
+#
+# The gate's normal exemption is an in-file `retired-ok:` marker at the site,
+# which is where a declaration belongs: the next reader finds it without
+# leaving the line. This file exists for the one case where that is not free.
+# A byte-budgeted file is re-read on a schedule, so a marker in it is paid
+# again every time. skills/king-for-a-day/references/postcompact-brief.md is
+# re-injected into every king's context on every compaction and a test
+# enforces its size; the 62-byte marker put it 36 bytes over. Moving the
+# budget was refused, and correctly: a budget that moves for the first thing
+# to exceed it is not a budget.
+#
+# This is a whole-file exemption, which is the weaker instrument. Two things
+# keep it honest. Every entry states why the marker cannot live in the file,
+# and the gate NAMES each path it cleared this way in its success line, so a
+# pass that leaned on this list never reads like a pass that did not.
+#
+# Add a path only when an in-file marker has a per-use cost. "The comment is
+# ugly" is not one.
+#
+# Format: <repo-relative path>|<why the marker cannot live in the file>
+skills/king-for-a-day/references/postcompact-brief.md|Re-injected into every king on every compaction and byte-budgeted by tests/hooks/test_king_postcompact_reinject.sh, so an in-file marker is paid per session forever. Its one hit forbids the command rather than teaching it.
