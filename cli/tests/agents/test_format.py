@@ -165,7 +165,7 @@ def test_render_json_for_populated_registry() -> None:
     assert parsed["count"] == 2
     assert parsed["schema_version"] == JSON_SCHEMA_VERSION
     assert parsed["filters_applied"] == filters
-    assert _contract()["projection_omissions"] == ["model", "provider"]
+    assert _contract()["projection_omissions"] == ["model"]
     assert parsed["fields_omitted"] == _contract()["projection_omissions"]
     assert len(parsed["agents"]) == 2
 
@@ -178,7 +178,7 @@ def test_render_json_for_empty_registry() -> None:
     assert parsed["agents"] == []
     assert parsed["count"] == 0
     assert parsed["schema_version"] == JSON_SCHEMA_VERSION
-    assert _contract()["projection_omissions"] == ["model", "provider"]
+    assert _contract()["projection_omissions"] == ["model"]
     assert parsed["fields_omitted"] == _contract()["projection_omissions"]
 
 
@@ -446,20 +446,25 @@ def test_serialize_entry_carries_the_observed_model() -> None:
     assert default["observed_model"] == {"kind": "no-transcript"}
 
 
-def test_serialize_entry_emits_no_key_that_names_a_vendor(_unused=None) -> None:
-    """AC8: no key whose name says vendor and whose value is a harness.
+def test_serialize_entry_provider_names_vendor_not_harness(_unused=None) -> None:
+    """AC8, post x-f273: `provider` carries the stored vendor, never a harness.
 
     `provider: "claude"` on a zai-routed worker is what produced the wrong
-    diagnosis this row shape was fixed for. Leaving it beside a correct
-    `observed_model` would hand a reader two answers and no way to rank them.
+    diagnosis this row shape was fixed for; the key was removed wholesale and
+    the removal then hid the real v15+ vendor axis. The guard that survives is
+    the one the original AC8 meant: the value under a vendor-named key must
+    never be the harness.
     """
-    row = serialize_entry(_claude_entry(), live_status=None)
+    row = serialize_entry(
+        _claude_entry(provider="zai"), live_status=None
+    )
     payload = json.loads(render_json([row], filters_applied={}))
 
-    assert "provider" not in row
-    assert "model" not in row
+    assert row["provider"] == "zai"
+    assert row["provider"] != row["harness"]
     assert row["harness"] == "claude"
-    assert payload["fields_omitted"] == ["model", "provider"]
+    assert "model" not in row
+    assert payload["fields_omitted"] == ["model"]
 
 
 # ---------------------------------------------------------------------------

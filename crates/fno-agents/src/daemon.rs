@@ -4943,7 +4943,7 @@ fn attention_sort_key(row: &Value) -> (u8, std::cmp::Reverse<u64>, String) {
 /// `agent.list`, with the truth probe injected as a BATCH seam: one call for
 /// the whole filtered page, keyed by handle. The per-row seam it replaced spent
 /// one Python interpreter cold start per row per list.
-const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "provider"];
+const LIST_PROJECTION_OMISSIONS: [&str; 1] = ["model"];
 
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
@@ -5049,7 +5049,10 @@ where
                 }
             }
             if let Some(ref prov) = filter_provider {
-                if e.harness_name() != prov.as_str() {
+                // The provider filter reads the v15+ vendor axis, never the
+                // harness: comparing harness_name() here dropped a worker
+                // hosted on one CLI and routed to another vendor.
+                if e.provider.as_deref() != Some(prov.as_str()) {
                     return false;
                 }
             }
@@ -5235,12 +5238,14 @@ where
                 let mut row = json!({
                     "name": e.name,
                     // `harness` is the sole identity axis, and it names the CLI,
-                    // never the model vendor. The `provider` alias that sat beside
-                    // it carried this same harness value, so a worker routed to
-                    // another vendor still listed `provider: claude` and read as
-                    // proof the route had fallen back. `observed_model`
-                    // below is the honest answer to that question.
+                    // never the model vendor. `provider` beside it is the v15+
+                    // model-vendor axis stamped at spawn; the pre-split alias that
+                    // carried the harness value under this name stayed omitted
+                    // until x-f273, which hid the real vendor axis from every
+                    // RPC consumer. `observed_model` below remains the honest
+                    // answer to what actually answered.
                     "harness": e.harness_name(),
+                    "provider": e.provider,
                     "harness_session_id": e.harness_session_id,
                     "short_id": short_id,
                     "session_id": session_id,
@@ -12443,7 +12448,7 @@ done
         let contract: Value = serde_json::from_str(CONTRACT).expect("contract is valid JSON");
         assert_eq!(
             contract["projection_omissions"],
-            json!(["model", "provider"]),
+            json!(["model"]),
             "projection omissions must stay canonical and sorted"
         );
         let mut expected: std::collections::BTreeSet<String> = contract["required"]
@@ -12479,6 +12484,10 @@ done
             e.crown_level = Some(1);
             e.crown_scope = Some("epic-x".into());
             e.crown_grantor = Some("king".into());
+            // A vendor stamp on a claude-hosted row: the exact shape the
+            // provider axis exists to describe, and the one the pre-split
+            // alias lied about by carrying "claude" here.
+            e.provider = Some("zai".into());
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
@@ -12500,11 +12509,12 @@ done
         // always null is the same lie in a different shape. Assert the values
         // reach the row.
         assert_eq!(row["harness"], "claude");
-        // No key whose name says vendor and whose value is a harness (AC8).
-        // Dropping it from one emitter only would be worse than keeping it
-        // everywhere: the field would then be present or absent depending on
-        // which reader answered.
-        assert!(row.get("provider").is_none());
+        // `provider` carries the stored vendor axis, never a harness (AC8,
+        // post x-f273). Emitting it from one serializer only would be worse
+        // than emitting it from both: the field would then be present or
+        // absent depending on which reader answered.
+        assert_eq!(row["provider"], "zai");
+        assert_ne!(row["provider"], row["harness"]);
         assert!(row.get("model").is_none());
         assert_eq!(
             row["harness_session_id"],
@@ -13010,10 +13020,14 @@ done
             registry.entries[1].harness = Some("codex".into());
             registry.entries[1].harness_session_id =
                 Some("bbbbbbbb-1111-2222-3333-444444444444".into());
+            // The provider filter reads the v15+ vendor axis: stamp the row
+            // so it matches below. entries[0] stays unstamped, so a null
+            // provider contributes to no vendor filter.
+            registry.entries[1].provider = Some("openai".into());
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"provider": "codex"}));
+        let req = Request::new(1, "agent.list", json!({"provider": "openai"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
         let response = handle_list_with_truth(

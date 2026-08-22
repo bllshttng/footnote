@@ -107,7 +107,10 @@ def list_agents(
                 entry_cwd = entry.cwd
             if entry_cwd != resolved_cwd:
                 continue
-        if provider is not None and entry.harness != provider:
+        # The provider filter reads the provider axis (v15+), never harness:
+        # pre-split this compared `entry.harness`, so filtering by a vendor
+        # dropped a worker hosted on claude and routed to that vendor.
+        if provider is not None and entry.provider != provider:
             continue
         filtered.append(entry)
 
