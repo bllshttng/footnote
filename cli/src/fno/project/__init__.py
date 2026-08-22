@@ -102,6 +102,13 @@ def init(
         repo_root = resolve_repo_root()
     repo_root = Path(repo_root)
 
+    # Normalize BEFORE anything derives from it. `backlog.id_prefix` is
+    # lowercased by its own validator at read time, so an id typed `WEB` mints
+    # `web-` nodes while this file says `WEB` and the root sits at
+    # `.../projects/WEB`. Worse, `fno project init web` afterwards trips the
+    # already-pinned refusal and dead-ends someone who only changed the case.
+    project_id = project_id.strip().lower()
+
     target = _state_dir_for(project_id)
 
     # Refusal 1: an explicit agents-registry override outlives `state_dir`.

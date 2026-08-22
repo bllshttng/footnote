@@ -155,3 +155,28 @@ def test_init_is_registered_on_the_cli():
 
     assert LAZY_SUBCOMMANDS["project"][0] == "fno.project:project_app"
     assert callable(init)
+
+
+def test_the_id_is_normalized_before_anything_derives_from_it(tmp_path, monkeypatch):
+    """`WEB` and `web` must name one environment, not two half-agreeing ones.
+
+    `backlog.id_prefix` lowercases at read time, so an un-normalized `WEB`
+    wrote `WEB` into the file while the graph minted `web-` nodes, and pointed
+    the root at a differently-cased directory. Re-running with the other case
+    then hit the already-pinned refusal.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    res = _run(repo, "WEB")
+    assert res.exit_code == 0, res.output
+
+    cfg = (repo / ".fno" / "config.toml").read_text(encoding="utf-8")
+    assert 'state_dir = "~/.fno/projects/web"' in cfg
+    assert 'id_prefix = "web"' in cfg
+    assert "project web: isolated" in res.output
+
+    # The other case is now the SAME environment, not a refusal.
+    again = _run(repo, "web")
+    assert again.exit_code == 0, again.output
