@@ -1570,6 +1570,21 @@ def _claude_create_path(
         resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
     )
 
+    # A revival continues one conversation under a NEW handle, which is the
+    # invariant directly above -- but it was never printed, so an operator
+    # watching the old handle heard nothing while the new one did the work.
+    # The sibling mail-revive fork already prints its lineage under "a fork is
+    # never silent"; this is the same event on a different door. Same rule as
+    # the rest of this node: never hand back a value without naming what it
+    # continues.
+    if revive and resume_session_id:
+        print(
+            f"fno agents spawn: resumed {canonical_handle(resume_session_id)} as "
+            f"{short_id} (same conversation, new handle).\n"
+            f"Watch the new one: fno agents peek {short_id}",
+            file=sys.stderr,
+        )
+
     # Capture the spawning session's ambient identity (Task 2.2, x-30f6).
     # Best-effort: never raises, degrades to (None, None, None) when absent.
     # spawn_trigger was already popped before bg_create above (x-42c5 ordering fix).
