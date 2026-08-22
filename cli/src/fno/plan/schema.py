@@ -57,6 +57,27 @@ class ConsolidationEntry(BaseModel):
         return v
 
 
+class DecisionAcknowledgment(BaseModel):
+    """One of the node's live decision-index rulings, judged non-closing."""
+
+    decision_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+    @field_validator("decision_id")
+    @classmethod
+    def _decision_id_is_wellformed(cls, v: str) -> str:
+        from fno.decide import looks_like_decision_id
+
+        if not looks_like_decision_id(v):
+            raise ValueError("is not a decision id (expected d-<hex>, e.g. d-a4b6e1c8)")
+        # Normalize to casefold: the regex accepts d-ABCD1234 (case-insensitive,
+        # matching looks_like_decision_id itself), but a real minted id
+        # (mint_decision_id) is always lowercase hex. Without this, the
+        # validator's own comparison against the (always-lowercase) live index
+        # would refuse a plan that named the right ruling in the wrong case.
+        return v.strip().casefold()
+
+
 class ConsolidationBlock(BaseModel):
     """The step 2d Consolidation Gate's recorded outcome.
 
@@ -64,14 +85,18 @@ class ConsolidationBlock(BaseModel):
     PyYAML and validates the block THROUGH this model rather than walking it
     in awk, so there is no second implementation to diverge from. The bash
     gate keeps only what is not shape: whether a block is present at all
-    (grandfathering pre-gate plans is a policy date), and the contradiction
-    between an `append` outcome and a plan file existing to carry it.
+    (grandfathering pre-gate plans is a policy date), the contradiction
+    between an `append` outcome and a plan file existing to carry it, and
+    whether every one of the node's LIVE decisions is named in
+    `decisions_acknowledged` - that check needs the live decision index, which
+    this model has no access to and does not attempt.
     """
 
     outcome: Literal["absorb", "append", "proceed_alone"]
     absorbed: list[ConsolidationEntry] = Field(default_factory=list)
     appended_to: list[ConsolidationEntry] = Field(default_factory=list)
     proceed_alone_against: list[ConsolidationEntry] = Field(default_factory=list)
+    decisions_acknowledged: list[DecisionAcknowledgment] = Field(default_factory=list)
     # Scalar OR list: one reversing command, or the several an absorb of
     # several nodes needs. The bash gate accepts both, and a model that
     # took only a scalar produced the 'plan is unreadable or invalid'

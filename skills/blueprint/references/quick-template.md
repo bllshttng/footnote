@@ -38,11 +38,18 @@ created: <YYYY-MM-DD>            # Required. The consolidation gate reads it to
 #                                 # the node details and code in hand. MANDATORY:
 #                                 # validate-plan.sh errors on a missing, empty, or
 #                                 # out-of-enum block. See SKILL.md step 2d.
+#                                 # decisions_acknowledged is separate from the outcome
+#                                 # above: one entry per row in graph.decisions, each
+#                                 # naming why that ruling does not close this work.
+#                                 # Empty is legal only when graph.decisions is empty.
 consolidation:
   outcome: proceed_alone
   proceed_alone_against: []      # ids considered and rejected, each with a reason:
   #  - id: x-0000
   #    reason: <why it is not the same work, in text a later reader can check>
+  decisions_acknowledged: []     # one per graph.decisions row:
+  #  - decision_id: d-00000000
+  #    reason: <why this ruling does not close this work>
   # outcome: absorb - the other node is a wave of THIS deliverable. After
   # intake run: fno backlog supersede <this-node> --replaces <id> --cause "..." --surface <path>
   # absorbed:

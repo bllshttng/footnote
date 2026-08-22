@@ -23,6 +23,7 @@ opening a PR.
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,11 @@ class DeliverResult:
     found: int
     verified: int
     terminated: str = "DoneAdvisory"
+    # None when no node was in scope, or the bind succeeded. Set to the reason
+    # when a node WAS in scope but the bind failed - the deliverable ships
+    # either way (x-953b: an unbound doc is the hole this closes, a lost
+    # deliverable would be a worse one).
+    bind_warning: Optional[str] = None
 
 
 def resolve_output_dir(configured: Optional[str]) -> Path:
@@ -122,6 +128,33 @@ def build_brief(
     return "\n".join(fm + body) + "\n"
 
 
+def _bind_plan_path(node: str, brief_path: Path) -> Optional[str]:
+    """Bind the shipped brief to `node` as its plan_path. Returns a warning
+    string on failure, None on success.
+
+    x-953b: an advisory brief with no bound node is unreachable from the work
+    it answers - the exact hole a second, worse spike walked into. One
+    `fno backlog update <id> --plan-path <doc>` call closes it, the same way
+    it was closed by hand after the fact. Shells out to the CLI rather than a
+    graph-internal call: `backlog update` is the one choke point every write
+    to plan_path already goes through (graph/cli.py:713), and duplicating its
+    locking/validation here would be a second implementation to diverge from.
+    """
+    try:
+        result = subprocess.run(
+            ["fno", "backlog", "update", node, "--plan-path", str(brief_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"could not bind {brief_path} to {node}: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return f"could not bind {brief_path} to {node}: {detail}"
+    return None
+
+
 def deliver(
     topic: str,
     *,
@@ -129,6 +162,7 @@ def deliver(
     stopped: str,
     output_dir: Optional[str],
     now: Optional[datetime] = None,
+    node: Optional[str] = None,
 ) -> DeliverResult:
     """Ship the brief + evidence sidecar to output_dir. Reports DoneAdvisory.
 
@@ -139,6 +173,10 @@ def deliver(
     404s and make the assertion vacuous (the plan's Failure Mode: "404 on
     self-fetch -> mark verified=false; the eval's dead-URL assertion catches
     it"). A brief goes green only if its dead sources were Wayback-archived.
+
+    `node`, when given, is the graph node this deliverable finishes; it gets
+    bound to the brief as `plan_path` (best-effort, see `_bind_plan_path`).
+    `node=None` (no node in scope) binds nothing, unchanged from before.
     """
     out = resolve_output_dir(output_dir)  # raises OutputDirUnset (AC5)
     slug = slugify(topic)
@@ -155,6 +193,8 @@ def deliver(
         for s in sources:  # full store, not just verified - keeps dead URLs visible
             fh.write(s.to_json_line() + "\n")
 
+    bind_warning = _bind_plan_path(node, brief_path) if node else None
+
     return DeliverResult(
         topic=topic,
         slug=slug,
@@ -162,6 +202,7 @@ def deliver(
         sidecar_path=str(sidecar_path),
         found=len(sources),
         verified=len(verified),
+        bind_warning=bind_warning,
     )
 
 

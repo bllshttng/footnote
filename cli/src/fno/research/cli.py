@@ -13,6 +13,7 @@ With `--deliver` (default) and an unset `output_dir`, the ship step fails loud
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import typer
@@ -52,6 +53,11 @@ def research_command(
         "declared", "--stopped",
         help='Why the investigation stopped, stamped in the brief ("declared" or "cap N").',
     ),
+    node: "str | None" = typer.Option(
+        None, "--node",
+        help="Graph node this deliverable finishes; binds the shipped brief as its "
+        "plan_path (best-effort). Falls back to $FNO_NODE when omitted.",
+    ),
 ) -> None:
     """Retrieve sources for TOPIC, store them, and ship a cited brief.
 
@@ -85,12 +91,22 @@ def research_command(
         return
 
     # Ship step: turn the cache into the doc deliverable (AC1/AC3/AC5).
+    # An explicit --node wins (the reliable path: /ship doc's own bash
+    # session holds $CLAIMS_ID and can pass it through directly, the same
+    # way /blueprint passes --node "$CLAIMS_ID"). $FNO_NODE, the spawn-time
+    # provenance env var (mux_spawn.py PROVENANCE_KEYS, read the same way at
+    # graph/cli.py:860), is the fallback for a spawned worker's own process
+    # environment. Neither is CLAIMS_ID: that is a shell-LOCAL variable a
+    # skill's own bash session sets via `eval "$(parse-claims-arg.sh ...)"`;
+    # it never reaches a child process environment on its own.
+    resolved_node = (node or "").strip() or (os.environ.get("FNO_NODE") or "").strip() or None
     try:
         delivered = deliver(
             result.topic,
             sources_path=Path(result.sources_path),
             stopped=stopped,
             output_dir=_output_dir(),
+            node=resolved_node,
         )
     except OutputDirUnset as e:
         typer.echo(str(e), err=True)
@@ -110,6 +126,10 @@ def research_command(
         f"research: shipped {delivered.brief_path} "
         f"(+{delivered.slug}.sources.jsonl, {delivered.verified} cited) -> DoneAdvisory"
     )
+    if delivered.bind_warning:
+        # Non-fatal (x-953b): the deliverable already landed above, so this
+        # warns rather than exits - a lost doc would be worse than an unbound one.
+        typer.echo(f"research: {delivered.bind_warning}", err=True)
 
 
 research_app = research_command  # registered as an individual command in cli.py
