@@ -4444,13 +4444,23 @@ fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>,
                 exe.display()
             )
         })?;
-    if let Some(mut stdin) = child.stdin.take() {
-        // A renderer that refuses reads nothing and exits, closing the pipe.
-        // That EPIPE is not the failure -- the exit status below is -- so it is
-        // recorded and left to the status arm to explain.
-        let _ = stdin.write_all(bytes);
+    // The write runs on its own thread, so it cannot deadlock against a child
+    // that starts answering before it has read everything. Dropping the handle
+    // at the end of the closure closes the pipe, which is the renderer's EOF.
+    // A renderer that refuses reads nothing and exits, closing the pipe first;
+    // that EPIPE is not the failure, the exit status below is, so it is
+    // swallowed here and left to the status arm to explain.
+    let payload = bytes.to_vec();
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&payload);
+        })
+    });
+    let out = wait_with_deadline(child, PANE_PREPARE_TIMEOUT);
+    if let Some(handle) = writer {
+        let _ = handle.join();
     }
-    let out = wait_with_deadline(child, PANE_PREPARE_TIMEOUT)?;
+    let out = out?;
     if !out.status.success() {
         let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let detail = if detail.is_empty() {
@@ -4464,21 +4474,53 @@ fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>,
 }
 
 /// Wait for `child`, killing it once `budget` elapses. `Child::wait_with_output`
-/// has no timeout of its own, and a renderer that never exits would hang the
-/// send forever -- a hang is a worse failure than a refusal, because nothing
-/// surfaces it.
+/// has no timeout of its own, and a renderer that never exits hangs the send
+/// forever -- a hang is a worse failure than a refusal, because nothing surfaces
+/// it.
+///
+/// Both pipes are drained on their own threads FOR THE WHOLE WAIT, not after it.
+/// The renderer's stdout is the wrapped body, so it is as large as the payload,
+/// and `pane send --stdin` has no body cap of its own. A poll loop that only
+/// calls `try_wait` leaves stdout unread; once it fills the pipe buffer the child
+/// blocks on write, never exits, and every large payload fails at the deadline
+/// with a message blaming a renderer that was working fine.
 fn wait_with_deadline(
     mut child: std::process::Child,
     budget: Duration,
 ) -> Result<std::process::Output, String> {
+    use std::io::Read;
+
+    let mut out_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| "envelope renderer stdout unavailable".to_string())?;
+    let mut err_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "envelope renderer stderr unavailable".to_string())?;
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+
     let deadline = std::time::Instant::now() + budget;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // The readers end when the killed child's pipes close, so
+                    // joining here cannot outlive the kill.
+                    let _ = out_reader.join();
+                    let _ = err_reader.join();
                     return Err(format!(
                         "envelope renderer did not answer within {}s; refusing to type \
                          an unattributed payload (pass --raw for a genuine keystroke)",
@@ -4489,10 +4531,18 @@ fn wait_with_deadline(
             }
             Err(e) => return Err(format!("envelope renderer wait failed: {e}")),
         }
-    }
-    child
-        .wait_with_output()
-        .map_err(|e| format!("envelope renderer output unreadable: {e}"))
+    };
+    let stdout = out_reader
+        .join()
+        .map_err(|_| "envelope renderer stdout reader panicked".to_string())?;
+    let stderr = err_reader
+        .join()
+        .map_err(|_| "envelope renderer stderr reader panicked".to_string())?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn positive_post_submit_marker(before_cr: &str, after_cr: &str) -> bool {

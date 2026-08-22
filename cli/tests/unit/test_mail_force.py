@@ -166,3 +166,50 @@ def test_a_refused_pane_write_claims_nothing(_tmp_state, monkeypatch):
     assert "typed" not in result.stdout
     path = bus_log_path()
     assert not path.exists() or path.read_text(encoding="utf-8").strip() == ""
+
+
+def test_force_writes_the_full_sender_session_on_the_row(_tmp_state, monkeypatch):
+    """`cmd_reply` reads the bus before any transcript. A forced row carrying
+    only the head-8 handle refuses as ambiguous on the one transport that has no
+    live confirmation to fall back to."""
+    import json as _json
+
+    from fno.bus.log import bus_log_path
+
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_session_id",
+        lambda *_a, **_k: "0199bbbb-2222-7000-8000-bbbbbbbbbbbb",
+    )
+    _install(monkeypatch)
+
+    result = runner.invoke(
+        mail_app,
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+    )
+    assert result.exit_code == 0, result.output
+
+    row = _json.loads(bus_log_path().read_text(encoding="utf-8").splitlines()[0])
+    assert row["from_session"] == "0199bbbb-2222-7000-8000-bbbbbbbbbbbb"
+
+
+def test_force_to_an_unknown_token_refuses_with_a_message(_tmp_state, monkeypatch):
+    """Discovery is liveness-gated, so a registered worker whose listing misses
+    lands on the token rung - the exact situation --force exists for. Without a
+    handler the verb exited non-zero with an empty terminal and a traceback."""
+    import fno.agents.discover as discover_mod
+    import fno.agents.registry as registry
+
+    monkeypatch.setattr(
+        discover_mod, "resolve_or_suggest", lambda _t, **_k: (None, [])
+    )
+    monkeypatch.setattr(
+        registry,
+        "resolve_agent",
+        lambda _t, **_k: (_ for _ in ()).throw(registry.AgentResolutionError("no")),
+    )
+
+    result = runner.invoke(mail_app, ["send", "totally-unknown-worker", "hi", "--force"])
+
+    assert result.exit_code != 0
+    assert "totally-unknown-worker" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)

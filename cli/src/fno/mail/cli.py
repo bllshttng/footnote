@@ -857,25 +857,27 @@ def cmd_reply(
         # code can do is how a resumable peer gets treated as voicemail.
         # (Not the harness-parsing this scheme forbids: the harness is discarded,
         # the short-id is what routes, and routing is still a roster lookup.)
+        from fno.agents.store_fallback import is_full_session_id
+        from fno.harness_identity import canonical_handle
+
         target = orig.from_ or ""
         require_resolution = False
-        if orig.to_kind == "session":
-            from fno.agents.store_fallback import is_full_session_id
-            from fno.harness_identity import canonical_handle
-
-            if orig.from_session and is_full_session_id(orig.from_session):
-                # Reply to the FULL id, not its head-8 (node x-3a64). Truncating
-                # here threw away the one thing that survives a collision: under
-                # UUIDv7 the first eight hex are a truncated millisecond
-                # timestamp, so two workers spawned in the same ~65-second bucket
-                # share a handle and the reply refuses as ambiguous. The record
-                # already held the address that works.
-                target = orig.from_session
-            else:
-                # A session-addressed record without full sender provenance may
-                # use its stored sender only when current discovery proves that
-                # token uniquely. Never demote an unverified mutable alias.
-                require_resolution = True
+        # Full sender provenance wins on EVERY lane, not only the
+        # session-addressed one (node x-3a64). The name lane is the lane that
+        # writes `from_session`, and it stamps `to_kind="name"` on all three of
+        # its records, so a check gated on `to_kind == "session"` never read the
+        # value it had just been taught to store. The head-8 the row also
+        # carries is a display handle: under UUIDv7 its first eight hex are a
+        # truncated millisecond timestamp, so two workers from one ~65-second
+        # bucket share it and the reply refuses as ambiguous. The record already
+        # held the address that works.
+        if orig.from_session and is_full_session_id(orig.from_session):
+            target = orig.from_session
+        elif orig.to_kind == "session":
+            # A session-addressed record without full sender provenance may use
+            # its stored sender only when current discovery proves that token
+            # uniquely. Never demote an unverified mutable alias.
+            require_resolution = True
         elif LEGACY_HANDLE_RE.match(target):
             migrated = canonical_handle(target.split("-", 1)[1])
             print(
@@ -1652,6 +1654,7 @@ def _forced_pane_send(
     reply_to: Optional[str],
     provider: Optional[str],
     sender_harness: Optional[str],
+    sender_session: Optional[str],
     sender_model: str,
     authored_words: Optional[int],
     reservation,
@@ -1710,6 +1713,7 @@ def _forced_pane_send(
             provider_from=sender_harness,
             provider_to=provider,
             in_reply_to=reply_to,
+            from_session=sender_session,
             from_model=sender_model,
             to_kind="name",
             word_count=authored_words,
@@ -1897,6 +1901,7 @@ def _name_lane_send(
             reply_to=reply_to,
             provider=provider,
             sender_harness=sender_harness,
+            sender_session=sender_session,
             sender_model=sender_model,
             authored_words=authored_words,
             reservation=reservation,
@@ -3633,16 +3638,58 @@ def cmd_send(
     # exists to keep out of every send.
     if force:
         from fno.agents import discover as discover_mod
+        from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
 
-        forced_resolved, _forced_suggestions = discover_mod.resolve_or_suggest(name)
-        _name_lane_send(
-            message,
-            from_name=from_name,
-            resolved=forced_resolved,
-            token=None if forced_resolved is not None else name,
-            style_exception=style_exception,
-            force=True,
-        )
+        forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
+        try:
+            _name_lane_send(
+                message,
+                from_name=from_name,
+                resolved=forced_resolved,
+                token=None if forced_resolved is not None else name,
+                # The recipient's harness decides `provider_to` on the row whose
+                # whole purpose is auditability. Dropping it let the token arm
+                # fall to a literal "claude" and label a codex recipient wrong.
+                provider=harness,
+                style_exception=style_exception,
+                force=True,
+            )
+        except AmbiguousTokenError as amb:
+            # Discovery is liveness-gated, so a registered worker whose listing
+            # misses lands on the token rung - which is exactly the situation
+            # --force exists for. These three refusals belong here for the same
+            # reason they belong on the ordinary lane below: without them the
+            # verb exits non-zero with an empty terminal and a raw traceback.
+            print(
+                f"ambiguous session token {name!r}: matches "
+                f"{', '.join(amb.candidates)}. Send to a full session id.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from amb
+        except UnreachableTokenError:
+            hint = (
+                f" Closest live sessions: {', '.join(forced_suggestions)}."
+                if forced_suggestions
+                else ""
+            )
+            print(
+                f"unknown agent or live-session handle: {name!r}.{hint}",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
+        except UnavailableTokenError as unavailable:
+            stores = ", ".join(unavailable.failed)
+            visible = (
+                f" Visible candidates: {', '.join(unavailable.candidates)}."
+                if unavailable.candidates
+                else ""
+            )
+            print(
+                f"cannot resolve short session token {name!r}: unreadable stores: "
+                f"{stores}.{visible} Send to a full session id.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from unavailable
         return
 
     try:

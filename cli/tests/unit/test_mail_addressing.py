@@ -91,3 +91,41 @@ def test_the_refusal_names_what_to_use_instead():
     """A refusal that does not name the working address just moves the wall."""
     assert "full session_id" in CODEX_SHORT_ADDRESS_RULE
     assert "pane" in CODEX_SHORT_ADDRESS_RULE
+
+
+def test_a_name_lane_row_replies_to_the_full_session(tmp_path, monkeypatch):
+    """The regression this half exists for, exercised end to end.
+
+    `_name_lane_send` stamps `to_kind="name"` on every record it writes, and it
+    is the lane that carries `from_session`. A reply that consulted the full id
+    only for `to_kind == "session"` therefore never read the value it had just
+    been taught to store, and the ambiguous-handle refusal still fired.
+    """
+    from typer.testing import CliRunner
+
+    from fno.bus.log import Envelope, append
+    from fno.mail.cli import mail_app
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    append(
+        Envelope.new(
+            id="msg-882e18",
+            from_=canonical_handle(V7_A),
+            to="me",
+            kind="send",
+            body="hi",
+            to_kind="name",
+            from_session=V7_A,
+        )
+    )
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        "fno.mail.cli._reply_to_name_handle",
+        lambda *_a, **kw: seen.update(kw),
+    )
+    result = CliRunner().invoke(mail_app, ["reply", "ok", "--to", "msg-882e18"])
+
+    assert result.exit_code == 0, result.output
+    assert seen.get("target") == V7_A, seen

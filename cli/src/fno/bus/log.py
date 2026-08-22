@@ -492,6 +492,7 @@ def record_typed_delivery(
     provider_from: Optional[str] = None,
     provider_to: Optional[str] = None,
     in_reply_to: Optional[str] = None,
+    from_session: Optional[str] = None,
     from_model: Optional[str] = None,
     to_kind: Optional[str] = None,
     word_count: Optional[int] = None,
@@ -516,6 +517,11 @@ def record_typed_delivery(
         provider_to=provider_to,
         in_reply_to=in_reply_to,
         delivery=TYPED_DELIVERY,
+        # The reply address, on the row a reader reaches for first. `cmd_reply`
+        # consults the bus before any transcript, so a forced message whose row
+        # carried only the head-8 handle refused as ambiguous - on the one
+        # transport with no live confirmation to fall back to.
+        from_session=from_session,
         from_model=from_model,
         to_kind=to_kind,
         word_count=word_count,

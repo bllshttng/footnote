@@ -16,7 +16,7 @@ It is not `--envelope` to opt in. An opt-in flag leaves every existing caller un
 
 An earlier ruling said "an envelope typed as keystrokes is still keystrokes" and dismissed this. That ruling is withdrawn. The envelope is metadata, not a security boundary, and typed metadata is still metadata. A worker reading `<fno_mail from="119e3c52" ...>` knows it is reading a peer, whichever transport typed it.
 
-**One renderer.** `cli/src/fno/mail/envelope.py` is the sole `<fno_mail>` renderer. Node x-1904 deleted the Rust mirror as dead code. If the Rust verb cannot reach `fno mail pane-prepare`, it **fails closed**. There is no bare-paste fallback. A silent one rebuilds the exact defect this closes, and it fires exactly at the moment something is already wrong.
+**One renderer.** `cli/src/fno/mail/envelope.py` is the sole `<fno_mail>` renderer. A prior node deleted the Rust mirror as dead code. If the Rust verb cannot reach `fno mail pane-prepare`, it **fails closed**. There is no bare-paste fallback. A silent one rebuilds the exact defect this closes, and it fires exactly at the moment something is already wrong.
 
 ## The read-back gate
 
@@ -68,7 +68,7 @@ So:
 
 The seed is the one message that defines a worker's entire task. It was also the one message a worker had no way to attribute.
 
-The envelope cannot ride the payload. `skills/agent/scripts/normalize.sh:710` classifies a payload by a LEADING slash (`case "$msg" in /*) payload_mode="passthrough"`), so anything in front of `/fno:target x-1234` destroys routing. Behind the verb line is no safer. The harness REPL is a second reader nobody controls. Probe 1 measured what it does with a trailing block. The verb still routes, and the whole trailer lands inside `<command-args>`. For `/fno:target <node>` those arguments are load-bearing, so an envelope swallowed into them is a real failure rather than a cosmetic one.
+The envelope cannot ride the payload. `skills/agent/scripts/normalize.sh:710` classifies a payload by a LEADING slash (`case "$msg" in /*) payload_mode="passthrough"`), so anything in front of `/fno:target x-aaaa` destroys routing. Behind the verb line is no safer. The harness REPL is a second reader nobody controls. Probe 1 measured what it does with a trailing block. The verb still routes, and the whole trailer lands inside `<command-args>`. For `/fno:target <node>` those arguments are load-bearing, so an envelope swallowed into them is a real failure rather than a cosmetic one.
 
 So the prompt stays byte-identical and the attribution arrives beside it. Every launcher exports bounded `FNO_SEED_PROV_*` fields on the child's environment (`cli/src/fno/mail/seed_provenance.py` owns the contract), and `hooks/spawn-seed-provenance-session-start.sh` renders them through the one renderer into startup context. The worker learns who supplied its seed before it acts. The transcript carries a greppable `</fno_mail>` for that seed, with no envelope at byte zero.
 
