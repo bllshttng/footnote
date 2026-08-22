@@ -3065,7 +3065,11 @@ def dispatch_spawn_pane(
     if crown_level is not None:
         # Same authorization rule as the bg seam: a grant must be a strict subset
         # of what the grantor holds. Both paths check, because either is a door.
-        grant_problem = grant_error(crown_scope or "", calling_agent_row())
+        grant_problem = grant_error(
+            crown_scope or "",
+            calling_agent_row(),
+            allow_terminal_recovery=True,
+        )
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
 
@@ -3923,6 +3927,23 @@ def dispatch_spawn_pane(
                 crown_scope = None
                 crown_grantor_val = None
             if crown_level is not None and crown_scope:
+                # Reclaiming an abandoned scope also clears the terminal
+                # holder's stale crown in this same write. Terminal rows are
+                # excluded from `holders`, but their crown fields still make
+                # them appear crowned to readers and can create a double-rule
+                # after re-registration.
+                rows = [
+                    replace(
+                        r,
+                        crown_level=None,
+                        crown_scope=None,
+                        crown_grantor=None,
+                    )
+                    if r.crown_scope == crown_scope
+                    and r.status in TERMINAL_STATUSES
+                    else r
+                    for r in rows
+                ]
                 holders = [
                     r
                     for r in rows

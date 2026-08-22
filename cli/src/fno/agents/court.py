@@ -21,32 +21,12 @@ from typing import Any, Optional
 
 from fno.agents.crown import (
     _canonical_project,
-    _same_territory,
+    _graph_index,
+    _territory_key,
     crown_reading,
     split_scope,
 )
-
-
-def _by_id() -> Optional[dict[str, dict]]:
-    """One graph parse, id -> entry, or ``None`` when it could not be read.
-
-    Matching :func:`fno.agents.crown._stranded_subordinates`: ``None`` is a
-    distinct answer from an empty graph, because "unreadable" and "nothing
-    here" are not the same fact for a caller deciding whether to trust the
-    absence of a disagreement.
-    """
-    from fno.tracker.metadata import read_entries
-
-    try:
-        entries = read_entries("agents.crown")
-    except Exception:
-        return None
-    by_id: dict[str, dict] = {}
-    for e in entries:
-        node_id = e.get("id") if isinstance(e, dict) else None
-        if node_id:
-            by_id[node_id] = e
-    return by_id
+from fno.plan._status import TERMINAL_STATUSES as PLAN_TERMINAL_STATUSES
 
 
 def _agreement(
@@ -79,7 +59,7 @@ def _agreement(
         if node_type != "epic":
             return False, f"{node_id!r} is a {node_type or 'node'}, not an epic"
         status = entry.get("status")
-        if status in ("done", "superseded"):
+        if status in PLAN_TERMINAL_STATUSES:
             return False, f"{node_id!r} status is {status!r} (terminal)"
         return True, None
     # Level 0/1: a portfolio or single-project crown agrees when every member
@@ -98,9 +78,9 @@ def _agreement(
 def _conflicts(rows: list) -> list[dict[str, Any]]:
     """Territory two live crowned rows hold at once, one entry per scope.
 
-    Reuses :func:`_same_territory` rather than a second equality check, so a
-    conflict here and the one-live-crown guard at grant time can never
-    disagree about what "same territory" means.
+    Groups on :func:`_territory_key`, the normalized key used by crown's
+    territory checks, so a conflict here and the succession check at grant time
+    can never disagree about what "same territory" means.
     """
     # Joined on crown_scope, NOT on a full crown_reading. crown_reading gates on
     # crown_label, which is None whenever crown_level is None, so a corrupted
@@ -115,17 +95,19 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
         scope = getattr(row, "crown_scope", None)
         if isinstance(scope, str) and scope.strip():
             claims.append((row, scope))
-    seen: list[tuple[str, list[str]]] = []
+    seen: dict[frozenset[str], tuple[str, list[str]]] = {}
     for row, scope in claims:
-        for other_scope, holders in seen:
-            if _same_territory(other_scope, scope):
-                holders.append(row.name)
-                break
+        key = _territory_key(scope)
+        if not key:
+            continue
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = (scope, [row.name])
         else:
-            seen.append((scope, [row.name]))
+            existing[1].append(row.name)
     return [
         {"scope": scope, "holders": holders}
-        for scope, holders in seen
+        for scope, holders in seen.values()
         if len(holders) > 1
     ]
 
@@ -163,7 +145,10 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
             }
     live_rows = [r for r in rows if r.status not in TERMINAL_STATUSES]
 
-    by_id = _by_id()
+    # One graph parse for every rung below. ``None`` is a distinct answer from
+    # an empty graph: "unreadable" and "nothing here" are not the same fact for
+    # a caller deciding whether to trust the absence of a disagreement.
+    by_id = _graph_index()
     entries: list[dict[str, Any]] = []
     for row in live_rows:
         reading = crown_reading(row)

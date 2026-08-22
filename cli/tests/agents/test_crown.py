@@ -211,6 +211,48 @@ def test_crown_grantor_defaults_to_human_for_a_direct_spawn(tmp_path: Path, monk
     assert row.crown_level == 0
 
 
+def test_pane_spawn_clears_a_terminal_holder_before_reclaiming_its_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="dead-king",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                harness_session_id="dead-session",
+                status="exited",
+                crown_level=1,
+                crown_scope="epic-x",
+                crown_grantor="human",
+            )
+        ]
+    )
+
+    _spawn_crowned(
+        monkeypatch,
+        tmp_path,
+        grantor_env="dead-session",
+        crown_level=1,
+        crown_scope="epic-x",
+    )
+
+    dead = next(row for row in load_registry() if row.name == "dead-king")
+    assert (dead.crown_level, dead.crown_scope, dead.crown_grantor) == (
+        None,
+        None,
+        None,
+    )
+    assert [row.name for row in load_registry() if row.crown_scope == "epic-x"] == [
+        "king-epic"
+    ]
+
+
 def test_uncrowned_spawn_leaves_crown_none(tmp_path: Path, monkeypatch) -> None:
     from fno.agents.registry import load_registry
 
@@ -514,6 +556,34 @@ def test_agent_caller_whose_crown_strictly_contains_scope_is_accepted(
     )
 
 
+@pytest.mark.parametrize("status", ["exited", "orphaned", "failed", "permanent_dead"])
+def test_terminal_agent_grantor_is_refused_before_authority_check(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status=status,
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry("worker", harness_session_id="worker-session", status="idle")
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert status in result.output
+    assert "grantor" in result.output.lower()
+    assert [asdict(row) for row in load_registry()] == before
+
+
 def test_agent_caller_whose_crown_does_not_contain_scope_is_refused_without_mutation(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -625,6 +695,46 @@ def test_grantor_whose_own_crown_moved_mid_grant_is_refused_under_the_lock(
     after = {r.name: r for r in load_registry()}
     assert after["worker"].crown_scope is None
     assert after["worker"].crown_level is None
+
+
+def test_grantor_that_becomes_terminal_mid_grant_is_refused_under_the_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import crown as crown_mod
+    from fno.agents.registry import load_registry, write_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="idle",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry("worker", harness_session_id="worker-session", status="idle")
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    real_calling_agent_row = crown_mod.calling_agent_row
+
+    def _terminal_after_reading(*args, **kwargs):
+        row = real_calling_agent_row(*args, **kwargs)
+        write_registry(
+            [
+                replace(r, status="exited") if r.name == "caller" else r
+                for r in load_registry()
+            ]
+        )
+        return row
+
+    monkeypatch.setattr(crown_mod, "calling_agent_row", _terminal_after_reading)
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "exited" in result.output
+    assert load_registry()[1].crown_scope is None
 
 
 def test_terminal_target_refusal_names_the_stale_snapshot_not_a_live_probe(

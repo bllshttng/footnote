@@ -1667,6 +1667,21 @@ def _claude_create_path(
         # a king reviving its own exited session must not be blocked by the
         # corpse it is about to overwrite.
         if crown_level is not None and crown_scope:
+            # Reclaiming an abandoned scope also clears the terminal holder's
+            # stale crown in this same write. Terminal rows are excluded from
+            # `holders`, but their crown fields still make them appear crowned
+            # to readers and can create a double-rule after re-registration.
+            entries = [
+                replace(
+                    e,
+                    crown_level=None,
+                    crown_scope=None,
+                    crown_grantor=None,
+                )
+                if e.crown_scope == crown_scope and e.status in TERMINAL_STATUSES
+                else e
+                for e in entries
+            ]
             contenders = [e for e in entries if not (revive and e.name == name)]
             holders = [
                 e
@@ -2502,7 +2517,11 @@ def dispatch_spawn(
         # authority you do not hold. Refuses BEFORE the launch rather than
         # declining after, because an unauthorized grant is an authority error,
         # not a race - nothing should exist as a result of it.
-        grant_problem = grant_error(crown_scope or "", calling_agent_row())
+        grant_problem = grant_error(
+            crown_scope or "",
+            calling_agent_row(),
+            allow_terminal_recovery=True,
+        )
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
         if once or headless:

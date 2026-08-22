@@ -218,6 +218,15 @@ def test_bg_spawn_crowns_over_a_scope_whose_king_is_terminal(bg_home, monkeypatc
     )
     assert result.exit_code == 0, result.output
     assert _row("successor").crown_level == 2
+    dead = _row("dead-king")
+    assert (dead.crown_level, dead.crown_scope, dead.crown_grantor) == (
+        None,
+        None,
+        None,
+    )
+    assert [row.name for row in load_registry() if row.crown_scope == "epic-y"] == [
+        "successor"
+    ]
 
 
 # --- headless stays refused --------------------------------------------------

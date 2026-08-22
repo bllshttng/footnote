@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 
+from fno.plan._status import TERMINAL_STATUSES
 from fno.paths_testing import use_tmpdir
 
 
@@ -135,6 +137,25 @@ def test_a_crown_over_a_wrongly_typed_node_disagrees(
     assert "not an epic" in row["reason"]
 
 
+@pytest.mark.parametrize("status", TERMINAL_STATUSES)
+def test_court_uses_every_canonical_plan_terminal_status(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("king", status="busy", crown_level=2, crown_scope="e-1")],
+        graph_entries=[{"id": "e-1", "type": "epic", "project": "alpha", "status": status}],
+    )
+
+    row = gather_court()["crowns"][0]
+
+    assert row["agree"] is False
+    assert status in row["reason"]
+
+
 def test_unreadable_graph_answers_null_never_true_or_false(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -252,6 +273,26 @@ def test_two_live_rows_holding_the_same_territory_is_a_conflict(
     court = gather_court()
 
     assert court["conflicts"] == [{"scope": "alpha", "holders": ["king-a", "king-b"]}]
+
+
+def test_aliases_and_ordered_scopes_share_one_conflict_group(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry("king-a", status="busy", crown_level=0, crown_scope="alpha,beta"),
+            _entry("king-b", status="idle", crown_level=0, crown_scope="beta,a"),
+        ],
+        graph_entries=[],
+    )
+
+    assert gather_court()["conflicts"] == [
+        {"scope": "alpha,beta", "holders": ["king-a", "king-b"]}
+    ]
 
 
 def test_render_court_json_matches_gather_court(tmp_path: Path, monkeypatch) -> None:

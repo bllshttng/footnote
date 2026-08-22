@@ -211,6 +211,29 @@ def _graph_entry(node_id: str) -> Optional[dict]:
     )
 
 
+def _graph_index() -> Optional[dict[str, dict]]:
+    """Return the readable crown graph as an id index, or ``None``.
+
+    ONE parse serves the availability probe and every per-row node lookup its
+    callers make. ``read_entries`` raises ``ExternalMetadataUnavailable`` under
+    an external tracker backend, so ``None`` is a distinct answer from an empty
+    index: without it a containment or agreement check would silently degrade to
+    "not contained" / "not in the graph" on a machine it never read.
+    """
+    from fno.tracker.metadata import read_entries
+
+    try:
+        entries = read_entries("agents.crown")
+    except Exception:
+        return None
+    by_id: dict[str, dict] = {}
+    for entry in entries:
+        node_id = entry.get("id") if isinstance(entry, dict) else None
+        if isinstance(node_id, str) and node_id:
+            by_id[node_id] = entry
+    return by_id
+
+
 def _canonical_project(name: str) -> Optional[str]:
     """``name`` resolved to its CANONICAL project name, or None if it is not a
     project. Projects are declared in config
@@ -339,7 +362,12 @@ def scope_contains(
     return proj in outer_members
 
 
-def grant_error(requested_scope: str, caller_row) -> Optional[str]:
+def grant_error(
+    requested_scope: str,
+    caller_row,
+    *,
+    allow_terminal_recovery: bool = False,
+) -> Optional[str]:
     """Why this caller may not bestow a crown over ``requested_scope``, or None.
 
     The rule the docs have always stated and nothing was enforcing after the
@@ -347,7 +375,7 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
     ``scope_contains`` existed but had no caller, so any spawned worker could
     mint portfolio-level authority for its child.
 
-    Two grantor classes, matching what the verb used to accept, plus two
+    Two grantor classes, matching what the verb used to accept, plus three
     failure modes that must fail closed:
 
     - **an attended human** (``caller_row`` is None - a shell with no agent
@@ -366,6 +394,15 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
       is not in it, so it is an agent holding no verified authority, not a human;
       refused with the heal (run ``/fno-me`` to join, or wait for the row) rather
       than authorized.
+    - **a terminal grantor** (its STORED status is exited/orphaned/failed/
+      permanent_dead) cannot bestow a crown: authority it can no longer exercise
+      is not authority to hand down.
+
+    ``allow_terminal_recovery`` is the one exemption, and the spawn seams pass
+    it because spawn is how an abandoned scope is recovered. It admits ONLY a
+    request for the SAME territory the terminal row already holds - handing the
+    whole thing to an heir. A strict subset is still refused there, because
+    narrowing from a dead grantor leaves the remainder ruled by nobody live.
     """
     if caller_row is None:
         return None
@@ -383,6 +420,22 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
             "or has not run /fno-me), so it is an agent with no verified authority, "
             "not an attended human. Run /fno-me to join or wait for the row, then "
             "retry; or spawn from an attended shell."
+        )
+    from fno.agents.registry import TERMINAL_STATUSES
+
+    status = getattr(caller_row, "status", None)
+    if status in TERMINAL_STATUSES:
+        if allow_terminal_recovery and _same_territory(
+            getattr(caller_row, "crown_scope", None), requested_scope
+        ):
+            # A stale shell may still carry the identity of a terminal holder.
+            # Spawn is the recovery path for that abandoned scope; it must not
+            # require succession from a session that can no longer spawn.
+            return None
+        return (
+            f"cannot verify the grantor's authority: its STORED status is "
+            f"{status!r}, which is terminal, so it cannot bestow a crown. "
+            "Re-register the grantor in its live session or use an attended shell."
         )
     holder = getattr(caller_row, "crown_scope", None)
     if not holder:
@@ -420,9 +473,14 @@ def _canonical_members(scope: Optional[str]) -> set:
     return {(_canonical_project(m) or m) for m in split_scope(scope)}
 
 
+def _territory_key(scope: Optional[str]) -> frozenset[str]:
+    """The hashable normalized territory used by all scope equality checks."""
+    return frozenset(_canonical_members(scope))
+
+
 def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
     """Do two stored scopes name the same territory, aliases normalized?"""
-    left, right = _canonical_members(a), _canonical_members(b)
+    left, right = _territory_key(a), _territory_key(b)
     return bool(left) and left == right
 
 
@@ -517,6 +575,13 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     def _stamp(rows: list) -> list:
         if caller is not None:
             live_caller = next((row for row in rows if row.name == grantor), None)
+            if live_caller is not None and live_caller.status in TERMINAL_STATUSES:
+                raise CrownPromotionError(
+                    f"refusing to crown {target_name!r}: the grantor's STORED "
+                    f"status is {live_caller.status!r}, which is terminal, so "
+                    "authority ended before the registry write. Re-register the "
+                    "grantor in its live session or use an attended shell."
+                )
             live_scope = None if live_caller is None else live_caller.crown_scope
             if not _same_territory(live_scope, granting_scope):
                 raise CrownPromotionError(
@@ -650,21 +715,11 @@ def _stranded_subordinates(
     """
     if vacated is None or _same_territory(vacated, new_scope):
         return []
-    from fno.tracker.metadata import read_entries
-
     from fno.agents.registry import TERMINAL_STATUSES
 
-    try:
-        # One parse serves both the availability probe and every per-row
-        # epic lookup: raises ExternalMetadataUnavailable under an external
-        # tracker backend, where containment checks would silently degrade
-        # to "not contained".
-        entries = read_entries("agents.crown")
-    except Exception:
+    by_id = _graph_index()
+    if by_id is None:
         return None
-    by_id = {
-        e.get("id"): e for e in entries if isinstance(e, dict) and e.get("id")
-    }
     stranded: list[str] = []
     for row in rows:
         if row.name == target_name or row.status in TERMINAL_STATUSES:
