@@ -206,9 +206,18 @@ jobs:
         # never reported). A hard timeout SIGKILLs the job and no trap runs,
         # which is itself the signal: no duration line means the cap ate the
         # run. The key names the shard so two numbers are never read as one.
+        #
+        # The reporter READS that number rather than only printing it, warning
+        # at 80% of the cap so the next approach is visible before it is fatal.
+        # `|| true` is load-bearing: a failing suite must stay red and a missing
+        # script must not break the step. The cap is passed explicitly because
+        # GitHub does not expose timeout-minutes to a step, so it is duplicated
+        # from the job above; tests/ci/test_smoke_duration_report.sh asserts the
+        # two agree, because a raise applied to only one would move the warning
+        # away from the real ceiling.
         run: |
           start=$SECONDS
-          trap 'printf "smoke-pytest-duration-seconds=%s\n" "$(( SECONDS - start ))"' EXIT
+          trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest "$(( SECONDS - start ))" 30 || true' EXIT
           uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*'
 
   smoke-rest:
@@ -225,7 +234,7 @@ jobs:
         # Same trap, same reason as the pytest shard above.
         run: |
           start=$SECONDS
-          trap 'printf "smoke-rest-duration-seconds=%s\n" "$(( SECONDS - start ))"' EXIT
+          trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest "$(( SECONDS - start ))" 30 || true' EXIT
           uv run --project cli fno-py doctor test smoke --skip 'Pytest*'
 
       # Static dead-import guard: a module move down a layer can leave
