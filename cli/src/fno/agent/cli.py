@@ -290,6 +290,34 @@ whoami_app = typer.Typer(
 )
 
 
+def _route_provider_line() -> Optional[str]:
+    """The model provider this session was routed to, when it was routed at all.
+
+    Env-gated on the stamp a bound route writes (x-c703), so a hand-started
+    session on the operator's own account prints nothing here and its output is
+    byte-for-byte what it was. A stamped worker gets the one fact it could not
+    previously learn about itself: whose quota it is spending, and whether that
+    account can afford an in-session panel.
+    """
+    provider = (os.environ.get("FNO_ROUTE_PROVIDER") or "").strip()
+    if not provider:
+        return None
+    try:
+        from fno.config import provider_subagent_budget
+
+        budget = provider_subagent_budget(provider)
+    except Exception:  # noqa: BLE001 - whoami reports, it never refuses
+        budget = None
+    if budget is None:
+        return f"provider: {provider} (route-bound; no subagent budget)"
+    plural = "" if budget == 1 else "s"
+    note = " - reviews resolve to one inline reviewer" if budget < 2 else ""
+    return (
+        f"provider: {provider} (route-bound; subagent budget "
+        f"{budget} agent{plural}{note})"
+    )
+
+
 @whoami_app.callback(invoke_without_command=True)
 def whoami_command(
     ctx: typer.Context,
@@ -410,6 +438,9 @@ def whoami_command(
     model = _session_model()
     if model:
         typer.echo(f"model:    {model}")
+    provider_line = _route_provider_line()
+    if provider_line:
+        typer.echo(provider_line)
     if context_reading is not None:
         typer.echo(
             f"context:  {context_reading.used_pct}% used "

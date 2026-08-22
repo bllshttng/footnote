@@ -161,12 +161,29 @@ class BusinessRoleRoutingProjectionError(RouteCompositionError):
     """A resolved business role lacks a deterministic provider/model route."""
 
 
+#: The env key a bound route stamps so a RUNNING worker can name its own model
+#: provider. Before x-c703 the provider resolution died at the spawn boundary:
+#: `.provider` was an attribute of the dict the parent held, and nothing carried
+#: it across the fork, so a worker could not tell whether it was billing a shared
+#: account. Route resolution for reviews reads this marker; an unstamped session
+#: resolves "unknown" and keeps today's behavior (LD3, fail open).
+ROUTE_PROVIDER_ENV = "FNO_ROUTE_PROVIDER"
+
+
 class BoundRouteEnv(dict[str, str]):
-    """A validated route environment carrying its model-provider identity."""
+    """A validated route environment carrying its model-provider identity.
+
+    The identity is carried twice on purpose, and the two are not redundant:
+    `.provider` serves the parent process making the routing decision, and the
+    :data:`ROUTE_PROVIDER_ENV` key serves the child process living with it.
+    Only the second survives the fork.
+    """
 
     def __init__(self, route: Mapping[str, str], provider: str) -> None:
         super().__init__(route)
         self.provider = provider
+        if provider:
+            self[ROUTE_PROVIDER_ENV] = provider
 
 
 def bind_route_provider(
