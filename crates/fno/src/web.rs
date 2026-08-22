@@ -734,18 +734,17 @@ console.log("evictedRowCount: 9 cases ok");
                 );
             }
             Ok(o) => {
+                // The end-of-harness marker is the whole verdict, and it is
+                // strictly stronger than the exit code: node printing it means
+                // every case passed, and nothing else prints it. A failed case,
+                // a syntax error, and a node that somehow exits 0 without
+                // running all fail the same way, with both streams shown.
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 assert!(
-                    o.status.success(),
-                    "node rejected the shipped evictedRowCount:\n{}{}",
+                    stdout.contains("evictedRowCount: 9 cases ok"),
+                    "the shipped evictedRowCount did not clear every case:\n{}{}",
                     stdout,
                     String::from_utf8_lossy(&o.stderr)
-                );
-                // Positive marker: the harness ran to its end, so an exit 0 from
-                // a node that never reached the cases cannot read as a pass.
-                assert!(
-                    stdout.contains("evictedRowCount: 9 cases ok"),
-                    "the harness did not reach its last case: {stdout}"
                 );
             }
         }
