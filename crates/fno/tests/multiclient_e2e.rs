@@ -519,6 +519,7 @@ fn concurrent_strict_spawn_only_one_commits() {
                 here: false,
                 fallback: PlacementFallback::Refuse,
             },
+            worker: None,
         },
     };
     // Queue both before reading either: the server serializes them in arrival

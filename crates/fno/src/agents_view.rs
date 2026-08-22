@@ -24,6 +24,12 @@ use crate::proto::{AgentBadge, AnswerablePrompt};
 pub struct RegistryAgent {
     pub name: String,
     pub cwd: String,
+    /// (x-5f7f) The harness axis (`claude`, `codex`, ...; `provider` is the
+    /// pre-v10 spelling on disk, read as a fallback the same way every
+    /// harness-keyed read here tolerates it). Decides the resume form: which
+    /// harnesses own one, and which argv it builds. `None` when the row names
+    /// neither key.
+    pub harness: Option<String>,
     /// (x-d865) The row's own fno session id - the durable identity `pane ls`
     /// reports as `fno_id` and `fno mux where <id>` resolves. `None` for a row
     /// the registry wrote without one. Distinct from `mux.0` (the mux server's
@@ -1464,6 +1470,12 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         out.push(RegistryAgent {
             name: name.to_string(),
             cwd: cwd.to_string(),
+            harness: row
+                .get("harness")
+                .or_else(|| row.get("provider"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             session_id,
             harness_session_id,
             exited,
@@ -1549,6 +1561,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         foreign.push(RegistryAgent {
             session_id: None,
             harness_session_id: None,
+            harness: Some("claude".to_string()),
             name: w.name.clone(),
             cwd: w.cwd.clone(),
             exited: false,
@@ -2978,6 +2991,7 @@ config_dir = "~/.claude-alt"
             } else {
                 Liveness::Alive
             },
+            harness: Some("claude".to_string()),
         }
     }
 

@@ -2035,6 +2035,10 @@ pub enum PaneCmd {
         argv: Vec<String>,
         claim: bool,
         placement: PanePlacement,
+        /// (x-5f7f) `--worker <registry-name>`: record this pane as a squad
+        /// member joined to that registry row, so it survives a mux restart
+        /// as an idle, resumable row.
+        worker: Option<String>,
     },
     Send {
         pane: u64,
@@ -2165,6 +2169,16 @@ default, so a worker can tell a peer's message from its operator's, and refuses 
 an option prompt. --raw types the bytes verbatim for genuine keystrokes: \
 `fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit.";
 
+/// `pane run --worker`'s one line, same posture as [`PANE_SEND_RAW_HELP`]: the
+/// flag records the pane as a squad member joined to the registry row by name,
+/// so a non-claude worker survives a mux restart as an idle, resumable row
+/// instead of vanishing (x-5f7f). Without it nothing is recorded - a plain
+/// `pane run` stays byte-identical.
+pub const PANE_RUN_WORKER_HELP: &str = "pane run --worker <registry-name> records the pane as a \
+squad member joined to that registry row: after a mux restart the member stays as an idle row in \
+the agent panel, and selecting it resumes the session through its own harness (claude --resume / \
+codex resume). Restore never respawns it. A run without --worker records no member.";
+
 pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
@@ -2172,7 +2186,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         .ok_or_else(|| format!("pane needs a verb: {PANE_VERBS}"))?;
     if matches!(verb, "-h" | "--help") {
         return Err(format!(
-            "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}"
+            "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}\n{PANE_RUN_WORKER_HELP}"
         ));
     }
 
@@ -2183,6 +2197,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut json = false;
         let mut cwd = None;
         let mut claim = false;
+        let mut worker = None;
         let mut squad = None;
         let mut split = None;
         let mut tab = None;
@@ -2194,6 +2209,11 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 .to_str()
                 .ok_or_else(|| "non-UTF-8 argument".to_string())?;
             match tok {
+                "-h" | "--help" => {
+                    return Err(format!(
+                        "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}\n{PANE_RUN_WORKER_HELP}"
+                    ))
+                }
                 "--" => {
                     i += 1;
                     break;
@@ -2202,6 +2222,21 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 "--claim" => claim = true,
                 "--session" => session = Some(flag_value(args, &mut i, "--session")?),
                 "--cwd" => cwd = Some(flag_value(args, &mut i, "--cwd")?),
+                // (x-5f7f) The registry name of the worker this pane hosts.
+                // Validated here with the same rule the store's load gate
+                // holds, so an unrecordable name refuses before any pane
+                // exists rather than landing in the store and being dropped
+                // at the next load.
+                "--worker" => {
+                    let name = flag_value(args, &mut i, "--worker")?;
+                    if !crate::squad_store::valid_worker_name(&name) {
+                        return Err(
+                            "--worker needs a registry name ([A-Za-z0-9._-], <=64 chars)"
+                                .into(),
+                        );
+                    }
+                    worker = Some(name);
+                }
                 "--workspace" | "--squad" | "-s" | "workspace" | "squad" => {
                     let name = flag_value(args, &mut i, tok)?;
                     if name.trim().is_empty() {
@@ -2274,6 +2309,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 cwd,
                 argv,
                 claim,
+                worker,
                 placement: PanePlacement {
                     target: squad
                         .map(PaneTarget::SquadName)
@@ -3745,6 +3781,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             cwd,
             argv,
             claim,
+            worker,
             placement,
         } => {
             let cwd = resolve_run_cwd(cwd, std::env::current_dir().ok());
@@ -3756,6 +3793,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     rows: None,
                     claim,
                     placement,
+                    worker,
                 },
                 CONTROL_TIMEOUT,
             )
@@ -5107,6 +5145,21 @@ mod tests {
     }
 
     #[test]
+    fn pane_run_help_documents_the_worker_flag() {
+        // x-5f7f: the flag is the capture funnel's front door, so the run
+        // verb's own help names it and what it records. Both spellings of the
+        // help request reach the same text.
+        for help_args in [&["run", "--help"][..], &["--help"][..]] {
+            let help = pane_args(help_args).unwrap_err();
+            assert!(help.contains("--worker"), "{help}");
+            assert!(
+                help.contains("idle row"),
+                "the help says what the flag buys, not just that it exists: {help}"
+            );
+        }
+    }
+
+    #[test]
     fn pane_positional_session_colon_parity_covers_every_pane_reference_verb() {
         let cases: &[&[&str]] = &[
             &["read", "3"],
@@ -5184,6 +5237,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             liveness: crate::agents_view::Liveness::Alive,
+            harness: None,
         }
     }
 
@@ -5895,6 +5949,7 @@ mod tests {
                     argv: vec!["claude".into(), "--print".into(), "hi".into()],
                     claim: false,
                     placement: PanePlacement::default(),
+                    worker: None,
                 },
             }
         );
