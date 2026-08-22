@@ -2186,6 +2186,13 @@ def cmd_spawn(
             # read. `unknown` is a live pane whose submit mux never answered.
             # Both leave a caller holding a row it cannot trust, which is what
             # exit 22 has always told it.
+            # A seed that rode in the harness argv can no longer reach
+            # `unattempted`: its delivery is settled at exec time and is
+            # classified before the frame is consulted. So exit 22 no longer
+            # fires for a late-painting pane on claude/codex/opencode, which
+            # is the false alarm that had readers re-seeding or reaping live
+            # workers. It still fires for the pane-send path, where an
+            # unreadable frame really does leave the send unmade.
             if pane_result.seed in ("unattempted", "unknown"):
                 raise typer.Exit(code=22)
             return
