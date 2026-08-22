@@ -1573,6 +1573,7 @@ def _name_lane_send(
 
     # Wire `to` carries the canonical handle, matching the durable-bus recipient
     # exactly -- `from` is already a handle via stamp_from, so both attrs agree.
+    assert recipient is not None  # every routing branch above resolves the address
     sender = stamp_from(from_name)
     reservation, authored_words = _reserve_budget(
         sender=sender,
@@ -1714,7 +1715,6 @@ def _name_lane_send(
                 if entry.status == "live":
                     injected = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
 
-    assert recipient is not None  # resolved before either hosted or durable receipt
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
     # Surface the minted id so the sender can quote it and the recipient (who
