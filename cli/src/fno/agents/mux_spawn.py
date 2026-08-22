@@ -2731,8 +2731,15 @@ def _submit_spawn_seed(
             runner,
         )
     except DispatchAskError:
-        if seed_in_argv:
-            return _ARGV_SEED_RECEIPT
+        # NOT short-circuited on `seed_in_argv`, unlike the blank-frame arm
+        # below. A read that raised leaves the pane's liveness unknown, and the
+        # `unattempted` path is what carries that doubt to the caller: it is the
+        # only state the retry probes again and the only one `cmd_spawn` turns
+        # into exit 22. Reporting `submitted` here would write a live registry
+        # row for a pane that may already be gone, holding a slot against
+        # max_live, which is the leak `_await_interactive_readiness` fails a
+        # non-zero read to prevent. Delivery really did happen; the point is
+        # that this arm cannot say the pane is still there to run it.
         # source is "", not "delivered": nothing was typed into the pane, and
         # `delivered` is the word the send arms use for text that WAS. A receipt
         # reading seed=unattempted with seed_source=delivered contradicts itself.
@@ -2782,7 +2789,14 @@ def _submit_spawn_seed(
     else:
         trust_source = ""
     if not frame.strip():
-        if seed_in_argv:
+        # `screen.returncode == 0` is load-bearing and is the whole narrowing.
+        # `_run_mux` does not raise on a non-zero exit, so a `mux pane read`
+        # against a pane that has GONE returns cleanly with empty stdout and is
+        # byte-identical here to a live pane that has not painted. Only the
+        # return code separates them, and `_await_interactive_readiness` already
+        # fails the same read on it. Without this gate a dead pane would earn a
+        # clean `submitted` receipt and a registry row.
+        if seed_in_argv and screen.returncode == 0:
             # An unpainted TUI cannot witness a delivery that happened at exec
             # time. Reporting the frame's silence as a fact about the seed is
             # what made one word cover both a live worker and an empty pane.
@@ -2790,7 +2804,13 @@ def _submit_spawn_seed(
         # A blank frame is an unpainted TUI, not a refused seed: nothing was
         # sent, so there is nothing to call unconfirmed.
         return "unattempted", "pane frame blank, seed submission not attempted", trust_source
-    if provider != "agy" and seed not in frame:
+    if seed_in_argv and seed not in frame:
+        # `seed_in_argv`, not `provider != "agy"`. This arm is the dominant
+        # path in practice - the enriched seed is multi-line and will not appear
+        # verbatim in a 40-line frame - so leaving a second provider-name test
+        # here would let the frame heuristic quietly outvote the argv fact the
+        # moment the two disagree, which is exactly the drift the predicate's
+        # docstring forbids.
         return "submitted", "", "argv"
     payload = "" if seed in frame else seed
     try:

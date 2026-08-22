@@ -604,48 +604,79 @@ def test_an_argv_seed_is_submitted_even_when_the_frame_is_blank() -> None:
     assert "argv" in detail
 
 
-def test_an_argv_seed_is_submitted_even_when_the_frame_is_unreadable() -> None:
-    """A read that raises is a fact about the instrument, never about the seed."""
+def test_an_argv_seed_on_a_RAISED_read_stays_unattempted() -> None:
+    """Delivery happened; whether the pane is still there to run it did not.
+
+    The narrowing that matters. A read that raises leaves pane liveness
+    unknown, and `unattempted` is what carries that doubt: it is the only state
+    the caller retries and the only one `cmd_spawn` turns into exit 22.
+    Reporting `submitted` here writes a live registry row for a pane that may
+    already be gone, holding a slot against max_live.
+    """
     from fno.agents.mux_spawn import DispatchAskError
 
     def run(argv, **_kw):
         if argv[3] == "read":
             raise DispatchAskError("mux read failed", exit_code=1)
-        raise AssertionError(f"an argv seed must not reach a send: {argv}")
+        raise AssertionError(f"a raised read must not reach a send: {argv}")
 
-    state, detail, source = _submit_spawn_seed(
+    state, detail, _source = _submit_spawn_seed(
         "claude", "main", 81, "seed text", run, seed_in_argv=True
     )
-    assert state == "submitted"
-    assert source == "argv"
-    assert "argv" in detail
+    assert state == "unattempted"
+    assert "not attempted" in detail
 
 
-def test_an_argv_seed_never_reports_unattempted_on_any_arm() -> None:
-    """The property the retry depends on.
+def test_an_argv_seed_on_a_FAILED_read_stays_unattempted() -> None:
+    """A pane that has GONE reads byte-identically to one that has not painted.
+
+    `_run_mux` does not raise on a non-zero exit, so `mux pane read` against a
+    dead pane returns cleanly with empty stdout. Only the return code separates
+    the two, and `_await_interactive_readiness` already fails the same read on
+    it. Without that gate a dead pane earns a clean `submitted` receipt.
+    """
+
+    def run(argv, **_kw):
+        verb = argv[3]
+        if verb == "wait":
+            return _proc(WAIT_ALIVE)
+        if verb == "read":
+            return _proc(1, "")
+        raise AssertionError(f"a failed read must not reach a send: {argv}")
+
+    state, detail, _source = _submit_spawn_seed(
+        "claude", "main", 81, "seed text", run, seed_in_argv=True
+    )
+    assert state == "unattempted", "a dead pane must not earn a clean receipt"
+    assert "not attempted" in detail
+
+
+def test_an_argv_seed_on_a_LATE_PAINTED_pane_never_reports_unattempted() -> None:
+    """The property the retry depends on, scoped to the arm it was measured on.
 
     `mux_spawn` retries only from `unattempted`, justified as the one state
     where nothing can already be sitting in the pane's buffer. With an argv
-    seed something IS already committed, so that argument was false for this
-    path. It holds now because an argv seed cannot reach the state at all.
+    seed something IS already committed, so that argument was false whenever a
+    LIVE pane simply had not painted - the measured case, where recovering the
+    receipt left a queued duplicate verb behind a running pipeline.
+
+    Scoped deliberately: the two read-failure arms keep `unattempted`, because
+    there the doubt is about the pane rather than about the seed.
     """
-    from fno.agents.mux_spawn import DispatchAskError
 
     def blank(argv, **_kw):
-        if argv[3] == "read":
+        verb = argv[3]
+        if verb == "wait":
+            return _proc(WAIT_ALIVE)
+        if verb == "read":
             return _proc(0, "  \n")
         raise AssertionError(argv)
 
-    def unreadable(argv, **_kw):
-        if argv[3] == "read":
-            raise DispatchAskError("mux read failed", exit_code=1)
-        raise AssertionError(argv)
-
-    for runner in (blank, unreadable):
-        state, _detail, _source = _submit_spawn_seed(
-            "claude", "main", 81, "seed text", runner, seed_in_argv=True
-        )
-        assert state != "unattempted", "an argv seed reaching the retry can double-seed a live pane"
+    state, _detail, source = _submit_spawn_seed(
+        "claude", "main", 81, "seed text", blank, seed_in_argv=True
+    )
+    assert state != "unattempted", "an argv seed reaching the retry can double-seed a live pane"
+    assert source == "argv"
 
 
 def test_a_seed_that_did_not_ride_in_argv_still_reports_unattempted() -> None:
@@ -688,44 +719,53 @@ def test_the_argv_arms_issue_no_keystroke() -> None:
         return _proc(0)
 
     _submit_spawn_seed("claude", "main", 81, "seed text", run, seed_in_argv=True)
+    assert [c for c in calls if c[3] == "read"], "the read must still happen"
     assert not [c for c in calls if c[3] == "send"], "the receipt fix must issue no send"
 
 
 def test_the_argv_marker_is_correct_for_every_pane_harness() -> None:
     """The marker must agree with what `build_pane_argv` really emits.
 
-    The harnesses do not agree on how a seed enters the argv. claude and codex
-    append it as its own token behind `--`; opencode FUSES it into
-    `--prompt=<seed>`; agy embeds nothing and types it instead. An element
-    membership test (`seed in argv`) answers False for opencode on a seed that
-    was genuinely delivered, so the defect this guard exists to close would
-    survive for that one harness, silently, because the receipt still looks
-    ordinary.
+    The harnesses do not agree on how a seed enters the argv. claude, codex and
+    gemini append it as its own token (behind `--`, or after `-i`); opencode
+    FUSES it into `--prompt=<seed>`; agy embeds nothing and types it instead.
+    An element membership test (`seed in argv`) answers False for opencode on a
+    seed that was genuinely delivered, so the defect this guard exists to close
+    would survive for that one harness, silently, because the receipt still
+    looks ordinary.
 
-    This pins the marker against the real builder rather than against a table
-    restated here, so a harness changing how it carries the seed fails loudly.
+    Two message shapes, because they exercise different paths. A plain message
+    reaches every pane-hostable harness including gemini, whose `normalize_command`
+    refuses a slash verb. A slash verb exercises the normalize-then-enrich
+    rewrite the real call site performs before building, which is where
+    opencode's fusion actually bites.
+
+    This pins the marker against the real builder and the PRODUCTION predicate,
+    never a table restated here, so a harness changing how it carries the seed
+    fails loudly.
     """
     from pathlib import Path
 
     from fno.agents.mux_spawn import build_pane_argv, normalize_command, seed_rode_in_argv
     from fno.agents.spawn_payload import enrich_spawn_payload
 
-    expected = {"claude": True, "codex": True, "opencode": True, "agy": False}
-    for provider, want in expected.items():
-        # Mirror dispatch_spawn_pane: normalize, enrich, THEN build.
-        msg = "/fno:target x-0000"
-        if msg.strip().startswith(("/", "$fno:")):
-            msg = normalize_command(msg, provider)
-        msg = enrich_spawn_payload(msg)
-        argv = build_pane_argv(provider, msg, Path("/tmp"), False, None)
-        # Call the PRODUCTION predicate. Restating its expression here made
-        # this test pass against a deliberately broken implementation.
-        got = seed_rode_in_argv(msg, argv)
-        assert got is want, (
-            f"{provider}: marker says seed_in_argv={got}, expected {want}. "
-            f"If this harness changed how it carries the seed, the receipt "
-            f"logic in _submit_spawn_seed must change with it."
-        )
+    plain = {"claude": True, "codex": True, "gemini": True, "opencode": True, "agy": False}
+    slash = {"claude": True, "codex": True, "opencode": True, "agy": False}
+
+    for raw, expected in (("do the thing", plain), ("/fno:target x-0000", slash)):
+        for provider, want in expected.items():
+            # Mirror dispatch_spawn_pane: normalize, enrich, THEN build.
+            msg = raw
+            if msg.strip().startswith(("/", "$fno:")):
+                msg = normalize_command(msg, provider)
+            msg = enrich_spawn_payload(msg)
+            argv = build_pane_argv(provider, msg, Path("/tmp"), False, None)
+            got = seed_rode_in_argv(msg, argv)
+            assert got is want, (
+                f"{provider} with {raw!r}: marker says seed_in_argv={got}, expected "
+                f"{want}. If this harness changed how it carries the seed, the "
+                f"receipt logic in _submit_spawn_seed must change with it."
+            )
 
 
 def test_shared_readiness_clears_agy_trust_before_seeding() -> None:
