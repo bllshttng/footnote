@@ -48,12 +48,31 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
         projected["last_message_at_basis"] = "refused-newer-than-transcript"
 
     has_pid = row.get("pid") is not None
-    created_at = _timestamp(row.get("created_at"))
-    pid_started_at = _timestamp(row.get("pid_start_time"))
-    if not has_pid or created_at is None or pid_started_at is None:
-        projected["liveness_origin"] = None
+    raw_created_at = row.get("created_at")
+    raw_pid_start_time = row.get("pid_start_time")
+    created_at = _timestamp(raw_created_at)
+    pid_started_at = _timestamp(raw_pid_start_time)
+    if not has_pid:
+        liveness_origin = None
+        liveness_basis = "missing-pid"
+    elif raw_created_at is None:
+        liveness_origin = None
+        liveness_basis = "missing-created-at"
+    elif created_at is None:
+        liveness_origin = None
+        liveness_basis = "unreadable-created-at"
+    elif raw_pid_start_time is None:
+        liveness_origin = None
+        liveness_basis = "missing-pid-start-time"
+    elif pid_started_at is None:
+        liveness_origin = None
+        liveness_basis = "unreadable-pid-start-time"
     elif (pid_started_at - created_at).total_seconds() > _RESUME_BAND_SECONDS:
-        projected["liveness_origin"] = "resumed"
+        liveness_origin = "resumed"
+        liveness_basis = None
     else:
-        projected["liveness_origin"] = "survivor"
+        liveness_origin = "survivor"
+        liveness_basis = None
+    projected["liveness_origin"] = liveness_origin
+    projected["liveness_origin_basis"] = liveness_basis
     return projected

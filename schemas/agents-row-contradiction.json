@@ -62,7 +62,8 @@
         "pid_start_time": "2026-08-21T00:31:40Z"
       },
       "expected": {
-        "liveness_origin": "resumed"
+        "liveness_origin": "resumed",
+        "liveness_origin_basis": null
       }
     },
     {
@@ -73,7 +74,8 @@
         "pid_start_time": "2026-08-20T23:00:50Z"
       },
       "expected": {
-        "liveness_origin": "survivor"
+        "liveness_origin": "survivor",
+        "liveness_origin_basis": null
       }
     },
     {
@@ -84,7 +86,8 @@
         "pid_start_time": null
       },
       "expected": {
-        "liveness_origin": null
+        "liveness_origin": null,
+        "liveness_origin_basis": "missing-pid-start-time"
       }
     },
     {
@@ -95,7 +98,32 @@
         "pid_start_time": "2026-08-21T00:31:40Z"
       },
       "expected": {
-        "liveness_origin": null
+        "liveness_origin": null,
+        "liveness_origin_basis": "missing-pid"
+      }
+    },
+    {
+      "name": "unreadable process start token is named",
+      "row": {
+        "created_at": "2026-08-20T23:00:00Z",
+        "pid": 123,
+        "pid_start_time": 12345
+      },
+      "expected": {
+        "liveness_origin": null,
+        "liveness_origin_basis": "unreadable-pid-start-time"
+      }
+    },
+    {
+      "name": "missing creation time is named",
+      "row": {
+        "created_at": null,
+        "pid": 123,
+        "pid_start_time": "2026-08-21T00:31:40Z"
+      },
+      "expected": {
+        "liveness_origin": null,
+        "liveness_origin_basis": "missing-created-at"
       }
     }
   ]

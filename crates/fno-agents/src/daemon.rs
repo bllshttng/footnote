@@ -4718,21 +4718,32 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
     }
 
     let has_pid = row.get("pid").is_some_and(|value| !value.is_null());
-    let liveness_origin = if !has_pid {
-        Value::Null
+    let created_raw = row.get("created_at");
+    let pid_start_raw = row.get("pid_start_time");
+    let created_missing = created_raw.is_none() || created_raw.is_some_and(Value::is_null);
+    let pid_start_missing = pid_start_raw.is_none() || pid_start_raw.is_some_and(Value::is_null);
+    let (liveness_origin, liveness_basis) = if !has_pid {
+        (Value::Null, json!("missing-pid"))
+    } else if created_missing {
+        (Value::Null, json!("missing-created-at"))
+    } else if row_timestamp(created_raw).is_none() {
+        (Value::Null, json!("unreadable-created-at"))
+    } else if pid_start_missing {
+        (Value::Null, json!("missing-pid-start-time"))
     } else if let (Some(created_at), Some(pid_started_at)) = (
-        row_timestamp(row.get("created_at")),
-        row_timestamp(row.get("pid_start_time")),
+        row_timestamp(created_raw),
+        row_timestamp(pid_start_raw),
     ) {
         if (pid_started_at - created_at).num_seconds() > 600 {
-            json!("resumed")
+            (json!("resumed"), Value::Null)
         } else {
-            json!("survivor")
+            (json!("survivor"), Value::Null)
         }
     } else {
-        Value::Null
+        (Value::Null, json!("unreadable-pid-start-time"))
     };
     row.insert("liveness_origin".into(), liveness_origin);
+    row.insert("liveness_origin_basis".into(), liveness_basis);
 }
 
 fn rendered_status_from_truth(
