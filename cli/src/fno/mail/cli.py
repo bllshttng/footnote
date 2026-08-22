@@ -1246,7 +1246,12 @@ def cmd_seed_provenance() -> None:
 
 @mail_app.command("pane-prepare", hidden=True)
 def cmd_pane_prepare(
-    session: str = typer.Option(..., "--session", help="mux session name."),
+    session: Optional[str] = typer.Option(
+        None, "--session-id", help="mux session name."
+    ),
+    session_legacy: Optional[str] = typer.Option(
+        None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
+    ),
     pane: int = typer.Option(..., "--pane", help="mux pane id."),
     harness: Optional[str] = typer.Option(
         None, "--harness",
@@ -1264,7 +1269,15 @@ def cmd_pane_prepare(
     pane is showing an option prompt, hosts no registered agent, or the body
     cannot be attributed.
     """
+    from fno._flag_aliases import merge_deprecated_alias
     from fno.mail.pane_transport import PaneSendRefused, prepare
+
+    session = merge_deprecated_alias(
+        session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
+    )
+    if not session:
+        print("error: --session-id is required", file=sys.stderr)
+        raise typer.Exit(code=2)
 
     body = sys.stdin.read()
     try:
@@ -3140,7 +3153,7 @@ def cmd_send(
         ),
     ),
     force: bool = typer.Option(
-        False, "--force",
+        False, "--force", "-F",
         help=(
             "Deliver over the PANE transport: type the wrapped body at the "
             "recipient's prompt instead of running the live-inject ladder. Every "

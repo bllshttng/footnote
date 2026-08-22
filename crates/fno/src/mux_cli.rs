@@ -4428,7 +4428,7 @@ fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>,
         .args([
             "mail",
             "pane-prepare",
-            "--session",
+            "--session-id",
             session,
             "--pane",
             &pane.to_string(),

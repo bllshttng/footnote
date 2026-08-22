@@ -11,7 +11,6 @@ have one so their transport assertions still run). Here the gate is the subject.
 """
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -30,24 +29,40 @@ def _entry():
     )
 
 
-def _runner(calls, *, screen="", verdict=None, returncode=0):
-    """A fake ``subprocess.run`` covering the three verbs this lane issues.
-
-    ``verdict`` is what the manifest engine answers for the frame; ``None``
-    means the default no-match. Pass ``{"error": ...}`` to model a detector that
-    could not run at all, which is a different answer from "no prompt showing".
-    """
-    payload = json.dumps(verdict if verdict is not None else {"matched": False})
+def _runner(calls, *, screen="", returncode=0):
+    """A fake ``subprocess.run`` covering the pane verbs this lane issues."""
 
     def run(argv, **kwargs):
         calls.append({"argv": list(argv), "input": kwargs.get("input")})
-        if "manifest-eval" in argv:
-            return SimpleNamespace(returncode=0, stdout=payload, stderr="")
         if argv[1:4] == ["mux", "pane", "read"]:
             return SimpleNamespace(returncode=0, stdout=screen, stderr="")
         return SimpleNamespace(returncode=returncode, stdout="", stderr="")
 
     return run
+
+
+def _detector(monkeypatch, asked, verdict=None):
+    """Stub the manifest engine and record the harness it was asked about.
+
+    Patched at :func:`fno.agents.mux_spawn._evaluate_manifest_screen` rather
+    than through ``subprocess.run``, because that function resolves an INSTALLED
+    ``fno-agents`` binary and returns ``{"error": "manifest-eval binary
+    unavailable"}`` without ever shelling out when there is none. CI has none, so
+    a subprocess-level stub silently never ran there and every gate assertion
+    read the unavailable branch instead of the one it named.
+
+    ``verdict=None`` is the default no-match. Pass ``{"error": ...}`` to model a
+    detector that could not run at all, which is a different answer from "no
+    prompt showing".
+    """
+    answer = verdict if verdict is not None else {"matched": False}
+
+    def _eval(harness, screen, runner=None, **_kwargs):
+        asked.append({"harness": harness, "screen": screen})
+        return answer
+
+    monkeypatch.setattr("fno.agents.mux_spawn._evaluate_manifest_screen", _eval)
+    return asked
 
 
 def _pasted(calls):
@@ -72,6 +87,7 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(monkeypatch, [])
 
     assert dispatch._mux_pane_send(_entry(), "status?", guarded=False) is True
 
@@ -132,17 +148,18 @@ def test_a_showing_option_prompt_refuses_and_types_nothing(monkeypatch, capsys):
     monkeypatch.setattr(
         dispatch.subprocess,
         "run",
-        _runner(
-            calls,
-            screen="Do you want to proceed?\n 1. Yes\n 2. No",
-            verdict={
-                "matched": True,
-                "rule_id": "claude-permission-prompt",
-                "answerable": {"options": ["1", "2"], "fingerprint": "abc"},
-            },
-        ),
+        _runner(calls, screen="Do you want to proceed?\n 1. Yes\n 2. No"),
     )
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(
+        monkeypatch,
+        [],
+        {
+            "matched": True,
+            "rule_id": "claude-permission-prompt",
+            "answerable": {"options": ["1", "2"], "fingerprint": "abc"},
+        },
+    )
 
     assert dispatch._mux_pane_send(_entry(), "take option 3", guarded=False) is False
     assert "send" not in _verbs(calls), "nothing may be typed at a showing prompt"
@@ -156,12 +173,9 @@ def test_an_unrunnable_detector_refuses_rather_than_typing_blind(monkeypatch, ca
     one cannot tell them apart, so the unmeasurable case refuses.
     """
     calls: list[dict] = []
-    monkeypatch.setattr(
-        dispatch.subprocess,
-        "run",
-        _runner(calls, verdict={"matched": False, "error": "manifest-eval unavailable"}),
-    )
+    monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(monkeypatch, [], {"matched": False, "error": "manifest-eval unavailable"})
 
     assert dispatch._mux_pane_send(_entry(), "hello", guarded=False) is False
     assert "send" not in _verbs(calls)
@@ -177,6 +191,7 @@ def test_an_already_wrapped_body_is_not_wrapped_twice(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(monkeypatch, [])
 
     body = '<fno_mail from="peer" harness="claude-code" model="m">hi</fno_mail>'
     assert dispatch._mux_pane_send(_entry(), body, guarded=False) is True
@@ -190,6 +205,7 @@ def test_every_pane_verb_this_lane_issues_is_raw(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(monkeypatch, [])
 
     dispatch._mux_pane_send(_entry(), "status?", guarded=False)
 
@@ -206,11 +222,12 @@ def test_the_gate_asks_about_the_recipients_own_harness(monkeypatch, harness):
     calls: list[dict] = []
     monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    asked: list[dict] = []
+    _detector(monkeypatch, asked)
 
     entry = _entry()
     entry.harness = harness
     dispatch._mux_pane_send(entry, "status?", guarded=False)
 
-    evals = [c["argv"] for c in calls if "manifest-eval" in c["argv"]]
-    assert evals, "the gate must run"
-    assert evals[0][evals[0].index("--harness") + 1] == harness
+    assert asked, "the gate must run"
+    assert asked[0]["harness"] == harness
