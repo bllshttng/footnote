@@ -199,6 +199,38 @@ def test_job_lane_refuses_the_second_send(monkeypatch, capsys):
     assert len(attempts) == 1
 
 
+def test_job_lane_durable_failure_releases_the_reservation(monkeypatch):
+    from fno.mail import cli
+    from fno.mail.job_address import JobHolder
+
+    job = JobHolder(
+        node_id="work-1234",
+        address="node:work-1234",
+        state="live",
+        session_id="bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        harness="claude",
+    )
+    monkeypatch.setattr(
+        "fno.mail.job_address.resolve_job_address", lambda _token: job
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda _sid, _body, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "fno.inbox.store.write_new_thread",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    body = words(79)
+
+    with pytest.raises(typer.Exit) as failed:
+        cli._job_lane_send(body, "node:work-1234", from_name="sender")
+    assert failed.value.exit_code == 12
+
+    retry = send("sender", "node:work-1234", 79, "msg-retry")
+    assert retry.running_before == 0
+
+
 def test_exactly_the_cap_is_allowed():
     send("a", "b", 80, "msg-cap")
     with pytest.raises(budget.BudgetRefused):
@@ -244,28 +276,50 @@ def _inbound(sender: str, recipient: str, msg_id: str) -> str:
 
 def test_inbound_reply_resets_the_running_total():
     send("a", "b", 79, "msg-out1")
-    time.sleep(1.1)  # bus ts has second resolution
     reset_id = _inbound("a", "b", "msg-in1")
-    time.sleep(1.1)
     second = send("a", "b", 79, "msg-out2")
     assert second.running_before == 0
     assert second.reset_by == reset_id
 
 
+def test_same_second_inbound_resets_once_without_erasing_a_later_reservation(
+    monkeypatch,
+):
+    from fno.bus.log import Envelope, append
+
+    monkeypatch.setattr(budget.time, "time", lambda: 1_000.75)
+    send("a", "b", 79, "msg-out-one")
+    append(
+        Envelope.new(
+            id="msg-inbound",
+            from_="b",
+            to="a",
+            kind="send",
+            body="ok",
+            ts="1970-01-01T00:16:40Z",
+            word_count=1,
+        )
+    )
+
+    second = send("a", "b", 79, "msg-out-two")
+    assert second.running_before == 0
+    assert second.reset_by == "msg-inbound"
+
+    with pytest.raises(budget.BudgetRefused) as raised:
+        send("a", "b", 2, "msg-after-reset")
+    assert raised.value.running == 79
+
+
 def test_reset_requires_the_exact_pair():
     send("a", "b", 79, "msg-out1")
-    time.sleep(1.1)
     _inbound("a", "other", "msg-in-wrong")  # from "other", not from "b"
-    time.sleep(1.1)
     with pytest.raises(budget.BudgetRefused):
         send("a", "b", 79, "msg-out2")
 
 
 def test_self_send_does_not_reset_its_own_pair():
     send("a", "a", 79, "msg-self-one")
-    time.sleep(1.1)
     _inbound("a", "a", "msg-self-loop")
-    time.sleep(1.1)
 
     with pytest.raises(budget.BudgetRefused) as raised:
         send("a", "a", 79, "msg-self-two")
@@ -277,7 +331,6 @@ def test_non_send_reverse_row_does_not_reset_the_pair():
     from fno.bus.log import Envelope, append
 
     send("a", "b", 79, "msg-out-one")
-    time.sleep(1.1)
     append(
         Envelope.new(
             id="msg-migration",
@@ -287,7 +340,6 @@ def test_non_send_reverse_row_does_not_reset_the_pair():
             body="migrated",
         )
     )
-    time.sleep(1.1)
 
     with pytest.raises(budget.BudgetRefused) as raised:
         send("a", "b", 79, "msg-out-two")

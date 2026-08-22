@@ -7776,6 +7776,13 @@ def dispatch_send(
                 from fno.inbox.store import generate_msg_id
 
                 msg_id = generate_msg_id()
+                reservation = _reserve_send_budget(
+                    sender=from_name,
+                    recipient=canonical_handle(timeout_entry.harness_session_id),
+                    message=message,
+                    msg_id=msg_id,
+                    enforce=budget_enforce,
+                )
                 try:
                     _emit_ev(
                         "agent_send_started",
@@ -7783,14 +7790,20 @@ def dispatch_send(
                         provider=timeout_entry.harness,
                         msg_id=msg_id,
                     )
-                    msg_id, _durable_to = _queue_durable_fallback(
-                        timeout_entry,
-                        message,
-                        from_name,
-                        timeout_entries,
-                        msg_id=msg_id,
-                        reason=queue_reason,
-                    )
+                    try:
+                        msg_id, _durable_to = _queue_durable_fallback(
+                            timeout_entry,
+                            message,
+                            from_name,
+                            timeout_entries,
+                            msg_id=msg_id,
+                            reason=queue_reason,
+                        )
+                    except Exception:
+                        from fno.mail import budget
+
+                        budget.release(reservation)
+                        raise
                     _emit_ev(
                         "agent_send_done",
                         name=name,

@@ -2016,6 +2016,7 @@ def _job_lane_send(
             word_count=authored_words,
         )
     except (OSError, ValueError, RuntimeError) as exc:
+        _release_budget(_reservation)
         print(
             f"durable envelope write failed for {recipient!r}: {exc}",
             file=sys.stderr,

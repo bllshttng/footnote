@@ -204,9 +204,19 @@ def reserve(
         entries = [e for e in _load(path, pair) if e["ts"] >= floor]
         reset_by = None
         inbound = last_inbound(sender, recipient, since=floor)
+        inbound_id = None
         if inbound is not None:
             reset_id, reset_ts = inbound
-            kept = [e for e in entries if e["ts"] > reset_ts]
+            inbound_id = reset_id
+            kept = [
+                entry
+                for entry in entries
+                if (
+                    entry.get("inbound_id") == reset_id
+                    if "inbound_id" in entry
+                    else entry["ts"] > reset_ts
+                )
+            ]
             if len(kept) != len(entries):
                 reset_by = reset_id
             entries = kept
@@ -216,7 +226,14 @@ def reserve(
             # written back so an expired window is not re-read on the next send.
             _store(path, pair, entries)
             raise BudgetRefused(pair=pair, running=running, current=words)
-        entries.append({"id": msg_id, "ts": now, "words": words})
+        entries.append(
+            {
+                "id": msg_id,
+                "ts": now,
+                "words": words,
+                "inbound_id": inbound_id,
+            }
+        )
         _store(path, pair, entries)
         return Reservation(
             pair=pair,

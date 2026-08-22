@@ -1925,6 +1925,43 @@ def test_dispatch_send_agent_lock_timeout_queues_durable(
     assert "hello" in threads[0].messages[0].body
 
 
+def test_dispatch_send_agent_lock_timeout_reserves_the_pair_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+
+    body = " ".join("word" for _ in range(79))
+    _fail_first_lock_acquire(monkeypatch)
+    first = dispatch_send(
+        name="red",
+        message=body,
+        provider=None,
+        cwd=tmp_path,
+        lock_timeout=0.2,
+        from_name="sender",
+    )
+    assert first.delivery == "durable"
+    assert first.reason == "agent-lock-timeout"
+
+    with pytest.raises(DispatchAskError) as raised:
+        dispatch_send(
+            name="red",
+            message=body,
+            provider=None,
+            cwd=tmp_path,
+            lock_timeout=0.2,
+            from_name="sender",
+        )
+
+    assert raised.value.exit_code == 1
+    assert "running=79 current=79 projected=158 cap=80 window=10m" in str(
+        raised.value
+    )
+
+
 def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
     tmp_path: Path, monkeypatch
 ) -> None:
