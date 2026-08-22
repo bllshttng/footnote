@@ -4744,13 +4744,13 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
 /// Parse one row timestamp into `(value, basis)`, separating absent from
 /// unreadable. Mirrors `_read_field` in cli/src/fno/agents/row_contradiction.py.
 ///
-/// Folding the two together is what let `liveness_origin: null` mean four
+/// Folding the two together is what let `liveness_origin: null` mean five
 /// different things at once, so a reader holding one null could not tell
 /// "nothing was recorded" from "something this parser cannot read".
-fn row_field_with_basis<'a>(
+fn row_field_with_basis(
     row: &Map<String, Value>,
     key: &str,
-    label: &'a str,
+    label: &str,
 ) -> (Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
     match row.get(key) {
         None | Some(Value::Null) => (None, Some(format!("{label}-absent"))),
