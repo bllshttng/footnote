@@ -29,17 +29,6 @@ from fno.agents.crown import (
 from fno.plan._status import TERMINAL_STATUSES as PLAN_TERMINAL_STATUSES
 
 
-def _by_id() -> Optional[dict[str, dict]]:
-    """One graph parse, id -> entry, or ``None`` when it could not be read.
-
-    Matching :func:`fno.agents.crown._stranded_subordinates`: ``None`` is a
-    distinct answer from an empty graph, because "unreadable" and "nothing
-    here" are not the same fact for a caller deciding whether to trust the
-    absence of a disagreement.
-    """
-    return _graph_index()
-
-
 def _agreement(
     level: Optional[int], scope: Optional[str], by_id: Optional[dict[str, dict]]
 ) -> tuple[Optional[bool], Optional[str]]:
@@ -89,9 +78,9 @@ def _agreement(
 def _conflicts(rows: list) -> list[dict[str, Any]]:
     """Territory two live crowned rows hold at once, one entry per scope.
 
-    Reuses :func:`_same_territory` rather than a second equality check, so a
-    conflict here and the one-live-crown guard at grant time can never
-    disagree about what "same territory" means.
+    Groups on :func:`_territory_key`, the normalized key used by crown's
+    territory checks, so a conflict here and the succession check at grant time
+    can never disagree about what "same territory" means.
     """
     # Joined on crown_scope, NOT on a full crown_reading. crown_reading gates on
     # crown_label, which is None whenever crown_level is None, so a corrupted
@@ -156,7 +145,10 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
             }
     live_rows = [r for r in rows if r.status not in TERMINAL_STATUSES]
 
-    by_id = _by_id()
+    # One graph parse for every rung below. ``None`` is a distinct answer from
+    # an empty graph: "unreadable" and "nothing here" are not the same fact for
+    # a caller deciding whether to trust the absence of a disagreement.
+    by_id = _graph_index()
     entries: list[dict[str, Any]] = []
     for row in live_rows:
         reading = crown_reading(row)

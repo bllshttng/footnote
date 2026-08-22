@@ -212,7 +212,14 @@ def _graph_entry(node_id: str) -> Optional[dict]:
 
 
 def _graph_index() -> Optional[dict[str, dict]]:
-    """Return the readable crown graph as an id index, or ``None``."""
+    """Return the readable crown graph as an id index, or ``None``.
+
+    ONE parse serves the availability probe and every per-row node lookup its
+    callers make. ``read_entries`` raises ``ExternalMetadataUnavailable`` under
+    an external tracker backend, so ``None`` is a distinct answer from an empty
+    index: without it a containment or agreement check would silently degrade to
+    "not contained" / "not in the graph" on a machine it never read.
+    """
     from fno.tracker.metadata import read_entries
 
     try:
@@ -368,7 +375,7 @@ def grant_error(
     ``scope_contains`` existed but had no caller, so any spawned worker could
     mint portfolio-level authority for its child.
 
-    Two grantor classes, matching what the verb used to accept, plus two
+    Two grantor classes, matching what the verb used to accept, plus three
     failure modes that must fail closed:
 
     - **an attended human** (``caller_row`` is None - a shell with no agent
@@ -387,6 +394,15 @@ def grant_error(
       is not in it, so it is an agent holding no verified authority, not a human;
       refused with the heal (run ``/fno-me`` to join, or wait for the row) rather
       than authorized.
+    - **a terminal grantor** (its STORED status is exited/orphaned/failed/
+      permanent_dead) cannot bestow a crown: authority it can no longer exercise
+      is not authority to hand down.
+
+    ``allow_terminal_recovery`` is the one exemption, and the spawn seams pass
+    it because spawn is how an abandoned scope is recovered. It admits ONLY a
+    request for the SAME territory the terminal row already holds - handing the
+    whole thing to an heir. A strict subset is still refused there, because
+    narrowing from a dead grantor leaves the remainder ruled by nobody live.
     """
     if caller_row is None:
         return None
