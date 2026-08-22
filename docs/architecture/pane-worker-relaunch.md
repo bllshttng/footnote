@@ -26,6 +26,8 @@ A worker pane's pty was a child of the previous mux server pid and died with it.
 
 The member stays as-is and the row renders idle in the agent panel. Restore also prints one notice naming how many idle worker rows it created. That makes "nothing resumed" distinguishable from "the counter never ran".
 
+Restore also prunes a worker member whose registry row is gone (an `fno agents rm`, a GC pass): a name that can never resume is dead weight, not a card, and each restart names the prune count in a notice. A name that still exists stays, exited or not.
+
 Claude attach members restore exactly as before: `claude attach` in the recorded cwd, because the daemon still owns those sessions.
 
 ## The resume gesture
@@ -38,9 +40,9 @@ Selecting an idle row sends `Command::ResumeAgent { name }`. The server joins th
 | codex | `codex resume <harness_session_id>` |
 | anything else | no Resume offered |
 
-A live claude bg row with a jobId is excluded: attach is the correct gesture there and already exists. A harness with no resume form here (agy has none verified) offers no Resume button at all. A button that fails is worse than an honest dead row. The session id is always a positional argument, never a shell string. `worker` names are validated to the registry slug charset at load (`valid_worker_name`) before any resume can key on them.
+Only a DEAD row offers Resume. A live row has a process writing its session state, and resuming under it would open a second writer on the same rollout. A live claude bg row with a jobId attaches instead: the daemon owns the session, and that gesture already exists. A harness with no resume form here (agy has none verified) offers no Resume button at all. A button that fails is worse than an honest dead row. The session id is always a positional argument, never a shell string. `worker` names are validated to the registry slug charset at load (`valid_worker_name`) before any resume can key on them.
 
-The resumed pane is titled from the registry row and recorded as a worker member again, so it survives the NEXT restart too.
+The resumed pane is placed in the squad that holds the worker's recorded membership, falling back to the squad owning its cwd. The two tokens the server builds are pinned against `harness_capabilities.toml` by a test that reads the toml, so the Rust mirror cannot drift from the file that owns it. The pane is titled from the registry row and recorded as a worker member again, so it survives the NEXT restart too.
 
 ## Files
 

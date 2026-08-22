@@ -828,6 +828,24 @@ fn set_resume_program(argv: &[&str]) {
     RESUME_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
 }
 
+#[cfg(test)]
+fn clear_resume_program() {
+    RESUME_PROGRAM.with(|p| *p.borrow_mut() = None);
+}
+
+/// Test-only guard clearing the [`RESUME_PROGRAM`] override on scope exit, so
+/// a test that installs the override cannot leak it into a later test on the
+/// same thread (`cargo test -- --test-threads=1`).
+#[cfg(test)]
+struct ResumeProgramGuard;
+
+#[cfg(test)]
+impl Drop for ResumeProgramGuard {
+    fn drop(&mut self) {
+        clear_resume_program();
+    }
+}
+
 /// The argv resuming `session_id` through its harness's own form (x-5f7f).
 /// The session id is always a positional arg (never a shell string), and it
 /// arrives from a registry row the catalog gate matched, so it can only name
@@ -840,6 +858,36 @@ fn resume_argv_for(bin: &str, token: &str, session_id: &str) -> Vec<String> {
         return argv;
     }
     vec![bin.to_string(), token.to_string(), session_id.to_string()]
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test override for the restore-time registry name set (see
+    /// [`Core::known_worker_names`]): restore reads the REAL registry once,
+    /// which unit tests cannot reach deterministically; installing a set here
+    /// pins the prune decision. `None` (the default) reads the file.
+    static KNOWN_WORKERS: std::cell::RefCell<Option<std::collections::HashSet<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_known_workers(names: &[&str]) {
+    KNOWN_WORKERS.with(|p| *p.borrow_mut() = Some(names.iter().map(|s| s.to_string()).collect()));
+}
+
+#[cfg(test)]
+fn clear_known_workers() {
+    KNOWN_WORKERS.with(|p| *p.borrow_mut() = None);
+}
+
+#[cfg(test)]
+struct KnownWorkersGuard;
+
+#[cfg(test)]
+impl Drop for KnownWorkersGuard {
+    fn drop(&mut self) {
+        clear_known_workers();
+    }
 }
 
 /// (x-c914) `short_id -> (account, config_dir)` for every isolated-account roster
@@ -4370,15 +4418,18 @@ impl Core {
         }
     }
 
-    /// (x-5f7f) Can this registry row be resumed into a pane? Needs a harness
-    /// that owns a resume form plus the session id it resumes; a LIVE claude
-    /// bg row with a jobId is excluded because its daemon owns the session -
-    /// attach is the correct gesture there, and it already exists.
+    /// (x-5f7f) Can this registry row be resumed into a pane? Only a DEAD
+    /// row: a live session has a process writing its state (its own harness
+    /// process, or claude's daemon), and resuming under it would open a
+    /// second writer on the same session. Needs a harness that owns a resume
+    /// form plus the session id it resumes. A live claude bg row with a jobId
+    /// is doubly excluded - its daemon owns the session, and the existing
+    /// attach path is the correct gesture.
     fn row_resumable(a: &RegistryAgent) -> bool {
         let Some(h) = a.harness.as_deref() else {
             return false;
         };
-        if Self::resume_form(h).is_none() {
+        if !a.exited || Self::resume_form(h).is_none() {
             return false;
         }
         let has_sid = a
@@ -4387,6 +4438,24 @@ impl Core {
             .or(a.claude_session_uuid.as_deref())
             .is_some_and(|s| !s.is_empty());
         has_sid && !(h == "claude" && a.attach_id.is_some() && !a.exited)
+    }
+
+    /// (x-5f7f) The registry names that still exist, for restore's ghost
+    /// prune. One disk read per restore; tests pin it via `set_known_workers`
+    /// because the real registry is unreachable deterministically from a unit
+    /// test. A read failure reads as empty (every worker member pruned with a
+    /// notice) rather than freezing ghosts in place forever - fail toward the
+    /// state that carries no dead weight.
+    fn known_worker_names(&self) -> HashSet<String> {
+        #[cfg(test)]
+        if let Some(names) = KNOWN_WORKERS.with(|p| p.borrow().clone()) {
+            return names;
+        }
+        std::fs::read_to_string(agents_view::registry_path())
+            .ok()
+            .and_then(|raw| agents_view::derive_rows(&raw, 0))
+            .map(|rows| rows.into_iter().map(|a| a.name).collect())
+            .unwrap_or_default()
     }
 
     // ---- Persisted named squads (x-8f11) --------------------------------
@@ -4877,6 +4946,13 @@ impl Core {
         // the one post-restore notice. An operator who sees no resumed worker
         // must be able to tell "zero were recorded" from "the code never ran".
         let mut idle_workers_total = 0usize;
+        // (x-5f7f) The registry names that still exist, read once up front:
+        // a worker member whose row was reaped (`fno agents rm`, a GC pass)
+        // can never resume, so restore prunes it instead of counting a ghost
+        // idle row forever. A name still present but exited STAYS - that row
+        // is exactly the resumable card this feature exists for.
+        let known_workers = self.known_worker_names();
+        let mut pruned_workers = 0usize;
         for ps in squads {
             let cwd0 = ps
                 .origins
@@ -4925,8 +5001,16 @@ impl Core {
                 // renders idle, and let the operator resume it through the
                 // harness's own form from the agent panel.
                 if m.worker.is_some() {
-                    members.push(m.clone());
-                    idle_workers += 1;
+                    let known = m
+                        .worker
+                        .as_deref()
+                        .is_some_and(|w| known_workers.contains(w));
+                    if known {
+                        members.push(m.clone());
+                        idle_workers += 1;
+                    } else {
+                        pruned_workers += 1;
+                    }
                     continue;
                 }
                 if !live.contains(&m.attach_id) {
@@ -5206,6 +5290,11 @@ impl Core {
         if idle_workers_total > 0 {
             self.notice_all(format!(
                 "restore: {idle_workers_total} worker row(s) idle - resume them from the agent panel"
+            ));
+        }
+        if pruned_workers > 0 {
+            self.notice_all(format!(
+                "restore: pruned {pruned_workers} worker member(s) whose registry row is gone"
             ));
         }
         // The restored squads must not steal the attaching client's view: its
@@ -8075,15 +8164,27 @@ impl Core {
                 if let Some(entry) = self.panes.get_mut(&pid) {
                     entry.name = Some(name.clone());
                 }
-                // Place the resumed worker in the squad owning its cwd, else
-                // the sender's view squad, as its own tab; then switch the
-                // sender onto it, like AttachAgent's spawn arm.
+                // Place the resumed worker where it belonged: the squad that
+                // holds its recorded membership FIRST (cwd ownership is only
+                // a fallback - a worker placed by name into a squad whose
+                // origin differs from its cwd would otherwise land in
+                // whatever squad matches the cwd first, often home), else the
+                // sender's view squad, as its own tab.
                 let sid = self
-                    .session
-                    .squads
+                    .squad_members
                     .iter()
-                    .find(|s| s.owns_path(&row_cwd))
-                    .map(|s| s.id)
+                    .find(|(_, ms)| {
+                        ms.iter()
+                            .any(|m| m.worker.as_deref() == Some(name.as_str()))
+                    })
+                    .map(|(sid, _)| *sid)
+                    .or_else(|| {
+                        self.session
+                            .squads
+                            .iter()
+                            .find(|s| s.owns_path(&row_cwd))
+                            .map(|s| s.id)
+                    })
                     .unwrap_or(view.0);
                 let tid = self.session.mint_tab_id();
                 if let Some(s) = self.session.squad_mut(sid) {
@@ -14456,6 +14557,10 @@ mod tests {
         .unwrap();
         let mut core = empty_core();
         core.shells = vec!["/bin/cat".into()];
+        // Pin the registry name set: restore reads the real registry, which a
+        // unit test cannot reach deterministically.
+        let _known = KnownWorkersGuard;
+        set_known_workers(&["t-codex-one", "t-codex-two"]);
         let (c, mut rx) = client_with_rx(1);
         core.clients.push(c);
         core.restore_squads(24, 80, 999);
@@ -14488,10 +14593,78 @@ mod tests {
     }
 
     #[test]
+    fn restore_prunes_worker_members_whose_registry_row_is_gone() {
+        // x-5f7f: a worker member whose name no longer exists in the registry
+        // can never resume, so restore drops it and says so - otherwise every
+        // restart counts a ghost idle row forever (a reaped worker, an `fno
+        // agents rm`). A name that still exists stays, exited or not.
+        let s = StoreScratch::new("restore-prune");
+        let origin = s.dir.join("repo");
+        std::fs::create_dir_all(&origin).unwrap();
+        crate::squad_store::upsert(
+            "",
+            &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
+            &[origin.to_string_lossy().into_owned()],
+            &[
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("t-codex-live".into()),
+                },
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("t-codex-reaped".into()),
+                },
+            ],
+        )
+        .unwrap();
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let _known = KnownWorkersGuard;
+        set_known_workers(&["t-codex-live"]);
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.restore_squads(24, 80, 999);
+        let members: Vec<String> = core
+            .squad_members
+            .values()
+            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
+            .collect();
+        assert_eq!(
+            members,
+            vec!["t-codex-live".to_string()],
+            "the known name stays, the reaped one is pruned"
+        );
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("pruned 1 worker member(s) whose registry row is gone"),
+            "the prune is named, never silent: {notices}"
+        );
+        assert!(
+            notices.contains("1 worker row(s) idle"),
+            "the survivor still counts as idle: {notices}"
+        );
+        // The prune is persisted, not just in-memory: the next load sees one.
+        let stored = crate::squad_store::load();
+        let all: Vec<&str> = stored
+            .squads
+            .iter()
+            .flat_map(|sq| sq.members.iter().filter_map(|m| m.worker.as_deref()))
+            .collect();
+        assert_eq!(all, vec!["t-codex-live"], "the prune reaches the store");
+    }
+
+    #[test]
     fn resume_agent_spawns_the_harness_form_and_records_the_member() {
         // x-5f7f: a dead paneless codex row resumes through codex's own form
         // in the recorded cwd. The program is overridden to /bin/cat so the
         // test spawns no real codex; the session id still rides the argv.
+        let _guard = ResumeProgramGuard;
         set_resume_program(&["/bin/cat"]);
         let mut core = empty_core();
         core.shells = vec!["/bin/cat".into()];
@@ -14625,9 +14798,55 @@ mod tests {
 
     #[test]
     fn resume_argv_matches_the_harness_capability_tokens() {
-        // The two forms mirror harness_capabilities.toml: claude --resume,
-        // codex resume. No override is installed, so this asserts the REAL
-        // argv shape the pane would run.
+        // The mirror is checked against the TOML that owns the tokens, not
+        // against this crate's own literals (Rust checked against Rust proves
+        // nothing). Codex resumes through its own interactive form; a claude
+        // row that reaches the resume arm is dead (no daemon owns it), so the
+        // headless resume token is the honest mirror - the interactive form
+        // is `claude attach`, which is the live-row gesture that already
+        // exists. No override is installed, so the REAL argv is asserted.
+        clear_resume_program();
+        let toml_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/src/fno/agents/harness_capabilities.toml");
+        let raw = std::fs::read_to_string(&toml_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", toml_path.display()));
+        let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");
+        let token = |form: &str| -> Vec<String> {
+            let mut node = caps.get("harness").expect("harness table");
+            for key in form.split('/') {
+                node = node
+                    .get(key)
+                    .unwrap_or_else(|| panic!("missing {key} in {form}"));
+            }
+            let arr = node
+                .get("tokens")
+                .and_then(|t| t.as_array())
+                .unwrap_or_else(|| panic!("missing tokens for {form}"));
+            arr.iter()
+                .filter_map(|t| t.as_str().map(str::to_string))
+                .collect()
+        };
+        let codex_form = token("codex/resume_strategy/forms/interactive_resume");
+        let claude_form = token("claude/resume_strategy/forms/headless_resume");
+        assert_eq!(
+            codex_form,
+            vec![
+                "codex".to_string(),
+                "resume".to_string(),
+                "{session_id}".into()
+            ],
+            "the codex arm must keep mirroring the capability toml"
+        );
+        assert_eq!(
+            claude_form,
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "{session_id}".into()
+            ],
+            "the claude arm must keep mirroring the capability toml"
+        );
+        // The built argv substitutes the placeholder with the session id.
         assert_eq!(
             resume_argv_for("codex", "resume", "01a027ad"),
             vec!["codex".to_string(), "resume".to_string(), "01a027ad".into()]
@@ -14668,6 +14887,12 @@ mod tests {
             liveness: agents_view::Liveness::Dead,
         };
         assert!(Core::row_resumable(&base()), "a dead codex row resumes");
+        let mut live_codex = base();
+        live_codex.exited = false;
+        assert!(
+            !Core::row_resumable(&live_codex),
+            "a live codex row has a process writing its rollout: resuming under it opens a second writer"
+        );
         let mut agy = base();
         agy.harness = Some("agy".into());
         agy.harness_session_id = None;
