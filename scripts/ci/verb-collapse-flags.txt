@@ -56,3 +56,5 @@ target resolve-model !--provider
 target start !--provider
 worker external !--pr
 worker review !--session
+agents mail pane-prepare !--session
+mail pane-prepare !--session

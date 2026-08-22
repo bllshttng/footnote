@@ -494,3 +494,7 @@ worktree policy	T1	worktree policy	9
 worktree reapable	T1	worktree reapable	4
 worktree status	T1	worktree status	1
 worktree stranded	T1	worktree stranded	1
+agents mail pane-prepare	T1	agents mail pane-prepare	0
+agents mail seed-provenance	T1	agents mail seed-provenance	0
+mail pane-prepare	T1	mail pane-prepare	0
+mail seed-provenance	T1	mail seed-provenance	0
