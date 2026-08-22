@@ -1962,6 +1962,61 @@ def test_dispatch_send_agent_lock_timeout_reserves_the_pair_budget(
     )
 
 
+def test_dispatch_send_lock_timeout_budget_refusal_clears_dispatch_context(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from contextlib import contextmanager
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.lock import AgentLockTimeout
+
+    real_hold = dispatch_mod.hold_agent_lock
+    calls = 0
+
+    @contextmanager
+    def _timeout_then_grace(lock_name, registry_path, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls % 2 == 1:
+            raise AgentLockTimeout(
+                name=lock_name,
+                timeout=kwargs.get("timeout", 0.1),
+            )
+        with real_hold(lock_name, registry_path, **kwargs) as handle:
+            yield handle
+
+    monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _timeout_then_grace)
+    body = " ".join("word" for _ in range(79))
+
+    first = dispatch_send(
+        name="red",
+        message=body,
+        provider=None,
+        cwd=tmp_path,
+        lock_timeout=0.2,
+        from_name="sender",
+    )
+    assert first.delivery == "durable"
+    assert dispatch_mod._DISPATCH_CTX.get() is None
+
+    with pytest.raises(DispatchAskError) as raised:
+        dispatch_send(
+            name="red",
+            message=body,
+            provider=None,
+            cwd=tmp_path,
+            lock_timeout=0.2,
+            from_name="sender",
+        )
+
+    assert raised.value.exit_code == 1
+    assert dispatch_mod._DISPATCH_CTX.get() is None
+
+
 def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -7770,7 +7770,6 @@ def dispatch_send(
                     else LOCK_TIMEOUT_REASON
                 )
 
-                ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
                 # Mint the id before the started event so started and done name
                 # the same message, as they do on the normal path.
                 from fno.inbox.store import generate_msg_id
@@ -7783,6 +7782,7 @@ def dispatch_send(
                     msg_id=msg_id,
                     enforce=budget_enforce,
                 )
+                ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
                 try:
                     _emit_ev(
                         "agent_send_started",
