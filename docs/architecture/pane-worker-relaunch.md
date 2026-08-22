@@ -44,6 +44,8 @@ Only a DEAD row offers Resume. A live row has a process writing its session stat
 
 The resumed pane is placed in the squad that holds the worker's recorded membership, falling back to the squad owning its cwd. The two tokens the server builds are pinned against `harness_capabilities.toml` by a test that reads the toml. The Rust mirror cannot drift from the file that owns it. The pane is titled from the registry row and recorded as a worker member again, so it survives the NEXT restart too.
 
+The resume argv cannot go through the porcelain: `fno agents spawn --resume` is claude-bg-only, and the mux is a reader of the registry. So the server binds the row to its new pane itself, in `worker_pane` (name to pane, the worker twin of the claude attach map). While the pane lives, the panel presents the row pane-hosted. A second Resume then focuses it instead of opening a second session on the same rollout. When the pane dies, the binding is swept and the row returns to idle.
+
 ## Files
 
 - `crates/fno/src/squad_store.rs` - `StoredMember.worker`, `valid_worker_name`, the load gate
