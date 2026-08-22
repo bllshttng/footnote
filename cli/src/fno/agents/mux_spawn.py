@@ -2454,19 +2454,27 @@ def _evaluate_manifest_screen(
     *,
     osc_title: Optional[str] = None,
     osc_progress: Optional[str] = None,
+    allow_dev_binary: bool = False,
 ) -> dict:
-    """Ask the Rust manifest engine for the winning rule on this exact screen."""
+    """Ask the Rust manifest engine for the winning rule on this exact screen.
+
+    ``allow_dev_binary`` lets a caller fall back to the cargo dev target when no
+    installed ``fno-agents`` exists. Pass it only where the verdict is used to
+    REFUSE, never where it is used to act on a pane.
+    """
     from fno import rust_binary
 
-    # The INSTALLED set first, then the full one. `resolve_installed_binary`
-    # narrows deliberately, but for two reasons that do not apply here: it keeps
-    # a dev checkout's DEFAULT DISPATCH on Python, and it keeps the in-process
-    # suite from exec'ing the binary. This is neither. It is a read-only
-    # screen -> verdict evaluation with no dispatch decision in it, and every
-    # caller treats an unavailable detector as a hard refusal. Under the narrow
-    # set alone a source checkout has no detector at all, so the prompt gate
-    # refused every enveloped pane send on it and the whole lane went dark.
-    binary = rust_binary.resolve_installed_binary() or rust_binary.resolve_binary()
+    # The dev target is OPT-IN per caller, never a blanket widening here. Two
+    # callers share this helper and they do opposite things with the verdict.
+    # The prompt gate only ever REFUSES on it, so a source checkout with no
+    # detector meant a lane that refused every enveloped send, and reading the
+    # dev build there can cost nothing worse than an accurate refusal. Spawn
+    # readiness ACTS on it: a blocked verdict claims the pane and types a
+    # permission response. Turning that on for every dev checkout is a
+    # behavior change nobody asked for, so it keeps the narrow set.
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None and allow_dev_binary:
+        binary = rust_binary.resolve_binary()
     if binary is None:
         return {"matched": False, "error": "manifest-eval binary unavailable"}
     try:

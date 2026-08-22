@@ -438,3 +438,38 @@ def test_a_forged_tombstone_cannot_retract_someone_elses_mail(env):
     )
 
     assert [m.id for m in scan_unread("cccc1111")] == [mid]
+
+
+def test_a_typed_row_is_not_reported_as_claimed(env):
+    """`typed` is the one state that must never imply the recipient consumed it.
+
+    A typed row is excluded from the unclaimed scan the way a hosted row is, so
+    it fell through to "claimed" and told the sender the recipient had read it.
+    Bytes written into a PTY can be discarded by the prompt they land on, which
+    is the whole reason this transport's receipt says `typed`, never
+    `delivered`.
+    """
+    _send(MY_HANDLE, PEER, "ship it", ts=_ts_ago(60), delivery="typed")
+
+    result = _run("agents", "mail", "sent")
+
+    assert result.exit_code == 0, result.output
+    # The JSON lane is the one machines read, so it carries the same answer.
+    row = json.loads(result.output)[0]
+    assert row["delivery"] == "typed"
+    assert row["claimed"] is False
+
+
+def test_withdrawing_a_typed_message_refuses_instead_of_pretending(env):
+    """There is nothing to retract once the bytes are at a prompt.
+
+    Withdraw guarded on `hosted` alone, so a forced pane message wrote its
+    tombstone and printed success while retracting nothing. That is worse than
+    refusing: the sender walks away believing the message is gone.
+    """
+    msg_id = _send(MY_HANDLE, PEER, "wrong ruling", ts=_ts_ago(60), delivery="typed")
+
+    result = _run("agents", "mail", "withdraw", msg_id)
+
+    assert result.exit_code == 1
+    assert "cannot be recalled" in (result.stderr or result.output)

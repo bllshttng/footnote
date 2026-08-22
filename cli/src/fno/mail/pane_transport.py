@@ -118,7 +118,12 @@ def prompt_refusal(
         detail = (frame.stderr or frame.stdout or "").strip() or "no detail"
         return f"pane {pane_id} read failed ({detail}); refusing to type blind"
 
-    verdict = _evaluate_manifest_screen(harness, frame.stdout or "", runner)
+    # allow_dev_binary: this caller only ever REFUSES on the verdict, so reading
+    # a cargo dev build here can cost nothing worse than an accurate refusal.
+    # Spawn readiness ACTS on its verdict and deliberately does not pass this.
+    verdict = _evaluate_manifest_screen(
+        harness, frame.stdout or "", runner, allow_dev_binary=True
+    )
     error = verdict.get("error")
     if error:
         return (
@@ -128,11 +133,20 @@ def prompt_refusal(
             f"unattributed. A source checkout hits this because the detector "
             f"resolves an INSTALLED fno-agents and skips the cargo dev target."
         )
+    # BLOCKED is the contract, and `answerable` is only the subset of it that
+    # carries a parsed answer grammar. `evaluate_answerable` returns nothing for
+    # a matched blocked rule with no grammar, or one whose options failed to
+    # parse -- a codex auth wall, a trust prompt whose menu did not parse. Those
+    # are the panes most in need of the refusal, and gating on `answerable`
+    # alone let every one of them through to a paste and a CR. Spawn readiness
+    # already tests `state == "blocked"`, and the doc states that same contract.
     answerable = verdict.get("answerable") or {}
-    if answerable:
+    blocked = verdict.get("state") == "blocked"
+    if answerable or blocked:
         rule = verdict.get("rule_id") or "unnamed rule"
+        what = "an option prompt" if answerable else "a blocking prompt"
         return (
-            f"pane {pane_id} is showing an option prompt ({rule}); a submit would "
+            f"pane {pane_id} is showing {what} ({rule}); a submit would "
             f"dismiss this payload and select the highlighted default. Answer the "
             f"prompt with --raw, or wait for it to clear."
         )

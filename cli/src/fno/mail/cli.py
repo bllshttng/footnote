@@ -1288,7 +1288,22 @@ def cmd_pane_prepare(
         print("error: --session-id is required", file=sys.stderr)
         raise typer.Exit(code=2)
 
-    body = sys.stdin.read()
+    # Read BYTES and decode once, explicitly. The Rust caller pipes a payload it
+    # never re-encodes, and text-mode stdin does two things to it: universal
+    # newlines rewrite a lone CR to LF, so a body carrying one is typed
+    # differently from the body that was sent, and a non-UTF-8 byte raises
+    # UnicodeDecodeError out of a read that has no handler, which the caller
+    # reports as a renderer fault rather than as the bad input it is.
+    raw = sys.stdin.buffer.read()
+    try:
+        body = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        print(
+            f"error: pane payload is not valid UTF-8 ({exc}); the envelope "
+            f"quotes text and cannot frame arbitrary bytes.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=3) from exc
     try:
         print(prepare(body, session=session, pane_id=pane, harness=harness), end="")
     except PaneSendRefused as exc:
@@ -1788,11 +1803,20 @@ def _reply_session_for(from_name: Optional[str]) -> Optional[str]:
     key = session_identity_key(session)
     # A caller may name itself by short handle or by full id; both are this
     # session, and only a THIRD address means "route the reply elsewhere".
-    # Case-folded, because `session_identity_key` lowercases and a hex address
-    # does not care: an uppercase self-address that fell through here dropped
-    # `from_session` silently and sent the reply back to the colliding head-8.
-    named = from_name.strip().lower()
-    return session if named in (key[:8], key, session.lower()) else None
+    named = from_name.strip()
+    exact = (key[:8], key, session)
+    if named in exact:
+        return session
+    # Fold case ONLY for a hex address, where case carries no meaning and an
+    # uppercase self-address would otherwise drop `from_session` without a word.
+    # An opencode `ses_` id is case-SENSITIVE, so folding it could accept a
+    # DIFFERENT session as this one, which is the same silent misroute in the
+    # other direction. Blanket lowercasing here did exactly that.
+    if all(c in "0123456789abcdefABCDEF-" for c in named) and named:
+        lowered = named.lower()
+        if any(lowered == candidate.lower() for candidate in exact):
+            return session
+    return None
 
 
 def _name_lane_send(
@@ -4045,7 +4069,15 @@ def cmd_sent(
         msgs = [
             m for m in all_msgs if m.from_ == handle and m.id not in retracted
         ]
-        claimed_flag = {m.id: m.id not in unclaimed_ids for m in msgs}
+        # A typed row is excluded from the unclaimed scan the way a hosted row
+        # is, so "not unclaimed" silently read as "claimed" for it. Consumption
+        # is the one thing the pane transport can never assert: bytes at a
+        # prompt can be discarded by that prompt. Neither renderer below may
+        # infer it, so the ambiguity is resolved HERE, once, rather than in each.
+        claimed_flag = {
+            m.id: (m.delivery != "typed" and m.id not in unclaimed_ids)
+            for m in msgs
+        }
 
     if json_out or not is_tty:
         print(
@@ -4070,6 +4102,12 @@ def cmd_sent(
     for m in msgs:
         state = (
             "delivered" if m.delivery == "hosted"
+            # `typed` gets its own word. It is excluded from the unclaimed scan
+            # like a hosted row, so it fell through to "claimed" here and told
+            # the sender the recipient had consumed it. That is the one claim
+            # this transport must never make: bytes written into a PTY can be
+            # discarded by the prompt they land on.
+            else "typed (unconfirmed)" if m.delivery == "typed"
             else "claimed" if claimed_flag[m.id]
             else "UNCLAIMED"
         )
@@ -4141,6 +4179,17 @@ def cmd_withdraw(
     if target.delivery == "hosted":
         print(
             f"{msg_id} was already delivered (hosted); it cannot be withdrawn",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+    if target.delivery == "typed":
+        # A typed row is not a durable message with a tombstone to write, it is
+        # bytes already sitting at somebody's prompt. Withdrawing it wrote the
+        # tombstone and printed success while retracting nothing, which is the
+        # worst of the three outcomes: the sender believes the message is gone.
+        print(
+            f"{msg_id} was typed into a pane; the bytes are already at the "
+            f"recipient's prompt and cannot be recalled. Send a correction.",
             file=sys.stderr,
         )
         raise typer.Exit(code=1)

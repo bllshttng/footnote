@@ -132,8 +132,14 @@ class ProviderSubprocessError(RuntimeError):
     surface them unwrapped (AC1-FR subprocess non-zero / auth-quota).
     """
 
-    def __init__(self, exit_code: int, stderr: str) -> None:
-        super().__init__(f"claude --bg exited {exit_code}: {stderr!r}")
+    def __init__(
+        self, exit_code: int, stderr: str, *, summary: Optional[str] = None
+    ) -> None:
+        # `summary` is for a refusal raised BEFORE claude is invoked. The default
+        # names a process exit, and a caller that never started one would report
+        # the wrong layer: a reader chasing "claude --bg exited 2" goes looking
+        # at claude, its auth, and its quota, for a decision this side made.
+        super().__init__(summary or f"claude --bg exited {exit_code}: {stderr!r}")
         self.exit_code = exit_code
         self.stderr = stderr
 
@@ -674,6 +680,7 @@ def bg_create(
                 f"seed provenance refused: {exc}. The seed would reach the "
                 f"worker unattributed."
             ),
+            summary=f"spawn refused before claude was invoked: {exc}",
         ) from exc
 
     start = time.monotonic()

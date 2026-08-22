@@ -26,6 +26,8 @@ A `--submit` against a showing prompt dismisses the payload and selects the high
 
 A detector that never ran refuses too. An absence of a detected prompt on an instrument that never ran is not evidence of an idle pane.
 
+The test is the BLOCKED state, not the parsed answer grammar. A rule can match as blocked and carry no grammar, or carry options that failed to parse. A codex auth wall and an unparsed trust prompt both land there. Gating on the grammar alone lets exactly those panes through, and they are the ones a stray submit hurts most. Spawn readiness tests the same state.
+
 `--raw` is exempt. Answering a showing prompt with a digit is the legitimate raw case. Gating it breaks the one caller that needs the prompt to be there.
 
 ## Receipt vocabulary

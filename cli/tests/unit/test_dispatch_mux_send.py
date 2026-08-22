@@ -262,3 +262,29 @@ def test_the_gate_asks_about_the_recipients_own_harness(monkeypatch, harness):
 
     assert asked, "the gate must run"
     assert asked[0]["harness"] == harness
+
+
+def test_a_blocked_pane_with_no_answer_grammar_is_still_refused(monkeypatch, capsys):
+    """`answerable` is a SUBSET of blocked, and the wrong half to gate on.
+
+    `evaluate_answerable` returns nothing for a matched blocked rule carrying no
+    answer grammar, or one whose options failed to parse: a codex auth wall, a
+    trust prompt whose menu did not render as a list. Those are the panes most
+    in need of the refusal, and gating on `answerable` alone sent every one of
+    them a paste and a CR. Spawn readiness already tests `state == "blocked"`,
+    and the transport doc states that same contract.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    _detector(
+        monkeypatch,
+        [],
+        {"matched": True, "state": "blocked", "rule_id": "auth_wall"},
+    )
+
+    assert dispatch._mux_pane_send(_entry(), "hello", guarded=False) is False
+    assert "send" not in _verbs(calls)
+    err = capsys.readouterr().err
+    assert "auth_wall" in err
+    assert "blocking prompt" in err

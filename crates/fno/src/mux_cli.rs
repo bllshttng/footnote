@@ -4433,6 +4433,13 @@ fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>,
             "--pane",
             &pane.to_string(),
         ])
+        // Hand the child the path we resolved. It runs a nested `mux pane read`
+        // for the prompt gate, and that hop resolves `FNO_BIN` or a bare `fno`
+        // on PATH. We are here via `current_exe` precisely because `fno` may not
+        // BE on PATH, so leaving this unset made the gate unable to read the
+        // frame on exactly those installs, and every non-raw send refused as
+        // "frame unreadable".
+        .env("FNO_BIN", &exe)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
