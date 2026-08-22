@@ -9830,6 +9830,7 @@ async fn serve(
 
     // Accept loop: handshake each connection off the core loop's back.
     let accept_core_tx = core_tx.clone();
+    let accept_stats = core.pane_stats.clone();
     let conns_alive = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let accept_conns = conns_alive.clone();
     tokio::spawn(async move {
@@ -9847,13 +9848,14 @@ async fn serve(
                     ));
                     let conn_core_tx = accept_core_tx.clone();
                     let conn_resolver = resolver.clone();
+                    let conn_stats = accept_stats.clone();
                     // Count from the accept itself, not the task's first poll:
                     // a scheduler-starved newborn task would otherwise leave
                     // the reaper a mid-verb window with conns_alive == 0.
                     let alive = ConnAlive::new(&accept_conns);
                     tokio::spawn(async move {
                         let _alive = alive;
-                        handle_client(stream, conn_core_tx, conn_resolver, id).await;
+                        handle_client(stream, conn_core_tx, conn_resolver, id, conn_stats).await;
                     });
                 }
                 Err(e) => {
@@ -10512,6 +10514,7 @@ async fn handle_client(
     core_tx: mpsc::Sender<CoreMsg>,
     resolver: Arc<Mutex<Resolver>>,
     id: u64,
+    stats: PaneStats,
 ) {
     let attach = tokio::time::timeout(ATTACH_TIMEOUT, read_msg::<_, ClientMsg>(&mut stream)).await;
     let (rows, cols, cwd) = match attach {
@@ -10588,6 +10591,7 @@ async fn handle_client(
         notify,
         core_tx.clone(),
         id,
+        stats,
     ));
     client_reader(read_half, core_tx, id).await;
 }
@@ -10770,7 +10774,22 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
     }
 }
 
-async fn write_reliable<W>(w: &mut W, msg: &ServerMsg, dirty: &DirtyMap) -> Result<bool, ProtoError>
+/// Count one `Frame` that actually crossed a client wire. A frame dropped by
+/// the newest-wins dirty map never reaches here - that asymmetry against
+/// `frames_composited` is the measurement. A miss (pane reaped mid-drain)
+/// skips silently: that pane's counters row is already gone by design.
+fn count_frame_emitted(stats: &PaneStats, pane_id: u64) {
+    if let Some(c) = stats.read().unwrap().get(&pane_id) {
+        c.frames_emitted.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+async fn write_reliable<W>(
+    w: &mut W,
+    msg: &ServerMsg,
+    dirty: &DirtyMap,
+    stats: &PaneStats,
+) -> Result<bool, ProtoError>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -10780,9 +10799,13 @@ where
         pending.sort_unstable_by_key(|(pane_id, _)| *pane_id);
         for (pane_id, frame) in pending {
             write_msg(w, &ServerMsg::Frame { pane_id, frame }).await?;
+            count_frame_emitted(stats, pane_id);
         }
     }
     write_msg(w, msg).await?;
+    if let ServerMsg::Frame { pane_id, .. } = msg {
+        count_frame_emitted(stats, *pane_id);
+    }
     Ok(is_bye)
 }
 
@@ -10797,13 +10820,14 @@ async fn client_writer(
     notify: Arc<Notify>,
     core_tx: mpsc::Sender<CoreMsg>,
     id: u64,
+    stats: PaneStats,
 ) {
     loop {
         tokio::select! {
             biased;
             msg = reliable_rx.recv() => {
                 let Some(msg) = msg else { break }; // deregistered by the core
-                match write_reliable(&mut w, &msg, &dirty).await {
+                match write_reliable(&mut w, &msg, &dirty, &stats).await {
                     Ok(true) => break,
                     Ok(false) => {}
                     Err(_) => {
@@ -10822,7 +10846,7 @@ async fn client_writer(
                     // biased select only prioritizes at the select point -
                     // not while an arm is running.
                     while let Ok(msg) = reliable_rx.try_recv() {
-                        match write_reliable(&mut w, &msg, &dirty).await {
+                        match write_reliable(&mut w, &msg, &dirty, &stats).await {
                             Ok(true) => return,
                             Ok(false) => {}
                             Err(_) => {
@@ -10844,6 +10868,7 @@ async fn client_writer(
                         let _ = core_tx.send(CoreMsg::Gone(id)).await;
                         return;
                     }
+                    count_frame_emitted(&stats, pane_id);
                 }
             }
         }
@@ -18089,12 +18114,14 @@ mod tests {
                     scroll_offset: 0,
                 };
                 dirty.lock().unwrap().insert(7, frame.clone());
+                let stats: PaneStats = Arc::default();
                 assert!(write_reliable(
                     &mut writer,
                     &ServerMsg::Bye {
                         reason: "done".into(),
                     },
                     &dirty,
+                    &stats,
                 )
                 .await
                 .unwrap());
