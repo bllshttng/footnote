@@ -864,15 +864,23 @@ fn resume_argv_for(bin: &str, token: &str, session_id: &str) -> Vec<String> {
 thread_local! {
     /// Test override for the restore-time registry name set (see
     /// [`Core::known_worker_names`]): restore reads the REAL registry once,
-    /// which unit tests cannot reach deterministically; installing a set here
-    /// pins the prune decision. `None` (the default) reads the file.
-    static KNOWN_WORKERS: std::cell::RefCell<Option<std::collections::HashSet<String>>> =
+    /// which unit tests cannot reach deterministically. The override is
+    /// itself Option-layered: `None` (the default) reads the file,
+    /// `Some(None)` simulates an unreadable registry, `Some(Some(set))` pins
+    /// the name set.
+    static KNOWN_WORKERS: std::cell::RefCell<Option<Option<std::collections::HashSet<String>>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 fn set_known_workers(names: &[&str]) {
-    KNOWN_WORKERS.with(|p| *p.borrow_mut() = Some(names.iter().map(|s| s.to_string()).collect()));
+    KNOWN_WORKERS
+        .with(|p| *p.borrow_mut() = Some(Some(names.iter().map(|s| s.to_string()).collect())));
+}
+
+#[cfg(test)]
+fn set_known_workers_unreadable() {
+    KNOWN_WORKERS.with(|p| *p.borrow_mut() = Some(None));
 }
 
 #[cfg(test)]
@@ -4446,16 +4454,20 @@ impl Core {
     /// test. A read failure reads as empty (every worker member pruned with a
     /// notice) rather than freezing ghosts in place forever - fail toward the
     /// state that carries no dead weight.
-    fn known_worker_names(&self) -> HashSet<String> {
+    fn known_worker_names(&self) -> Option<HashSet<String>> {
         #[cfg(test)]
         if let Some(names) = KNOWN_WORKERS.with(|p| p.borrow().clone()) {
             return names;
         }
+        // None = the registry could not be read (unreadable, torn write, an
+        // unparseable body). The caller must then skip the prune entirely:
+        // mapping a failed read to an empty set would delete EVERY worker
+        // member and persist the deletion. Ghosts are cheap; deletion on a
+        // transient IO error is not.
         std::fs::read_to_string(agents_view::registry_path())
             .ok()
             .and_then(|raw| agents_view::derive_rows(&raw, 0))
             .map(|rows| rows.into_iter().map(|a| a.name).collect())
-            .unwrap_or_default()
     }
 
     // ---- Persisted named squads (x-8f11) --------------------------------
@@ -4952,6 +4964,11 @@ impl Core {
         // idle row forever. A name still present but exited STAYS - that row
         // is exactly the resumable card this feature exists for.
         let known_workers = self.known_worker_names();
+        if known_workers.is_none() {
+            self.notice_all(
+                "restore: registry unreadable; worker member prune skipped (no row deleted)",
+            );
+        }
         let mut pruned_workers = 0usize;
         for ps in squads {
             let cwd0 = ps
@@ -5001,15 +5018,20 @@ impl Core {
                 // renders idle, and let the operator resume it through the
                 // harness's own form from the agent panel.
                 if m.worker.is_some() {
-                    let known = m
-                        .worker
-                        .as_deref()
-                        .is_some_and(|w| known_workers.contains(w));
-                    if known {
-                        members.push(m.clone());
-                        idle_workers += 1;
-                    } else {
-                        pruned_workers += 1;
+                    match &known_workers {
+                        // An unreadable registry prunes NOTHING - keeping a
+                        // ghost idle row costs nothing, deleting every worker
+                        // member on a transient IO error costs the record.
+                        None => members.push(m.clone()),
+                        Some(known) => {
+                            let listed = m.worker.as_deref().is_some_and(|w| known.contains(w));
+                            if listed {
+                                members.push(m.clone());
+                                idle_workers += 1;
+                            } else {
+                                pruned_workers += 1;
+                            }
+                        }
                     }
                     continue;
                 }
@@ -6444,13 +6466,27 @@ impl Core {
                     // through the harness's own form instead of dead-ending
                     // on a focus at a pane that no longer exists.
                     let resumable = Self::row_resumable(a);
+                    // Attribute the row to the squad holding its recorded
+                    // membership FIRST (cwd ownership only as a fallback), so
+                    // the panel shows it where ResumeAgent will actually place
+                    // the pane - the two lookups must agree.
+                    let squad = self
+                        .squad_members
+                        .iter()
+                        .find(|(_, ms)| {
+                            ms.iter()
+                                .any(|m| m.worker.as_deref() == Some(a.name.as_str()))
+                        })
+                        .map(|(sid, _)| *sid)
+                        .or_else(|| {
+                            self.session
+                                .squads
+                                .iter()
+                                .find(|s| s.owns_path(&a.cwd))
+                                .map(|s| s.id)
+                        });
                     out.push(AgentRow {
-                        squad: self
-                            .session
-                            .squads
-                            .iter()
-                            .find(|s| s.owns_path(&a.cwd))
-                            .map(|s| s.id),
+                        squad,
                         name: a.name.clone(),
                         pane_id: None,
                         badge: None,
@@ -14657,6 +14693,69 @@ mod tests {
             .flat_map(|sq| sq.members.iter().filter_map(|m| m.worker.as_deref()))
             .collect();
         assert_eq!(all, vec!["t-codex-live"], "the prune reaches the store");
+    }
+
+    #[test]
+    fn restore_skips_the_prune_entirely_when_the_registry_is_unreadable() {
+        // The fail-safe half of the prune: an unreadable registry must delete
+        // NOTHING. Mapping a failed read to an empty set would prune every
+        // worker member and persist the deletion - ghosts are cheap, deletion
+        // on a transient IO error is not. Every member stays, idle-counted,
+        // and the skip is named in a notice.
+        let s = StoreScratch::new("restore-prune-skip");
+        let origin = s.dir.join("repo");
+        std::fs::create_dir_all(&origin).unwrap();
+        crate::squad_store::upsert(
+            "",
+            &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
+            &[origin.to_string_lossy().into_owned()],
+            &[
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("t-codex-one".into()),
+                },
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("t-codex-two".into()),
+                },
+            ],
+        )
+        .unwrap();
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let _known = KnownWorkersGuard;
+        set_known_workers_unreadable();
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.restore_squads(24, 80, 999);
+        let members: Vec<String> = core
+            .squad_members
+            .values()
+            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
+            .collect();
+        assert_eq!(
+            members.len(),
+            2,
+            "an unreadable registry keeps every member: {members:?}"
+        );
+        let stored = crate::squad_store::load();
+        let all: Vec<&str> = stored
+            .squads
+            .iter()
+            .flat_map(|sq| sq.members.iter().filter_map(|m| m.worker.as_deref()))
+            .collect();
+        assert_eq!(all.len(), 2, "nothing was deleted from the store");
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("prune skipped"),
+            "the skip is named, never silent: {notices}"
+        );
     }
 
     #[test]

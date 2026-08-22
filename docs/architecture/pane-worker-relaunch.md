@@ -26,7 +26,7 @@ A worker pane's pty was a child of the previous mux server pid and died with it.
 
 The member stays as-is and the row renders idle in the agent panel. Restore also prints one notice naming how many idle worker rows it created. That makes "nothing resumed" distinguishable from "the counter never ran".
 
-Restore also prunes a worker member whose registry row is gone (an `fno agents rm`, a GC pass): a name that can never resume is dead weight, not a card, and each restart names the prune count in a notice. A name that still exists stays, exited or not.
+Restore also prunes a worker member whose registry row is gone. A name that can never resume (an `fno agents rm`, a GC pass) is dead weight, not a card, and each restart names the prune count in a notice. A name that still exists stays, exited or not. An UNREADABLE registry prunes nothing and says so. Mapping a failed read to an empty set would delete every worker member and persist the deletion. Ghosts are cheaper than that.
 
 Claude attach members restore exactly as before: `claude attach` in the recorded cwd, because the daemon still owns those sessions.
 
