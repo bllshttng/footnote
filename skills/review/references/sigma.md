@@ -119,11 +119,11 @@ The panel is six subagents wide. A shared-quota account cannot afford that, and 
 fno whoami | grep '^provider:' || true
 ```
 
-A `subagent budget` below 2 on that line means the panel is not the route here. Print the provider and the budget, then run ONE inline reviewer instead: read the changed files yourself on this thread and report against the same checklist. Do not dispatch the six agents, do not dispatch a smaller panel, and do not queue them sequentially. The budget is about what the account spends, not about how fast it spends it.
+A `subagent budget` below 2 on that line means the panel is not the route here. Print the provider and the budget. Then run ONE inline reviewer instead. Read the changed files yourself on this thread and report against the same checklist. Do not dispatch the six agents, do not dispatch a smaller panel, and do not queue them sequentially. The budget is about what the account spends, not about how fast it spends it.
 
 No line at all means this session carries no route stamp. That is the operator's own account, so the panel runs exactly as it always has.
 
-This step READS the route; it never decides it. The decision lives in `fno.review_capability`, which resolves `sigma` unavailable under a budget below 2 and names `code-review` as the resolved route. Prose here that merely preferred one reviewer would be the decorative form of the fix, and a session that ignored it would fan out anyway. Printing the resolved route is what makes an explicit `/fno:review sigma` visible rather than silent.
+This step READS the route. It never decides it. The decision lives in `fno.review_capability`. That resolver marks `sigma` unavailable under a budget below 2 and names `code-review` as the resolved route. Prose here that merely preferred one reviewer is the decorative form of the fix. A session can ignore prose and fan out anyway. Printing the resolved route is what makes an explicit `/fno:review sigma` visible rather than silent.
 
 ### Step 1: Detect Change Type and Review Tier (MANDATORY)
 
