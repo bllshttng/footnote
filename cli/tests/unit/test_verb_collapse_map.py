@@ -142,7 +142,8 @@ def test_live_baseline_matches_the_projected_allocation():
     # dispatched `do` leaf (x-f730); the pre-existing bare `outstanding` alias
     # still doubles it, netting +2 leaves over whatever main independently
     # carries. Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 101
+    # +1 for `project init`, the isolated-environment verb (x-20f1).
+    assert len(leaves) <= 102
     assert "fno-agents" in leaves
 
 
