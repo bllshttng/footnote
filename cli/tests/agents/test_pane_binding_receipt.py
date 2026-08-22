@@ -17,9 +17,14 @@ Coverage:
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -499,10 +504,11 @@ def test_shared_readiness_submits_a_preloaded_seed(harness: str) -> None:
             return _proc(0)
         raise AssertionError(argv)
 
-    state, detail, source = _submit_spawn_seed(harness, "main", 81, "seed text", run)
+    state, detail, source, pane = _submit_spawn_seed(harness, "main", 81, "seed text", run)
     assert state == "submitted"
     assert detail == ""
     assert source == "preloaded"
+    assert pane == "painted", "a frame that read back with content was seen"
     send = next(call for call in calls if call[3] == "send")
     assert "--submit" in send
     assert send[send.index("--text") + 1] == ""
@@ -527,10 +533,11 @@ def test_shared_readiness_never_certifies_an_unconfirmed_submit() -> None:
             return _proc(17, stdout="")
         raise AssertionError(argv)
 
-    state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    state, detail, source, pane = _submit_spawn_seed("agy", "main", 81, "seed text", run)
     assert state == "unconfirmed"
     assert detail == "submission refused"
     assert source == "delivered", "this seed was typed, so delivered is true here"
+    assert pane == "painted", "the refusal is about the send, not about the read"
 
 
 def test_a_blank_frame_is_unattempted_not_unconfirmed() -> None:
@@ -548,9 +555,10 @@ def test_a_blank_frame_is_unattempted_not_unconfirmed() -> None:
             return _proc(0, "   \n")
         raise AssertionError(f"a blank frame must not reach a send: {argv}")
 
-    state, detail, _source = _submit_spawn_seed("claude", "main", 81, "seed text", run)
+    state, detail, _source, pane = _submit_spawn_seed("claude", "main", 81, "seed text", run)
     assert state == "unattempted"
     assert "not attempted" in detail
+    assert pane == "blank", "a clean read of nothing is an unpainted pane, not a failed read"
 
 
 def test_an_unreadable_frame_is_unattempted_not_unconfirmed() -> None:
@@ -562,9 +570,10 @@ def test_an_unreadable_frame_is_unattempted_not_unconfirmed() -> None:
             raise DispatchAskError("mux read failed", exit_code=1)
         raise AssertionError(f"an unreadable frame must not reach a send: {argv}")
 
-    state, detail, _source = _submit_spawn_seed("claude", "main", 81, "seed text", run)
+    state, detail, _source, pane = _submit_spawn_seed("claude", "main", 81, "seed text", run)
     assert state == "unattempted"
     assert "not attempted" in detail
+    assert pane == "unreadable"
 
 
 # --- an argv seed's delivery is not observable from a pane frame -------------
@@ -596,22 +605,27 @@ def test_an_argv_seed_is_submitted_even_when_the_frame_is_blank() -> None:
             return _proc(0, "   \n")
         raise AssertionError(f"an argv seed must not reach a send: {argv}")
 
-    state, detail, source = _submit_spawn_seed(
+    state, detail, source, pane = _submit_spawn_seed(
         "claude", "main", 81, "seed text", run, seed_in_argv=True
     )
     assert state == "submitted"
     assert source == "argv"
     assert "argv" in detail
+    assert pane == "blank"
 
 
-def test_an_argv_seed_on_a_RAISED_read_stays_unattempted() -> None:
-    """Delivery happened; whether the pane is still there to run it did not.
+def test_an_argv_seed_on_a_RAISED_read_reports_delivery_and_doubt_apart() -> None:
+    """AC1-HP. Two questions, two fields, and the answers disagree here.
 
-    The narrowing that matters. A read that raises leaves pane liveness
-    unknown, and `unattempted` is what carries that doubt: it is the only state
-    the caller retries and the only one `cmd_spawn` turns into exit 22.
-    Reporting `submitted` here writes a live registry row for a pane that may
-    already be gone, holding a slot against max_live.
+    The seed rode in the argv, so its delivery was settled at exec time and no
+    frame can witness it either way. The read raising says the INSTRUMENT
+    failed. This arm used to fuse the two into `unattempted`, a word about the
+    seed, and shipped a detail string reading "seed submission not attempted"
+    three lines under a comment saying delivery really did happen.
+
+    The doubt itself is real and is not dropped: it moves to `pane_observation`,
+    and `cmd_spawn` still exits non-zero on it (`test_...exit_22...` below), so
+    no live registry row is certified for a pane that may already be gone.
     """
     from fno.agents.mux_spawn import DispatchAskError
 
@@ -620,20 +634,23 @@ def test_an_argv_seed_on_a_RAISED_read_stays_unattempted() -> None:
             raise DispatchAskError("mux read failed", exit_code=1)
         raise AssertionError(f"a raised read must not reach a send: {argv}")
 
-    state, detail, _source = _submit_spawn_seed(
+    state, detail, source, pane = _submit_spawn_seed(
         "claude", "main", 81, "seed text", run, seed_in_argv=True
     )
-    assert state == "unattempted"
-    assert "not attempted" in detail
+    assert state == "submitted"
+    assert source == "argv"
+    assert pane == "unreadable"
+    assert "not attempted" not in detail, "the seed WAS attempted; it rode in the argv"
 
 
-def test_an_argv_seed_on_a_FAILED_read_stays_unattempted() -> None:
-    """A pane that has GONE reads byte-identically to one that has not painted.
+def test_an_argv_seed_on_a_FAILED_read_reports_delivery_and_doubt_apart() -> None:
+    """AC2-HP. A non-zero read is the same instrument failure, arriving quietly.
 
     `_run_mux` does not raise on a non-zero exit, so `mux pane read` against a
-    dead pane returns cleanly with empty stdout. Only the return code separates
-    the two, and `_await_interactive_readiness` already fails the same read on
-    it. Without that gate a dead pane earns a clean `submitted` receipt.
+    dead pane returns cleanly with empty stdout and is byte-identical to a live
+    pane that has not painted. The return code is the only thing separating
+    them, so it decides `pane_observation` and both failure shapes land on
+    `unreadable` - which is what keeps the dead pane from earning a clean spawn.
     """
 
     def run(argv, **_kw):
@@ -644,11 +661,13 @@ def test_an_argv_seed_on_a_FAILED_read_stays_unattempted() -> None:
             return _proc(1, "")
         raise AssertionError(f"a failed read must not reach a send: {argv}")
 
-    state, detail, _source = _submit_spawn_seed(
+    state, detail, source, pane = _submit_spawn_seed(
         "claude", "main", 81, "seed text", run, seed_in_argv=True
     )
-    assert state == "unattempted", "a dead pane must not earn a clean receipt"
-    assert "not attempted" in detail
+    assert state == "submitted"
+    assert source == "argv"
+    assert pane == "unreadable", "a dead pane must not earn a clean receipt"
+    assert "not attempted" not in detail
 
 
 def test_an_argv_seed_on_a_LATE_PAINTED_pane_never_reports_unattempted() -> None:
@@ -660,8 +679,10 @@ def test_an_argv_seed_on_a_LATE_PAINTED_pane_never_reports_unattempted() -> None
     LIVE pane simply had not painted - the measured case, where recovering the
     receipt left a queued duplicate verb behind a running pipeline.
 
-    Scoped deliberately: the two read-failure arms keep `unattempted`, because
-    there the doubt is about the pane rather than about the seed.
+    The two read-failure arms once kept `unattempted` here, because the doubt
+    there is about the pane rather than about the seed. That doubt now has its
+    own field, so no arm needs to borrow this word - which is what makes the
+    property below hold for every arm rather than for this one case.
     """
 
     def blank(argv, **_kw):
@@ -672,7 +693,7 @@ def test_an_argv_seed_on_a_LATE_PAINTED_pane_never_reports_unattempted() -> None
             return _proc(0, "  \n")
         raise AssertionError(argv)
 
-    state, _detail, source = _submit_spawn_seed(
+    state, _detail, source, _pane = _submit_spawn_seed(
         "claude", "main", 81, "seed text", blank, seed_in_argv=True
     )
     assert state != "unattempted", "an argv seed reaching the retry can double-seed a live pane"
@@ -696,11 +717,12 @@ def test_a_seed_that_did_not_ride_in_argv_still_reports_unattempted() -> None:
             return _proc(0, "   \n")
         raise AssertionError(f"a blank frame must not reach a send: {argv}")
 
-    state, detail, _source = _submit_spawn_seed(
+    state, detail, _source, pane = _submit_spawn_seed(
         "claude", "main", 81, "seed text", run, seed_in_argv=False
     )
     assert state == "unattempted"
     assert "not attempted" in detail
+    assert pane == "blank"
 
 
 def test_the_argv_arms_issue_no_keystroke() -> None:
@@ -721,6 +743,156 @@ def test_the_argv_arms_issue_no_keystroke() -> None:
     _submit_spawn_seed("claude", "main", 81, "seed text", run, seed_in_argv=True)
     assert [c for c in calls if c[3] == "read"], "the read must still happen"
     assert not [c for c in calls if c[3] == "send"], "the receipt fix must issue no send"
+
+
+# --- AC7: the docstring's UNREACHABLE clause, asserted as a property ---------
+# `_submit_spawn_seed.__doc__` has claimed since PR 1078 that `unattempted` is
+# unreachable when `seed_in_argv` is set. One arm returned it anyway. A test per
+# arm cannot stop that recurring: a NEW arm arrives with no test and the claim
+# quietly goes false again. So the property is asserted over every arm, and the
+# scenario table is proven to reach every arm rather than trusted to.
+
+TRUST_FRAME = "Do you trust this folder?"
+
+
+def _seed_scenarios() -> list[tuple[str, str, Any]]:
+    """(name, provider, make_runner) covering every return in `_submit_spawn_seed`.
+
+    The third element BUILDS a runner rather than being one. Each scenario runs
+    more than once (both `seed_in_argv` values), and the agy arms consume a
+    two-read script, so a shared runner would exhaust its own iterator on the
+    second run and fail as a StopIteration nowhere near the cause.
+    """
+    from fno.agents.mux_spawn import DispatchAskError
+
+    def reader(read_rc: int, read_out: str, send=None, second_read=None):
+        def make():
+            reads = iter([(read_rc, read_out), second_read or (read_rc, read_out)])
+
+            def run(argv, **_kw):
+                verb = argv[3]
+                if verb == "wait":
+                    return _proc(WAIT_ALIVE)
+                if verb == "read":
+                    nxt = next(reads)
+                    if nxt == "raise":
+                        raise DispatchAskError("mux read failed", exit_code=1)
+                    return _proc(nxt[0], nxt[1])
+                if verb == "send":
+                    if send == "raise":
+                        raise DispatchAskError("mux send failed", exit_code=1)
+                    return _proc(0 if send is None else send)
+                raise AssertionError(argv)
+
+            return run
+
+        return make
+
+    def raising_read():
+        def run(argv, **_kw):
+            if argv[3] == "read":
+                raise DispatchAskError("mux read failed", exit_code=1)
+            raise AssertionError(argv)
+
+        return run
+
+    return [
+        ("read_raises", "claude", raising_read),
+        ("read_failed_blank", "claude", reader(1, "")),
+        ("read_blank_ok", "claude", reader(0, "   \n")),
+        ("frame_without_seed", "claude", reader(0, "idle composer")),
+        ("frame_with_seed", "claude", reader(0, "seed text")),
+        ("send_raises", "claude", reader(0, "seed text", send="raise")),
+        ("send_refused", "claude", reader(0, "seed text", send=17)),
+        ("agy_trust_submit_raises", "agy", reader(0, TRUST_FRAME, send="raise")),
+        ("agy_trust_submit_refused", "agy", reader(0, TRUST_FRAME, send=17)),
+        (
+            "agy_trust_readback_raises",
+            "agy",
+            reader(0, TRUST_FRAME, second_read="raise"),
+        ),
+        (
+            "agy_trust_modal_persists",
+            "agy",
+            reader(0, TRUST_FRAME, second_read=(0, TRUST_FRAME)),
+        ),
+    ]
+
+
+def _run_capturing_returns(provider: str, runner: Any, seed_in_argv: bool):
+    """Run one scenario and report which `return` LINE it came back from.
+
+    The line number is what makes the coverage assertion below a real one: a
+    scenario table can look exhaustive while three entries funnel through the
+    same arm, and only the executed lines can tell you so.
+    """
+    code = _submit_spawn_seed.__code__
+    taken: set[int] = set()
+
+    def local(frame, event, _arg):
+        if event == "return":
+            taken.add(frame.f_lineno)
+        return local
+
+    def tracer(frame, _event, _arg):
+        return local if frame.f_code is code else None
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        result = _submit_spawn_seed(
+            provider, "main", 81, "seed text", runner, seed_in_argv=seed_in_argv
+        )
+    finally:
+        sys.settrace(previous)
+    return result, taken
+
+
+def _all_return_lines() -> set[int]:
+    """Every `return` in `_submit_spawn_seed`, read off the source itself."""
+    source = textwrap.dedent(inspect.getsource(_submit_spawn_seed))
+    offset = _submit_spawn_seed.__code__.co_firstlineno - 1
+    return {
+        node.lineno + offset
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Return)
+    }
+
+
+def test_no_arm_returns_unattempted_when_the_seed_rode_in_argv() -> None:
+    """AC7-EDGE. The property, over every arm, not over one case."""
+    for name, provider, make_runner in _seed_scenarios():
+        (state, detail, _source, pane), _taken = _run_capturing_returns(
+            provider, make_runner(), seed_in_argv=True
+        )
+        assert state != "unattempted", (
+            f"{name}: an argv seed came back `unattempted`, the state the "
+            f"docstring calls UNREACHABLE here and the one `cmd_spawn` turns "
+            f"into exit 22. detail={detail!r}"
+        )
+        assert pane in ("painted", "blank", "unreadable"), f"{name}: pane={pane!r}"
+
+
+def test_the_ac7_scenarios_reach_every_arm_of_the_function() -> None:
+    """The guard on the guard: a new arm with no scenario fails HERE.
+
+    Without this, AC7 above is only as strong as the table it iterates, and a
+    table that silently stops covering the function is exactly how the original
+    contradiction survived a green suite.
+    """
+    reached: set[int] = set()
+    for _name, provider, make_runner in _seed_scenarios():
+        for seed_in_argv in (True, False):
+            _result, taken = _run_capturing_returns(
+                provider, make_runner(), seed_in_argv
+            )
+            reached |= taken
+    missing = _all_return_lines() - reached
+    assert not missing, (
+        f"no scenario reaches the return(s) at line(s) {sorted(missing)} of "
+        f"_submit_spawn_seed. Add one to _seed_scenarios, or AC7 is not being "
+        f"asserted over that arm."
+    )
 
 
 def test_the_argv_marker_is_correct_for_every_pane_harness() -> None:
@@ -787,10 +959,11 @@ def test_shared_readiness_clears_agy_trust_before_seeding() -> None:
             return _proc(0)
         raise AssertionError(argv)
 
-    state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    state, detail, source, pane = _submit_spawn_seed("agy", "main", 81, "seed text", run)
     assert state == "submitted"
     assert detail == ""
     assert source == "trust-cleared"
+    assert pane == "painted", "the read-back that proved the modal cleared was seen"
     sends = [call for call in calls if call[3] == "send"]
     assert len(sends) == 2
     assert sends[0][sends[0].index("--text") + 1] == ""
@@ -810,15 +983,16 @@ def test_shared_readiness_waits_for_a_slow_first_paint() -> None:
             return _proc(0)
         raise AssertionError(argv)
 
-    state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    state, detail, source, pane = _submit_spawn_seed("agy", "main", 81, "seed text", run)
     # A first paint that has not landed is `unattempted`, not `unconfirmed`:
     # this call never reached a send, so it asserts nothing about the seed. The
     # caller's one retry is what picks up the second frame, and only a send that
     # was tried and dropped can fail the spawn.
-    assert (state, detail, source) == (
+    assert (state, detail, source, pane) == (
         "unattempted",
         "pane frame blank, seed submission not attempted",
         "",
+        "blank",
     )
 
 
@@ -832,7 +1006,7 @@ def test_shared_readiness_fails_when_agy_trust_does_not_clear() -> None:
             return _proc(0)
         raise AssertionError(argv)
 
-    state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    state, detail, source, pane = _submit_spawn_seed("agy", "main", 81, "seed text", run)
     # `unconfirmed`, not `unattempted`. The clearing submit WAS sent and the
     # modal outlived it, which is positive evidence the gate did not clear - not
     # a paint-timing miss. Until a human answers that modal the pane runs
@@ -841,6 +1015,7 @@ def test_shared_readiness_fails_when_agy_trust_does_not_clear() -> None:
     assert state == "unconfirmed"
     assert "trust gate did not clear" in detail
     assert source == "trust-cleared"
+    assert pane == "painted", "the modal was read, twice; the instrument worked fine"
 
 
 # ---------------------------------------------------------------------------

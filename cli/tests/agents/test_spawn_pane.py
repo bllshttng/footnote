@@ -4366,7 +4366,7 @@ def _seed_script(monkeypatch, *states: str) -> list[tuple]:
             "submitted": "",
             "unknown": "mux did not answer the submit; the keystroke may have landed",
         }.get(state, "text delivered, submission unconfirmed")
-        return state, detail, "delivered"
+        return state, detail, "delivered", "painted"
 
     monkeypatch.setattr(mux_spawn, "_submit_spawn_seed", fake_submit)
     return calls

@@ -90,9 +90,9 @@ def test_python_opencode_pane_submits_brevity_marker_after_exact_payload(
         seed: str,
         _runner: Any,
         **_kw: Any,
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, str]:
         captured["seed"] = seed
-        return "submitted", "", "delivered"
+        return "submitted", "", "delivered", "painted"
 
     monkeypatch.setattr(mux_spawn, "_submit_spawn_seed", capture_seed)
 
