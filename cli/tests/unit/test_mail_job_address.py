@@ -442,6 +442,14 @@ def test_drain_self_surfaces_job_mail_for_holder(runner, isolated, monkeypatch):
     from fno.claims.core import claim_status as _cs
 
     _diag["direct_status"] = _cs("node:drain-abcd", root=_root)
+    # The leg that separates "the claim is gone" from "the reader looked
+    # somewhere else". `direct_status` above passes $FNO_CLAIMS_ROOT explicitly,
+    # while `resolve_truth_status` derives the root itself, so a disagreement
+    # names the derivation as the suspect. That is exactly what it named once:
+    # see `test_truth_status_root_binding_is_late`.
+    from fno.claims.io import claims_root_for as _crf
+
+    _diag["derived_root"] = str(_crf("node:drain-abcd"))
     assert "reached the successor" in res.stdout, f"diag={_diag}"
 
 
