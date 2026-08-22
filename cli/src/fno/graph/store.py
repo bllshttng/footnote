@@ -257,11 +257,25 @@ def _compute_children(entries: list[dict]) -> list[dict]:
     it can never drift: any change to a child is itself a mutation, and
     ``locked_mutate_graph`` runs this over the whole list on each write. A
     ``parent`` pointing at a non-existent id is ignored (no phantom summary).
-    Mutates entries in place and returns the same list.
+    Each summary's ``status`` DERIVES through ``statuses.readiness_status``
+    (the same overlay every live read applies): the stored field never
+    encodes ``blocked`` - it is a read-time derivation - so a snapshot of the
+    raw field would report a blocked child as ready in the one array a
+    surveying king reads. Mutates entries in place and returns the same list.
     """
-    valid_ids = {e["id"] for e in entries if isinstance(e.get("id"), str)}
+    from fno.graph.statuses import readiness_status
+
+    id_to_entry = {
+        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    valid_ids = id_to_entry.keys()
     kids: dict[str, list[dict]] = {}
     for e in entries:
+        if not isinstance(e, dict):
+            # A junk row (scalar/list/null) is skipped, never dropped here:
+            # `_apply_graph_defaults` runs this on the read path where the
+            # evidence caller needs malformed rows to survive the pass.
+            continue
         parent = e.get("parent")
         cid = e.get("id")
         # cid != parent: a self-parented node (corrupt import, manual edit)
@@ -274,10 +288,12 @@ def _compute_children(entries: list[dict]) -> list[dict]:
             and parent in valid_ids
             and cid != parent
         ):
-            kids.setdefault(parent, []).append(
-                {k: e.get(k) for k in CHILD_SUMMARY_FIELDS}
-            )
+            summary = {k: e.get(k) for k in CHILD_SUMMARY_FIELDS}
+            summary["status"], _ = readiness_status(e, id_to_entry)
+            kids.setdefault(parent, []).append(summary)
     for e in entries:
+        if not isinstance(e, dict):
+            continue
         eid = e.get("id")
         # Most nodes are leaves: skip the empty-list allocation + no-op sort for
         # them, only sorting when a node actually has children.
@@ -338,8 +354,10 @@ def canonicalize_entries(entries: list[dict]) -> list[dict]:
     Returns a new list of new dicts (does not preserve the input dict objects'
     key order). Unknown keys are appended after the canonical block in their
     original relative order so nothing is dropped. Called inside
-    ``locked_mutate_graph`` after ``recompute_statuses`` so ``status`` and the
-    child summaries' ``status`` are already current.
+    ``locked_mutate_graph`` after ``recompute_statuses``; each child summary's
+    ``status`` is derived at build time inside ``_compute_children``
+    (``recompute_statuses`` never writes ``blocked`` - it is a read-time
+    derivation - so the summaries cannot simply copy the cascade field).
     """
     _compute_children(entries)
     # Keep the locked_by/session_id mirror consistent after the mutator +
@@ -462,9 +480,10 @@ def _apply_readiness_overlay(entries: list[dict]) -> None:
     `render_graph_md`/`render_graph_html` right after a mutation need this
     same overlay re-applied, or the freshly written graph.md/graph.html would
     show a mutated node's dependency-blocked status as ready/idea/etc until
-    the next explicit read.
+    the next explicit read. The per-entry precedence lives in
+    `statuses.readiness_status`, shared with `_compute_children`.
     """
-    from fno.graph.statuses import compute_readiness
+    from fno.graph.statuses import readiness_status
 
     id_to_entry = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
@@ -472,15 +491,7 @@ def _apply_readiness_overlay(entries: list[dict]) -> None:
     for e in entries:
         if not isinstance(e, dict):
             continue
-        if e.get("status") in ("done", "superseded", "deferred", "in_review"):
-            e["blocked_reason"] = None
-            continue
-        kind, blocker_id = compute_readiness(e, id_to_entry)
-        if kind == "ready":
-            e["blocked_reason"] = None
-        else:
-            e["status"] = "blocked"
-            e["blocked_reason"] = f"{kind}:{blocker_id}"
+        e["status"], e["blocked_reason"] = readiness_status(e, id_to_entry)
 
 
 def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) -> list[dict]:
@@ -620,6 +631,14 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
     # blocked, so they are left alone; everything else (in_progress/idea/
     # design/ready) is a candidate for the blocked overlay.
     _apply_readiness_overlay(entries)
+
+    # Rebuild the parent children summaries AFTER the overlay so every reader
+    # derives them live: the persisted snapshot predates this call and carries
+    # whatever the last write stamped, so without this a parent's children
+    # array can contradict the same read's own top-level statuses (a stored-
+    # ready child with an open blocker reads blocked above but ready below).
+    # Same function the write path runs; idempotent on already-derived input.
+    _compute_children(entries)
 
     if not keep_malformed:
         entries = [e for e in entries if isinstance(e, dict)]

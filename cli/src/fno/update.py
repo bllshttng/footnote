@@ -1369,14 +1369,6 @@ def update_command(
 
     typer.echo(f"Reinstalling fno from {resolved}")
 
-    if not no_rust:
-        # Outcome string deliberately dropped (locked decision 4:
-        # warn-and-continue). The helper prints one line per path, and on
-        # Unix execvp below replaces this process, so an exit-code channel
-        # for the rust leg is unreachable from here anyway. `fno doctor
-        # --fix` is the caller that branches on the outcome.
-        _refresh_rust_bins(resolved, force=rust, dry_run=dry_run)
-
     if shutil.which("uv"):
         # --refresh busts uv's build cache. Without it, a path source at an
         # unchanged version (fno stays 0.2.1 across rebuilds) can reinstall a
@@ -1410,6 +1402,10 @@ def update_command(
     install_sh = _uv_retry_sh(cmd) if cmd[0] == "uv" else None
 
     if dry_run:
+        # The rust leg still prints its plan here (a dry run states everything
+        # an update would do); it EXECUTES only below, under the claim.
+        if not no_rust:
+            _refresh_rust_bins(resolved, force=rust, dry_run=True)
         # shlex.join shell-escapes each arg so the printed command is safe to
         # paste into a terminal even when the source path contains spaces.
         # The uv path prints the retry snippet, not the bare command: that is
@@ -1454,6 +1450,69 @@ def update_command(
     except Exception:
         refresh_cmds = []
         _await_bin = None
+
+    # Machine-global mutations start here (cargo bins below, the uv/pip env
+    # at the exec), so this is where the machine-scoped guard belongs - not
+    # at the verb entry. `uv tool install --reinstall` tears down the venv
+    # every running fno verb executes from, and a racing pair of cargo
+    # installs interleaves the same binaries running sessions exec, so two
+    # concurrent updates kill unrelated sessions mid-turn. REFUSE, never
+    # queue: the loser's update is either already landed (next lines say so)
+    # or minutes away, and waiting would serialize twenty reinstalls of one
+    # version. The default pid anchoring is the release mechanism: os.execvp
+    # keeps this pid, the claim's liveness tracks the installer itself, and
+    # once the exec'd shell exits the next acquire_claim stale-reclaims the
+    # corpse - so there is deliberately no release here (a try/finally after
+    # execvp is dead code).
+    from fno.claims import CLAIM_UNAVAILABLE, ClaimCorrupted, acquire_claim
+    from fno.claims.io import claim_path, claims_root_for
+
+    _UPDATE_CLAIM_KEY = "update:fno"
+    try:
+        acquire_claim(
+            _UPDATE_CLAIM_KEY,
+            holder=f"fno-update-pid{os.getpid()}",
+            reason="machine-global install guard (tool env + cargo bins)",
+            root=claims_root_for(_UPDATE_CLAIM_KEY),
+        )
+    except CLAIM_UNAVAILABLE as exc:
+        holder = getattr(exc, "holder", "another session")
+        try:
+            from fno import doctor
+
+            installed_rev = doctor._read_marker()
+        except Exception:
+            installed_rev = None
+        if rev and installed_rev == rev:
+            typer.echo(
+                f"fno doctor update: revision {rev} already landed by another "
+                "session; nothing to do."
+            )
+        else:
+            typer.echo(
+                "fno doctor update: another session is updating fno right now "
+                f"(claim held by {holder}); skipping. Re-run once it finishes."
+            )
+        return
+    except ClaimCorrupted:
+        # A mangled lockfile must not brick the verb with a traceback, and
+        # silently installing without the guard would rather race than say
+        # what is broken - so refuse with the one-line repair instead.
+        typer.echo(
+            "fno doctor update: the update:fno claim file is corrupt; remove "
+            f"{claim_path(_UPDATE_CLAIM_KEY, root=claims_root_for(_UPDATE_CLAIM_KEY))} "
+            "and re-run.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not no_rust:
+        # Outcome string deliberately dropped (locked decision 4:
+        # warn-and-continue). The helper prints one line per path, and on
+        # Unix execvp below replaces this process, so an exit-code channel
+        # for the rust leg is unreachable from here anyway. `fno doctor
+        # --fix` is the caller that branches on the outcome.
+        _refresh_rust_bins(resolved, force=rust, dry_run=False)
 
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the

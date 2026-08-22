@@ -87,9 +87,12 @@ def global_claims_root() -> Path:
 #                  a session is durable + cross-checkout, so two project checkouts
 #                  must coordinate on the SAME lock or both could drive its
 #                  transcript (codex P1).
+# - update:fno     the machine-global installed tool env one `fno update`
+#                  reinstalls in place; every repo and session on the machine
+#                  executes from that env, so the guard must never be cwd-local.
 # Keys whose identifier is a repo-local resource (walker:<repo_root>) embed
 # their own scope and are NOT listed here; they keep the cwd/env default.
-_GLOBAL_ID_PREFIXES = frozenset({"node", "dispatch", "reconcile", "session", "groom"})
+_GLOBAL_ID_PREFIXES = frozenset({"node", "dispatch", "reconcile", "session", "groom", "update"})
 
 
 def claims_root_for(key: str) -> Path | None:
