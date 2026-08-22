@@ -39,6 +39,7 @@ def repo(tmp_path: Path) -> Path:
     shutil.copy(GATE, tmp_path / "scripts/ci/check-retired-command-strings.sh")
     shutil.copy(REGISTRY, tmp_path / "scripts/ci/retired-commands.txt")
     shutil.copy(CANARY, tmp_path / "scripts/ci/fixtures/retired-command-canary.sh")
+    (tmp_path / "scripts/ci/retired-ok-paths.txt").write_text("# none\n")
 
     # Every surface must hold at least one tracked file of its extension, or
     # the per-surface control fires before any verdict is reached.
@@ -234,3 +235,53 @@ def test_docs_are_scanned(repo: Path) -> None:
 def test_a_shell_comment_is_never_reported(repo: Path) -> None:
     _add(repo, "hooks/new.sh", "# reaps with claude rm <short_id> internally\ntrue\n")
     assert _run(repo).returncode == 0
+
+
+def test_a_path_on_the_allowlist_clears_its_sites(repo: Path) -> None:
+    """The exemption for a file that cannot afford an in-file marker.
+
+    A byte-budgeted file is re-read on a schedule, so a marker in it is paid
+    every time. The brief that forced this was 36 bytes over its budget with
+    the marker and exactly at main's size without it.
+    """
+    _add(repo, "docs/budgeted.md", "Never run a bare `claude rm <id>`.\n")
+    assert _run(repo).returncode == 1
+    (repo / "scripts/ci/retired-ok-paths.txt").write_text(
+        "docs/budgeted.md|byte-budgeted, so an in-file marker is paid per read\n"
+    )
+    _git(repo, "add", "-A")
+    assert _run(repo).returncode == 0
+
+
+def test_the_success_line_names_every_path_it_cleared(repo: Path) -> None:
+    """A whole-file exemption shown only as a count reads like no exemption."""
+    _add(repo, "docs/budgeted.md", "Never run a bare `claude rm <id>`.\n")
+    (repo / "scripts/ci/retired-ok-paths.txt").write_text(
+        "docs/budgeted.md|byte-budgeted, so an in-file marker is paid per read\n"
+    )
+    _git(repo, "add", "-A")
+    result = _run(repo)
+    assert result.returncode == 0
+    assert "1 declared by path" in result.stdout
+    assert "docs/budgeted.md" in result.stdout
+
+
+def test_a_stale_allowlist_entry_fails(repo: Path) -> None:
+    """An exemption for a path that no longer exists silently widens the gate."""
+    (repo / "scripts/ci/retired-ok-paths.txt").write_text(
+        "docs/deleted.md|it moved and nobody updated this line\n"
+    )
+    _git(repo, "add", "-A")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "does not exist" in result.stderr
+
+
+def test_a_malformed_allowlist_line_names_its_line_number(repo: Path) -> None:
+    (repo / "scripts/ci/retired-ok-paths.txt").write_text(
+        "# header\ndocs/budgeted.md\n"
+    )
+    _git(repo, "add", "-A")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert ":2:" in result.stderr and "malformed" in result.stderr

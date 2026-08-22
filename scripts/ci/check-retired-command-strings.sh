@@ -26,6 +26,11 @@
 #      that failed, an API docstring naming what the function wraps, and a
 #      prohibition that names the command in order to forbid it.
 #
+#      scripts/ci/retired-ok-paths.txt declares the same thing by PATH, for
+#      the one case where an in-file marker is not free: a byte-budgeted file
+#      re-read on a schedule pays for the marker every time. It is the weaker
+#      instrument, so the success line names every path it cleared.
+#
 # Narrowing 2 has a known ceiling: a bare-form instruction with no argument
 # at all ("run claude rm") passes. Widening it to catch that means separating
 # instruction from description by reading the sentence, and no regex does
@@ -58,6 +63,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "$REPO_ROOT"
 
 REGISTRY="scripts/ci/retired-commands.txt"
+OK_PATHS="scripts/ci/retired-ok-paths.txt"
 MARKER='retired-ok:'
 
 fail() {
@@ -83,6 +89,24 @@ while IFS= read -r line || [ -n "$line" ]; do
 done <"$REGISTRY"
 
 [ "${#CMDS[@]}" -gt 0 ] || fail "$REGISTRY holds no entries; nothing to police"
+
+# --- 1b. Parse the path allowlist ------------------------------------------
+# A whole-file exemption for the one case an in-file marker is not free: a
+# byte-budgeted file re-read on a schedule pays for the marker every time.
+declare -a OK_PATH_LIST
+if [ -f "$OK_PATHS" ]; then
+    lineno=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        lineno=$((lineno + 1))
+        case "$line" in ''|'#'*) continue ;; esac
+        IFS='|' read -r okpath okwhy <<<"$line"
+        [ -n "$okpath" ] && [ -n "$okwhy" ] ||
+            fail "$OK_PATHS:$lineno: malformed entry, want <repo-relative path>|<why the marker cannot live in the file>"
+        [ -f "$okpath" ] ||
+            fail "$OK_PATHS:$lineno: $okpath does not exist; a stale exemption silently widens the gate"
+        OK_PATH_LIST+=("$okpath")
+    done <"$OK_PATHS"
+fi
 
 # Runnable form, three shapes:
 #   1. an argument placeholder - `claude rm <id>`, `{row}`, `$job`
@@ -158,6 +182,8 @@ BAD=""
 MARKED=0
 INSPECTED=0
 CANARY_SEEN=0
+ALLOWED=0
+ALLOWED_PATHS=""
 while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     file="${hit%%:*}"; rest="${hit#*:}"; num="${rest%%:*}"; text="${rest#*:}"
@@ -170,6 +196,17 @@ while IFS= read -r hit; do
     esac
 
     INSPECTED=$((INSPECTED + 1))
+
+    path_ok=""
+    for okpath in ${OK_PATH_LIST[@]+"${OK_PATH_LIST[@]}"}; do
+        [ "$file" = "$okpath" ] && { path_ok=1; break; }
+    done
+    if [ -n "$path_ok" ]; then
+        ALLOWED=$((ALLOWED + 1))
+        case " $ALLOWED_PATHS " in *" $file "*) ;; *) ALLOWED_PATHS="${ALLOWED_PATHS}${ALLOWED_PATHS:+ }$file" ;; esac
+        continue
+    fi
+
     if [ "$num" -gt 1 ]; then
         prev="$(sed -n "$((num - 1))p" "$file")"
     else
@@ -215,4 +252,10 @@ fi
 [ "$CANARY_SEEN" -eq 1 ] ||
     fail "clean, but the ${MARKER} canary at ${CANARY_FILE} was never seen and cleared; the marker spelling or the fixture drifted, so this pass is vacuous"
 
-echo "retired-command strings OK: inspected ${INSPECTED} runnable-form site(s), ${MARKED} declared descriptive, controls fired"
+echo "retired-command strings OK: inspected ${INSPECTED} runnable-form site(s), ${MARKED} declared at the site, ${ALLOWED} declared by path, controls fired"
+# Name the paths, never just the count. A whole-file exemption that shows up
+# only as a number reads the same as no exemption at all.
+if [ -n "$ALLOWED_PATHS" ]; then
+    echo "  cleared by ${OK_PATHS}, so no line in them was read:"
+    for p in $ALLOWED_PATHS; do echo "    $p"; done
+fi
