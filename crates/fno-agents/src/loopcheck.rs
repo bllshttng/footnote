@@ -3463,6 +3463,10 @@ struct BotProfile {
     /// ISSUE-comment body markers this bot posts when it is rate-limited and will
     /// never post a review object (PR #214). Empty for a bot never seen to do so.
     usage_markers: &'static [&'static str],
+    /// Other characterized ISSUE-comment bodies that mean the bot declined to
+    /// review. Kept separate from quota markers because telemetry still names
+    /// quota exhaustion specifically.
+    refusal_markers: &'static [&'static str],
     /// Body markers for a CLEAN pass this bot posts as a plain issue comment
     /// rather than a review object. Codex submits a formal review only when it
     /// has findings (measured on PR #947: the clean pass is the comment `Codex
@@ -3487,6 +3491,7 @@ const BOT_PROFILES: &[BotProfile] = &[
         review_handle: "@codex review",
         reply_handle: "@chatgpt-codex-connector",
         usage_markers: &["usage limits for code reviews", "codex usage limits"],
+        refusal_markers: &["authentication failed"],
         clean_pass_markers: &[
             "didn't find any major issues",
             "didn\u{2019}t find any major issues",
@@ -3498,6 +3503,7 @@ const BOT_PROFILES: &[BotProfile] = &[
         review_handle: "",
         reply_handle: "@gemini-code-assist",
         usage_markers: &[],
+        refusal_markers: &[],
         clean_pass_markers: &[],
         nudgeable: false,
     },
@@ -4027,6 +4033,17 @@ pub(crate) fn body_is_usage_limit(body: &str) -> bool {
         .any(|m| lower.contains(m))
 }
 
+fn body_is_reviewer_refusal(body: &str) -> bool {
+    if body_is_usage_limit(body) {
+        return true;
+    }
+    let lower = body.to_lowercase();
+    BOT_PROFILES
+        .iter()
+        .flat_map(|profile| profile.refusal_markers.iter())
+        .any(|marker| lower.contains(marker))
+}
+
 /// The clean-pass markers for a CONFIGURED login (may differ from the comment
 /// author by case or a `[bot]` suffix, and may be the config's short name -
 /// hence the SYMMETRIC correspond test, not the one-way matches). Empty for a
@@ -4095,14 +4112,14 @@ fn reviewed_commit_from_body(body: &str) -> &str {
 /// the author's login contains the configured name AND the author resolves
 /// to a known bot profile, so a config short name ("codex") cannot draft
 /// every human whose login contains it into the bot's marker lane.
-fn usage_comment_by(login: &str, c: &Value) -> bool {
+fn refusal_comment_by(login: &str, c: &Value) -> bool {
     let author = c
         .pointer("/author/login")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     login_matches_bot(author, login)
         && profile_by_author(author).is_some()
-        && body_is_usage_limit(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
+        && body_is_reviewer_refusal(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
 }
 
 /// A comment's `createdAt`, empty when absent (empty orders as "unknown",
@@ -4320,7 +4337,7 @@ pub(crate) fn bot_verdict(
     if let Some((sha, fresh, clean_ts)) = clean.as_ref() {
         if fresh.counts() {
             let later_refusal = comments.iter().any(|c| {
-                if !usage_comment_by(login, c) {
+                if !refusal_comment_by(login, c) {
                     return false;
                 }
                 // ts_after, never a raw compare: offset-suffixed and Z-suffixed
@@ -4355,7 +4372,7 @@ pub(crate) fn bot_verdict(
         }
     };
     let refused = comments.iter().any(|c| {
-        usage_comment_by(login, c)
+        refusal_comment_by(login, c)
             && (comment_ts(c).is_empty()
                 || latest_evidence_ts.is_empty()
                 || ts_after(comment_ts(c), latest_evidence_ts))
@@ -4675,6 +4692,14 @@ pub struct CoverageReport {
     pub verdicts: Vec<ReviewerVerdict>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewState {
+    Reviewed,
+    ReviewerRefused,
+    Unreviewed,
+}
+
 impl CoverageReport {
     /// Count of `reviewed` verdicts, excluding human approvals. This is the one
     /// place that decides whether a human GitHub approval counts; flip the
@@ -4702,6 +4727,27 @@ impl CoverageReport {
                     .count(),
             ),
         }
+    }
+
+    pub fn review_state(&self) -> Option<ReviewState> {
+        if matches!(self.coverage, Coverage::Unknown) {
+            return None;
+        }
+        if self
+            .verdicts
+            .iter()
+            .any(|verdict| verdict.verdict == CoverageVerdict::Reviewed && !verdict.human_approval)
+        {
+            return Some(ReviewState::Reviewed);
+        }
+        if self
+            .verdicts
+            .iter()
+            .any(|verdict| verdict.verdict == CoverageVerdict::Refused)
+        {
+            return Some(ReviewState::ReviewerRefused);
+        }
+        Some(ReviewState::Unreviewed)
     }
 }
 
@@ -5153,6 +5199,9 @@ fn coverage_event_data(
         "verdicts": &rep.verdicts,
         "head_sha": head_sha,
     });
+    if let Some(review_state) = rep.review_state() {
+        data["review_state"] = serde_json::json!(review_state);
+    }
     if let Coverage::Covered(n) = &rep.coverage {
         data["reviewed_count"] = serde_json::json!(n);
         // How much of that count is the author reviewing its own diff. Nothing
@@ -16117,6 +16166,14 @@ mod tests {
         })
     }
 
+    fn authentication_failure_comment() -> Value {
+        serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Authentication failed while starting this code review",
+            "createdAt": "2026-08-17T03:00:00Z"
+        })
+    }
+
     fn stale_findings_review() -> Value {
         serde_json::json!({
             "author": {"login": "chatgpt-codex-connector[bot]"},
@@ -16173,6 +16230,83 @@ mod tests {
             info.usage_limited,
             vec!["chatgpt-codex-connector".to_string()]
         );
+    }
+
+    #[test]
+    fn bot_verdict_authentication_failure_is_a_refusal() {
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict(
+            "chatgpt-codex-connector",
+            &[],
+            &[authentication_failure_comment()],
+            &fresh_at,
+        );
+        assert_eq!(verdict, CoverageVerdict::Refused);
+    }
+
+    #[test]
+    fn bot_verdict_empty_or_unrecognized_comment_is_absent() {
+        let fresh_at = fresh_at_head();
+        for body in ["", "Review request received"] {
+            let comment = serde_json::json!({
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": body,
+                "createdAt": "2026-08-17T03:00:00Z"
+            });
+            let (verdict, _, _) =
+                bot_verdict("chatgpt-codex-connector", &[], &[comment], &fresh_at);
+            assert_eq!(verdict, CoverageVerdict::Absent, "body: {body:?}");
+        }
+    }
+
+    #[test]
+    fn coverage_event_review_state_preserves_refusal_and_unknown_boundaries() {
+        let login = ["chatgpt-codex-connector".to_string()];
+        let fresh_at = fresh_at_head();
+
+        let unreviewed =
+            classify_coverage(&[], &[], "", &login, true, None, &fresh_at, "", "abc12345");
+        let unreviewed_event = coverage_event_data(1, &unreviewed, "abc12345", "", None);
+        assert_eq!(unreviewed_event["review_state"], "unreviewed");
+
+        let refused = classify_coverage(
+            &[],
+            &[usage_comment("2026-08-17T03:00:00Z")],
+            "",
+            &login,
+            true,
+            None,
+            &fresh_at,
+            "",
+            "abc12345",
+        );
+        let refused_event = coverage_event_data(1, &refused, "abc12345", "", None);
+        assert_eq!(refused_event["review_state"], "reviewer_refused");
+
+        let recovered = classify_coverage(
+            &[],
+            &[usage_comment("2026-08-17T03:00:00Z")],
+            &attestation_line("code-review", "abc12345", "pass"),
+            &login,
+            true,
+            Some("sess-author"),
+            &fresh_at,
+            "",
+            "abc12345",
+        );
+        let recovered_event = coverage_event_data(1, &recovered, "abc12345", "", None);
+        assert_eq!(recovered_event["review_state"], "reviewed");
+        assert!(recovered_event["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["verdict"] == "refused"));
+
+        let unknown =
+            classify_coverage(&[], &[], "", &login, false, None, &fresh_at, "", "abc12345");
+        let unknown_event = coverage_event_data(1, &unknown, "abc12345", "", None);
+        assert_eq!(unknown_event["coverage"], "unknown");
+        assert!(unknown_event.get("review_state").is_none());
     }
 
     #[test]
