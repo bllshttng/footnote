@@ -284,6 +284,58 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
         raise typer.Exit(code=1)
 
 
+def _reserve_budget(
+    *,
+    sender: str,
+    recipient: str,
+    body: str,
+    msg_id: str,
+    allow_reason: str | None = None,
+):
+    """Reserve the authored count after both pair identities are canonical."""
+    from fno import style
+    from fno.mail import budget
+
+    words = style.word_count(body)
+    exempt = not _budget_enforced(body, allow_reason=allow_reason)
+    try:
+        reservation = budget.reserve(
+            sender=sender,
+            recipient=recipient,
+            words=words,
+            msg_id=msg_id,
+            enforce=not exempt,
+        )
+    except budget.BudgetRefused as exc:
+        print(
+            f"refused: rolling word budget for {exc.pair}: {exc.marker()}",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1) from exc
+    except budget.BudgetUnavailable as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from exc
+    return reservation, words
+
+
+def _budget_enforced(body: str, *, allow_reason: str | None = None) -> bool:
+    """Whether this send refuses over-budget; all sends still reserve."""
+    from fno import style
+
+    return not (
+        os.environ.get("FNO_STYLE_ENFORCE") == "0"
+        or bool(allow_reason and allow_reason.strip())
+        or style.has_exception(body)
+    )
+
+
+def _release_budget(reservation) -> None:
+    """Release only after the caller proves no outward lane accepted the body."""
+    from fno.mail import budget
+
+    budget.release(reservation)
+
+
 def _emit_style_refusal(violations: list) -> None:
     """Record one style_refusal event so the retry rate is a query over events.jsonl.
 
@@ -554,6 +606,7 @@ def _reply_to_name_handle(
     target: str,
     to_msg: str,
     require_resolution: bool = False,
+    style_exception: Optional[str] = None,
 ) -> None:
     """Send a name-lane reply to ``target`` (a canonical handle): resolve it live
     and inject, else durable-floor to it. Shared by the bus-record reply path and
@@ -567,7 +620,11 @@ def _reply_to_name_handle(
     resolved, suggestions = discover_mod.resolve_or_suggest(target)
     if resolved is not None:
         _name_lane_send(
-            body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
+            body_text,
+            from_name=from_project,
+            resolved=resolved,
+            reply_to=to_msg,
+            style_exception=style_exception,
         )
     else:
         try:
@@ -620,6 +677,7 @@ def _reply_to_name_handle(
                 resolved=None,
                 token=target,
                 reply_to=to_msg,
+                style_exception=style_exception,
             )
             return
         if require_resolution:
@@ -636,6 +694,7 @@ def _reply_to_name_handle(
             resolved=None,
             recipient=target,
             reply_to=to_msg,
+            style_exception=style_exception,
         )
 
 
@@ -732,6 +791,7 @@ def cmd_reply(
             target=target,
             to_msg=to_msg,
             require_resolution=require_resolution,
+            style_exception=style_exception,
         )
         return
     if orig is None:
@@ -745,7 +805,11 @@ def cmd_reply(
         live_sender = resolve_live_sender(to_msg)
         if live_sender:
             _reply_to_name_handle(
-                body_text, from_project=from_project, target=live_sender, to_msg=to_msg
+                body_text,
+                from_project=from_project,
+                target=live_sender,
+                to_msg=to_msg,
+                style_exception=style_exception,
             )
             return
         # AC1-ERR / LD4: the name lane cannot invent a target from nothing. An id
@@ -771,9 +835,29 @@ def cmd_reply(
 
     refs = _collect_refs(None, None, None, ref_mission, source_mission, cascade_of)
 
+    from fno.inbox.store import generate_msg_id
+
+    reply_id = generate_msg_id()
+    reservation, authored_words = _reserve_budget(
+        sender=sender,
+        recipient=recipient,
+        body=body_text,
+        msg_id=reply_id,
+        allow_reason=style_exception,
+    )
     existing = find_thread_by_msg_id(recipient, to_msg)
     if existing is not None:
-        new_id = append_to_thread(existing.path, sender, body_text)
+        try:
+            new_id = append_to_thread(
+                existing.path,
+                sender,
+                body_text,
+                msg_id=reply_id,
+                word_count=authored_words,
+            )
+        except Exception:
+            _release_budget(reservation)
+            raise
         payload = {"msg_id": new_id, "thread_path": str(existing.path), "appended": True}
         if json_out:
             typer.echo(json.dumps(payload))
@@ -781,10 +865,20 @@ def cmd_reply(
             typer.echo(f"appended reply {new_id} to {existing.path.name} (in {recipient})")
         return
 
-    handle = write_new_thread(
-        recipient, sender, kind, body_text,
-        replies_to=to_msg, refs=refs,
-    )
+    try:
+        handle = write_new_thread(
+            recipient,
+            sender,
+            kind,
+            body_text,
+            msg_id=reply_id,
+            replies_to=to_msg,
+            refs=refs,
+            word_count=authored_words,
+        )
+    except Exception:
+        _release_budget(reservation)
+        raise
     payload = {
         "msg_id": handle.thread_id,
         "thread_path": str(handle.path),
@@ -1379,6 +1473,7 @@ def _name_lane_send(
     provider: Optional[str] = None,
     reply_to: Optional[str] = None,
     token: Optional[str] = None,
+    style_exception: Optional[str] = None,
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
     ``mail reply`` -- the ONE choke point every delivery ladder rung lives in.
@@ -1478,7 +1573,15 @@ def _name_lane_send(
 
     # Wire `to` carries the canonical handle, matching the durable-bus recipient
     # exactly -- `from` is already a handle via stamp_from, so both attrs agree.
+    assert recipient is not None  # every routing branch above resolves the address
     sender = stamp_from(from_name)
+    reservation, authored_words = _reserve_budget(
+        sender=sender,
+        recipient=recipient,
+        body=message,
+        msg_id=msg_id,
+        allow_reason=style_exception,
+    )
     sender_harness = infer_invoking_harness()
     sender_model = resolve_self_model()
     wrapped = wrap_fno_mail(
@@ -1612,7 +1715,6 @@ def _name_lane_send(
                 if entry.status == "live":
                     injected = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
 
-    assert recipient is not None  # resolved before either hosted or durable receipt
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
     # Surface the minted id so the sender can quote it and the recipient (who
@@ -1633,6 +1735,7 @@ def _name_lane_send(
                 in_reply_to=reply_to,
                 from_model=sender_model,
                 to_kind="name",
+                word_count=authored_words,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -1698,8 +1801,11 @@ def _name_lane_send(
             provider_to=provider,
             replies_to=reply_to,
             owner=owner.value,
+            word_count=authored_words,
         )
     except (OSError, ValueError, RuntimeError) as exc2:
+        if not injected:
+            _release_budget(reservation)
         print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
         raise typer.Exit(code=12) from exc2
     if not bus_only:
@@ -1765,6 +1871,7 @@ def _job_lane_send(
     token: str,
     *,
     from_name: Optional[str],
+    style_exception: Optional[str] = None,
 ) -> None:
     """Deliver to a JOB address (``node:<id>`` / ``pr:<n>``), resolved to whoever
     holds the claim RIGHT NOW (x-8f8c part 2).
@@ -1831,6 +1938,13 @@ def _job_lane_send(
     # already normalized to node:<id> by the resolver.
     recipient = job.address
     sender = stamp_from(from_name)
+    _reservation, authored_words = _reserve_budget(
+        sender=sender,
+        recipient=recipient,
+        body=message,
+        msg_id=msg_id,
+        allow_reason=style_exception,
+    )
     sender_harness = infer_invoking_harness()
     sender_model = resolve_self_model()
     wrapped = wrap_fno_mail(
@@ -1870,6 +1984,7 @@ def _job_lane_send(
                 provider_to=provider,
                 from_model=sender_model,
                 to_kind="node",
+                word_count=authored_words,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -1898,8 +2013,10 @@ def _job_lane_send(
             provider_to=provider,
             to_kind="node",
             owner=owner.value,
+            word_count=authored_words,
         )
     except (OSError, ValueError, RuntimeError) as exc:
+        _release_budget(_reservation)
         print(
             f"durable envelope write failed for {recipient!r}: {exc}",
             file=sys.stderr,
@@ -2110,7 +2227,14 @@ def _codex_review_target(
     return "uncommittedChanges", True
 
 
-def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
+def _raw_send(
+    name,
+    payload,
+    *,
+    self_ok: bool,
+    check: bool = False,
+    style_exception: Optional[str] = None,
+) -> None:
     """``fno agents mail send --raw``: fire a verb in a peer by injecting ``payload``
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
     REPL's slash parser runs it before the model sees it.
@@ -2192,7 +2316,7 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     # transports can fire. Under --check the cap refusal is a usage error
     # (exit 2), never a session verdict: exit 1 is the not-injectable code.
     _enforce_body_cap(stripped, usage=check)
-    _enforce_style(stripped)
+    _enforce_style(stripped, allow_reason=style_exception)
 
     # 2b. Forged envelope: a raw payload starts with "/", so it cannot itself
     #     be a `<fno_mail>` tag, but it can still smuggle one mid-line. The mux
@@ -2273,9 +2397,44 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     # Derive provenance before routing: daemon review/start returns before the
     # keystroke transports below, but its unwrapped invocation needs the same
     # actor record.
-    from fno.agents.self_stamp import resolve_self_handle
+    from fno.agents.self_stamp import resolve_self_handle, stamp_from
+    from fno.harness_identity import canonical_handle
+    from fno.inbox.store import generate_msg_id
 
-    sender = resolve_self_handle()
+    transport_sender = resolve_self_handle()
+    sender = stamp_from(transport_sender)
+    raw_recipient = canonical_handle(session_id)
+
+    def _reserve_raw():
+        raw_msg_id = generate_msg_id()
+        reservation, authored_words = _reserve_budget(
+            sender=sender,
+            recipient=raw_recipient,
+            body=stripped,
+            msg_id=raw_msg_id,
+            allow_reason=style_exception,
+        )
+        return raw_msg_id, reservation, authored_words
+
+    def _record_raw(raw_msg_id: str, authored_words: int) -> None:
+        from fno.bus.log import record_hosted_delivery
+
+        try:
+            record_hosted_delivery(
+                msg_id=raw_msg_id,
+                sender=sender,
+                recipient=raw_recipient,
+                body=stripped,
+                provider_to=entry.harness,
+                to_kind="session",
+                word_count=authored_words,
+            )
+        except Exception as exc:  # noqa: BLE001 - delivery already succeeded
+            print(
+                "delivery succeeded; outbox record failed; "
+                f"do not retry: {exc}",
+                file=sys.stderr,
+            )
 
     # 4. Route by the actual lane. Mux-hosted Codex is a keystroke lane like any
     #    other mux pane; only a Codex app-server thread uses structured review/start.
@@ -2345,14 +2504,16 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
                     "explicitly request '/review --uncommitted'"
                 )
             assert target is not None
+            raw_msg_id, reservation, authored_words = _reserve_raw()
             receipt = _review_start_codex(
                 session_id,
                 target,
                 audit_payload=stripped[:512],
-                audit_sender=sender,
+                audit_sender=transport_sender,
                 audit_target_cwd=getattr(entry, "cwd", None),
             )
             if receipt.get("delivered"):
+                _record_raw(raw_msg_id, authored_words)
                 note = " (unrecognized remainder ignored)" if ignored_remainder else ""
                 print(
                     f"review/start target={target} delivery=inline "
@@ -2361,6 +2522,16 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
                 )
                 raise typer.Exit(code=0)
             reason = str(receipt.get("reason") or "rpc-error")
+            if reason == "not-confirmed":
+                print(
+                    f"warning: {name!r} codex review/start was not-confirmed after "
+                    "the request was sent; the review may already be running. "
+                    "Inspect the thread before deciding what happened; do not retry "
+                    "blindly",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=0)
+            _release_budget(reservation)
             if reason == "no-daemon":
                 _refused(
                     f"{name!r} codex review/start failed: no-daemon; run "
@@ -2372,15 +2543,6 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
                     "fno-agents binary is absent or rejected the invocation - "
                     "run `fno doctor --fix` and retry"
                 )
-            if reason == "not-confirmed":
-                print(
-                    f"warning: {name!r} codex review/start was not-confirmed after "
-                    "the request was sent; the review may already be running. "
-                    "Inspect the thread before deciding what happened; do not retry "
-                    "blindly",
-                    file=sys.stderr,
-                )
-                raise typer.Exit(code=0)
             _refused(f"{name!r} codex review/start failed: {reason}")
         if check:
             print(f"not-injectable: {lane} is not a prompt-line keystroke lane")
@@ -2458,10 +2620,21 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     #        payload has no `from` attribute in the recipient transcript, so the
     #        ledger is the ONLY place that can say who fired the verb. Absent
     #        ambient identity it stays absent rather than guessing.
+    raw_msg_id, _reservation, authored_words = _reserve_raw()
     if entry.mux:
-        delivered = _mux_pane_send(entry, stripped, guarded=False, confirm=True, sender=sender)
+        delivered = _mux_pane_send(
+            entry,
+            stripped,
+            guarded=False,
+            confirm=True,
+            sender=transport_sender,
+        )
     else:  # claude control.sock - the only other keystroke lane
-        delivered = _mail_inject_claude(session_id, stripped, sender=sender)
+        delivered = _mail_inject_claude(
+            session_id,
+            stripped,
+            sender=transport_sender,
+        )
 
     # 8. Four-state receipt (never a boolean; never a durable write).
     # The note used to read as a refusal: it named a defect in the argument and
@@ -2478,6 +2651,7 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     # advice survives as retrospective ("would have"), which is what it is:
     # nothing here is actionable for the send that just happened.
     if delivered:
+        _record_raw(raw_msg_id, authored_words)
         note = ""
         if stripped == "/compact":
             note = (
@@ -2731,7 +2905,13 @@ def cmd_send(
         if message is None:
             print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
             raise typer.Exit(code=2)
-        _raw_send(name, message, self_ok=to_self, check=check)
+        _raw_send(
+            name,
+            message,
+            self_ok=to_self,
+            check=check,
+            style_exception=style_exception,
+        )
         return
     if check:
         # Only the --raw lane has a keystroke path to have or lack; a wrapped send
@@ -2929,6 +3109,16 @@ def cmd_send(
         if ref_gate is not None:
             refs["ref_gate"] = ref_gate
 
+        from fno.inbox.store import generate_msg_id
+
+        msg_id = generate_msg_id()
+        reservation, authored_words = _reserve_budget(
+            sender=sender,
+            recipient=recipient,
+            body=content,
+            msg_id=msg_id,
+            allow_reason=style_exception,
+        )
         try:
             res = post_inbox_message(
                 recipient=recipient,
@@ -2938,10 +3128,16 @@ def cmd_send(
                 persist_to_memory=persist_to_memory,
                 reply_to=reply_to,
                 refs=refs or None,
+                msg_id=msg_id,
+                word_count=authored_words,
             )
         except ValueError as exc:
+            _release_budget(reservation)
             print(f"error: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
+        except (OSError, RuntimeError):
+            _release_budget(reservation)
+            raise
 
         # A question never gets an autonomous responder (US9 wakes only heads-up);
         # it escalates to the human at send time instead, debounced per pair.
@@ -3000,6 +3196,9 @@ def cmd_send(
                 cwd=workdir,
                 from_name=stamp_from(from_name),
                 any_=any_live,
+                budget_enforce=_budget_enforced(
+                    content, allow_reason=style_exception
+                ),
             )
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
@@ -3063,7 +3262,12 @@ def cmd_send(
             _refuse_forged_envelope(message)
             _enforce_body_cap(message)
             _enforce_style(message, allow_reason=style_exception)
-            _job_lane_send(message, name, from_name=stamp_from(from_name))
+            _job_lane_send(
+                message,
+                name,
+                from_name=stamp_from(from_name),
+                style_exception=style_exception,
+            )
             return
 
     # Name mode.
@@ -3085,6 +3289,9 @@ def cmd_send(
             provider=harness,
             cwd=workdir,
             from_name=stamp_from(from_name),
+            budget_enforce=_budget_enforced(
+                message, allow_reason=style_exception
+            ),
         )
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
@@ -3115,7 +3322,12 @@ def cmd_send(
         if resolved is not None:
             # Live-inject-first with a durable floor addressed to the resolved
             # session's canonical handle. Shared with the name-lane reply path.
-            _name_lane_send(message, from_name=from_name, resolved=resolved)
+            _name_lane_send(
+                message,
+                from_name=from_name,
+                resolved=resolved,
+                style_exception=style_exception,
+            )
             return
 
         # A caller-TYPED retired <harness>-<short8> address is refused outright,
@@ -3138,7 +3350,13 @@ def cmd_send(
         # matrix cell 5 (resolves nowhere) actually belongs, instead of here
         # where it used to pre-empt every live rung.
         try:
-            _name_lane_send(message, from_name=from_name, resolved=None, token=name)
+            _name_lane_send(
+                message,
+                from_name=from_name,
+                resolved=None,
+                token=name,
+                style_exception=style_exception,
+            )
         except AmbiguousTokenError as amb:
             print(
                 f"ambiguous session token {name!r}: matches "

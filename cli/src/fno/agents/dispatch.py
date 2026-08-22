@@ -7039,10 +7039,12 @@ def _queue_durable_fallback(
         to=mail_ctx.to,
         id=mail_ctx.id,
     )
+    from fno import style as _style
+
     try:
         write_new_thread(
             recipient=durable_recipient,
-            sender=from_name,
+            sender=mail_ctx.from_,
             kind="send",
             body=durable_body,
             msg_id=msg_id,
@@ -7051,6 +7053,9 @@ def _queue_durable_fallback(
             provider_from=provider_from,
             from_session=from_session,
             owner=DurableOwner.WAKE_DAEMON.value,
+            # Count the raw body, not the wire wrapper: Rule 7 and the rolling
+            # budget read the same string, so the row must too.
+            word_count=_style.word_count(message),
         )
     except (OSError, ValueError, RuntimeError) as exc:
         events.emit(
@@ -7154,6 +7159,35 @@ def _stamp_after_delivery(
             pass  # stderr already carries the non-retryable degradation
 
 
+def _reserve_send_budget(
+    *,
+    sender: str,
+    recipient: str,
+    message: str,
+    msg_id: str,
+    enforce: bool,
+):
+    """Reserve one canonical pair before any outward send side effect."""
+    from fno import style
+    from fno.mail import budget
+
+    try:
+        return budget.reserve(
+            sender=sender,
+            recipient=recipient,
+            words=style.word_count(message),
+            msg_id=msg_id,
+            enforce=enforce,
+        )
+    except budget.BudgetRefused as exc:
+        raise DispatchAskError(
+            f"refused: rolling word budget for {exc.pair}: {exc.marker()}",
+            exit_code=1,
+        ) from exc
+    except budget.BudgetUnavailable as exc:
+        raise DispatchAskError(f"refused: {exc}", exit_code=1) from exc
+
+
 def dispatch_send(
     name: str,
     message: str,
@@ -7163,6 +7197,7 @@ def dispatch_send(
     from_name: str = _FROM_NAME_DEFAULT,
     *,
     registry_stamp_timeout_seconds: float = 1.0,
+    budget_enforce: bool = True,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
@@ -7412,6 +7447,7 @@ def dispatch_send(
                 if existing.harness_session_id
                 else None
             )
+            budget_recipient = durable_recipient or existing.short_id or canonical_name
             mail_ctx = _build_mail_ctx(
                 from_name,
                 from_session,
@@ -7419,6 +7455,15 @@ def dispatch_send(
                 to=(durable_recipient or existing.short_id or None),
                 id=msg_id,
             )
+            reservation = _reserve_send_budget(
+                sender=mail_ctx.from_,
+                recipient=budget_recipient,
+                message=message,
+                msg_id=msg_id,
+                enforce=budget_enforce,
+            )
+
+            live_attempted = False
 
             def _write_durable() -> None:
                 """Write the durable FALLBACK envelope: the pending-queue for an
@@ -7430,14 +7475,21 @@ def dispatch_send(
                 lock-timeout handler below uses, so a message queued from inside
                 the lock and one queued after failing to acquire it share one
                 envelope-construction and error path."""
-                _queue_durable_fallback(
-                    existing,
-                    message,
-                    from_name,
-                    entries,
-                    msg_id=msg_id,
-                    mail_ctx=mail_ctx,
-                )
+                try:
+                    _queue_durable_fallback(
+                        existing,
+                        message,
+                        from_name,
+                        entries,
+                        msg_id=msg_id,
+                        mail_ctx=mail_ctx,
+                    )
+                except Exception:
+                    if not live_attempted:
+                        from fno.mail import budget
+
+                        budget.release(reservation)
+                    raise
 
             # 4d/4e. Live-inject-first, durable fallback. The context stash ensures
             # started/done share one request_id + caller attribution (mirrors the
@@ -7489,6 +7541,7 @@ def dispatch_send(
                     _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
                 )
                 if family1_attemptable:
+                    live_attempted = True
                     _live_delivered = _deliver_live(
                         existing,
                         message,
@@ -7512,6 +7565,9 @@ def dispatch_send(
                             to=mail_ctx.to,
                             id=mail_ctx.id,
                         )
+                        from fno import style as _hstyle
+
+                        _hosted_words = _hstyle.word_count(message)
                         try:
                             record_hosted_delivery(
                                 msg_id=msg_id,
@@ -7523,6 +7579,7 @@ def dispatch_send(
                                 from_session=from_session,
                                 from_model=mail_ctx.model,
                                 to_kind="session",
+                                word_count=_hosted_words,
                             )
                         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
                             print(
@@ -7713,12 +7770,40 @@ def dispatch_send(
                     else LOCK_TIMEOUT_REASON
                 )
 
-                ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
                 # Mint the id before the started event so started and done name
                 # the same message, as they do on the normal path.
                 from fno.inbox.store import generate_msg_id
 
                 msg_id = generate_msg_id()
+                sender_entry = next(
+                    (entry for entry in timeout_entries if entry.name == from_name),
+                    None,
+                )
+                from_session = provider_from = None
+                if sender_entry is not None:
+                    provider_from = sender_entry.harness
+                    from_session = (
+                        getattr(sender_entry, "harness_session_id", None)
+                        or getattr(sender_entry, "short_id", None)
+                    )
+                timeout_recipient = canonical_handle(
+                    timeout_entry.harness_session_id
+                )
+                timeout_mail_ctx = _build_mail_ctx(
+                    from_name,
+                    from_session,
+                    provider_from,
+                    to=timeout_recipient,
+                    id=msg_id,
+                )
+                reservation = _reserve_send_budget(
+                    sender=timeout_mail_ctx.from_,
+                    recipient=timeout_recipient,
+                    message=message,
+                    msg_id=msg_id,
+                    enforce=budget_enforce,
+                )
+                ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
                 try:
                     _emit_ev(
                         "agent_send_started",
@@ -7726,14 +7811,21 @@ def dispatch_send(
                         provider=timeout_entry.harness,
                         msg_id=msg_id,
                     )
-                    msg_id, _durable_to = _queue_durable_fallback(
-                        timeout_entry,
-                        message,
-                        from_name,
-                        timeout_entries,
-                        msg_id=msg_id,
-                        reason=queue_reason,
-                    )
+                    try:
+                        msg_id, _durable_to = _queue_durable_fallback(
+                            timeout_entry,
+                            message,
+                            from_name,
+                            timeout_entries,
+                            msg_id=msg_id,
+                            reason=queue_reason,
+                            mail_ctx=timeout_mail_ctx,
+                        )
+                    except Exception:
+                        from fno.mail import budget
+
+                        budget.release(reservation)
+                        raise
                     _emit_ev(
                         "agent_send_done",
                         name=name,
@@ -7960,6 +8052,7 @@ def dispatch_send_to_project(
     from_name: str = _FROM_NAME_DEFAULT,
     any_: bool = False,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
+    budget_enforce: bool = True,
 ) -> "DispatchSendResult":
     """Async send addressed to a project (anycast over the registry).
 
@@ -7995,6 +8088,10 @@ def dispatch_send_to_project(
 
     if res.recipient is not None:
         # Exactly one live peer (or --any winner): deliver live by name.
+        # Omit the default kwarg so existing in-process adapters that implement
+        # the pre-budget dispatch signature keep working. The exception lane
+        # passes False explicitly because it changes enforcement.
+        budget_kwargs = {} if budget_enforce else {"budget_enforce": False}
         result = dispatch_send(
             name=res.recipient,
             message=message,
@@ -8002,6 +8099,7 @@ def dispatch_send_to_project(
             cwd=cwd,
             lock_timeout=lock_timeout,
             from_name=from_name,
+            **budget_kwargs,
         )
         return replace(result, recipient=res.recipient, to_project=project)
 
@@ -8009,7 +8107,7 @@ def dispatch_send_to_project(
     # (and bus mirror) record to == project (to_kind=project); the next drain in
     # that project picks it up, EXCLUDING the sender (Group 1, ab-ba91b807). The
     # sender identity is best-effort - exclusion falls back to the from_ name.
-    from fno.inbox.store import DurableOwner, write_new_thread
+    from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
 
     from_session = provider_from = None
     try:
@@ -8025,20 +8123,35 @@ def dispatch_send_to_project(
     except Exception:  # noqa: BLE001 - sender identity is best-effort
         pass
 
+    from fno import style as _pstyle
+    from fno.mail import budget
+
+    msg_id = generate_msg_id()
+    reservation = _reserve_send_budget(
+        sender=from_name,
+        recipient=project,
+        message=message,
+        msg_id=msg_id,
+        enforce=budget_enforce,
+    )
+
     try:
         handle = write_new_thread(
             recipient=project,
             sender=from_name,
             kind="send",
             body=message,
+            msg_id=msg_id,
             to_kind="project",
             from_session=from_session,
             provider_from=provider_from,
+            word_count=_pstyle.word_count(message),
             # US6: an explicit --to-project note deliberately chose the durable
             # project-inbox lane; the project's own drain owns it.
             owner=DurableOwner.INBOX_DRAIN.value,
         )
     except (OSError, ValueError, RuntimeError) as exc:
+        budget.release(reservation)
         events.emit("agent_send_failed", stage="durable-write", name=project)
         raise DispatchAskError(
             f"durable envelope write failed for project {project!r}: {exc}",

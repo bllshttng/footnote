@@ -139,7 +139,9 @@ def test_dispatch_send_writes_addressed_session_envelope(env, tmp_path):
     assert len(addressed) == 1
     env_ = addressed[0]
     assert env_.to_kind == "session"
-    assert env_.from_ == "alice"
+    # The durable row carries the same canonical sender as the wire envelope
+    # and rolling-budget pair, so an inbound reply resets the right ledger.
+    assert env_.from_ == "000alice"
     # sender session recorded (best-effort) so a project-broadcast read can exclude it
     assert env_.from_session == "000alice-1111-7222-8333-444455556666"
     # The durable bus body is <fno_mail>-wrapped now (node x-1f23): the same

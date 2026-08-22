@@ -16,6 +16,7 @@ One global append-only log is the system of record. The per-recipient markdown t
 | :--- | :--- | :--- |
 | Registry (exists) | `~/.fno/agents/registry.json` | WHO: name, provider, session id, cwd, status. Sole addressing authority. |
 | Bus log (this work) | `<bus_dir>/messages.jsonl` (+ rotated `.N`) | WHAT WAS SAID: canonical, append-only, provider-neutral transcript. |
+| Pair budget ledger | `<bus_dir>/word-budget/<pair-digest>.json` | WHAT MAY BE SENT NOW: lock-protected reservations for one canonical sender-recipient pair, pruned after 10 minutes or reset by an inbound authored message. |
 | Cursors (this work) | `<bus_dir>/cursors/<name>.json` | Per-consumer read position, keyed by last-seen message-id. |
 | Markdown render (demoted) | `<recipient>/inbox/*.md` | Obsidian-visible render of the log; no authority. |
 
@@ -26,10 +27,30 @@ One global append-only log is the system of record. The per-recipient markdown t
 One JSON object per line (`fno.bus.log.Envelope`):
 
 ```json
-{"v":1,"id":"msg-3f8f96","ts":"2026-06-07T19:51:32Z","thread":"msg-3f8f96","from":"alice","to":"bob","kind":"send","provider_from":"claude","provider_to":"codex","in_reply_to":"...","delivery":"hosted","meta":{...},"body":"..."}
+{"v":1,"id":"msg-3f8f96","ts":"2026-06-07T19:51:32Z","thread":"msg-3f8f96","from":"alice","to":"bob","kind":"send","provider_from":"claude","provider_to":"codex","in_reply_to":"...","delivery":"hosted","word_count":17,"meta":{...},"body":"..."}
 ```
 
-`from`/`to` are the addresses (registry names, or a project name in `--to-project` durable mode). `provider_from`/`provider_to` are metadata-only transport/audit tags, never used for addressing. Reply correlation is `request_id`/`in_reply_to`, independent of provider tags. `meta` carries inbox passthrough (`refs`, `persist_to_memory`, `render_path`) so triage->graph provenance and Obsidian visibility survive without polluting the canonical address/correlation fields. Optional fields are omitted when unset so lines stay scannable; the body is written last. A root message threads under its own id (`thread == id`); a reply sets `in_reply_to`.
+`from` and `to` are canonical registry names, session handles, or project names. `provider_from` and `provider_to` are audit tags, never addresses. Reply correlation uses `request_id` and `in_reply_to` independently of provider tags.
+
+`word_count` stores the authored body's send-time count under the pure Rule 7 masking rules. It is never recomputed from a stored `<fno_mail>` wrapper.
+
+`meta` carries `refs`, `persist_to_memory`, and `render_path` without polluting address or correlation fields. Optional fields are omitted so legacy rows parse and lines stay scannable. The body is written last.
+
+A root message threads under its own id. A reply sets `in_reply_to`.
+
+### Rolling sender-recipient word budget
+
+Before any outward send effect, `fno.mail.budget.reserve` charges the authored word count to one canonical sender-recipient pair. The fixed policy is 80 masked words over a rolling 10-minute window.
+
+An authored inbound `send`, `heads-up`, `question`, or `fyi` resets earlier reservations. Self-sends, migrations, withdrawals, and other non-authored rows do not reset them.
+
+A refused or proven failed send releases its reservation. An unconfirmed or post-delivery audit failure stays charged until reset or expiry.
+
+Pair files use a digest of the canonical addresses instead of an address-derived path. A sidecar lock serializes same-pair reservations. A temporary file and atomic replace persist the ledger before transport begins.
+
+Different pairs do not share a lock. A malformed or unreadable active ledger fails closed instead of resetting the count.
+
+A style exception or `FNO_STYLE_ENFORCE=0` bypasses refusal for that send. It still records and charges the real count.
 
 Serialization is single-source: only the Python CLI writes `messages.jsonl` (the Rust daemon does PTY *delivery*, not envelope appends), so there is no Python/Rust byte-divergence to reconcile on this surface.
 

@@ -1,13 +1,15 @@
 # Architecture: live-inject-first a2a delivery and the `<fno_mail>` envelope
 
-`fno agents mail send` delivers an agent-to-agent message to a LIVE recipient first and queues the durable bus only as a fallback. This is the unification that sits on top of the G1 substrate: one send interface, one wire envelope, one live primitive per provider, with the durable bus demoted from a peer system to the offline pending-queue.
+`fno agents mail send` delivers an agent-to-agent message to a LIVE recipient first and queues the durable bus only as a fallback.
+
+This unifies the G1 substrate around one send interface, one wire envelope, and one live primitive per provider. The bus stores sender audit history and the offline pending queue.
 
 ## The delivery model
 
 `dispatch_send` (`cli/src/fno/agents/dispatch.py`) runs, in order:
 
 1. Capture the sender provenance (short sessionId, provider, model) for the envelope.
-2. If the recipient is `live`, attempt a single fire-and-forget live delivery via `_deliver_live`. On success the result is `hosted` and NOTHING is written to the durable bus.
+2. For a live recipient, attempt one fire-and-forget delivery through `_deliver_live`. After confirmation, write one `delivery: hosted` row with the exact id, addresses, body, provenance, and send-time `word_count`. The row is audit-only. It appears in sender and operator history but never enters delivery, rebuild, unclaimed, or withdrawal paths.
 3. Otherwise (offline recipient, or the live attempt did not confirm), write the durable envelope. That copy is the pending-queue an offline recipient drains on wake, and the recovery record when a live inject did not land.
 
 The per-agent flock that `dispatch_send` already holds serializes concurrent sends to the same recipient, so two sends never interleave their envelopes.
@@ -23,7 +25,9 @@ Every live transport carries the same `<fno_mail>`-wrapped turn:
 - **codex / gemini**: the daemon `agent.deliver` RPC, now carrying the `<fno_mail>` envelope (see [fno-agents-deliver-gate.md](fno-agents-deliver-gate.md)).
 - **A mux-hosted pane** of any harness takes `fno mux pane send` (`dispatch._mux_pane_send`), which writes the text and then the harness's `submit_keys` from `harness_capabilities.toml`. A harness declaring `submit_keys = ["unsupported"]` is refused BEFORE the transport is tried, and the send falls to the durable queue. That refusal is a capability declaration, not a transport failure, and it now says so. The old wording named `mux-send-failed` and the layer that did not run. It read as a broken pane. It cost two agents and an operator a night on a codex worker whose pane was fine. codex declares `["enter"]` with no delay. That value was measured against 0.148.0 by reading the pane, not an exit code. claude needs 800ms after the text. gemini, agy and opencode stay unsupported because nothing has been measured for them.
 
-`_deliver_live` returns `True` on the first lane that succeeds, else `False`; `dispatch_send` writes durable exactly when it returns `False`. So a message takes exactly one of {one live transport, durable}.
+`_deliver_live` returns `True` on the first successful lane and `False` otherwise. `dispatch_send` writes a hosted audit row after `True` and a deliverable durable row after `False`.
+
+Delivery takes exactly one path: a live transport or the durable queue. The bus field distinguishes delivered history from pending mail.
 
 ## The `<fno_mail>` envelope
 
@@ -35,7 +39,9 @@ message text
 </fno_mail>
 ```
 
-`from` is the sender's short 8-hex sessionId (the identity). `harness` maps the provider to a reply vocabulary (`claude` -> `claude-code`; `codex`/`gemini` unchanged) via `harness_for_provider`. `node`/`to` are optional. A delivered turn is self-recording: it lands in both transcripts, so `grep <fno_mail>` across transcripts reconstructs the a2a history. That is what lets the durable bus stop being the history store and become only the offline pending-queue.
+`from` is the sender's short 8-hex sessionId. `harness_for_provider` maps the provider to the reply vocabulary. Claude becomes `claude-code`, while Codex and Gemini keep their names. `node` and `to` are optional.
+
+The delivered turn records itself in the recipient transcript. The hosted audit row adds provider-neutral sender history without creating pending mail.
 
 ## Where the envelope lands: per-harness transcript map
 
