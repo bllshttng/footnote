@@ -36,6 +36,7 @@ CHECKS: dict[str, str] = {
     "verb-ratchet": "verb_ratchet",
     "style": "style",
     "stale-skill-refs": "stale_skill_refs",
+    "retired-commands": "retired_commands",
     "registry": "registry",
 }
 
@@ -880,6 +881,29 @@ def stale_skill_refs() -> None:
         result = subprocess.run(["bash", str(script)], cwd=repo_root)
     except FileNotFoundError as exc:
         typer.echo(f"failed to run audit script: {exc}", err=True)
+        raise typer.Exit(code=2)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def retired_commands() -> None:
+    """Fail a caller-facing string that shows a ruling-retired command.
+
+    Thin wrapper over the source-of-truth bash gate
+    scripts/ci/check-retired-command-strings.sh; exit code matches it (0
+    clean, 1 a surviving hit or a control that did not fire, 2 script error).
+    """
+    from fno._subprocess_util import propagate_returncode
+    from fno.paths import resolve_repo_root
+
+    repo_root = Path(resolve_repo_root())
+    script = repo_root / "scripts" / "ci" / "check-retired-command-strings.sh"
+    if not script.exists():
+        typer.echo(f"gate script not found at {script}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = subprocess.run(["bash", str(script)], cwd=repo_root)
+    except FileNotFoundError as exc:
+        typer.echo(f"failed to run gate script: {exc}", err=True)
         raise typer.Exit(code=2)
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
