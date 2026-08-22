@@ -7448,19 +7448,19 @@ def dispatch_send(
                 else None
             )
             budget_recipient = durable_recipient or existing.short_id or canonical_name
-            reservation = _reserve_send_budget(
-                sender=from_name,
-                recipient=budget_recipient,
-                message=message,
-                msg_id=msg_id,
-                enforce=budget_enforce,
-            )
             mail_ctx = _build_mail_ctx(
                 from_name,
                 from_session,
                 provider_from,
                 to=(durable_recipient or existing.short_id or None),
                 id=msg_id,
+            )
+            reservation = _reserve_send_budget(
+                sender=mail_ctx.from_,
+                recipient=budget_recipient,
+                message=message,
+                msg_id=msg_id,
+                enforce=budget_enforce,
             )
 
             live_attempted = False

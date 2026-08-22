@@ -120,6 +120,46 @@ def test_project_kind_send_refuses_the_second_79_word_body(runner, mailbox):
     assert "running=79 current=79 projected=158 cap=80 window=10m" in second.stderr
 
 
+@pytest.mark.parametrize("error_type", [OSError, RuntimeError])
+def test_project_kind_known_failure_releases_the_reservation(
+    runner,
+    mailbox,
+    monkeypatch,
+    error_type,
+):
+    from fno.mail import budget
+
+    monkeypatch.setattr(
+        "fno.inbox.store.post_inbox_message",
+        lambda **_kwargs: (_ for _ in ()).throw(error_type("write failed")),
+    )
+    body = _passing_mail_body(79)
+    result = runner.invoke(
+        app,
+        [
+            "mail",
+            "send",
+            "--to-project",
+            "web",
+            "--kind",
+            "fyi",
+            "--from-name",
+            "etl",
+            "--body",
+            body,
+        ],
+    )
+
+    assert isinstance(result.exception, error_type)
+    retry = budget.reserve(
+        sender="etl",
+        recipient="web",
+        words=79,
+        msg_id=f"msg-retry-{error_type.__name__}",
+    )
+    assert retry.running_before == 0
+
+
 def test_project_anycast_send_refuses_the_second_79_word_body(runner, mailbox):
     body = _passing_mail_body(79)
     args = [

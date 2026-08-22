@@ -878,6 +878,29 @@ def test_raw_injects_unwrapped_on_claude_keystroke_lane(mailbox, monkeypatch, ca
     assert rows[0].word_count == style.word_count(rows[0].body)
 
 
+def test_raw_hosted_audit_uses_stable_sender_without_ambient_identity(
+    mailbox, monkeypatch, capsys
+):
+    from fno.bus.log import iter_messages
+    from fno.mail import budget
+    from fno.mail.cli import _raw_send
+
+    _seed_claude(mailbox, monkeypatch)
+    _clear_harness_markers(monkeypatch)
+
+    with pytest.raises(typer.Exit) as sent:
+        _raw_send("claudepeer", "/review", self_ok=False)
+
+    assert sent.value.exit_code == 0
+    assert capsys.readouterr().out.strip() == "injected"
+    rows = list(iter_messages(warn=False))
+    assert len(rows) == 1
+    assert rows[0].from_ == "fno"
+    ledger = budget._ledger_path("fno -> 9a063cd3")
+    state = json.loads(ledger.read_text())
+    assert state["pair"] == "fno -> 9a063cd3"
+
+
 def test_raw_check_writes_nothing_and_does_not_reserve(
     mailbox, monkeypatch, capsys
 ):

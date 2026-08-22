@@ -2397,11 +2397,12 @@ def _raw_send(
     # Derive provenance before routing: daemon review/start returns before the
     # keystroke transports below, but its unwrapped invocation needs the same
     # actor record.
-    from fno.agents.self_stamp import resolve_self_handle
+    from fno.agents.self_stamp import resolve_self_handle, stamp_from
     from fno.harness_identity import canonical_handle
     from fno.inbox.store import generate_msg_id
 
-    sender = resolve_self_handle()
+    transport_sender = resolve_self_handle()
+    sender = stamp_from(transport_sender)
     raw_recipient = canonical_handle(session_id)
 
     def _reserve_raw():
@@ -2508,7 +2509,7 @@ def _raw_send(
                 session_id,
                 target,
                 audit_payload=stripped[:512],
-                audit_sender=sender,
+                audit_sender=transport_sender,
                 audit_target_cwd=getattr(entry, "cwd", None),
             )
             if receipt.get("delivered"):
@@ -2621,9 +2622,19 @@ def _raw_send(
     #        ambient identity it stays absent rather than guessing.
     raw_msg_id, _reservation, authored_words = _reserve_raw()
     if entry.mux:
-        delivered = _mux_pane_send(entry, stripped, guarded=False, confirm=True, sender=sender)
+        delivered = _mux_pane_send(
+            entry,
+            stripped,
+            guarded=False,
+            confirm=True,
+            sender=transport_sender,
+        )
     else:  # claude control.sock - the only other keystroke lane
-        delivered = _mail_inject_claude(session_id, stripped, sender=sender)
+        delivered = _mail_inject_claude(
+            session_id,
+            stripped,
+            sender=transport_sender,
+        )
 
     # 8. Four-state receipt (never a boolean; never a durable write).
     # The note used to read as a refusal: it named a defect in the argument and
@@ -3124,6 +3135,9 @@ def cmd_send(
             _release_budget(reservation)
             print(f"error: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
+        except (OSError, RuntimeError):
+            _release_budget(reservation)
+            raise
 
         # A question never gets an autonomous responder (US9 wakes only heads-up);
         # it escalates to the human at send time instead, debounced per pair.

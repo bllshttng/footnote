@@ -165,6 +165,72 @@ def test_registered_dispatch_refuses_the_second_send(
     assert rows[0].word_count == 79
 
 
+def test_registered_dispatch_budget_sender_matches_the_hosted_envelope(
+    monkeypatch,
+    tmp_path,
+):
+    from fno import paths
+    from fno.agents.dispatch import dispatch_send
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.bus.log import iter_messages
+
+    registry = tmp_path / "agents.json"
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry)
+    write_registry(
+        [
+            AgentEntry(
+                name="sender-worker",
+                harness="claude",
+                harness_session_id="cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee",
+                short_id="cccccccc",
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+            AgentEntry(
+                name="recipient-worker",
+                harness="claude",
+                harness_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                short_id="aaaaaaaa",
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+        ],
+        registry,
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._registered_family1_state",
+        lambda _entry: "working",
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._deliver_live",
+        lambda *_args, **_kwargs: True,
+    )
+    real_reserve = budget.reserve
+    reserved_senders: list[str] = []
+
+    def _capture_sender(**kwargs):
+        reserved_senders.append(kwargs["sender"])
+        return real_reserve(**kwargs)
+
+    monkeypatch.setattr(budget, "reserve", _capture_sender)
+
+    result = dispatch_send(
+        "recipient-worker",
+        "hello",
+        provider=None,
+        cwd=tmp_path,
+        from_name="sender-worker",
+    )
+
+    assert result.delivery == "hosted"
+    rows = list(iter_messages(warn=False))
+    assert len(rows) == 1
+    assert rows[0].delivery == "hosted"
+    assert reserved_senders == [rows[0].from_] == ["cccccccc"]
+
+
 def test_job_lane_refuses_the_second_send(monkeypatch, capsys):
     from fno.mail import cli
     from fno.mail.job_address import JobHolder
