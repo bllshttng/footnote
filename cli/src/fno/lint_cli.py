@@ -889,8 +889,10 @@ def retired_commands() -> None:
     """Fail a caller-facing string that shows a ruling-retired command.
 
     Thin wrapper over the source-of-truth bash gate
-    scripts/ci/check-retired-command-strings.sh; exit code matches it (0
-    clean, 1 a surviving hit or a control that did not fire, 2 script error).
+    scripts/ci/check-retired-command-strings.sh, whose exit code passes
+    through: 0 clean, 1 a surviving hit or a control that did not fire. Every
+    failure path in the gate goes through its own ``fail()`` and exits 1, so
+    the 2 below is this wrapper's alone - the script is missing or unrunnable.
     """
     from fno._subprocess_util import propagate_returncode
     from fno.paths import resolve_repo_root

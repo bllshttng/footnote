@@ -220,6 +220,7 @@ _reap_jobs() {
         if claude rm "$job" >/dev/null 2>&1; then
             echo "  reaped bg-job record $job (worktree archived)" >&2
         else
+            # retired-ok: reports which shellout failed on which job.
             echo "  reap: claude rm $job failed (non-fatal)" >&2
         fi
     done < <(_reap_job_candidates "$selector" "$canonical")

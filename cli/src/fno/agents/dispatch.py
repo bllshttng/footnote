@@ -3788,8 +3788,9 @@ def rm_agent(
                         # proceed to drop the registry row.
                         sys.stderr.write(
                             "WARN: claude rm failed but --force given; removing "
-                            f"registry only. Orphan supervisor: claude rm "
-                            f"{short_id} to clean later.\n"
+                            f"registry only. Supervisor session {short_id} is "
+                            f"orphaned; `fno agents adopt {short_id}` brings it "
+                            f"back under management.\n"
                         )
 
             elif existing.harness in ("codex", "opencode"):

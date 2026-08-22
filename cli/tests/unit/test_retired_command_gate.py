@@ -6,7 +6,7 @@ wrong, so each one gets a case here against a repo built for the purpose
 rather than against the real tree, whose contents move under every sweep.
 
 The negative cases matter as much as the positive ones. A gate never observed
-failing has not been tested, and both of this gate's controls exist to refuse
+failing has not been tested, and all three of this gate's controls exist to refuse
 a pass that only means "the instrument never matched anything".
 """
 from __future__ import annotations
@@ -21,6 +21,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GATE = REPO_ROOT / "scripts" / "ci" / "check-retired-command-strings.sh"
 REGISTRY = REPO_ROOT / "scripts" / "ci" / "retired-commands.txt"
+CANARY = REPO_ROOT / "scripts" / "ci" / "fixtures" / "retired-command-canary.sh"
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -30,21 +31,24 @@ def _git(repo: Path, *args: str) -> None:
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """A minimal tree the gate can scan, carrying the real gate and registry."""
-    for sub in ("scripts/ci", "cli/src/fno", "crates/fno-agents/src", "skills/k"):
+    for sub in (
+        "scripts/ci/fixtures", "cli/src/fno", "crates/fno-agents/src",
+        "skills/k", "docs", "hooks", "agents", "commands",
+    ):
         (tmp_path / sub).mkdir(parents=True, exist_ok=True)
     shutil.copy(GATE, tmp_path / "scripts/ci/check-retired-command-strings.sh")
     shutil.copy(REGISTRY, tmp_path / "scripts/ci/retired-commands.txt")
+    shutil.copy(CANARY, tmp_path / "scripts/ci/fixtures/retired-command-canary.sh")
 
     # Every surface must hold at least one tracked file of its extension, or
     # the per-surface control fires before any verdict is reached.
     (tmp_path / "cli/src/fno/a.py").write_text("x = 1\n")
     (tmp_path / "crates/fno-agents/src/a.rs").write_text("fn a() {}\n")
     (tmp_path / "skills/k/a.md").write_text("prose\n")
-    # One declared site, so the green path's target control can fire.
-    (tmp_path / "cli/src/fno/seed.py").write_text(
-        '# retired-ok: names the shellout this wrapper performs.\n'
-        'MSG = "claude rm <short_id> failed"\n'
-    )
+    (tmp_path / "docs/a.md").write_text("prose\n")
+    (tmp_path / "hooks/a.sh").write_text("true\n")
+    (tmp_path / "agents/a.md").write_text("prose\n")
+    (tmp_path / "commands/a.md").write_text("prose\n")
 
     _git(tmp_path, "init", "-q", "-b", "main")
     _git(tmp_path, "add", "-A")
@@ -171,28 +175,62 @@ def test_a_surface_that_resolves_to_nothing_fails(repo: Path) -> None:
     assert "surface crates holds no tracked .rs files" in result.stderr
 
 
-def test_green_with_no_marker_anywhere_is_refused_as_vacuous(repo: Path) -> None:
-    """Zero markers on a clean tree means the marker spelling drifted.
+def test_losing_the_canary_fixture_is_refused_as_vacuous(repo: Path) -> None:
+    """The target control asserts on the FIXTURE, not on production text.
 
-    Reaching this control needs raw hits that all filter out as comments:
-    with no raw hits at all the earlier pattern control fires first, and with
-    an inspected site the only way to clear it is the marker itself.
+    That is deliberate. A real cleanup may legitimately take the tree to zero
+    marked sites, and a control keyed on production text cannot tell that from
+    a marker spelling that drifted - it would answer a successful cleanup with
+    a permanent red whose only exits are to re-add a forbidden string or to
+    delete the gate.
     """
-    (repo / "cli/src/fno/seed.py").unlink()
-    _add(
-        repo,
-        "crates/fno-agents/src/new.rs",
-        "/// Shells out to `claude rm <short_id>` on teardown.\nfn f() {}\n",
-    )
+    (repo / "scripts/ci/fixtures/retired-command-canary.sh").unlink()
+    _git(repo, "add", "-A")
     result = _run(repo)
     assert result.returncode == 1
     assert "vacuous" in result.stderr
 
 
-def test_zero_raw_hits_anywhere_fails_rather_than_passing(repo: Path) -> None:
-    """The other half: an absence-only pass has two explanations."""
-    (repo / "cli/src/fno/seed.py").unlink()
+def test_the_canary_line_is_a_real_hit_when_unmarked(repo: Path) -> None:
+    """A canary that the pattern cannot match would certify nothing."""
+    canary = repo / "scripts/ci/fixtures/retired-command-canary.sh"
+    canary.write_text(canary.read_text().replace("# retired-ok:", "# note:"))
     _git(repo, "add", "-A")
     result = _run(repo)
     assert result.returncode == 1
-    assert "zero raw hits" in result.stderr
+    assert "retired-command-canary.sh" in result.stderr
+
+
+def test_a_concrete_short_id_is_reported(repo: Path) -> None:
+    """`claude rm 7c5dcf5d` is strictly more copyable than a placeholder."""
+    _add(repo, "docs/new.md", "You are responsible for the manual `claude rm 7c5dcf5d`.\n")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "docs/new.md" in result.stderr
+
+
+def test_a_wrapped_format_string_is_reported(repo: Path) -> None:
+    """The shape that carried a live instruction past the first draft.
+
+    The command ends one line and its argument starts the next, so no
+    argument token ever appears on the matched line.
+    """
+    _add(
+        repo,
+        "cli/src/fno/new.py",
+        'sys.stderr.write(\n    f"Orphan supervisor: claude rm "\n    f"{short_id} to clean later.\\n"\n)\n',
+    )
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "cli/src/fno/new.py" in result.stderr
+
+
+def test_docs_are_scanned(repo: Path) -> None:
+    """The operator guide is the most caller-facing surface there is."""
+    _add(repo, "docs/new.md", "Run `claude stop <short_id>` by hand first.\n")
+    assert _run(repo).returncode == 1
+
+
+def test_a_shell_comment_is_never_reported(repo: Path) -> None:
+    _add(repo, "hooks/new.sh", "# reaps with claude rm <short_id> internally\ntrue\n")
+    assert _run(repo).returncode == 0

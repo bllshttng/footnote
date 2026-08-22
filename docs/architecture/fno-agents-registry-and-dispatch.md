@@ -222,7 +222,7 @@ macOS argv limit is ~256KB; Linux is ~128KB. The implementation routes messages 
 
 ### Lock release semantics
 
-`hold_agent_lock` releases the per-agent flock in a `finally` branch by default. The yielded handle exposes `detach()` for one specific case: a post-subprocess registry-write failure. When `update_registry` raises `OSError` after `claude --bg` already created a supervisor session, the registry doesn't know about the orphan. The dispatcher calls `lock_handle.detach()` and re-raises so the next caller sees a stuck lock — a "manual cleanup needed" signal pointing at `claude rm <short_id>` (printed verbatim in the error stderr).
+`hold_agent_lock` releases the per-agent flock in a `finally` branch by default. The yielded handle exposes `detach()` for one specific case: a post-subprocess registry-write failure. When `update_registry` raises `OSError` after `claude --bg` already created a supervisor session, the registry does not know about the orphan. The dispatcher calls `lock_handle.detach()` and re-raises so the next caller sees a stuck lock — a "manual cleanup needed" signal. The error stderr names the orphaned session and points at `fno agents adopt`, which registers it rather than destroying it.
 
 POSIX flocks release on file-descriptor close, so the detached file handle is stashed in a module-global list to keep it alive until process exit. Contract: this is CLI-process-lifetime only — the dispatcher raises `DispatchAskError(12)` immediately after detach and the typer CLI propagates the exit code to the shell, so the process exits within milliseconds. A long-lived host (test harness, future daemon) reusing the module must clear `_detached_handles` between operations or switch to a sentinel-file approach.
 

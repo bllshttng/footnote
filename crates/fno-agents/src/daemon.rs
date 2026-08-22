@@ -872,6 +872,7 @@ fn cascade_harness_session_result_with(
             let after = read_claude_agents();
             if after.find(&short_id).is_some() {
                 return CascadeOutcome::Failed(format!(
+                    // retired-ok: reports a successful shellout that left the row behind.
                     "claude row {short_id} survives successful claude rm"
                 ));
             }
@@ -8464,7 +8465,9 @@ mod tests {
         // d-1900e419 retired that pair: the harness row IS the resume handle,
         // and dropping it by hand spends the handle for nothing rm has not
         // already done. The refusal must not teach it back.
+        // retired-ok: asserts the retired pair is ABSENT from the refusal.
         assert!(!message.contains("claude stop bbbb8888"));
+        // retired-ok: asserts the retired pair is ABSENT from the refusal.
         assert!(!message.contains("claude rm bbbb8888"));
         assert!(!message.contains("--force"));
         assert!(!message.contains("-F"));
