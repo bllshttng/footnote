@@ -21,6 +21,12 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+# Imported, not mirrored. The hand copy that used to live further down drifted
+# the moment node_is_open learned that a supersession without merged-PR evidence
+# is still open: retro follow-ups vanished on a merely proposed supersede. Both
+# are keyed off raw fields, so this holds on an entries list that has not been
+# through recompute_statuses - the property the copy existed to preserve.
+from fno.graph._reconcile import node_is_open as _node_is_open
 from fno.retro import harvest
 from fno.retro.dedup import _TRAILER_RE
 
@@ -42,12 +48,6 @@ class AddressedFinding:
     comment_id: str
     repo: Optional[str]  # owner/repo, for gh scoping and the close reason
     signal: str  # "resolved/outdated thread" | "commit-after"
-
-
-def _node_is_open(node: dict) -> bool:
-    # Keyed off raw fields (mirrors graph._reconcile.node_is_open) so it holds on
-    # a raw entries list that has not been through recompute_statuses.
-    return not node.get("completed_at") and not node.get("superseded_by")
 
 
 def _retro_targets(entries: list, *, include_planned: bool = False) -> list:

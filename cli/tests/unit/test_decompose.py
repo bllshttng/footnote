@@ -2824,7 +2824,7 @@ def test_supersede_releases_its_contained_children(graph_env, monkeypatch):
     _seed_children(g, _node("ab-new00001", status="ready"))
     assert _invoke(
         ["backlog", "supersede", "ab-new00001", "--replaces", unit,
-         "--reason", "regrouped"]
+         "--cause", "regrouped", "--surface", "x.py"]
     ).exit_code == 0
 
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
@@ -3024,7 +3024,7 @@ def test_adopt_under_a_superseded_group_child_names_the_supersession(graph_env):
     unit = _child(read_entries(), "one")["id"]
     assert _invoke([
         "backlog", "supersede", "ab-new00001", "--replaces", unit,
-        "--reason", "reshaped",
+        "--cause", "reshaped", "--surface", "x.py",
     ]).exit_code == 0
 
     result = _decompose(ADOPT_ONE)
@@ -3089,7 +3089,7 @@ def test_a_superseded_but_completed_group_child_still_adopts(graph_env):
     unit = _child(read_entries(), "one")["id"]
     assert _invoke([
         "backlog", "supersede", "ab-new00001", "--replaces", unit,
-        "--reason", "reshaped",
+        "--cause", "reshaped", "--surface", "x.py",
     ]).exit_code == 0
 
     # Model what `_apply_completion_fields` does on close: stamp completed_at
@@ -3104,3 +3104,37 @@ def test_a_superseded_but_completed_group_child_still_adopts(graph_env):
     assert result.exit_code == 0, result.output
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
     assert kid["contained_in"] == unit
+
+
+def test_child_progress_set_matches_the_predicate_it_replaced():
+    from fno.graph._intake import _epics_with_child_progress
+
+    id_to_entry = {
+        "x-1a2b": {"id": "x-1a2b", "type": "epic"},
+        "x-9f0c": {"id": "x-9f0c", "type": "epic"},
+        "x-3c4d": {"id": "x-3c4d", "type": "epic"},
+        "x-5e6f": {"id": "x-5e6f", "type": "epic"},
+        "kid-done": {"id": "kid-done", "parent": "x-1a2b", "completed_at": "t"},
+        "kid-run": {"id": "kid-run", "parent": "x-9f0c", "status": "in_progress"},
+        "kid-sess": {"id": "kid-sess", "parent": "x-3c4d", "session_id": "s"},
+        "kid-idle": {"id": "kid-idle", "parent": "x-5e6f", "status": "ready"},
+    }
+    assert _epics_with_child_progress(id_to_entry) == frozenset(
+        {"x-1a2b", "x-9f0c", "x-3c4d"}
+    )
+
+
+def test_sort_key_orders_live_epic_children_before_their_epic():
+    """The whole point of the per-node epic lookup the scan was hiding inside."""
+    from fno.graph._intake import make_selection_sort_key
+
+    entries = [
+        {"id": "x-1a2b", "type": "epic", "priority": "p1", "status": "in_progress",
+         "created_at": "2026-01-01"},
+        {"id": "x-9f0c", "parent": "x-1a2b", "priority": "p2", "status": "done",
+         "completed_at": "t", "created_at": "2026-01-02"},
+        {"id": "x-3c4d", "parent": "x-1a2b", "priority": "p2", "status": "ready",
+         "created_at": "2026-01-03"},
+    ]
+    ordered = [e["id"] for e in sorted(entries, key=make_selection_sort_key(entries))]
+    assert ordered.index("x-3c4d") < ordered.index("x-1a2b")

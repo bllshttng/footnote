@@ -190,6 +190,45 @@ def test_worker_ship_passes_the_trailer_to_gh(tmp_path, monkeypatch):
     assert parse_closure_trailer(sent_body) == ["x-49ec"]
 
 
+def test_worker_ship_reports_incomplete_delivery_when_graph_binding_fails(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    state_dir = tmp_path / ".fno"
+    state_dir.mkdir(parents=True)
+    (state_dir / "target-state.md").write_text(
+        "---\nstatus: IN_PROGRESS\nsession_id: session-1\n"
+        "artifact_shipped: false\nauto_merge_approved: false\n---\n"
+        "graph_node_id: x-49ec\n"
+    )
+    pr_url = "https://github.com/o/r/pull/42"
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/x-49ec\n", stderr=""),
+        MagicMock(returncode=0, stdout="[]", stderr=""),
+        MagicMock(returncode=0, stdout=f"{pr_url}\n", stderr=""),
+        MagicMock(returncode=1, stdout="", stderr="binding refused"),
+    ]
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch("fno.pr._preflight.local_verification_required", lambda **_k: (False, "")), \
+            patch("fno.pr.closure.known_node_ids", lambda: KNOWN):
+        from fno.worker.ship import ship
+
+        result = ship(
+            state_path=state_dir / "target-state.md",
+            title="feat: x",
+            body="Auto-generated PR body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "incomplete_delivery"
+    assert result["pr_number"] == 42
+    assert result["pr_url"] == pr_url
+    assert result["binding_error"] == "binding refused"
+    assert result["repair_command"] == (
+        f"fno do pr bind-created --url {pr_url} --repo {tmp_path} --node x-49ec"
+    )
+
+
 def test_a_graph_unknown_branch_candidate_is_never_claimed():
     # "cache-dead" is cache plus the hex dead, so it parses as a node id and is
     # ordinary English. Claiming it passed CI and then made bind_closure_claims
@@ -638,3 +677,189 @@ def test_hook_main_gates_gh_behind_a_repo_flag(node_branch_repo):
     # is what keeps this from being a one-spelling guard.
     payload = _hook_main('gh --repo o/r pr create --body "$BODY"', node_branch_repo)
     assert payload["permissionDecision"] == "deny"
+
+
+def _pending(node_id: str, successor: str, surfaces: list[str]) -> dict:
+    return {
+        "id": node_id,
+        "superseded_by": successor,
+        "supersession": {
+            "successor": successor,
+            "cause": "c",
+            "surfaces": surfaces,
+            "verified_at": None,
+        },
+    }
+
+
+def test_dotfile_surface_does_not_match_a_dot_stripped_lookalike():
+    """lstrip('./') ate the leading dot, so `github/ci.yml` matched `.github/ci.yml`."""
+    from fno.graph._reconcile import verify_pending_supersessions
+
+    entries = [_pending("x-old", "x-new", ["github/ci.yml"])]
+    receipts = verify_pending_supersessions(
+        entries, successor="x-new", changed_files=[".github/ci.yml"], evidence_pr=1
+    )
+    assert [r["kind"] for r in receipts] == ["supersession_unverified"]
+    assert entries[0]["supersession"]["verified_at"] is None
+
+
+def test_leading_dot_slash_is_still_stripped_on_both_sides():
+    from fno.graph._reconcile import verify_pending_supersessions
+
+    entries = [_pending("x-old", "x-new", ["./cli/a.py"])]
+    receipts = verify_pending_supersessions(
+        entries, successor="x-new", changed_files=["cli/a.py"], evidence_pr=1
+    )
+    assert receipts == []
+    assert entries[0]["supersession"]["verified_at"]
+
+
+def test_truncated_evidence_blames_the_truncation_not_the_surface():
+    """A miss against a short file list is an absence with two explanations."""
+    from fno.graph._reconcile import verify_pending_supersessions
+
+    entries = [_pending("x-old", "x-new", ["cli/untouched.py"])]
+    receipts = verify_pending_supersessions(
+        entries,
+        successor="x-new",
+        changed_files=["cli/a.py"],
+        evidence_pr=1,
+        evidence_complete=False,
+    )
+    assert [r["kind"] for r in receipts] == ["supersession_evidence_truncated"]
+    assert entries[0]["supersession"]["verified_at"] is None
+
+
+def test_page_sized_file_list_reads_as_truncated():
+    from fno.graph._reconcile import query_pr_merge_state
+
+    payload = {
+        "number": 5,
+        "state": "MERGED",
+        "url": "u",
+        "mergedAt": "t",
+        "mergeCommit": {"oid": "sha"},
+        "files": [{"path": f"f{i}.py"} for i in range(100)],
+    }
+
+    def runner(*args, **kwargs):
+        import subprocess, json
+
+        return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+    state = query_pr_merge_state(5, runner=runner)
+    assert state.files_truncated is True
+
+
+def test_manifest_node_id_beats_a_stale_branch():
+    """A reused worktree's branch still names the PREVIOUS node; the manifest wins."""
+    from fno.pr.closure import bind_created_pr
+
+    entries = [{"id": "x-9f0c"}, {"id": "x-1a2b"}]
+    result = bind_created_pr(
+        entries,
+        head_ref="feature/x-prev",
+        pr_url="https://github.com/o/r/pull/7",
+        node_id="x-1a2b",
+    )
+    assert result.outcome == "bound"
+    assert result.bound_ids == ["x-1a2b"]
+    assert {e["id"]: e.get("pr_number") for e in entries} == {"x-9f0c": None, "x-1a2b": 7}
+
+
+def test_manifest_id_binds_when_the_branch_names_no_node():
+    from fno.pr.closure import bind_created_pr
+
+    entries = [{"id": "x-1a2b"}]
+    result = bind_created_pr(
+        entries, head_ref="tmp-scratch", pr_url="https://github.com/o/r/pull/7",
+        node_id="x-1a2b",
+    )
+    assert result.outcome == "bound"
+    assert result.bound_ids == ["x-1a2b"]
+
+
+def test_unknown_manifest_id_falls_back_to_the_branch():
+    from fno.pr.closure import bind_created_pr
+
+    entries = [{"id": "x-1a2b"}]
+    result = bind_created_pr(
+        entries, head_ref="feature/x-1a2b", pr_url="https://github.com/o/r/pull/7",
+        node_id="x-dead",
+    )
+    assert result.outcome == "bound"
+    assert result.bound_ids == ["x-1a2b"]
+
+
+def test_supersede_keeps_the_human_reason(tmp_path, monkeypatch):
+    """--reason is accepted and documented, so it must land somewhere."""
+    import json
+    from typer.testing import CliRunner
+    from fno.graph.cli import cli
+
+    # The graph path is frozen at import time (see conftest), so point at the
+    # already-sandboxed location rather than a fresh env var.
+    from fno.graph._constants import GRAPH_JSON as graph
+
+    graph.parent.mkdir(parents=True, exist_ok=True)
+    graph.write_text(json.dumps({"entries": [
+        {"id": "x-1a2b", "title": "new"},
+        {"id": "x-9f0c", "title": "old"},
+    ]}))
+
+    result = CliRunner().invoke(cli, [
+        "supersede", "x-1a2b", "--replaces", "x-9f0c",
+        "--cause", "owned the parser", "--surface", "cli/p.py",
+        "--reason", "folded into the rewrite",
+    ])
+    assert result.exit_code == 0, result.output
+    rows = {e["id"]: e for e in json.loads(graph.read_text())["entries"]}
+    assert rows["x-9f0c"]["supersession"]["reason"] == "folded into the rewrite"
+
+
+def test_supersede_without_surface_names_a_runnable_example():
+    from typer.testing import CliRunner
+    from fno.graph.cli import cli
+
+    result = CliRunner().invoke(cli, [
+        "supersede", "x-1a2b", "--replaces", "x-9f0c", "--cause", "c",
+    ])
+    assert result.exit_code == 1
+    assert "--surface" in result.output
+    assert "fno backlog supersede" in result.output
+
+
+def test_a_closed_successor_still_owes_its_predecessor_a_verdict():
+    """The close path is not the only way a successor reaches done."""
+    from fno.graph._reconcile import successors_owing_verification
+
+    entries = [
+        {"id": "x-9f0c", "superseded_by": "x-1a2b",
+         "supersession": {"successor": "x-1a2b", "surfaces": ["cli/p.py"], "verified_at": None}},
+        {"id": "x-1a2b", "completed_at": "2026-08-20T00:00:00Z", "pr_number": 7},
+    ]
+    assert list(successors_owing_verification(entries)) == ["x-1a2b"]
+
+
+def test_an_open_successor_is_not_owed_yet():
+    """Its ordinary close still lies ahead, and that path already verifies."""
+    from fno.graph._reconcile import successors_owing_verification
+
+    entries = [
+        {"id": "x-9f0c", "superseded_by": "x-1a2b",
+         "supersession": {"successor": "x-1a2b", "surfaces": ["cli/p.py"], "verified_at": None}},
+        {"id": "x-1a2b", "pr_number": 7},
+    ]
+    assert successors_owing_verification(entries) == {}
+
+
+def test_an_already_verified_predecessor_is_not_owed():
+    from fno.graph._reconcile import successors_owing_verification
+
+    entries = [
+        {"id": "x-9f0c", "superseded_by": "x-1a2b",
+         "supersession": {"successor": "x-1a2b", "surfaces": [], "verified_at": "t"}},
+        {"id": "x-1a2b", "completed_at": "t", "pr_number": 7},
+    ]
+    assert successors_owing_verification(entries) == {}

@@ -14,6 +14,25 @@ from pydantic import BaseModel, Field, computed_field, field_validator, model_va
 from fno.company.contracts import CompanyWorkRefs, validate_company_work_for_node
 
 
+_UNRESOLVED_NODE_SENTINELS = frozenset({"", "null", "none", "nil"})
+
+
+def normalize_graph_node_id(value: object) -> Optional[str]:
+    """Return a real graph node id, or ``None`` for unresolved identity.
+
+    Target manifests and ledgers are written by more than one producer, so
+    readers must agree that empty values and case-insensitive null spellings
+    are no node. Quotes are accepted because the shell manifest uses quoted
+    scalar values in some release shapes.
+    """
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().strip('"').strip("'").strip()
+    if normalized.casefold() in _UNRESOLVED_NODE_SENTINELS:
+        return None
+    return normalized
+
+
 class Status(str, Enum):
     ready = "ready"
     design = "design"
@@ -59,6 +78,14 @@ def _derive_status(data: dict) -> str:
     if data.get("completed_at"):
         return "done"
     if data.get("superseded_by"):
+        # One authority for the pending shape. recompute_statuses and the
+        # readiness overlay both answer `blocked` here, and this function's
+        # contract is to mirror them; answering in_progress made the same row
+        # read two ways depending on which path last touched it.
+        from fno.graph.statuses import pending_supersession_reason
+
+        if pending_supersession_reason(data):
+            return "blocked"
         return "superseded"
     if data.get("deferred_at"):
         return "deferred"
@@ -191,6 +218,10 @@ class Entry(BaseModel):
     # here so computed_field can reference it cleanly without going through
     # model_extra.
     superseded_by: Optional[str] = None
+    # Proposed supersession remains active until merged-PR evidence verifies
+    # every inherited cause surface. The legacy superseded_by edge remains for
+    # compatibility; this record carries the proof state.
+    supersession: Optional[dict] = None
 
     # Parent-edge provenance (x-30f6). Declared first-class (typed, default
     # None) so model_dump round-trips them and they validate as strings. The
@@ -313,7 +344,8 @@ class Entry(BaseModel):
 
         Precedence (mirrors recompute_statuses single-entry portion):
           completed_at set    -> "done"
-          superseded_by set   -> "superseded"
+          verified superseded_by set -> "superseded"
+          pending supersession      -> "blocked"
           deferred_at set     -> "deferred"
           pr_number set       -> "in_review"
           non-empty blocked_by -> "blocked"
@@ -328,6 +360,7 @@ class Entry(BaseModel):
         return _derive_status({
             "completed_at": self.completed_at,
             "superseded_by": self.superseded_by,
+            "supersession": self.supersession,
             "deferred_at": self.deferred_at,
             "pr_number": self.pr_number,
             "blocked_by": self.blocked_by,

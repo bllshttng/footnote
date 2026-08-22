@@ -510,9 +510,7 @@ Apply the user's choice:
 - **Option 2 (modify):** print the existing plan path and exit cleanly.
   The user edits the older plan; the new file is left on disk for
   reference but not adopted.
-- **Option 3 (supersede):** continue to step 3b. After adoption, run
-  `fno backlog supersede <new-id> --replaces ab-XYZ --reason "..."`.
-  Use the colliding plan's rationale or ask the user for a reason.
+- **Option 3 (supersede):** continue to step 3b. After adoption, run `fno backlog supersede <new-id> --replaces ab-XYZ --cause "..." --surface <path>`. Use the colliding plan's rationale or ask the user for a reason.
 - **Option 4 (cancel):** delete the plan file and exit cleanly.
 
 Medium and low-severity collisions are reported as single-line warnings on

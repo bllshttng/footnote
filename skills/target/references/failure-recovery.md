@@ -110,7 +110,7 @@ The order is load-bearing: supersede runs **before** cancel so no window exists 
    ```
 2. **Supersede the old node.** This sets `superseded_by` on the old node and auto-defers it, so `next`/`ready` stop selecting it *before* anything is cancelled:
    ```bash
-   fno backlog supersede <NEW_ID> --replaces <OLD_ID> -R "restart: <one-line why fix-in-place fails>"
+   fno backlog supersede <NEW_ID> --replaces <OLD_ID> --cause "<what OLD_ID was for>" --surface <path/it/owned> -R "restart: <one-line why fix-in-place fails>"
    ```
    If this exits non-zero (lock contention, bad id), **STOP** - do not cancel, do not dispatch. The old node stays claimed and the operator resolves the error first.
 3. **Close the PR if one exists.** Comment linking the lessons block; the branch is preserved, never deleted (its commits survive the discard - see AC5):

@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -204,6 +204,8 @@ class PrMergeState:
     # mergeCommit.oid - the dedup key for post-merge-ritual auto-dispatch
     # (x-47be). Optional: absent on a non-merged PR or when gh omits it.
     merge_sha: Optional[str] = None
+    changed_files: list[str] = field(default_factory=list)
+    files_truncated: bool = False
 
 
 @dataclass
@@ -233,10 +235,130 @@ class MergeDriftRecord:
     # (branch-name match has no SHA); the dispatcher falls back to a pr-number
     # key there.
     merge_sha: Optional[str] = None
+    changed_files: list[str] = field(default_factory=list)
+    files_truncated: bool = False
 
     @property
     def closeable(self) -> bool:
         return self.error is None and self.pr_state == "MERGED"
+
+
+_GH_FILES_PAGE_SIZE = 100
+
+
+def _normalize_surface(path: object) -> str:
+    """One spelling for a repo-relative path on both sides of the match.
+
+    ``removeprefix`` and not ``lstrip("./")``: lstrip strips a character SET, so
+    it ate the leading dot of every dotfile path and let a declared
+    ``github/ci.yml`` falsely match a changed ``.github/ci.yml``.
+    """
+    return str(path).strip().replace("\\", "/").removeprefix("./")
+
+
+def verify_pending_supersessions(
+    entries: list[dict],
+    *,
+    successor: str,
+    changed_files: Iterable[str],
+    evidence_pr: int,
+    verified_at: Optional[str] = None,
+    evidence_complete: bool = True,
+) -> list[dict]:
+    """Verify predecessor cause surfaces against one merged PR's file set.
+
+    Returns positive receipts for predecessors that remain pending. A
+    predecessor never becomes terminal from the relationship alone: every
+    declared repo-relative surface must appear in the merged PR's changed-file
+    evidence.
+
+    ``evidence_complete=False`` says the file list is known to be short of the
+    PR's real one. A surface missing from a truncated list is an absence with
+    two explanations, so neither verdict is available: nothing verifies and the
+    receipt names the truncation rather than blaming the surface.
+    """
+    changed = {
+        _normalize_surface(path)
+        for path in changed_files
+        if isinstance(path, str) and path.strip()
+    }
+    receipts: list[dict] = []
+    stamp = verified_at or datetime.now(timezone.utc).isoformat()
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("superseded_by") != successor:
+            continue
+        record = entry.get("supersession")
+        if not isinstance(record, dict) or record.get("verified_at"):
+            continue
+        surfaces = [
+            _normalize_surface(surface)
+            for surface in record.get("surfaces") or []
+            if isinstance(surface, str) and surface.strip()
+        ]
+        matched = [surface for surface in surfaces if surface in changed]
+        uncovered = [surface for surface in surfaces if surface not in changed]
+        if uncovered and not evidence_complete:
+            receipts.append({
+                "kind": "supersession_evidence_truncated",
+                "predecessor": entry.get("id"),
+                "successor": successor,
+                "cause": record.get("cause"),
+                "uncovered_surfaces": uncovered,
+                "evidence_pr": evidence_pr,
+            })
+            continue
+        if uncovered:
+            receipts.append({
+                "kind": "supersession_unverified",
+                "predecessor": entry.get("id"),
+                "successor": successor,
+                "cause": record.get("cause"),
+                "uncovered_surfaces": uncovered,
+                "evidence_pr": evidence_pr,
+            })
+            continue
+        record.update({
+            "verified_at": stamp,
+            "evidence_pr": evidence_pr,
+            "matched_surfaces": matched,
+        })
+    return receipts
+
+
+def successors_owing_verification(entries: list[dict]) -> dict[str, dict]:
+    """Successor id -> successor node, for pending predecessors already owed proof.
+
+    ``verify_pending_supersessions`` only ever runs while reconcile is CLOSING a
+    successor. A successor that closed at any other moment - an earlier sweep, a
+    hand-run ``fno backlog done``, or a supersede recorded against a node that
+    had already shipped - never passes through that path. Its predecessors stay
+    pending, pending reads as blocked, and nothing in the system ever revisits
+    them: the only escape was ``unsupersede``.
+
+    This finds those rows so the sweep can settle them against the evidence the
+    successor already carries.
+    """
+    by_id = {
+        entry.get("id"): entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    owed: dict[str, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        successor_id = entry.get("superseded_by")
+        record = entry.get("supersession")
+        if not successor_id or not isinstance(record, dict) or record.get("verified_at"):
+            continue
+        successor = by_id.get(successor_id)
+        # Only a CLOSED successor is owed here. An open one still has its
+        # ordinary close ahead of it, and that path already verifies.
+        if not isinstance(successor, dict) or not successor.get("completed_at"):
+            continue
+        if isinstance(successor.get("pr_number"), int):
+            owed[successor_id] = successor
+    return owed
 
 
 def node_is_open(node: dict) -> bool:
@@ -246,7 +368,13 @@ def node_is_open(node: dict) -> bool:
     predicate holds even on an entries list that has not been through
     ``recompute_statuses`` (e.g. a raw test fixture).
     """
-    return not node.get("completed_at") and not node.get("superseded_by")
+    if node.get("completed_at"):
+        return False
+    successor = node.get("superseded_by")
+    if not successor:
+        return True
+    record = node.get("supersession")
+    return isinstance(record, dict) and not record.get("verified_at")
 
 
 def node_pr_refs(node: dict) -> list[tuple[int, Optional[str]]]:
@@ -274,6 +402,122 @@ def node_pr_refs(node: dict) -> list[tuple[int, Optional[str]]]:
         seen.add(num)
 
     return refs
+
+
+@dataclass
+class PrRowBinding:
+    node_id: str
+    action: str  # filled_primary | appended_additional | already_bound | already_done
+
+
+@dataclass
+class PrRowBindResult:
+    outcome: Literal["bound", "refused"]
+    claimed_ids: list[str] = field(default_factory=list)
+    bindings: list[PrRowBinding] = field(default_factory=list)
+    refusal: Optional[str] = None
+
+    @property
+    def bound_ids(self) -> list[str]:
+        return [
+            binding.node_id
+            for binding in self.bindings
+            if binding.action in ("filled_primary", "appended_additional")
+        ]
+
+
+def bind_pr_rows(
+    entries: list[dict],
+    claimed_ids: list[str],
+    *,
+    pr_number: int,
+    pr_url: Optional[str],
+    repo: Optional[str] = None,
+    owner: Optional[str] = None,
+) -> PrRowBindResult:
+    """Validate and bind every PR claim as one graph-owned mutation.
+
+    Callers may run this against a copy for a dry-run or inside
+    ``locked_mutate_graph`` for persistence. Validation completes before any
+    row changes, so malformed, unknown, or cross-repository claims cannot
+    leave a partial binding behind.
+    """
+    from fno.graph._constants import is_wellformed_node_id
+    from fno.graph._intake import _find_node
+
+    if not claimed_ids:
+        return PrRowBindResult(outcome="refused", refusal="no closure claims to bind")
+
+    our_repo = repo or repo_slug_from_url(pr_url)
+    nodes: dict[str, dict] = {}
+    for nid in claimed_ids:
+        if not is_wellformed_node_id(nid):
+            return PrRowBindResult(
+                outcome="refused", claimed_ids=claimed_ids, refusal=f"malformed claim: {nid!r}"
+            )
+        node = _find_node(entries, nid)
+        if node is None:
+            return PrRowBindResult(
+                outcome="refused", claimed_ids=claimed_ids, refusal=f"unknown node: {nid}"
+            )
+        existing_refs = node_pr_refs(node)
+        if our_repo:
+            for number, url in existing_refs:
+                existing_repo = repo_slug_from_url(url)
+                if existing_repo is None:
+                    return PrRowBindResult(
+                        outcome="refused",
+                        claimed_ids=claimed_ids,
+                        refusal=(
+                            f"{nid} already carries a PR #{number} ref with no "
+                            f"resolvable repo; this PR is {our_repo} - refusing an "
+                            "unverifiable cross-repo claim"
+                        ),
+                    )
+                if existing_repo.lower() != our_repo.lower():
+                    return PrRowBindResult(
+                        outcome="refused",
+                        claimed_ids=claimed_ids,
+                        refusal=(
+                            f"{nid} already carries a {existing_repo} PR ref; "
+                            f"this PR is {our_repo} - refusing a cross-repo claim"
+                        ),
+                    )
+        elif existing_refs:
+            return PrRowBindResult(
+                outcome="refused",
+                claimed_ids=claimed_ids,
+                refusal=(
+                    f"{nid} already carries a PR ref and this PR's repo is "
+                    "unresolvable - refusing an unscoped claim"
+                ),
+            )
+        nodes[nid] = node
+
+    bindings: list[PrRowBinding] = []
+    clean_owner = owner.strip() if isinstance(owner, str) else ""
+    for nid in claimed_ids:
+        node = nodes[nid]
+        refs = node_pr_refs(node)
+        if any(number == pr_number for number, _ in refs):
+            action = "already_bound"
+        elif not node_is_open(node):
+            action = "already_done"
+        elif not isinstance(node.get("pr_number"), int):
+            node["pr_number"] = pr_number
+            node["pr_url"] = pr_url
+            action = "filled_primary"
+        else:
+            additional = list(node.get("additional_prs") or [])
+            additional.append({"number": pr_number, "url": pr_url})
+            node["additional_prs"] = additional
+            action = "appended_additional"
+        if clean_owner and node_is_open(node):
+            node["locked_by"] = clean_owner
+            node["session_id"] = clean_owner
+        bindings.append(PrRowBinding(nid, action))
+
+    return PrRowBindResult(outcome="bound", claimed_ids=claimed_ids, bindings=bindings)
 
 
 def node_cwd_in_repo(entry: dict, our_root: str) -> bool:
@@ -812,7 +1056,7 @@ def query_pr_merge_state(
     cmd = ["gh", "pr", "view", str(pr_number)]
     if repo:
         cmd += ["--repo", repo]
-    cmd += ["--json", "number,state,url,mergedAt,mergeCommit"]
+    cmd += ["--json", "number,state,url,mergedAt,mergeCommit,files"]
     try:
         result = runner(
             cmd,
@@ -840,12 +1084,24 @@ def query_pr_merge_state(
     except json.JSONDecodeError as exc:
         raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
 
+    raw_files = row.get("files") or []
+    changed_files = [
+        item.get("path") if isinstance(item, dict) else item
+        for item in raw_files
+        if isinstance(item, str) or isinstance(item, dict)
+    ]
     return PrMergeState(
         number=row.get("number", pr_number),
         state=row.get("state", "UNKNOWN"),
         url=row.get("url"),
         merged_at=row.get("mergedAt"),
         merge_sha=(row.get("mergeCommit") or {}).get("oid"),
+        changed_files=[path for path in changed_files if isinstance(path, str) and path],
+        # `gh pr view --json files` returns the first page only and does not
+        # paginate, so a list at the cap is evidence of more, not of exactly
+        # this many. Treat it as short and let the caller refuse to read an
+        # absence out of it.
+        files_truncated=len(raw_files) >= _GH_FILES_PAGE_SIZE,
     )
 
 
@@ -1260,6 +1516,8 @@ def scan_merge_drift(
                     session_id=node.get("session_id"),
                     cwd=cwd,
                     merge_sha=merged.merge_sha,
+                    changed_files=list(merged.changed_files),
+                    files_truncated=merged.files_truncated,
                 )
             )
         elif first_error is not None:
@@ -1702,4 +1960,3 @@ def emit_gate_escape_for_record(
         )
         _record_gate_escape_emit_failure(fail_log, record.node_id, reason, exc)
         return None
-

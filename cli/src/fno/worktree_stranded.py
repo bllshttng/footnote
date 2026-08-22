@@ -150,6 +150,8 @@ def _read_state_graph_node_id(path: str) -> Optional[str]:
     """The ``graph_node_id: <id>`` line appended to the manifest BODY by
     ``hooks/helpers/init-target-state.sh`` - outside the YAML frontmatter,
     so ``fno do state show --field`` cannot return it."""
+    from fno.graph.types import normalize_graph_node_id
+
     state_file = Path(path) / ".fno" / "target-state.md"
     try:
         text = state_file.read_text(encoding="utf-8")
@@ -158,8 +160,7 @@ def _read_state_graph_node_id(path: str) -> Optional[str]:
     m = re.search(r"^graph_node_id:\s*(\S+)\s*$", text, re.MULTILINE)
     if not m:
         return None
-    value = m.group(1)
-    return None if value == "null" else value
+    return normalize_graph_node_id(m.group(1))
 
 
 def resolve_node_id(

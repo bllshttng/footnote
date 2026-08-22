@@ -1233,6 +1233,15 @@ class TestNodeIdFromWorktree:
             'graph_node_id: "x-1234"\n', encoding="utf-8")
         assert recovery._node_id_from_worktree(str(tmp_path)) == "x-1234"
 
+    @pytest.mark.parametrize("raw", ["null", "NULL", "none", "None", "nil", "NIL", "''", '""', ""])
+    def test_sentinel_values_are_unresolved(self, tmp_path, raw):
+        fno_dir = tmp_path / ".fno"
+        fno_dir.mkdir()
+        (fno_dir / "target-state.md").write_text(
+            f"graph_node_id: {raw}\n", encoding="utf-8"
+        )
+        assert recovery._node_id_from_worktree(str(tmp_path)) is None
+
     def test_missing_file_returns_none(self, tmp_path):
         assert recovery._node_id_from_worktree(str(tmp_path)) is None
 

@@ -184,6 +184,16 @@ def test_resolve_state_file_null_is_unresolved(tmp_path):
     assert entry is None
 
 
+@pytest.mark.parametrize("raw", ["null", "NULL", "none", "None", "nil", "NIL", "''", '""', ""])
+def test_resolve_state_file_sentinel_is_unresolved(tmp_path, raw):
+    state_dir = tmp_path / ".fno"
+    state_dir.mkdir()
+    (state_dir / "target-state.md").write_text(f"graph_node_id: {raw}\n")
+    node, entry = resolve_node_id(str(tmp_path), None, {})
+    assert node is None
+    assert entry is None
+
+
 def test_resolve_nothing_matches():
     node, entry = resolve_node_id("/repo/nope", None, {"x-1": {"id": "x-1"}})
     assert node is None

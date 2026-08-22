@@ -192,8 +192,10 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
     """Recompute status for all entries based on graph state.
 
     Called inside locked_mutate_graph() after every mutation.
-    Derives status from: completed_at, superseded_by, deferred_at, pr_number,
-    locked_by, and open ``do`` session rows. Does NOT derive from blocked_by:
+    Derives leaf status from: completed_at, superseded_by, deferred_at,
+    pr_number, locked_by, and open ``do`` session rows. Container status is
+    then rolled up from real ``parent`` edges, independent of the ``type``
+    label. Does NOT derive from blocked_by:
     dependency-satisfaction is a cross-node join that can go stale the instant
     a sibling changes after this write, so it is answered fresh on every read
     instead (see compute_readiness, wired into _apply_graph_defaults in
@@ -206,6 +208,21 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
     from fno.graph.store import _normalize_lock_fields
     rung_to_status = _rung_to_graph_status()
     _normalize_lock_fields(entries)
+    valid_ids = {
+        e.get("id")
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    children_by_parent: dict[str, list[dict]] = {}
+    for entry in entries:
+        parent = entry.get("parent") if isinstance(entry, dict) else None
+        if (
+            isinstance(parent, str)
+            and parent in valid_ids
+            and isinstance(entry.get("id"), str)
+            and entry.get("id") != parent
+        ):
+            children_by_parent.setdefault(parent, []).append(entry)
     # One-shot priority vocabulary backfill: migrate any legacy
     # high/medium/low values to the new p0/p1/p2/p3 vocabulary the first
     # time each row is touched after the migration ships. Idempotent and
@@ -249,6 +266,12 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
 
         if e.get("completed_at"):
             e["status"] = "done"
+            continue
+
+        pending_reason = pending_supersession_reason(e)
+        if pending_reason:
+            e["status"] = "blocked"
+            e["blocked_reason"] = pending_reason
             continue
 
         # Superseded sits between done and deferred: a node whose work has
@@ -337,7 +360,71 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             # same defect this module was written to remove.
             e["status"] = rung_to_status[plan_rung(e)]
 
+    def _depth(node_id: str, visiting: set[str] | None = None) -> int:
+        visiting = visiting or set()
+        if node_id in visiting:
+            return 0
+        node = next((e for e in entries if e.get("id") == node_id), None)
+        parent = node.get("parent") if node else None
+        if not isinstance(parent, str) or parent not in children_by_parent:
+            return 0
+        return 1 + _depth(parent, visiting | {node_id})
+
+    # Children are already leaf-derived. Process nested containers deepest
+    # first so a parent sees the final status of any container child.
+    for parent_id in sorted(children_by_parent, key=_depth, reverse=True):
+        parent = next(e for e in entries if e.get("id") == parent_id)
+        if parent.get("completed_at"):
+            parent["status"] = "done"
+            continue
+        pending_reason = pending_supersession_reason(parent)
+        if pending_reason:
+            parent["status"] = "blocked"
+            parent["blocked_reason"] = pending_reason
+            continue
+        if parent.get("superseded_by"):
+            parent["status"] = "superseded"
+            continue
+        if parent.get("deferred_at"):
+            parent["status"] = "deferred"
+            continue
+        child_statuses = [child.get("status") for child in children_by_parent[parent_id]]
+        # The parent's own leaf status was derived above from its own row. A
+        # container carrying live work of its own - an open PR, a claim, an open
+        # `do` row - is NOT done just because its children are, and rolling
+        # `done` over that would drop the row off the board while its PR is
+        # still open while every open-ness predicate (node_is_open, _is_live)
+        # still reads it open off the absent completed_at. Children decide a
+        # container that has no truth of its own; they never outvote one that has.
+        own_work_live = parent.get("status") in {"in_review", "in_progress"}
+        if child_statuses and all(status == "done" for status in child_statuses):
+            if not own_work_live:
+                parent["status"] = "done"
+        elif any(
+            status in {"done", "in_review", "in_progress"}
+            or pending_supersession_reason(child)
+            for child, status in zip(children_by_parent[parent_id], child_statuses)
+        ):
+            parent["status"] = "in_progress"
+
     return entries
+
+
+def pending_supersession_reason(entry: dict) -> str | None:
+    """Describe a proposed supersession that lacks merged-PR proof."""
+    record = entry.get("supersession")
+    if not entry.get("superseded_by") or not isinstance(record, dict):
+        return None
+    if record.get("verified_at"):
+        return None
+    successor = record.get("successor") or entry.get("superseded_by")
+    cause = str(record.get("cause") or "missing cause")
+    surfaces = record.get("surfaces") or []
+    surface_text = ", ".join(str(s) for s in surfaces) or "missing surfaces"
+    return (
+        f"pending supersession: successor={successor}; cause={cause}; "
+        f"surfaces={surface_text}"
+    )
 
 
 def live_claimed_node_ids(*, strict: bool = False) -> set[str]:

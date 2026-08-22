@@ -200,6 +200,7 @@ def test_held_by_other_refuses(tmp_path):
     assert (repo / ".fno" / ".target-cancelled").exists(), \
         "exit 1 must touch the cancel sentinel"
     assert "target_claim_blocked_reason: claim_held_by_other" in state
+    assert f"graph_node_id: {NODE_ID}" in state
     assert f'target_claim_key: "node:{NODE_ID}"' not in state
 
 

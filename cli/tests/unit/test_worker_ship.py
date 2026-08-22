@@ -384,14 +384,12 @@ def _make_state_with_node(tmp_path: Path, node_id: str) -> Path:
     return path
 
 
-def test_ac2_hp_ship_stamps_node_pr_link(tmp_path):
-    """AC2-HP: with a graph_node_id, ship() runs `fno backlog update --pr-number`,
-    which is also where the ship-phase lifecycle row now lands (update stamps it
-    on the pr_number unset->set transition), so ship() no longer fires a separate
-    `session add --phase ship`."""
+def test_ac2_hp_ship_stamps_node_pr_link(tmp_path, monkeypatch):
+    """AC2-HP: with a graph_node_id, ship() uses the shared bind-created path."""
+    monkeypatch.chdir(tmp_path)
     state_path = _make_state_with_node(tmp_path, "x-1a2b")
 
-    # Calls: git rev-parse, gh pr list, gh pr create, fno backlog update.
+    # Calls: git rev-parse, gh pr list, gh pr create, fno do pr bind-created.
     mock_run = MagicMock()
     mock_run.side_effect = [
         MagicMock(returncode=0, stdout="feature/test\n", stderr=""),  # git rev-parse
@@ -414,19 +412,24 @@ def test_ac2_hp_ship_stamps_node_pr_link(tmp_path):
     assert result["action"] == "pr_created"
     stamp_cmd = mock_run.call_args_list[3][0][0]
     assert stamp_cmd == [
-        "fno", "backlog", "update", "x-1a2b",
-        "--pr-number", "42",
-        "--pr-url", "https://github.com/owner/repo/pull/42",
+        "fno", "do", "pr", "bind-created",
+        "--url", "https://github.com/owner/repo/pull/42",
+        "--repo", str(tmp_path),
+        # The manifest id, not the branch: bind-created resolves from the branch
+        # alone without it, which binds nothing on a branch that never carried
+        # the id and binds the WRONG node on a reused worktree.
+        "--node", "x-1a2b",
     ]
-    # The ship row now lands inside the update above, so ship() must NOT fire a
+    # bind-created stamps the ship row itself, so ship() must NOT fire a
     # separate `session add --phase ship`: a double-fire would write two ship
     # rows for one PR link.
     argvs = [c[0][0] for c in mock_run.call_args_list]
     assert not any("session" in a and "add" in a for a in argvs), argvs
 
 
-def test_ac2_err_stamp_failure_never_fails_ship(tmp_path):
-    """AC2-ERR: a non-zero link stamp is logged but ship still reports the PR created."""
+def test_ac2_err_stamp_failure_reports_incomplete_delivery(tmp_path, monkeypatch):
+    """AC2-ERR: a created PR with no graph binding is incomplete delivery."""
+    monkeypatch.chdir(tmp_path)
     state_path = _make_state_with_node(tmp_path, "x-1a2b")
 
     mock_run = MagicMock()
@@ -448,8 +451,14 @@ def test_ac2_err_stamp_failure_never_fails_ship(tmp_path):
             artifacts_dir=tmp_path / ".fno" / "artifacts",
         )
 
-    assert result["action"] == "pr_created"
+    assert result["action"] == "incomplete_delivery"
     assert result["pr_number"] == 42
+    assert result["binding_error"] == "graph locked"
+    assert result["repair_command"] == (
+        "fno do pr bind-created --url "
+        "https://github.com/owner/repo/pull/42 --repo "
+        f"{tmp_path} --node x-1a2b"
+    )
 
 
 def test_no_node_id_skips_stamp(tmp_path):
