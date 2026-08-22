@@ -857,6 +857,8 @@ def env_scrub_spawn_warning(
     else:
         from fno.harness_identity import resolve_harness_identity
 
+        # READ-ONLY (x-20f1 LD5): branches on the ambient harness to pick a
+        # default provider. Nothing durable carries this value.
         provider = resolve_harness_identity(env).harness or "claude"
     from fno.agents.model_routing import env_scrub_warning
     from fno.agents.spawn_defaults import _has_permission_mode

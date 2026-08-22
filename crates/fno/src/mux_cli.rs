@@ -1483,7 +1483,35 @@ fn gather_checks() -> Vec<Check> {
     ));
     checks.push(clipboard_check(crate::clipboard::available_tool()));
     checks.push(squad_store_check());
+    checks.push(board_scope_check());
     checks
+}
+
+/// What the backlog board would be scoped to (x-20f1).
+///
+/// Resolves LIVE, the same way a client does at spawn, so this answers "what
+/// will a server started from here show". A server already running latched its
+/// scope when it was spawned; changing the config takes a `mux kill-server`,
+/// and this line is where that is visible.
+///
+/// Read-only and advisory: a refusal is a `warn`, not a `fail`, because nothing
+/// is broken - the board just falls back to every project. But it must be
+/// VISIBLE here, because that fallback is silent everywhere else: a board
+/// correctly scoped to one project and a board that could not resolve one and
+/// widened look nothing alike, and only this line says which you got.
+fn board_scope_check() -> Check {
+    let (scope, why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
+    let refused = matches!(
+        &scope,
+        crate::backlog_view::BoardScope::Projects(s) if s.is_empty()
+    );
+    Check {
+        name: "backlog board scope".into(),
+        verdict: if refused { Verdict::Warn } else { Verdict::Ok },
+        detail: why,
+        remedy: refused
+            .then(|| "set config.project.id in this repo, or config.mux.board_scope=all".into()),
+    }
 }
 
 /// Render every check and return the exit code: `EXIT_ERROR` iff any check

@@ -3780,40 +3780,37 @@ def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
 def _self_handle_or_exit() -> "tuple[str, object]":
     """This session's canonical mail handle AND the identity it came from.
 
-    Returns both so the caller never re-resolves. A second
-    ``resolve_harness_identity()`` call can answer differently from the one
-    this function validated, and then the row written is not the row checked.
+    Returns both so the caller never re-resolves. A second resolve can answer
+    differently from the one this function validated, and then the row written
+    is not the row checked.
 
     Fails closed on a contaminated env, for the same reason `--to-self` does
-    and with worse consequences. `resolve_harness_identity` refuses a mixed
-    family env, so an inherited marker from a parent harness cannot be
-    laundered into the PARENT session either. A misaddressed `--to-self`
-    sends one message to the wrong place, which is visible and recoverable.
-    A misaddressed hold stamps a DELIVERY POLICY on another agent's row and
-    arms a timer against their handle, silently holding their mail. Same
-    resolver, same ambiguity, so the same refusal. The families check runs
-    FIRST because the resolver already refused the mixed env: without the
-    reorder, every mixed env would land on the generic "no identity" message
-    and this specific refusal would be unreachable.
-    """
-    from fno.harness_identity import (
-        canonical_handle,
-        present_harness_markers,
-        resolve_harness_identity,
-    )
+    and with worse consequences. An inherited marker from a parent harness
+    makes a precedence-only resolve answer with the PARENT session. A
+    misaddressed `--to-self` sends one message to the wrong place, which is
+    visible and recoverable. A misaddressed hold stamps a DELIVERY POLICY on
+    another agent's row and arms a timer against their handle, silently holding
+    their mail.
 
-    families = {harness for _, harness, _ in present_harness_markers()}
-    if len(families) > 1:
+    The refusal is the shared one now. `resolve_harness_identity` already
+    refuses a mixed-family env, so nothing is laundered either way; what the
+    owned path adds is that a mixed env the process tree CAN decide resolves
+    instead of refusing, which is the difference between a real claude worker
+    holding its own mail and being told it has no identity.
+    """
+    from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
+    from fno.harness_identity import canonical_handle
+
+    try:
+        ident = require_self_identity()
+    except IdentityAmbiguousError as exc:
         sys.stderr.write(
-            "multiple harness markers present (inherited env?) - cannot decide "
-            "which session is 'self', and a hold stamped on the wrong row holds "
-            f"another agent's mail. Families seen: {', '.join(sorted(families))}\n"
+            f"{exc}\na hold stamped on the wrong row holds another agent's mail\n"
         )
-        raise typer.Exit(code=3)
-    ident = resolve_harness_identity()
+        raise typer.Exit(code=3) from exc
     if not ident.harness or not ident.session_id:
         sys.stderr.write(
-            "no ambient harness identity - there is no session to hold mail for\n"
+            "no provable harness identity - there is no session to hold mail for\n"
         )
         raise typer.Exit(code=3)
     return canonical_handle(ident.session_id), ident

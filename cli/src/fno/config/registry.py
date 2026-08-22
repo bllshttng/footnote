@@ -323,6 +323,16 @@ FIELD_META: dict[str, Meta] = {
         "Auto-inject OSC 133 block markers into mux-spawned shells: "
         "mux-panes (default) | off. Never edits your global shell rc.",
     ),
+    "mux.board_scope": Meta(
+        "advanced",
+        "Which projects the mux backlog board shows: repo (default, this "
+        "checkout's project.id) | all | workspace:<name>, e.g. "
+        "workspace:main for a workspace holding web, backend and marketing. "
+        "A scope that cannot resolve falls back to every project, and `fno mux "
+        "doctor` reports that as a warn naming the remedy. Latched at mux "
+        "server birth; `fno mux kill-server` re-reads.",
+        default_source="default",
+    ),
     "mux.prefix": Meta("advanced", "The mux prefix key, as C-a / Ctrl-a / ^a or a bare printable character. A digit 1-9 is refused (those select tabs), as is a key an action already holds. Unset keeps the built-in Ctrl-b."),
     "mux.keys": Meta("advanced", "Per-action key rebinds (action -> key), e.g. detach: 'Q'. Action ids are the ones prefix+? lists. An unreadable key, an unknown action, a digit (1-9 select tabs), or a collision is refused and reported rather than silently ignored.", default_source="default"),
     "mux.notify_on_blocked": Meta("advanced", "Fire an OS notification when an agent badge enters 'blocked' (default on).", default_source="default"),

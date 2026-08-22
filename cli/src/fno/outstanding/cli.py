@@ -108,6 +108,7 @@ def _is_crowned() -> bool:
             registry = load_registry()
         except RegistryVersionError:
             pass
+        # READ-ONLY (x-20f1 LD5): resolves the crown holder to display it.
         ident = resolve_harness_identity()
         result = resolve_self(
             env=os.environ,
@@ -174,8 +175,9 @@ def ask(
     lands - and in a mail-driven mesh the very next turn is usually the agent
     answering some mail.
     """
+    from fno.claims.self_identity import resolve_self_identity
     from fno.events import QUESTION_CAP, operator_question
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    from fno.harness_identity import canonical_handle
     from fno.outstanding.core import QuestionIndexWriteError, append_question_event
 
     if len(question) > QUESTION_CAP:
@@ -186,7 +188,9 @@ def ask(
         )
     qid = f"q-{secrets.token_hex(4)}"
     session_id = _session_id()
-    ident = resolve_harness_identity()
+    # OWNED (x-20f1): the asker handle lands on a durable question event and is
+    # the address the answer comes back to.
+    ident = resolve_self_identity()
     asker = canonical_handle(ident.session_id) if ident.session_id and ident.harness else None
     try:
         event = operator_question(

@@ -393,6 +393,19 @@ fn spawn_server(path: &Path) -> Result<(), String> {
     if std::env::var_os("FNO_MUX_SHELL_INTEGRATION").is_none() && shell_integration_off() {
         cmd.env("FNO_MUX_SHELL_INTEGRATION", "off");
     }
+    // Same bridge, same reason, for the backlog board's project scope (x-20f1).
+    // Resolving it needs `fno config get`, and the SERVER must not shell out on
+    // its startup path: doing so delayed shutdown past the SIGTERM grace and
+    // perturbed multiclient frame ordering. The client already pays a bounded
+    // config read here, so the resolution happens once, in this process, and
+    // rides in on the env. An explicit export wins, inherited untouched.
+    if std::env::var_os("FNO_BOARD_SCOPE").is_none() {
+        let (scope, _why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
+        cmd.env(
+            "FNO_BOARD_SCOPE",
+            crate::backlog_view::board_scope_wire(&scope),
+        );
+    }
     // Safety: setsid only detaches the child from our session/terminal; it is
     // async-signal-safe and touches no shared state.
     unsafe {
@@ -407,67 +420,18 @@ fn spawn_server(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot spawn the mux server: {e}"))
 }
 
-/// Shell `fno config get mux.shell_integration` once, bounded, to learn whether
-/// the interactive path must disable OSC 133 injection. Bounded + fail-open (the
-/// `run_dispatch_one` idiom): any spawn/read error, a non-`off` value, or a read
-/// that overruns the budget all leave injection on (the default). The bound
-/// matters because this runs synchronously inside `spawn_server`, *before* the
-/// client's spawn-connect wait loop exists - nothing downstream would rescue an
-/// unbounded read, so a slow or wedged config read would freeze `fno` startup
-/// with no notice.
-///
-/// Capture stdout to a FILE, not a pipe. A pipe read blocks until EOF (every
-/// write-end closed), so a descendant of `fno config get` that inherits stdout
-/// and outlives the direct child would hang the read even after `try_wait`
-/// reports the child gone - re-introducing the very freeze the bound exists to
-/// prevent (peer + sigma review). A file read never blocks on EOF; the bounded
-/// try_wait/kill still caps the child's own runtime.
+/// Whether the interactive path must disable OSC 133 injection. Bounded +
+/// fail-open through [`crate::server::config_get`]: any spawn/read error, a
+/// non-`off` value, or a read that overruns the budget all leave injection on
+/// (the default). The bound matters because this runs synchronously inside
+/// `spawn_server`, *before* the client's spawn-connect wait loop exists -
+/// nothing downstream would rescue an unbounded read, so a slow or wedged
+/// config read would freeze `fno` startup with no notice.
 fn shell_integration_off() -> bool {
-    const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(3);
-    // 0700 per-user dir (never world-writable /tmp); pid-unique name for this
-    // one-shot at server birth. Removed on every return path.
-    let dir = crate::proto::mux_dir();
-    if crate::proto::ensure_private_dir(&dir).is_err() {
-        return false;
-    }
-    let out_path = dir.join(format!("shell-integration-{}.out", std::process::id()));
-    let out_file = match std::fs::File::create(&out_path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let mut child = match std::process::Command::new(crate::server::fno_bin())
-        .args(["config", "get", "mux.shell_integration"])
-        .stdin(std::process::Stdio::null())
-        .stdout(out_file)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            let _ = std::fs::remove_file(&out_path);
-            return false;
-        }
-    };
-    let deadline = Instant::now() + CONFIG_READ_TIMEOUT;
-    let off = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                break status.success()
-                    && std::fs::read_to_string(&out_path)
-                        .map(|s| config_says_off(&s))
-                        .unwrap_or(false);
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break false;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => break false,
-        }
-    };
-    let _ = std::fs::remove_file(&out_path);
-    off
+    crate::server::config_get("mux.shell_integration")
+        .as_deref()
+        .map(config_says_off)
+        .unwrap_or(false)
 }
 
 /// The one off-switch, matched exactly like the Rust pane-spawn side

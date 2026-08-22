@@ -112,6 +112,7 @@ plugins
 pr
 pr merge
 pr-watch
+project init
 research
 restart
 resume

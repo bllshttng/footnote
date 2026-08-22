@@ -1728,6 +1728,75 @@ pub(crate) fn fno_bin() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fno"))
 }
 
+/// How long one `fno config get` may take before it is killed and read as
+/// absent. Bounded because the sync callers run on a startup path with nothing
+/// downstream to rescue a wedged read.
+const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Read one config key through `fno config get <key>`, bounded and fail-open:
+/// any spawn error, non-zero exit, or overrun reads as `None` (absent), never
+/// as a value. `fno config get` prints the bare value on stdout and its
+/// provenance on stderr, so stdout is the value.
+///
+/// Callers are the CLIENT (at server spawn) and `mux doctor`. Never the server:
+/// a subprocess on its startup path delayed shutdown past the SIGTERM grace and
+/// perturbed multiclient frame ordering, so the server reads only the env the
+/// client latched.
+///
+/// Capture stdout to a FILE, not a pipe. A pipe read blocks until EOF (every
+/// write-end closed), so a descendant of `fno config get` that inherits stdout
+/// and outlives the direct child would hang the read even after `try_wait`
+/// reports the child gone - re-introducing the very freeze the bound exists to
+/// prevent. A file read never blocks on EOF; the bounded try_wait/kill still
+/// caps the child's own runtime.
+pub(crate) fn config_get(key: &str) -> Option<String> {
+    let dir = crate::proto::mux_dir();
+    crate::proto::ensure_private_dir(&dir).ok()?;
+    // 0700 per-user dir (never world-writable /tmp); a pid+key-unique name, so
+    // no two processes and no two KEYS share a capture file. Callers read keys
+    // one at a time, so the same key twice at once does not arise. Removed on
+    // every return path.
+    let safe_key: String = key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let out_path = dir.join(format!("config-{}-{safe_key}.out", std::process::id()));
+    let out_file = std::fs::File::create(&out_path).ok()?;
+    let mut child = match std::process::Command::new(fno_bin())
+        .args(["config", "get", key])
+        .stdin(std::process::Stdio::null())
+        .stdout(out_file)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = std::fs::remove_file(&out_path);
+            return None;
+        }
+    };
+    let deadline = std::time::Instant::now() + CONFIG_READ_TIMEOUT;
+    let value = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break status
+                    .success()
+                    .then(|| std::fs::read_to_string(&out_path).ok())
+                    .flatten();
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break None,
+        }
+    };
+    let _ = std::fs::remove_file(&out_path);
+    value
+}
+
 /// Shell `fno agents dispatch one --session <s> --json`, bounded + fail-open (the
 /// digest_overlay idiom), and turn its verdict into the client notice. An empty
 /// return says nothing (the launched pane speaks for itself); every error path
@@ -9533,7 +9602,16 @@ async fn serve(
         let external = backlog_view::external_backend_selected();
         let mut count_rx = client_count_rx.clone();
         tokio::spawn(async move {
-            let mut state = backlog_view::ReaderState::default();
+            // The board's project scope, latched ONCE (x-20f1). The server
+            // resolves nothing: the CLIENT read the config at spawn, from the
+            // checkout the operator launched in, and passed the answer in the
+            // env. Latched rather than re-read per tick, because a scope that
+            // changed under a live board makes the card set unexplainable.
+            // Changing it means `fno mux kill-server`, and `fno mux doctor`
+            // reports what a fresh spawn latches.
+            let (scope, why) = backlog_view::board_scope_from_spawn_env();
+            eprintln!("fno mux: backlog board scope: {why}");
+            let mut state = backlog_view::ReaderState::with_scope(scope);
             // The last-good claim sweep (x-54fa): `None` until the first
             // success (render un-overlaid), then only ever replaced by a
             // fresher success — a sweep failure keeps this tick's overlay.

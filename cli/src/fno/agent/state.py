@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 
-from fno.harness_identity import resolve_harness_identity
+from fno.claims.self_identity import resolve_self_identity
 
 Harness = Literal["claude", "gemini", "codex"]
 SessionKind = Literal["target", "session", "override"]
@@ -131,7 +131,11 @@ def _detect_harness() -> Harness:
     session env but no ``*_PLUGIN_ROOT``; sniffing plugin roots alone silently
     mislabeled those sessions as ``claude`` (the fail-open this fixes).
     """
-    harness = resolve_harness_identity().harness
+    # OWNED, not precedence (x-20f1): this value is written to the persisted
+    # manifest as `provider`, and an inherited marker mislabels the session for
+    # the manifest's whole life. An ambiguous resolve falls through to the
+    # plugin-root sniff below rather than stamping a stranger's harness.
+    harness = resolve_self_identity().harness
     if harness in ("claude", "codex", "gemini"):
         return harness  # type: ignore[return-value]
     if os.environ.get("CODEX_PLUGIN_ROOT"):

@@ -28,6 +28,8 @@ The CLI reads every candidate that exists and **deep-merges** them, with higher-
 
 The merge is per key: nested maps merge recursively, while scalars and lists replace wholesale (a project-level `config.external_reviewers` list fully replaces the global one rather than appending). A key absent from a higher-priority file falls through to the next file down. So the per-user global can hold shared defaults (for example `config.obsidian.vault`) while each repo's project-local file sets only its deltas (for example `config.post_merge.parking_lot_path`). The project-local file no longer shadows the entire global; it overrides only the keys it actually sets.
 
+Pointing `state_dir` at a per-project root is how one checkout gets its own graph, ledger, briefs, agent registry and mail bus. `fno project init <id>` writes that key for you and prints which half of the environment it actually isolated: see [project environments](architecture/fno-project-environments.md).
+
 This matches the shell reader (`scripts/lib/config.sh`, which already does per-key local-over-global fallback) and the provider loader, so all three config surfaces agree on precedence. Note `fno config get` only resolves schema-modeled keys (`config.{state_dir, plans_dir, paths.*, obsidian, project, blueprint, post_merge, target}`); unmodeled keys such as `external_reviewers`, `auto_merge`, `gates`, and `budget_cap` are read only by the shell reader.
 
 ## Full schema

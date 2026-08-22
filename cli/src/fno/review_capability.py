@@ -201,6 +201,7 @@ def detect_session(
     for the key, which is a larger change than this node.
     """
     environ = os.environ if env is None else env
+    # READ-ONLY (x-20f1 LD5): branches to name this harness's review verb.
     harness = resolve_harness_identity(environ).harness or "unknown"
 
     bg = bool(environ.get("FNO_BG"))

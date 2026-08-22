@@ -58,7 +58,6 @@ from fno.agents.crown import calling_agent_row, crown_validation_error, grant_er
 from fno.agents.whoami import is_caller_row
 from fno.harness_identity import (
     canonical_handle,
-    resolve_harness_identity,
     session_identity_key,
 )
 
@@ -1271,7 +1270,13 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
       GEMINI_SESSION_ID      -> harness="gemini"
       OPENCODE_SESSION_ID    -> harness="opencode"
     """
-    identity = resolve_harness_identity()
+    # OWNED, not precedence (x-20f1): this triple is stamped onto the SPAWNED
+    # row as its `spawned_by_*` edge, so an inherited marker records a stranger
+    # as the parent for the life of that row. An ambiguous resolve records no
+    # lineage rather than a wrong one.
+    from fno.claims.self_identity import resolve_self_identity
+
+    identity = resolve_self_identity()
 
     # $PWD may be unset (non-interactive shells, cron, daemonized procs); fall
     # back to os.getcwd(), which for a `fno agents spawn` subprocess is the

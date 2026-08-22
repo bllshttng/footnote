@@ -443,28 +443,35 @@ def test_a_row_with_no_hold_renders_a_null_dnd():
 
 
 def test_hold_refuses_a_contaminated_env_rather_than_stamping_a_guessed_row(monkeypatch):
-    """`resolve_harness_identity` is precedence-only, so an inherited marker
-    from a parent harness makes it answer with the PARENT session.
+    """Precedence order is not ownership, so an inherited marker from a parent
+    harness makes a precedence-only resolve answer with the PARENT session.
 
     `--to-self` already fails closed here. A hold must too, and the stakes are
     higher: a misaddressed send delivers one message to the wrong place, while
     a misaddressed hold stamps a delivery policy on another agent's row and
     arms a timer against their handle. This was live on the machine that wrote
     the test, where claude and codex markers were both present.
-    """
-    from types import SimpleNamespace
 
+    The hold now shares the one owned-identity path rather than hand-rolling a
+    >1-family check, so this drives the real seam: two families the process
+    tree cannot decide between refuse, one family resolves.
+    """
     import typer
 
+    from fno.harness_identity import OwnedHarnessIdentity
     from fno.mail import cli as mail_cli
 
     monkeypatch.setattr(
-        "fno.harness_identity.resolve_harness_identity",
-        lambda: SimpleNamespace(harness="codex", session_id=f"{HANDLE}-full"),
-    )
-    monkeypatch.setattr(
-        "fno.harness_identity.present_harness_markers",
-        lambda: [("CLAUDE_CODE_SESSION_ID", "claude", "x"), ("CODEX_THREAD_ID", "codex", "y")],
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda *a, **k: OwnedHarnessIdentity(
+            None,
+            None,
+            (
+                ("CLAUDE_CODE_SESSION_ID", "claude", "x"),
+                ("CODEX_THREAD_ID", "codex", "y"),
+            ),
+            "ambiguous",
+        ),
     )
 
     with pytest.raises(typer.Exit) as caught:
@@ -473,8 +480,10 @@ def test_hold_refuses_a_contaminated_env_rather_than_stamping_a_guessed_row(monk
 
     # One family present is a clean session and must still resolve.
     monkeypatch.setattr(
-        "fno.harness_identity.present_harness_markers",
-        lambda: [("CODEX_THREAD_ID", "codex", "y")],
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda *a, **k: OwnedHarnessIdentity(
+            f"{HANDLE}-full", "codex", (("CODEX_THREAD_ID", "codex", "y"),), "single"
+        ),
     )
     resolved_handle, resolved_ident = mail_cli._self_handle_or_exit()
     assert resolved_handle == HANDLE

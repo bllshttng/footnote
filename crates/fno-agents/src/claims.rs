@@ -1134,6 +1134,14 @@ pub fn resolve_harness() -> Option<String> {
 /// a process-tree/transcript check the Python resolver does), so it records
 /// `None` for the ambiguous case rather than guessing; the authoritative proven
 /// harness is stamped on the manifest by the init hook via that resolver.
+///
+/// That resolver is `resolve_self_identity` in `cli/src/fno/claims/self_identity.py`,
+/// which supplies a process-tree prover to `resolve_owned_identity`. The two writers agree on
+/// direction and differ in reach: Python proves an inherited marker foreign and
+/// stamps the real one, while this side only knows the families disagree. Both
+/// refuse rather than launder, so a claim written here is never WRONG, only
+/// sometimes untagged. Keep it that way - resolving by precedence here would
+/// reintroduce the leak on the one path the Python gate cannot see.
 pub fn resolve_harness_from(get: impl Fn(&str) -> Option<String>) -> Option<String> {
     let mut resolved: Option<&'static str> = None;
     for (marker, harness) in HARNESS_SESSION_MARKERS {
