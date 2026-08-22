@@ -313,6 +313,13 @@ def emit(
         None, "--state", help="path to target-state.md (for source auto-detection)"
     ),
     events_path: Optional[Path] = typer.Option(None, "--events", help="path to events.jsonl"),
+    global_log: bool = typer.Option(
+        False,
+        "--global",
+        help="write to the machine-global journal (global_events_json()) instead of the "
+        "per-checkout one, so any-cwd readers share one stream. Mutually exclusive "
+        "with --events.",
+    ),
 ) -> None:
     """Emit a single canonical event to events.jsonl.
 
@@ -337,6 +344,13 @@ def emit(
     if data is not None and payload is not None:
         typer.echo(
             "error: pass either --data or --payload, not both",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if global_log and events_path is not None:
+        typer.echo(
+            "error: pass either --global or --events, not both",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -408,7 +422,16 @@ def emit(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    resolved_events = events_path if events_path is not None else default_events
+    if global_log:
+        # One resolution function for every writer and reader: the Rust mux
+        # emitter, this CLI, and the pane-stats readers all name the journal
+        # through global_events_json(), so a config.paths override moves them
+        # together or not at all.
+        from fno.paths import global_events_json
+
+        resolved_events = global_events_json()
+    else:
+        resolved_events = events_path if events_path is not None else default_events
 
     try:
         append_event(event, events_path=resolved_events)

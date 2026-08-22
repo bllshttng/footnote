@@ -465,3 +465,72 @@ def test_verification_receipt_is_refused_by_generic_emitter(
     assert result.exit_code == 1
     assert "preflight-owned" in result.output
     assert not (tmp_path / "events.jsonl").exists()
+
+
+# ---------------------------------------------------------------------------
+# --global: write the machine-global journal, one resolution for all readers
+# ---------------------------------------------------------------------------
+
+
+def test_global_targets_the_resolved_global_journal(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--global routes the append through global_events_json(), never a
+    hardcoded path, so a config.paths override moves writer and readers
+    together. The real journal is monkeypatched away: a test emit must never
+    land a row in the operator's ~/.fno/events.jsonl."""
+    global_journal = tmp_path / "global-events.jsonl"
+    import fno.paths
+
+    monkeypatch.setattr(fno.paths, "global_events_json", lambda: global_journal)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit",
+            "--type", "phase_transition",
+            "--data", json.dumps({
+                "gate_bearing": True,
+                "gate": "ledger_updated",
+                "phase": "register",
+                "nonce": "n1",
+                "session_id": "s1",
+            }),
+            "--source", "target",
+            "--global",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in global_journal.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["type"] == "phase_transition"
+
+
+def test_global_conflicts_with_events_and_writes_nowhere(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ambiguous target (--global AND --events) refuses before any append:
+    two named destinations is a caller bug, not a choice to arbitrate."""
+    global_journal = tmp_path / "global-events.jsonl"
+    pinned = _events_path(tmp_path)
+    import fno.paths
+
+    monkeypatch.setattr(fno.paths, "global_events_json", lambda: global_journal)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit",
+            "--type", "phase_transition",
+            "--data", "{}",
+            "--source", "target",
+            "--global",
+            "--events", str(pinned),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "not both" in result.stderr
+    assert not global_journal.exists()
+    assert not pinned.exists()

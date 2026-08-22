@@ -215,3 +215,233 @@ def test_subagents_json_emits_key(monkeypatch, runner):
     assert "subagents" in payload
     assert payload["subagents"][0]["agent_id"] == "af8f986001a0cc559"
     assert payload["subagents"][0]["verdict"] == "idle"
+
+
+# ---------------------------------------------------------------------------
+# --pane-stats: per-pane mux counter deltas, one reader for every consumer
+# ---------------------------------------------------------------------------
+
+
+def _counter_event(tmp_path, monkeypatch, rows_by_ts):
+    """Write mux_pane_counters snapshots to a pinned journal and point
+    pane_counter_rows at it. rows_by_ts: {ts: [pane rows]}."""
+    journal = tmp_path / "global-events.jsonl"
+    with journal.open("a") as fh:
+        for ts, panes in rows_by_ts.items():
+            fh.write(
+                json.dumps(
+                    {"ts": ts, "type": "mux_pane_counters", "source": "daemon",
+                     "data": {"session": "main", "panes": panes}}
+                )
+                + "\n"
+            )
+    return journal
+
+
+_PANE_A = {
+    "pane_id": 3, "node": "x-deadbeef", "name": "peer", "cmd": "claude",
+    "bytes_in": 100, "grid_updates": 10, "frames_composited": 6,
+    "frames_emitted": 4, "cpu_ns": 1_000_000_000,
+}
+
+
+def test_pane_stats_differences_last_two_samples(tmp_path, monkeypatch):
+    from fno.agents.top import pane_counter_rows
+
+    journal = _counter_event(
+        tmp_path,
+        monkeypatch,
+        {
+            "2026-08-22T14:30:00Z": [_PANE_A],
+            "2026-08-22T14:30:30Z": [{**_PANE_A, "bytes_in": 350, "grid_updates": 33,
+                                      "frames_composited": 20, "frames_emitted": 13,
+                                      "cpu_ns": 2_500_000_000}],
+        },
+    )
+    section = pane_counter_rows(journal)
+    assert section["status"] == "ok"
+    assert section["window_s"] == 30.0
+    assert len(section["rows"]) == 1
+    row = section["rows"][0]
+    assert row["pane_id"] == 3
+    assert row["node"] == "x-deadbeef"
+    assert row["bytes_in"] == 250
+    assert row["grid_updates"] == 23
+    assert row["frames_composited"] == 14
+    assert row["frames_emitted"] == 9
+    assert row["cpu_ns"] == 1_500_000_000
+
+
+def test_pane_stats_reports_born_and_gone(tmp_path, monkeypatch):
+    from fno.agents.top import pane_counter_rows
+
+    pane_b = {**_PANE_A, "pane_id": 4, "bytes_in": 5}
+    journal = _counter_event(
+        tmp_path,
+        monkeypatch,
+        {
+            "2026-08-22T14:30:00Z": [_PANE_A],
+            "2026-08-22T14:30:30Z": [pane_b],
+        },
+    )
+    section = pane_counter_rows(journal)
+    assert section["status"] == "ok"
+    assert section["rows"] == []  # no pane appeared in both samples
+    assert section["born"] == [4]
+    assert section["gone"] == [3]
+
+
+def test_pane_stats_single_sample_says_so(tmp_path, monkeypatch):
+    """Honest-edge: one sample prints an explicit insufficiency, never an
+    empty table that reads as 'no cost'."""
+    from fno.agents.top import _render_pane_stats_lines, pane_counter_rows
+
+    journal = _counter_event(
+        tmp_path, monkeypatch, {"2026-08-22T14:30:00Z": [_PANE_A]}
+    )
+    section = pane_counter_rows(journal)
+    assert section["status"] == "insufficient-samples"
+    lines = _render_pane_stats_lines(section)
+    assert any("insufficient samples" in line for line in lines)
+
+
+def test_pane_stats_missing_journal_is_insufficient_not_error(tmp_path, monkeypatch):
+    from fno.agents.top import pane_counter_rows
+
+    section = pane_counter_rows(tmp_path / "nope.jsonl")
+    assert section["status"] == "insufficient-samples"
+
+
+def test_pane_stats_restart_resets_instead_of_differencing(tmp_path, monkeypatch):
+    """A mux restart under a NEW session name reuses pane ids from 1 with
+    zeroed totals; the session grouping differences within one session only,
+    so the rename reports every pane as born/gone instead."""
+    from fno.agents.top import pane_counter_rows
+
+    fresh = {**_PANE_A, "bytes_in": 2, "grid_updates": 1, "frames_composited": 1,
+             "frames_emitted": 1, "cpu_ns": 1000}
+    journal = tmp_path / "global-events.jsonl"
+    with journal.open("a") as fh:
+        for ts, session, panes in [
+            ("2026-08-22T14:30:00Z", "main", [_PANE_A]),
+            ("2026-08-22T14:30:30Z", "restarted", [fresh]),
+        ]:
+            fh.write(
+                json.dumps(
+                    {"ts": ts, "type": "mux_pane_counters", "source": "daemon",
+                     "data": {"session": session, "panes": panes}}
+                )
+                + "\n"
+            )
+    section = pane_counter_rows(journal)
+    # The renamed session has one sample only: honest insufficiency, not a
+    # delta fabricated across the rename.
+    assert section["status"] == "insufficient-samples"
+    assert section["rows"] == []
+
+
+def test_pane_stats_same_socket_reset_reads_as_reset_not_negative_delta(tmp_path, monkeypatch):
+    """A server restarting on the SAME socket name keeps the session label
+    while pane ids and totals reset; a decreased total must report the pane
+    born-and-gone, never a negative delta."""
+    from fno.agents.top import pane_counter_rows
+
+    reset = {**_PANE_A, "bytes_in": 1, "grid_updates": 0, "frames_composited": 0,
+             "frames_emitted": 0, "cpu_ns": 5}
+    journal = _counter_event(
+        tmp_path,
+        monkeypatch,
+        {
+            "2026-08-22T14:30:00Z": [_PANE_A],
+            "2026-08-22T14:30:30Z": [reset],
+        },
+    )
+    section = pane_counter_rows(journal)
+    assert section["status"] == "ok"
+    assert section["rows"] == []
+    assert section["born"] == [3]
+    assert section["gone"] == [3]
+
+
+def test_pane_stats_differences_within_one_session_when_journals_interleave(
+    tmp_path, monkeypatch,
+):
+    """Two live mux sessions append interleaved rows to one journal; the last
+    two rows journal-wide can belong to different sessions. The reader groups
+    by session and differences the journal-latest session's own pair."""
+    from fno.agents.top import pane_counter_rows
+
+    journal = tmp_path / "global-events.jsonl"
+    rows = [
+        ("2026-08-22T14:30:00Z", "main", [_PANE_A]),
+        ("2026-08-22T14:30:15Z", "scratch", [{**_PANE_A, "pane_id": 9, "bytes_in": 50}]),
+        ("2026-08-22T14:30:30Z", "main", [{**_PANE_A, "bytes_in": 350}]),
+    ]
+    with journal.open("a") as fh:
+        for ts, session, panes in rows:
+            fh.write(
+                json.dumps(
+                    {"ts": ts, "type": "mux_pane_counters", "source": "daemon",
+                     "data": {"session": session, "panes": panes}}
+                )
+                + "\n"
+            )
+    section = pane_counter_rows(journal)
+    assert section["status"] == "ok"
+    assert section["session"] == "main"
+    assert len(section["rows"]) == 1
+    assert section["rows"][0]["pane_id"] == 3
+    assert section["rows"][0]["bytes_in"] == 250
+
+
+def test_pane_stats_skips_rows_without_integer_pane_id(tmp_path, monkeypatch):
+    """A pane row missing pane_id is journal noise; the debug view must skip
+    it and keep rendering, never KeyError the whole table."""
+    from fno.agents.top import pane_counter_rows
+
+    journal = tmp_path / "global-events.jsonl"
+    with journal.open("a") as fh:
+        for ts, panes in [
+            ("2026-08-22T14:30:00Z", [{"noise": True}, _PANE_A]),
+            ("2026-08-22T14:30:30Z", [{}, {**_PANE_A, "bytes_in": 400}]),
+        ]:
+            fh.write(
+                json.dumps(
+                    {"ts": ts, "type": "mux_pane_counters", "source": "daemon",
+                     "data": {"session": "main", "panes": panes}}
+                )
+                + "\n"
+            )
+    section = pane_counter_rows(journal)
+    assert section["status"] == "ok"
+    assert len(section["rows"]) == 1
+    assert section["rows"][0]["pane_id"] == 3
+    assert section["rows"][0]["bytes_in"] == 300
+
+
+def test_pane_stats_flag_renders_into_top(monkeypatch, runner):
+    _hermetic_registry(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.top.pane_counter_rows",
+        lambda *a, **kw: {
+            "status": "ok",
+            "rows": [
+                {"pane_id": 3, "node": "x-deadbeef", "name": "peer", "cmd": "claude",
+                 "bytes_in": 250, "grid_updates": 23, "frames_composited": 14,
+                 "frames_emitted": 9, "cpu_ns": 1_500_000_000}
+            ],
+            "born": [],
+            "gone": [],
+            "session": "main",
+            "window_s": 30.0,
+        },
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["top", "--pane-stats"])
+    assert result.exit_code == 0, result.output
+    assert "pane counters" in result.output
+    assert "x-deadbeef" in result.output
+    # The flag-off default stays clean.
+    result_off = runner.invoke(agents_app, ["top"])
+    assert "pane counters" not in result_off.output
