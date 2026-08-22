@@ -1753,8 +1753,9 @@ pub(crate) fn config_get(key: &str) -> Option<String> {
     let dir = crate::proto::mux_dir();
     crate::proto::ensure_private_dir(&dir).ok()?;
     // 0700 per-user dir (never world-writable /tmp); a pid+key-unique name, so
-    // two reads from one process never share a capture file. Removed on every
-    // return path.
+    // no two processes and no two KEYS share a capture file. Callers read keys
+    // one at a time, so the same key twice at once does not arise. Removed on
+    // every return path.
     let safe_key: String = key
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -9601,13 +9602,13 @@ async fn serve(
         let external = backlog_view::external_backend_selected();
         let mut count_rx = client_count_rx.clone();
         tokio::spawn(async move {
-            // The board's project scope, resolved ONCE (x-20f1). The read
-            // shells `fno config get` from the server's cwd, which it inherited
-            // from the client that spawned it, so the checkout the operator
-            // launched in is the selector. Latched rather than re-read per
-            // tick: it is a subprocess, and a scope that changed under a live
-            // board would make the card set unexplainable. Changing it means
-            // `fno mux kill-server`, which `fno mux doctor` says out loud.
+            // The board's project scope, latched ONCE (x-20f1). The server
+            // resolves nothing: the CLIENT read the config at spawn, from the
+            // checkout the operator launched in, and passed the answer in the
+            // env. Latched rather than re-read per tick, because a scope that
+            // changed under a live board makes the card set unexplainable.
+            // Changing it means `fno mux kill-server`, and `fno mux doctor`
+            // reports what a fresh spawn latches.
             let (scope, why) = backlog_view::board_scope_from_spawn_env();
             eprintln!("fno mux: backlog board scope: {why}");
             let mut state = backlog_view::ReaderState::with_scope(scope);
