@@ -376,7 +376,7 @@ def _prepare_crown_cli(monkeypatch, tmp_path, rows) -> None:
     from fno.harness_identity import AMBIENT_IDENTITY_ENV
     from fno.projects import resolve as proj_resolve
 
-    _seed(monkeypatch, tmp_path, rows)
+    _seed(monkeypatch, tmp_path, [replace(row, cwd=str(tmp_path)) for row in rows])
     for name in AMBIENT_IDENTITY_ENV:
         monkeypatch.delenv(name, raising=False)
     config = tmp_path / "config.toml"
@@ -761,6 +761,50 @@ def test_in_place_crown_rescopes_an_already_crowned_target(
     )
     assert not old_manifest.exists()
     assert (tmp_path / ".fno" / "kings" / "alpha.md").exists()
+
+
+def test_in_place_rescope_does_not_delete_a_successor_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import registry
+    import fno.king.state as king_state
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="worker-session",
+                status="idle",
+                crown_level=1,
+                crown_scope="beta",
+                crown_grantor="human",
+            )
+        ],
+    )
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    old_manifest = king_state.king_manifest_path("beta", state_root=tmp_path / ".fno")
+    king_state.write_manifest(
+        old_manifest, scope="beta", harness_session_id="worker-session"
+    )
+    real_update_registry = registry.update_registry
+
+    def update_then_refresh_successor(mutator):
+        rows = real_update_registry(mutator)
+        king_state.write_manifest(
+            old_manifest, scope="beta", harness_session_id="successor-session", force=True
+        )
+        return rows
+
+    monkeypatch.setattr(registry, "update_registry", update_then_refresh_successor)
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    assert king_state.parse_manifest(old_manifest)["harness_session_id"] == (
+        "successor-session"
+    )
 
 
 def test_in_place_crown_rescopes_a_live_row_from_project_to_epic(

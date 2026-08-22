@@ -18,6 +18,7 @@
 #   K7  claude shim, manifest names ANOTHER session -> exit 0, never gates
 #   K8  agy adapter, repeated king refusals         -> bounded, then allows
 #   K6  agy adapter, no manifest              -> allow (the refusal is scoped)
+#   K9  conflicting ambient markers omit harness narrowing
 
 set -uo pipefail
 
@@ -66,6 +67,7 @@ setup_king() {
     BIN="${TMP_DIR}/bin/fno-agents"
     cat > "${TMP_DIR}/bin/fno" <<'STUB'
 #!/usr/bin/env bash
+printf '%s\n' "$*" > .fno/fno.args
 if [[ "$1 $2" != "king manifest-path" ]]; then
     exit 1
 fi
@@ -117,6 +119,27 @@ run_claude_hook() {
 }
 
 cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
+
+# ── K9: conflicting markers keep the session-id lookup harness-neutral ───────
+{
+    setup_king
+    stub_binary '{"decision":"block","message":"scoped board has work"}'
+    CLAUDE_RC=0
+    (
+        cd "$TMP_DIR" || exit 1
+        env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_HARNESS="" \
+            CODEX_THREAD_ID="foreign-codex" CLAUDE_CODE_SESSION_ID="transcript" \
+            FNO_AGENTS_BIN="$BIN" bash "$CLAUDE_HOOK" \
+            <<< "{\"transcript_path\":\"${TRANSCRIPT}\"}" >/dev/null 2>/dev/null
+    ) || CLAUDE_RC=$?
+    FNO_ARGS="$(cat "${TMP_DIR}/.fno/fno.args" 2>/dev/null)"
+    if [[ "$CLAUDE_RC" -eq 2 ]] && ! tr ' ' '\n' <<< "$FNO_ARGS" | grep -qx -- "--harness"; then
+        pass "K9: conflicting markers omit harness narrowing"
+    else
+        fail "K9: rc=$CLAUDE_RC fno_args=$FNO_ARGS"
+    fi
+    cleanup
+}
 
 # ── K1: no manifest at all -> silent allow, binary never called ───────────────
 {

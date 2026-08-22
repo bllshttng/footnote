@@ -104,12 +104,12 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # stranger. `fno agents king init` refuses to write an unattributable manifest, so
     # a real king always has an id to match.
     HOOK_HARNESS="${FNO_HARNESS:-}"
-    if [[ -z "$HOOK_HARNESS" && -n "${CODEX_THREAD_ID:-}" ]]; then
-        HOOK_HARNESS="codex"
-    elif [[ -z "$HOOK_HARNESS" && -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
-        HOOK_HARNESS="claude"
-    elif [[ -z "$HOOK_HARNESS" && -n "${GEMINI_SESSION_ID:-}" ]]; then
-        HOOK_HARNESS="gemini"
+    if [[ -z "$HOOK_HARNESS" ]]; then
+        MARKER_COUNT=0
+        [[ -n "${CODEX_THREAD_ID:-}" ]] && { HOOK_HARNESS="codex"; MARKER_COUNT=$((MARKER_COUNT + 1)); }
+        [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] && { HOOK_HARNESS="claude"; MARKER_COUNT=$((MARKER_COUNT + 1)); }
+        [[ -n "${GEMINI_SESSION_ID:-}" ]] && { HOOK_HARNESS="gemini"; MARKER_COUNT=$((MARKER_COUNT + 1)); }
+        [[ $MARKER_COUNT -gt 1 ]] && HOOK_HARNESS=""
     fi
     if [[ -n "$HOOK_HARNESS_ID" ]] && command -v fno >/dev/null 2>&1; then
         MANIFEST_ARGS=(king manifest-path --harness-session-id "$HOOK_HARNESS_ID" --state-root "$REPO_ROOT/.fno")

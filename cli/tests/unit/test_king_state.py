@@ -118,6 +118,45 @@ def test_disabled_king_loop_arms_no_manifest(monkeypatch, tmp_path):
     assert not (tmp_path / ".fno" / "kings" / "x-f3d0.md").exists()
 
 
+def test_disabled_coronation_neutralizes_stale_scope_state(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    root = tmp_path / "repo" / ".fno"
+    stale = state.king_manifest_path("x-f3d0", state_root=root)
+    write_manifest(stale, scope="x-f3d0", harness_session_id="old-session")
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: False)
+
+    assert state.arm_king_manifest(
+        "x-f3d0", "new-session", owner_cwd=str(tmp_path / "repo")
+    ) is None
+    assert not stale.exists()
+
+
+def test_coronation_defaults_to_the_owner_repositories_state_root(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    owner = tmp_path / "repo"
+    owner.mkdir()
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
+
+    path = state.arm_king_manifest("x-f3d0", "session", owner_cwd=str(owner))
+
+    assert path == owner / ".fno" / "kings" / "x-f3d0.md"
+
+
+def test_cleanup_does_not_delete_a_successors_refreshed_manifest(tmp_path):
+    import fno.king.state as state
+
+    root = tmp_path / ".fno"
+    path = state.king_manifest_path("alpha", state_root=root)
+    write_manifest(path, scope="alpha", harness_session_id="successor")
+
+    assert state.remove_king_manifest(
+        "alpha", state_root=root, expected_harness_session_id="vacating-owner"
+    ) is False
+    assert parse_manifest(path)["harness_session_id"] == "successor"
+
+
 def test_best_effort_cleanup_removes_only_the_named_scope(tmp_path):
     import fno.king.state as state
 

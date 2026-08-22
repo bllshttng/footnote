@@ -18,10 +18,13 @@ about the world rather than about a file.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import secrets
+import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -119,35 +122,71 @@ def arm_king_manifest(
     owner_cwd: Optional[str] = None,
 ) -> Optional[Path]:
     """Refresh loop state at the moment a crown becomes authoritative."""
+    if state_root is None:
+        state_root = _owner_state_root(owner_cwd)
     if not king_loop_enabled():
+        remove_king_manifest(scope, state_root=state_root)
         return None
     if not harness_session_id.strip():
         raise ValueError("a crowned king manifest needs a harness session id")
-    if state_root is None:
-        from fno import paths
-
-        state_root = paths.state_dir()
     path = king_manifest_path(scope, state_root=state_root)
-    write_manifest(
-        path,
-        scope=scope,
-        harness_session_id=harness_session_id,
-        force=True,
-        owner_pid=owner_pid,
-        owner_cwd=owner_cwd,
-    )
+    with _manifest_lock(path):
+        write_manifest(
+            path,
+            scope=scope,
+            harness_session_id=harness_session_id,
+            force=True,
+            owner_pid=owner_pid,
+            owner_cwd=owner_cwd,
+        )
     return path
 
 
-def remove_king_manifest(scope: str, *, state_root: Optional[Path] = None) -> bool:
+def _owner_state_root(owner_cwd: Optional[str]) -> Path:
+    cwd = Path(owner_cwd).resolve() if owner_cwd else Path.cwd().resolve()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        root = Path(proc.stdout.strip()).resolve() if proc.returncode == 0 else cwd
+    except OSError:
+        root = cwd
+    return root / ".fno"
+
+
+@contextmanager
+def _manifest_lock(path: Path):
+    lock = path.with_suffix(path.suffix + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def remove_king_manifest(
+    scope: str,
+    *,
+    state_root: Optional[Path] = None,
+    owner_cwd: Optional[str] = None,
+    expected_harness_session_id: Optional[str] = None,
+) -> bool:
     """Best-effort cleanup; live registry authority never depends on this."""
     try:
         if state_root is None:
-            from fno import paths
-
-            state_root = paths.state_dir()
+            state_root = _owner_state_root(owner_cwd)
         path = king_manifest_path(scope, state_root=state_root)
-        path.unlink(missing_ok=True)
+        with _manifest_lock(path):
+            if expected_harness_session_id:
+                current = parse_manifest(path).get("harness_session_id")
+                if current != expected_harness_session_id:
+                    return False
+            path.unlink(missing_ok=True)
         return True
     except (OSError, ValueError):
         return False

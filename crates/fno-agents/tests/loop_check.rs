@@ -7463,7 +7463,7 @@ fn king_manifest(dir: &Path, fno_id: &str) -> PathBuf {
     path
 }
 
-/// A mock `fno` whose `king board --json` prints `payload`.
+/// A mock `fno` whose `inbox board --json` prints `payload`.
 fn king_board_bin(dir: &Path, payload: &str, exit: i32) -> PathBuf {
     make_script(
         dir,
@@ -7493,7 +7493,7 @@ fn king_board_invocation_carries_the_selected_manifest_path() {
     assert_eq!(code, 0, "{decision}");
     assert_eq!(decision["actionable"], 0);
     let args = fs::read_to_string(record).unwrap();
-    assert!(args.contains("king board --json --state"), "{args}");
+    assert!(args.contains("inbox board --json --state"), "{args}");
     assert!(args.contains(state.to_str().unwrap()), "{args}");
 }
 
