@@ -80,12 +80,16 @@ def test_python_opencode_pane_submits_brevity_marker_after_exact_payload(
         lambda *_args, **_kwargs: ("ready", "ready-marker=idle_prompt"),
     )
 
+    # **_kw absorbs seed_in_argv, which the real _submit_spawn_seed takes as a
+    # keyword-only argument. A stub standing in for a growing signature must
+    # not pin it.
     def capture_seed(
         _provider: str,
         _session: str,
         _pane_id: int,
         seed: str,
         _runner: Any,
+        **_kw: Any,
     ) -> tuple[str, str, str]:
         captured["seed"] = seed
         return "submitted", "", "delivered"
