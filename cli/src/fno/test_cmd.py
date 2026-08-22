@@ -452,6 +452,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Registry schema parity check", ".", "bash scripts/ci/check-registry-schema-parity.sh"),
     ("Provider vocabulary parity selftest", ".", "bash tests/ci/test_provider_vocabulary_parity.sh"),
     ("Provider vocabulary parity check", ".", "bash scripts/ci/check-provider-vocabulary-parity.sh"),
+    ("Spawn lineage parity selftest", ".", "bash tests/ci/test_spawn_lineage_parity.sh"),
+    ("Spawn lineage parity check", ".", "bash scripts/ci/check-spawn-lineage-parity.sh"),
     ("Reviewer descriptor parity selftest", ".",
      "bash scripts/ci/check-reviewer-descriptor-parity.sh --selftest"),
     ("Reviewer descriptor parity check", ".",

@@ -587,6 +587,64 @@ class TestRunGate:
         assert "provider=lane_provider" in python_claude_spawn
         assert "provider=resolved_lane_provider" in python_pane_spawn
 
+    def test_every_registry_mint_site_stamps_spawned_by(self):
+        """The parent-edge sibling of the provider stamp test: each mint site
+        calls the ambient capture helper and wires the triple onto the row.
+        The shell gate (check-spawn-lineage-parity.sh) runs the same sweep in
+        CI; this pytest copy fails in the local suite a developer actually
+        runs."""
+        root = Path(__file__).resolve().parents[3]
+        rust_sites = {
+            "claude create": (
+                root / "crates/fno-agents/src/claude_ask.rs", "fn create(\n", "#[cfg(test)]"
+            ),
+            "claude adopt": (
+                root / "crates/fno-agents/src/claude_adopt.rs",
+                "pub fn mint_adopted_entry", "pub fn upsert_adopted_row",
+            ),
+            "codex create": (
+                root / "crates/fno-agents/src/codex_ask.rs",
+                "fn dispatch_create(\n", "fn dispatch_resume(\n",
+            ),
+            "gemini create": (
+                root / "crates/fno-agents/src/gemini_ask.rs",
+                "fn dispatch_create(\n", "fn dispatch_resume(\n",
+            ),
+            "daemon stream worker": (
+                root / "crates/fno-agents/src/daemon.rs",
+                "fn build_claude_stream_entry", "fn acquire_session_claim",
+            ),
+            "synthesized row": (
+                root / "crates/fno-agents/src/client_verbs.rs",
+                "fn mint_synthesized_entry", "fn upsert_synthesized_row",
+            ),
+        }
+        for label, (path, start, end) in rust_sites.items():
+            text = path.read_text()
+            assert start in text and end in text.split(start, 1)[1], label
+            body = text.split(start, 1)[1].split(end, 1)[0]
+            assert "crate::claims::ambient_parent_edge()" in body, label
+            assert "spawned_by_session: parent_session" in body, label
+
+        state_rust = (root / "crates/fno-agents/src/state.rs").read_text()
+        for field in ("spawned_by_session", "spawned_by_harness", "spawned_by_cwd"):
+            assert f"pub {field}:" in state_rust, field
+
+        dispatch_python = (root / "cli/src/fno/agents/dispatch.py").read_text()
+        codex_create = dispatch_python.split("def _codex_create_path(\n", 1)[1].split(
+            "def _codex_followup_path(\n", 1
+        )[0]
+        assert "_capture_parent_edge()" in codex_create
+        assert "spawned_by_session=_cx_session" in codex_create
+        registry_python = (root / "cli/src/fno/agents/registry.py").read_text()
+        register = registry_python.split("def register_existing_session(", 1)[1].split(
+            "def restamp_harness_session_id(", 1
+        )[0]
+        assert 'origin == "operator"' in register
+        assert "spawned_by_session=_sb_session" in register
+        fallback_python = (root / "cli/src/fno/agents/store_fallback.py").read_text()
+        assert "spawned_by_session=_sb_session" in fallback_python
+
     def test_force_does_not_bypass_provider_cap(self, monkeypatch):
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 1})
         row = AgentEntry(
