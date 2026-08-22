@@ -407,11 +407,18 @@ def review_activity(
         # guarantee this path can lean on.
         release_review_hold(branch, root=root)
 
+    # A separate name, not a rebind of the parameter: an `import as runner`
+    # inside the branch leaves the declared Optional type in force, so mypy
+    # reads the call below as passing a possible None.
     if runner is None:
-        from fno.pr._proc import run as runner  # type: ignore[assignment]
+        from fno.pr._proc import run as _default_runner
+
+        probe_runner: Callable = _default_runner
+    else:
+        probe_runner = runner
 
     blocker, detail, reading = _worktree_probe(
-        branch, pr_head, repo or os.getcwd(), runner
+        branch, pr_head, repo or os.getcwd(), probe_runner
     )
     hold = status if state == ClaimState.STALE.value else None
     return ReviewActivity(bool(blocker), blocker, detail, hold, reading)
