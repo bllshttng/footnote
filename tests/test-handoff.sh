@@ -386,11 +386,8 @@ STUBEOF
   # verb fold does not know `fno whoami context`, so scenarios 7/7b would read
   # empty and park without the measurement. Delegate to the same FNO_PYTHON
   # the stub's doors use, keeping the suite hermetic against the machine.
-  cat > "$sbx/stub-bin/fno-py" <<'PYSHIM'
-#!/usr/bin/env bash
-exec env PYTHONPATH="__FNO_SRC__" "__FNO_PYTHON__" -m fno.cli "$@"
-PYSHIM
-  sed -i "" "s|__FNO_SRC__|$FNO_SRC|; s|__FNO_PYTHON__|$FNO_PYTHON|" "$sbx/stub-bin/fno-py"
+  printf '#!/usr/bin/env bash\nexec env PYTHONPATH="%s" "%s" -m fno.cli "$@"\n' \
+    "$FNO_SRC" "$FNO_PYTHON" > "$sbx/stub-bin/fno-py"
   chmod +x "$sbx/stub-bin/fno-py"
 
   echo "$sbx"
