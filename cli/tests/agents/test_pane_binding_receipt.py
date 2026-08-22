@@ -567,6 +567,167 @@ def test_an_unreadable_frame_is_unattempted_not_unconfirmed() -> None:
     assert "not attempted" in detail
 
 
+# --- an argv seed's delivery is not observable from a pane frame -------------
+# Measured 2026-08-22: three spawns minutes apart. Pane 93 reported
+# `seed: unattempted` while the pane already showed the verb and the agent was
+# running it, and pane 96 reported the same word for a pane that genuinely got
+# nothing. One word, two opposite realities, and the false reading correlates
+# with machine load because frame paint is slower when the box is busy.
+#
+# The seed rides in the process argv for every pane harness except agy, so its
+# delivery is committed at exec time, before a pane exists to read. The spawn
+# knows what it put in the argv; that positive fact is what the receipt reports
+# now, instead of inferring delivery from the seed's ABSENCE in a painted frame.
+
+
+def test_an_argv_seed_is_submitted_even_when_the_frame_is_blank() -> None:
+    """A pane that has not painted has not refused anything.
+
+    This is the false-negative that nearly cost a live worker: a king reading
+    `unattempted` either re-seeds a pane that is already running its task, or
+    reaps it and respawns.
+    """
+
+    def run(argv, **_kw):
+        verb = argv[3]
+        if verb == "wait":
+            return _proc(WAIT_ALIVE)
+        if verb == "read":
+            return _proc(0, "   \n")
+        raise AssertionError(f"an argv seed must not reach a send: {argv}")
+
+    state, detail, source = _submit_spawn_seed(
+        "claude", "main", 81, "seed text", run, seed_in_argv=True
+    )
+    assert state == "submitted"
+    assert source == "argv"
+    assert "argv" in detail
+
+
+def test_an_argv_seed_is_submitted_even_when_the_frame_is_unreadable() -> None:
+    """A read that raises is a fact about the instrument, never about the seed."""
+    from fno.agents.mux_spawn import DispatchAskError
+
+    def run(argv, **_kw):
+        if argv[3] == "read":
+            raise DispatchAskError("mux read failed", exit_code=1)
+        raise AssertionError(f"an argv seed must not reach a send: {argv}")
+
+    state, detail, source = _submit_spawn_seed(
+        "claude", "main", 81, "seed text", run, seed_in_argv=True
+    )
+    assert state == "submitted"
+    assert source == "argv"
+    assert "argv" in detail
+
+
+def test_an_argv_seed_never_reports_unattempted_on_any_arm() -> None:
+    """The property the retry depends on.
+
+    `mux_spawn` retries only from `unattempted`, justified as the one state
+    where nothing can already be sitting in the pane's buffer. With an argv
+    seed something IS already committed, so that argument was false for this
+    path. It holds now because an argv seed cannot reach the state at all.
+    """
+    from fno.agents.mux_spawn import DispatchAskError
+
+    def blank(argv, **_kw):
+        if argv[3] == "read":
+            return _proc(0, "  \n")
+        raise AssertionError(argv)
+
+    def unreadable(argv, **_kw):
+        if argv[3] == "read":
+            raise DispatchAskError("mux read failed", exit_code=1)
+        raise AssertionError(argv)
+
+    for runner in (blank, unreadable):
+        state, _detail, _source = _submit_spawn_seed(
+            "claude", "main", 81, "seed text", runner, seed_in_argv=True
+        )
+        assert state != "unattempted", "an argv seed reaching the retry can double-seed a live pane"
+
+
+def test_a_seed_that_did_not_ride_in_argv_still_reports_unattempted() -> None:
+    """The marker is the built argv, not the provider name.
+
+    agy is the one pane harness whose argv carries no seed, but the rule is not
+    "agy": it is whether THIS spawn's argv holds the message. A provider that
+    stops preloading must fall back here without anyone remembering to edit a
+    second table.
+    """
+
+    def run(argv, **_kw):
+        verb = argv[3]
+        if verb == "wait":
+            return _proc(WAIT_ALIVE)
+        if verb == "read":
+            return _proc(0, "   \n")
+        raise AssertionError(f"a blank frame must not reach a send: {argv}")
+
+    state, detail, _source = _submit_spawn_seed(
+        "claude", "main", 81, "seed text", run, seed_in_argv=False
+    )
+    assert state == "unattempted"
+    assert "not attempted" in detail
+
+
+def test_the_argv_arms_issue_no_keystroke() -> None:
+    """This is a receipt fix, not a delivery fix.
+
+    The bare submit at the painted-frame path presses Enter on a seed already
+    showing at the prompt. Both arms changed here returned without sending
+    before, and must still, or a harness that needs that Enter loses it.
+    """
+    calls: list[list[str]] = []
+
+    def run(argv, **_kw):
+        calls.append(argv)
+        if argv[3] == "read":
+            return _proc(0, "")
+        return _proc(0)
+
+    _submit_spawn_seed("claude", "main", 81, "seed text", run, seed_in_argv=True)
+    assert not [c for c in calls if c[3] == "send"], "the receipt fix must issue no send"
+
+
+def test_the_argv_marker_is_correct_for_every_pane_harness() -> None:
+    """The marker must agree with what `build_pane_argv` really emits.
+
+    The harnesses do not agree on how a seed enters the argv. claude and codex
+    append it as its own token behind `--`; opencode FUSES it into
+    `--prompt=<seed>`; agy embeds nothing and types it instead. An element
+    membership test (`seed in argv`) answers False for opencode on a seed that
+    was genuinely delivered, so the defect this guard exists to close would
+    survive for that one harness, silently, because the receipt still looks
+    ordinary.
+
+    This pins the marker against the real builder rather than against a table
+    restated here, so a harness changing how it carries the seed fails loudly.
+    """
+    from pathlib import Path
+
+    from fno.agents.mux_spawn import build_pane_argv, normalize_command, seed_rode_in_argv
+    from fno.agents.spawn_payload import enrich_spawn_payload
+
+    expected = {"claude": True, "codex": True, "opencode": True, "agy": False}
+    for provider, want in expected.items():
+        # Mirror dispatch_spawn_pane: normalize, enrich, THEN build.
+        msg = "/fno:target x-0000"
+        if msg.strip().startswith(("/", "$fno:")):
+            msg = normalize_command(msg, provider)
+        msg = enrich_spawn_payload(msg)
+        argv = build_pane_argv(provider, msg, Path("/tmp"), False, None)
+        # Call the PRODUCTION predicate. Restating its expression here made
+        # this test pass against a deliberately broken implementation.
+        got = seed_rode_in_argv(msg, argv)
+        assert got is want, (
+            f"{provider}: marker says seed_in_argv={got}, expected {want}. "
+            f"If this harness changed how it carries the seed, the receipt "
+            f"logic in _submit_spawn_seed must change with it."
+        )
+
+
 def test_shared_readiness_clears_agy_trust_before_seeding() -> None:
     reads = iter(
         [

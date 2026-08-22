@@ -2641,12 +2641,48 @@ def _send_source(payload: str) -> str:
     return "preloaded" if payload == "" else "delivered"
 
 
+#: The receipt for a seed that rode in the harness argv. Delivery is committed
+#: at exec time, before any pane exists to read, so it is reported from the
+#: spawn's own knowledge of the argv it built rather than inferred from the
+#: seed's absence in a painted frame. One tuple, so both arms that would
+#: otherwise report an instrument failure as a fact about the seed cannot drift
+#: apart.
+_ARGV_SEED_RECEIPT = (
+    "submitted",
+    "seed rode in the harness argv; committed at exec time and not observable from the pane frame",
+    "argv",
+)
+
+
+def seed_rode_in_argv(message: str, argv: Sequence[str]) -> bool:
+    """Did this spawn commit the seed into the process argv it built?
+
+    Read off the argv actually produced, never a second provider-name table.
+    `build_pane_argv` already owns which harnesses preload a seed, and a
+    restatement of that fact drifts silently here because the wrong answer
+    still looks like an ordinary receipt.
+
+    CONTAINMENT, not element equality. The harnesses disagree on how the seed
+    enters the argv: claude and codex append it as its own token behind `--`,
+    opencode FUSES it into `--prompt=<seed>`. An `in argv` membership test
+    answers False for opencode on a seed that was genuinely delivered, which is
+    this whole defect surviving for one harness. agy embeds nothing and
+    correctly answers False either way.
+
+    Call it with the message AFTER normalize/enrich, the same value handed to
+    `build_pane_argv`, or nothing matches.
+    """
+    return bool(message) and any(message in token for token in argv)
+
+
 def _submit_spawn_seed(
     provider: str,
     session: str,
     pane_id: int,
     seed: str,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    *,
+    seed_in_argv: bool = False,
 ) -> tuple[str, str, str]:
     """Submit a spawn seed after the shared readiness probe has painted.
 
@@ -2663,6 +2699,19 @@ def _submit_spawn_seed(
                      for the crime of not having painted yet. It is also the
                      only state the caller retries, because it is the only one
                      where nothing can already be sitting in the pane's buffer.
+                     UNREACHABLE when ``seed_in_argv`` is set: there the seed
+                     was committed at exec time, so something IS already in
+                     flight and the retry's premise would not hold.
+
+    ``seed_in_argv`` is the caller's positive knowledge that the seed rode in
+    the harness argv this spawn built. Delivery is then settled before a pane
+    exists to read, so no frame can witness it, and the frame's failure modes
+    must not be reported as facts about the seed. Measured 2026-08-22: the same
+    argv seed read ``submitted`` on one pane and ``unattempted`` on another
+    minutes later, the second already running its task. The difference was
+    paint latency, which rises with machine load, so the instrument degrades
+    exactly when the fleet is busiest and a reader can least afford to check
+    every pane by hand.
     ``unknown``      the seed was typed into a RUNNING pane and mux did not
                      answer the submit. The keystroke may have landed, so
                      reaping would kill a worker already doing its job, and a
@@ -2682,6 +2731,8 @@ def _submit_spawn_seed(
             runner,
         )
     except DispatchAskError:
+        if seed_in_argv:
+            return _ARGV_SEED_RECEIPT
         # source is "", not "delivered": nothing was typed into the pane, and
         # `delivered` is the word the send arms use for text that WAS. A receipt
         # reading seed=unattempted with seed_source=delivered contradicts itself.
@@ -2731,6 +2782,11 @@ def _submit_spawn_seed(
     else:
         trust_source = ""
     if not frame.strip():
+        if seed_in_argv:
+            # An unpainted TUI cannot witness a delivery that happened at exec
+            # time. Reporting the frame's silence as a fact about the seed is
+            # what made one word cover both a live worker and an empty pane.
+            return _ARGV_SEED_RECEIPT
         # A blank frame is an unpainted TUI, not a refused seed: nothing was
         # sent, so there is nothing to call unconfirmed.
         return "unattempted", "pane frame blank, seed submission not attempted", trust_source
@@ -3260,9 +3316,10 @@ def dispatch_spawn_pane(
         )
         seed_state: Optional[str] = None
         seed_source: Optional[str] = None
+        seed_in_argv = seed_rode_in_argv(message, argv)
         if message and readiness != "failed":
             seed_state, seed_detail, seed_source = _submit_spawn_seed(
-                provider, session, pane_id, message, runner
+                provider, session, pane_id, message, runner, seed_in_argv=seed_in_argv
             )
             if seed_state == "unattempted":
                 # One retry, and ONLY from `unattempted`. That state means no
@@ -3272,6 +3329,16 @@ def dispatch_spawn_pane(
                 # a partial seed would submit fragment+seed into a live pane.
                 # Failing that spawn is the safer answer than typing twice.
                 #
+                # "Nothing can already be in the buffer" was FALSE for a seed
+                # that rode in the argv: that one is committed at exec time,
+                # before the first probe runs, and a late-painting pane read
+                # `unattempted` while already running its task. Recovering it
+                # left a queued duplicate verb behind a live pipeline. The
+                # premise holds now for a different reason - an argv seed is
+                # classified before the frame is consulted and never reaches
+                # this state - so the retry keeps serving the pane-send path it
+                # was written for and can no longer double-seed an argv one.
+                #
                 # The sleep is load-bearing, not politeness. `unattempted` IS
                 # the late-paint state, and `_run_mux` neither polls nor backs
                 # off, so an immediate re-read lands milliseconds later on the
@@ -3279,7 +3346,7 @@ def dispatch_spawn_pane(
                 # to recover.
                 time.sleep(_SEED_RETRY_DELAY_S)
                 seed_state, seed_detail, seed_source = _submit_spawn_seed(
-                    provider, session, pane_id, message, runner
+                    provider, session, pane_id, message, runner, seed_in_argv=seed_in_argv
                 )
             if seed_state == "unconfirmed":
                 # A pane that REFUSED the payload is a worker that will never
