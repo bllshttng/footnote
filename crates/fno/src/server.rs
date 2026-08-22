@@ -6437,6 +6437,8 @@ impl Core {
                                 && !pane_dead
                                 && a.liveness == agents_view::Liveness::Unmeasured;
                             AgentRow {
+                                spawned_by_session: a.spawned_by_session.clone(),
+                                harness_session_id: a.harness_session_id.clone(),
                                 squad: Some(squad.id),
                                 name: a.name.clone(),
                                 pane_id: Some(pid),
@@ -6479,6 +6481,8 @@ impl Core {
                             // pane labels (v22) so the two agree.
                             let e = pane_entry;
                             AgentRow {
+                                spawned_by_session: None,
+                                harness_session_id: None,
                                 squad: Some(squad.id),
                                 name: pane_label(
                                     e.and_then(|e| e.name.as_deref()),
@@ -6563,6 +6567,8 @@ impl Core {
                                 .map(|s| s.id)
                         });
                     out.push(AgentRow {
+                        spawned_by_session: a.spawned_by_session.clone(),
+                        harness_session_id: a.harness_session_id.clone(),
                         squad,
                         name: a.name.clone(),
                         pane_id: None,
@@ -6607,6 +6613,8 @@ impl Core {
                     // exception subline.
                     let cwd_base = cwd_basename(&a.cwd);
                     out.push(AgentRow {
+                        spawned_by_session: a.spawned_by_session.clone(),
+                        harness_session_id: a.harness_session_id.clone(),
                         squad,
                         name: a.name.clone(),
                         pane_id: None,
@@ -6654,6 +6662,8 @@ impl Core {
                     continue;
                 }
                 out.push(AgentRow {
+                    spawned_by_session: None,
+                    harness_session_id: None,
                     squad: Some(sid),
                     name: format!("cc-{}", m.attach_id),
                     pane_id: None,
@@ -6727,6 +6737,8 @@ impl Core {
             // still renders (the "every row" wire contract; codex review).
             let cwd_base = cwd_basename(&r.cwd);
             out.push(AgentRow {
+                spawned_by_session: None,
+                harness_session_id: None,
                 squad,
                 name: r.name.clone(),
                 pane_id: None,
@@ -11973,6 +11985,7 @@ mod tests {
 
     fn agent_in(sess: &str, pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
             name: "w".into(),
@@ -12016,6 +12029,7 @@ mod tests {
             // A pane hosted by ANOTHER session -> that session's server renders
             // it; correctly skipped here.
             RegistryAgent {
+                spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
                 name: "foreign-pane".into(),
@@ -12038,6 +12052,7 @@ mod tests {
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
             RegistryAgent {
+                spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
                 name: "bg-worker".into(),
@@ -12117,6 +12132,7 @@ mod tests {
             // but its registry cwd "/w" matches no origin - membership must win.
             agent_in("main", 42, None, false),
             RegistryAgent {
+                spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
                 name: "watcher".into(),
@@ -12193,6 +12209,7 @@ mod tests {
         // consult at all, so `unmeasured` passes the registry's own
         // corroboration read straight through.
         let paneless = |name: &str, liveness: agents_view::Liveness| RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
             name: name.into(),
@@ -12241,6 +12258,7 @@ mod tests {
         let mut core = empty_core();
         core.agents = vec![
             RegistryAgent {
+                spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
                 name: "think-x-9999".into(),
@@ -12262,6 +12280,7 @@ mod tests {
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
+                spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
                 name: "dead-ext".into(),
@@ -12317,6 +12336,7 @@ mod tests {
         // merge_rows would have set exited=false + external=true on this row,
         // but its mux pane (77) is absent from core.panes -> pane_dead.
         core.agents = vec![RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
             name: "upgraded".into(),
@@ -14626,6 +14646,7 @@ mod tests {
     /// optional recorded claude session uuid.
     fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
         RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
             name: name.into(),
@@ -16944,6 +16965,7 @@ mod tests {
     /// are the join surfaces; everything else is the quiet default.
     fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
         RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
             name: name.into(),

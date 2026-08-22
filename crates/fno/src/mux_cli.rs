@@ -5220,6 +5220,7 @@ mod tests {
 
     fn reg_row(name: &str, session_id: Option<&str>) -> crate::agents_view::RegistryAgent {
         crate::agents_view::RegistryAgent {
+            spawned_by_session: None,
             name: name.to_string(),
             cwd: "/x".into(),
             session_id: session_id.map(str::to_string),
