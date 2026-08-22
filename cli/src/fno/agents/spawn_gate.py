@@ -727,6 +727,26 @@ def _acquire_gate_mutex(holder: str, *, fail_closed: bool = False) -> bool:
         return True
 
 
+def provider_lanes_cap(budget: object) -> Optional[int]:
+    """The `lanes` dimension of one provider budget, whichever spelling arrived.
+
+    `config.agents.max_lanes.<provider>` is a :class:`~fno.config.ProviderBudget`
+    record since x-c703, and was a bare integer before it. Both reach this seam:
+    the configured table carries the record, and the fail-safe fallback below
+    carries the integer. Reading them through one function is what keeps the two
+    paths from disagreeing about a cap.
+
+    Returns None for "no lane cap", which is what an unlisted provider and an
+    unreadable budget both mean here.
+    """
+    if isinstance(budget, bool) or budget is None:
+        return None
+    if isinstance(budget, int):
+        return budget if budget >= 1 else None
+    lanes = getattr(budget, "lanes", None)
+    return lanes if isinstance(lanes, int) and lanes >= 1 else None
+
+
 def _refuse_provider_cap(
     provider: str,
     cap: int,
@@ -828,9 +848,16 @@ def run_gate(
         max_lanes = dict(getattr(agents_cfg, "max_lanes", {"zai": 5}))
     except Exception:
         cap, floor_gb = 3, 4.0
+        # The same lanes number the built-in ProviderBudget carries.
+        # `provider_lanes_cap` reads either spelling, so this fail-safe path
+        # cannot disagree with the configured one about zai's lane cap.
         max_lanes = {"zai": 5}
 
-    provider_cap = max_lanes.get(route_provider) if route_provider is not None else None
+    provider_cap = (
+        provider_lanes_cap(max_lanes.get(route_provider))
+        if route_provider is not None
+        else None
+    )
 
     holder = f"spawn-gate:{os.getpid()}:{name}"
     guard = GateGuard(
