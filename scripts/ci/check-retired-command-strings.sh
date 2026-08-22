@@ -102,10 +102,12 @@ SURFACES=("cli/src:py" "crates:rs" "skills:md")
 RAW=""
 for surface in "${SURFACES[@]}"; do
     dir="${surface%%:*}"; ext="${surface##*:}"
-    files="$(git ls-files -- "$dir" | grep -E "\.${ext}\$" || true)"
-    [ -n "$files" ] ||
+    git ls-files -- "$dir" | grep -qE "\.${ext}\$" ||
         fail "surface ${dir} holds no tracked .${ext} files; the surface list drifted and its scan is vacuous"
-    hits="$(printf '%s\n' "$files" | xargs grep -nE "$PATTERN" /dev/null || true)"
+    # git grep over the directory, then filter by extension here: the
+    # extension test stays in this script rather than in a pathspec, where a
+    # glob that matches nothing is indistinguishable from a clean surface.
+    hits="$(git grep -nE "$PATTERN" -- "$dir" | grep -E "^[^:]+\.${ext}:" || true)"
     RAW="${RAW}${hits}${hits:+$'\n'}"
 done
 

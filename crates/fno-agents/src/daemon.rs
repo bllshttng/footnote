@@ -8458,8 +8458,14 @@ mod tests {
 
         let message = &response.error().unwrap().message;
         assert!(message.contains("claude agents --json --all"));
-        assert!(message.contains("claude stop bbbb8888"));
-        assert!(message.contains("claude rm bbbb8888"));
+        assert!(message.contains("fno agents stop"));
+        // This refusal used to offer `claude stop <row>` then `claude rm <row>`
+        // as a by-hand alternative, and this test required it. Ruling
+        // d-1900e419 retired that pair: the harness row IS the resume handle,
+        // and dropping it by hand spends the handle for nothing rm has not
+        // already done. The refusal must not teach it back.
+        assert!(!message.contains("claude stop bbbb8888"));
+        assert!(!message.contains("claude rm bbbb8888"));
         assert!(!message.contains("--force"));
         assert!(!message.contains("-F"));
         assert_eq!(
