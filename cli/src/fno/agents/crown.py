@@ -571,8 +571,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         )
 
     receipt: dict[str, Any] = {}
+    vacated_manifest_owner = ""
+    vacated_owner_cwd = ""
 
     def _stamp(rows: list) -> list:
+        nonlocal vacated_manifest_owner, vacated_owner_cwd
         if caller is not None:
             live_caller = next((row for row in rows if row.name == grantor), None)
             if live_caller is not None and live_caller.status in TERMINAL_STATUSES:
@@ -625,6 +628,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         # so the receipt can name what changed hands.
         vacated_scope = target.crown_scope
         vacated_level = target.crown_level
+        vacated_manifest_owner = (
+            target.harness_session_id or target.cc_session_id or target.short_id or ""
+        )
+        vacated_owner_cwd = target.cwd
         if (vacated_level is None) != (vacated_scope is None):
             # Half a crown is unstampable by crown_validation_error, so no
             # legal writer produces it; overwrite would erase the corruption
@@ -703,7 +710,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     ):
         from fno.king.state import remove_king_manifest
 
-        remove_king_manifest(receipt["vacated_scope"])
+        remove_king_manifest(
+            receipt["vacated_scope"],
+            owner_cwd=vacated_owner_cwd,
+            expected_harness_session_id=vacated_manifest_owner,
+        )
     try:
         receipt["stranded_subordinates"] = _stranded_subordinates(
             receipt["vacated_scope"], scope, target_name, rows_after

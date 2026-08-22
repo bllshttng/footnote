@@ -120,7 +120,7 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
 
     result = _spawn(
         "spawn", "--name", "king-bg", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "epic-x",
+        "--substrate", "bg", "--cwd", str(bg_home), "--crown", "epic-x",
     )
     assert result.exit_code == 0, result.output
 
@@ -130,7 +130,7 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
     # Provenance, not self-declaration: the grantor is the session that spawned it.
     assert row.crown_grantor == "parent-sess-abc"
     assert row.crown_label == "L2 epic-x"
-    manifest = bg_home / ".fno" / "kings" / "epic-x.md"
+    manifest = Path(row.cwd) / ".fno" / "kings" / "epic-x.md"
     assert king_state.parse_manifest(manifest)["harness_session_id"] == (
         row.harness_session_id or row.short_id
     )

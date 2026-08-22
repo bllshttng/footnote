@@ -971,6 +971,7 @@ def test_rm_crowned_agent_cleans_its_scope_manifest_best_effort(
             provider="claude",
             short_id="7c5dcf5d",
             harness_session_id="session-worker",
+            cwd=str(tmp_path),
             crown_level=1,
             crown_scope="alpha",
             crown_grantor="human",

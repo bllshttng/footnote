@@ -3906,7 +3906,16 @@ def rm_agent(
             if existing.crown_scope:
                 from fno.king.state import remove_king_manifest
 
-                remove_king_manifest(existing.crown_scope)
+                remove_king_manifest(
+                    existing.crown_scope,
+                    owner_cwd=existing.cwd,
+                    expected_harness_session_id=(
+                        existing.harness_session_id
+                        or existing.cc_session_id
+                        or existing.short_id
+                        or ""
+                    ),
+                )
 
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
