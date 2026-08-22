@@ -598,7 +598,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         try:
             from fno.king.state import arm_king_manifest
 
-            arm_king_manifest(
+            manifest_path = arm_king_manifest(
                 scope,
                 target.harness_session_id or target.cc_session_id or target.short_id or "",
                 owner_pid=target.pid,
@@ -625,6 +625,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             grantor=grantor,
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
+            king_loop_armed=manifest_path is not None,
         )
         return rows
 

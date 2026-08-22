@@ -202,7 +202,9 @@ def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypat
     assert king_state.parse_manifest(manifest)["harness_session_id"] == heir.harness_session_id
 
 
-def test_crown_grantor_defaults_to_human_for_a_direct_spawn(tmp_path: Path, monkeypatch) -> None:
+def test_crown_grantor_defaults_to_human_for_a_direct_spawn(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     from fno.agents.registry import load_registry
 
     _spawn_crowned(
@@ -213,6 +215,7 @@ def test_crown_grantor_defaults_to_human_for_a_direct_spawn(tmp_path: Path, monk
     row = load_registry()[0]
     assert row.crown_grantor == "human"
     assert row.crown_level == 0
+    assert "king loop disabled" in capsys.readouterr().err
 
 
 def test_uncrowned_spawn_leaves_crown_none(tmp_path: Path, monkeypatch) -> None:
@@ -420,6 +423,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "vacated_scope": None,
         "vacated_level": None,
         "stranded_subordinates": [],
+        "king_loop_armed": True,
     }
     row = load_registry()[0]
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
@@ -429,6 +433,21 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
     )
     manifest = tmp_path / ".fno" / "kings" / "alpha.md"
     assert king_state.parse_manifest(manifest)["harness_session_id"] == "session-worker"
+
+
+def test_in_place_crown_receipt_names_a_disabled_king_loop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="session-worker", status="idle")],
+    )
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["king_loop_armed"] is False
 
 
 def test_in_place_crown_aborts_before_registry_publish_when_manifest_write_fails(

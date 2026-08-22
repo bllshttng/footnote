@@ -145,6 +145,7 @@ def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert _row("king-bg-human").crown_grantor == "human"
     assert _row("king-bg-human").crown_level == 1, "a project is a project king"
+    assert "king loop disabled" in result.output
 
 
 def test_bg_spawn_without_crown_leaves_the_fields_none(bg_home, monkeypatch) -> None:
