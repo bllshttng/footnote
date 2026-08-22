@@ -13,11 +13,7 @@ requires:
 
 ## Relay compression contract
 
-Agent-authored `fno agents mail send`, `fno agents mail reply`, and `fno mux pane send` are handoffs. Use 80 words or fewer.
-
-Think fully. Send outcome, reason, next action. Drop articles only where clear. Cut filler, pleasantries, hedges, repeated context. Fragments work. Keep technical terms, commands, errors, numbers, negation exact. Put findings on node/doc. Send link. Operator text stays exact.
-
-Use `Status: X. Why Y. Done at Z.` or `Approval: Problem X. Options Y/Z. Recommend Z because A. Your call?`
+Every agent-authored mail is a handoff: 80 words or fewer, outcome and next action only. The full contract (what to cut, what stays exact, the `Status:`/`Approval:` forms) is stated ONCE in the auto-loaded `skills/using-fno/SKILL.md`. A second copy here can drift from the one every session loads. Compress against that statement. Keep technical terms, commands, errors, numbers, and negation exact. This binds `fno agents mail send`, `fno agents mail reply`, and `fno mux pane send` alike.
 
 **Message background workers and projects from anywhere - even your phone.**
 
