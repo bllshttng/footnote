@@ -184,6 +184,50 @@ def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     return str(info.get("head_sha") or "").strip() or None
 
 
+def _pr_head_ref_and_oid(pr_number: int, repo: str) -> Optional[Tuple[str, str]]:
+    """``(branch, head_sha)`` for a PR, or None when the read failed.
+
+    One REST request answers both, the same one ``_pr_head_oid`` already makes.
+    Deliberately NOT ``_pr_base_head_refs``: that reads through ``gh pr view``,
+    which bills the per-user GraphQL quota every watcher on the machine shares.
+    """
+    from fno.pr._rest import fetch_pr_info_rest
+
+    info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=run)
+    if info is None:
+        return None
+    branch = str(info.get("head_ref") or "").strip()
+    sha = str(info.get("head_sha") or "").strip()
+    if not branch or not sha:
+        return None
+    return branch, sha
+
+
+def _in_flight_review_refusal(pr_number: int, repo: str) -> Optional[str]:
+    """The merge-side spelling of "a review is still running", or None.
+
+    Fail-closed in both directions a read can go wrong. A PR whose branch and
+    head cannot be resolved cannot be probed at all, and an unprobed PR is not a
+    clear one: the whole defect is a merge taken while something unseen was
+    still writing. A raise inside the probe refuses for the same reason the
+    plan-hold read does, and says so in the same words.
+    """
+    from fno.pr._review_hold import review_hold_refusal
+
+    try:
+        refs = _pr_head_ref_and_oid(pr_number, repo)
+        if refs is None:
+            return (
+                "review-activity-unreadable: could not resolve the PR's head branch "
+                "and sha, so no in-flight review could be ruled out; "
+                "refusing to assume none is running"
+            )
+        branch, head = refs
+        return review_hold_refusal(branch, pr_head=head, repo=repo)
+    except Exception as exc:  # noqa: BLE001 - matches the plan-hold polarity
+        return f"review-activity-unreadable: {exc}; refusing to assume no review is running"
+
+
 _REPO_FROM_URL = re.compile(r"github\.com/([^/]+/[^/]+?)(?:\.git)?/pull/")
 
 
@@ -1336,6 +1380,25 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     hold_reason = merge_hold_reason(pr_number, repo)
     if hold_reason:
         _emit(pr_number, "held", hold_reason, "none", err=False)
+        return 2
+
+    # (-1.5) In-flight review (x-a089). A review that is RUNNING is invisible to
+    # every gate below: coverage answers what verdicts EXIST for this head, and
+    # a review still writing its fixes has produced none yet. Three PRs on
+    # 2026-08-22 were green, settled and mergeable while their reviews were
+    # mid-flight, one of them with five counted findings under repair.
+    #
+    # Sited HERE, beside the plan hold and BEFORE the auto_merge gate below, for
+    # the reason that comment already gives: the auto-merge lane is not a
+    # separate caller, it is this function with `auto_merge.enabled`, and it is
+    # the caller with no human judgment to fall back on. A guard placed after
+    # that gate would be decorative for exactly the path that needs it most.
+    #
+    # No self-exemption: an author who merges over its own uncommitted fixes
+    # loses them as surely as a stranger does.
+    review_refusal = _in_flight_review_refusal(pr_number, repo)
+    if review_refusal:
+        _emit(pr_number, "held", review_refusal, "none", err=False)
         return 2
 
     # (-1) Incarnation fence (x-eea5 1.3): a losing incarnation - a forked or

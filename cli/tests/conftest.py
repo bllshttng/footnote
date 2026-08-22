@@ -197,6 +197,23 @@ def _hermetic_merge_hold_gate(monkeypatch):
     monkeypatch.setattr(hold, "hold_for_pr", lambda pr_number, cwd: None)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_in_flight_review_gate(monkeypatch):
+    """Default the in-flight-review merge gate to "nothing running".
+
+    Same ambient-state class as ``_hermetic_merge_hold_gate`` above, with two
+    live reads instead of one: the gate resolves the PR's head branch over REST
+    (no working ``gh`` on the CI runner, so it fails closed and every merge test
+    reads ``held``), and its worktree layer shells ``git`` against whatever
+    checkout the suite happens to be running in - which, inside an active
+    /target worktree with edits in progress, is legitimately dirty. Closed at
+    the reader; the tests that exercise it override this.
+    """
+    import fno.pr._merge as merge
+
+    monkeypatch.setattr(merge, "_in_flight_review_refusal", lambda pr_number, repo: None)
+
+
 # ---------------------------------------------------------------------------
 # Hermetic state isolation
 # ---------------------------------------------------------------------------
