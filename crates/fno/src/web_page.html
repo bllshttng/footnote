@@ -9,11 +9,44 @@
   styled <span> runs - no ANSI reconstruction, no xterm.js. Read-only: the page
   never sends a byte upstream; pane selection only changes which cached frame we
   draw locally.
+
+  NOT SCROLLBACK (x-ce65). A Frame is a composite of the CURRENT VISIBLE GRID
+  and the bridge caches only the latest one per pane, so no history reaches this
+  page. What it does instead is RETAIN: it diffs consecutive frames, keeps the
+  rows that scrolled off the top, and paints them above the live grid. That is
+  strictly weaker than scrollback and the UI says so. Its ceiling:
+    - it starts empty; history begins when you select the pane, never before
+    - it is per-selected-pane; switching panes clears it
+    - ONLY a whole-screen scroll is detectable. A pane with a fixed header, or
+      one driving its own scrolling region, retains nothing at all
+    - a burst larger than one screenful between two frames is lost
+    - any full-screen repaint (alternate screen, clear, resize) breaks continuity
+  The last three are made VISIBLE rather than hidden: a frame we cannot prove
+  continuity across retains nothing, and the next rows that ARE retained get a
+  break rule above them. Never silent concatenation, and never a guess.
+
+  Real history is a PROTOCOL change, and the shape matters. A history REQUEST is
+  unreachable from here: web.rs:381 calls `writer.forget()` on the socket write
+  half, and that call IS Locked Decision 5 (read-only is structural), so nothing
+  in this process can ask the server for anything. Reaching history through the
+  existing scroll is worse than unreachable - `Frame.scroll_offset` is SHARED
+  state broadcast to every viewer, so a browser-driven scroll would move the TUI
+  user's viewport.
+
+  The open path is a PUSH, not a pull, and it costs read-only nothing: the server
+  already knows an observer from a driver (`server.rs`, `rows == 0 && cols == 0`)
+  and the vt layer already reads history (`Pane::read_tail`), so it can volunteer
+  a pane's history to a passive client unprompted. The browser still asks for
+  nothing and `writer.forget()` stays exactly where it is. That is filed; this
+  page keeps retention until it lands.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<!-- No maximum-scale / user-scalable: that pair disables pinch-zoom on iOS, and a
+     pane grid is as wide as its TERMINAL (183 columns in the reported specimen),
+     so zooming is the operator's only way in on a phone. -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; connect-src 'self' ws: wss:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>fno mux (read-only)</title>
@@ -31,6 +64,10 @@
   #bar.ended { background: #4a1616; color: #f08a8a; }
   #bar.authfailed { background: #4a1616; color: #f08a8a; }
   #status { font-weight: 600; }
+  /* Pushed to the far edge, and a 30px box so a thumb can hit it. */
+  #fitbtn { margin-left: auto; font: inherit; font-size: 12px; cursor: pointer;
+    background: #141a26; color: #9aa4b6; border: 1px solid #232b3a;
+    border-radius: 5px; padding: 4px 10px; min-width: 46px; min-height: 30px; }
   #picker { flex: 0 0 auto; display: flex; gap: 6px; overflow-x: auto;
     padding: 6px 10px; border-bottom: 1px solid #1c2230; white-space: nowrap; }
   #picker button { font: inherit; font-size: 12px; cursor: pointer;
@@ -44,6 +81,14 @@
   #screen { flex: 1 1 auto; overflow: auto; }
   pre#term { margin: 0; padding: 8px 10px; font-size: 13px; line-height: 1.15;
     white-space: pre; }
+  /* The retained region is dimmed so the live grid stays the thing you read,
+     and so nobody mistakes browser-kept lines for terminal scrollback. */
+  .kept { opacity: .72; }
+  .kept-note, .kept-break { color: #6f7a8f; font-style: italic; }
+  /* The note is fixed-width prose inside `white-space: pre`, so on any pane
+     narrower than the note it, not the grid, set the page width and brought the
+     horizontal scrollbar fit-to-width exists to remove. */
+  .kept-note { white-space: pre-wrap; }
   .cur { outline: 1px solid #c5cdd9; }
   #overlay { position: fixed; inset: 0; display: none; align-items: center;
     justify-content: center; background: rgba(11,14,20,.85); font-size: 15px;
@@ -52,16 +97,18 @@
 </style>
 </head>
 <body>
-  <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span></div>
+  <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span><button id="fitbtn" type="button" title="fit the grid to the screen width, or show it at full size">fit</button></div>
   <div id="picker"></div>
-  <div id="screen"><pre id="term"></pre></div>
+  <div id="screen"><pre id="term"><span id="keptnote" class="kept-note"></span><span id="kept" class="kept"></span><span id="live"></span></pre></div>
   <div id="overlay"></div>
 <script>
 "use strict";
 (() => {
   const $ = (id) => document.getElementById(id);
   const bar = $("bar"), statusEl = $("status"), subEl = $("sub"),
-        picker = $("picker"), term = $("term"), overlay = $("overlay");
+        picker = $("picker"), term = $("term"), overlay = $("overlay"),
+        screenEl = $("screen"), fitBtn = $("fitbtn"), keptEl = $("kept"),
+        keptNoteEl = $("keptnote"), liveEl = $("live");
 
   // ---- state ----
   const frames = new Map();   // pane_id -> latest Frame (insertion order = LRU)
@@ -70,6 +117,19 @@
   let agents = [];            // from Layout
   let current = null;         // selected pane_id
   let upstreamUp = true;
+  // Retention (x-ce65), NOT scrollback: rows evicted off the top of the live
+  // grid, kept by this browser for the SELECTED pane only. The file header says
+  // why the protocol cannot answer this and what the ceiling is.
+  // The retained rows live in their OWN element, appended to and trimmed in
+  // place. Rebuilding them into the live grid's innerHTML each frame reparsed
+  // the whole region per frame - megabytes of HTML at the cap, on the phone this
+  // feature exists for. Only the live grid is rewritten per frame now.
+  const MAX_KEPT_ROWS = 1000; // hard cap; the oldest row is dropped past it
+  let keptFor = null;         // the pane the retained region belongs to
+  let prevRows = null;        // last drawn rows, for the overlap diff
+  let gapPending = false;     // a frame we could not prove continuity across
+  const KEPT_NOTE = "recent output kept by this browser since you opened this pane, not terminal scrollback";
+  const BREAK_RULE = "─".repeat(8) + " break in output " + "─".repeat(8);
 
   // ---- xterm 256-color palette -> css ----
   const base16 = ["#000000","#cd0000","#00cd00","#cdcd00","#0000ee","#cd00cd",
@@ -109,37 +169,218 @@
     JSON.stringify(a.fg) === JSON.stringify(b.fg) &&
     JSON.stringify(a.bg) === JSON.stringify(b.bg);
 
+  // One grid row as styled <span> runs, newline-terminated. `showCur` is off for
+  // the retention copy: a cursor outline frozen into kept output would read as a
+  // live cursor sitting in history.
+  function renderRow(fr, r, showCur) {
+    let html = "", run = "", runStyle = null, runFlags = null;
+    const flush = () => {
+      if (run) html += `<span style="${runStyle}">${esc(run)}</span>`;
+      run = "";
+    };
+    for (let cx = 0; cx < fr.cols; cx++) {
+      const cell = fr.cells[r * fr.cols + cx];
+      if ((cell.flags | 0) & WIDE_SPACER) continue; // right half of a wide glyph
+      if (showCur && r === fr.cursor_row && cx === fr.cursor_col) {
+        flush(); runFlags = null;
+        html += `<span class="cur" style="${cellStyle(cell)}">${esc(cell.c)}</span>`;
+        continue;
+      }
+      if (runFlags === null || !sameStyle(cell, runFlags)) {
+        flush(); runFlags = cell; runStyle = cellStyle(cell);
+      }
+      run += cell.c;
+    }
+    flush();
+    return html + "\n";
+  }
+
+  // The deepest fixed bottom region we will look past. An agent pane keeps an
+  // input box or a status footer on its last rows, and it is the DOMINANT case
+  // here - a claude or codex pane is the thing an operator opens this page to
+  // watch. Requiring the whole grid to shift made retention permanently inert on
+  // every one of them, silently, which is worse than not shipping it.
+  const MAX_FIXED_TAIL = 6;
+
+  // The smallest k where prev[k..body) equals next[0..body-k), or -1 if the
+  // region is not related by a scroll at all. k === 0 means it did not move.
+  function scrollWithin(prev, next, body) {
+    for (let k = 0; k < body; k++) {
+      let ok = true;
+      for (let i = k; i < body; i++) if (prev[i] !== next[i - k]) { ok = false; break; }
+      if (ok) return k;
+    }
+    return -1;
+  }
+
+  // How many rows scrolled off the top between two frames, or -1 when that is
+  // not provable. k === 0 means nothing moved, so a redraw of an unchanged frame
+  // retains nothing - that idempotence is load-bearing, because a Layout redraw
+  // calls draw() with the same frame.
+  //
+  // -1 must NOT be read as "the whole screen scrolled off". An earlier version
+  // returned n there and evicted the entire previous screen. A terminal changes
+  // rows in place constantly - a spinner tick, a status line, a progress bar, a
+  // prompt appearing on an unfilled screen - and none of that is a scroll. Every
+  // such frame dumped a duplicate of the visible screen into the retained
+  // region, filling the cap in about twenty frames with copies of what was
+  // already on screen and trimming the real output off the top.
+  //
+  // The whole grid is tried first, because it is the plain case and the only one
+  // that can honestly answer 0. Then successively shallower bodies, so a pane
+  // whose last rows are pinned still has its body read. The SHALLOWEST fixed
+  // tail that explains the frame wins, which keeps the answer conservative.
+  //
+  // Row strings are compared, not cells, because draw() already built them.
+  // ponytail: O(MAX_FIXED_TAIL * n^2) row-string compares worst case, n = rows.
+  // At a phone's ~50 rows that is ~17k short-string compares on a frame nothing
+  // explains; the common frames exit at the first or second body. A suffix
+  // automaton is the upgrade if it ever shows up in a profile.
+  function evictedRowCount(prev, next) {
+    const n = next.length;
+    if (!prev || prev.length !== n) return -1; // no previous frame, or resized
+    const maxTail = Math.min(MAX_FIXED_TAIL, n - 1);
+    for (let f = 0; f <= maxTail; f++) {
+      const k = scrollWithin(prev, next, n - f);
+      if (k >= 0) return k;
+    }
+    return -1;
+  }
+
+  // ---- fit to width (x-ce65), CLIENT SIDE ONLY ----
+  // A pane is as wide as its TERMINAL - 183 columns in the reported specimen -
+  // and a phone shows roughly 45 of them at 13px. The fix shrinks the TYPE here
+  // and never touches the terminal. It cannot do otherwise and must not try:
+  // the bridge attaches as a passive observer (rows: 0, cols: 0) precisely so it
+  // is excluded from the smallest-client clamp and never shrinks a PTY, and it
+  // drops the socket write half besides. A page that asked the server to narrow
+  // the pane would collapse it for every native viewer at the same time.
+  const BASE_FONT_PX = 13;  // the 1:1 size, and the ceiling when fitting
+  const MIN_FONT_PX = 2;    // past this there is nothing left for zoom to rescue
+  let fitToWidth = true;
+  let advanceRatio = 0;     // character advance width per 1px of font-size
+  let lastFitKey = "";
+
+  // Measured, not assumed: the ratio is a property of whichever font in the
+  // stack the device actually resolved, and guessing 0.6 puts a 183-column grid
+  // off the edge on any face that differs.
+  function measureAdvance() {
+    const probe = document.createElement("span");
+    probe.style.cssText =
+      "position:absolute;visibility:hidden;white-space:pre;font-size:100px;";
+    probe.textContent = "0".repeat(100);
+    term.appendChild(probe);
+    const w = probe.getBoundingClientRect().width;
+    probe.remove();
+    return w > 0 ? w / 100 / 100 : 0.6; // fallback: the usual monospace ratio
+  }
+
+  function applyFit(cols) {
+    // clientWidth excludes the scrollbar, which the retained region can summon.
+    const key = `${cols}x${screenEl.clientWidth}x${fitToWidth ? 1 : 0}`;
+    if (key === lastFitKey) return; // a per-frame layout read is not free
+    lastFitKey = key;
+    let px = BASE_FONT_PX;
+    if (fitToWidth && cols > 0) {
+      if (!advanceRatio) advanceRatio = measureAdvance();
+      const st = getComputedStyle(term);
+      const pad = (parseFloat(st.paddingLeft) || 0) + (parseFloat(st.paddingRight) || 0);
+      const avail = screenEl.clientWidth - pad;
+      const want = Math.floor((avail / cols / advanceRatio) * 10) / 10;
+      px = Math.min(BASE_FONT_PX, Math.max(MIN_FONT_PX, want));
+    }
+    term.style.fontSize = px + "px";
+  }
+
+  function refit() {
+    const fr = current != null ? frames.get(current) : null;
+    lastFitKey = ""; // the container may have changed under an unchanged frame
+    // Changing the type size changes scrollHeight several-fold while scrollTop
+    // stays put, so a pane pinned to its tail silently stops following: tapping
+    // the toggle, or just rotating the phone, unpinned it until the operator
+    // scrolled back down by hand.
+    const pinned = screenEl.scrollHeight - screenEl.scrollTop - screenEl.clientHeight < 24;
+    applyFit(fr ? fr.cols : 0);
+    if (pinned) screenEl.scrollTop = screenEl.scrollHeight;
+  }
+
+  fitBtn.onclick = () => {
+    fitToWidth = !fitToWidth;
+    fitBtn.textContent = fitToWidth ? "fit" : "1:1";
+    refit();
+    if (fitToWidth) screenEl.scrollLeft = 0;
+  };
+  addEventListener("resize", refit);
+  addEventListener("orientationchange", refit);
+
+  // One row per element, so the cap can drop the oldest without rebuilding the
+  // rest. Row HTML is already newline-terminated.
+  function pushKept(html) {
+    keptEl.insertAdjacentHTML("beforeend", `<span>${html}</span>`);
+    while (keptEl.childElementCount > MAX_KEPT_ROWS) keptEl.firstElementChild.remove();
+  }
+
+  function resetKept() {
+    keptEl.textContent = "";
+    keptNoteEl.textContent = "";
+    prevRows = null;
+    gapPending = false;
+  }
+
   function draw() {
     const fr = current != null ? frames.get(current) : null;
-    if (!fr) { term.textContent = current == null ? "" : "…"; return; }
+    // Retention belongs to one pane. Every path that changes `current` - the
+    // picker, LRU eviction, an exited agent, the first paint - lands here, so
+    // resetting on the mismatch covers them all without touching each one.
+    if (keptFor !== current) { resetKept(); keptFor = current; }
+    if (!fr) { liveEl.textContent = current == null ? "" : "…"; return; }
     // Defensive re-guard: never draw a geometry-inconsistent grid (AC5-FR twin).
     if (fr.cells.length !== fr.rows * fr.cols) return;
-    const showCur = fr.cursor_visible;
-    let html = "";
-    for (let r = 0; r < fr.rows; r++) {
-      let run = "", runStyle = null, runFlags = null;
-      const flush = () => {
-        if (run) html += `<span style="${runStyle}">${esc(run)}</span>`;
-        run = "";
-      };
-      for (let cx = 0; cx < fr.cols; cx++) {
-        const cell = fr.cells[r * fr.cols + cx];
-        if ((cell.flags | 0) & WIDE_SPACER) continue; // right half of a wide glyph
-        const isCur = showCur && r === fr.cursor_row && cx === fr.cursor_col;
-        if (isCur) {
-          flush(); runFlags = null;
-          html += `<span class="cur" style="${cellStyle(cell)}">${esc(cell.c)}</span>`;
-          continue;
+
+    // Read the pin BEFORE anything mutates the DOM. Appending evicted rows grows
+    // scrollHeight while scrollTop stays put, so a pin measured afterwards reads
+    // the gap it just created as "the operator scrolled up" - and a burst of
+    // several rows loses the tail for good, on exactly the busy pane this is for.
+    const pinned = screenEl.scrollHeight - screenEl.scrollTop - screenEl.clientHeight < 24;
+
+    const rows = [];
+    for (let r = 0; r < fr.rows; r++) rows.push(renderRow(fr, r, false));
+
+    const evicted = evictedRowCount(prevRows, rows);
+    if (prevRows) {
+      if (evicted < 0) {
+        // Continuity is not provable across this frame. Retain nothing - most of
+        // the previous screen is usually still visible below.
+        //
+        // Only claim a GAP when the old top row has left the screen entirely.
+        // Marking every unprovable frame put a "break in output" rule above
+        // output that was perfectly contiguous: a shell printing into a screen
+        // it has not filled yet produces unprovable frames, then starts
+        // scrolling, and the rule landed on top of the very first lines. A rule
+        // that fires where nothing was lost teaches the operator to ignore it,
+        // which costs more than the rule was ever worth.
+        if (rows.indexOf(prevRows[0]) < 0) gapPending = true;
+      } else if (evicted > 0) {
+        if (gapPending) {
+          pushKept(`<span class="kept-break">${esc(BREAK_RULE)}</span>\n`);
+          gapPending = false;
         }
-        if (runFlags === null || !sameStyle(cell, runFlags)) {
-          flush(); runFlags = cell; runStyle = cellStyle(cell);
-        }
-        run += cell.c;
+        for (let i = 0; i < evicted; i++) pushKept(prevRows[i]);
+        if (!keptNoteEl.textContent) keptNoteEl.textContent = KEPT_NOTE + "\n";
       }
-      flush();
-      html += "\n";
     }
-    term.innerHTML = html;
+    prevRows = rows;
+
+    // The live copy differs from the retained one by the cursor alone.
+    const live = rows.slice();
+    if (fr.cursor_visible && fr.cursor_row < fr.rows) {
+      live[fr.cursor_row] = renderRow(fr, fr.cursor_row, true);
+    }
+
+    applyFit(fr.cols); // before the write: the type size decides scrollHeight
+    liveEl.innerHTML = live.join("");
+    // Follow the tail unless the operator had scrolled up to read something.
+    if (pinned) screenEl.scrollTop = screenEl.scrollHeight;
   }
 
   function badgeClass(a) {

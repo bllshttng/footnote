@@ -627,6 +627,221 @@ mod tests {
         assert_eq!(v["_bridge"]["state"], "disconnected");
     }
 
+    /// The served page must stay pinch-zoomable (x-ce65). A pane grid is as wide
+    /// as its terminal, so on a phone zooming is the only way to read a grid
+    /// wider than the screen; `maximum-scale` / `user-scalable=no` take that away.
+    /// Anchored on the meta line itself, so a page that lost the tag entirely
+    /// fails here rather than passing on an absence.
+    #[test]
+    fn served_page_leaves_pinch_zoom_enabled() {
+        let meta = PAGE
+            .lines()
+            .find(|l| l.contains(r#"name="viewport""#))
+            .expect("the served page declares a viewport meta");
+        assert!(
+            meta.contains("width=device-width"),
+            "viewport still maps the layout to the device: {meta}"
+        );
+        assert!(
+            !meta.contains("maximum-scale"),
+            "maximum-scale disables pinch-zoom on iOS: {meta}"
+        );
+        assert!(
+            !meta.contains("user-scalable"),
+            "user-scalable=no disables pinch-zoom on iOS: {meta}"
+        );
+    }
+
+    /// Lift one top-level `function <name>(` body out of the served page.
+    /// Brace-balanced, which is exact for the page as written (no brace lives
+    /// inside a string or comment in the lifted functions) and is the ceiling:
+    /// a future `"{"` inside one of them would cut the slice short, and the
+    /// node run then fails loudly on a syntax error rather than passing.
+    fn lift_js_fn(name: &str) -> String {
+        let head = format!("function {name}(");
+        let start = PAGE
+            .find(&head)
+            .unwrap_or_else(|| panic!("the served page defines {name}()"));
+        let rest = &PAGE[start..];
+        let open = rest.find('{').expect("a function body opens");
+        let mut depth = 0usize;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return rest[..open + i + c.len_utf8()].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces lifting {name}()");
+    }
+
+    /// The retention diff (x-ce65) decides how many rows scrolled off between
+    /// two frames, and getting it wrong silently corrupts what the operator
+    /// reads as recent output. Exercise the SHIPPED source, not a Rust
+    /// re-implementation, by running the lifted function under node.
+    ///
+    /// node is preinstalled on the CI runners. Where it is absent the test
+    /// cannot assert anything, so it says so on stdout instead of passing
+    /// quietly - a skip that looks like a pass is the failure mode here.
+    #[test]
+    fn evicted_row_count_tracks_the_grid_shift() {
+        let asserts = r#"
+const eq = (got, want, what) => {
+  if (got !== want) { console.error(`FAIL ${what}: got ${got}, want ${want}`); process.exit(1); }
+};
+const g = (...rows) => rows;
+
+// --- proven scrolls: a non-negative row count ---
+// An unmoved grid evicts nothing, so redrawing one frame stays idempotent.
+eq(evictedRowCount(g("a","b","c"), g("a","b","c")), 0, "identical");
+// Scrolled up by one: the top row left, a new row arrived at the bottom.
+eq(evictedRowCount(g("a","b","c"), g("b","c","d")), 1, "shift by 1");
+eq(evictedRowCount(g("a","b","c","d"), g("c","d","e","f")), 2, "shift by 2");
+eq(evictedRowCount(g("a","b","c","d"), g("d","w","x","y")), 3, "shift by 3");
+// A blank screen staying blank is unmoved, never a screenful of evictions.
+eq(evictedRowCount(g("","",""), g("","","")), 0, "blank stays blank");
+// Repeated rows leave the shift ambiguous. The smallest fit wins, which is
+// the conservative read: an ambiguous shift retains fewer rows rather than
+// inventing evictions that never happened.
+eq(evictedRowCount(g("x","x","x","p"), g("x","x","p","q")), 1, "ambiguous shift takes the smallest fit");
+
+// --- edited in place: 0 rows evicted, and NO gap ---
+// A terminal edits rows in place constantly, and none of it is a scroll. These
+// are the cases that made an earlier version dump a duplicate of the visible
+// screen into the retained region on every single frame. Reading the last rows
+// as a pinned tail answers 0 here, which is stronger than "unprovable": nothing
+// scrolled off, so nothing is retained AND no gap is claimed.
+eq(evictedRowCount(g("hdr","body","* work"), g("hdr","body","- work")), 0, "spinner tick on the last row");
+eq(evictedRowCount(g("$ ls","a.txt","",""), g("$ ls","a.txt","$ ","")), 0, "prompt appears on an unfilled screen");
+
+// --- not provably a scroll: -1, and the caller must retain NOTHING ---
+// A live HEADER is not covered: only a pinned TAIL is looked past, because that
+// is where an agent pane puts its input box. Under-reporting, never a guess.
+eq(evictedRowCount(g("t=1","a","b"), g("t=2","b","c")), -1, "body scrolls under a live header");
+// A whole new screen shares nothing: a repaint, or output outrunning the
+// frame rate. Unprovable either way, so it is never treated as a shift.
+eq(evictedRowCount(g("a","b","c"), g("x","y","z")), -1, "no overlap");
+// Geometry changed under us. Note this is the SHRINK direction, which an
+// earlier version silently concatenated because it compared the shift against
+// the old row count rather than the new one.
+eq(evictedRowCount(g("a","b","c","d","e"), g("c","d","e")), -1, "terminal shrank");
+eq(evictedRowCount(g("a","b"), g("a","b","c")), -1, "terminal grew");
+eq(evictedRowCount(null, g("a","b","c")), -1, "no previous frame");
+
+// --- a pinned bottom region: the pane an operator actually opens this for ---
+// An agent pane keeps an input box or a footer line on its last rows. Requiring
+// the WHOLE grid to shift made retention permanently inert on every one of them,
+// and silently, because the note only appears once a row is retained.
+// A static footer, body scrolled by one.
+eq(evictedRowCount(g("a","b","c","foot"), g("b","c","d","foot")), 1, "static footer, body scrolls");
+// A LIVE footer, body scrolled by one: the tail differs too, so nothing about
+// the last row can be assumed, only that it is not part of the scrolling body.
+eq(evictedRowCount(g("a","b","c","spin |"), g("b","c","d","spin /")), 1, "live footer, body scrolls");
+// A live footer over a body that did NOT move evicts nothing. This is the
+// spinner case again, one row deeper, and it must not read as a scroll.
+eq(evictedRowCount(g("a","b","c","spin |"), g("a","b","c","spin /")), 0, "live footer, body still");
+// Two-row footer, body scrolled by two.
+eq(evictedRowCount(g("a","b","c","f1","f2"), g("c","d","e","f1","f2")), 2, "two-row footer");
+// The tail we look past is bounded, so a grid that is mostly footer is still
+// reported honestly rather than explained away by an ever-deeper tail.
+eq(evictedRowCount(g("a","b","c","d","e","f","g","h"), g("z","y","x","w","v","u","t","s")), -1, "unrelated beats any tail");
+console.log("evictedRowCount: 18 cases ok");
+"#;
+        let src = format!(
+            "{}\n{}\n{}\n{}",
+            // MAX_FIXED_TAIL is a const the lifted function closes over.
+            PAGE.lines()
+                .find(|l| l.contains("const MAX_FIXED_TAIL"))
+                .expect("the page bounds the fixed tail it looks past"),
+            lift_js_fn("scrollWithin"),
+            lift_js_fn("evictedRowCount"),
+            asserts
+        );
+        let path = std::env::temp_dir().join(format!("fno-evicted-{}.mjs", std::process::id()));
+        std::fs::write(&path, src).expect("temp dir writable");
+        let out = std::process::Command::new("node").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        match out {
+            Err(e) => {
+                // On CI a missing node means the assertions never ran, and a
+                // skip that reads as a pass is exactly the failure this guard
+                // exists to prevent. The runners ship node, so demand it there.
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "node is required on CI to exercise the shipped evictedRowCount: {e}"
+                );
+                println!(
+                    "SKIPPED evicted_row_count_tracks_the_grid_shift: node not runnable ({e}); \
+                     nothing was asserted"
+                );
+            }
+            Ok(o) => {
+                // The end-of-harness marker is the whole verdict, and it is
+                // strictly stronger than the exit code: node printing it means
+                // every case passed, and nothing else prints it. A failed case,
+                // a syntax error, and a node that somehow exits 0 without
+                // running all fail the same way, with both streams shown.
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                assert!(
+                    stdout.contains("evictedRowCount: 18 cases ok"),
+                    "the shipped evictedRowCount did not clear every case:\n{}{}",
+                    stdout,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+        }
+    }
+
+    /// The page must keep calling retention what it is (x-ce65). A protocol
+    /// history request is unreachable while `writer.forget()` stands, so the
+    /// visible label must not promise scrollback the wire never carries.
+    #[test]
+    fn served_page_does_not_advertise_scrollback_to_the_operator() {
+        let note = PAGE
+            .lines()
+            .find(|l| l.contains("const KEPT_NOTE ="))
+            .expect("the page names the retained region");
+        assert!(
+            note.contains("not terminal scrollback"),
+            "the retained region disclaims scrollback: {note}"
+        );
+    }
+
+    /// Fit-to-width is client-side only (x-ce65). The bridge attaches passive
+    /// with rows==0/cols==0 so it never shrinks a PTY, and `writer.forget()`
+    /// leaves no upstream handle. A page that learned to ask for a resize would
+    /// collapse every terminal user's pane to phone width.
+    ///
+    /// Anchored on the WIRE vocabulary and on sending, not on the bare word
+    /// "Resize". A bare match also banned `ResizeObserver`, which is a local DOM
+    /// API and the right way to refit when the screen box changes without a
+    /// window resize event - the guard would have refused it with a message
+    /// about PTY geometry it has nothing to do with.
+    #[test]
+    fn served_page_never_asks_for_a_resize() {
+        assert!(
+            PAGE.contains("new WebSocket("),
+            "the page still opens the read-only socket"
+        );
+        assert!(
+            !PAGE.contains(".send("),
+            "the page sends nothing upstream at all (Locked Decision 5)"
+        );
+        assert!(
+            !PAGE.contains(r#""Resize""#),
+            "the page never names the Resize message: a passive observer must not drive PTY geometry"
+        );
+        assert!(
+            !PAGE.contains("ClientMsg"),
+            "the page never builds an upstream message of any kind"
+        );
+    }
+
     #[test]
     fn bind_addr_brackets_ipv6_only() {
         assert_eq!(bind_addr("127.0.0.1", 8722), "127.0.0.1:8722");

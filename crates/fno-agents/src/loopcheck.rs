@@ -13584,12 +13584,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let git = git_stub(dir.path(), true, true);
         let pr = shipped_pr("23480a0e", PrState::Merged);
-        assert!(head_is_shipped(
-            &pr,
-            "fe407c3b",
-            git.to_str().unwrap(),
-            Path::new(".")
-        ));
+        // Retry the spawn, for the same measured reason probe_graphql_quota
+        // does: this suite forks hundreds of fake `git` subprocesses in
+        // parallel, and a loaded runner intermittently fails one fork/exec.
+        // This arm reaches git twice (`git_tree_clean` then `git_head_on_base`)
+        // and both fail CLOSED, so a blip in either reads as "not shipped" and
+        // reds a PR that changed nothing here. Observed doing exactly that.
+        //
+        // The retry cannot hide a regression: the stub answers clean and
+        // ancestor unconditionally, so the only way to get `false` is a failed
+        // spawn, and a real regression fails all five attempts.
+        //
+        // Its sibling `head_is_shipped_still_refuses_a_commit_stacked_on_a_
+        // merged_pr` asserts the NEGATIVE, so a blip there passes it for the
+        // wrong reason rather than failing. That is a quieter defect and is
+        // left alone here; it needs a positive control on the stub, not a retry.
+        let mut shipped = false;
+        for _ in 0..5 {
+            shipped = head_is_shipped(&pr, "fe407c3b", git.to_str().unwrap(), Path::new("."));
+            if shipped {
+                break;
+            }
+        }
+        assert!(
+            shipped,
+            "the stub git kept failing to spawn across 5 retries - a real regression, not a blip"
+        );
     }
 
     /// THE #447 REGRESSION TEST. A change that makes this case pass as shipped
