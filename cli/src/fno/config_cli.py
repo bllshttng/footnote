@@ -343,6 +343,25 @@ def _repo_root() -> Path:
     return Path.cwd()
 
 
+def _jsonable_container(node: object) -> object:
+    """Reduce records nested inside a container the way a leaf is reduced.
+
+    A block read (`fno config get agents.max_lanes`) returns a dict whose
+    VALUES can be models, and `json.dumps` renders one as its repr. A machine
+    consumer of `--json` then gets a string it cannot parse for exactly the
+    key that grew a record.
+    """
+    from pydantic import BaseModel
+
+    if isinstance(node, dict):
+        return {k: _jsonable_container(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_jsonable_container(v) for v in node]
+    if isinstance(node, BaseModel):
+        return node.model_dump(mode="json")
+    return node
+
+
 def _report_review_capability(json_out: bool = False) -> int:
     """`fno config doctor --review`: the diagnostic twin of the init refusal.
 
@@ -741,7 +760,9 @@ def get_cmd(
         # model_dump(mode="json") is the JSON-ready form in one step; scalars
         # and containers pass through unchanged.
         value: object = (
-            node.model_dump(mode="json") if isinstance(node, BaseModel) else node
+            node.model_dump(mode="json")
+            if isinstance(node, BaseModel)
+            else _jsonable_container(node)
         )
         typer.echo(
             json.dumps(

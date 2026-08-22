@@ -47,6 +47,15 @@ from fno.harness_identity import resolve_harness_identity
 # opt-in (AGENTS.md), so it resolves `unavailable` rather than being assumed.
 _SUBAGENT_DISPATCH_HARNESSES = frozenset({"claude", "codex"})
 
+#: How many subagents the panel dispatches, from the table in
+#: `skills/review/references/sigma.md`. Compared against a provider's subagent
+#: budget, because a budget of 3 is not permission to run a six-wide panel: the
+#: account is spent on what the panel dispatches, not on whether it dispatches
+#: more than one. A narrower panel is not a legal substitute either, since a
+#: fan-out that only reads half the dimensions is a coverage lie wearing the
+#: panel's name.
+_PANEL_WIDTH = 6
+
 Status = Literal["satisfiable", "needs-operator", "unavailable", "unverifiable"]
 
 # The allowlist half of the fail-closed default; see `blocks_autonomy`.
@@ -407,12 +416,13 @@ def _resolve_one(
         # is that this account cannot afford it. Reversing the order would
         # answer "yes, satisfiable" on exactly the sessions this exists for.
         budget = provider_subagent_budget(session.provider)
-        if budget is not None and budget < 2:
+        if budget is not None and budget < _PANEL_WIDTH:
             return verdict(
                 "unavailable",
                 f"needs subagent-dispatch; provider {session.provider} has a "
-                f"subagent budget of {budget} (shared quota), so the panel is "
-                f"not dispatched here - resolves to {_BUDGET_SUBSTITUTE}",
+                f"subagent budget of {budget} (shared quota) and the panel "
+                f"dispatches {_PANEL_WIDTH}, so it is not dispatched here - "
+                f"resolves to {_BUDGET_SUBSTITUTE}",
             )
         if session.harness in _SUBAGENT_DISPATCH_HARNESSES:
             return verdict("satisfiable", f"run `{descriptor.invocation}`")
@@ -447,7 +457,11 @@ _BUDGET_SUBSTITUTE = "code-review"
 _BUDGET_MARKER = "subagent budget of "
 
 
-def _apply_budget_substitution(v: ReviewerVerdict) -> ReviewerVerdict:
+def _apply_budget_substitution(
+    v: ReviewerVerdict,
+    session: SessionCapability,
+    known: Mapping[str, ReviewerDescriptor],
+) -> ReviewerVerdict:
     """Record the downgrade on a verdict the PROVIDER BUDGET made unavailable.
 
     The budget is the only cause that substitutes. A reviewer unavailable
@@ -462,6 +476,23 @@ def _apply_budget_substitution(v: ReviewerVerdict) -> ReviewerVerdict:
     """
     if v.status != "unavailable" or _BUDGET_MARKER not in v.reason:
         return v
+    substitute = known.get(_BUDGET_SUBSTITUTE)
+    if substitute is None:
+        return v
+    resolved = _resolve_one(_BUDGET_SUBSTITUTE, substitute, session)
+    if resolved.blocks_autonomy:
+        # The substitute cannot run here either, so recording it would trade a
+        # refusal at init for a wedge at the stop gate with no reviewer that
+        # can attest. A gemini session under a budget is exactly that shape:
+        # neither the panel nor the self-review verb exists there. Keep the
+        # refusal and say what BOTH routes are missing.
+        return replace(
+            v,
+            reason=(
+                f"{v.reason}, which cannot run here either "
+                f"({resolved.reason})"
+            ),
+        )
     return replace(v, resolves_to=_BUDGET_SUBSTITUTE)
 
 
@@ -497,7 +528,11 @@ def resolve_reviewers(
                 )
             )
             continue
-        out.append(_apply_budget_substitution(_resolve_one(name, descriptor, sess)))
+        out.append(
+            _apply_budget_substitution(
+                _resolve_one(name, descriptor, sess), sess, known
+            )
+        )
     return out
 
 

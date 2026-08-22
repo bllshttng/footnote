@@ -376,7 +376,13 @@ def test_an_explicit_account_composes_with_a_restored_route(
         )
     assert exc.value.exit_code == 99, "the pair must reach the launch, not be refused"
     assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/cfg"}, "account survives"
-    assert seen["route_env"] == ROUTE_ENV, "and the restored route rides with it"
+    # The restored route reaches the launch carrying its provider stamp: the
+    # relaunch re-binds the provider, and that binding is what a running worker
+    # reads to name its own account (x-c703).
+    assert seen["route_env"] == {
+        **ROUTE_ENV,
+        "FNO_ROUTE_PROVIDER": "zai",
+    }, "and the restored route rides with it"
 
 
 def test_a_legacy_routed_row_without_provider_refuses_relaunch(

@@ -170,6 +170,22 @@ class BusinessRoleRoutingProjectionError(RouteCompositionError):
 ROUTE_PROVIDER_ENV = "FNO_ROUTE_PROVIDER"
 
 
+def inherited_route_stamp(env: "Optional[Mapping[str, str]]" = None) -> str:
+    """A route stamp this process carries and a child must not simply inherit.
+
+    A spawned child gets its parent's environment. The stamp names WHOSE QUOTA
+    a session spends, so an inherited one labels the child with an account it
+    may not be billing - and hands it that account's subagent budget for a
+    review its own account can afford. Every seam that births a worker clears
+    it, and a composed route re-supplies it, which is the set-or-clear rule the
+    identity markers already follow.
+    """
+    import os as _os
+
+    source = _os.environ if env is None else env
+    return (source.get(ROUTE_PROVIDER_ENV) or "").strip()
+
+
 class BoundRouteEnv(dict[str, str]):
     """A validated route environment carrying its model-provider identity.
 
@@ -1087,7 +1103,12 @@ def read_route_settings(path: str) -> dict[str, str]:
     if not isinstance(env, dict):
         raise RouteRestoreError(f"route settings file {path} has no env mapping")
     route = {str(k): str(v) for k, v in env.items() if str(v) != ""}
-    if not route:
+    # The stamp NAMES a route; it never IS one. Counting it toward "this file
+    # records a route" would let a file holding the scrub floor plus a provider
+    # name pass this refusal and relaunch a worker with no endpoint, no auth
+    # and no model, on the default Anthropic account - the silent wrong-bill
+    # outcome this refusal exists to prevent.
+    if not {k: v for k, v in route.items() if k != ROUTE_PROVIDER_ENV}:
         # The row claims this worker was routed, and the file is readable but
         # carries only the scrub floor. Returning {} would read as "never routed"
         # to the caller and relaunch on the default account without a word - the
@@ -1110,6 +1131,9 @@ class CodexRoute(NamedTuple):
     ``model_provider=<name>`` + ``model=<model>``), with the API key supplied in
     the ``env_key`` env var the config names. ``env`` is merged into the codex
     spawn env; ``config_args`` is prepended to the codex argv as global flags.
+
+    ``env`` also carries :data:`ROUTE_PROVIDER_ENV`, so a codex worker can name
+    its own model provider exactly as a claude-lane worker can.
     """
 
     env: dict[str, str]
@@ -1243,7 +1267,13 @@ def resolve_codex_route(
         "-c",
         f"model={lits['model']}",
     ]
-    return CodexRoute(env={api_key_env: key}, config_args=config_args)
+    # The same stamp the claude lane writes. Without it a routed codex worker
+    # resolves provider "unknown" and ignores its account's subagent budget, so
+    # a shared provider reached through codex still launches the full panel.
+    return CodexRoute(
+        env={api_key_env: key, ROUTE_PROVIDER_ENV: pname},
+        config_args=config_args,
+    )
 
 
 def _routing_block(settings: "Optional[SettingsModel]") -> "ModelRoutingBlock":

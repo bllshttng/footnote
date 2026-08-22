@@ -387,6 +387,16 @@ def whoami_command(
         if foreign_identity is not None:
             payload["inherited_identity_env"] = foreign_identity
         payload["model"] = _session_model()
+        # Beside the model, because the two answer the same shape of question
+        # about this session. sigma.md's step 0 tells an agent to read the
+        # route before it dispatches, and an agent reading the JSON surface
+        # read nothing and dispatched the panel.
+        provider = (os.environ.get("FNO_ROUTE_PROVIDER") or "").strip()
+        if provider:
+            payload["route_provider"] = provider
+            from fno.config import provider_subagent_budget
+
+            payload["subagent_budget"] = provider_subagent_budget(provider)
         if crown is not None:
             payload["crown"] = crown["text"]
         if context_reading is not None:

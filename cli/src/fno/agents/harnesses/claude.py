@@ -443,8 +443,16 @@ def headless_create(
     )
 
     _incoherent = incoherent_model_env()
-    if account_env or route_env or _incoherent:
+    # A stamp with no route behind it is the same class of stale inherited
+    # marker as an incoherent model env, and it earns an env for the same
+    # reason: leaving it makes the child report a provider it is not billing.
+    from fno.agents.model_routing import ROUTE_PROVIDER_ENV, inherited_route_stamp
+
+    _stale_stamp = bool(inherited_route_stamp()) and not route_env
+    if account_env or route_env or _incoherent or _stale_stamp:
         spawn_env = dict(os.environ)
+        if _stale_stamp:
+            spawn_env.pop(ROUTE_PROVIDER_ENV, None)
         # Strip before the overlay below so a real route still wins.
         scrub_incoherent_model_env_and_notify(
             spawn_env,
@@ -623,6 +631,12 @@ def bg_create(
         spawn_env,
         routed=overlay_restores_model_env(account_env, route_env),
     )
+    if not route_env:
+        # Set-or-clear: an unrouted child must not wear its parent's provider.
+        # A route re-supplies the stamp through compose_worker_credentials below.
+        from fno.agents.model_routing import ROUTE_PROVIDER_ENV
+
+        spawn_env.pop(ROUTE_PROVIDER_ENV, None)
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_HARNESS"] = "claude"
     # Raise the harness Stop-hook block cap so fno's repeated-block loop is not

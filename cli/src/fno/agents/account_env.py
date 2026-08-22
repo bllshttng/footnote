@@ -72,6 +72,13 @@ SCRUB_AUTH_VARS = (
     "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
+    # Not a credential, and here anyway: the stamp NAMES the route, so it has
+    # to be cleared by whatever clears the route. A child spawned onto a pinned
+    # account inherits its parent's environment, and without this it would
+    # report the parent's provider while billing its own - and be handed that
+    # provider's subagent budget for a review its own account can afford
+    # (x-c703). Set-or-clear, never inherit.
+    "FNO_ROUTE_PROVIDER",
     # Reused, not restated: the routed-model set is the same set a route
     # composes, so a new Claude tier lands in both at once.
     *MODEL_ENV_KEYS,

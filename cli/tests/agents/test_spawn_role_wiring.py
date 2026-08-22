@@ -38,6 +38,19 @@ def _route_unit(model: str = "glm-5.2") -> dict[str, str]:
     }
 
 
+def _stamped(route: dict[str, str], provider: str = "zai") -> dict[str, str]:
+    """The route as it reaches the spawn, carrying its provider stamp.
+
+    `bind_route_provider` writes `FNO_ROUTE_PROVIDER` into the route env so the
+    provider resolution survives the fork (x-c703). The env a spawn receives is
+    therefore the resolved route PLUS that key, and asserting the bare route
+    would pass on a build that dropped the stamp.
+    """
+    from fno.agents.model_routing import ROUTE_PROVIDER_ENV
+
+    return {**route, ROUTE_PROVIDER_ENV: provider}
+
+
 def _resolved_zai(route: dict[str, str]):
     def resolve(*_args: Any, **kwargs: Any) -> dict[str, str]:
         callback = kwargs.get("resolved_provider")
@@ -83,7 +96,7 @@ def test_dispatch_spawn_threads_captured_role_route_to_create_path(
     )
     assert result.kind == "created"
     assert captured["role"] is None
-    assert captured["route_env"] == route
+    assert captured["route_env"] == _stamped(route)
 
 
 def test_dispatch_spawn_defaults_role_to_none(
@@ -148,7 +161,7 @@ def test_direct_dispatch_spawn_composes_managed_role_route(
         provider_gate=_zai_admission(monkeypatch, "direct-route"),
     )
     assert result.kind == "created"
-    assert captured["route_env"] == route
+    assert captured["route_env"] == _stamped(route)
 
 
 def test_direct_pane_spawn_composes_managed_route_before_mux(
@@ -546,7 +559,7 @@ def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
             model="opus",
             provider_gate=_zai_admission(monkeypatch, "snapshot-worker"),
         )
-        assert captured["route_env"] == route
+        assert captured["route_env"] == _stamped(route)
         assert captured["role"] is None
     else:
         calls: list[list[str]] = []
@@ -706,7 +719,7 @@ def test_cmd_spawn_resolves_role_route_once_before_substrate_fanout(
 
     assert result.exit_code == 0, result.output
     assert resolutions == ["tidy"]
-    assert received["route_env"] == route
+    assert received["route_env"] == _stamped(route)
     assert received["route_provider"] == "zai"
     assert gate_calls == [{
         "force": False,
@@ -793,4 +806,4 @@ def test_cmd_spawn_composes_role_route_over_managed_oauth_overlay(
     assert result.exit_code == 0, result.output
     assert len(gate_calls) == 1
     assert len(spawn_calls) == 1
-    assert spawn_calls[0]["route_env"] == route
+    assert spawn_calls[0]["route_env"] == _stamped(route)

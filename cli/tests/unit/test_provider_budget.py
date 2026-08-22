@@ -15,6 +15,7 @@ from fno.agents.model_routing import ROUTE_PROVIDER_ENV, bind_route_provider
 from fno.agents.spawn_gate import provider_lanes_cap
 from fno.config import AgentsBlock, ProviderBudget, provider_subagent_budget
 from fno.review_capability import (
+    _PANEL_WIDTH,
     ReviewerVerdict,
     SessionCapability,
     detect_session,
@@ -159,11 +160,37 @@ def test_a_provider_with_no_budget_keeps_the_panel():
     assert verdict.resolves_to is None
 
 
-def test_a_budget_of_two_or_more_keeps_the_panel(monkeypatch):
+def test_a_budget_that_covers_the_panel_keeps_it(monkeypatch):
     monkeypatch.setattr(
-        "fno.review_capability.provider_subagent_budget", lambda _p: 6
+        "fno.review_capability.provider_subagent_budget", lambda _p: _PANEL_WIDTH
     )
     assert _sigma(_session(provider="zai")).status == "satisfiable"
+
+
+@pytest.mark.parametrize("budget", [2, 3, 5])
+def test_a_budget_below_the_panel_width_still_refuses(monkeypatch, budget):
+    # A budget of 3 is not permission to run a six-wide panel. Treating every
+    # value above 1 as unlimited would let an operator's declared quota be
+    # exceeded by the panel it was written to bound.
+    monkeypatch.setattr(
+        "fno.review_capability.provider_subagent_budget", lambda _p: budget
+    )
+    verdict = _sigma(_session(provider="zai"))
+    assert verdict.status == "unavailable"
+    assert f"subagent budget of {budget}" in verdict.reason
+    assert f"panel dispatches {_PANEL_WIDTH}" in verdict.reason
+
+
+def test_the_substitute_must_be_runnable_before_it_clears_the_block():
+    # A gemini session under a budget can run neither the panel nor the
+    # self-review verb. Recording the substitute there would trade a two-second
+    # init refusal for a stop-gate wedge with no reviewer that can attest.
+    verdict = _sigma(_session(harness="gemini", provider="zai"))
+    assert verdict.resolves_to is None
+    assert verdict.blocks_autonomy is True
+    assert "subagent budget of 1" in verdict.reason
+    assert "cannot run here either" in verdict.reason
+    assert "no code-review verb for" in verdict.reason
 
 
 def test_a_non_budget_refusal_never_substitutes():
@@ -180,5 +207,57 @@ def test_a_non_budget_refusal_never_substitutes():
 def test_the_budget_is_checked_before_the_harness():
     # Reversing the order answers the harness question on exactly the sessions
     # this exists for, and a budgeted claude worker resolves satisfiable again.
-    verdict = _sigma(_session(harness="gemini", provider="zai"))
+    verdict = _sigma(_session(harness="codex", provider="zai"))
     assert "subagent budget of 1" in verdict.reason
+    assert verdict.resolves_to == "code-review"
+
+
+# --- the stamp is set or cleared, never inherited ---------------------------
+
+
+def test_the_stamp_is_cleared_by_whatever_clears_a_route():
+    # A child spawned onto a pinned account must not report its parent's
+    # provider: it would be handed that account's budget while billing its own.
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+
+    assert ROUTE_PROVIDER_ENV in SCRUB_AUTH_VARS
+
+
+def test_a_codex_route_carries_the_same_stamp():
+    # Without it a routed codex worker resolves "unknown" and a shared provider
+    # reached through codex still launches the full panel.
+    import inspect
+
+    from fno.agents import model_routing
+
+    source = inspect.getsource(model_routing.resolve_codex_route)
+    assert "ROUTE_PROVIDER_ENV" in source
+
+
+def test_a_stamp_alone_does_not_count_as_a_recorded_route(tmp_path):
+    # A settings file holding the scrub floor plus a provider name records no
+    # route, and relaunching from it would bill the default account in silence.
+    import json
+
+    from fno.agents.model_routing import RouteRestoreError, read_route_settings
+
+    path = tmp_path / "route.json"
+    path.write_text(
+        json.dumps({"env": {"ANTHROPIC_API_KEY": "", ROUTE_PROVIDER_ENV: "zai"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(RouteRestoreError, match="records no route"):
+        read_route_settings(str(path))
+
+
+# --- the lane cap survived the widening -------------------------------------
+
+
+def test_the_lanes_view_reads_the_record_not_the_object():
+    # `cap` reached a `{:>3}` cell and a json.dumps; rendering the record there
+    # raised instead of printing a number.
+    from fno.scoreboard.fold import _lane_cap
+
+    assert _lane_cap({"zai": ProviderBudget(lanes=5, subagents=1)}, "zai") == 5
+    assert _lane_cap({"zai": 5}, "zai") == 5
+    assert _lane_cap({}, "zai") is None
