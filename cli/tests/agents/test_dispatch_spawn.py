@@ -169,7 +169,9 @@ def test_spawn_once_codex_normalizes_direct_plugin_command(
     )
 
     assert result.exit_code == 0, result.output
-    assert fake_codex_create_once.call_args.kwargs["prompt"] == "$fno:target x-81ad"
+    prompt = fake_codex_create_once.call_args.kwargs["prompt"]
+    assert prompt.startswith("$fno:target x-81ad\n\n")
+    assert prompt.count("<fno_relay_compression>") == 1
 
 
 # ---------------------------------------------------------------------------

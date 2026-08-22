@@ -28,6 +28,7 @@ A	/code-review <level> --comment	py=cli/src/fno/config/__init__.py;rs=crates/fno
 A	/scripts/ci/preflight.sh	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# data
 A	/var/lib/dbus/machine-id	py=cli/src/fno/claims/hostid.py;rs=crates/fno-agents/src/claims.rs|crates/fno/src/agents_view.rs	# data
 A	</cross-session-message>	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
+A	</fno_relay_compression>	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# protocol: schemas/spawn-brevity.json plus Python and Rust parity tests pin both runtime carriers
 A	[self-cert: asserts no review evidence]	py=cli/src/fno/target/orient.py;rs=crates/fno-agents/src/loopcheck.rs	# msg-twin
 A	^backgrounded · ([0-9a-f]{8}) ·	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
 A	a model vendor is only routable at spawn	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# msg-twin
@@ -88,6 +89,7 @@ A	the child falls back to its account's own default.	py=cli/src/fno/agents/model
 A	the child receives that route's own model instead.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# msg-twin
 A	truth-live-inject-failed	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
 A	{fno_mail_trailer}</fno_mail>	py=cli/src/fno/mail/cli.py;rs=crates/fno-agents/src/mail_inject.rs	# protocol
+A	{brevity_marker}{brevity_instruction}{brevity_end_marker}	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# protocol: schemas/spawn-brevity.json plus Python and Rust parity tests pin both runtime carriers
 A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 R	provider-resolution:cli/src/fno/agents/spawn_gate.py::provider_live_count	# both raw row.provider reads live here; no resolver exists yet
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# the epic surface reads stored status; the overlay routing lands with its fix

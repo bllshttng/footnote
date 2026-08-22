@@ -8324,6 +8324,7 @@ enum NeedsOverlayRow {
 }
 
 impl NeedsOverlayRow {
+    #[cfg(test)]
     fn label(&self) -> &str {
         match self {
             Self::Mine(item) => &item.text,
