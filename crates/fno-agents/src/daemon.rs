@@ -4894,6 +4894,8 @@ fn attention_sort_key(row: &Value) -> (u8, std::cmp::Reverse<u64>, String) {
 /// `agent.list`, with the truth probe injected as a BATCH seam: one call for
 /// the whole filtered page, keyed by handle. The per-row seam it replaced spent
 /// one Python interpreter cold start per row per list.
+const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "provider"];
+
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
     F: Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
@@ -5298,7 +5300,11 @@ where
     });
     Response::ok(
         req.id,
-        json!({"agents": entries, "filters_applied": filters_applied}),
+        json!({
+            "agents": entries,
+            "filters_applied": filters_applied,
+            "fields_omitted": LIST_PROJECTION_OMISSIONS,
+        }),
     )
 }
 
@@ -12386,6 +12392,11 @@ done
             "/../../schemas/agents-list-row.json"
         ));
         let contract: Value = serde_json::from_str(CONTRACT).expect("contract is valid JSON");
+        assert_eq!(
+            contract["projection_omissions"],
+            json!(["model", "provider"]),
+            "projection omissions must stay canonical and sorted"
+        );
         let mut expected: std::collections::BTreeSet<String> = contract["required"]
             .as_array()
             .expect("required is an array")
@@ -12431,6 +12442,10 @@ done
         let actual: std::collections::BTreeSet<String> =
             row.as_object().unwrap().keys().cloned().collect();
         assert_eq!(actual, expected, "list row key set drifted from contract");
+        assert_eq!(
+            result["fields_omitted"], contract["projection_omissions"],
+            "list envelope omissions drifted from contract"
+        );
 
         // Presence in the key set is not the bug being guarded: a key that is
         // always null is the same lie in a different shape. Assert the values
@@ -12441,6 +12456,7 @@ done
         // everywhere: the field would then be present or absent depending on
         // which reader answered.
         assert!(row.get("provider").is_none());
+        assert!(row.get("model").is_none());
         assert_eq!(
             row["harness_session_id"],
             "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"

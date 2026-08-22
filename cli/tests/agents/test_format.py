@@ -136,6 +136,8 @@ def test_render_json_for_populated_registry() -> None:
     assert parsed["count"] == 2
     assert parsed["schema_version"] == JSON_SCHEMA_VERSION
     assert parsed["filters_applied"] == filters
+    assert _contract()["projection_omissions"] == ["model", "provider"]
+    assert parsed["fields_omitted"] == _contract()["projection_omissions"]
     assert len(parsed["agents"]) == 2
 
 
@@ -147,6 +149,8 @@ def test_render_json_for_empty_registry() -> None:
     assert parsed["agents"] == []
     assert parsed["count"] == 0
     assert parsed["schema_version"] == JSON_SCHEMA_VERSION
+    assert _contract()["projection_omissions"] == ["model", "provider"]
+    assert parsed["fields_omitted"] == _contract()["projection_omissions"]
 
 
 def test_render_json_is_round_trip_parseable() -> None:
@@ -421,9 +425,12 @@ def test_serialize_entry_emits_no_key_that_names_a_vendor(_unused=None) -> None:
     `observed_model` would hand a reader two answers and no way to rank them.
     """
     row = serialize_entry(_claude_entry(), live_status=None)
+    payload = json.loads(render_json([row], filters_applied={}))
 
     assert "provider" not in row
+    assert "model" not in row
     assert row["harness"] == "claude"
+    assert payload["fields_omitted"] == ["model", "provider"]
 
 
 # ---------------------------------------------------------------------------

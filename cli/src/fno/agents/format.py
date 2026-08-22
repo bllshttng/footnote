@@ -29,6 +29,7 @@ JSON_SCHEMA_VERSION = 2
 # Basis values that are falsifiers rather than evidence: a positive
 # measurement that the worker is gone, which no other reading outranks.
 _FALSIFIER_BASES = {"process-gone", "pane-gone"}
+_PROJECTION_OMISSIONS = ("model", "provider")
 
 
 def attention_rank(row: dict) -> int:
@@ -281,6 +282,7 @@ def render_json(
         "discovered_sessions": discovered,
         "discovered_count": len(discovered),
         "filters_applied": filters_applied,
+        "fields_omitted": _PROJECTION_OMISSIONS,
         "schema_version": JSON_SCHEMA_VERSION,
     }
     return _json.dumps(payload, indent=2, sort_keys=False)
