@@ -4402,7 +4402,14 @@ fn control_roundtrip(
 /// manifest engine over it, so it is a couple of subprocess hops, not a network
 /// call; a renderer that has not answered by now is wedged, and a wedged
 /// renderer must fail the send rather than release a bare paste.
-const PANE_PREPARE_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// Strictly GREATER than the child's own worst case, which is what makes the
+/// diagnostic honest. The nested pane read is bounded at 30s
+/// (`_MUX_SUBPROCESS_TIMEOUT_S`) and manifest-eval adds 2s, plus interpreter
+/// startup. At exactly 30s this side killed the child first and reported a
+/// wedged renderer for a slow pane, sending the reader to the wrong component.
+/// The child hits its own bound first now and says which hop was slow.
+const PANE_PREPARE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Gate and envelope `bytes` for `session:pane` by shelling to the Python
 /// renderer (`fno mail pane-prepare`), the SOLE `<fno_mail>` renderer.

@@ -136,4 +136,24 @@ except Exception as exc:
 check "the envelope survives the strip" "1" \
     "$(printf '%s' "$out" | grep -c '</fno_mail>' || true)"
 
+# 8. a codex-shaped payload (valid JSON, no `.source`) DOES emit. `.source` is a
+#    claude field and codex routes compaction to PostCompact, a separate event
+#    this hook is not registered for, so a codex SessionStart is a real start.
+#    Requiring the literal "startup" silenced the sidecar on the one harness
+#    whose head-8 is a clock bucket rather than random bits.
+out="$(printf '{"cwd":"/w"}' \
+    | env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" FNO_BIN="$FNO_BIN" "${seed_env[@]}" \
+      bash "$HOOK" 2>/dev/null)"
+check "a payload with no source field still emits" "1" \
+    "$(printf '%s' "$out" | grep -c '</fno_mail>' || true)"
+
+# 9. and an UNPARSEABLE payload still does not. The two absences differ: one
+#    harness does not report the field, the other input cannot be read at all,
+#    and only the second leaves the hook unable to tell a start from a compact.
+out="$(printf 'not json at all' \
+    | env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" FNO_BIN="$FNO_BIN" "${seed_env[@]}" \
+      bash "$HOOK" 2>/dev/null)"
+check "an unparseable payload emits no envelope" "" \
+    "$(printf '%s' "$out" | grep -o '</fno_mail>' || true)"
+
 exit "$fail"

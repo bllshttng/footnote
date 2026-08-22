@@ -32,8 +32,22 @@ if ! command -v jq >/dev/null 2>&1; then
     echo '{}'
     exit 0
 fi
+# Two different absences, and only one of them is safe to treat as a start.
+# Unparseable input means the hook cannot tell a startup from a compaction, and
+# guessing wrong duplicates the envelope on every compaction for the rest of the
+# session, so that one fails closed.
+if ! printf '%s' "$HOOK_INPUT" | jq -e . >/dev/null 2>&1; then
+    echo '{}'
+    exit 0
+fi
+# A payload that PARSES and carries no `.source` is the codex shape: `.source`
+# is a claude field, and codex routes compaction to PostCompact, a separate
+# event this hook is not registered for. So a codex SessionStart is always a
+# real start. Requiring the literal "startup" silenced the sidecar on the one
+# harness whose head-8 is a clock bucket, which is the collision that made a
+# full reply address necessary in the first place.
 SOURCE="$(printf '%s' "$HOOK_INPUT" | jq -r '.source // empty' 2>/dev/null || true)"
-if [[ "$SOURCE" != "startup" ]]; then
+if [[ -n "$SOURCE" && "$SOURCE" != "startup" ]]; then
     echo '{}'
     exit 0
 fi

@@ -731,8 +731,36 @@ def _reply_to_name_handle(
                 file=sys.stderr,
             )
             reachable, ambiguous = None, []
+        if sender_session and not ambiguous:
+            # An explicitly named session is an ADDRESS, not a tie-breaker. It
+            # was read only inside the ambiguous branch below, so a sibling
+            # exiting between the refused reply and the retry made the handle
+            # resolve uniquely, and the flag was dropped without a word: the
+            # reply then went to whichever session survived, which is not
+            # necessarily the one the operator named. Honor it, and refuse on a
+            # disagreement rather than picking one of the two silently.
+            from fno.harness_identity import session_identity_key
+
+            resolved_id = getattr(reachable, "session_id", None)
+            if resolved_id and session_identity_key(resolved_id) != session_identity_key(
+                sender_session
+            ):
+                raise typer.BadParameter(
+                    f"--sender-session {sender_session!r} does not name the "
+                    f"session {target!r} now resolves to ({resolved_id}). "
+                    f"Nothing was sent."
+                )
+            _name_lane_send(
+                body_text,
+                from_name=from_project,
+                resolved=None,
+                token=sender_session,
+                reply_to=to_msg,
+                style_exception=style_exception,
+            )
+            return
         if ambiguous:
-            # The collision escape hatch (node x-3a64, absorbing x-05ae). A
+            # The collision escape hatch. A
             # threaded reply that cannot be sent is worse than an unthreaded
             # one, and before this the verb offered no disambiguator at all:
             # the only route left was `send <name>`, which discards the thread.
@@ -1726,13 +1754,21 @@ def _forced_pane_send(
     # than the ladder does, because it is reached after the ladder missed, which
     # is exactly the shape a dead recipient makes. --force overrides the
     # transport, never the fact that nobody is there.
-    if getattr(entry, "status", None) != "live":
+    # NOT-TERMINAL, never `== "live"`. `live` is one of six non-terminal
+    # statuses: `dispatch_spawn_pane` writes `spawning` until the SessionStart
+    # restamp and `register_agent` defaults to `idle`, so an equality test
+    # refused a pane that was alive and told the sender its id might belong to
+    # somebody else. `TERMINAL_STATUSES` is shared for exactly this reason, and
+    # a hand-rolled copy of the vocabulary is the drift its comment warns about.
+    from fno.agents.registry import TERMINAL_STATUSES
+
+    status = getattr(entry, "status", None)
+    if status in TERMINAL_STATUSES:
         _release_budget(reservation)
         print(
             f"error: --force types at a live prompt and {recipient} is "
-            f"{getattr(entry, 'status', None) or 'unknown'}. Its pane id may "
-            f"already belong to another session. Send without --force to reach "
-            f"the durable bus.",
+            f"{status}. Its pane id may already belong to another session. "
+            f"Send without --force to reach the durable bus.",
             file=sys.stderr,
         )
         raise typer.Exit(code=1)
@@ -1748,9 +1784,16 @@ def _forced_pane_send(
 
     if not _mux_pane_send(entry, wrapped, guarded=False):
         _release_budget(reservation)
+        # NOT "nothing was sent". One bool covers two worlds here: a refusal
+        # before any bytes moved, and a paste that landed whose submit key then
+        # failed, which leaves the envelope sitting in the recipient's composer.
+        # No outbox row exists either way, so a sender told "nothing was sent"
+        # retries and pastes it twice. The raw lane already says this honestly.
         print(
-            f"error: --force could not type into pane {pane_id}; nothing was "
-            f"sent and no row claims otherwise. The refusal is on stderr above.",
+            f"error: --force did not confirm a send into pane {pane_id}, and no "
+            f"row claims otherwise. The payload may still be sitting unsent in "
+            f"the recipient's composer, so check the pane before retrying. The "
+            f"refusal is on stderr above.",
             file=sys.stderr,
         )
         raise typer.Exit(code=1)
@@ -3355,6 +3398,13 @@ def cmd_send(
         message = name
         name = canonical_handle(ident.session_id)
 
+    # The codex head-8 refusal belongs up here for the same reason the --force
+    # guard below does: it sat under the --raw, --to-project, --kind and
+    # job-address returns, so `send 01a025f8 '/verb' --raw` still fired a verb at
+    # whichever colliding session discovery happened to list. An address rule
+    # that only covers the lanes reached last is not an address rule.
+    _refuse_unsafe_short_address(name)
+
     # --force ABOVE every lane that returns without reading it. Four lanes below
     # end the command on their own, so a guard placed after any of them leaves
     # the flag silently dropped there -- which is the defect this guard exists to
@@ -3768,10 +3818,6 @@ def cmd_send(
         )
         raise typer.Exit(code=2)
 
-    # A codex head-8 is refused before anything is composed or written: it is a
-    # clock bucket, not an address (node x-3a64).
-    _refuse_unsafe_short_address(name)
-
     _refuse_forged_envelope(message)
     _enforce_body_cap(message)
     _enforce_style(message, allow_reason=style_exception)
@@ -4040,6 +4086,7 @@ def cmd_sent(
     prints is what that line is counting, never a differently-scoped set.
     """
     from fno.agents.self_stamp import stamp_from
+    from fno.bus.log import HOSTED_DELIVERY, TYPED_DELIVERY
     from fno.config import load_settings
 
     # `stamp_from`, not the precedence-only resolver: this must be the SAME
@@ -4075,7 +4122,7 @@ def cmd_sent(
         # prompt can be discarded by that prompt. Neither renderer below may
         # infer it, so the ambiguity is resolved HERE, once, rather than in each.
         claimed_flag = {
-            m.id: (m.delivery != "typed" and m.id not in unclaimed_ids)
+            m.id: (m.delivery != TYPED_DELIVERY and m.id not in unclaimed_ids)
             for m in msgs
         }
 
@@ -4101,13 +4148,13 @@ def cmd_sent(
         return
     for m in msgs:
         state = (
-            "delivered" if m.delivery == "hosted"
+            "delivered" if m.delivery == HOSTED_DELIVERY
             # `typed` gets its own word. It is excluded from the unclaimed scan
             # like a hosted row, so it fell through to "claimed" here and told
             # the sender the recipient had consumed it. That is the one claim
             # this transport must never make: bytes written into a PTY can be
             # discarded by the prompt they land on.
-            else "typed (unconfirmed)" if m.delivery == "typed"
+            else "typed (unconfirmed)" if m.delivery == TYPED_DELIVERY
             else "claimed" if claimed_flag[m.id]
             else "UNCLAIMED"
         )
@@ -4142,6 +4189,8 @@ def cmd_withdraw(
     """
     from fno.bus.cursor import read_cursor
     from fno.bus.log import (
+        HOSTED_DELIVERY,
+        TYPED_DELIVERY,
         WITHDRAW_KIND,
         Envelope,
         append,
@@ -4176,13 +4225,13 @@ def cmd_withdraw(
     if msg_id in withdrawn_ids(all_msgs):
         print(f"{msg_id} is already withdrawn")
         raise typer.Exit(code=0)
-    if target.delivery == "hosted":
+    if target.delivery == HOSTED_DELIVERY:
         print(
             f"{msg_id} was already delivered (hosted); it cannot be withdrawn",
             file=sys.stderr,
         )
         raise typer.Exit(code=1)
-    if target.delivery == "typed":
+    if target.delivery == TYPED_DELIVERY:
         # A typed row is not a durable message with a tombstone to write, it is
         # bytes already sitting at somebody's prompt. Withdrawing it wrote the
         # tombstone and printed success while retracting nothing, which is the
@@ -4274,9 +4323,19 @@ def cmd_bus_ack(
         )
         raise typer.Exit(code=2)
     if not is_deliverable(target):
+        # Name the delivery this row actually carries. `is_deliverable` excludes
+        # `typed` alongside `hosted`, so a forced pane message reported itself as
+        # "delivered (hosted)" here, which is the one claim the pane transport
+        # must never make: bytes at a prompt can be discarded by that prompt.
+        from fno.bus.log import TYPED_DELIVERY
+
+        how = (
+            "typed into a pane (delivery unconfirmed)"
+            if target.delivery == TYPED_DELIVERY
+            else "already delivered (hosted)"
+        )
         print(
-            f"message {msg_id!r} was already delivered (hosted); "
-            "cursor not advanced",
+            f"message {msg_id!r} was {how}; cursor not advanced",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)

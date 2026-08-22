@@ -215,7 +215,29 @@ def test_force_to_an_unknown_token_refuses_with_a_message(_tmp_state, monkeypatc
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
-def test_force_refuses_a_row_that_is_not_live(_tmp_state, monkeypatch):
+@pytest.mark.parametrize("status", ["spawning", "ready", "idle", "busy", "restarting"])
+def test_force_accepts_every_non_terminal_status(_tmp_state, monkeypatch, status):
+    """`live` is one of SIX non-terminal statuses, and the wrong one to test.
+
+    `dispatch_spawn_pane` writes `spawning` until the SessionStart restamp and
+    `register_agent` defaults to `idle`, so an equality test refused panes that
+    were alive and blamed a recycled pane id for it. The registry publishes
+    `TERMINAL_STATUSES` precisely so callers stop hand-rolling the vocabulary.
+    """
+    entry, sent = _install(monkeypatch)
+    entry.status = status
+
+    result = runner.invoke(
+        mail_app,
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+    )
+
+    assert result.exit_code == 0, (status, result.output, result.stderr)
+    assert sent, f"a {status} pane is alive and must be typed into"
+
+
+@pytest.mark.parametrize("status", ["exited", "orphaned", "failed", "permanent_dead"])
+def test_force_refuses_a_row_that_is_not_live(_tmp_state, monkeypatch, status):
     """A stale row's pane id may belong to somebody else by now.
 
     The resolved lane already gates the identical call on `status == "live"`,
@@ -225,7 +247,7 @@ def test_force_refuses_a_row_that_is_not_live(_tmp_state, monkeypatch):
     the transport, never the fact that nobody is there.
     """
     entry, sent = _install(monkeypatch)
-    entry.status = "exited"
+    entry.status = status
 
     result = runner.invoke(
         mail_app,
@@ -233,7 +255,7 @@ def test_force_refuses_a_row_that_is_not_live(_tmp_state, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "exited" in (result.stderr or "")
+    assert status in (result.stderr or "")
     assert not sent, "nothing may be typed into a pane a dead row still names"
 
 

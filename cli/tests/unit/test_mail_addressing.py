@@ -129,3 +129,44 @@ def test_a_name_lane_row_replies_to_the_full_session(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert seen.get("target") == V7_A, seen
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--raw"],
+        ["--to-project", "footnote"],
+        ["--kind", "heads-up"],
+    ],
+    ids=["raw", "to-project", "kind"],
+)
+def test_the_short_address_refusal_covers_the_lanes_that_return_early(
+    tmp_path, monkeypatch, extra
+):
+    """An address rule that only covers the lanes reached last is not a rule.
+
+    The refusal sat below the `--raw`, `--to-project`, `--kind` and job-address
+    returns, so `send <codex-head-8> '/verb' --raw` still fired a verb at
+    whichever colliding session discovery happened to list. `--raw` is the worst
+    of them: it runs a verb rather than leaving a message to be read.
+    """
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    import fno.agents.registry as registry
+    from fno.mail.cli import mail_app
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    entry = SimpleNamespace(
+        name="codex-worker", harness="codex",
+        harness_session_id=V7_A, session_id=V7_A,
+        mux={"session": "main", "pane_id": 3}, cwd="/w", status="live",
+    )
+    monkeypatch.setattr(registry, "load_registry", lambda *_a, **_k: [entry])
+
+    result = CliRunner().invoke(mail_app, ["send", V7_A[:8], "/fno:review", *extra])
+
+    assert result.exit_code == 2, result.output
+    assert "addresses codex" in (result.stderr or result.output)
