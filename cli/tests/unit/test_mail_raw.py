@@ -911,6 +911,43 @@ def test_raw_check_writes_nothing_and_does_not_reserve(
     assert state["entries"][0]["words"] == 80
 
 
+def test_raw_style_exception_permits_overage_and_still_charges_it(
+    runner, mailbox, monkeypatch
+):
+    from fno import style
+    from fno.bus.log import iter_messages
+    from fno.mail import budget
+
+    _seed_claude(mailbox, monkeypatch)
+    payload = _raw_payload_at_word_cap() + " extra."
+    assert style.word_count(payload) == 81
+
+    result = runner.invoke(
+        app,
+        [
+            "mail",
+            "send",
+            "claudepeer",
+            payload,
+            "--raw",
+            "--style-exception",
+            "approved overage",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+    assert result.stdout.strip() == "injected"
+    rows = list(iter_messages(warn=False))
+    assert len(rows) == 1
+    assert rows[0].delivery == "hosted"
+    assert rows[0].body == payload
+    assert rows[0].word_count == 81
+    ledger = budget._ledger_path(f"{rows[0].from_} -> {rows[0].to}")
+    state = json.loads(ledger.read_text())
+    assert len(state["entries"]) == 1
+    assert state["entries"][0]["words"] == 81
+
+
 def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
     """AC29/AC30: a not-confirmed result is poll-budget exhaustion, not rejection
     (exit 0, never failure wording), and never queues durable."""

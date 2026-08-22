@@ -69,6 +69,8 @@ from typing import Optional
 
 import yaml
 
+from fno.mail.kinds import AUTHORED_MAIL_KINDS
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -82,7 +84,7 @@ class Kind(str, Enum):
     SEND = "send"
 
 
-VALID_KINDS = frozenset(k.value for k in Kind)
+VALID_KINDS = AUTHORED_MAIL_KINDS
 
 
 class DurableOwner(str, Enum):

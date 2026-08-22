@@ -257,7 +257,13 @@ def test_reservation_names_the_canonical_pair():
 
 # --- AC2-RESET: an inbound message starts a new conversation budget --------
 
-def _inbound(sender: str, recipient: str, msg_id: str) -> str:
+def _inbound(
+    sender: str,
+    recipient: str,
+    msg_id: str,
+    *,
+    kind: str = "send",
+) -> str:
     """Write one bus envelope FROM the recipient TO the sender."""
     from fno.bus.log import Envelope, append
 
@@ -266,12 +272,32 @@ def _inbound(sender: str, recipient: str, msg_id: str) -> str:
             id=msg_id,
             from_=recipient,
             to=sender,
-            kind="send",
+            kind=kind,
             body="ok",
             word_count=1,
         )
     )
     return msg_id
+
+
+@pytest.mark.parametrize("kind", ["heads-up", "question", "fyi"])
+def test_each_authored_inbound_kind_resets_the_running_total(kind):
+    send("a", "b", 79, f"msg-out-{kind}")
+    reset_id = _inbound("a", "b", f"msg-in-{kind}", kind=kind)
+
+    second = send("a", "b", 79, f"msg-after-{kind}")
+    assert second.running_before == 0
+    assert second.reset_by == reset_id
+
+
+@pytest.mark.parametrize("kind", ["migration", "withdraw", "audit"])
+def test_non_authored_reverse_rows_do_not_reset_the_running_total(kind):
+    send("a", "b", 79, f"msg-out-{kind}")
+    _inbound("a", "b", f"msg-in-{kind}", kind=kind)
+
+    with pytest.raises(budget.BudgetRefused) as raised:
+        send("a", "b", 79, f"msg-after-{kind}")
+    assert raised.value.running == 79
 
 
 def test_inbound_reply_resets_the_running_total():

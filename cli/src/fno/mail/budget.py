@@ -153,12 +153,17 @@ def last_inbound(sender: str, recipient: str, *, since: float) -> Optional[tuple
     for durable replies.
     """
     from fno.bus.log import iter_messages
+    from fno.mail.kinds import is_authored_mail_kind
 
     if sender == recipient:
         return None
     newest: Optional[tuple[str, float]] = None
     for env in iter_messages(warn=False):
-        if env.kind != "send" or env.from_ != recipient or env.to != sender:
+        if (
+            not is_authored_mail_kind(env.kind)
+            or env.from_ != recipient
+            or env.to != sender
+        ):
             continue
         ts = _parse_ts(env.ts)
         if ts is None or ts < since:

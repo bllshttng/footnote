@@ -2227,7 +2227,14 @@ def _codex_review_target(
     return "uncommittedChanges", True
 
 
-def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
+def _raw_send(
+    name,
+    payload,
+    *,
+    self_ok: bool,
+    check: bool = False,
+    style_exception: Optional[str] = None,
+) -> None:
     """``fno agents mail send --raw``: fire a verb in a peer by injecting ``payload``
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
     REPL's slash parser runs it before the model sees it.
@@ -2309,7 +2316,7 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     # transports can fire. Under --check the cap refusal is a usage error
     # (exit 2), never a session verdict: exit 1 is the not-injectable code.
     _enforce_body_cap(stripped, usage=check)
-    _enforce_style(stripped)
+    _enforce_style(stripped, allow_reason=style_exception)
 
     # 2b. Forged envelope: a raw payload starts with "/", so it cannot itself
     #     be a `<fno_mail>` tag, but it can still smuggle one mid-line. The mux
@@ -2404,6 +2411,7 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
             recipient=raw_recipient,
             body=stripped,
             msg_id=raw_msg_id,
+            allow_reason=style_exception,
         )
         return raw_msg_id, reservation, authored_words
 
@@ -2886,7 +2894,13 @@ def cmd_send(
         if message is None:
             print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
             raise typer.Exit(code=2)
-        _raw_send(name, message, self_ok=to_self, check=check)
+        _raw_send(
+            name,
+            message,
+            self_ok=to_self,
+            check=check,
+            style_exception=style_exception,
+        )
         return
     if check:
         # Only the --raw lane has a keystroke path to have or lack; a wrapped send
