@@ -26,6 +26,8 @@ on:
       - tests/ci/test_provider_vocabulary_parity.sh
       - scripts/ci/check-session-identity-parity.sh
       - tests/ci/test_session_identity_parity.sh
+      - scripts/ci/check-spawn-lineage-parity.sh
+      - tests/ci/test_spawn_lineage_parity.sh
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - scripts/ci/check-review-app-parity.sh
@@ -35,6 +37,8 @@ on:
       - cli/src/fno/agents/spawn_defaults.py
       - cli/src/fno/agents/spawn_gate.py
       - cli/src/fno/agents/registry.py
+      - cli/src/fno/agents/store_fallback.py
+      - cli/src/fno/agents/mux_spawn.py
       - .github/workflows/rust-ci.yml
   pull_request:
     paths:
@@ -47,6 +51,8 @@ on:
       - tests/ci/test_provider_vocabulary_parity.sh
       - scripts/ci/check-session-identity-parity.sh
       - tests/ci/test_session_identity_parity.sh
+      - scripts/ci/check-spawn-lineage-parity.sh
+      - tests/ci/test_spawn_lineage_parity.sh
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - scripts/ci/check-review-app-parity.sh
@@ -56,6 +62,8 @@ on:
       - cli/src/fno/agents/spawn_defaults.py
       - cli/src/fno/agents/spawn_gate.py
       - cli/src/fno/agents/registry.py
+      - cli/src/fno/agents/store_fallback.py
+      - cli/src/fno/agents/mux_spawn.py
       - .github/workflows/rust-ci.yml
 
 jobs:
@@ -235,6 +243,8 @@ jobs:
         run: |
           bash tests/ci/test_session_identity_parity.sh
           bash scripts/ci/check-session-identity-parity.sh
+          bash tests/ci/test_spawn_lineage_parity.sh
+          bash scripts/ci/check-spawn-lineage-parity.sh
 
   audit:
     name: cargo audit (RUSTSEC advisories)
