@@ -85,6 +85,10 @@
      and so nobody mistakes browser-kept lines for terminal scrollback. */
   .kept { opacity: .72; }
   .kept-note, .kept-break { color: #6f7a8f; font-style: italic; }
+  /* The note is fixed-width prose inside `white-space: pre`, so on any pane
+     narrower than the note it, not the grid, set the page width and brought the
+     horizontal scrollbar fit-to-width exists to remove. */
+  .kept-note { white-space: pre-wrap; }
   .cur { outline: 1px solid #c5cdd9; }
   #overlay { position: fixed; inset: 0; display: none; align-items: center;
     justify-content: center; background: rgba(11,14,20,.85); font-size: 15px;
@@ -191,36 +195,54 @@
     return html + "\n";
   }
 
-  // How far the grid scrolled between two frames, or -1 when that is not
-  // provable. A scroll of k means the old frame's rows [k..] equal the new
-  // frame's rows [0..n-k] EXACTLY. k === 0 means the grid did not move, so a
-  // redraw of an unchanged frame retains nothing - that idempotence is
-  // load-bearing, because a Layout redraw calls draw() with the same frame.
+  // The deepest fixed bottom region we will look past. An agent pane keeps an
+  // input box or a status footer on its last rows, and it is the DOMINANT case
+  // here - a claude or codex pane is the thing an operator opens this page to
+  // watch. Requiring the whole grid to shift made retention permanently inert on
+  // every one of them, silently, which is worse than not shipping it.
+  const MAX_FIXED_TAIL = 6;
+
+  // The smallest k where prev[k..body) equals next[0..body-k), or -1 if the
+  // region is not related by a scroll at all. k === 0 means it did not move.
+  function scrollWithin(prev, next, body) {
+    for (let k = 0; k < body; k++) {
+      let ok = true;
+      for (let i = k; i < body; i++) if (prev[i] !== next[i - k]) { ok = false; break; }
+      if (ok) return k;
+    }
+    return -1;
+  }
+
+  // How many rows scrolled off the top between two frames, or -1 when that is
+  // not provable. k === 0 means nothing moved, so a redraw of an unchanged frame
+  // retains nothing - that idempotence is load-bearing, because a Layout redraw
+  // calls draw() with the same frame.
   //
-  // -1 is the honest answer to everything else, and it must NOT be read as "the
-  // whole screen scrolled off". An earlier version returned n there and evicted
-  // the entire previous screen. A terminal changes rows in place constantly - a
-  // spinner tick, a status line, a progress bar, a prompt appearing on an
-  // unfilled screen - and none of that is a scroll. Every such frame dumped a
-  // duplicate of the visible screen into the retained region, filling the cap in
-  // about twenty frames with copies of what was already on screen and trimming
-  // the real scrolled-off output away from the top.
+  // -1 must NOT be read as "the whole screen scrolled off". An earlier version
+  // returned n there and evicted the entire previous screen. A terminal changes
+  // rows in place constantly - a spinner tick, a status line, a progress bar, a
+  // prompt appearing on an unfilled screen - and none of that is a scroll. Every
+  // such frame dumped a duplicate of the visible screen into the retained
+  // region, filling the cap in about twenty frames with copies of what was
+  // already on screen and trimming the real output off the top.
   //
-  // So this is deliberately conservative: it retains on a PROVEN whole-screen
-  // scroll and never guesses. A pane with a fixed header, or one driving its own
-  // scrolling region, retains nothing rather than something wrong.
+  // The whole grid is tried first, because it is the plain case and the only one
+  // that can honestly answer 0. Then successively shallower bodies, so a pane
+  // whose last rows are pinned still has its body read. The SHALLOWEST fixed
+  // tail that explains the frame wins, which keeps the answer conservative.
   //
   // Row strings are compared, not cells, because draw() already built them.
-  // ponytail: O(n^2) row-string compares, n = rows. At a phone's ~50 rows that
-  // is 2.5k compares per frame; a suffix automaton is the upgrade if it ever
-  // shows up in a profile.
+  // ponytail: O(MAX_FIXED_TAIL * n^2) row-string compares worst case, n = rows.
+  // At a phone's ~50 rows that is ~17k short-string compares on a frame nothing
+  // explains; the common frames exit at the first or second body. A suffix
+  // automaton is the upgrade if it ever shows up in a profile.
   function evictedRowCount(prev, next) {
     const n = next.length;
     if (!prev || prev.length !== n) return -1; // no previous frame, or resized
-    for (let k = 0; k < n; k++) {
-      let ok = true;
-      for (let i = k; i < n; i++) if (prev[i] !== next[i - k]) { ok = false; break; }
-      if (ok) return k;
+    const maxTail = Math.min(MAX_FIXED_TAIL, n - 1);
+    for (let f = 0; f <= maxTail; f++) {
+      const k = scrollWithin(prev, next, n - f);
+      if (k >= 0) return k;
     }
     return -1;
   }
@@ -273,7 +295,13 @@
   function refit() {
     const fr = current != null ? frames.get(current) : null;
     lastFitKey = ""; // the container may have changed under an unchanged frame
+    // Changing the type size changes scrollHeight several-fold while scrollTop
+    // stays put, so a pane pinned to its tail silently stops following: tapping
+    // the toggle, or just rotating the phone, unpinned it until the operator
+    // scrolled back down by hand.
+    const pinned = screenEl.scrollHeight - screenEl.scrollTop - screenEl.clientHeight < 24;
     applyFit(fr ? fr.cols : 0);
+    if (pinned) screenEl.scrollTop = screenEl.scrollHeight;
   }
 
   fitBtn.onclick = () => {
@@ -322,10 +350,16 @@
     if (prevRows) {
       if (evicted < 0) {
         // Continuity is not provable across this frame. Retain nothing - most of
-        // the previous screen is usually still visible below. Just remember the
-        // gap, and draw the rule only if something is ever retained after it, so
-        // an idle pane never accrues break rules.
-        gapPending = true;
+        // the previous screen is usually still visible below.
+        //
+        // Only claim a GAP when the old top row has left the screen entirely.
+        // Marking every unprovable frame put a "break in output" rule above
+        // output that was perfectly contiguous: a shell printing into a screen
+        // it has not filled yet produces unprovable frames, then starts
+        // scrolling, and the rule landed on top of the very first lines. A rule
+        // that fires where nothing was lost teaches the operator to ignore it,
+        // which costs more than the rule was ever worth.
+        if (rows.indexOf(prevRows[0]) < 0) gapPending = true;
       } else if (evicted > 0) {
         if (gapPending) {
           pushKept(`<span class="kept-break">${esc(BREAK_RULE)}</span>\n`);

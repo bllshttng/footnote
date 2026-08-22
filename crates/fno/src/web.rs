@@ -710,12 +710,18 @@ eq(evictedRowCount(g("","",""), g("","","")), 0, "blank stays blank");
 // inventing evictions that never happened.
 eq(evictedRowCount(g("x","x","x","p"), g("x","x","p","q")), 1, "ambiguous shift takes the smallest fit");
 
-// --- not a scroll: -1, and the caller must retain NOTHING ---
+// --- edited in place: 0 rows evicted, and NO gap ---
 // A terminal edits rows in place constantly, and none of it is a scroll. These
 // are the cases that made an earlier version dump a duplicate of the visible
-// screen into the retained region on every single frame.
-eq(evictedRowCount(g("hdr","body","* work"), g("hdr","body","- work")), -1, "spinner tick on the last row");
-eq(evictedRowCount(g("$ ls","a.txt","",""), g("$ ls","a.txt","$ ","")), -1, "prompt appears on an unfilled screen");
+// screen into the retained region on every single frame. Reading the last rows
+// as a pinned tail answers 0 here, which is stronger than "unprovable": nothing
+// scrolled off, so nothing is retained AND no gap is claimed.
+eq(evictedRowCount(g("hdr","body","* work"), g("hdr","body","- work")), 0, "spinner tick on the last row");
+eq(evictedRowCount(g("$ ls","a.txt","",""), g("$ ls","a.txt","$ ","")), 0, "prompt appears on an unfilled screen");
+
+// --- not provably a scroll: -1, and the caller must retain NOTHING ---
+// A live HEADER is not covered: only a pinned TAIL is looked past, because that
+// is where an agent pane puts its input box. Under-reporting, never a guess.
 eq(evictedRowCount(g("t=1","a","b"), g("t=2","b","c")), -1, "body scrolls under a live header");
 // A whole new screen shares nothing: a repaint, or output outrunning the
 // frame rate. Unprovable either way, so it is never treated as a shift.
@@ -726,9 +732,36 @@ eq(evictedRowCount(g("a","b","c"), g("x","y","z")), -1, "no overlap");
 eq(evictedRowCount(g("a","b","c","d","e"), g("c","d","e")), -1, "terminal shrank");
 eq(evictedRowCount(g("a","b"), g("a","b","c")), -1, "terminal grew");
 eq(evictedRowCount(null, g("a","b","c")), -1, "no previous frame");
-console.log("evictedRowCount: 13 cases ok");
+
+// --- a pinned bottom region: the pane an operator actually opens this for ---
+// An agent pane keeps an input box or status footer on its last rows. Requiring
+// the WHOLE grid to shift made retention permanently inert on every one of them,
+// and silently, because the note only appears once a row is retained.
+// A static footer, body scrolled by one.
+eq(evictedRowCount(g("a","b","c","foot"), g("b","c","d","foot")), 1, "static footer, body scrolls");
+// A LIVE footer, body scrolled by one: the tail differs too, so nothing about
+// the last row can be assumed, only that it is not part of the scrolling body.
+eq(evictedRowCount(g("a","b","c","spin |"), g("b","c","d","spin /")), 1, "live footer, body scrolls");
+// A live footer over a body that did NOT move evicts nothing. This is the
+// spinner case again, one row deeper, and it must not read as a scroll.
+eq(evictedRowCount(g("a","b","c","spin |"), g("a","b","c","spin /")), 0, "live footer, body still");
+// Two-row footer, body scrolled by two.
+eq(evictedRowCount(g("a","b","c","f1","f2"), g("c","d","e","f1","f2")), 2, "two-row footer");
+// The tail we look past is bounded, so a grid that is mostly footer is still
+// reported honestly rather than explained away by an ever-deeper tail.
+eq(evictedRowCount(g("a","b","c","d","e","f","g","h"), g("z","y","x","w","v","u","t","s")), -1, "unrelated beats any tail");
+console.log("evictedRowCount: 18 cases ok");
 "#;
-        let src = format!("{}\n{}", lift_js_fn("evictedRowCount"), asserts);
+        let src = format!(
+            "{}\n{}\n{}\n{}",
+            // MAX_FIXED_TAIL is a const the lifted function closes over.
+            PAGE.lines()
+                .find(|l| l.contains("const MAX_FIXED_TAIL"))
+                .expect("the page bounds the fixed tail it looks past"),
+            lift_js_fn("scrollWithin"),
+            lift_js_fn("evictedRowCount"),
+            asserts
+        );
         let path = std::env::temp_dir().join(format!("fno-evicted-{}.mjs", std::process::id()));
         std::fs::write(&path, src).expect("temp dir writable");
         let out = std::process::Command::new("node").arg(&path).output();
@@ -755,7 +788,7 @@ console.log("evictedRowCount: 13 cases ok");
                 // running all fail the same way, with both streams shown.
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 assert!(
-                    stdout.contains("evictedRowCount: 13 cases ok"),
+                    stdout.contains("evictedRowCount: 18 cases ok"),
                     "the shipped evictedRowCount did not clear every case:\n{}{}",
                     stdout,
                     String::from_utf8_lossy(&o.stderr)
@@ -783,6 +816,12 @@ console.log("evictedRowCount: 13 cases ok");
     /// with rows==0/cols==0 so it never shrinks a PTY, and `writer.forget()`
     /// leaves no upstream handle. A page that learned to ask for a resize would
     /// collapse every terminal user's pane to phone width.
+    ///
+    /// Anchored on the WIRE vocabulary and on sending, not on the bare word
+    /// "Resize". A bare match also banned `ResizeObserver`, which is a local DOM
+    /// API and the right way to refit when the screen box changes without a
+    /// window resize event - the guard would have refused it with a message
+    /// about PTY geometry it has nothing to do with.
     #[test]
     fn served_page_never_asks_for_a_resize() {
         assert!(
@@ -790,12 +829,16 @@ console.log("evictedRowCount: 13 cases ok");
             "the page still opens the read-only socket"
         );
         assert!(
-            !PAGE.contains("ws.send("),
-            "the page sends nothing upstream (Locked Decision 5)"
+            !PAGE.contains(".send("),
+            "the page sends nothing upstream at all (Locked Decision 5)"
         );
         assert!(
-            !PAGE.contains("Resize"),
-            "the page never names a Resize: a passive observer must not drive PTY geometry"
+            !PAGE.contains(r#""Resize""#),
+            "the page never names the Resize message: a passive observer must not drive PTY geometry"
+        );
+        assert!(
+            !PAGE.contains("ClientMsg"),
+            "the page never builds an upstream message of any kind"
         );
     }
 
