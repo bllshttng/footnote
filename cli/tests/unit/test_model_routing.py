@@ -421,7 +421,12 @@ def test_codex_route_returns_config_and_env_for_openai_provider() -> None:
         "tidy", settings=_openai_settings(), env={"OPENAI_API_KEY": "oai-key"}
     )
     assert route is not None
-    assert route.env == {"OPENAI_API_KEY": "oai-key"}
+    # The stamp rides with the codex lane too (x-c703): without it a routed
+    # codex worker resolves provider "unknown" and ignores its subagent budget.
+    assert route.env == {
+        "OPENAI_API_KEY": "oai-key",
+        "FNO_ROUTE_PROVIDER": "zai-openai",
+    }
     # Codex config: provider table + selection + model, all as -c flags.
     joined = " ".join(route.config_args)
     assert route.config_args[0] == "-c"
