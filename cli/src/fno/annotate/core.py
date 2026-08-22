@@ -15,7 +15,10 @@ import secrets
 from pathlib import Path
 from typing import Any, Optional
 
-import fno.events as _events
+# fno.events is imported inside the write paths, not at module level: it
+# costs ~148ms (the whole events tree) and is needed only by add/resolve.
+# annotate now mounts eagerly under `fno backlog`, the hottest verb in the
+# CLI, so a module-level import would tax every backlog call.
 
 # x-9ed6: node/operator free text embedded in an injected frame could carry a
 # literal delimiter and break out into the recipient's next prompt. Defang the
@@ -141,6 +144,8 @@ def add_finding(
     if block_excerpt:
         data["block_excerpt"] = block_excerpt
 
+    import fno.events as _events
+
     event = _events._build("review_finding", "observer", data)
     _events.append_event(event, _events_path(events_path))
 
@@ -233,6 +238,8 @@ def resolve_finding(
         return {"finding_id": finding_id, "resolved": False, "warning": "already resolved"}
 
     data = {"finding_id": finding_id, "node": f.get("node")}
+    import fno.events as _events
+
     event = _events._build("review_finding_resolved", "observer", data)
     _events.append_event(event, _events_path(events_path))
     return {"finding_id": finding_id, "resolved": True}

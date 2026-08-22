@@ -127,7 +127,7 @@ The method is named `append` (not `emit` or `emit_fields`) deliberately - see "T
 
 ## The typed-event contract
 
-The loop NEVER parses session stdout. The session's terminal state is communicated entirely through the project journal: When it decides to allow the session to exit, the stop hook (`fno-agents loop-check`) emits a `termination` event. `Journal::find_termination` scans for the last matching event keyed on `unit.session_key` (= `session_id` from the manifest).
+The loop NEVER parses session stdout. The session's terminal state is communicated entirely through the project journal. When it decides to allow the session to exit, the stop hook (`fno-agents loop-check`) emits a `termination` event. `Journal::find_termination` scans for the last matching event keyed on `unit.session_key` (= `session_id` from the manifest).
 
 Envelope shape for all loop-runtime events:
 

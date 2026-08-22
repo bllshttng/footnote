@@ -265,6 +265,12 @@ def whoami_command(
     # Group callback discipline: click runs this callback before a subcommand
     # too, so the summary body must not fire on `fno whoami status` etc.
     if ctx.invoked_subcommand is not None:
+        # A group-level `-J` (fno whoami --json status) must still reach the
+        # subcommand: fold it into the shared ctx.obj the leaves read via
+        # _global_json, or the flag is silently dropped (flag position must
+        # not decide the output shape).
+        ctx.ensure_object(dict)
+        ctx.obj["json"] = bool(ctx.obj.get("json", False)) or json_output
         return
     opts = AgentOptions(
         json_output=json_output or _global_json(ctx),

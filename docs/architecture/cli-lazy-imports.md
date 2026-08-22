@@ -23,8 +23,7 @@ app.add_typer(state_app, name="state")
 # ... 28 more
 ```
 
-Every `fno <verb>` invocation paid the union cost of importing all 30
-sub-apps before even parsing `argv`. `fno --help` median wall time was 225ms p50, and `fno config paths state-dir` (the cheapest possible hot-path call) was 206ms. Earlier measurement found the fno-daemon proposal saves only ~0.22% of target phase wall time, and deferred the daemon in favor of this simpler approach.
+Every `fno <verb>` invocation paid the union cost of importing all 30 sub-apps before even parsing `argv`. `fno --help` median wall time was 225ms p50. `fno config paths state-dir` (the cheapest hot-path call) was 206ms. Earlier measurement found the fno-daemon proposal saves only ~0.22% of target phase wall time, and deferred the daemon in favor of this simpler approach.
 
 ## Solution: Click LazyGroup, adapted for Typer
 

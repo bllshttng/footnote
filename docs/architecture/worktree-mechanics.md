@@ -50,8 +50,7 @@ Flags: `--force`, `--yes` (skip kill prompt), `--delete-branch`.
 Or use `git worktree remove <path>`.
 NEVER `rm -rf` a worktree, which leaves dangling refs.
 
-Post-merge pruning is automated.
-`/fno:pr merged` archives the PR's worktree, and `fno workspace worktree cleanup --merged --apply` sweeps landed ones.
+Post-merge pruning is automated. `/fno:pr merged` archives the PR's worktree. `fno workspace worktree cleanup --merged --apply` sweeps landed ones.
 
 ## Enforcement
 

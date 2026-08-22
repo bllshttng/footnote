@@ -52,14 +52,13 @@ fno config setup plan              # /setup and /setup local
 fno config setup plan --advanced   # /setup advanced
 ```
 
-Parse the JSON. For each field, ask the user using its `question` text. Use the
-`default` as the pre-filled answer and `default_source` as an inference hint:
+Parse the JSON. For each field, ask the user using its `question` text. Use the `default` as the pre-filled answer and `default_source` as an inference hint:
 
 - `repo-slug`  -> default from `basename $(git rev-parse --show-toplevel)`.
 - `readme`     -> infer a one-line vision from the README's first paragraph.
 - `auto-detect`-> detect from the repo (vault name, workspace topology).
 
-The `always` set today is roughly: Obsidian on/off (+ vault name), project vision, backlog id_prefix, external reviewer(s), auto-merge on/off. Ask only what `fno config setup plan` returns; do not invent extra questions.
+The `always` set today is roughly Obsidian on/off (plus vault name), project vision, backlog id_prefix, external reviewer(s), and auto-merge on/off. Ask only what `fno config setup plan` returns; do not invent extra questions.
 
 ## Step 2: Write each answer through `fno config set`
 
@@ -97,7 +96,7 @@ fno config set config.auto_merge.enabled false
 
 ## Step 2b: Review gate (how a PR is allowed to go green)
 
-`fno config setup plan` asks about `config.review.external_reviewers` (which logins to *request* and *recognize*). The GATE - what `fno-agents loop-check` REQUIRES before `/target` promises - lives in three `advanced`-tier keys the default plan does not surface. Most users never learn the bot-less options exist. Offer the choice explicitly (ask; default = none / PR + CI only). These are additive - a repo can require both a bot AND a local sigma pass:
+`fno config setup plan` asks about `config.review.external_reviewers` (which logins to *request* and *recognize*). The GATE - what `fno-agents loop-check` REQUIRES before `/target` promises - lives in three `advanced`-tier keys the default plan does not surface. Most users never learn the bot-less options exist. Offer the choice explicitly. Default = none / PR + CI only. These are additive - a repo can require both a bot AND a local sigma pass:
 
 > "How does review gate a PR before `/target` considers it done?
 >  1. **GitHub App bots** - a bot login (e.g. `chatgpt-codex-connector`, `gemini-code-assist`) must post a review. Needs the bot installed on the repo.
