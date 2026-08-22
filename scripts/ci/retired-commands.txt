@@ -1,0 +1,13 @@
+# Commands a ruling has retired. A caller-facing string that shows one of
+# these in RUNNABLE form fails scripts/ci/check-retired-command-strings.sh
+# unless it carries a `retired-ok:` marker saying it describes rather than
+# instructs.
+#
+# Format: <retired command>|<what to say instead>|<ruling id>
+#
+# Adding a line here is how a ruling reaches the moment of acting. Recording
+# it in the decision record alone does not: the decision record fires when
+# someone goes looking, and a runtime string fires when someone is about to
+# act. Only the second is the moment that matters.
+claude rm|fno agents rm, then fno agents adopt <session-id> to reverse it|d-1900e419
+claude stop|fno agents stop|d-1900e419
