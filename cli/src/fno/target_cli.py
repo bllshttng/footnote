@@ -133,6 +133,11 @@ def _refuse_unsatisfiable_reviewers() -> None:
     ]
     for reviewer_verdict in [v for v in verdicts if v.status == "unverifiable"]:
         typer.echo(f"note target init: {reviewer_verdict.line()}", err=True)
+    # A budget downgrade is not a refusal, so it never reaches the block above -
+    # and a receipt that stayed silent about it would show the route the config
+    # named while the session ran a different one (x-c703 LD2).
+    for reviewer_verdict in [v for v in verdicts if v.resolves_to is not None]:
+        typer.echo(f"note target init: {reviewer_verdict.line()}", err=True)
     for peer_verdict in [v for v in peer_verdicts if v.status == "unverifiable"]:
         typer.echo(f"note target init: {peer_verdict.line()}", err=True)
     if messages:

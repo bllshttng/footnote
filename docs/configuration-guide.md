@@ -107,7 +107,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `agents.codex.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless codex workers. |
 | `agents.gemini.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless gemini workers. |
 | `agents.max_live` | int | `3` | advanced | Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3). |
-| `agents.max_lanes` | dict[str, int] | `{"zai": 5}` | advanced | Immediate-refusal concurrent live-worker caps keyed by model provider; unlisted providers are uncapped (default zai = 5). |
+| `agents.max_lanes` | dict[str, ProviderBudget] | `{"zai": {"lanes": 5, "subagents": 1}}` | advanced | Per-provider budget record keyed by model provider: `lanes` is the immediate-refusal cap on concurrent live workers, `subagents` is the in-session fan-out width review route resolution reads (1 means a panel is never dispatched there). A bare integer is still legal and reads as `lanes`. Unlisted providers are uncapped in both dimensions; the built-in zai budget is lanes 5, subagents 1, because that account is shared. |
 | `agents.pane_group_max` | int | `4` | advanced | Maximum panes placed in one named pane_group tab before a spawn creates the next numbered sibling tab (default 4). |
 | `agents.min_free_gb` | float | `4.0` | advanced | Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4). |
 | `agents.worker_qos` | str | `utility` | advanced | Worker CPU/IO priority: utility (background QoS, default) or off. |

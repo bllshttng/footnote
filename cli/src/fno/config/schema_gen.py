@@ -120,13 +120,30 @@ def json_schema() -> str:
     return json.dumps(SettingsModel.model_json_schema(), indent=2, sort_keys=True)
 
 
+def _jsonable(value: Any) -> Any:
+    """Reduce a default to something `json.dumps` accepts.
+
+    A default can be a Pydantic model now that a config value is a RECORD and
+    not only a scalar (`agents.max_lanes` carries a `ProviderBudget`). Without
+    this the generator raised on the model instance, so the docs gate failed
+    with a TypeError instead of reporting drift.
+    """
+    if isinstance(value, BaseModel):
+        return value.model_dump()
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(v) for v in value]
+    return value
+
+
 def _fmt_default(value: Any) -> str:
     if value is None:
         return "_(none)_"
     if isinstance(value, bool):
         return f"`{str(value).lower()}`"
-    if isinstance(value, (list, dict)):
-        return f"`{json.dumps(value)}`"
+    if isinstance(value, (list, dict, BaseModel)):
+        return f"`{json.dumps(_jsonable(value))}`"
     return f"`{value}`"
 
 
@@ -183,7 +200,16 @@ def _toml_value(value: Any) -> str:
     commented-out). Strings use ``json.dumps`` (a valid TOML basic string for
     these config defaults); lists/dicts use JSON flow, which is valid TOML for
     scalar-element arrays and the empty inline table ``{}``.
+
+    A dict VALUE may itself be a record now (`agents.max_lanes` maps a provider
+    to a `ProviderBudget`), so an inline table nests one more level. A `None`
+    field inside such a record is DROPPED rather than rendered: TOML has no
+    null, and an absent key already means "unset" for every optional field
+    here. A list inside a dict is still refused, because a flow array of tables
+    is where this renderer's simplicity would stop being honest.
     """
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
@@ -193,7 +219,11 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, dict):
         parts: list[str] = []
         for key, item in value.items():
-            if not isinstance(key, str) or isinstance(item, (dict, list)):
+            if isinstance(item, BaseModel):
+                item = item.model_dump()
+            if item is None:
+                continue
+            if not isinstance(key, str) or isinstance(item, list):
                 raise ValueError(
                     f"_toml_value: nested/non-string dict default not supported: {value!r}"
                 )

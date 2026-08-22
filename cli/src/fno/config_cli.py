@@ -379,6 +379,7 @@ def _report_review_capability(json_out: bool = False) -> int:
                     "harness": session.harness,
                     "substrate": session.substrate,
                     "attended": session.attended,
+                    "provider": session.provider,
                     "reviewers": [
                         {
                             "name": v.name,
@@ -390,6 +391,7 @@ def _report_review_capability(json_out: bool = False) -> int:
                                 v.descriptor.invocation if v.descriptor else None
                             ),
                             "reason": v.reason,
+                            "resolved_route": v.resolves_to or v.name,
                         }
                         for v in verdicts
                     ],
@@ -462,6 +464,11 @@ def _report_gates() -> None:
     ):
         rung = v.descriptor.asserts if v.descriptor else "unknown"
         typer.echo(f"  reviewer: {v.name} - asserts {rung}{_RUNG_GLOSS.get(rung, '')}")
+        if v.resolves_to is not None:
+            # The gate an operator reads here is the one that will RUN, not the
+            # one config.review.reviewers names. Printing only the configured
+            # name would teach the wrong reviewer on every routed worker.
+            typer.echo(f"    resolved route: {v.resolves_to} - {v.reason}")
 
 
 _RUNG_GLOSS = {
