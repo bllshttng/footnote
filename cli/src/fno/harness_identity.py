@@ -179,6 +179,19 @@ def ambient_identity_env_unset_args() -> list[str]:
     return flags
 
 
+# Families a strip suggestion never names, whatever session is asking.
+#
+#   fno     - TARGET_SESSION_ID is this run's own claim linkage. The resolver
+#             never consults it, so stripping it cannot cure an ambiguity, and
+#             dropping it would mis-key the retried command's claims.
+#   hermes  - HERMES_SESSION_ID is a fail-closed guard, not a session identity:
+#             HermesCliAdapter reads it as "we are inside a CLI agent session,
+#             shell spawn is FORBIDDEN" (adapters/hermes.py). It is never a
+#             keep_family, so without this entry every remedy line offered to
+#             delete it, which turns that refusal into a real spawn.
+_NEVER_STRIPPED_FAMILIES: frozenset[str] = frozenset({"fno", "hermes"})
+
+
 def ambient_identity_strip_flags(
     keep_family: str, env: Optional[Mapping[str, str]] = None
 ) -> list[str]:
@@ -190,15 +203,20 @@ def ambient_identity_strip_flags(
     harness it is (that is the ambiguity), but the operator reading the
     refusal knows, and stripping the foreign family restores self-resolution
     while keeping the session's own markers. Names not in
-    :data:`AMBIENT_IDENTITY_FAMILY` are never stripped here. The ``fno``
-    family is kept too: TARGET_SESSION_ID is this run's own claim linkage
-    (the resolver never consults it, so stripping it cannot cure the
-    ambiguity) and dropping it would mis-key the retried command's claims.
+    :data:`AMBIENT_IDENTITY_FAMILY` are never stripped here, and neither is any
+    family in :data:`_NEVER_STRIPPED_FAMILIES`.
     """
     environ = os.environ if env is None else env
     flags: list[str] = []
     for name in AMBIENT_IDENTITY_ENV:
-        if AMBIENT_IDENTITY_FAMILY.get(name) in (keep_family, "fno"):
+        family = AMBIENT_IDENTITY_FAMILY.get(name)
+        # An unmapped name is skipped, which is what the docstring has always
+        # said and what the code did not do: `.get(name) in (...)` compares None
+        # against the keep list, finds no match, and strips it. So a name added
+        # to AMBIENT_IDENTITY_ENV without a family entry landed in the remedy
+        # line by default. Fail closed instead - never suggest deleting a
+        # variable nobody has classified.
+        if family is None or family == keep_family or family in _NEVER_STRIPPED_FAMILIES:
             continue
         if (environ.get(name) or "").strip():
             flags += ["-u", name]

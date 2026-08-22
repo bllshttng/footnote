@@ -58,7 +58,7 @@ def _mail_handle() -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
-def _foreign_identity_line(harness: Optional[str]) -> Optional[str]:
+def _foreign_identity_line() -> Optional[str]:
     """One line naming identity env this session inherited from another harness.
 
     A long-lived daemon started from a shell that held a codex session's exports
@@ -68,22 +68,33 @@ def _foreign_identity_line(harness: Optional[str]) -> Optional[str]:
     them as identity; this line is what tells the operator they are there,
     because fno cannot unexport a variable from a parent that is still running.
 
+    The family to KEEP comes from :func:`resolve_self_identity`, never from
+    ``state.harness``. ``_detect_harness`` fails open to "claude" for any
+    harness outside claude/codex/gemini, so a clean opencode session would be
+    told its own OPENCODE_SESSION_ID is foreign and handed the command to
+    delete it - which costs that session its mail handle and its claims. An
+    unproven identity returns None and says nothing.
+
     Built from :func:`ambient_identity_strip_flags`, the same list the scrub and
     the ambiguity refusal read, so the remedy cannot drift from what is actually
     consulted. Returns None when the env is clean, which is the normal case.
     """
+    from fno.claims.self_identity import resolve_self_identity
     from fno.harness_identity import (
         AMBIENT_IDENTITY_FAMILY,
         ambient_identity_strip_flags,
     )
 
+    harness = resolve_self_identity().harness
     if not harness:
         return None
     flags = ambient_identity_strip_flags(harness)
     if not flags:
         return None
     names = flags[1::2]
-    families = sorted({AMBIENT_IDENTITY_FAMILY[name] for name in names})
+    # Defaulted: whoami is the confused-agent recovery verb and must never gain
+    # a failure mode, so an unmapped name renders rather than raising.
+    families = sorted({AMBIENT_IDENTITY_FAMILY.get(name, "unknown") for name in names})
     remedy = " ".join(flags)
     return (
         f"identity: {len(names)} inherited {'/'.join(families)} name(s) in this "
@@ -339,10 +350,14 @@ def whoami_command(
     # and both branches below omit the line/key entirely - byte-for-byte
     # unchanged from before this session gained a crown to report.
     crown = current_crown()
+    # Resolved once and rendered by both branches, like mail and crown above.
+    foreign_identity = _foreign_identity_line()
     if opts.json_output:
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail
         payload["harness_session_id"] = harness_sid
+        if foreign_identity is not None:
+            payload["inherited_identity_env"] = foreign_identity
         payload["model"] = _session_model()
         if crown is not None:
             payload["crown"] = crown["text"]
@@ -390,7 +405,6 @@ def whoami_command(
         # SessionStart context - a collidable prefix invites copying the count.
         typer.echo(f"mail_unread: {mail_unread}")
     typer.echo(f"harness:  {state.harness}")
-    foreign_identity = _foreign_identity_line(state.harness)
     if foreign_identity:
         typer.echo(foreign_identity)
     model = _session_model()

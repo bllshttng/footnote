@@ -224,12 +224,15 @@ def test_the_setup_doctor_reads_the_shared_marker_table(monkeypatch):
 # --- the names fno cannot unexport ------------------------------------------
 
 
-def test_whoami_names_the_inherited_family_it_cannot_unexport(poisoned_env):
+def test_whoami_names_the_inherited_family_it_cannot_unexport(
+    poisoned_env, monkeypatch
+):
     """fno cannot unexport a variable from a parent that is still running, so
     the operator gets the clearing instruction instead of silence."""
     from fno.agent.cli import _foreign_identity_line
 
-    line = _foreign_identity_line("claude")
+    _walk(monkeypatch, "claude")
+    line = _foreign_identity_line()
 
     assert line is not None
     assert "inherited codex name" in line
@@ -245,5 +248,56 @@ def test_a_clean_session_says_nothing(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CLAUDE_SID)
+    _walk(monkeypatch, "claude")
 
-    assert _foreign_identity_line("claude") is None
+    assert _foreign_identity_line() is None
+
+
+def test_an_opencode_session_is_never_told_to_delete_its_own_marker(monkeypatch):
+    """The keep-family must come from the resolver, not from `_detect_harness`.
+
+    That helper fails open to "claude" for any harness outside claude/codex/
+    gemini, so a cleanly resolving opencode session would be handed the command
+    to unset its own OPENCODE_SESSION_ID, costing it its mail handle and its
+    claims. It prints on every whoami and every SessionStart injection, so the
+    wrong advice is loud.
+    """
+    from fno.agent.cli import _foreign_identity_line
+
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "ses_9f2a")
+    _walk(monkeypatch, "opencode")
+
+    assert _foreign_identity_line() is None
+
+
+def test_the_remedy_never_offers_to_delete_the_hermes_spawn_guard(monkeypatch):
+    """HERMES_SESSION_ID is a fail-closed guard, not a session identity:
+    HermesCliAdapter reads it as "shell spawn is FORBIDDEN". It is never a
+    keep-family, so an unguarded strip list would offer to delete it and turn
+    that refusal into a real spawn."""
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CLAUDE_SID)
+    monkeypatch.setenv("HERMES_SESSION_ID", "hermes-1")
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_TID)
+
+    flags = ambient_identity_strip_flags("claude")
+
+    assert "HERMES_SESSION_ID" not in flags
+    assert "CODEX_THREAD_ID" in flags
+
+
+def test_an_unclassified_name_is_never_suggested_for_deletion(monkeypatch):
+    """The docstring has always promised that a name missing from
+    AMBIENT_IDENTITY_FAMILY is not stripped. The old membership test compared
+    None against the keep list, found no match, and stripped it anyway."""
+    import fno.harness_identity as hi
+
+    monkeypatch.setattr(hi, "AMBIENT_IDENTITY_ENV", ("MYSTERY_SESSION_ID",))
+    monkeypatch.setenv("MYSTERY_SESSION_ID", "whatever")
+
+    assert hi.ambient_identity_strip_flags("claude") == []
