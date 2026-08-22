@@ -3260,7 +3260,10 @@ mod tests {
         });
         let out = format_success("rm", "bar-agent", &result, false, true, false)
             .expect("rm renders a receipt");
-        assert!(out.starts_with("removed: bar-agent (fno + claude)"), "{out}");
+        assert!(
+            out.starts_with("removed: bar-agent (fno + claude)"),
+            "{out}"
+        );
         assert!(out.contains("fno agents adopt 0a6e775f"), "{out}");
         assert!(out.contains("resume handle"), "{out}");
     }
