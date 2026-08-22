@@ -28,6 +28,7 @@ WF=".github/workflows/cli-ci.yml"
 [[ -f "$WF" ]] || { echo "FAIL: $WF missing"; exit 1; }
 
 python3 - "$WF" <<'PY'
+import re
 import sys
 
 try:
@@ -126,16 +127,21 @@ if gate_shards:
 else:
     runner_jobs = {"smoke": smoke}
 
+# --changed / --retry-failed select a subset nobody declared, so ANY gate job
+# using one shrinks the merge gate to whatever happened to change or fail last.
+# --only / --skip are legitimate only as a complementary PAIR across shards,
+# whose coverage cli/tests/unit/test_smoke_shards.py owns. A lone gate job
+# using either has no complement to complete it, so there it narrows too.
+FORBIDDEN = ("--changed", "--retry-failed")
+if not gate_shards:
+    FORBIDDEN += ("--only", "--skip")
+
 for name, job in sorted(runner_jobs.items()):
     run = "\n".join(st.get("run", "") for st in job.get("steps", []))
     check("uv run --project cli fno-py doctor test smoke" in run,
           f"{name} runs the canonical full runner invocation",
           f"{name} does not invoke the canonical smoke runner")
-    # --only / --skip are how the shards divide the suite, and their COVERAGE
-    # is owned by cli/tests/unit/test_smoke_shards.py. These two are different:
-    # both select a subset nobody declared, so a shard using either silently
-    # shrinks the merge gate to whatever happened to change or fail last.
-    narrowed = [f for f in ("--changed", "--retry-failed") if f in run]
+    narrowed = [f for f in FORBIDDEN if f in run]
     check(not narrowed, f"{name} runs no undeclared subset mode",
           f"the merge gate was narrowed to a subset ({', '.join(narrowed)}) in {name}")
 
@@ -156,12 +162,18 @@ if gate_shards:
         check(asserted,
               f"the gate requires {name} to succeed",
               f"the gate never asserts {name} succeeded - that shard could fail unnoticed")
-    # A skipped required check is not a red one, so the gate has to run even
-    # when a shard fails.
-    check(str(smoke.get("if", "")).strip() == "always()",
-          "the gate runs even when a shard fails (if: always())",
-          f"smoke has if: {smoke.get('if')!r} - GitHub SKIPS it when a shard fails, "
-          "and a skipped required check does not block")
+    # A skipped required check is not a red one, so the gate has to run when a
+    # shard FAILS. It must not run when the whole run was CANCELLED, or it
+    # publishes a red check for a run nobody let finish - the phantom red this
+    # suite's own history is about. `!cancelled()` is the only condition that
+    # does both; bare `always()` fails the second half, and no condition at all
+    # fails the first.
+    gate_if = re.sub(r"[${}\s]", "", str(smoke.get("if", "")))
+    check(gate_if == "!cancelled()",
+          "the gate runs on failure but not on cancellation (if: !cancelled())",
+          f"smoke has if: {smoke.get('if')!r} - it must be !cancelled(): omitted, "
+          "GitHub skips it when a shard fails and a skipped required check does "
+          "not block; always(), it publishes a red check for a cancelled run")
 
 sys.exit(1 if fails else 0)
 PY
