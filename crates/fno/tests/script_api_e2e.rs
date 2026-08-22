@@ -284,7 +284,10 @@ fn script_api_dead_pane_verbs_fail_closed() {
 
     for verb in [
         vec!["read", "9999"],
-        vec!["send", "9999", "--text", "x"],
+        // --raw keeps this on the server path the loop is about: a dead pane
+        // exits 1, fast. A non-raw send refuses client-side before the server
+        // ever hears about pane 9999, which would prove nothing here.
+        vec!["send", "9999", "--text", "x", "--raw"],
         vec!["wait", "9999", "--timeout", "5"],
         vec!["kill", "9999"],
     ] {

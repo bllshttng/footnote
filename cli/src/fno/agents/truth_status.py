@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fno.claims.core import claim_status
-from fno.claims.io import claims_root_for
 
 # Claim-live + a fire within this window reads as working; older reads waiting.
 # Surfaced in the rendered age so a mis-tuned window misleads less (the age
@@ -232,6 +231,20 @@ def resolve_truth_status(
     # that claim_status's default resolution uses. Route through claims_root_for
     # so `fno agents list` reads the same dir the claim was written to; without
     # this the list always reads `free` and the fill never appears (codex P2).
+    # Imported HERE, not at module scope. A module-level `from fno.claims.io
+    # import claims_root_for` binds whatever that name points at during THIS
+    # module's first import, permanently, because sys.modules caches the module
+    # thereafter. A test that redirects `fno.claims.io.claims_root_for` at its
+    # own tmp dir and happens to trigger the first import while that patch is
+    # live leaves the stale lambda bound for every later caller in the process,
+    # and monkeypatch's teardown cannot see it to restore.
+    #
+    # Measured: `mail drain-self` read a node claim as `free` while a direct
+    # read of the same key answered `live`, because this function was resolving
+    # the claims root of an unrelated test's tmp dir. The same trap is called
+    # out on `fno.mail.reply_resolve._read_own_transcript_text`.
+    from fno.claims.io import claims_root_for
+
     key = f"node:{node_id}"
     root = claims_root if claims_root is not None else claims_root_for(key)
     claim = claim_status(key, root=root)

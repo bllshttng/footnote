@@ -420,7 +420,14 @@ fn agent_edge_inject_vs_typing_interlock() {
     });
 
     // The injection burst rides PaneSend and arrives unbroken.
-    let send = pane(&scratch, &["send", &id, "--text", "INJECTED-BYTES"]);
+    // --raw: this drives a `cat` pane and asserts the literal bytes reach the
+    // grid, which is the byte-level interlock this test exists for. A default
+    // send now envelopes for an agent recipient and refuses a pane no registry
+    // row claims, so the enveloped lane is not the subject here (node x-3a64).
+    let send = pane(
+        &scratch,
+        &["send", &id, "--text", "INJECTED-BYTES", "--raw"],
+    );
     assert!(send.status.success());
     let text = client.wait(10, "injected bytes on the grid", |c| {
         c.frames

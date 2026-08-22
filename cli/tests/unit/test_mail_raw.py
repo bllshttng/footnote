@@ -707,9 +707,13 @@ def test_raw_generic_daemon_lane_keeps_its_refusal(mailbox, monkeypatch, capsys,
     injected = []
     monkeypatch.setattr(
         "fno.agents.dispatch._mux_pane_send",
-        lambda resolved, payload, guarded=True, sender=None, confirm=False: (
-            injected.append((resolved, payload, sender))
-        )
+        # `raw` is what keeps this lane unwrapped: the payload is a slash verb
+        # aimed at the REPL parser, which an envelope defeats. `gate` is
+        # separate and stays ON here, because a showing prompt swallows a verb
+        # exactly as it swallows mail. `**_kw` so a new transport argument does
+        # not break this stub with a TypeError that reads like a lane failure.
+        lambda resolved, payload, guarded=True, sender=None, confirm=False,
+        raw=False, **_kw: (injected.append((resolved, payload, sender, raw)))
         or True,
     )
     review_calls = []
@@ -720,7 +724,9 @@ def test_raw_generic_daemon_lane_keeps_its_refusal(mailbox, monkeypatch, capsys,
     with pytest.raises(typer.Exit) as exc:
         _raw_send("codexmux", "/compact", self_ok=False)
     assert exc.value.exit_code == 0
-    assert injected == [(entry, "/compact", None)]
+    # raw=True: the envelope would defeat the REPL slash parser this lane exists
+    # to fire, so the pane-send default is opted out of here on purpose.
+    assert injected == [(entry, "/compact", None, True)]
     assert not review_calls
     assert "injected" in capsys.readouterr().out
 

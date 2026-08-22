@@ -5748,6 +5748,20 @@ def _mux_content_confirm(
     return False
 
 
+def _pane_recipient_handle(entry: "AgentEntry") -> Optional[str]:
+    """The canonical mail handle of a pane's occupant, or None.
+
+    None is not a failure: an unregistered pane has no handle to address, and
+    an envelope with no `to` is the honest rendering of that.
+    """
+    from fno.harness_identity import canonical_handle
+
+    session_id = getattr(entry, "harness_session_id", None) or getattr(
+        entry, "session_id", None
+    )
+    return canonical_handle(session_id) if session_id else None
+
+
 def _mux_pane_send(
     entry: "AgentEntry",
     text: str,
@@ -5755,6 +5769,8 @@ def _mux_pane_send(
     guarded: bool = True,
     sender: Optional[str] = None,
     confirm: bool = False,
+    raw: bool = False,
+    gate: Optional[bool] = None,
 ) -> bool:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
@@ -5795,6 +5811,17 @@ def _mux_pane_send(
     itself standing in for a confirm, and this flag governs the unguarded path
     replacing it), and ignored for a non-claude recipient, which has no
     ~/.claude/projects transcript to confirm against.
+
+    ``raw`` (default False) is the keystroke opt-out. By default the text is
+    gated and enveloped through :func:`fno.mail.pane_transport.prepare`, so an
+    agent-to-agent pane drive carries the same ``<fno_mail>`` attribution the
+    mail lane produces, and a pane showing an option prompt is refused (a submit
+    there dismisses the payload and selects the highlighted default). Set it for
+    the genuine keystroke cases -- an unwrapped slash payload aimed at the REPL
+    parser, a digit answering a prompt, a bare submit -- where an envelope is
+    nonsense. Already-wrapped text passes the wrap through untouched, so the mail
+    lane's own ``<fno_mail>`` / ``<cross-session-message>`` bodies are unchanged
+    and only gain the gate.
     """
     mux = entry.mux or {}
     session = mux.get("session")
@@ -5836,6 +5863,53 @@ def _mux_pane_send(
         enter_delay_s = input_caps["send_keys_enter_delay_ms"] / 1000
     except (KeyError, TypeError):
         return False
+    # Envelope by default (node x-3a64): every agent-to-agent pane drive carries
+    # the same attribution the mail lane produces, and the read-back gate refuses
+    # a pane showing an option prompt (a submit there dismisses the payload and
+    # selects the highlighted default). `raw=True` is the keystroke opt-out.
+    # Already-wrapped text passes the wrap through, so the mail lane's own bodies
+    # are byte-unchanged and only gain the gate.
+    # THREE cases, not two. `prepare` does two jobs -- it wraps, and it refuses
+    # a pane showing a prompt -- and a caller can want either without the other:
+    #
+    #   wrap + gate   default a2a mail
+    #   gate only     an operational payload that must land verbatim (a ritual
+    #                 command, a busy-hold digest). It is not mail, so it must
+    #                 not be dressed as mail, but a submit into a showing prompt
+    #                 discards it exactly the same way.
+    #   neither       a genuine keystroke ANSWERING a prompt (a digit, a control
+    #                 key). Gating this one breaks the caller that needs the
+    #                 prompt to be there.
+    #
+    # Collapsing the middle case into the last is what shipped a hold digest and
+    # a ritual into an ungated pane. `gate` defaults to `not raw`, so every
+    # existing caller keeps its behavior and the middle case says `gate=True`.
+    if gate is None:
+        gate = not raw
+    if not raw or gate:
+        from fno.mail.pane_transport import PaneSendRefused, prepare
+
+        try:
+            text = prepare(
+                text,
+                session=str(session),
+                pane_id=pane_id,
+                harness=harness or None,
+                sender=sender,
+                # The recipient's own handle. Without it the envelope renders
+                # with no `to`, and `_addressed_here` answers True for any tag
+                # carrying none, which turns the receipt check for this whole
+                # lane into a mention check. The entry is right here.
+                to=_pane_recipient_handle(entry),
+                gate=gate,
+                # `wrap=False` for the gate-only case: the body is already what
+                # has to land, byte for byte.
+                wrap_body=not raw,
+            )
+        except PaneSendRefused as exc:
+            print(f"mux pane {pane_id} send refused: {exc}", file=sys.stderr)
+            return False
+
     # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
     # the <cross-session-message> peer-follow-up container) leaves no agent-authored
     # marker in the recipient transcript, so record it in the ledger. Both wrapped
@@ -5906,7 +5980,11 @@ def _mux_pane_send(
 
     def _paste_then_submit() -> bool:
         # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
-        send_args = ["send", pane, "--stdin"]
+        # --raw: this function already ran the gate and the wrap above, so the
+        # Rust verb types these bytes verbatim rather than preparing them a
+        # second time (a second pass would re-read the pane and re-decide a
+        # question this one already answered).
+        send_args = ["send", pane, "--stdin", "--raw"]
         if guarded:
             send_args.append("--guarded")
         rc = _run(send_args, stdin_text=text)
@@ -5922,7 +6000,10 @@ def _mux_pane_send(
         # The CR is unguarded: the guarded paste already proved the pane idle, and
         # guarding the submit could strand a pasted-but-unsent prompt.
         time.sleep(enter_delay_s)
-        return all(_run(["send", pane, "--text", key]) == 0 for key in submit_text)
+        # A submit key is a control byte, never a message: always --raw.
+        return all(
+            _run(["send", pane, "--text", key, "--raw"]) == 0 for key in submit_text
+        )
 
     if guarded:
         sent = _paste_then_submit()
@@ -6016,8 +6097,13 @@ def _mux_followup_path(
             reason="pane-send-failed",
         )
         raise DispatchAskError(
-            f"mux pane send to {name!r} failed; the pane may be gone. "
-            f"Check 'fno mux ls' or 'fno agents logs {name}'.",
+            f"mux pane send to {name!r} did not deliver. The reason is on "
+            f"stderr above and it is not always a dead pane: the read-back "
+            f"gate refuses a pane showing a prompt, and refuses again when the "
+            f"prompt detector cannot run at all. This lane is fire-and-forget "
+            f"with no durable floor, so a refusal here is the whole outcome. "
+            f"Check 'fno mux pane read --session <s> <pane>' first, then "
+            f"'fno mux ls' or 'fno agents logs {name}'.",
             exit_code=1,
         )
     # Message delivered. Bump registry under the held flock; on OSError the
@@ -6885,7 +6971,34 @@ def _deliver_live(
         return False
 
     if entry.mux:
-        mux_delivered = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
+        # `mail is None` means this is NOT a2a mail: it is an operational
+        # payload that has to land verbatim (a post-merge ritual command, a
+        # busy-hold digest). Enveloping it by default did three separate wrongs.
+        # A digest EMBEDS `<fno_mail>` bodies, and `wrap_fno_mail` refuses a body
+        # holding one, so every hold release to a pane raised and the cursor
+        # never advanced. A ritual arrived dressed as chat and the caller's
+        # `True` suppressed its cold-dispatch fallback, losing it silently. And
+        # the auto-wrap stamped this process's own handle rather than the
+        # declared `from_name`, so the envelope named the wrong peer.
+        #
+        # `sender` is passed for the wrapped case too. It costs nothing there
+        # (the body is already enveloped, so `prepare` passes it through) and it
+        # stops this call site from depending on that staying true.
+        mux_delivered = _mux_pane_send(
+            entry,
+            wrapped,
+            guarded=False,
+            confirm=True,
+            raw=mail is None,
+            # Verbatim, but STILL GATED. `raw` alone skipped `prepare` whole,
+            # and `prepare` is where the read-back gate lives, so a digest or a
+            # ritual went into a pane nobody had looked at. On a codex auth wall
+            # the CR takes the wall's default, the payload is discarded, and the
+            # bytes-written verdict still reads True -- so the hold release then
+            # advances the cursor and retires every held message unread.
+            gate=True,
+            sender=from_name or None,
+        )
         if not mux_delivered:
             _record("mux-send-failed")
         return mux_delivered

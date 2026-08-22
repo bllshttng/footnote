@@ -30,6 +30,12 @@ from fno.time_budget import validate_timeout_budget
 
 ENVELOPE_VERSION = 1
 HOSTED_DELIVERY = "hosted"
+#: `fno mail send --force`: the body was TYPED into a pane as keystrokes. Kept
+#: distinct from `hosted` on purpose (node x-3a64). Bytes written to a PTY is
+#: not delivery and is certainly not action -- a full payload can arrive, render,
+#: and be discarded while the return selects a prompt's default. The row says
+#: what happened and no more, and names the pane a reader can go read.
+TYPED_DELIVERY = "typed"
 
 # Size-triggered rotation. A segment is rolled once it reaches this many bytes
 # (checked before each append, under the lock). Env overrides exist for tests
@@ -429,8 +435,11 @@ def is_deliverable(env: Envelope) -> bool:
 
     Missing delivery metadata is the legacy durable shape. A hosted row records
     a delivery that already succeeded and exists only for sender/operator audit.
+    A typed row records bytes already written into the recipient's pane, so it
+    is audit-only too -- draining it would hand the recipient a second copy of
+    text already sitting at its prompt.
     """
-    return getattr(env, "delivery", None) != HOSTED_DELIVERY
+    return getattr(env, "delivery", None) not in (HOSTED_DELIVERY, TYPED_DELIVERY)
 
 
 def record_hosted_delivery(
@@ -466,6 +475,61 @@ def record_hosted_delivery(
         from_model=from_model,
         to_kind=to_kind,
         word_count=word_count,
+    )
+    append(env)
+    return env
+
+
+def record_typed_delivery(
+    *,
+    msg_id: str,
+    sender: str,
+    recipient: str,
+    body: str,
+    pane_id: str,
+    mux_session: Optional[str] = None,
+    thread: Optional[str] = None,
+    provider_from: Optional[str] = None,
+    provider_to: Optional[str] = None,
+    in_reply_to: Optional[str] = None,
+    from_session: Optional[str] = None,
+    from_model: Optional[str] = None,
+    to_kind: Optional[str] = None,
+    word_count: Optional[int] = None,
+) -> Envelope:
+    """Append one audit-only record after a ``--force`` pane send typed the body.
+
+    The mapping from ``msg_id`` to ``pane_id`` is the whole point (node x-3a64).
+    A message delivered by keystroke used to be invisible to every mail surface:
+    the recipient saw text with no id and the sender's outbox had no row. With
+    the mapping, ``fno mail sent`` shows the message and names the transport, and
+    a payload that lands in a pane and is never consumed becomes traceable to a
+    pane a reader can go read.
+    """
+    env = Envelope.new(
+        id=msg_id,
+        thread=thread or msg_id,
+        from_=sender,
+        to=recipient,
+        kind="send",
+        body=body,
+        provider_from=provider_from,
+        provider_to=provider_to,
+        in_reply_to=in_reply_to,
+        delivery=TYPED_DELIVERY,
+        # The reply address, on the row a reader reaches for first. `cmd_reply`
+        # consults the bus before any transcript, so a forced message whose row
+        # carried only the head-8 handle refused as ambiguous - on the one
+        # transport with no live confirmation to fall back to.
+        from_session=from_session,
+        from_model=from_model,
+        to_kind=to_kind,
+        word_count=word_count,
+        meta={
+            "transport": "pane",
+            "pane_id": str(pane_id),
+            **({"mux_session": mux_session} if mux_session else {}),
+        },
     )
     append(env)
     return env

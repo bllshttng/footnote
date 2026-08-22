@@ -138,7 +138,7 @@ You rarely type these by hand - hooks and drivers do - but they live under `fno 
 | Old verb | Where it went |
 |---|---|
 | `grid` | The mux. Open `fno mux`; script panes with `fno mux pane ls\|read\|run\|send\|wait\|kill`. |
-| `drive` | `fno mux pane send <pane> ...`, or type into the pane in `fno mux`. `--text` fills the composer without submitting - see [Submitting a pane send](#submitting-a-pane-send). |
+| `drive` | `fno mux pane send <pane> --raw ...`, or type into the pane in `fno mux`. `--raw` sends keystrokes verbatim; without it the payload is wrapped in an `<fno_mail>` envelope. `--text` fills the composer without submitting - see [Submitting a pane send](#submitting-a-pane-send). |
 | `host` | `fno agents spawn --name <n> --substrate pane`. |
 | `promote` | Same - the mux hosts agent panes now. |
 | `send` / `inbox` / `ack` | The `fno agents mail` namespace (`fno agents mail send`, `fno agents mail inbox`, ...). |
@@ -147,7 +147,7 @@ Retired verbs print these pointers and exit non-zero, so scripts fail loud rathe
 
 ## Submitting a pane send
 
-`fno mux pane send <pane> --text <s>` writes bytes into the composer. It does not submit. This default remains the staging contract for `fno mux block pipe`.
+`fno mux pane send <pane> --raw --text <s>` writes bytes into the composer. It does not submit. This default remains the staging contract for `fno mux block pipe`. Drop `--raw` only when the payload IS a peer message: the envelope is the default and keystrokes are the opt-out.
 
 When delivery is intended, add `--submit`. The verb settles, sends a separate carriage return, and requires changed output. Unconfirmed text exits 22.
 

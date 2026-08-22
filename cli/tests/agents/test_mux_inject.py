@@ -27,6 +27,24 @@ import pytest
 from fno.paths_testing import use_tmpdir
 
 
+@pytest.fixture(autouse=True)
+def _idle_pane(monkeypatch):
+    """Every test in this module drives an IDLE pane.
+
+    Node x-3a64 put a read-back gate in front of the enveloped pane lane: it
+    reads the frame, asks the manifest engine whether an option prompt is
+    showing, and refuses when it cannot measure. These tests stub
+    ``subprocess.run`` wholesale, so the detector reads an empty frame and
+    correctly refuses as unmeasurable -- which is the gate working, not the
+    transport failing. Stub the verdict so each test keeps asserting the thing
+    it was written for. The gate itself has its own tests in
+    ``test_dispatch_mux_send.py``, which does NOT use this fixture.
+    """
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.prompt_refusal",
+        lambda **_kwargs: None,
+    )
+
 def _mux_entry(name: str = "muxed", provider: str = "claude"):
     from fno.agents.registry import AgentEntry
 
@@ -235,7 +253,12 @@ def _capture_audits(monkeypatch) -> list[tuple[dict, object]]:
 def test_mux_pane_send_audits_raw_inject(monkeypatch) -> None:
     """AC10: the mux pane lane records an agent_raw_inject for an unwrapped
     payload (it never reaches the Rust mail-inject binary, so this site is
-    mandatory, not decorative) and stays silent for a <fno_mail>-wrapped one."""
+    mandatory, not decorative) and stays silent for a <fno_mail>-wrapped one.
+
+    Since node x-3a64 an unwrapped payload only reaches the pane through
+    ``raw=True``, the keystroke opt-out -- a default send is enveloped and so is
+    audited by construction. That is the row keeping its meaning, not losing it:
+    it still marks every send that arrives at a prompt with no attribution."""
     from fno.agents.dispatch import _mux_pane_send
 
     fake = FakeMux()
@@ -243,7 +266,7 @@ def test_mux_pane_send_audits_raw_inject(monkeypatch) -> None:
     seen = _capture_audits(monkeypatch)
 
     # Unwrapped -> one audit record; wrapped envelope -> none.
-    _mux_pane_send(_mux_entry(), "/code-review <level> --comment --fix")
+    _mux_pane_send(_mux_entry(), "/code-review <level> --comment --fix", raw=True)
     _mux_pane_send(_mux_entry(), "<fno_mail from=\"a\">hi</fno_mail>")
 
     assert len(seen) == 1, "only the unwrapped payload is audited"
@@ -272,7 +295,7 @@ def test_mux_pane_send_audit_records_a_failed_send_as_unconfirmed(monkeypatch) -
     _patch_mux(monkeypatch, FakeMux(fail_verbs={"send"}))
     seen = _capture_audits(monkeypatch)
 
-    assert _mux_pane_send(_mux_entry(), "/code-review") is False
+    assert _mux_pane_send(_mux_entry(), "/code-review", raw=True) is False
     assert len(seen) == 1
     assert seen[0][0]["data"]["confirmed"] is False
 

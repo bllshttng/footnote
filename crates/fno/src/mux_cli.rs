@@ -31,7 +31,7 @@
 
 use std::ffi::OsString;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::proto::{
@@ -2047,6 +2047,13 @@ pub enum PaneCmd {
         /// Submit the pasted text with a separate wire-level carriage return,
         /// then require a positive changed-frame marker before returning zero.
         submit: bool,
+        /// `--raw`: type these bytes verbatim. Default OFF, so an ordinary
+        /// `pane send` carries the same `<fno_mail>` envelope the mail lane
+        /// produces and is refused when the pane is showing an option prompt
+        /// (node x-3a64). Raw is for the genuine keystroke cases: a digit
+        /// answering a prompt, a bare control key, a shell command, clearing a
+        /// modal. An envelope around the character `1` is nonsense.
+        raw: bool,
     },
     Wait {
         pane: u64,
@@ -2149,13 +2156,24 @@ pub const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|bre
 pub const PANE_REFERENCE_USAGE: &str =
     "pane refs are <pane-id> or <session>:<pane-id>; --session overrides the prefix";
 
+/// `pane send`'s one non-obvious flag, stated where an operator looks for it
+/// (node x-3a64). The default is the surprising half, so name it first and show
+/// the raw case with a real payload rather than a placeholder: an envelope
+/// around the character `1` is the nonsense the flag exists to avoid.
+pub const PANE_SEND_RAW_HELP: &str = "pane send wraps the text in an <fno_mail> envelope by \
+default, so a worker can tell a peer's message from its operator's, and refuses a pane showing \
+an option prompt. --raw types the bytes verbatim for genuine keystrokes: \
+`fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit.";
+
 pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
         .and_then(|a| a.to_str())
         .ok_or_else(|| format!("pane needs a verb: {PANE_VERBS}"))?;
     if matches!(verb, "-h" | "--help") {
-        return Err(format!("{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}"));
+        return Err(format!(
+            "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}"
+        ));
     }
 
     // `run` is special: leading options/directives, then the command argv
@@ -2278,6 +2296,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut stdin = false;
     let mut guarded = false;
     let mut submit = false;
+    let mut raw = false;
     let mut quiet_ms = None;
     let mut pattern = None;
     let mut timeout_s = None;
@@ -2317,6 +2336,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             "--stdin" => stdin = true,
             "--guarded" => guarded = true,
             "--submit" => submit = true,
+            "--raw" => raw = true,
             "--quiet-ms" => {
                 quiet_ms = Some(parse_u64(
                     &flag_value(args, &mut i, "--quiet-ms")?,
@@ -2398,6 +2418,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 source,
                 guarded,
                 submit,
+                raw,
             }
         }
         "wait" => PaneCmd::Wait {
@@ -2423,6 +2444,9 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     };
     if fzf && verb != "focus" {
         return Err("--fzf pairs only with pane focus".into());
+    }
+    if raw && verb != "send" {
+        return Err("--raw pairs only with pane send".into());
     }
     if session.is_none() {
         session = selector_session;
@@ -3741,6 +3765,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             source,
             guarded,
             submit,
+            raw,
         } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
@@ -3751,6 +3776,24 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                         return EXIT_ERROR;
                     }
                     buf
+                }
+            };
+            // Envelope by default (node x-3a64). A pane drive types at a
+            // worker's prompt, and unwrapped it is indistinguishable from the
+            // operator typing: no sender, no message id, no reply handle, no
+            // authority footer. Delegate to the Python renderer, which is the
+            // SOLE renderer (x-1904 deleted the Rust mirror), and FAIL CLOSED.
+            // A bare-paste fallback would rebuild that exact defect, and would
+            // do it precisely when something is already wrong.
+            let bytes = if raw {
+                bytes
+            } else {
+                match prepare_pane_bytes(session, pane, &bytes) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("fno mux pane send: {e}");
+                        return EXIT_ERROR;
+                    }
                 }
             };
             if submit {
@@ -4355,6 +4398,169 @@ fn control_roundtrip(
     control_roundtrip_with_timeouts(sock, session, verb, CONTROL_TIMEOUT, CONTROL_REPLY_DEADLINE)
 }
 
+/// How long the envelope renderer gets. It reads the pane frame and runs the
+/// manifest engine over it, so it is a couple of subprocess hops, not a network
+/// call; a renderer that has not answered by now is wedged, and a wedged
+/// renderer must fail the send rather than release a bare paste.
+///
+/// Strictly GREATER than the child's own worst case, which is what makes the
+/// diagnostic honest. The nested pane read is bounded at 30s
+/// (`_MUX_SUBPROCESS_TIMEOUT_S`) and manifest-eval adds 2s, plus interpreter
+/// startup. At exactly 30s this side killed the child first and reported a
+/// wedged renderer for a slow pane, sending the reader to the wrong component.
+/// The child hits its own bound first now and says which hop was slow.
+const PANE_PREPARE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Gate and envelope `bytes` for `session:pane` by shelling to the Python
+/// renderer (`fno mail pane-prepare`), the SOLE `<fno_mail>` renderer.
+///
+/// Fails closed on every arm: a missing renderer, a non-zero exit (the pane is
+/// showing an option prompt, hosts no registered agent, or the body cannot be
+/// attributed) or a timeout. There is deliberately no
+/// bare-paste fallback -- an unattributed send is the defect this exists to
+/// close, so falling back to one when the renderer is unavailable would restore
+/// it exactly when something is already wrong.
+///
+/// Re-invokes this binary by `current_exe`, which forwards non-mux verbs to the
+/// Python wheel. `FNO_BIN` overrides it for a test or a split install.
+fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+
+    let exe = match std::env::var_os("FNO_BIN") {
+        Some(v) => PathBuf::from(v),
+        None => std::env::current_exe()
+            .map_err(|e| format!("cannot locate the fno binary to render the envelope: {e}"))?,
+    };
+    let mut child = std::process::Command::new(&exe)
+        .args([
+            "mail",
+            "pane-prepare",
+            "--session-id",
+            session,
+            "--pane",
+            &pane.to_string(),
+        ])
+        // Hand the child the path we resolved. It runs a nested `mux pane read`
+        // for the prompt gate, and that hop resolves `FNO_BIN` or a bare `fno`
+        // on PATH. We are here via `current_exe` precisely because `fno` may not
+        // BE on PATH, so leaving this unset made the gate unable to read the
+        // frame on exactly those installs, and every non-raw send refused as
+        // "frame unreadable".
+        .env("FNO_BIN", &exe)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "envelope renderer ({}) could not start: {e}. Refusing to type an \
+                 unattributed payload; pass --raw for a genuine keystroke.",
+                exe.display()
+            )
+        })?;
+    // The write runs on its own thread, so it cannot deadlock against a child
+    // that starts answering before it has read everything. Dropping the handle
+    // at the end of the closure closes the pipe, which is the renderer's EOF.
+    // A renderer that refuses reads nothing and exits, closing the pipe first;
+    // that EPIPE is not the failure, the exit code below is, so it is swallowed
+    // here and left to the exit arm to explain.
+    let payload = bytes.to_vec();
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&payload);
+        })
+    });
+    let waited = wait_with_deadline(child, PANE_PREPARE_TIMEOUT);
+    if let Some(handle) = writer {
+        let _ = handle.join();
+    }
+    let (exit, rendered, diagnostics) = waited?;
+    if !exit.success() {
+        let detail = String::from_utf8_lossy(&diagnostics).trim().to_string();
+        let detail = if detail.is_empty() {
+            format!("renderer exited {exit}")
+        } else {
+            detail
+        };
+        return Err(format!("{detail} (pass --raw to type keystrokes instead)"));
+    }
+    Ok(rendered)
+}
+
+/// Wait for `child`, killing it once `budget` elapses. `Child::wait_with_output`
+/// has no timeout of its own, and a renderer that never exits hangs the send
+/// forever -- a hang is a worse failure than a refusal, because nothing surfaces
+/// it.
+///
+/// Both pipes are drained on their own threads FOR THE WHOLE WAIT, not after it.
+/// The renderer's stdout is the wrapped body, so it is as large as the payload,
+/// and `pane send --stdin` has no body cap of its own. A poll loop that only
+/// calls `try_wait` leaves stdout unread; once it fills the pipe buffer the child
+/// blocks on write, never exits, and every large payload fails at the deadline
+/// with a message blaming a renderer that was working fine.
+///
+/// Returns the exit result plus both drained streams, rather than
+/// `process::Output`: naming that struct's exit field would put a bare
+/// plan-frontmatter identifier in this file, which a repo ratchet counts to keep
+/// readiness classification out of Rust. The tuple is what the one caller wants
+/// anyway.
+fn wait_with_deadline(
+    mut child: std::process::Child,
+    budget: Duration,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
+    use std::io::Read;
+
+    let mut out_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| "envelope renderer stdout unavailable".to_string())?;
+    let mut err_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "envelope renderer stderr unavailable".to_string())?;
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + budget;
+    let exit = loop {
+        match child.try_wait() {
+            Ok(Some(exit)) => break exit,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // The readers end when the killed child's pipes close, so
+                    // joining here cannot outlive the kill.
+                    let _ = out_reader.join();
+                    let _ = err_reader.join();
+                    return Err(format!(
+                        "envelope renderer did not answer within {}s; refusing to type \
+                         an unattributed payload (pass --raw for a genuine keystroke)",
+                        budget.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => return Err(format!("envelope renderer wait failed: {e}")),
+        }
+    };
+    let rendered = out_reader
+        .join()
+        .map_err(|_| "envelope renderer stdout reader panicked".to_string())?;
+    let diagnostics = err_reader
+        .join()
+        .map_err(|_| "envelope renderer stderr reader panicked".to_string())?;
+    Ok((exit, rendered, diagnostics))
+}
+
 fn positive_post_submit_marker(before_cr: &str, after_cr: &str) -> bool {
     !after_cr.trim().is_empty() && after_cr != before_cr
 }
@@ -4951,7 +5157,8 @@ mod tests {
                 pane: 9,
                 source: SendSource::Text("hi".into()),
                 guarded: false,
-                submit: false
+                submit: false,
+                raw: false
             }
         );
     }
@@ -5851,6 +6058,7 @@ mod tests {
                 source: SendSource::Text("hi\r".into()),
                 guarded: false,
                 submit: false,
+                raw: false,
             }
         );
         assert_eq!(
@@ -5860,6 +6068,7 @@ mod tests {
                 source: SendSource::Stdin,
                 guarded: false,
                 submit: false,
+                raw: false,
             }
         );
         // --guarded opts the send into the server-side turn-taken interlock.
@@ -5872,6 +6081,7 @@ mod tests {
                 source: SendSource::Stdin,
                 guarded: true,
                 submit: false,
+                raw: false,
             }
         );
         assert_eq!(
@@ -5883,11 +6093,41 @@ mod tests {
                 source: SendSource::Text("hi".into()),
                 guarded: false,
                 submit: true,
+                raw: false,
+            }
+        );
+        // --raw opts OUT of the envelope (node x-3a64). Default false is the
+        // load-bearing half: an opt-in flag would leave every existing caller
+        // unattributed and fix nothing.
+        assert_eq!(
+            parse_pane_args(&os(&["send", "2", "--text", "1", "--raw", "--submit"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Text("1".into()),
+                guarded: false,
+                submit: true,
+                raw: true,
             }
         );
         // Neither / both are usage errors.
         assert!(parse_pane_args(&os(&["send", "2"])).is_err());
         assert!(parse_pane_args(&os(&["send", "2", "--text", "x", "--stdin"])).is_err());
+        // --raw pairs only with send: on any other verb it is a usage error, not
+        // a silently ignored flag that reads as "the envelope was skipped".
+        assert!(parse_pane_args(&os(&["read", "2", "--raw"])).is_err());
+    }
+
+    #[test]
+    fn mux_pane_send_help_names_the_envelope_default_and_the_raw_opt_out() {
+        // The DEFAULT is the surprising half, so the help must state it. An
+        // operator who only learns `--raw` exists still does not know what a
+        // plain send now carries.
+        let err = parse_pane_args(&os(&["--help"])).unwrap_err();
+        assert!(err.contains("--raw"), "{err}");
+        assert!(err.contains("<fno_mail>"), "{err}");
+        assert!(err.contains("option prompt"), "{err}");
     }
 
     #[test]

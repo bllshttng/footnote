@@ -132,8 +132,14 @@ class ProviderSubprocessError(RuntimeError):
     surface them unwrapped (AC1-FR subprocess non-zero / auth-quota).
     """
 
-    def __init__(self, exit_code: int, stderr: str) -> None:
-        super().__init__(f"claude --bg exited {exit_code}: {stderr!r}")
+    def __init__(
+        self, exit_code: int, stderr: str, *, summary: Optional[str] = None
+    ) -> None:
+        # `summary` is for a refusal raised BEFORE claude is invoked. The default
+        # names a process exit, and a caller that never started one would report
+        # the wrong layer: a reader chasing "claude --bg exited 2" goes looking
+        # at claude, its auth, and its quota, for a decision this side made.
+        super().__init__(summary or f"claude --bg exited {exit_code}: {stderr!r}")
         self.exit_code = exit_code
         self.stderr = stderr
 
@@ -640,6 +646,31 @@ def bg_create(
     from fno.setup.github_cli import worker_environment
 
     spawn_env = worker_environment(spawn_env)
+
+    # Seed provenance, set AFTER the env floor. The seed argument stays
+    # byte-identical - a leading-slash payload is classified by that first
+    # character - so who sent it travels as env and a SessionStart hook renders
+    # the <fno_mail> envelope. It goes after `worker_environment` because that
+    # floor CLEARS this group for every adapter (a child must never inherit its
+    # parent's seed attribution); setting before it would be silently undone.
+    #
+    # KNOWN GAP on this lane, and the same one x-6de8 names ~90 lines up: a
+    # ROUTED `claude --bg` session is forked by the claude daemon with the
+    # DAEMON's env, not this spawn_env, so these fields do not reach that
+    # child and its SessionStart renders no sidecar. The forgery refusal below
+    # still fires, because it reads the seed here rather than in the child.
+    # Reaching a daemon-forked worker needs a carrier that survives the fork,
+    # the way `materialize_model_scrub_settings` floats a settings file for the
+    # model vars. Do not read the update below as proof the bg lane is covered.
+    from fno.mail.seed_provenance import build_env as _seed_provenance_env
+
+    # Cannot refuse. `build_env` returns empty when it cannot honestly attribute
+    # the seed, and an unattributed launch is the right outcome every time it
+    # does. It briefly raised for a seed carrying an envelope, which killed the
+    # mail wake-fork rung: that rung seeds a worker with the wrapped message
+    # itself, so every send to an asleep-but-resumable peer reaching it died
+    # here and demoted to durable, blaming a spawn failure that never happened.
+    spawn_env.update(_seed_provenance_env(message, node=os.environ.get("FNO_NODE")))
 
     start = time.monotonic()
     try:

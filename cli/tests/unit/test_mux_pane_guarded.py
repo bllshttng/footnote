@@ -28,6 +28,26 @@ import pytest
 import fno.agents.dispatch as dispatch
 
 
+@pytest.fixture(autouse=True)
+def _idle_pane(monkeypatch):
+    """Every test in this module drives an IDLE pane.
+
+    Node x-3a64 put a read-back gate in front of the enveloped pane lane: it
+    reads the frame, asks the manifest engine whether an option prompt is
+    showing, and refuses when it cannot measure. These tests stub
+    ``subprocess.run`` wholesale, so the detector reads an empty frame and
+    correctly refuses as unmeasurable -- which is the gate working, not the
+    transport failing. Stub the verdict so each test keeps asserting the thing
+    it was written for. The gate itself has its own tests in
+    ``test_dispatch_mux_send.py``, which does NOT use this fixture.
+    """
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.prompt_refusal",
+        lambda **_kwargs: None,
+    )
+
+
+
 def _reap_runner(child_pid=42):
     def run(argv, **_kwargs):
         if argv[1:4] == ["mux", "pane", "ls"]:
@@ -197,12 +217,18 @@ def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch, tm
 
     calls: list[list[str]] = []
 
-    def _run(argv, **_kwargs):
+    def _run(argv, **kwargs):
         calls.append(list(argv))
         if "--stdin" in argv:
             # The recipient "processes" the paste and it lands in its transcript
-            # before the confirm poll runs.
-            transcript.write_text('{"type":"queue-operation","content":"hi there"}\n')
+            # before the confirm poll runs. Echo back what was actually pasted:
+            # since node x-3a64 the lane envelopes the body, so the confirm
+            # marker is the envelope's open tag rather than the caller's first
+            # word, and a hardcoded copy here would test yesterday's bytes.
+            pasted = (kwargs.get("input") or "").strip().split("\n", 1)[0]
+            transcript.write_text(
+                '{"type":"queue-operation","content":' + json.dumps(pasted) + "}\n"
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(dispatch.subprocess, "run", _run)

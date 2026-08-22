@@ -98,6 +98,17 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     from fno.harness_identity import scrub_ambient_identity
 
     scrub_ambient_identity(env)
+    # Seed provenance is inherited the same way and for the same reason it must
+    # not be (node x-3a64): these fields name WHO SENT THIS CHILD ITS SEED, so a
+    # child that inherits them attributes its own first message to whoever
+    # seeded its parent - an envelope naming the wrong peer, which is worse than
+    # none. Scrubbed at the floor rather than per adapter, so a launcher that
+    # knows the seed SETS them after crossing it, and one that does not (a
+    # headless one-shot) emits no sidecar instead of a wrong one.
+    from fno.mail.seed_provenance import SEED_PROVENANCE_KEYS
+
+    for _seed_key in SEED_PROVENANCE_KEYS:
+        env.pop(_seed_key, None)
     # Dropped once, before any return: a worker inherits the marker from a
     # delegated gh, never earns it, and would have its first gh call refused.
     env.pop(PROXY_DEPTH_ENV, None)

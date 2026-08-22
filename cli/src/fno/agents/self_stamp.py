@@ -110,6 +110,27 @@ def resolve_self_handle(
     return None
 
 
+def resolve_self_session_id(
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """Return this process's proven FULL session id, or None when unprovable.
+
+    The companion to :func:`resolve_self_handle`, and the one that survives a
+    collision. A handle is the first eight characters of the session id; under
+    UUIDv7 those are a truncated millisecond timestamp, so two sessions started
+    inside the same ~65.536-second bucket share a handle and a threaded reply to
+    either refuses as ambiguous. The full id is what the envelope carries as
+    ``from_session`` so a recipient always has one address that cannot collide.
+
+    Same owned resolution as the handle: an ambiguous or contradicted identity
+    returns None rather than address the return leg to a stranger.
+    """
+    ident = resolve_self_identity(env)
+    if ident.session_id and ident.harness:
+        return ident.session_id
+    return None
+
+
 def resolve_self_model(env: Optional[Mapping[str, str]] = None) -> str:
     """The invoking harness's own model string, or ``"unknown"``.
 

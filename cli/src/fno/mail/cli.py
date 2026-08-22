@@ -238,6 +238,12 @@ def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
         )
 
 
+#: Matches either end of the peer-follow-up container, case-insensitively, for
+#: the same reason `contains_fno_mail_tag` is case-insensitive: an exact-case
+#: check is bypassed by one capital letter.
+_CROSS_SESSION_TAG_RE = re.compile(r"</?cross-session-message", re.IGNORECASE)
+
+
 def _refuse_forged_envelope(body: str) -> None:
     """Refuse a body containing an ``<fno_mail`` open tag or ``</fno_mail>`` close
     tag (x-4ce4), with a CLI-friendly error before the body ever reaches
@@ -599,6 +605,79 @@ def _collect_refs(
 # Commands
 # ---------------------------------------------------------------------------
 
+def _is_job_name(name: Optional[str]) -> bool:
+    """True when ``name`` is a ``node:<id>`` / ``pr:<n>`` job address."""
+    if not name:
+        return False
+    from fno.mail.job_address import is_job_token
+
+    return bool(is_job_token(name))
+
+
+def _refuse_unsafe_short_address(
+    token: Optional[str], *, self_addressed: bool = False
+) -> None:
+    """Refuse a codex head-8 supplied as a mail ADDRESS, naming what to use.
+
+    Registry names and claude handles pass through untouched. A codex head-8 is
+    refused on SHAPE, not on whether it happens to resolve uniquely this second:
+    a codex session id is UUIDv7, so those eight characters are a ~65.536-second
+    clock bucket, and the collision arrives silently the moment a sibling spawns
+    in the same minute. Refusing only after a collision exists is refusing after
+    the reply has already become impossible.
+    """
+    if not token:
+        return
+    if self_addressed:
+        # A self-address resolves to exactly one session by construction: the
+        # one running this process. The ambiguity this rule guards against
+        # cannot arise, so refusing here only blocks a caller from reaching
+        # itself.
+        return
+    from fno.agents.registry import load_registry
+    from fno.harness_identity import (
+        CODEX_SHORT_ADDRESS_RULE,
+        canonical_handle,
+        is_unsafe_short_address,
+    )
+
+    # Shape first: it is cheap, and it is what makes the registry read worth
+    # doing. A registry name or a full session id never reaches the read below.
+    if not is_unsafe_short_address(token, "codex"):
+        return
+    try:
+        entries = load_registry()
+    except Exception:  # noqa: BLE001 - an unreadable registry proves nothing
+        return
+
+    # The registry is what proves the head-8 is CODEX's. The same eight hex are
+    # a fine claude address (UUIDv4, 32 random bits), so refusing on shape alone
+    # would break the harness this rule does not apply to.
+    wanted = token.strip().lower()
+    matches = []
+    for entry in entries:
+        if getattr(entry, "harness", None) != "codex":
+            continue
+        session_id = (
+            getattr(entry, "harness_session_id", None)
+            or getattr(entry, "session_id", None)
+            or ""
+        )
+        if session_id and canonical_handle(session_id).lower() == wanted:
+            matches.append((entry, session_id))
+    if not matches:
+        return
+
+    lines = [f"error: {token!r} addresses codex: {CODEX_SHORT_ADDRESS_RULE}."]
+    for entry, session_id in matches:
+        mux = getattr(entry, "mux", None) or {}
+        pane = mux.get("pane_id")
+        pane_note = f"  (pane {pane})" if pane is not None else ""
+        lines.append(f"  {session_id}{pane_note}")
+    print("\n".join(lines), file=sys.stderr)
+    raise typer.Exit(code=2)
+
+
 def _reply_to_name_handle(
     body_text: str,
     *,
@@ -607,6 +686,7 @@ def _reply_to_name_handle(
     to_msg: str,
     require_resolution: bool = False,
     style_exception: Optional[str] = None,
+    sender_session: Optional[str] = None,
 ) -> None:
     """Send a name-lane reply to ``target`` (a canonical handle): resolve it live
     and inject, else durable-floor to it. Shared by the bus-record reply path and
@@ -617,6 +697,15 @@ def _reply_to_name_handle(
     replies back to and that drain-self scans, NOT a project name."""
     from fno.agents import discover as discover_mod
 
+    # `sender_session` is deliberately NOT consulted here. It is validated
+    # against the real candidate set in `cmd_reply`, which is the only place
+    # that has one: discovery knows which sessions a handle can name, and this
+    # function does not. An attempt to honor it here compared its head-8 against
+    # the target's, which every candidate in a collision shares BY CONSTRUCTION,
+    # so it accepted any string with the right first eight characters (a
+    # one-character tail typo included) and then ran the ladder on it, raising
+    # UnreachableTokenError out of the command with the budget still reserved.
+    # A guard that cannot fail is worse than no guard: it reads as validation.
     resolved, suggestions = discover_mod.resolve_or_suggest(target)
     if resolved is not None:
         _name_lane_send(
@@ -666,9 +755,42 @@ def _reply_to_name_handle(
             )
             reachable, ambiguous = None, []
         if ambiguous:
+            # The collision escape hatch, and the ONLY place `--sender-session`
+            # is read. A threaded reply that cannot be sent is worse than an
+            # unthreaded one, and before this the verb offered no disambiguator
+            # at all: the only route left was `send <name>`, which discards the
+            # thread. `--sender-session` keeps `reply_to`, so the correlation
+            # survives.
+            #
+            # It belongs here because `ambiguous` IS the candidate set. Validate
+            # membership anywhere else and there is nothing real to check
+            # against, which is how a version of this compared head-8s that
+            # every candidate shares by construction and validated nothing.
+            if sender_session:
+                from fno.harness_identity import session_identity_key
+
+                candidates = {session_identity_key(c): c for c in ambiguous}
+                chosen = candidates.get(session_identity_key(sender_session))
+                if chosen is None:
+                    raise typer.BadParameter(
+                        f"--sender-session {sender_session!r} is not one of the "
+                        f"sessions {target!r} could name: {', '.join(ambiguous)}. "
+                        f"Nothing was sent."
+                    )
+                _name_lane_send(
+                    body_text,
+                    from_name=from_project,
+                    resolved=None,
+                    token=chosen,
+                    reply_to=to_msg,
+                    style_exception=style_exception,
+                )
+                return
             raise typer.BadParameter(
                 f"sender handle {target!r} is ambiguous across sessions: "
-                f"{', '.join(ambiguous)}"
+                f"{', '.join(ambiguous)}. Re-run with "
+                f"--sender-session <full-session-id> to answer one and keep the "
+                f"thread."
             )
         if reachable is not None:
             _name_lane_send(
@@ -712,6 +834,17 @@ def cmd_reply(
     cascade_of: Optional[str] = typer.Option(None, "--cascade-of", help="Originating msg-id for cascades"),
     from_project: Optional[str] = typer.Option(None, "--from", help="Sender project (overrides settings.yaml)"),
     json_out: bool = typer.Option(False, "--json", "-J", help="Print {msg_id, thread_path} as JSON"),
+    sender_session: str | None = typer.Option(
+        None, "--sender-session",
+        help=(
+            "Full session id to answer when the stored sender handle is "
+            "ambiguous. A legacy message carries only a head-8 handle, and under "
+            "UUIDv7 that is a ~65.536-second clock bucket, so two workers started "
+            "in one minute share it. Naming the full id here keeps the thread: "
+            "the reply still carries the original in_reply_to. A value that is "
+            "not one of the candidates sends nothing."
+        ),
+    ),
     style_exception: str | None = typer.Option(
         None, "--style-exception",
         help="Bypass the style check for this body with a stated reason.",
@@ -762,19 +895,27 @@ def cmd_reply(
         # code can do is how a resumable peer gets treated as voicemail.
         # (Not the harness-parsing this scheme forbids: the harness is discarded,
         # the short-id is what routes, and routing is still a roster lookup.)
+        from fno.agents.store_fallback import is_full_session_id
+        from fno.harness_identity import canonical_handle
+
         target = orig.from_ or ""
         require_resolution = False
-        if orig.to_kind == "session":
-            from fno.agents.store_fallback import is_full_session_id
-            from fno.harness_identity import canonical_handle
-
-            if orig.from_session and is_full_session_id(orig.from_session):
-                target = canonical_handle(orig.from_session)
-            else:
-                # A session-addressed record without full sender provenance may
-                # use its stored sender only when current discovery proves that
-                # token uniquely. Never demote an unverified mutable alias.
-                require_resolution = True
+        # Full sender provenance wins on EVERY lane, not only the
+        # session-addressed one (node x-3a64). The name lane is the lane that
+        # writes `from_session`, and it stamps `to_kind="name"` on all three of
+        # its records, so a check gated on `to_kind == "session"` never read the
+        # value it had just been taught to store. The head-8 the row also
+        # carries is a display handle: under UUIDv7 its first eight hex are a
+        # truncated millisecond timestamp, so two workers from one ~65-second
+        # bucket share it and the reply refuses as ambiguous. The record already
+        # held the address that works.
+        if orig.from_session and is_full_session_id(orig.from_session):
+            target = orig.from_session
+        elif orig.to_kind == "session":
+            # A session-addressed record without full sender provenance may use
+            # its stored sender only when current discovery proves that token
+            # uniquely. Never demote an unverified mutable alias.
+            require_resolution = True
         elif LEGACY_HANDLE_RE.match(target):
             migrated = canonical_handle(target.split("-", 1)[1])
             print(
@@ -792,6 +933,7 @@ def cmd_reply(
             to_msg=to_msg,
             require_resolution=require_resolution,
             style_exception=style_exception,
+            sender_session=sender_session,
         )
         return
     if orig is None:
@@ -810,6 +952,7 @@ def cmd_reply(
                 target=live_sender,
                 to_msg=to_msg,
                 style_exception=style_exception,
+                sender_session=sender_session,
             )
             return
         # AC1-ERR / LD4: the name lane cannot invent a target from nothing. An id
@@ -1116,6 +1259,107 @@ def cmd_status(
     typer.echo(f"wake signals: {snapshot['wake_signals']}")
     typer.echo(f"errors_24h: {snapshot['errors_24h']}")
     typer.echo(f"sent unclaimed: {snapshot['sent_unclaimed']}")
+
+
+@mail_app.command("seed-provenance", hidden=True)
+def cmd_seed_provenance() -> None:
+    """Render this session's spawn-seed provenance envelope on stdout.
+
+    Reads the ``FNO_SEED_PROV_*`` fields the launcher exported and renders them
+    through the sole ``<fno_mail>`` renderer. Called by
+    ``hooks/spawn-seed-provenance-session-start.sh``, which owns the
+    ``source=startup`` gate and the hook JSON.
+
+    Exit 1 with no output when there is nothing to attribute: a hand-started
+    session, an operator spawn, or an unusable sidecar. The hook stays silent on
+    that, because a session with no peer sender has nothing to attribute.
+    """
+    from fno.mail.seed_provenance import render_from_env
+
+    rendered = render_from_env()
+    if rendered is None:
+        raise typer.Exit(code=1)
+    print(rendered)
+
+
+@mail_app.command("pane-prepare", hidden=True)
+def cmd_pane_prepare(
+    session: Optional[str] = typer.Option(
+        None, "--session-id", help="mux session name."
+    ),
+    session_legacy: Optional[str] = typer.Option(
+        None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
+    ),
+    pane: int = typer.Option(..., "--pane", help="mux pane id."),
+    harness: Optional[str] = typer.Option(
+        None, "--harness",
+        help="Harness hosting the pane (default: resolved from the agent registry).",
+    ),
+) -> None:
+    """Gate and envelope a pane payload read from stdin; print it on stdout.
+
+    The transport-agnostic half of an enveloped ``fno mux pane send``. The Rust
+    verb shells here rather than mirroring the renderer (node x-1904 deleted the
+    Rust mirror; ``fno.mail.envelope`` is the sole renderer) and fails closed on
+    any non-zero exit.
+
+    Exit 0 prints the bytes to type. Exit 3 refuses and names why on stderr: the
+    pane is showing an option prompt, hosts no registered agent, or the body
+    cannot be attributed.
+    """
+    from fno._flag_aliases import merge_deprecated_alias
+    from fno.mail.pane_transport import PaneSendRefused, prepare
+
+    session = merge_deprecated_alias(
+        session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
+    )
+    if not session:
+        print("error: --session-id is required", file=sys.stderr)
+        raise typer.Exit(code=2)
+
+    # Read BYTES and decode once, explicitly. The Rust caller pipes a payload it
+    # never re-encodes, and text-mode stdin does two things to it: universal
+    # newlines rewrite a lone CR to LF, so a body carrying one is typed
+    # differently from the body that was sent, and a non-UTF-8 byte raises
+    # UnicodeDecodeError out of a read that has no handler, which the caller
+    # reports as a renderer fault rather than as the bad input it is.
+    raw = sys.stdin.buffer.read()
+    # The UNTRUSTED boundary. Internal callers import `prepare` directly, so
+    # everything arriving here came off a command line, and `wrap`'s
+    # already-wrapped passthrough is a PREFIX test: a body opening with a
+    # handcrafted `<fno_mail from="king" ...>` is returned verbatim, typed at a
+    # pane, and read as peer mail from whoever it names. The audit row is
+    # skipped too, because that check uses the same prefix test. Every other
+    # producer refuses a body carrying the tag; this one has to as well.
+    try:
+        body = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        print(
+            f"error: pane payload is not valid UTF-8 ({exc}); the envelope "
+            f"quotes text and cannot frame arbitrary bytes.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=3) from exc
+    _refuse_forged_envelope(body)
+    # BOTH attribution containers, because `_already_wrapped` passes both. The
+    # guard above knows only `<fno_mail`, so a handcrafted
+    # `<cross-session-message from-name="king">` sailed through it, matched the
+    # passthrough, and was typed at a worker's pane as an attributed peer order
+    # with no envelope of ours and no audit row. Refusing one tag and not its
+    # sibling is not a boundary. `claude_ask.rs` already refuses both.
+    if _CROSS_SESSION_TAG_RE.search(body):
+        print(
+            "error: body carries a <cross-session-message> container. That tag "
+            "marks a peer's attributed turn, and a body cannot supply its own. "
+            "Send it as mail, or use --raw to type it as keystrokes.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    try:
+        print(prepare(body, session=session, pane_id=pane, harness=harness), end="")
+    except PaneSendRefused as exc:
+        print(f"pane send refused: {exc}", file=sys.stderr)
+        raise typer.Exit(code=3) from exc
 
 
 @mail_app.command("lint", hidden=True)
@@ -1464,6 +1708,209 @@ def _codex_daemon_socket_absent() -> bool:
     return not _codex_app_server_report().get("present", False)
 
 
+def _resolve_pane_entry(resolved, recipient: Optional[str], token: Optional[str]):
+    """The registry row behind a name-lane address, or None.
+
+    Tries the resolved session id first (the strongest address), then the token
+    the caller typed, then the canonical recipient handle. None means no row
+    claims this address, which for ``--force`` is a refusal, not a fallback.
+    """
+    from fno.agents.registry import AgentResolutionError, resolve_agent
+
+    candidates = [
+        getattr(resolved, "session_id", None) if resolved is not None else None,
+        token,
+        recipient,
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return resolve_agent(candidate).entry
+        except (AgentResolutionError, OSError):
+            continue
+    return None
+
+
+def _forced_pane_send(
+    wrapped: str,
+    *,
+    entry,
+    recipient: str,
+    sender: str,
+    msg_id: str,
+    reply_to: Optional[str],
+    provider: Optional[str],
+    sender_harness: Optional[str],
+    sender_session: Optional[str],
+    sender_model: str,
+    authored_words: Optional[int],
+    reservation,
+) -> bool:
+    """``mail send --force``: type the wrapped body into the recipient's pane.
+
+    ``--force`` changes only the TRANSPORT. Every mail semantic is kept: the same
+    minted ``msg_id`` rides the envelope, the reply handle and authority footer
+    travel with it, and an outbox row records the send. Before this existed, a
+    live-miss forced the sender to switch verbs, and switching verbs is what lost
+    all four.
+
+    The gate runs. ``_mux_pane_send`` is called non-raw, so it reads the pane
+    first and refuses one showing an option prompt -- a submit there would
+    dismiss the payload and select the highlighted default, which is how a
+    king's option-3 ruling once became the worker's option 1.
+
+    The receipt says ``typed``, never ``delivered``. Bytes written to a PTY is
+    not delivery and is certainly not action; the recipient's own transcript is
+    the only thing that could confirm consumption, and this path does not read
+    it. Returns True when the bytes were written.
+    """
+    from fno.agents.dispatch import _mux_pane_send
+    from fno.bus.log import record_typed_delivery
+
+    mux = getattr(entry, "mux", None) or {}
+    pane_id = mux.get("pane_id")
+    mux_session = mux.get("session")
+    # Liveness, on the same rule the resolved lane states: an exited row keeps
+    # its mux ref, and pane ids are reused across a mux restart, so a stale ref
+    # types into whatever pane now holds that number. --force needs this MORE
+    # than the ladder does, because it is reached after the ladder missed, which
+    # is exactly the shape a dead recipient makes. --force overrides the
+    # transport, never the fact that nobody is there.
+    # NOT-TERMINAL, never `== "live"`. `live` is one of six non-terminal
+    # statuses: `dispatch_spawn_pane` writes `spawning` until the SessionStart
+    # restamp and `register_agent` defaults to `idle`, so an equality test
+    # refused a pane that was alive and told the sender its id might belong to
+    # somebody else. `TERMINAL_STATUSES` is shared for exactly this reason, and
+    # a hand-rolled copy of the vocabulary is the drift its comment warns about.
+    from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
+    from fno.agents.registry import TERMINAL_STATUSES
+
+    # The ROW is the truth about which harness occupies this pane. `provider`
+    # arrives from the caller's optional -H flag, which is normally unset, and
+    # the name lane then floors it to a literal "claude". For a full codex
+    # session id whose discovery listing missed -- the case --force exists for
+    # -- that labelled a codex pane as claude on the one row whose entire
+    # purpose is auditability.
+    provider = getattr(entry, "harness", None) or provider
+
+    # Bus-only FIRST, and up front, because it is a policy on the row rather
+    # than an outcome of trying. `_mux_pane_send` returns False for it without
+    # printing anything, which every other caller reads correctly as "demote to
+    # durable". This one does not demote, so that silent False surfaced as an
+    # exit 1 blaming a refusal that was never printed and a composer that was
+    # never typed into, with no durable row written. The same send without
+    # --force queues durable and reports a turn-boundary delivery.
+    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+        _release_budget(reservation)
+        print(
+            f"error: {recipient} is bus-only by policy, so no pane paste is "
+            f"allowed and --force has nothing it may do. Send without --force: "
+            f"that queues durable and the recipient drains it.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+
+    status = getattr(entry, "status", None)
+    if status in TERMINAL_STATUSES:
+        _release_budget(reservation)
+        print(
+            f"error: --force types at a live prompt and {recipient} is "
+            f"{status}. Its pane id may already belong to another session. "
+            f"Send without --force to reach the durable bus.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+    if pane_id is None:
+        _release_budget(reservation)
+        print(
+            f"error: --force types into a mux pane and {recipient} has none. "
+            f"Send without --force (it queues durable), or spawn the recipient "
+            f"with --substrate pane.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+
+    if not _mux_pane_send(entry, wrapped, guarded=False):
+        _release_budget(reservation)
+        # NOT "nothing was sent". One bool covers two worlds here: a refusal
+        # before any bytes moved, and a paste that landed whose submit key then
+        # failed, which leaves the envelope sitting in the recipient's composer.
+        # No outbox row exists either way, so a sender told "nothing was sent"
+        # retries and pastes it twice. The raw lane already says this honestly.
+        print(
+            f"error: --force did not confirm a send into pane {pane_id}, and no "
+            f"row claims otherwise. The payload may still be sitting unsent in "
+            f"the recipient's composer, so check the pane before retrying. The "
+            f"refusal is on stderr above.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        record_typed_delivery(
+            msg_id=msg_id,
+            sender=sender,
+            recipient=recipient,
+            body=wrapped,
+            pane_id=str(pane_id),
+            mux_session=str(mux_session) if mux_session else None,
+            provider_from=sender_harness,
+            provider_to=provider,
+            in_reply_to=reply_to,
+            from_session=sender_session,
+            from_model=sender_model,
+            to_kind="name",
+            word_count=authored_words,
+        )
+    except Exception as exc:  # noqa: BLE001 - the bytes are already typed
+        print(
+            f"typed; outbox record failed; do not retry: {exc}",
+            file=sys.stderr,
+        )
+    corr = f" re:{reply_to}" if reply_to else ""
+    print(f"typed (pane {pane_id}) to {recipient} id:{msg_id}{corr}")
+    return True
+
+
+def _reply_session_for(from_name: Optional[str]) -> Optional[str]:
+    """This session's full id, or None when ``--from-name`` set another address.
+
+    `cmd_reply` prefers a record's `from_session` over its compact `from` handle
+    on every lane, so stamping the ambient id unconditionally let it OUTRANK an
+    explicit override: `--from-name web` sent the answer back to this session
+    instead of to web, and the flag went quiet rather than erroring.
+
+    `--from-self` is not that case. It derives `from_name` from this very
+    session, so the handle matches here and the collision-safe id still rides,
+    which is the whole point of the flag.
+    """
+    from fno.agents.self_stamp import resolve_self_session_id
+
+    session = resolve_self_session_id()
+    if not session or from_name is None:
+        return session
+    from fno.harness_identity import session_identity_key
+
+    key = session_identity_key(session)
+    # A caller may name itself by short handle or by full id; both are this
+    # session, and only a THIRD address means "route the reply elsewhere".
+    named = from_name.strip()
+    exact = (key[:8], key, session)
+    if named in exact:
+        return session
+    # Fold case ONLY for a hex address, where case carries no meaning and an
+    # uppercase self-address would otherwise drop `from_session` without a word.
+    # An opencode `ses_` id is case-SENSITIVE, so folding it could accept a
+    # DIFFERENT session as this one, which is the same silent misroute in the
+    # other direction. Blanket lowercasing here did exactly that.
+    if all(c in "0123456789abcdefABCDEF-" for c in named) and named:
+        lowered = named.lower()
+        if any(lowered == candidate.lower() for candidate in exact):
+            return session
+    return None
+
+
 def _name_lane_send(
     message: str,
     *,
@@ -1474,6 +1921,7 @@ def _name_lane_send(
     reply_to: Optional[str] = None,
     token: Optional[str] = None,
     style_exception: Optional[str] = None,
+    force: bool = False,
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
     ``mail reply`` -- the ONE choke point every delivery ladder rung lives in.
@@ -1558,8 +2006,32 @@ def _name_lane_send(
             # bare hex short-handle of a session no store currently knows still
             # earns a durable write (it may yet drain if that session revives).
             if not is_session_shaped(token):
-                raise UnreachableTokenError(token)
-            recipient = token
+                # --force is the exception, and the refusal above says why it is
+                # one: a name cannot be a DURABLE recipient because the drain is
+                # handle-keyed. Forcing writes no such row. It types at a pane
+                # the registry names, and the registry is exactly what resolves
+                # a friendly name to the session behind it. Discovery is
+                # liveness-gated, so this arm IS the situation --force exists
+                # for, and refusing here made the flag unusable for the address
+                # its own error text tells you to use.
+                forced_entry = _resolve_pane_entry(None, None, token) if force else None
+                # `harness_session_id` FIRST, matching `_pane_recipient_handle`
+                # and `resolve_pane_recipient`. `AgentEntry.session_id` is a
+                # property that returns claude's short_id (an attach jobId) when
+                # one is present, and that is not a mail address. Bounded today
+                # by the mux-XOR-bg invariant so it only ever reached a refusal
+                # string, but three places deriving one address must not derive
+                # it three ways.
+                forced_session = (
+                    getattr(forced_entry, "harness_session_id", None)
+                    or getattr(forced_entry, "session_id", None)
+                ) if forced_entry is not None else None
+                if not forced_session:
+                    raise UnreachableTokenError(token)
+                recipient = canonical_handle(forced_session)
+                provider = getattr(forced_entry, "harness", None) or provider
+            else:
+                recipient = token
         provider = (
             token_reachable.agent if token_reachable is not None else provider
         ) or "claude"
@@ -1584,6 +2056,12 @@ def _name_lane_send(
     )
     sender_harness = infer_invoking_harness()
     sender_model = resolve_self_model()
+    # The collision-safe reply address (node x-3a64). `from` stays the compact
+    # display handle; `from_session` is the full id, and it is the one a
+    # recipient can answer when two workers share a head-8 clock bucket. None
+    # when this session's identity is unprovable, and then the attribute is
+    # omitted rather than guessed.
+    sender_session = _reply_session_for(from_name)
     wrapped = wrap_fno_mail(
         message,
         from_=sender,
@@ -1597,7 +2075,56 @@ def _name_lane_send(
         to=recipient,
         id=msg_id,
         reply_to=reply_to,
+        from_session=sender_session,
     )
+
+    # --force (node x-3a64): change the TRANSPORT, keep every mail semantic. The
+    # branch sits here, after the envelope and the msg-id, and before the live
+    # ladder: forcing means "type it into the pane", not "try the ladder first".
+    # An automatic fallback is deliberately absent -- the pane path asks
+    # permission from nothing, so a caller must opt into a transport that cannot
+    # refuse.
+    if force:
+        if self_send:
+            # The ladder parks a self-send durable because a self-inject is a
+            # deadlock, and --force returned before ever reaching that. Typing a
+            # wrapped envelope into this session's own composer (guarded=False,
+            # so the turn interlock is skipped too) is what that bar exists to
+            # stop. Self-injection has its own supported lane, and it is the raw
+            # one: it carries a `self_ok` of its own and never wraps.
+            _release_budget(reservation)
+            print(
+                "error: --force cannot type into this session's own prompt. "
+                "Use --to-self --raw to self-inject a verb, or send without "
+                "--force to leave yourself a durable note.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        entry = _resolve_pane_entry(resolved, recipient, token)
+        if entry is None:
+            _release_budget(reservation)
+            print(
+                f"error: --force needs a registry row naming the recipient's "
+                f"pane, and none resolves for {recipient!r}. Send without "
+                f"--force to reach the durable bus.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=1)
+        _forced_pane_send(
+            wrapped,
+            entry=entry,
+            recipient=recipient,
+            sender=sender,
+            msg_id=msg_id,
+            reply_to=reply_to,
+            provider=provider,
+            sender_harness=sender_harness,
+            sender_session=sender_session,
+            sender_model=sender_model,
+            authored_words=authored_words,
+            reservation=reservation,
+        )
+        return
 
     injected = False
     woken_as: Optional[str] = None
@@ -1733,6 +2260,7 @@ def _name_lane_send(
                 provider_from=sender_harness,
                 provider_to=provider,
                 in_reply_to=reply_to,
+                from_session=sender_session,
                 from_model=sender_model,
                 to_kind="name",
                 word_count=authored_words,
@@ -1801,6 +2329,10 @@ def _name_lane_send(
             provider_to=provider,
             replies_to=reply_to,
             owner=owner.value,
+            # The durable floor carries the same full sender id the live
+            # envelope does, so a drained reply resolves the collision-safe
+            # address exactly as a live one does (node x-3a64).
+            from_session=sender_session,
             word_count=authored_words,
         )
     except (OSError, ValueError, RuntimeError) as exc2:
@@ -1947,6 +2479,12 @@ def _job_lane_send(
     )
     sender_harness = infer_invoking_harness()
     sender_model = resolve_self_model()
+    # Same collision-safe reply address the name lane carries: a job address
+    # routes the message IN, and the holder still answers the sender, so the
+    # sender needs an id that survives a head-8 collision. Bound to a local
+    # because the wire is not the only place it has to land -- both durable
+    # records below read it too, and a reply consults THOSE, not the envelope.
+    sender_session = _reply_session_for(from_name)
     wrapped = wrap_fno_mail(
         message,
         from_=sender,
@@ -1955,6 +2493,7 @@ def _job_lane_send(
         to=recipient,
         node=job.node_id,
         id=msg_id,
+        from_session=sender_session,
     )
 
     # Live-inject to the current holder's session. Inject targets the session id
@@ -1982,6 +2521,7 @@ def _job_lane_send(
                 body=wrapped,
                 provider_from=sender_harness,
                 provider_to=provider,
+                from_session=sender_session,
                 from_model=sender_model,
                 to_kind="node",
                 word_count=authored_words,
@@ -2013,6 +2553,7 @@ def _job_lane_send(
             provider_to=provider,
             to_kind="node",
             owner=owner.value,
+            from_session=sender_session,
             word_count=authored_words,
         )
     except (OSError, ValueError, RuntimeError) as exc:
@@ -2628,6 +3169,17 @@ def _raw_send(
             guarded=False,
             confirm=True,
             sender=transport_sender,
+            # raw: this lane exists to make the REPL slash parser fire, which an
+            # envelope defeats.
+            raw=True,
+            # But GATED. This is the middle case, not the keystroke case. The
+            # keystroke exemption exists for a payload that ANSWERS a showing
+            # prompt (a digit, a control key), where the prompt has to be there.
+            # This lane fires a verb, which a showing prompt swallows exactly
+            # the way it swallows mail: at a codex auth wall the CR takes the
+            # wall's default, the verb never runs, and codex has no transcript
+            # confirm, so the receipt still reads `injected`.
+            gate=True,
         )
     else:  # claude control.sock - the only other keystroke lane
         delivered = _mail_inject_claude(
@@ -2681,9 +3233,12 @@ def cmd_send(
         None,
         help=(
             "Agent name, short-id (first 8 of the session id), or full session "
-            "id. An ambiguous short-id fails and asks for the full id; codex "
-            "session ids are time-prefixed so their first-8 collides across "
-            "same-window sessions, so codex is often addressed by full id."
+            "id. Codex: use the full session_id or pane; never head-8. A codex "
+            "session id is UUIDv7, so its first 8 characters are a "
+            "65.536-second timestamp bucket rather than random - siblings "
+            "spawned in one minute share them - and a head-8 aimed at a codex "
+            "row is refused outright, not merely when it happens to be "
+            "ambiguous today. Claude ids are UUIDv4, so either form works there."
         ),
     ),
     message: str | None = typer.Argument(
@@ -2810,6 +3365,21 @@ def cmd_send(
             "unwrapped payload carries no `from`."
         ),
     ),
+    force: bool = typer.Option(
+        False, "--force", "-F",
+        help=(
+            "Deliver over the PANE transport: type the wrapped body at the "
+            "recipient's prompt instead of running the live-inject ladder. Every "
+            "mail semantic is kept - same envelope, same msg-id, same reply "
+            "handle, same outbox row - and only the transport changes, so a "
+            "live-miss no longer forces you to switch verbs and lose all four. "
+            "The receipt says `typed (pane <id>)`, NEVER `delivered`: bytes "
+            "written to a PTY is not delivery and is certainly not action. Opt-in "
+            "on purpose - the pane path asks permission from nothing, so it can "
+            "also select a showing prompt's default; it reads the pane first and "
+            "refuses one."
+        ),
+    ),
     style_exception: str | None = typer.Option(
         None, "--style-exception",
         help="Bypass the style check for this body with a stated reason.",
@@ -2890,6 +3460,52 @@ def cmd_send(
             raise typer.Exit(code=2)
         message = name
         name = canonical_handle(ident.session_id)
+
+    # The codex head-8 refusal belongs up here for the same reason the --force
+    # guard below does: it sat under the --raw, --to-project, --kind and
+    # job-address returns, so `send 01a025f8 '/verb' --raw` still fired a verb at
+    # whichever colliding session discovery happened to list. An address rule
+    # that only covers the lanes reached last is not an address rule.
+    #
+    # Never for --to-self. The rule exists because a head-8 cannot pick between
+    # two sessions in one clock bucket, and self-addressing has nothing to pick
+    # between: --to-self DERIVED this handle from the running session twelve
+    # lines up. Refusing it killed `mail send --to-self --raw '/<verb>'` on
+    # codex, which is the documented self-invocation path and the one the
+    # --force refusal text recommends, and the caller cannot even comply because
+    # --to-self rejects a positional address.
+    # Not on the --to-project lane, where `name` holds the message BODY rather
+    # than an address (the project is the address, and the positional parks the
+    # text). Hoisting the call without that exclusion made an eight-hex body
+    # refuse as an address whenever a live codex row happened to share those
+    # characters, which is a refusal aimed at content nobody was addressing.
+    if not to_project:
+        _refuse_unsafe_short_address(name, self_addressed=to_self)
+
+    # --force ABOVE every lane that returns without reading it. Four lanes below
+    # end the command on their own, so a guard placed after any of them leaves
+    # the flag silently dropped there -- which is the defect this guard exists to
+    # close, reintroduced one line at a time. A dropped transport flag is worse
+    # than a refused one, because the receipt reads like a success: the send
+    # prints `queued (durable)` while the sender believes it was typed at a
+    # prompt. Only the name lane can force, because only it names one pane.
+    if force:
+        why = None
+        if raw:
+            why = "--raw already types at the prompt line, unwrapped"
+        elif kind is not None:
+            why = f"--kind {kind} is a durable inbox note by design"
+        elif to_project:
+            why = "a project addresses a repo, not a pane"
+        elif name and _is_job_name(name):
+            why = "a job address names work that outlives any one session"
+        if why is not None:
+            print(
+                f"error: --force types into one named pane and {why}. Send to "
+                f"the agent by name to force a pane, or drop --force.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
 
     # --raw: fire a verb in a peer by injecting the payload UNWRAPPED at the
     # prompt line (no <fno_mail> envelope, so the REPL slash parser runs it).
@@ -3282,6 +3898,68 @@ def cmd_send(
     _refuse_forged_envelope(message)
     _enforce_body_cap(message)
     _enforce_style(message, allow_reason=style_exception)
+
+    # --force routes into the shared name-lane choke point with the ladder
+    # skipped. Intercepted here rather than threaded through `dispatch_send`
+    # because forcing is a transport CHOICE, not a rung: running the ladder
+    # first and forcing on its miss would be the automatic fallback this flag
+    # exists to keep out of every send.
+    if force:
+        from fno.agents import discover as discover_mod
+        from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
+
+        forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
+        try:
+            _name_lane_send(
+                message,
+                from_name=from_name,
+                resolved=forced_resolved,
+                token=None if forced_resolved is not None else name,
+                # The recipient's harness decides `provider_to` on the row whose
+                # whole purpose is auditability. Dropping it let the token arm
+                # fall to a literal "claude" and label a codex recipient wrong.
+                provider=harness,
+                style_exception=style_exception,
+                force=True,
+            )
+        except AmbiguousTokenError as amb:
+            # Discovery is liveness-gated, so a registered worker whose listing
+            # misses lands on the token rung - which is exactly the situation
+            # --force exists for. These three refusals belong here for the same
+            # reason they belong on the ordinary lane below: without them the
+            # verb exits non-zero with an empty terminal and a raw traceback.
+            print(
+                f"ambiguous session token {name!r}: matches "
+                f"{', '.join(amb.candidates)}. Send to a full session id.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from amb
+        except UnreachableTokenError:
+            hint = (
+                f" Closest live sessions: {', '.join(forced_suggestions)}."
+                if forced_suggestions
+                else ""
+            )
+            print(
+                f"unknown agent or live-session handle: {name!r}.{hint}",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
+        except UnavailableTokenError as unavailable:
+            stores = ", ".join(unavailable.failed)
+            visible = (
+                f" Visible candidates: {', '.join(unavailable.candidates)}."
+                if unavailable.candidates
+                else ""
+            )
+            print(
+                f"cannot resolve short session token {name!r}: unreadable stores: "
+                f"{stores}.{visible} Send to a full session id.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from unavailable
+        return
+
     try:
         result = dispatch_send(
             name=name,
@@ -3485,6 +4163,7 @@ def cmd_sent(
     prints is what that line is counting, never a differently-scoped set.
     """
     from fno.agents.self_stamp import stamp_from
+    from fno.bus.log import HOSTED_DELIVERY, TYPED_DELIVERY
     from fno.config import load_settings
 
     # `stamp_from`, not the precedence-only resolver: this must be the SAME
@@ -3514,7 +4193,15 @@ def cmd_sent(
         msgs = [
             m for m in all_msgs if m.from_ == handle and m.id not in retracted
         ]
-        claimed_flag = {m.id: m.id not in unclaimed_ids for m in msgs}
+        # A typed row is excluded from the unclaimed scan the way a hosted row
+        # is, so "not unclaimed" silently read as "claimed" for it. Consumption
+        # is the one thing the pane transport can never assert: bytes at a
+        # prompt can be discarded by that prompt. Neither renderer below may
+        # infer it, so the ambiguity is resolved HERE, once, rather than in each.
+        claimed_flag = {
+            m.id: (m.delivery != TYPED_DELIVERY and m.id not in unclaimed_ids)
+            for m in msgs
+        }
 
     if json_out or not is_tty:
         print(
@@ -3525,6 +4212,13 @@ def cmd_sent(
                         "kind": m.kind, "ts": m.ts,
                         "delivery": m.delivery or "durable",
                         "claimed": claimed_flag[m.id],
+                        # A typed row is neither claimed nor claimABLE: it is
+                        # excluded from the unclaimed scan, withdraw refuses it,
+                        # and the recipient cannot drain it. Reporting only
+                        # `claimed: false` made it identical to an UNCLAIMED
+                        # durable row that can still clear, so this renderer and
+                        # `--unclaimed-only` disagreed about the same row.
+                        "claimable": m.delivery != TYPED_DELIVERY,
                     }
                     for m in msgs
                 ],
@@ -3538,7 +4232,13 @@ def cmd_sent(
         return
     for m in msgs:
         state = (
-            "delivered" if m.delivery == "hosted"
+            "delivered" if m.delivery == HOSTED_DELIVERY
+            # `typed` gets its own word. It is excluded from the unclaimed scan
+            # like a hosted row, so it fell through to "claimed" here and told
+            # the sender the recipient had consumed it. That is the one claim
+            # this transport must never make: bytes written into a PTY can be
+            # discarded by the prompt they land on.
+            else "typed (unconfirmed)" if m.delivery == TYPED_DELIVERY
             else "claimed" if claimed_flag[m.id]
             else "UNCLAIMED"
         )
@@ -3573,6 +4273,8 @@ def cmd_withdraw(
     """
     from fno.bus.cursor import read_cursor
     from fno.bus.log import (
+        HOSTED_DELIVERY,
+        TYPED_DELIVERY,
         WITHDRAW_KIND,
         Envelope,
         append,
@@ -3607,9 +4309,20 @@ def cmd_withdraw(
     if msg_id in withdrawn_ids(all_msgs):
         print(f"{msg_id} is already withdrawn")
         raise typer.Exit(code=0)
-    if target.delivery == "hosted":
+    if target.delivery == HOSTED_DELIVERY:
         print(
             f"{msg_id} was already delivered (hosted); it cannot be withdrawn",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+    if target.delivery == TYPED_DELIVERY:
+        # A typed row is not a durable message with a tombstone to write, it is
+        # bytes already sitting at somebody's prompt. Withdrawing it wrote the
+        # tombstone and printed success while retracting nothing, which is the
+        # worst of the three outcomes: the sender believes the message is gone.
+        print(
+            f"{msg_id} was typed into a pane; the bytes are already at the "
+            f"recipient's prompt and cannot be recalled. Send a correction.",
             file=sys.stderr,
         )
         raise typer.Exit(code=1)
@@ -3694,9 +4407,19 @@ def cmd_bus_ack(
         )
         raise typer.Exit(code=2)
     if not is_deliverable(target):
+        # Name the delivery this row actually carries. `is_deliverable` excludes
+        # `typed` alongside `hosted`, so a forced pane message reported itself as
+        # "delivered (hosted)" here, which is the one claim the pane transport
+        # must never make: bytes at a prompt can be discarded by that prompt.
+        from fno.bus.log import TYPED_DELIVERY
+
+        how = (
+            "typed into a pane (delivery unconfirmed)"
+            if target.delivery == TYPED_DELIVERY
+            else "already delivered (hosted)"
+        )
         print(
-            f"message {msg_id!r} was already delivered (hosted); "
-            "cursor not advanced",
+            f"message {msg_id!r} was {how}; cursor not advanced",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
