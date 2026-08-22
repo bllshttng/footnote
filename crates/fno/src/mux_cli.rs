@@ -4416,7 +4416,7 @@ const PANE_PREPARE_TIMEOUT: Duration = Duration::from_secs(45);
 ///
 /// Fails closed on every arm: a missing renderer, a non-zero exit (the pane is
 /// showing an option prompt, hosts no registered agent, or the body cannot be
-/// attributed), non-UTF-8 output, or a timeout. There is deliberately no
+/// attributed) or a timeout. There is deliberately no
 /// bare-paste fallback -- an unattributed send is the defect this exists to
 /// close, so falling back to one when the renderer is unavailable would restore
 /// it exactly when something is already wrong.

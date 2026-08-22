@@ -6102,8 +6102,13 @@ def _mux_followup_path(
             reason="pane-send-failed",
         )
         raise DispatchAskError(
-            f"mux pane send to {name!r} failed; the pane may be gone. "
-            f"Check 'fno mux ls' or 'fno agents logs {name}'.",
+            f"mux pane send to {name!r} did not deliver. The reason is on "
+            f"stderr above and it is not always a dead pane: the read-back "
+            f"gate refuses a pane showing a prompt, and refuses again when the "
+            f"prompt detector cannot run at all. This lane is fire-and-forget "
+            f"with no durable floor, so a refusal here is the whole outcome. "
+            f"Check 'fno mux pane read --session <s> <pane>' first, then "
+            f"'fno mux ls' or 'fno agents logs {name}'.",
             exit_code=1,
         )
     # Message delivered. Bump registry under the held flock; on OSError the

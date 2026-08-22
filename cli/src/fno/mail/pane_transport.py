@@ -46,13 +46,8 @@ def _already_wrapped(text: str) -> bool:
     return text.lstrip().startswith(("<fno_mail", "<cross-session-message"))
 
 
-def resolve_pane_harness(session: str, pane_id: int) -> Optional[str]:
-    """The harness hosting ``session:pane_id``, or None when no agent row claims it.
-
-    None is not an error here, it is the discriminator: a pane with no registry
-    row is a shell pane or an unregistered process, and typing an agent-to-agent
-    envelope at one is meaningless. :func:`prepare` refuses it and names ``--raw``.
-    """
+def _pane_entry(session: str, pane_id: int):
+    """The registry row occupying ``session:pane_id``, or None."""
     from fno.agents.registry import load_registry
 
     try:
@@ -62,8 +57,40 @@ def resolve_pane_harness(session: str, pane_id: int) -> Optional[str]:
     for entry in entries:
         mux = getattr(entry, "mux", None) or {}
         if str(mux.get("session")) == str(session) and str(mux.get("pane_id")) == str(pane_id):
-            return getattr(entry, "harness", None) or None
+            return entry
     return None
+
+
+def resolve_pane_harness(session: str, pane_id: int) -> Optional[str]:
+    """The harness hosting ``session:pane_id``, or None when no agent row claims it.
+
+    None is not an error here, it is the discriminator: a pane with no registry
+    row is a shell pane or an unregistered process, and typing an agent-to-agent
+    envelope at one is meaningless. :func:`prepare` refuses it and names ``--raw``.
+    """
+    entry = _pane_entry(session, pane_id)
+    return (getattr(entry, "harness", None) or None) if entry is not None else None
+
+
+def resolve_pane_recipient(session: str, pane_id: int) -> Optional[str]:
+    """The mail handle of the pane's occupant, for the envelope's ``to``.
+
+    Resolved HERE rather than at each caller, because both of them have the same
+    session and pane and neither reliably has the row. Without a ``to`` the
+    envelope renders without one, and ``_addressed_here`` answers True for any
+    tag lacking it, which turns the receipt check for this lane into a mention
+    check. That matters most on the bare pane drive, which writes no bus row and
+    has nothing else to resolve against.
+    """
+    from fno.harness_identity import canonical_handle
+
+    entry = _pane_entry(session, pane_id)
+    if entry is None:
+        return None
+    session_id = getattr(entry, "harness_session_id", None) or getattr(
+        entry, "session_id", None
+    )
+    return canonical_handle(session_id) if session_id else None
 
 
 def prompt_refusal(
@@ -233,6 +260,8 @@ def prepare(
     when the pane hosts no known agent, or when the body cannot be attributed.
     """
     resolved = harness or resolve_pane_harness(session, pane_id)
+    if to is None:
+        to = resolve_pane_recipient(session, pane_id)
     if not resolved:
         raise PaneSendRefused(
             f"pane {pane_id} hosts no registered agent, so there is no peer to "
