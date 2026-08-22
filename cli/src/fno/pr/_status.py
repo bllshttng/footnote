@@ -301,6 +301,41 @@ def _merge_hold_reason(pr: str, cwd: Optional[str]) -> Optional[str]:
         return f"dispatch-hold-invalid: {exc}; refusing to assume unheld"
 
 
+def _review_activity(branch: str, head: str, cwd: Optional[str]):
+    """The in-flight-review reading, or a fail-closed stand-in.
+
+    A review that is RUNNING is invisible to ``review_coverage``, which only
+    knows what verdicts EXIST for a head. Three PRs read ``ready: true`` with an
+    empty ``ready_blockers`` while a review of that exact head was still writing
+    its fixes. Fail-closed on a raise, like every other hold read here: a guard
+    that cannot answer must not answer "clear".
+
+    An empty ``branch`` is the one clear case - without it there is no hold key
+    and no worktree to match, and a degraded fetch that omitted ``headRefName``
+    is a missing INPUT, not a failed probe.
+    """
+    from fno.pr._review_hold import ReviewActivity, review_activity
+
+    if not branch:
+        return ReviewActivity(
+            False, "", "", None,
+            {"probed": False, "path": None, "dirty": None, "head": None,
+             "note": "no head branch on the PR read"},
+        )
+    try:
+        return review_activity(branch, pr_head=head, repo=cwd or os.getcwd())
+    except Exception as exc:  # noqa: BLE001
+        from fno.pr import _review_hold
+
+        return ReviewActivity(
+            True,
+            _review_hold.REVIEW_HOLD_UNREADABLE,
+            f"review-activity read failed ({exc}); refusing to assume no review is running",
+            None,
+            {"probed": False, "path": None, "dirty": None, "head": None, "note": str(exc)},
+        )
+
+
 def _ready_blockers(
     green: bool,
     verdict: str,
@@ -458,6 +493,15 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         review_lane = False
         code_review_required = False
         hold_reason = None
+        # Same exemption the coverage conjunct takes: the guard protects what
+        # WOULD merge, and a merged or closed PR has no would-merge left.
+        from fno.pr._review_hold import ReviewActivity
+
+        activity: Any = ReviewActivity(
+            False, "", "", None,
+            {"probed": False, "path": None, "dirty": None, "head": None,
+             "note": "not asked: PR is terminal"},
+        )
     else:
         # Additive review signal (x-705b): computed AFTER the authoritative CI
         # verdict so a slow/failed review read can never delay or corrupt it.
@@ -510,6 +554,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             # side only.
             coverage = dict(_UNKNOWN_COVERAGE)
         hold_reason = _merge_hold_reason(pr, cwd)
+        activity = _review_activity(
+            pr_json.get("headRefName") or "", pr_json.get("headRefOid") or "", cwd
+        )
 
     blockers = _ready_blockers(
         green,
@@ -527,6 +574,14 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     )
     if hold_reason:
         blockers.append("dispatch_hold")
+    if activity.blocked:
+        # Config-independent on purpose. Every other review conjunct here is
+        # gated on `review_lane`, so a repo with no lane configured reports
+        # ready:true while a review of that head is mid-flight - which is
+        # technically correct against the configured policy and operationally
+        # wrong. A review that is RUNNING blocks whether or not one was ever
+        # required.
+        blockers.append(activity.blocker)
     coverage_status_repost = None
     if not is_terminal and review_lane:
         from fno.pr import _reviews
@@ -572,6 +627,16 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         "optional_reviews": reviews.get("optional_reviews", "unknown"),
         "optional_reviews_unresolved": unresolved,
         "review_coverage": coverage,
+        # Reported whether or not it blocked. The original complaint was an
+        # empty `ready_blockers` next to a live review: a reader has to be able
+        # to see that both probes RAN and what each answered, because an absent
+        # hold and an unasked question are not the same fact.
+        "review_activity": {
+            "blocker": activity.blocker,
+            "detail": activity.detail,
+            "hold": activity.hold,
+            "worktree": activity.worktree,
+        },
         "dispatch_hold": hold_reason,
         # The obvious "read this, not green": ready iff CI is green AND
         # no optional finding is unresolved AND review coverage is a
