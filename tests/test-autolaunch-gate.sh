@@ -438,6 +438,11 @@ echo "fno $*" >> "$CALL_LOG"
 
 subcmd1="${1:-}"
 subcmd2="${2:-}"
+if [ "$subcmd1 $subcmd2" = "agents claim" ]; then
+  shift
+  subcmd1="${1:-}"
+  subcmd2="${2:-}"
+fi
 
 case "$subcmd1 $subcmd2" in
   "claim acquire")
