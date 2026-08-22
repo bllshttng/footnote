@@ -658,6 +658,30 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
     ),
 }
 
+def provider_subagent_budget(
+    provider: Optional[str], settings: Optional["SettingsModel"] = None
+) -> Optional[int]:
+    """The in-session fan-out width one provider's account tolerates, or None.
+
+    None means "no budget applies" and is returned for three different
+    situations on purpose, because all three mean the same thing to a caller:
+    no provider was resolved, the provider carries no budget entry, or the
+    settings could not be read at all. Every one of them has to FAIL OPEN - the
+    reader is route resolution, and refusing a review route because a config
+    file was unreadable would wedge every session on the machine over a
+    resource question that only ever applied to one shared account (x-c703 LD3).
+    """
+    if not provider or provider == "unknown":
+        return None
+    try:
+        resolved = load_settings() if settings is None else settings
+        budget = resolved.agents.max_lanes.get(provider)
+    except Exception:  # noqa: BLE001 - fail open; see the docstring
+        return None
+    subagents = getattr(budget, "subagents", None)
+    return subagents if isinstance(subagents, int) and subagents >= 1 else None
+
+
 def resolvable_reviewers(
     registry: Optional[Mapping[str, ReviewerDescriptor]] = None,
 ) -> dict[str, ReviewerDescriptor]:
@@ -1582,6 +1606,68 @@ class DispatchBlock(BaseModel):
         return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
 
 
+def _positive_int(v: object) -> bool:
+    """A budget dimension is a count, so `True`, `0` and `-1` are all malformed."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 1
+
+
+# The per-provider budgets footnote ships. A provider absent from this table is
+# unbounded in every dimension, which is today's behavior for a dedicated
+# account. zai is here because the account is SHARED: `subagents = 1` is what
+# makes route resolution refuse to hand it a review panel (x-c703).
+_BUILTIN_PROVIDER_BUDGETS: dict[str, dict[str, int]] = {
+    "zai": {"lanes": 5, "subagents": 1},
+}
+
+
+class ProviderBudget(BaseModel):
+    """What ONE account at a model provider tolerates, in every dimension.
+
+    The fleet already had a per-provider record: `agents.max_lanes.<provider>`,
+    a bare integer capping concurrent spawned workers. It carried one dimension
+    while the account is spent on two - a worker also fans out subagents inside
+    its own session, and a shared-quota account was spent eight subagents deep
+    on one review that returned nothing (x-c703).
+
+    `subagents` is that second dimension, and it is consumed by ROUTE
+    RESOLUTION rather than by a guard: a native subagent is a harness-internal
+    Task call fno never observes, so a spawn-path guard is decorative for
+    exactly the case that cost the account. `review_capability` reads this
+    budget and refuses to hand a panel reviewer to a provider that cannot
+    afford one - a worker cannot fan out a panel it was never handed.
+
+    `None` on either field means unbounded in that dimension, which is what an
+    unlisted provider gets: today's behavior for every dedicated account.
+    """
+
+    #: concurrent spawned workers on this provider; None = uncapped.
+    lanes: Optional[int] = None
+    #: in-session subagent fan-out width; 1 means "never a panel". None = uncapped.
+    subagents: Optional[int] = None
+
+    @field_validator("lanes", "subagents", mode="before")
+    @classmethod
+    def _coerce_positive(cls, v: object) -> object:
+        """A malformed dimension reads as unbounded IN THAT DIMENSION only.
+
+        Never raises: the whole-table validator (`_coerce_max_lanes`) is the
+        one that decides a malformed table restores the safe built-in, and a
+        raise here would turn a typo in one field into a load failure for the
+        entire settings model.
+        """
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, int) and v >= 1:
+            return v
+        if isinstance(v, str):
+            try:
+                n = int(v.strip())
+            except ValueError:
+                return None
+            return n if n >= 1 else None
+        return None
+
+
 class AgentsBlock(BaseModel):
     """Agent-runtime settings (nested under 'config.agents').
 
@@ -1664,12 +1750,20 @@ class AgentsBlock(BaseModel):
     # cap would fail open exactly when the fleet is busiest.
     #   max_live    — cap on concurrent live worker processes (union of the fno
     #                 registry and claude's daemon roster). Spawn queues at cap.
-    #   max_lanes   — immediate-refusal cap per model provider. Unlisted
-    #                 providers are uncapped; the built-in zai cap is 5.
+    #   max_lanes   — the per-provider budget record (:class:`ProviderBudget`):
+    #                 `lanes` is the immediate-refusal spawn cap, `subagents`
+    #                 is the in-session fan-out width route resolution reads.
+    #                 Unlisted providers are uncapped in both dimensions; the
+    #                 built-in zai budget is lanes 5, subagents 1. A bare
+    #                 integer is still legal and coerces to `lanes`.
     #   min_free_gb — available-RAM floor for spawn preflight; <= 0 disables.
     #   worker_qos  — utility (demote workers to background QoS) | off.
     max_live: int = 3
-    max_lanes: dict[str, int] = Field(default_factory=lambda: {"zai": 5})
+    max_lanes: dict[str, ProviderBudget] = Field(
+        default_factory=lambda: {
+            k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
+        }
+    )
     pane_group_max: int = 4
     min_free_gb: float = 4.0
     worker_qos: str = "utility"
@@ -1757,26 +1851,46 @@ class AgentsBlock(BaseModel):
     @field_validator("max_lanes", mode="before")
     @classmethod
     def _coerce_max_lanes(cls, v: object) -> object:
-        """Accept positive integer caps keyed by literal model provider.
+        """Accept a per-provider budget table, or the bare integer that used to be one.
 
-        An explicit empty table disables all provider caps. Any malformed key
-        or value restores the safe built-in zai cap instead of dropping the
+        Two spellings are legal and mean the same thing, so no live config
+        breaks when the record widens::
+
+            [agents.max_lanes]
+            zai = 5                 # legacy scalar -> lanes = 5
+
+            [agents.max_lanes.zai]
+            lanes = 5
+            subagents = 1
+
+        A dimension the operator did not write falls back to that provider's
+        BUILT-IN budget, not to unbounded: an install that predates the
+        subagent dimension still gets zai's `subagents = 1`, which is the whole
+        point of shipping a built-in for a shared-quota provider.
+
+        An explicit empty table disables all provider budgets. Any malformed
+        key or value restores the safe built-in table instead of dropping the
         invalid entry and accidentally making that provider unlimited.
         """
-        safe_default = {"zai": 5}
         if not isinstance(v, dict):
-            return safe_default
-        out: dict[str, int] = {}
-        for provider, cap in v.items():
+            return dict(_BUILTIN_PROVIDER_BUDGETS)
+        out: dict[str, dict[str, object]] = {}
+        for provider, budget in v.items():
             if not (
                 isinstance(provider, str)
                 and re.fullmatch(r"[a-z][a-z0-9_-]*", provider)
-                and isinstance(cap, int)
-                and not isinstance(cap, bool)
-                and cap >= 1
             ):
-                return safe_default
-            out[provider] = cap
+                return dict(_BUILTIN_PROVIDER_BUDGETS)
+            if _positive_int(budget):
+                fields: dict[str, object] = {"lanes": budget}
+            elif isinstance(budget, dict) and not (set(budget) - {"lanes", "subagents"}):
+                fields = {k: v for k, v in budget.items() if _positive_int(v)}
+                if len(fields) != len(budget):
+                    return dict(_BUILTIN_PROVIDER_BUDGETS)
+            else:
+                return dict(_BUILTIN_PROVIDER_BUDGETS)
+            builtin = _BUILTIN_PROVIDER_BUDGETS.get(provider, {})
+            out[provider] = {**builtin, **fields}
         return out
 
     @field_validator("min_free_gb", mode="before")

@@ -15,7 +15,8 @@ def test_provider_loader_reserved_keys_match_agents_schema():
 def test_defaults():
     b = AgentsBlock()
     assert b.max_live == 3
-    assert b.max_lanes == {"zai": 5}
+    assert b.max_lanes["zai"].lanes == 5
+    assert b.max_lanes["zai"].subagents == 1
     assert b.min_free_gb == 4.0
     assert b.worker_qos == "utility"
 
@@ -35,13 +36,19 @@ def test_max_live_below_one_coerces_to_default():
 
 
 def test_max_lanes_is_per_provider_and_invalid_shape_keeps_safe_default():
-    assert AgentsBlock(max_lanes={"zai": 2, "openai": 7}).max_lanes == {
-        "zai": 2,
-        "openai": 7,
+    # x-c703 widened the value from a bare lane count to a ProviderBudget. The
+    # scalar spelling stays legal and reads as `lanes`; zai's built-in
+    # `subagents = 1` rides along, because an install that predates the
+    # dimension is exactly the one that must not fan out on a shared account.
+    lanes = {
+        name: (b.lanes, b.subagents)
+        for name, b in AgentsBlock(max_lanes={"zai": 2, "openai": 7}).max_lanes.items()
     }
+    assert lanes == {"zai": (2, 1), "openai": (7, None)}
     assert AgentsBlock(max_lanes={}).max_lanes == {}
-    assert AgentsBlock(max_lanes={"zai": 0}).max_lanes == {"zai": 5}
-    assert AgentsBlock(max_lanes="broken").max_lanes == {"zai": 5}
+    for broken in ({"zai": 0}, "broken", {"zai": True}, {"zai": {"bogus": 1}}):
+        restored = AgentsBlock(max_lanes=broken).max_lanes["zai"]
+        assert (restored.lanes, restored.subagents) == (5, 1), broken
 
 
 def test_min_free_gb_zero_is_valid_disable():

@@ -169,7 +169,12 @@ def test_real_manifest_reaches_codex_worker_argv_and_env(
     )
 
     assert "model='gpt-business'" in " ".join(captured["argv"])
-    assert captured["route_env"] == {"OPENAI_API_KEY": "openai-key"}
+    # The codex lane carries the same provider stamp the claude lane does, so a
+    # routed codex worker can name its own account and read its budget (x-c703).
+    assert captured["route_env"] == {
+        "OPENAI_API_KEY": "openai-key",
+        "FNO_ROUTE_PROVIDER": "oai",
+    }
 
 
 @pytest.mark.parametrize(

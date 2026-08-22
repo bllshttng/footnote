@@ -133,6 +133,20 @@ def _refuse_unsatisfiable_reviewers() -> None:
     ]
     for reviewer_verdict in [v for v in verdicts if v.status == "unverifiable"]:
         typer.echo(f"note target init: {reviewer_verdict.line()}", err=True)
+    # A budget downgrade is not a refusal, so it never reaches the block above -
+    # and a receipt that stayed silent about it shows the route the config named
+    # while the session runs a different one (x-c703 LD2). It is a WARN and not
+    # a note: the stop gate matches an attestation against the configured NAME,
+    # so a session whose route was resolved down clears CI and then holds, and
+    # the operator has to learn that at init rather than at the gate.
+    for reviewer_verdict in [v for v in verdicts if v.resolves_to is not None]:
+        typer.echo(f"WARN target init: {reviewer_verdict.line()}", err=True)
+        typer.echo(
+            f"     the ship gate still asks for `{reviewer_verdict.name}` by name. "
+            f"Set config.review.reviewers to [\"{reviewer_verdict.resolves_to}\"] "
+            f"on this project, or run it on an account with a wider budget.",
+            err=True,
+        )
     for peer_verdict in [v for v in peer_verdicts if v.status == "unverifiable"]:
         typer.echo(f"note target init: {peer_verdict.line()}", err=True)
     if messages:

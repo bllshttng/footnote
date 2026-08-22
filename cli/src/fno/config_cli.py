@@ -343,6 +343,25 @@ def _repo_root() -> Path:
     return Path.cwd()
 
 
+def _jsonable_container(node: object) -> object:
+    """Reduce records nested inside a container the way a leaf is reduced.
+
+    A block read (`fno config get agents.max_lanes`) returns a dict whose
+    VALUES can be models, and `json.dumps` renders one as its repr. A machine
+    consumer of `--json` then gets a string it cannot parse for exactly the
+    key that grew a record.
+    """
+    from pydantic import BaseModel
+
+    if isinstance(node, dict):
+        return {k: _jsonable_container(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_jsonable_container(v) for v in node]
+    if isinstance(node, BaseModel):
+        return node.model_dump(mode="json")
+    return node
+
+
 def _report_review_capability(json_out: bool = False) -> int:
     """`fno config doctor --review`: the diagnostic twin of the init refusal.
 
@@ -379,6 +398,7 @@ def _report_review_capability(json_out: bool = False) -> int:
                     "harness": session.harness,
                     "substrate": session.substrate,
                     "attended": session.attended,
+                    "provider": session.provider,
                     "reviewers": [
                         {
                             "name": v.name,
@@ -390,6 +410,7 @@ def _report_review_capability(json_out: bool = False) -> int:
                                 v.descriptor.invocation if v.descriptor else None
                             ),
                             "reason": v.reason,
+                            "resolved_route": v.resolves_to or v.name,
                         }
                         for v in verdicts
                     ],
@@ -462,6 +483,11 @@ def _report_gates() -> None:
     ):
         rung = v.descriptor.asserts if v.descriptor else "unknown"
         typer.echo(f"  reviewer: {v.name} - asserts {rung}{_RUNG_GLOSS.get(rung, '')}")
+        if v.resolves_to is not None:
+            # The gate an operator reads here is the one that will RUN, not the
+            # one config.review.reviewers names. Printing only the configured
+            # name would teach the wrong reviewer on every routed worker.
+            typer.echo(f"    resolved route: {v.resolves_to} - {v.reason}")
 
 
 _RUNG_GLOSS = {
@@ -734,7 +760,9 @@ def get_cmd(
         # model_dump(mode="json") is the JSON-ready form in one step; scalars
         # and containers pass through unchanged.
         value: object = (
-            node.model_dump(mode="json") if isinstance(node, BaseModel) else node
+            node.model_dump(mode="json")
+            if isinstance(node, BaseModel)
+            else _jsonable_container(node)
         )
         typer.echo(
             json.dumps(
@@ -759,7 +787,15 @@ def get_cmd(
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())
     elif isinstance(node, (dict, list)):
-        typer.echo(json.dumps(node, default=str))
+        # A container can now hold RECORDS (`agents.max_lanes` maps a provider
+        # to a ProviderBudget), and `default=str` renders one as its repr. A
+        # reader cannot paste that back into config.toml, so dump the record.
+        typer.echo(
+            json.dumps(
+                node,
+                default=lambda v: v.model_dump() if isinstance(v, BaseModel) else str(v),
+            )
+        )
     else:
         typer.echo("" if node is None else str(node))
     typer.echo(source_line, file=sys.stderr)

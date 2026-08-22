@@ -796,7 +796,11 @@ def _select_profile_lane(
         return None, None
 
     from fno.agents.registry import TERMINAL_STATUSES
-    from fno.agents.spawn_gate import ProviderCountUnavailable, provider_live_count
+    from fno.agents.spawn_gate import (
+        ProviderCountUnavailable,
+        provider_lanes_cap,
+        provider_live_count,
+    )
 
     live_rows = [
         row
@@ -817,7 +821,9 @@ def _select_profile_lane(
         index = (start + offset) % len(lanes)
         lane = lanes[index]
         vendor = _lane_vendor(lane)
-        cap = caps.get(vendor) if vendor else None
+        # `.lanes` of the per-provider budget, read through the same helper
+        # the spawn gate uses so lane STEERING and lane REFUSAL cannot disagree.
+        cap = provider_lanes_cap(caps.get(vendor)) if vendor else None
         if vendor is None or cap is None:
             # A lane with no routed vendor has no cap to be at. The `vendor is
             # None` arm is what the guard below actually relies on: it was

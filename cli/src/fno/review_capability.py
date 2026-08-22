@@ -21,11 +21,16 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Mapping, Optional
 
-from fno.config import _coerce_affirmative, resolvable_reviewers, ReviewerDescriptor
+from fno.config import (
+    _coerce_affirmative,
+    provider_subagent_budget,
+    resolvable_reviewers,
+    ReviewerDescriptor,
+)
 from fno.harness_identity import resolve_harness_identity
 
 # Harnesses that can run the sigma panel to a verdict, and so can produce its
@@ -42,6 +47,15 @@ from fno.harness_identity import resolve_harness_identity
 # opt-in (AGENTS.md), so it resolves `unavailable` rather than being assumed.
 _SUBAGENT_DISPATCH_HARNESSES = frozenset({"claude", "codex"})
 
+#: How many subagents the panel dispatches, from the table in
+#: `skills/review/references/sigma.md`. Compared against a provider's subagent
+#: budget, because a budget of 3 is not permission to run a six-wide panel: the
+#: account is spent on what the panel dispatches, not on whether it dispatches
+#: more than one. A narrower panel is not a legal substitute either, since a
+#: fan-out that only reads half the dimensions is a coverage lie wearing the
+#: panel's name.
+_PANEL_WIDTH = 6
+
 Status = Literal["satisfiable", "needs-operator", "unavailable", "unverifiable"]
 
 # The allowlist half of the fail-closed default; see `blocks_autonomy`.
@@ -55,9 +69,16 @@ class SessionCapability:
     harness: str  # claude | codex | gemini | unknown
     substrate: str  # bg | headless | pane | interactive
     attended: bool
+    #: the model provider this session bills, from the route stamp a spawn
+    #: writes (`FNO_ROUTE_PROVIDER`). "unknown" for a session fno did not
+    #: route, which is the operator's own account and never the shared one.
+    provider: str = "unknown"
 
     def describe(self) -> str:
-        return f"harness={self.harness} substrate={self.substrate}"
+        return (
+            f"harness={self.harness} substrate={self.substrate} "
+            f"provider={self.provider}"
+        )
 
 
 @dataclass(frozen=True)
@@ -73,6 +94,10 @@ class ReviewerVerdict:
     descriptor: Optional[ReviewerDescriptor]
     status: Status
     reason: str
+    #: the reviewer that runs INSTEAD, when a provider budget - and only a
+    #: provider budget - made this one undispatchable. None everywhere else:
+    #: an unavailable reviewer with no substitute still refuses the gate.
+    resolves_to: Optional[str] = None
 
     @property
     def blocks_autonomy(self) -> bool:
@@ -90,12 +115,27 @@ class ReviewerVerdict:
         it. The inverse would let an unclassified status run autonomously,
         which is the wrong default for a gate whose whole point is fail-closed.
         """
+        # A substitution is a RESOLUTION, not a refusal: `resolves_to` is only
+        # ever set when a real reviewer with a real attestation takes over, so
+        # blocking here would wedge every worker on a shared account over a
+        # review that is still going to run.
+        if self.resolves_to is not None:
+            return False
         return self.status not in _NON_BLOCKING_STATUSES
 
     def line(self) -> str:
         """One report line. A rung weaker than review-evidence always says so."""
         asserts = self.descriptor.asserts if self.descriptor is not None else None
-        return f"{self.status}: {self.name} - {self.reason}{_RUNG_NOTES.get(asserts, '')}"
+        note = _RUNG_NOTES.get(asserts, "")
+        if self.resolves_to is not None:
+            # The receipt has to show WHICH route this session got, not which
+            # one the config named. The cause travels with it, so an operator
+            # reading the line learns why without reading the config.
+            return (
+                f"{self.status}: {self.name} - {self.reason}{note}\n"
+                f"    resolved route: {self.resolves_to}"
+            )
+        return f"{self.status}: {self.name} - {self.reason}{note}"
 
 
 @dataclass(frozen=True)
@@ -220,7 +260,17 @@ def detect_session(
     else:
         substrate = "interactive"
 
-    return SessionCapability(harness=harness, substrate=substrate, attended=attended)
+    # The stamp a bound route writes at spawn (fno.agents.model_routing). Read
+    # verbatim and never inferred from an endpoint or a model name: the point
+    # is to carry the decision fno already made, not to make a second one.
+    provider = (environ.get("FNO_ROUTE_PROVIDER") or "").strip() or "unknown"
+
+    return SessionCapability(
+        harness=harness,
+        substrate=substrate,
+        attended=attended,
+        provider=provider,
+    )
 
 
 def _skill_roots(cwd: Optional[Path] = None) -> list[Path]:
@@ -361,6 +411,19 @@ def _resolve_one(
         return verdict(*_resolve_skill(_skill_id(descriptor, name), session))
 
     if descriptor.requires == "subagent-dispatch":
+        # The provider budget is checked BEFORE the harness, because it is the
+        # stricter question. A claude worker CAN dispatch the panel; the point
+        # is that this account cannot afford it. Reversing the order would
+        # answer "yes, satisfiable" on exactly the sessions this exists for.
+        budget = provider_subagent_budget(session.provider)
+        if budget is not None and budget < _PANEL_WIDTH:
+            return verdict(
+                "unavailable",
+                f"needs subagent-dispatch; provider {session.provider} has a "
+                f"subagent budget of {budget} (shared quota) and the panel "
+                f"dispatches {_PANEL_WIDTH}, so it is not dispatched here - "
+                f"resolves to {_BUDGET_SUBSTITUTE}",
+            )
         if session.harness in _SUBAGENT_DISPATCH_HARNESSES:
             return verdict("satisfiable", f"run `{descriptor.invocation}`")
         if session.harness == "unknown":
@@ -379,6 +442,58 @@ def _resolve_one(
         "unavailable",
         f"declares an unknown capability {descriptor.requires!r}",
     )
+
+
+#: The reviewer a budget-blocked panel resolves DOWN to. `code-review` and never
+#: `declare`: the whole point of the downgrade is that a real review still runs
+#: and still produces a head-pinned attestation. Substituting a self-cert would
+#: clear the gate with nothing behind it, which is the move this module's
+#: docstring refuses in every other case.
+_BUDGET_SUBSTITUTE = "code-review"
+
+#: The phrase that marks a verdict as budget-caused. Matched rather than
+#: re-derived so the substitution can never fire on a reason it did not write:
+#: a `sigma` unavailable for any OTHER cause keeps today's refusal verbatim.
+_BUDGET_MARKER = "subagent budget of "
+
+
+def _apply_budget_substitution(
+    v: ReviewerVerdict,
+    session: SessionCapability,
+    known: Mapping[str, ReviewerDescriptor],
+) -> ReviewerVerdict:
+    """Record the downgrade on a verdict the PROVIDER BUDGET made unavailable.
+
+    The budget is the only cause that substitutes. A reviewer unavailable
+    because the harness cannot dispatch subagents is a misconfiguration the
+    operator has to fix, and quietly running something else there would hide it.
+    A budget is not a misconfiguration - it is the account telling the truth
+    about what it can afford - so the gate resolves down instead of refusing.
+
+    The verdict keeps its `unavailable` status and its reason on purpose. The
+    reason is the evidence, and a status flipped to `satisfiable` would claim
+    the panel ran.
+    """
+    if v.status != "unavailable" or _BUDGET_MARKER not in v.reason:
+        return v
+    substitute = known.get(_BUDGET_SUBSTITUTE)
+    if substitute is None:
+        return v
+    resolved = _resolve_one(_BUDGET_SUBSTITUTE, substitute, session)
+    if resolved.blocks_autonomy:
+        # The substitute cannot run here either, so recording it would trade a
+        # refusal at init for a wedge at the stop gate with no reviewer that
+        # can attest. A gemini session under a budget is exactly that shape:
+        # neither the panel nor the self-review verb exists there. Keep the
+        # refusal and say what BOTH routes are missing.
+        return replace(
+            v,
+            reason=(
+                f"{v.reason}, which cannot run here either "
+                f"({resolved.reason})"
+            ),
+        )
+    return replace(v, resolves_to=_BUDGET_SUBSTITUTE)
 
 
 def resolve_reviewers(
@@ -413,7 +528,11 @@ def resolve_reviewers(
                 )
             )
             continue
-        out.append(_resolve_one(name, descriptor, sess))
+        out.append(
+            _apply_budget_substitution(
+                _resolve_one(name, descriptor, sess), sess, known
+            )
+        )
     return out
 
 

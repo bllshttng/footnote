@@ -17,6 +17,24 @@ The obligation to use one of these lanes on a code payload is enforced at the st
 This doc is the lane menu; the gate is the authority.
 Opt out with `config.review.self_review_required = false`.
 
+## Lane 0: the provider budget decides the route before any lane runs
+
+A lane is how a review is triggered. This is about how WIDE it is allowed to be, and it is decided before any of the lanes below.
+
+`config.agents.max_lanes.<provider>` is a `ProviderBudget` record. `lanes` caps concurrent spawned workers on that account, and `subagents` caps in-session fan-out. The built-in zai budget is `lanes = 5, subagents = 1`, because that account is shared. A provider absent from the table is uncapped in both dimensions, which is what a dedicated account gets.
+
+`fno.review_capability` reads the budget in the `subagent-dispatch` branch, before the harness check. Under a `subagent budget` below 2, `sigma` resolves `unavailable` and the reason names the provider, the number, and the route that runs instead. The verdict records `resolves_to = code-review`, stops blocking, and prints a `resolved route:` line in `fno config doctor --review` and in the `fno do target init` receipt. So the receipt shows which route this worker GOT, not which one the config asked for.
+
+The substitute is `code-review` and never `declare`. `code-review` still runs a real review. It still emits a head-pinned `review_attestation`. `declare` is a self-cert, so it clears the gate with nothing behind it. The budget is also the ONLY cause that substitutes. A `sigma` unavailable because the harness cannot dispatch subagents is a misconfiguration the operator has to see. It refuses exactly as it did before.
+
+Two boundaries, stated rather than papered over.
+
+The first is enforcement. A native subagent is a harness-internal Task call. fno never observes it, so no guard in the spawn path can stop one. The constraint is in ROUTE RESOLUTION for that reason. A worker cannot fan out a panel it was never handed. An operator who types `/fno:review sigma` by hand is overriding this. `skills/review/references/sigma.md` prints the provider and the budget before it dispatches, so the override is visible rather than silent. Total prevention needs a harness hook that does not exist.
+
+The second is the stop gate. `loopcheck.rs` reads `config.review.reviewers` from `config.toml` by NAME. It matches an attestation against that name and never consults the provider budget. So a project that configures `reviewers = ["sigma"]` AND routes its workers to a budgeted provider gets a `code-review` attestation the gate rejects. The default `reviewers` list is empty, so no stock install is affected. Closing this means the gate consumes the resolved route rather than the configured name. That belongs with the `agents.provider_limits` consolidation, not here.
+
+Why it is not a mailed cap. It was tried, and it caught nothing. On 2026-08-22 four zai workers were mailed a one-subagent cap by hand. Three replied, and all three said their review had already run. Every message was delivered and none was late on the bus. One of the three had already spent eight subagents on a single PR. None of the eight returned, so the account paid for the panel and got zero findings. A worker reaches its review on its own schedule. No out-of-band message beats it there.
+
 ## Lane 1: self-invoke via the Skill tool (primary)
 
 An in-session agent can launch the native review verb through the Skill

@@ -220,7 +220,12 @@ def test_mux_pane_send_delivers_to_an_agy_pane(monkeypatch) -> None:
     assert [call[0][3] for call in fake.calls] == ["send", "send"]
     paste, submit = fake.calls
     assert "--stdin" in paste[0]
-    assert paste[1] == "hi"
+    # The body rides inside the envelope, not verbatim: an agent-to-agent pane
+    # drive carries the same `<fno_mail>` attribution the mail lane produces
+    # unless the caller opts out with raw=True. This test is about the SUBMIT
+    # key, so it asserts the payload is carried rather than that it is bare.
+    assert "hi" in paste[1]
+    assert paste[1].startswith("<fno_mail")
     assert submit[0][submit[0].index("--text") + 1] == "\r"
 
 

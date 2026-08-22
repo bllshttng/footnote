@@ -299,10 +299,19 @@ def resolve_monitor(
             )
         from fno.agents.model_routing import resolve_explicit_route
 
+        from fno.agents.model_routing import ROUTE_PROVIDER_ENV
+
         expected_route = resolve_explicit_route(
             "zai", str(explicit_route["ANTHROPIC_MODEL"])
         )
-        if expected_route is None or dict(explicit_route) != expected_route:
+        # The provider stamp is part of a BOUND route and not part of a
+        # resolved one, so it is compared separately. Leaving it in the
+        # equality made every complete zai route look tampered with.
+        stamp = str(explicit_route.get(ROUTE_PROVIDER_ENV, "zai"))
+        compared = {
+            k: v for k, v in dict(explicit_route).items() if k != ROUTE_PROVIDER_ENV
+        }
+        if expected_route is None or compared != expected_route or stamp != "zai":
             raise DispatchAskError(
                 "--monitor happy currently requires a complete resolved zai route",
                 exit_code=2,
@@ -1400,6 +1409,14 @@ def _mesh_env_wrapper(
     from fno.harness_identity import ambient_identity_env_unset_args
 
     unset += ambient_identity_env_unset_args()
+    # The route stamp travels with the same rule and for a related reason: it
+    # names whose quota a session spends, so an inherited one labels this pane
+    # with an account it is not billing. Unconditional, because `env(1)`
+    # applies every `-u` before the assignments, and a composed route below
+    # re-supplies its own stamp as a pair.
+    from fno.agents.model_routing import ROUTE_PROVIDER_ENV
+
+    unset += ["-u", ROUTE_PROVIDER_ENV]
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")

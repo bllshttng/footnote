@@ -216,7 +216,9 @@ def test_resolved_business_role_routes_the_codex_lane() -> None:
     )
 
     assert route is not None
-    assert route.env == {"OPENAI_API_KEY": "openai-key"}
+    # The stamp rides with the codex lane too (x-c703): without it a routed
+    # codex worker resolves provider "unknown" and ignores its subagent budget.
+    assert route.env == {"OPENAI_API_KEY": "openai-key", "FNO_ROUTE_PROVIDER": "oai"}
     assert "model='gpt-business'" in " ".join(route.config_args)
 
 
@@ -423,7 +425,9 @@ def test_default_production_lookup_projects_manifest_through_codex_route(
     )
 
     assert route is not None
-    assert route.env == {"OPENAI_API_KEY": "openai-key"}
+    # The stamp rides with the codex lane too (x-c703): without it a routed
+    # codex worker resolves provider "unknown" and ignores its subagent budget.
+    assert route.env == {"OPENAI_API_KEY": "openai-key", "FNO_ROUTE_PROVIDER": "oai"}
     assert "model='gpt-business'" in " ".join(route.config_args)
 
 
