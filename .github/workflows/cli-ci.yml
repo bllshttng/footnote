@@ -185,6 +185,16 @@ jobs:
         uses: ./.github/actions/smoke-setup
 
       - name: "Smoke shard: pytest"
+        # ponytail: this shard throws away the fno-agents binary smoke-setup
+        # just built (the runner clears it so @requires_rust tests skip) and
+        # never rebuilds it, because the build step lives in the other shard.
+        # Both shards share one cargo cache key, so on a Cargo.lock change this
+        # shard can win the save race and store a target dir with fingerprints
+        # but no binary. Cargo relinks, so the ceiling is seconds of rebuild,
+        # never a wrong result. Upgrade path if it ever shows up in the
+        # numbers: give smoke-setup a flag to skip the fno-agents build, and
+        # pass it here.
+        #
         # The test/lint steps live in the code-owned `fno doctor test smoke`
         # runner (cli/src/fno/test_cmd.py) so "run what CI runs" is one command
         # and local/CI parity is structural. A bare `fno doctor test smoke` with
@@ -230,13 +240,23 @@ jobs:
   # Keeps the required check named `smoke`. Branch protection and the review
   # gate key on that exact name, so publishing only `smoke-pytest` and
   # `smoke-rest` would make the required check stop appearing rather than fail
-  # loudly. `if: always()` is load-bearing: without it this job is SKIPPED when
-  # a shard fails, and a skipped required check is not a red one. The assertion
-  # is positive per shard, because `cancelled` and `skipped` are neither
-  # success nor failure and both must block.
+  # loudly.
+  #
+  # The condition is load-bearing in BOTH directions and `always()` is wrong.
+  # Omit it and GitHub skips this job when a shard fails, and a skipped
+  # required check is not a red one. Use `always()` and this job also runs
+  # after a CANCELLED run - `cancel-in-progress` is on at the top of this file,
+  # so every superseding push cancels its predecessor - where it reads
+  # `result: cancelled` for both shards and exits 1. That publishes a FAILED
+  # `smoke` for a run nobody let finish, which is the phantom red the history
+  # above is about. `!cancelled()` gives the same protection: a failed shard
+  # does not make the run cancelled, so the gate still runs and still blocks.
+  #
+  # The assertion is positive per shard, because `cancelled` and `skipped` are
+  # neither success nor failure and both must block.
   smoke:
     needs: [smoke-pytest, smoke-rest]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # Two string compares. A cap this tight is a real alarm on a job that can
     # only ever hang, and this whole change exists because a job outran its

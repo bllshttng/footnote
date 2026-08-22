@@ -843,7 +843,7 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
             raise ValueError(f"smoke: unknown arg {a!r}")
     if pending:
         raise ValueError(f"smoke: --{pending.replace('_', '-')} needs a value")
-    # Three subset modes with no defined precedence: refuse rather than let one
+    # Four subset modes with no defined precedence: refuse rather than let one
     # silently win and mislabel the evidence.
     subsets = [n for n, on in
                (("--changed", opts["changed"]), ("--only", bool(opts["only"])),
@@ -1300,7 +1300,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     and --changed [--base REV --head REV] for the changed-surface packet (a
     CHANGED SUBSET; exits 20 when nothing mapped, 21 when the diff is not
     trustworthy - neither is a green verdict, and the full run still gates).
-    The three subset modes are mutually exclusive.
+    The four subset modes are mutually exclusive.
 
     --ambient clean|dirty|both (default clean) picks the ambient shape every
     step's child process runs under. `dirty` poisons this runner's own
@@ -1457,10 +1457,22 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         sys.stderr.write(f"smoke: missing prerequisite: {miss}\n")
         return 2  # the full run's documented prerequisite code; 22 is changed-only
 
-    # Faithful-ordering guard: the main pytest step runs with the fno-agents
-    # binary absent so @requires_rust parity tests skip (they need a provider
-    # CLI CI lacks); the dedicated build step recreates it for later rust steps.
-    if "Pytest (unit + integration)" in {names[i] for i in selected}:
+    # Faithful-ordering guard: every step BEFORE the dedicated build step runs
+    # with the fno-agents binary absent so @requires_rust parity tests skip
+    # (they need a provider CLI CI lacks); the build step recreates it for the
+    # rust steps after it.
+    #
+    # Keyed on the build step as well as pytest, not pytest alone. Pytest alone
+    # was a proxy that held only while every run contained it. Once CI sharded,
+    # the shard without pytest skipped the deletion while smoke-setup had
+    # already built the binary, so the 17 steps between pytest and the build
+    # step ran with it PRESENT where they had always run without it. Deleting
+    # whenever the build step is selected restores that, and it stays safe: the
+    # build step puts the binary back before anything downstream needs it.
+    # A run selecting neither still deletes nothing, so `--only '<a rust step>'`
+    # keeps using whatever binary is already on disk.
+    _DELETE_TRIGGERS = {"Pytest (unit + integration)", _RUST_BUILD_STEP}
+    if _DELETE_TRIGGERS & {names[i] for i in selected}:
         for rel in ("crates/fno-agents/target/debug/fno-agents",
                     "crates/fno-agents/target/release/fno-agents"):
             try:
