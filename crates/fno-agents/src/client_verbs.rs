@@ -1660,6 +1660,10 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
     let session = id.canonical_session_id().to_string();
     let short = derived_short_id(&session);
     let is_claude = harness == "claude";
+    // The synthesizing session's ambient identity (x-132c): this fn runs in
+    // the CLIENT process, so the markers name the session that vouched for
+    // the adopted row.
+    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
         name: synthesized_name(&short),
         // Birth marker: synthesized from a session identity that arrived
@@ -1706,6 +1710,9 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         },
         delivery_policy: None,
         spawn_trigger: None,
+        spawned_by_session: parent_session,
+        spawned_by_harness: parent_harness,
+        spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
     }
 }

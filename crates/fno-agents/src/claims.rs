@@ -1158,6 +1158,54 @@ pub fn resolve_harness_from(get: impl Fn(&str) -> Option<String>) -> Option<Stri
     resolved.map(|h| h.to_string())
 }
 
+/// The spawn-time parent edge (x-132c), the Rust mirror of Python's
+/// `_capture_parent_edge` (dispatch.py): ambient-captured from the SPAWNING
+/// session's environment at every registry mint site, never required of a
+/// caller. Returns `(session, harness, cwd)` for the spawned row's
+/// `spawned_by_*` fields.
+///
+/// Same family rules as [`resolve_harness_from`]: a set-but-blank marker is
+/// unset, and two DISAGREEING families attribute NOTHING - a foreign inherited
+/// marker must not be laundered into a parent record for the life of the row.
+/// Within one family the earlier marker wins (`CODEX_THREAD_ID` over legacy
+/// `CODEX_SESSION_ID`, matching Python's AC-EDGE-multi), and the winner's
+/// VALUE is the parent session id, not just its harness kind.
+pub fn ambient_parent_edge() -> (Option<String>, Option<String>, Option<String>) {
+    ambient_parent_edge_from(|k| std::env::var(k).ok())
+}
+
+/// Testable core of [`ambient_parent_edge`]: `get` supplies each marker's
+/// value so the precedence and refusal rules run without mutating env.
+pub fn ambient_parent_edge_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let cwd = std::env::var_os("PWD")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .map(|p| p.to_string_lossy().trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut family: Option<&'static str> = None;
+    let mut session: Option<String> = None;
+    for (marker, harness) in HARNESS_SESSION_MARKERS {
+        let Some(value) = get(marker)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        match family {
+            None => {
+                family = Some(harness);
+                session = Some(value);
+            }
+            Some(prev) if prev != *harness => return (None, None, cwd),
+            // Same family: the earlier (higher-precedence) marker keeps the id.
+            Some(_) => {}
+        }
+    }
+    (session, family.map(|h| h.to_string()), cwd)
+}
+
 fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
     let acquired = now_ms();
     ClaimRecord {
@@ -2393,6 +2441,50 @@ mod tests {
         );
         // No markers -> None (unknown), never a panic.
         assert_eq!(resolve_harness_from(|_| None), None);
+    }
+
+    #[test]
+    fn ambient_parent_edge_resolves_id_harness_and_refuses_mixing() {
+        // Single claude marker: the VALUE is the parent session id.
+        let claude = |k: &str| match k {
+            "CLAUDE_CODE_SESSION_ID" => Some("7420e8f7-eeba".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            ambient_parent_edge_from(claude),
+            (
+                Some("7420e8f7-eeba".to_string()),
+                Some("claude".to_string()),
+                ambient_parent_edge_from(|_| None).2
+            )
+        );
+        // Within the codex family the thread id wins over the legacy var, and
+        // the winner's value (not the loser's) is the parent id.
+        let codex = |k: &str| match k {
+            "CODEX_THREAD_ID" => Some("t-1".to_string()),
+            "CODEX_SESSION_ID" => Some("legacy-1".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            ambient_parent_edge_from(codex),
+            (
+                Some("t-1".to_string()),
+                Some("codex".to_string()),
+                ambient_parent_edge_from(|_| None).2
+            )
+        );
+        // Two DISAGREEING families attribute NOTHING: no laundered lineage.
+        let mixed = |k: &str| match k {
+            "CODEX_THREAD_ID" => Some("cx".to_string()),
+            "CLAUDE_CODE_SESSION_ID" => Some("cl".to_string()),
+            _ => None,
+        };
+        let (s, h, c) = ambient_parent_edge_from(mixed);
+        assert_eq!((s, h), (None, None));
+        assert!(c.is_some(), "cwd is captured even when identity is refused");
+        // No markers: identity absent, cwd still present, never a panic.
+        let (s, h, _) = ambient_parent_edge_from(|_| None);
+        assert_eq!((s, h), (None, None));
     }
 
     // ---- liveness classification (contract item 8) ------------------------
