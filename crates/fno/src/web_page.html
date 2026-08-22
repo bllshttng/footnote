@@ -9,6 +9,27 @@
   styled <span> runs - no ANSI reconstruction, no xterm.js. Read-only: the page
   never sends a byte upstream; pane selection only changes which cached frame we
   draw locally.
+
+  NOT SCROLLBACK (x-ce65). A Frame is a composite of the CURRENT VISIBLE GRID
+  and the bridge caches only the latest one per pane, so no history reaches this
+  page. What it does instead is RETAIN: it diffs consecutive frames, keeps the
+  rows that scrolled off the top, and paints them above the live grid. That is
+  strictly weaker than scrollback and the UI says so. Its ceiling:
+    - it starts empty; history begins when you select the pane, never before
+    - it is per-selected-pane; switching panes clears it
+    - a burst larger than one screenful between two frames is lost
+    - any full-screen repaint (alternate screen, clear, resize) breaks continuity
+  The last one is made VISIBLE rather than hidden: two consecutive frames that
+  share no overlapping rows get a break rule, never silent concatenation.
+
+  The correct fix is a protocol history request answered from the vt layer's
+  existing scrollback. It is unreachable from here: web.rs:381 calls
+  `writer.forget()` on the socket write half, and that call IS Locked Decision 5
+  (read-only is structural). Restoring a write path to carry a history request
+  reverses the decision read-only rests on, which is a live operator question and
+  deliberately out of scope. Per-viewer history would also need a new server-side
+  read path, since `Frame.scroll_offset` is SHARED state broadcast to every
+  viewer - a browser-driven scroll would move the TUI user's viewport.
 -->
 <html lang="en">
 <head>
@@ -34,6 +55,10 @@
   #bar.ended { background: #4a1616; color: #f08a8a; }
   #bar.authfailed { background: #4a1616; color: #f08a8a; }
   #status { font-weight: 600; }
+  /* Pushed to the far edge, and a 30px box so a thumb can hit it. */
+  #fitbtn { margin-left: auto; font: inherit; font-size: 12px; cursor: pointer;
+    background: #141a26; color: #9aa4b6; border: 1px solid #232b3a;
+    border-radius: 5px; padding: 4px 10px; min-width: 46px; min-height: 30px; }
   #picker { flex: 0 0 auto; display: flex; gap: 6px; overflow-x: auto;
     padding: 6px 10px; border-bottom: 1px solid #1c2230; white-space: nowrap; }
   #picker button { font: inherit; font-size: 12px; cursor: pointer;
@@ -47,6 +72,10 @@
   #screen { flex: 1 1 auto; overflow: auto; }
   pre#term { margin: 0; padding: 8px 10px; font-size: 13px; line-height: 1.15;
     white-space: pre; }
+  /* The retained region is dimmed so the live grid stays the thing you read,
+     and so nobody mistakes browser-kept lines for terminal scrollback. */
+  .kept { opacity: .72; }
+  .kept-note, .kept-break { color: #6f7a8f; font-style: italic; }
   .cur { outline: 1px solid #c5cdd9; }
   #overlay { position: fixed; inset: 0; display: none; align-items: center;
     justify-content: center; background: rgba(11,14,20,.85); font-size: 15px;
@@ -55,7 +84,7 @@
 </style>
 </head>
 <body>
-  <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span></div>
+  <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span><button id="fitbtn" type="button" title="fit the grid to the screen width, or show it at full size">fit</button></div>
   <div id="picker"></div>
   <div id="screen"><pre id="term"></pre></div>
   <div id="overlay"></div>
@@ -64,7 +93,8 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const bar = $("bar"), statusEl = $("status"), subEl = $("sub"),
-        picker = $("picker"), term = $("term"), overlay = $("overlay");
+        picker = $("picker"), term = $("term"), overlay = $("overlay"),
+        screenEl = $("screen"), fitBtn = $("fitbtn");
 
   // ---- state ----
   const frames = new Map();   // pane_id -> latest Frame (insertion order = LRU)
@@ -73,6 +103,15 @@
   let agents = [];            // from Layout
   let current = null;         // selected pane_id
   let upstreamUp = true;
+  // Retention (x-ce65), NOT scrollback: rows evicted off the top of the live
+  // grid, kept by this browser for the SELECTED pane only. The file header says
+  // why the protocol cannot answer this and what the ceiling is.
+  const kept = [];            // rendered rows that scrolled off, oldest first
+  const MAX_KEPT_ROWS = 1000; // hard cap; the front is dropped past it
+  let keptFor = null;         // the pane `kept` belongs to
+  let prevRows = null;        // last drawn rows, for the overlap diff
+  const KEPT_NOTE = "recent output kept by this browser since you opened this pane, not terminal scrollback";
+  const BREAK_RULE = "─".repeat(8) + " break in output " + "─".repeat(8);
 
   // ---- xterm 256-color palette -> css ----
   const base16 = ["#000000","#cd0000","#00cd00","#cdcd00","#0000ee","#cd00cd",
@@ -112,37 +151,151 @@
     JSON.stringify(a.fg) === JSON.stringify(b.fg) &&
     JSON.stringify(a.bg) === JSON.stringify(b.bg);
 
+  // One grid row as styled <span> runs, newline-terminated. `showCur` is off for
+  // the retention copy: a cursor outline frozen into kept output would read as a
+  // live cursor sitting in history.
+  function renderRow(fr, r, showCur) {
+    let html = "", run = "", runStyle = null, runFlags = null;
+    const flush = () => {
+      if (run) html += `<span style="${runStyle}">${esc(run)}</span>`;
+      run = "";
+    };
+    for (let cx = 0; cx < fr.cols; cx++) {
+      const cell = fr.cells[r * fr.cols + cx];
+      if ((cell.flags | 0) & WIDE_SPACER) continue; // right half of a wide glyph
+      if (showCur && r === fr.cursor_row && cx === fr.cursor_col) {
+        flush(); runFlags = null;
+        html += `<span class="cur" style="${cellStyle(cell)}">${esc(cell.c)}</span>`;
+        continue;
+      }
+      if (runFlags === null || !sameStyle(cell, runFlags)) {
+        flush(); runFlags = cell; runStyle = cellStyle(cell);
+      }
+      run += cell.c;
+    }
+    flush();
+    return html + "\n";
+  }
+
+  // How far the grid scrolled between two frames: the smallest k where the old
+  // frame's rows [k..] equal the new frame's rows [0..n-k]. k === 0 means the
+  // grid did not move, so nothing was evicted and redrawing the same frame
+  // retains nothing - this must stay idempotent, because a Layout redraw calls
+  // draw() with an unchanged frame. k === n means the two frames share no
+  // overlap at all: a full-screen repaint, or a burst taller than the grid.
+  // Row strings are compared, not cells, because draw() already built them.
+  // ponytail: O(n^2) row-string compares, n = rows. At a phone's ~50 rows that
+  // is 2.5k compares per frame; a suffix automaton is the upgrade if it ever
+  // shows up in a profile.
+  function evictedRowCount(prev, next) {
+    const n = next.length;
+    if (!prev || prev.length !== n) return n; // geometry changed: a break
+    for (let k = 0; k < n; k++) {
+      let ok = true;
+      for (let i = k; i < n; i++) if (prev[i] !== next[i - k]) { ok = false; break; }
+      if (ok) return k;
+    }
+    return n;
+  }
+
+  // ---- fit to width (x-ce65), CLIENT SIDE ONLY ----
+  // A pane is as wide as its TERMINAL - 183 columns in the reported specimen -
+  // and a phone shows roughly 45 of them at 13px. The fix shrinks the TYPE here
+  // and never touches the terminal. It cannot do otherwise and must not try:
+  // the bridge attaches as a passive observer (rows: 0, cols: 0) precisely so it
+  // is excluded from the smallest-client clamp and never shrinks a PTY, and it
+  // drops the socket write half besides. A page that asked the server to narrow
+  // the pane would collapse it for every native viewer at the same time.
+  const BASE_FONT_PX = 13;  // the 1:1 size, and the ceiling when fitting
+  const MIN_FONT_PX = 2;    // past this there is nothing left for zoom to rescue
+  let fitToWidth = true;
+  let advanceRatio = 0;     // character advance width per 1px of font-size
+  let lastFitKey = "";
+
+  // Measured, not assumed: the ratio is a property of whichever font in the
+  // stack the device actually resolved, and guessing 0.6 puts a 183-column grid
+  // off the edge on any face that differs.
+  function measureAdvance() {
+    const probe = document.createElement("span");
+    probe.style.cssText =
+      "position:absolute;visibility:hidden;white-space:pre;font-size:100px;";
+    probe.textContent = "0".repeat(100);
+    term.appendChild(probe);
+    const w = probe.getBoundingClientRect().width;
+    probe.remove();
+    return w > 0 ? w / 100 / 100 : 0.6; // fallback: the usual monospace ratio
+  }
+
+  function applyFit(cols) {
+    // clientWidth excludes the scrollbar, which the retained region can summon.
+    const key = `${cols}x${screenEl.clientWidth}x${fitToWidth ? 1 : 0}`;
+    if (key === lastFitKey) return; // a per-frame layout read is not free
+    lastFitKey = key;
+    let px = BASE_FONT_PX;
+    if (fitToWidth && cols > 0) {
+      if (!advanceRatio) advanceRatio = measureAdvance();
+      const st = getComputedStyle(term);
+      const pad = (parseFloat(st.paddingLeft) || 0) + (parseFloat(st.paddingRight) || 0);
+      const avail = screenEl.clientWidth - pad;
+      const want = Math.floor((avail / cols / advanceRatio) * 10) / 10;
+      px = Math.min(BASE_FONT_PX, Math.max(MIN_FONT_PX, want));
+    }
+    term.style.fontSize = px + "px";
+  }
+
+  function refit() {
+    const fr = current != null ? frames.get(current) : null;
+    lastFitKey = ""; // the container may have changed under an unchanged frame
+    applyFit(fr ? fr.cols : 0);
+  }
+
+  fitBtn.onclick = () => {
+    fitToWidth = !fitToWidth;
+    fitBtn.textContent = fitToWidth ? "fit" : "1:1";
+    refit();
+    if (fitToWidth) screenEl.scrollLeft = 0;
+  };
+  addEventListener("resize", refit);
+  addEventListener("orientationchange", refit);
+
   function draw() {
     const fr = current != null ? frames.get(current) : null;
+    // Retention belongs to one pane. Every path that changes `current` - the
+    // picker, LRU eviction, an exited agent, the first paint - lands here, so
+    // resetting on the mismatch covers them all without touching each one.
+    if (keptFor !== current) { kept.length = 0; prevRows = null; keptFor = current; }
     if (!fr) { term.textContent = current == null ? "" : "…"; return; }
     // Defensive re-guard: never draw a geometry-inconsistent grid (AC5-FR twin).
     if (fr.cells.length !== fr.rows * fr.cols) return;
-    const showCur = fr.cursor_visible;
-    let html = "";
-    for (let r = 0; r < fr.rows; r++) {
-      let run = "", runStyle = null, runFlags = null;
-      const flush = () => {
-        if (run) html += `<span style="${runStyle}">${esc(run)}</span>`;
-        run = "";
-      };
-      for (let cx = 0; cx < fr.cols; cx++) {
-        const cell = fr.cells[r * fr.cols + cx];
-        if ((cell.flags | 0) & WIDE_SPACER) continue; // right half of a wide glyph
-        const isCur = showCur && r === fr.cursor_row && cx === fr.cursor_col;
-        if (isCur) {
-          flush(); runFlags = null;
-          html += `<span class="cur" style="${cellStyle(cell)}">${esc(cell.c)}</span>`;
-          continue;
-        }
-        if (runFlags === null || !sameStyle(cell, runFlags)) {
-          flush(); runFlags = cell; runStyle = cellStyle(cell);
-        }
-        run += cell.c;
+
+    const rows = [];
+    for (let r = 0; r < fr.rows; r++) rows.push(renderRow(fr, r, false));
+
+    const evicted = evictedRowCount(prevRows, rows);
+    if (prevRows && evicted > 0) {
+      if (evicted >= prevRows.length) {
+        // No overlap: the screen was repainted, or output outran the frame rate.
+        // Say so in the output rather than butting unrelated text together.
+        kept.push(`<span class="kept-break">${esc(BREAK_RULE)}</span>\n`);
       }
-      flush();
-      html += "\n";
+      for (let i = 0; i < Math.min(evicted, prevRows.length); i++) kept.push(prevRows[i]);
+      if (kept.length > MAX_KEPT_ROWS) kept.splice(0, kept.length - MAX_KEPT_ROWS);
     }
-    term.innerHTML = html;
+    prevRows = rows;
+
+    // The live copy differs from the retained one by the cursor alone.
+    const live = rows.slice();
+    if (fr.cursor_visible && fr.cursor_row < fr.rows) {
+      live[fr.cursor_row] = renderRow(fr, fr.cursor_row, true);
+    }
+
+    // Follow the tail unless the operator has scrolled up to read something.
+    const pinned = screenEl.scrollHeight - screenEl.scrollTop - screenEl.clientHeight < 24;
+    applyFit(fr.cols); // before the write: the type size decides scrollHeight
+    const head = kept.length ? `<span class="kept-note">${esc(KEPT_NOTE)}</span>\n` : "";
+    term.innerHTML =
+      (kept.length ? `<span class="kept">${head}${kept.join("")}</span>` : "") + live.join("");
+    if (pinned) screenEl.scrollTop = screenEl.scrollHeight;
   }
 
   function badgeClass(a) {

@@ -652,6 +652,140 @@ mod tests {
         );
     }
 
+    /// Lift one top-level `function <name>(` body out of the served page.
+    /// Brace-balanced, which is exact for the page as written (no brace lives
+    /// inside a string or comment in the lifted functions) and is the ceiling:
+    /// a future `"{"` inside one of them would cut the slice short, and the
+    /// node run then fails loudly on a syntax error rather than passing.
+    fn lift_js_fn(name: &str) -> String {
+        let head = format!("function {name}(");
+        let start = PAGE
+            .find(&head)
+            .unwrap_or_else(|| panic!("the served page defines {name}()"));
+        let rest = &PAGE[start..];
+        let open = rest.find('{').expect("a function body opens");
+        let mut depth = 0usize;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return rest[..open + i + c.len_utf8()].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces lifting {name}()");
+    }
+
+    /// The retention diff (x-ce65) decides how many rows scrolled off between
+    /// two frames, and getting it wrong silently corrupts what the operator
+    /// reads as recent output. Exercise the SHIPPED source, not a Rust
+    /// re-implementation, by running the lifted function under node.
+    ///
+    /// node is preinstalled on the CI runners. Where it is absent the test
+    /// cannot assert anything, so it says so on stdout instead of passing
+    /// quietly - a skip that looks like a pass is the failure mode here.
+    #[test]
+    fn evicted_row_count_tracks_the_grid_shift() {
+        let asserts = r#"
+const eq = (got, want, what) => {
+  if (got !== want) { console.error(`FAIL ${what}: got ${got}, want ${want}`); process.exit(1); }
+};
+const g = (...rows) => rows;
+// An unmoved grid evicts nothing, so redrawing one frame stays idempotent.
+eq(evictedRowCount(g("a","b","c"), g("a","b","c")), 0, "identical");
+// Scrolled up by one: the top row left, a new row arrived at the bottom.
+eq(evictedRowCount(g("a","b","c"), g("b","c","d")), 1, "shift by 1");
+eq(evictedRowCount(g("a","b","c","d"), g("d","w","x","y")), 3, "shift by 3");
+// A whole new screen shares nothing: a break, not a shift.
+eq(evictedRowCount(g("a","b","c"), g("x","y","z")), 3, "no overlap");
+// Geometry changed under us; there is no meaningful shift to report.
+eq(evictedRowCount(g("a","b"), g("a","b","c")), 3, "row count changed");
+eq(evictedRowCount(null, g("a","b","c")), 3, "no previous frame");
+// A blank screen staying blank is unmoved, never a screenful of evictions.
+eq(evictedRowCount(g("","",""), g("","","")), 0, "blank stays blank");
+// Repeated rows leave the shift ambiguous. The smallest fit wins, which is
+// the conservative read: an ambiguous shift retains fewer rows rather than
+// inventing evictions that never happened.
+eq(evictedRowCount(g("x","x","x","p"), g("x","x","p","q")), 1, "ambiguous shift takes the smallest fit");
+eq(evictedRowCount(g("a","b","c","d"), g("c","d","e","f")), 2, "shift by 2");
+console.log("evictedRowCount: 9 cases ok");
+"#;
+        let src = format!("{}\n{}", lift_js_fn("evictedRowCount"), asserts);
+        let path = std::env::temp_dir().join(format!("fno-evicted-{}.mjs", std::process::id()));
+        std::fs::write(&path, src).expect("temp dir writable");
+        let out = std::process::Command::new("node").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        match out {
+            Err(e) => {
+                // On CI a missing node means the assertions never ran, and a
+                // skip that reads as a pass is exactly the failure this guard
+                // exists to prevent. The runners ship node, so demand it there.
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "node is required on CI to exercise the shipped evictedRowCount: {e}"
+                );
+                println!(
+                    "SKIPPED evicted_row_count_tracks_the_grid_shift: node not runnable ({e}); \
+                     nothing was asserted"
+                );
+            }
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                assert!(
+                    o.status.success(),
+                    "node rejected the shipped evictedRowCount:\n{}{}",
+                    stdout,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                // Positive marker: the harness ran to its end, so an exit 0 from
+                // a node that never reached the cases cannot read as a pass.
+                assert!(
+                    stdout.contains("evictedRowCount: 9 cases ok"),
+                    "the harness did not reach its last case: {stdout}"
+                );
+            }
+        }
+    }
+
+    /// The page must keep calling retention what it is (x-ce65). A protocol
+    /// history request is unreachable while `writer.forget()` stands, so the
+    /// visible label must not promise scrollback the wire never carries.
+    #[test]
+    fn served_page_does_not_advertise_scrollback_to_the_operator() {
+        let note = PAGE
+            .lines()
+            .find(|l| l.contains("const KEPT_NOTE ="))
+            .expect("the page names the retained region");
+        assert!(
+            note.contains("not terminal scrollback"),
+            "the retained region disclaims scrollback: {note}"
+        );
+    }
+
+    /// Fit-to-width is client-side only (x-ce65). The bridge attaches passive
+    /// with rows==0/cols==0 so it never shrinks a PTY, and `writer.forget()`
+    /// leaves no upstream handle. A page that learned to ask for a resize would
+    /// collapse every terminal user's pane to phone width.
+    #[test]
+    fn served_page_never_asks_for_a_resize() {
+        assert!(
+            PAGE.contains("new WebSocket("),
+            "the page still opens the read-only socket"
+        );
+        assert!(
+            !PAGE.contains("ws.send("),
+            "the page sends nothing upstream (Locked Decision 5)"
+        );
+        assert!(
+            !PAGE.contains("Resize"),
+            "the page never names a Resize: a passive observer must not drive PTY geometry"
+        );
+    }
+
     #[test]
     fn bind_addr_brackets_ipv6_only() {
         assert_eq!(bind_addr("127.0.0.1", 8722), "127.0.0.1:8722");
