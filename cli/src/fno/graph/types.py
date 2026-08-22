@@ -78,9 +78,14 @@ def _derive_status(data: dict) -> str:
     if data.get("completed_at"):
         return "done"
     if data.get("superseded_by"):
-        supersession = data.get("supersession")
-        if isinstance(supersession, dict) and not supersession.get("verified_at"):
-            return "in_progress"
+        # One authority for the pending shape. recompute_statuses and the
+        # readiness overlay both answer `blocked` here, and this function's
+        # contract is to mirror them; answering in_progress made the same row
+        # read two ways depending on which path last touched it.
+        from fno.graph.statuses import pending_supersession_reason
+
+        if pending_supersession_reason(data):
+            return "blocked"
         return "superseded"
     if data.get("deferred_at"):
         return "deferred"
@@ -340,7 +345,7 @@ class Entry(BaseModel):
         Precedence (mirrors recompute_statuses single-entry portion):
           completed_at set    -> "done"
           verified superseded_by set -> "superseded"
-          pending supersession      -> "in_progress"
+          pending supersession      -> "blocked"
           deferred_at set     -> "deferred"
           pr_number set       -> "in_review"
           non-empty blocked_by -> "blocked"
