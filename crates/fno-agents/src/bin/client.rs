@@ -2359,6 +2359,7 @@ fn format_success(
         }
         "list" => {
             let agents = &result["agents"];
+            let fields_omitted = &result["fields_omitted"];
             let filters = result.get("filters_applied").cloned().unwrap_or_else(
                 || json!({"cwd": null, "provider": null, "status": null, "progress": null}),
             );
@@ -2377,7 +2378,12 @@ fn format_success(
                 Vec::new()
             };
             if json_flag || !is_tty {
-                Some(render_list_json(agents, &filters, &discovered))
+                Some(render_list_json(
+                    agents,
+                    &filters,
+                    fields_omitted,
+                    &discovered,
+                ))
             } else {
                 Some(render_list_table(agents, &discovered))
             }
@@ -2428,16 +2434,22 @@ fn format_success(
 /// ab-098967b4).
 ///
 /// Shape (schema_version 2): `{"agents": [...], "count": N,
-/// "discovered_sessions": [...], "discovered_count": M, "filters_applied":
-/// {...}, "schema_version": 2}`. Stays byte-shape-aligned with Python's
-/// `format.render_json`.
-fn render_list_json(agents: &Value, filters_applied: &Value, discovered: &[Value]) -> String {
+/// "discovered_sessions": [...], "discovered_count": M, "fields_omitted":
+/// [...], "filters_applied": {...}, "schema_version": 2}`. Stays
+/// byte-shape-aligned with Python's `format.render_json`.
+fn render_list_json(
+    agents: &Value,
+    filters_applied: &Value,
+    fields_omitted: &Value,
+    discovered: &[Value],
+) -> String {
     let count = agents.as_array().map(|a| a.len()).unwrap_or(0);
     let payload = json!({
         "agents": agents,
         "count": count,
         "discovered_sessions": discovered,
         "discovered_count": discovered.len(),
+        "fields_omitted": fields_omitted,
         "filters_applied": filters_applied,
         "schema_version": 2,
     });
@@ -4649,9 +4661,10 @@ mod tests {
     /// AC2-HP: render_list_json produces the Python-matching shape with correct keys
     #[test]
     fn render_list_json_shape_matches_python_contract() {
-        // Simulate daemon returning agents list in the new 10-key serialize_entry shape
-        let agents = json!([
-            {
+        // Simulate the full daemon RPC result so envelope metadata cannot be
+        // reconstructed independently by the outward client renderer.
+        let result = json!({
+            "agents": [{
                 "name": "worker-a",
                 "harness": "claude",
                 "observed_model": {"kind": "observed", "model": "glm-5.2", "samples": 300},
@@ -4665,10 +4678,12 @@ mod tests {
                 "pid": 4242,
                 "last_reconciled_at": "2026-05-25T00:30:00Z",
                 "log_path": null,
-            }
-        ]);
-        let filters = json!({"cwd": null, "provider": null, "status": null});
-        let output = render_list_json(&agents, &filters, &[]);
+            }],
+            "fields_omitted": ["model", "provider"],
+            "filters_applied": {"cwd": null, "provider": null, "status": null},
+        });
+        let output = format_success("list", "", &result, true, false, false)
+            .expect("list has an outward renderer");
 
         let parsed: Value = serde_json::from_str(&output).expect("must be valid JSON");
         // Top-level keys must match Python's render_json shape
@@ -4690,6 +4705,10 @@ mod tests {
         assert_eq!(parsed["discovered_count"], 0);
         assert_eq!(parsed["schema_version"], 2);
         assert_eq!(parsed["count"], 1);
+        assert_eq!(
+            parsed["fields_omitted"], result["fields_omitted"],
+            "outward envelope must preserve the daemon's exact sorted omission contract"
+        );
 
         // NOT the key-set guard, despite appearances: this row is hand-built in
         // this test, so the list below only asserts against its own input. The
@@ -4740,7 +4759,12 @@ mod tests {
             "status": "busy",
             "agent": "claude",
         })];
-        let out = render_list_json(&agents, &filters, &discovered);
+        let out = render_list_json(
+            &agents,
+            &filters,
+            &json!(["model", "provider"]),
+            &discovered,
+        );
         let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["discovered_count"], 1);
         assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
