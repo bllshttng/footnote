@@ -2664,7 +2664,6 @@ def _reprobe_pane_observation(
     session: str,
     pane_id: int,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
-    current: str,
 ) -> str:
     """Look at the pane once more, and report ONLY what the second look saw.
 
@@ -2672,9 +2671,11 @@ def _reprobe_pane_observation(
     already running a payload committed at exec time. That is the difference
     from the seed retry, which re-enters the submit path.
 
-    A second failure keeps `current`. Downgrading a successful first look on a
-    failed second one is not this function's job - it is called only when the
-    first look already failed.
+    It takes no "current" value to fall back to, because it answers about the
+    second look and nothing else. A raised read is `unreadable` for the same
+    reason a raised first read is. Carrying a prior verdict in would let this
+    function silently downgrade a good observation on a bad probe, and a
+    parameter the body does not honor is a contract that reads as kept.
     """
     try:
         screen = _run_mux(
@@ -2682,7 +2683,7 @@ def _reprobe_pane_observation(
             runner,
         )
     except DispatchAskError:
-        return current
+        return "unreadable"
     return _pane_observation(screen)
 
 
@@ -2744,13 +2745,18 @@ def _submit_spawn_seed(
     ``unconfirmed``  a send WAS attempted and did not land, or cannot be shown
                      to have landed into a pane that can run it. A fact about
                      the seed, so the caller may fail the spawn on it.
-    ``unattempted``  the pane frame could not be read, so no send was tried.
-                     That is a fact about the INSTRUMENT, not about the seed,
-                     and an alive-but-unpainted child is still a live worker.
-                     Folding it into ``unconfirmed`` would reap a healthy pane
-                     for the crime of not having painted yet. It is also the
-                     only state the caller retries, because it is the only one
-                     where nothing can already be sitting in the pane's buffer.
+    ``unattempted``  no send was tried, so nothing was ever put in the pane's
+                     buffer. A fact about the SEED and only about it. The
+                     instrument's own failure is ``pane_observation``'s job now,
+                     and this word used to carry both - which is the fusion this
+                     signature exists to end, so do not reintroduce it here.
+                     It is reached on a blank frame that read back CLEANLY (an
+                     unpainted TUI), and on an unreadable one for a provider
+                     whose argv carries no seed. Folding it into ``unconfirmed``
+                     would reap a healthy pane for the crime of not having
+                     painted yet. It is also the only state the caller retries,
+                     because it is the only one where nothing can already be
+                     sitting in the pane's buffer.
                      UNREACHABLE when ``seed_in_argv`` is set: there the seed
                      was committed at exec time, so something IS already in
                      flight and the retry's premise would not hold.
@@ -3511,7 +3517,7 @@ def dispatch_spawn_pane(
                 # the keystroke: it can only ever upgrade the OBSERVATION, and it
                 # never touches the seed, which was already settled.
                 time.sleep(_SEED_RETRY_DELAY_S)
-                seed_pane = _reprobe_pane_observation(session, pane_id, runner, seed_pane)
+                seed_pane = _reprobe_pane_observation(session, pane_id, runner)
         if readiness == "failed" or (recovered and readiness != "ready"):
             if recovered and readiness != "failed":
                 readiness_detail = (

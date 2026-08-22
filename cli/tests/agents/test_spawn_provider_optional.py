@@ -202,12 +202,18 @@ def test_an_observed_pane_with_a_delivered_seed_exits_clean(monkeypatch, runner)
     assert receipt["pane_observation"] == "blank"
 
 
-def test_the_pane_observation_is_absent_when_no_seed_was_requested(monkeypatch, runner):
+def test_the_pane_observation_is_omitted_when_the_spawn_never_set_it(
+    monkeypatch, runner
+):
     """A field whose job is to carry doubt must not appear asserting none.
 
-    Same only-when-set rule `seed_source` follows: a spawn with no seed never
-    looked at a pane on the seed's behalf, so it has nothing to report and says
-    nothing, rather than printing a reassuring word."""
+    The only-when-set rule `seed_source` already follows. A spawn that never
+    looked at a pane on the seed's behalf leaves the field None, and the receipt
+    then says nothing rather than printing a reassuring word.
+
+    Named for what it drives: the stub returns a result with the field unset.
+    An earlier name claimed "when no seed was requested", which this does not
+    arrange - the invocation carries a message."""
     _stub_pane_path(monkeypatch)
     from fno.agents.cli import agents_app
 
