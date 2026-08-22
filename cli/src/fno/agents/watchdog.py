@@ -1982,8 +1982,14 @@ def _send_machine_report(
 
     try:
         sender = resolve_project(cwd=Path.cwd(), flag_hint="--from-name")
-    except ProjectIdentificationError as exc:
-        return False, f"mail send failed: {exc}"
+    except ProjectIdentificationError:
+        # A watchdog daemon can run outside any checkout. Let dispatch use its
+        # existing neutral sender instead of dropping the alert at resolution.
+        sender = None
+
+    dispatch_kwargs: dict[str, object] = {"budget_enforce": False}
+    if sender is not None:
+        dispatch_kwargs["from_name"] = sender
 
     try:
         if to.startswith("project:"):
@@ -1991,8 +1997,7 @@ def _send_machine_report(
                 to[len("project:"):],
                 body,
                 cwd=Path.cwd(),
-                from_name=sender,
-                budget_enforce=False,
+                **dispatch_kwargs,
             )
         else:
             result = dispatch_send(
@@ -2000,8 +2005,7 @@ def _send_machine_report(
                 message=body,
                 provider=None,
                 cwd=Path.cwd(),
-                from_name=sender,
-                budget_enforce=False,
+                **dispatch_kwargs,
             )
     except DispatchAskError as exc:
         return False, str(exc)

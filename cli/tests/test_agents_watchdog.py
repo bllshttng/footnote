@@ -1693,6 +1693,12 @@ def test_machine_report_uses_internal_transport_for_long_digest(monkeypatch, tmp
         return DispatchSendResult(msg_id="msg-4", delivery="durable", reason="offline")
 
     monkeypatch.setattr(dispatch, "dispatch_send", internal_send)
+    from fno.inbox import store
+
+    def no_project(**_kwargs):
+        raise store.ProjectIdentificationError("unregistered watchdog cwd")
+
+    monkeypatch.setattr(store, "resolve_project", no_project)
     payload = {
         "verdicts": [
             {
@@ -1714,6 +1720,7 @@ def test_machine_report_uses_internal_transport_for_long_digest(monkeypatch, tmp
     assert receipt == "msg-4 queued (durable) [offline]"
     assert sent["name"] == "king"
     assert sent["kwargs"]["budget_enforce"] is False
+    assert "from_name" not in sent["kwargs"]
     assert len(sent["message"].split()) > 80
 
 
