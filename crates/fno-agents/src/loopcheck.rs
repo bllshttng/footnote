@@ -1620,6 +1620,64 @@ fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
     }
 }
 
+/// True when local HEAD carries nothing the base does not already have.
+///
+/// Resolves the base the same way [`classify_payload`] does, so the two cannot
+/// disagree about which remote branch is the mainline. A base that does not
+/// resolve, a git that errors, and a HEAD that is genuinely ahead all answer
+/// false, which is the conservative direction: see [`head_is_shipped`].
+fn git_head_on_base(git_bin: &str, cwd: &Path) -> bool {
+    for base in ["origin/main", "origin/master"] {
+        let verify = Command::new(git_bin)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{base}^{{commit}}"),
+            ])
+            .current_dir(cwd)
+            .output();
+        match verify {
+            Ok(v) if v.status.success() => {}
+            _ => continue,
+        }
+        // `--is-ancestor` exits 0 when HEAD is reachable from base, 1 when it
+        // is not, and >1 on a real error. Only a clean 0 counts, so an errored
+        // probe reads as "not shipped" rather than as consent to terminate.
+        let out = Command::new(git_bin)
+            .args(["merge-base", "--is-ancestor", "HEAD", base])
+            .current_dir(cwd)
+            .output();
+        return matches!(out, Ok(o) if o.status.success());
+    }
+    false
+}
+
+/// True when every local commit is already shipped.
+///
+/// Two ways that holds: the PR records this exact head, or local HEAD is
+/// already reachable from the base, which is what a post-merge rebase or
+/// fast-forward onto main produces.
+///
+/// The second disjunct cannot re-open the codex P1 on #447 that the first one
+/// guards. That defect was unpushed work terminating as DonePRGreen, and a
+/// genuine unpushed commit stacked on a merged PR is NOT an ancestor of the
+/// base, so it still reads as unshipped. The disjunct only ever releases a
+/// HEAD with no commits of its own left to ship.
+///
+/// The equality arm is checked first and makes no subprocess call, so the
+/// common path costs nothing. A git that cannot answer leaves the old
+/// behavior exactly as it was.
+fn head_is_shipped(pr: &PrInfo, local_head: &str, git_bin: &str, cwd: &Path) -> bool {
+    if pr.head_oid.is_empty() {
+        return false;
+    }
+    if pr.head_oid == local_head {
+        return true;
+    }
+    git_head_on_base(git_bin, cwd)
+}
+
 fn git_head_branch(git_bin: &str, cwd: &Path) -> Option<String> {
     let out = Command::new(git_bin)
         .args(["branch", "--show-current"])
@@ -7286,7 +7344,17 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // without ever shipping. MERGED PRs are exempt only when the
                 // local HEAD matches too; an unpushed commit on top of a
                 // merged PR is still unshipped work.
-                let head_shipped = !pr_info.head_oid.is_empty() && pr_info.head_oid == head_sha;
+                //
+                // CONTAIN, not EQUAL. This read was `head_oid == head_sha` for
+                // a year, and equality is a proxy for containment that is
+                // wrong in one direction: a DESCENDANT of the merge has
+                // nothing left to ship, and equality called it unshipped
+                // anyway. That wedged two finished sessions past their own
+                // merges (PR #671 in July, PR #1071 in August) with an
+                // unactionable "push the latest commits". `head_is_shipped`
+                // keeps the #447 guard intact: a real extra commit is not an
+                // ancestor of the base, so it still blocks.
+                let head_shipped = head_is_shipped(&pr_info, &head_sha, git_bin, &cwd);
 
                 // done_probes: the FINAL DonePRGreen conjunct. Gated on
                 // every other conjunct already holding, so a plan with no probes
@@ -7648,7 +7716,11 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         author_harness.as_deref(),
                         std::env::var("FNO_DRIVER_LIB").is_ok(),
                     ) {
-                        async_wait_class(&pr_info, &head_sha, open_findings.is_empty())
+                        async_wait_class(
+                            &pr_info,
+                            open_findings.is_empty(),
+                            head_is_shipped(&pr_info, &head_sha, git_bin, &cwd),
+                        )
                     } else {
                         None
                     };
@@ -7833,7 +7905,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         .clone()
                         .or(fidelity_block.clone())
                         .unwrap_or_else(|| {
-                            build_block_reason(&pr_info, &head_sha, open_findings.is_empty())
+                            build_block_reason(
+                                &pr_info,
+                                &head_sha,
+                                open_findings.is_empty(),
+                                head_is_shipped(&pr_info, &head_sha, git_bin, &cwd),
+                            )
                         }),
                     &cwd,
                     &session_id,
@@ -8086,12 +8163,16 @@ fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bo
 /// operator), and the sole remaining blocker is CI still pending or an
 /// outstanding bot review. Returns the blocker label, or None if anything else
 /// blocks. External truth only - the tag is a request, this is the authority.
+/// `head_shipped` is passed in rather than recomputed. It used to be
+/// `pr.head_oid == local_head` here, a third copy of a predicate that must
+/// agree with `done()`, and the copies drifted: this one returning false is
+/// why a `<watching>` tag could not rescue a session whose branch had moved
+/// past its own merge. One caller computes it once via `head_is_shipped`.
 fn async_wait_class(
     pr: &PrInfo,
-    local_head: &str,
     open_findings_empty: bool,
+    head_shipped: bool,
 ) -> Option<&'static str> {
-    let head_shipped = !pr.head_oid.is_empty() && pr.head_oid == local_head;
     if pr.state != PrState::Open
         || !head_shipped
         || !pr.unaddressed_findings.is_empty()
@@ -9003,13 +9084,22 @@ fn evaluate_done_probes(
     }
 }
 
-fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) -> String {
+/// `head_shipped` is passed in for the same reason `async_wait_class` takes
+/// it: this function held the THIRD copy of the predicate, and its copy is the
+/// one that rendered "push the latest commits" at a session with nothing to
+/// push. Computed once by the caller via `head_is_shipped`.
+fn build_block_reason(
+    pr: &PrInfo,
+    local_head: &str,
+    open_findings_empty: bool,
+    head_shipped: bool,
+) -> String {
     // The ONE predicate. A message that prescribes the arm-and-tag ritual for a
     // blocker `async_wait_class` refuses to idle is the code contradicting
     // itself, and a session complied with exactly that roughly ten times on
     // #618. Deriving the hint from the classifier makes the two agree by
     // construction rather than by two hand-kept branch orders.
-    let idlable = async_wait_class(pr, local_head, open_findings_empty);
+    let idlable = async_wait_class(pr, open_findings_empty, head_shipped);
     let hint = |blocker: &str| -> String {
         if idlable == Some(blocker) {
             arm_watch_hint(pr.number, blocker)
@@ -9037,7 +9127,12 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
         );
     }
 
-    if !pr.head_oid.is_empty() && pr.head_oid != local_head {
+    // Gated on the shared predicate, not on bare inequality. A branch that
+    // fast-forwarded or rebased onto a base already containing its merge has a
+    // different head and nothing to push, and this message told two such
+    // sessions to push anyway. The message itself is unchanged for the case it
+    // is right about: a genuinely unpushed commit.
+    if !head_shipped {
         return format!(
             "PR #{} head {} != local HEAD {}: push the latest commits before completing",
             pr.number,
@@ -12195,7 +12290,7 @@ mod tests {
                 verdicts: vec![],
             },
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             reason.contains("still running"),
             "pending CI must not read as red; got: {reason}"
@@ -12213,7 +12308,7 @@ mod tests {
             ci_has_pending: true,
             ..watch_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("<watching"), "got: {reason}");
         assert!(reason.contains("timeout"), "got: {reason}");
         // The taught watcher is the REST status poll, never the
@@ -12248,7 +12343,7 @@ mod tests {
             bot_nudges: vec![],
             ..watch_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("chatgpt-codex-connector"), "got: {reason}");
         assert!(reason.contains("<watching"), "got: {reason}");
     }
@@ -12338,7 +12433,7 @@ mod tests {
 
     #[test]
     fn watch_idle_classifies_pending_ci() {
-        assert_eq!(async_wait_class(&watch_pr(), "abc", true), Some("ci"));
+        assert_eq!(async_wait_class(&watch_pr(), true, true), Some("ci"));
     }
 
     #[test]
@@ -12367,7 +12462,7 @@ mod tests {
             bot_nudges: vec![],
             ..watch_pr()
         };
-        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+        assert_eq!(async_wait_class(&pr, true, true), Some("review"));
     }
 
     #[test]
@@ -12379,7 +12474,7 @@ mod tests {
             ci_has_pending: true,
             ..watch_pr()
         };
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        assert_eq!(async_wait_class(&pr, true, true), None);
     }
 
     #[test]
@@ -12396,7 +12491,7 @@ mod tests {
             bot_nudges: vec![],
             ..watch_pr()
         };
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        assert_eq!(async_wait_class(&pr, true, true), None);
     }
 
     // ── x-b167 idle rule + message rendering ──────────────────────────────────
@@ -12438,8 +12533,8 @@ mod tests {
                 0,
             )],
         );
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
-        let reason = build_block_reason(&pr, "abc", true);
+        assert_eq!(async_wait_class(&pr, true, true), None);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             reason.contains("gh pr comment 618 --body \"@codex review\""),
             "{reason}"
@@ -12458,8 +12553,8 @@ mod tests {
             "chatgpt-codex-connector",
             vec![bn("chatgpt-codex-connector", NudgeClass::Awaiting, 1, 3, 3)],
         );
-        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
-        let reason = build_block_reason(&pr, "abc", true);
+        assert_eq!(async_wait_class(&pr, true, true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("nudged"), "{reason}");
         assert!(reason.contains("awaiting"), "{reason}");
         assert!(
@@ -12481,8 +12576,8 @@ mod tests {
                 47,
             )],
         );
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
-        let reason = build_block_reason(&pr, "abc", true);
+        assert_eq!(async_wait_class(&pr, true, true), None);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             reason.contains("did not review after 3 nudges over 47m"),
             "{reason}"
@@ -12503,8 +12598,8 @@ mod tests {
             "gemini-code-assist",
             vec![bn("gemini-code-assist", NudgeClass::NotNudgeable, 0, 0, 0)],
         );
-        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
-        let reason = build_block_reason(&pr, "abc", true);
+        assert_eq!(async_wait_class(&pr, true, true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             reason.contains("gemini-code-assist has not reviewed"),
             "{reason}"
@@ -12520,8 +12615,8 @@ mod tests {
         // A non-empty missing_bots with an EMPTY bot_nudges (not classified)
         // behaves exactly as pre-x-b167: idlable, today's string.
         let pr = bot_review_pr("chatgpt-codex-connector", vec![]);
-        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
-        let reason = build_block_reason(&pr, "abc", true);
+        assert_eq!(async_wait_class(&pr, true, true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("has not reviewed"), "{reason}");
     }
 
@@ -12545,8 +12640,8 @@ mod tests {
             "chatgpt-codex-connector".to_string(),
             "deadbeef1234".to_string(),
         )];
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
-        let reason = build_block_reason(&pr, "abc", true);
+        assert_eq!(async_wait_class(&pr, true, true), None);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("gh pr comment 618"), "{reason}");
         assert!(
             reason.contains("(read deadbeef, superseded by this head)"),
@@ -12574,8 +12669,8 @@ mod tests {
             "chatgpt-codex-connector".to_string(),
             "0daa4d6cea7c".to_string(),
         )];
-        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
-        let reason = build_block_reason(&pr, "abc", true);
+        assert_eq!(async_wait_class(&pr, true, true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             reason.contains("chatgpt-codex-connector (read 0daa4d6c, superseded by this head)"),
             "{reason}"
@@ -12600,7 +12695,7 @@ mod tests {
             "chatgpt-codex-connector".to_string(),
             "111122223333".to_string(),
         )];
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             reason.contains("chatgpt-codex-connector (read 11112222, superseded by this head)"),
             "{reason}"
@@ -12626,7 +12721,7 @@ mod tests {
             }],
             ..watch_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("@chatgpt-codex-connector"), "{reason}");
     }
 
@@ -12701,7 +12796,7 @@ mod tests {
     fn block_reason_names_the_reviewers_gate_not_a_bot() {
         // AC2: the old string claimed a bot had not reviewed while
         // required_bots was empty and the real blocker was local.
-        let reason = build_block_reason(&reviewers_gate_pr(), "abc", true);
+        let reason = build_block_reason(&reviewers_gate_pr(), "abc", true, true);
         assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
         assert!(reason.contains("sigma"), "got: {reason}");
         assert!(reason.contains("/fno:review sigma"), "got: {reason}");
@@ -12712,7 +12807,7 @@ mod tests {
     fn block_reason_names_the_local_peer_invocation() {
         let mut pr = reviewers_gate_pr();
         pr.unattested_reviewers[0].name = LOCAL_PEER_REVIEWER.to_string();
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             reason.contains("/fno:review peer --attest"),
             "got: {reason}"
@@ -12727,7 +12822,7 @@ mod tests {
     fn block_reason_explains_same_model_local_peer_refusal() {
         let mut pr = reviewers_gate_pr();
         pr.unattested_reviewers[0].name = SAME_MODEL_LOCAL_PEER_SENTINEL.to_string();
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             reason.contains("configure a cross-model peer"),
             "got: {reason}"
@@ -12744,8 +12839,8 @@ mod tests {
         // (watch_idle_rejects_local_attestation_review_gate), so prescribing
         // the arm-and-tag ritual here is the code contradicting itself.
         let pr = reviewers_gate_pr();
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
-        let reason = build_block_reason(&pr, "abc", true);
+        assert_eq!(async_wait_class(&pr, true, true), None);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(!reason.contains("<watching"), "got: {reason}");
         assert!(
             !reason.contains("Arm a harness-tracked watcher"),
@@ -12766,7 +12861,7 @@ mod tests {
             }],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("01234567"), "got: {reason}");
         assert!(reason.contains("superseded"), "got: {reason}");
     }
@@ -12779,7 +12874,7 @@ mod tests {
             unattested_reviewers: vec![],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(!reason.contains("<watching"), "got: {reason}");
         assert!(!reason.contains("bot reviewer"), "got: {reason}");
     }
@@ -12794,7 +12889,7 @@ mod tests {
             unattested_reviewers: vec![],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("chatgpt-codex-connector"), "got: {reason}");
         assert!(reason.contains("<watching"), "got: {reason}");
     }
@@ -12811,7 +12906,7 @@ mod tests {
             bot_nudges: vec![],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
         assert!(!reason.contains("<watching"), "got: {reason}");
         // Once the local half is attested, the bot wait is the sole blocker and
@@ -12820,7 +12915,7 @@ mod tests {
             unattested_reviewers: vec![],
             ..pr
         };
-        assert!(build_block_reason(&after, "abc", true).contains("<watching"));
+        assert!(build_block_reason(&after, "abc", true, true).contains("<watching"));
     }
 
     #[test]
@@ -12929,7 +13024,7 @@ mod tests {
             malformed_attestations: malformed,
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             reason.contains("unparseable attestation line"),
             "got: {reason}"
@@ -12948,7 +13043,7 @@ mod tests {
             .1,
             0
         );
-        assert!(!build_block_reason(&reviewers_gate_pr(), "abc", true)
+        assert!(!build_block_reason(&reviewers_gate_pr(), "abc", true, true)
             .contains("unparseable attestation line"));
     }
 
@@ -13062,7 +13157,7 @@ mod tests {
             }],
             ..reviewers_gate_pr()
         };
-        build_block_reason(&pr, "1234567\u{e9}abc", true);
+        build_block_reason(&pr, "1234567\u{e9}abc", true, true);
     }
 
     #[test]
@@ -13116,13 +13211,13 @@ mod tests {
                 false,
             ),
         ] {
-            let reason = build_block_reason(&pr, "abc", open_empty);
-            assert_eq!(async_wait_class(&pr, "abc", open_empty), None, "{label}");
+            let reason = build_block_reason(&pr, "abc", open_empty, true);
+            assert_eq!(async_wait_class(&pr, open_empty, true), None, "{label}");
             assert!(!reason.contains("<watching"), "{label}: {reason}");
         }
         // The genuinely idlable state keeps the ritual.
-        assert_eq!(async_wait_class(&bot_only, "abc", true), Some("review"));
-        assert!(build_block_reason(&bot_only, "abc", true).contains("<watching"));
+        assert_eq!(async_wait_class(&bot_only, true, true), Some("review"));
+        assert!(build_block_reason(&bot_only, "abc", true, true).contains("<watching"));
     }
 
     #[test]
@@ -13142,7 +13237,7 @@ mod tests {
             }],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("unaddressed"), "got: {reason}");
         assert!(!reason.contains("reviewers gate unmet"), "got: {reason}");
         // With the finding cleared, the reviewers gate is what is named.
@@ -13150,7 +13245,7 @@ mod tests {
             unaddressed_findings: vec![],
             ..pr
         };
-        assert!(build_block_reason(&after, "abc", true).contains("reviewers gate unmet"));
+        assert!(build_block_reason(&after, "abc", true, true).contains("reviewers gate unmet"));
     }
 
     #[test]
@@ -13172,7 +13267,7 @@ mod tests {
             }],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("no in-thread reply"), "got: {reason}");
         assert!(reason.contains("in_reply_to_id"), "got: {reason}");
         assert!(reason.contains("top-level PR comment"), "got: {reason}");
@@ -13191,7 +13286,7 @@ mod tests {
             }],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("verdict NOT pass"), "got: {reason}");
     }
 
@@ -13207,14 +13302,14 @@ mod tests {
             }],
             ..reviewers_gate_pr()
         };
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("self-cert"), "got: {reason}");
         assert!(
             reason.contains("asserts no review evidence"),
             "got: {reason}"
         );
         // A real reviewer carries no such mark.
-        assert!(!build_block_reason(&reviewers_gate_pr(), "abc", true).contains("self-cert"));
+        assert!(!build_block_reason(&reviewers_gate_pr(), "abc", true, true).contains("self-cert"));
     }
 
     #[test]
@@ -13243,7 +13338,7 @@ mod tests {
             bot_nudges: vec![],
             ..reviewers_gate_pr()
         };
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        assert_eq!(async_wait_class(&pr, true, true), None);
     }
 
     #[test]
@@ -13445,7 +13540,7 @@ mod tests {
             .unwrap();
 
         std::env::set_var(var, stub.to_str().unwrap());
-        let sized_reason = build_block_reason(&pr, "abc", true);
+        let sized_reason = build_block_reason(&pr, "abc", true, true);
         assert!(
             sized_reason.contains("`/code-review from-stub --comment --fix`"),
             "got: {sized_reason}"
@@ -13456,7 +13551,7 @@ mod tests {
         );
 
         std::env::set_var(var, "/nonexistent-fno-for-this-test");
-        let reason = build_block_reason(&pr, "abc", true);
+        let reason = build_block_reason(&pr, "abc", true, true);
         match prior {
             Some(v) => std::env::set_var(var, v),
             None => std::env::remove_var(var),
@@ -13955,9 +14050,12 @@ mod tests {
     }
 
     #[test]
-    fn watch_idle_rejects_head_mismatch() {
-        // AC2-ERR: unpushed work (PR head != local HEAD) is never async-wait.
-        assert_eq!(async_wait_class(&watch_pr(), "def", true), None);
+    fn watch_idle_rejects_unshipped_work() {
+        // AC2-ERR: unpushed work is never async-wait. The predicate used to be
+        // `PR head != local HEAD` and is now "not shipped", which is the same
+        // verdict for a genuine unpushed commit and a different one for a head
+        // that merely moved past its own merge.
+        assert_eq!(async_wait_class(&watch_pr(), true, false), None);
     }
 
     #[test]
@@ -13968,7 +14066,7 @@ mod tests {
             ci_has_pending: false,
             ..watch_pr()
         };
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        assert_eq!(async_wait_class(&pr, true, true), None);
     }
 
     #[test]
@@ -13986,13 +14084,13 @@ mod tests {
             }],
             ..watch_pr()
         };
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        assert_eq!(async_wait_class(&pr, true, true), None);
     }
 
     #[test]
     fn watch_idle_rejects_open_operator_finding() {
         // An open operator review_finding for the node also blocks idling.
-        assert_eq!(async_wait_class(&watch_pr(), "abc", false), None);
+        assert_eq!(async_wait_class(&watch_pr(), false, true), None);
     }
 
     #[test]
@@ -14002,7 +14100,7 @@ mod tests {
             state: PrState::Merged,
             ..watch_pr()
         };
-        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        assert_eq!(async_wait_class(&pr, true, true), None);
     }
 
     #[test]
