@@ -686,6 +686,39 @@ def _lookup_mux_pane(
         return None
 
 
+def _transcript_on_disk(
+    handle: str,
+    *,
+    projects_root: Optional[Path] = None,
+    codex_sessions_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    """The transcript for ``handle`` if one is on disk, else None.
+
+    The registry and the transcript are two different surfaces, and a reaped
+    row leaves its transcript behind. This is what lets the miss below say
+    which one it actually measured instead of reporting an absence as a death.
+
+    Reuses the locators already in this module rather than adding a third
+    search: ``resolve_transcript`` handles a claude full uuid AND an 8-hex
+    prefix (the form an operator peeks by), and ``_codex_rollout_path`` handles
+    a codex rollout. Every failure degrades to None and never raises, matching
+    ``_lookup_mux_pane`` on a torn registry.
+    """
+    try:
+        from fno.provenance.resolver import resolve_transcript
+
+        rt = resolve_transcript("claude", handle, "", projects_root=projects_root)
+        if getattr(rt, "resolved", False) and getattr(rt, "transcript_path", None):
+            return Path(rt.transcript_path)
+    except Exception:  # noqa: BLE001 - an advisory locator never raises
+        pass
+    try:
+        found = _codex_rollout_path(handle, codex_sessions_dir)
+    except Exception:  # noqa: BLE001 - same contract
+        return None
+    return found
+
+
 def _read_mux_pane(
     session: str, pane_id: int, n: int, *, runner: Optional[Callable] = None
 ) -> tuple[int, str]:
@@ -804,7 +837,28 @@ def peek(
         )
         if mux_rc is not None:
             return mux_rc
-        err.write(f"peer not found: {handle}\n")
+        # Name the instrument. Both reads above (the live-session resolver and
+        # the mux-pane fallback) are registry-shaped, and the registry is not
+        # the transcript: a reaped row leaves 4.9M of conversation on disk
+        # while this line used to answer a bare "peer not found". A king read
+        # that as destroyed and nearly spawned fresh over a green PR.
+        err.write(f"peer not found in the registry: {handle}\n")
+        transcript = _transcript_on_disk(
+            handle,
+            projects_root=projects_root,
+            codex_sessions_dir=codex_sessions_dir,
+        )
+        if transcript is not None:
+            err.write(
+                f"the transcript IS on disk: {transcript}\n"
+                "the registry row is gone; the conversation is not.\n"
+            )
+        else:
+            err.write(
+                "the registry is not the transcript. A reaped row leaves its "
+                "transcript on disk.\n"
+            )
+        err.write(f"try: fno agents adopt {handle}\n")
         if suggestions:
             err.write(f"did you mean: {', '.join(suggestions)}\n")
         return EXIT_NOT_FOUND
@@ -816,7 +870,13 @@ def peek(
 
     if not json_out:
         out.write(
-            f"peer {handle}: agent={agent} short_id={short_id} cwd={cwd}\n"
+            # `recorded_cwd`, not `cwd`: this is the registry's launch-time
+            # snapshot, never a live pwd. Unlabelled, it reported two recovered
+            # sessions as sitting in canonical main; one of them then named its
+            # own pwd inside its feature worktree. Do not read the live pwd
+            # here - that costs a pid resolution per call on a hot verb, and
+            # the label removes the ambiguity for free.
+            f"peer {handle}: agent={agent} short_id={short_id} recorded_cwd={cwd}\n"
         )
 
     # Fast-path: prefer normalized status events when present.
