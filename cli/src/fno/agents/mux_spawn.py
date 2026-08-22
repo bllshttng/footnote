@@ -1345,6 +1345,7 @@ def _mesh_env_wrapper(
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
     route_env: Optional[dict[str, str]] = None,
+    seed_provenance: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """Prefix ``argv`` with ``env(1)`` carrying the mesh identity the daemon
     worker used to set on its PTY child (worker.rs), plus any role-routing env
@@ -1467,6 +1468,16 @@ def _mesh_env_wrapper(
         if _k not in resolved_prov:
             unset += ["-u", _k]
     pairs += [f"{k}={v}" for k, v in resolved_prov.items()]
+    # Seed provenance (x-3a64), set-or-cleared as a whole group for exactly the
+    # reason the node triple above is: a pane worker spawning a child passes its
+    # whole environment down, so leaving these behind would hand the child the
+    # PARENT's seed and sender - an envelope attributing the wrong message to the
+    # wrong peer, which is worse than none.
+    resolved_seed = {k: v for k, v in (seed_provenance or {}).items() if v}
+    for _k in SEED_PROVENANCE_KEYS:
+        if _k not in resolved_seed:
+            unset += ["-u", _k]
+    pairs += [f"{k}={v}" for k, v in resolved_seed.items()]
     return ["env", *unset, *pairs, *argv]
 
 
@@ -1484,6 +1495,47 @@ PROVENANCE_KEYS: tuple[str, ...] = (
     "FNO_PLAN",
     "FNO_NODE_CLAIM_HOLDER",
 )
+
+#: The seed-provenance env keys (x-3a64), as one set, for the same set-or-clear
+#: reason as ``PROVENANCE_KEYS``: an inherited half of this group would attribute
+#: a child's seed to its parent's sender. Named here rather than imported into
+#: the wrapper so the clear list cannot drift from the module that writes them.
+SEED_PROVENANCE_KEYS: tuple[str, ...] = (
+    "FNO_SEED_PROV_SEED_B64",
+    "FNO_SEED_PROV_FROM",
+    "FNO_SEED_PROV_FROM_SESSION",
+    "FNO_SEED_PROV_HARNESS",
+    "FNO_SEED_PROV_MODEL",
+    "FNO_SEED_PROV_NODE",
+    "FNO_SEED_PROV_MSG_ID",
+)
+
+
+def _seed_provenance_env(
+    message: str, provenance: Optional[dict[str, str]] = None
+) -> dict[str, str]:
+    """The seed-attribution env for a spawn, or ``{}`` when there is none.
+
+    Empty is the common, correct answer for an operator spawn: a person typing
+    ``fno agents spawn`` in a shell authored the seed, and stamping a peer
+    envelope on it would name an agent sender that does not exist.
+
+    Raises :class:`DispatchAskError` when the seed exists but cannot be honestly
+    attributed (over the size cap, or already carrying an ``<fno_mail>`` tag).
+    Fail closed: an attributed spawn whose attribution silently did not render
+    is the exact gap this node exists to close, so refuse the spawn instead of
+    launching the one message it promises to identify.
+    """
+    from fno.mail.seed_provenance import SeedProvenanceRefused, build_env
+
+    try:
+        return build_env(message, node=(provenance or {}).get("FNO_NODE"))
+    except SeedProvenanceRefused as exc:
+        raise DispatchAskError(
+            f"seed provenance refused: {exc}. The seed would reach the worker "
+            f"unattributed; shorten it or remove the envelope tag and spawn again.",
+            exit_code=2,
+        ) from exc
 
 
 def resolve_provenance(
@@ -2608,7 +2660,12 @@ def _send_permission_response(
         for key in keys:
             raw = token_bytes.get(key, key.encode("ascii")).decode("latin1")
             sent = _run_mux(
-                ["mux", "pane", "send", pane, "--text", raw, "--session", session],
+                # --raw: this types a fingerprinted keystroke to ANSWER a
+                # showing prompt. An envelope around a digit is nonsense, and
+                # the enveloped lane's read-back gate refuses exactly the pane
+                # state this caller requires. It is the archetypal keystroke
+                # case, not an oversight (node x-3a64).
+                ["mux", "pane", "send", pane, "--text", raw, "--session", session, "--raw"],
                 runner,
             )
             if sent.returncode != 0:
@@ -2748,7 +2805,10 @@ def _submit_spawn_seed(
     if provider == "agy" and re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
         try:
             cleared = _run_mux(
-                ["mux", "pane", "send", "--session", session, str(pane_id), "--text", "", "--submit"],
+                # --raw: a bare submit keystroke clearing a modal. There is no
+                # text to attribute and the modal IS the prompt the enveloped
+                # lane refuses (node x-3a64).
+                ["mux", "pane", "send", "--session", session, str(pane_id), "--text", "", "--submit", "--raw"],
                 runner,
             )
         except DispatchAskError:
@@ -2815,7 +2875,16 @@ def _submit_spawn_seed(
     payload = "" if seed in frame else seed
     try:
         submitted = _run_mux(
-            ["mux", "pane", "send", "--session", session, str(pane_id), "--text", payload, "--submit"],
+            # --raw, and the reason is the seed's own shape, not an oversight.
+            # An empty payload is a bare submit (the seed rode in on argv), which
+            # has nothing to attribute. A non-empty payload is the SEED, a
+            # leading-slash verb whose routing keys off that first character;
+            # whether an envelope can ride behind the verb line without the
+            # harness REPL swallowing it into the verb's ARGUMENTS is a separate,
+            # probe-gated question (node x-3a64 task 5). Until that probe answers,
+            # this arm types the seed verbatim rather than forcing a shape the
+            # harness may refuse.
+            ["mux", "pane", "send", "--session", session, str(pane_id), "--text", payload, "--submit", "--raw"],
             runner,
         )
     except DispatchAskError:
@@ -3121,8 +3190,22 @@ def dispatch_spawn_pane(
     # env(1) applies its assignments and then execs taskpolicy/nice -> provider.
     from fno.agents.spawn_gate import qos_wrap
 
+    # Seed provenance (x-3a64): the seed argument itself stays byte-identical -
+    # normalize.sh and the harness REPL both key off its leading slash - so the
+    # attribution travels as env and a SessionStart hook renders it. Quotes the
+    # message as this launcher received it; the provider-specific respelling
+    # `build_pane_argv` applies (`/fno:target` -> `$fno:target` for codex) is a
+    # spelling of the same seed, and the sender is what the envelope is for.
+    seed_prov = _seed_provenance_env(message, provenance)
     wrapped = _mesh_env_wrapper(
-        name, provider, launch_role, qos_wrap(argv), provenance, account_env, route_env
+        name,
+        provider,
+        launch_role,
+        qos_wrap(argv),
+        provenance,
+        account_env,
+        route_env,
+        seed_prov,
     )
 
     registry_path = paths.agents_registry_path()

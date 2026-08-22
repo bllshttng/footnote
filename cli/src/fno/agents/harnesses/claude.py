@@ -619,6 +619,33 @@ def bg_create(
     )
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_HARNESS"] = "claude"
+    # Seed provenance (x-3a64): the message argument stays byte-identical - a
+    # leading-slash seed is classified by that first character - so who sent it
+    # travels as env and a SessionStart hook renders the <fno_mail> envelope.
+    # Cleared then set as a whole group, because the `dict(os.environ)` snapshot
+    # above inherits THIS parent's own seed fields, and a half-inherited group
+    # would attribute the child's seed to whoever seeded the parent.
+    from fno.agents.mux_spawn import SEED_PROVENANCE_KEYS
+    from fno.mail.seed_provenance import SeedProvenanceRefused
+    from fno.mail.seed_provenance import build_env as _seed_provenance_env
+
+    for _seed_key in SEED_PROVENANCE_KEYS:
+        spawn_env.pop(_seed_key, None)
+    try:
+        spawn_env.update(
+            _seed_provenance_env(message, node=os.environ.get("FNO_NODE"))
+        )
+    except SeedProvenanceRefused as exc:
+        # Fail closed. Launching the one message this node promises to identify
+        # while its attribution silently did not render is the exact gap being
+        # closed here.
+        raise ProviderSubprocessError(
+            exit_code=2,
+            stderr=(
+                f"seed provenance refused: {exc}. The seed would reach the "
+                f"worker unattributed."
+            ),
+        ) from exc
     # Raise the harness Stop-hook block cap so fno's repeated-block loop is not
     # force-ended at the default 9 (x-1680). Non-auth spawn env reaches the bg
     # session process the same way FNO_AGENT_SELF above does.

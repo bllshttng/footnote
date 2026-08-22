@@ -67,15 +67,26 @@ def fno_mail_open(
     to: Optional[str] = None,
     id: Optional[str] = None,
     reply_to: Optional[str] = None,
+    from_session: Optional[str] = None,
 ) -> str:
     """Render the ``<fno_mail ...>`` OPEN tag with double-quoted attributes:
-    ``<fno_mail from="..." harness="..." model="..."[ node="..."][ to="..."][ id="..."][ reply_to="..."]>``.
+    ``<fno_mail from="..." harness="..." model="..."[ node="..."][ to="..."][ id="..."][ reply_to="..."][ from_session="..."]>``.
 
     The relay PTY hop reuses this open tag for its single-line, no-close
     transport variant (the Enter newline is its delimiter).
     ``id`` (this message's own bus msg-id) and ``reply_to`` (the answered bus
     msg-id) are additive; ``id`` is last-but-one, ``reply_to`` last, and both are
     omitted when absent, so a plain send stays byte-identical.
+
+    ``from_session`` is the sender's FULL session id and is the reply address
+    when present (node x-3a64, absorbing x-05ae). ``from`` stays the compact
+    DISPLAY label, and it is not a safe address for every harness: a session id
+    here is UUIDv7, whose first eight hex are a truncated millisecond timestamp,
+    so a head-8 handle is a ~65.536-second clock bucket rather than 32 random
+    bits. Two codex workers spawned in one minute collide by construction, which
+    is exactly what a fleet does, and a threaded reply then refuses outright.
+    Rendered last so every pre-existing attribute keeps its position and an
+    envelope written without it is byte-unchanged.
 
     Every attribute is validated here, the one chokepoint every caller of this
     renderer shares (``wrap_fno_mail`` and the two direct live-inject callers
@@ -89,6 +100,7 @@ def fno_mail_open(
         ("to", to),
         ("id", id),
         ("reply_to", reply_to),
+        ("from_session", from_session),
     ):
         if value:
             _refuse_unsafe_attr(name, value)
@@ -101,6 +113,8 @@ def fno_mail_open(
         s += f' id="{id}"'
     if reply_to:
         s += f' reply_to="{reply_to}"'
+    if from_session:
+        s += f' from_session="{from_session}"'
     return s + ">"
 
 
@@ -165,6 +179,7 @@ def wrap_fno_mail(
     to: Optional[str] = None,
     id: Optional[str] = None,
     reply_to: Optional[str] = None,
+    from_session: Optional[str] = None,
 ) -> str:
     """Wrap ``body`` in the PAIRED ``<fno_mail>`` envelope::
 
@@ -184,6 +199,13 @@ def wrap_fno_mail(
     or ``</fno_mail>`` tag; see :func:`refuse_if_forged`."""
     refuse_if_forged(body)
     open_tag = fno_mail_open(
-        from_=from_, harness=harness, model=model, node=node, to=to, id=id, reply_to=reply_to
+        from_=from_,
+        harness=harness,
+        model=model,
+        node=node,
+        to=to,
+        id=id,
+        reply_to=reply_to,
+        from_session=from_session,
     )
     return f"{open_tag}\n{body}\n{FNO_MAIL_TRAILER}\n</fno_mail>"

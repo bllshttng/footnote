@@ -15,6 +15,13 @@ from typing import Optional
 # are pulled independently within the tag).
 _OPEN_TAG_RE = re.compile(r"<fno_mail\b[^>]*>")
 _FROM_RE = re.compile(r'from="([^"]+)"')
+# The FULL sender session id (node x-3a64). Preferred over `from` whenever the
+# tag carries it: `from` is a head-8 display handle, and under UUIDv7 that is a
+# ~65.536-second clock bucket rather than 32 random bits, so two workers started
+# in one minute share it and a threaded reply to either refuses as ambiguous.
+# `\b` keeps this distinct from the `from="` match above, which cannot fire
+# inside `from_session="` anyway (the literal there is `from_`).
+_FROM_SESSION_RE = re.compile(r'\bfrom_session="([^"]+)"')
 _TO_RE = re.compile(r'\bto="([^"]+)"')
 # Capture the id attribute of a <fno_mail ...> open tag (W2 dedup-at-drain).
 _ID_RE = re.compile(r'<fno_mail\b[^>]*\bid="([^"]+)"')
@@ -50,8 +57,12 @@ def _addressed_here(tag: str, session_id: str) -> bool:
 def sender_from_transcript_text(
     text: str, msg_id: str, *, session_id: Optional[str] = None
 ) -> Optional[str]:
-    """Return the ``from`` handle of the ``<fno_mail ... id="<msg_id>" ...>`` open
+    """Return the sender address of the ``<fno_mail ... id="<msg_id>" ...>`` open
     tag in ``text``, or ``None`` if no such envelope is present.
+
+    The FULL ``from_session`` wins when the tag carries it, because it is the
+    only sender address that survives a head-8 collision; a legacy envelope with
+    only ``from`` still resolves through that handle exactly as before.
 
     The envelope lives inside JSONL transcript records, so its quotes arrive
     escaped (``from=\\"X\\"``); normalize ``\\"`` to ``"`` before matching so a
@@ -74,6 +85,12 @@ def sender_from_transcript_text(
             continue
         if session_id is not None and not _addressed_here(s, session_id):
             continue
+        # Full provenance first, display handle second. An envelope written
+        # before the attribute existed carries only `from`, and that legacy
+        # path stays exactly as it was.
+        full = _FROM_SESSION_RE.search(s)
+        if full:
+            return full.group(1)
         m = _FROM_RE.search(s)
         if m:
             return m.group(1)
@@ -138,7 +155,10 @@ def _candidate_stores() -> list[tuple[str, str]]:
 
 
 def resolve_live_sender(msg_id: str) -> Optional[str]:
-    """Find ``msg_id``'s sender handle by scanning this session's own transcript.
+    """Find ``msg_id``'s sender address by scanning this session's own transcript.
+
+    Returns the envelope's full ``from_session`` when it carries one, else its
+    ``from`` handle (node x-3a64).
 
     Searches every candidate store and accepts the one holding a RECEIPT: an
     envelope carrying both ``id="<msg_id>"`` and a ``to=`` equal to that store's

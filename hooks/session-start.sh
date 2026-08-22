@@ -276,6 +276,23 @@ if [[ -f "${SCRIPT_DIR}/outstanding-session-start.sh" ]]; then
     outstanding_content=$(bash "${SCRIPT_DIR}/outstanding-session-start.sh" 2>/dev/null || true)
 fi
 
+# 7b. spawn seed provenance (x-3a64) — the <fno_mail> envelope for the seed that
+#     started this worker. The seed itself must stay byte-identical (normalize.sh
+#     and the harness REPL both key off its leading slash), so the attribution
+#     rides beside it here. The sub-hook owns the startup-only gate: it re-reads
+#     the SessionStart input to check `.source`, and prints nothing on resume or
+#     compact, so one spawn leaves exactly one envelope in the transcript. It is
+#     the same hook Claude registers directly in hooks.json, so both harnesses
+#     run ONE implementation.
+seed_prov_content=""
+if [[ -f "${SCRIPT_DIR}/spawn-seed-provenance-session-start.sh" ]]; then
+    raw_seed_prov=$(bash "${SCRIPT_DIR}/spawn-seed-provenance-session-start.sh" \
+        <"${CONTEXT_HOOK_INPUT:-/dev/null}" 2>/dev/null || true)
+    if [[ -n "$raw_seed_prov" ]]; then
+        seed_prov_content=$(printf '%s\n' "$raw_seed_prov" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // .additionalContext // empty' 2>/dev/null || true)
+    fi
+fi
+
 # 8. orphan sweep — processes that outlived whatever started them. The
 #    counterpart to hooks/bg-process-guard.py: the guard refuses a process that
 #    can never end, this reports the ones that already survived, and it is the
@@ -363,6 +380,7 @@ append_section "$hygiene_content"
 append_section "$nudge_content"
 append_section "$mail_content"
 append_section "$outstanding_content"
+append_section "$seed_prov_content"
 append_section "$orphan_content"
 
 # Self-heal a defunct target manifest (x-4af4) before anything reads it, so a

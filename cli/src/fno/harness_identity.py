@@ -260,6 +260,43 @@ def session_handle_tier(token: str, session_id: str) -> Optional[int]:
     return None
 
 
+# A UUID head-8 (`01a025f8`): exactly eight hex characters and nothing else.
+# Deliberately NOT anchored to a harness -- the caller supplies the harness,
+# because the same eight characters are safe under v4 and degenerate under v7.
+_HEAD8_RE = re.compile(r"^[0-9a-fA-F]{8}$")
+
+#: The one sentence every surface prints for a refused codex short address. One
+#: string so `mail send`, `mail reply`, and the help text cannot drift.
+CODEX_SHORT_ADDRESS_RULE = (
+    "use the full session_id or pane; codex head-8 is a 65.536-second "
+    "timestamp bucket"
+)
+
+
+def is_unsafe_short_address(token: str, harness: Optional[str]) -> bool:
+    """Whether ``token`` is a head-8 slice that cannot safely address ``harness``.
+
+    True only for a bare eight-hex token aimed at codex. Codex session ids are
+    UUIDv7, whose first 48 bits are a truncated millisecond timestamp, so the
+    first eight hex characters name a ~65.536-second clock bucket rather than 32
+    random bits. Every codex session started inside one bucket shares them, which
+    is exactly what a fleet does: three sessions landed on ``01a025f8`` in one
+    night, and ``fno agents mail reply`` then refused outright with no
+    disambiguation flag, leaving a threaded reply impossible.
+
+    False for claude, whose ids are UUIDv4 and whose head-8 is 32 random bits.
+    The slice is a display aid on both; it is only an ADDRESS on one.
+
+    Uniqueness right now is not a defence. A head-8 that resolves uniquely at
+    this instant collides the moment a sibling spawns in the same minute, and the
+    failure is silent until it is a hard refusal. So this refuses on SHAPE, which
+    is the only property that does not change under you.
+    """
+    if not token or harness != "codex":
+        return False
+    return bool(_HEAD8_RE.match(token.strip()))
+
+
 # The retired harness-prefixed address. Kept ONLY so the send path can recognize
 # one and refuse it with a message naming the fix, and so `fno doctor` can still
 # report mail queued to one before the flip as the dead letter it is. Never an
