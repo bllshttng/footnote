@@ -140,11 +140,16 @@ fn priority_rank(p: &str) -> u8 {
 /// project is not another project's work, so hiding it would make work
 /// disappear rather than filter it.
 ///
-/// An EMPTY set is the refusal, not a bug. When the selector cannot resolve a
-/// project - a cwd outside any repo, an unreadable workspace - the board
-/// narrows to the unscoped lane rather than widening back to everything.
-/// Widening on failure turns "I could not tell" into "here is all of it",
-/// which is the exact complaint this scope answers.
+/// An EMPTY set keeps the unscoped lane and nothing else. It is reachable only
+/// from an explicit wire value that names no project; it is NOT what an
+/// unresolvable selector produces. That case is deliberately different:
+/// [`resolve_board_scope`] returns the empty set to mean "nothing scoped this",
+/// [`board_scope_wire`] writes it as the empty string, and the server reads
+/// that as "no client latched a scope" and renders every project. A board that
+/// silently blanked would be a worse failure than an unscoped one, so the
+/// refusal is reported through `fno mux doctor` (a `warn` plus the remedy)
+/// rather than by hiding work. Every reason string on that path says which
+/// board you actually get.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BoardScope {
     /// The historical whole-graph board, and the `Default` so a reader built
@@ -303,8 +308,9 @@ pub fn resolve_board_scope(config_get: impl Fn(&str) -> Option<String>) -> (Boar
             None => (
                 BoardScope::Projects(HashSet::new()),
                 format!(
-                    "mux.board_scope=workspace:{name}: {key} names no project; \
-                     showing unscoped cards only rather than every project"
+                    "mux.board_scope=workspace:{name}: {key} names no project, so \
+                     nothing scopes the board and it shows EVERY project; name a \
+                     project in that workspace, or set mux.board_scope=repo|all"
                 ),
             ),
         };
@@ -313,8 +319,8 @@ pub fn resolve_board_scope(config_get: impl Fn(&str) -> Option<String>) -> (Boar
         return (
             BoardScope::Projects(HashSet::new()),
             format!(
-                "mux.board_scope={setting:?} is not one of repo|all|workspace:<name>; \
-                 showing unscoped cards only rather than every project"
+                "mux.board_scope={setting:?} is not one of repo|all|workspace:<name>, \
+                 so nothing scopes the board and it shows EVERY project"
             ),
         );
     }
@@ -328,8 +334,8 @@ pub fn resolve_board_scope(config_get: impl Fn(&str) -> Option<String>) -> (Boar
         }
         _ => (
             BoardScope::Projects(HashSet::new()),
-            "no config.project.id here; showing unscoped cards only rather than every \
-             project (set project.id, or mux.board_scope=all)"
+            "no config.project.id here, so nothing scopes the board and it shows EVERY \
+             project; set project.id, or mux.board_scope=all to mean it on purpose"
                 .into(),
         ),
     }
@@ -1230,7 +1236,8 @@ mod tests {
 
     #[test]
     fn resolve_board_scope_refuses_rather_than_widening() {
-        // No project.id resolves (a cwd outside any repo): narrow, and SAY so.
+        // No project.id resolves (a cwd outside any repo): resolve to the empty
+        // set, and SAY which board that produces.
         let (scope, why) = resolve_board_scope(|_| None);
         assert_eq!(scope, BoardScope::Projects(HashSet::new()));
         assert!(why.contains("project.id"), "{why}");
@@ -1239,6 +1246,49 @@ mod tests {
             resolve_board_scope(|k| (k == "mux.board_scope").then(|| "everything".to_string()));
         assert_eq!(scope, BoardScope::Projects(HashSet::new()));
         assert!(why.contains("repo|all|workspace:<name>"), "{why}");
+    }
+
+    #[test]
+    fn every_refusal_reason_names_the_board_it_actually_produces() {
+        // The reason is the ONLY place the fallback is visible: `mux doctor`
+        // prints it verbatim and the server logs it. Each of these three paths
+        // resolves to the empty set, which the client writes to the wire as ""
+        // and the server reads back as All - so a reason promising an
+        // unscoped-only board would be describing a board nobody gets. That is
+        // the receipt-can-lie shape, and it shipped here once already.
+        let refusals = [
+            resolve_board_scope(|_| None),
+            resolve_board_scope(|k| (k == "mux.board_scope").then(|| "everything".to_string())),
+            resolve_board_scope(|k| (k == "mux.board_scope").then(|| "workspace:typo".to_string())),
+        ];
+        for (scope, why) in &refusals {
+            assert_eq!(*scope, BoardScope::Projects(HashSet::new()), "{why}");
+            assert!(
+                why.contains("EVERY project"),
+                "refusal reason must name the board it produces: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_latched_refusal_widens_at_the_server_rather_than_blanking_the_board() {
+        // The client ALWAYS sets the var, so a refusal arrives as a set-but-
+        // empty value, not an absent one. Both must read as "nothing latched":
+        // narrowing here would leave an upgrading user with a board showing
+        // only their handful of unscoped cards and no visible cause.
+        let key = "FNO_BOARD_SCOPE";
+        let guard = std::env::var(key).ok();
+
+        let refused = BoardScope::Projects(HashSet::new());
+        std::env::set_var(key, board_scope_wire(&refused));
+        let (scope, why) = board_scope_from_spawn_env();
+        assert_eq!(scope, BoardScope::All);
+        assert!(why.contains("not latched"), "{why}");
+
+        match guard {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
 
     #[test]

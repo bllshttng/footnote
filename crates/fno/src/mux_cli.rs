@@ -1494,10 +1494,11 @@ fn gather_checks() -> Vec<Check> {
 /// scope when it was spawned; changing the config takes a `mux kill-server`,
 /// and this line is where that is visible.
 ///
-/// Read-only and advisory: a refusal is a `warn` because an unscoped-only board
-/// is a deliberate narrowing, not a fault - but it must be VISIBLE, since a
-/// board correctly scoped to a quiet project and a board that could not resolve
-/// one look identical from the outside.
+/// Read-only and advisory: a refusal is a `warn`, not a `fail`, because nothing
+/// is broken - the board just falls back to every project. But it must be
+/// VISIBLE here, because that fallback is silent everywhere else: a board
+/// correctly scoped to one project and a board that could not resolve one and
+/// widened look nothing alike, and only this line says which you got.
 fn board_scope_check() -> Check {
     let (scope, why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
     let refused = matches!(
