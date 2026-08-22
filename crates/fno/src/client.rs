@@ -393,6 +393,19 @@ fn spawn_server(path: &Path) -> Result<(), String> {
     if std::env::var_os("FNO_MUX_SHELL_INTEGRATION").is_none() && shell_integration_off() {
         cmd.env("FNO_MUX_SHELL_INTEGRATION", "off");
     }
+    // Same bridge, same reason, for the backlog board's project scope (x-20f1).
+    // Resolving it needs `fno config get`, and the SERVER must not shell out on
+    // its startup path: doing so delayed shutdown past the SIGTERM grace and
+    // perturbed multiclient frame ordering. The client already pays a bounded
+    // config read here, so the resolution happens once, in this process, and
+    // rides in on the env. An explicit export wins, inherited untouched.
+    if std::env::var_os("FNO_BOARD_SCOPE").is_none() {
+        let (scope, _why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
+        cmd.env(
+            "FNO_BOARD_SCOPE",
+            crate::backlog_view::board_scope_wire(&scope),
+        );
+    }
     // Safety: setsid only detaches the child from our session/terminal; it is
     // async-signal-safe and touches no shared state.
     unsafe {

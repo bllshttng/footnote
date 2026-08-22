@@ -197,6 +197,25 @@ pub fn parse_board_scope(raw: &str) -> BoardScope {
     )
 }
 
+/// The `FNO_BOARD_SCOPE` wire value for a resolved scope: the inverse of
+/// [`parse_board_scope`], so what the client latches is what the server reads.
+///
+/// A refusal (the empty set) serializes to the empty string, which
+/// [`board_scope_from_spawn_env`] reads as "not latched" and widens to `All`.
+/// That is deliberate: an unresolvable scope must not silently narrow a board
+/// the operator never configured. `fno mux doctor` is where the refusal is
+/// reported, with its remedy.
+pub fn board_scope_wire(scope: &BoardScope) -> String {
+    match scope {
+        BoardScope::All => "all".to_string(),
+        BoardScope::Projects(set) => {
+            let mut names: Vec<&str> = set.iter().map(String::as_str).collect();
+            names.sort_unstable();
+            names.join(",")
+        }
+    }
+}
+
 /// Project names declared by `work.workspaces.<name>`, read from the JSON
 /// block `fno config get` prints for it. `None` when the block is missing or
 /// names nothing - the caller REFUSES on `None` rather than falling back to
@@ -215,7 +234,35 @@ pub fn workspace_projects(json: &str) -> Option<HashSet<String>> {
     (!names.is_empty()).then_some(names)
 }
 
-/// Resolve the board scope once, at server start.
+/// The scope a running server uses, read ONLY from the env the client latched
+/// at spawn (`FNO_BOARD_SCOPE`).
+///
+/// The server resolves nothing itself. Resolution shells out to `fno config
+/// get`, and a subprocess on the server's startup path is not free: it delayed
+/// shutdown past the SIGTERM grace (a healthy server reported as an unclean
+/// death) and perturbed frame ordering in the multiclient e2e. The client
+/// already pays exactly this cost for `FNO_MUX_SHELL_INTEGRATION`, on a path
+/// built to tolerate it, so the read happens there and rides in on the env.
+///
+/// No env means no client latched one - a hand-started `fno mux server`. That
+/// gets the historical whole-graph board rather than a silent narrowing, and
+/// the reason says so. `fno mux doctor` resolves live and reports what a fresh
+/// spawn WOULD latch.
+pub fn board_scope_from_spawn_env() -> (BoardScope, String) {
+    match std::env::var("FNO_BOARD_SCOPE") {
+        Ok(v) if !v.trim().is_empty() => {
+            let scope = parse_board_scope(&v);
+            let d = scope.describe();
+            (scope, format!("latched at spawn: {d}"))
+        }
+        _ => (
+            BoardScope::All,
+            "not latched by a client spawn (FNO_BOARD_SCOPE unset): all projects".into(),
+        ),
+    }
+}
+
+/// Resolve the board scope once, at CLIENT spawn time (and for `mux doctor`).
 ///
 /// Ladder, first hit wins:
 ///   1. `FNO_BOARD_SCOPE` (the test hatch, and what a spawner latches).
@@ -1063,6 +1110,54 @@ mod tests {
         let scope = BoardScope::Projects(HashSet::from(["fno".to_string()]));
         let q = derive_queue(&multi_project_graph(), None, &scope).unwrap();
         assert_eq!(q.total(), 3);
+    }
+
+    #[test]
+    fn the_server_reads_only_what_the_client_latched() {
+        // The server resolves nothing: a subprocess on its startup path delayed
+        // shutdown past the SIGTERM grace and perturbed multiclient frame
+        // ordering. It parses the env the client already resolved.
+        let key = "FNO_BOARD_SCOPE";
+        let guard = std::env::var(key).ok();
+
+        std::env::set_var(key, "fno,etl");
+        let (scope, why) = board_scope_from_spawn_env();
+        assert_eq!(
+            scope,
+            BoardScope::Projects(HashSet::from(["fno".to_string(), "etl".to_string()]))
+        );
+        assert!(why.contains("latched at spawn"), "{why}");
+
+        // No latch means a hand-started `fno mux server`. That gets the
+        // historical board, never a silent narrowing, and says so.
+        std::env::remove_var(key);
+        let (scope, why) = board_scope_from_spawn_env();
+        assert_eq!(scope, BoardScope::All);
+        assert!(why.contains("not latched"), "{why}");
+
+        match guard {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn the_wire_round_trips_what_the_client_resolved() {
+        // What the client latches is what the server reads, or the scope the
+        // operator configured is not the board they get.
+        for scope in [
+            BoardScope::All,
+            BoardScope::Projects(HashSet::from(["fno".to_string()])),
+            BoardScope::Projects(HashSet::from(["fno".to_string(), "etl".to_string()])),
+        ] {
+            assert_eq!(parse_board_scope(&board_scope_wire(&scope)), scope);
+        }
+        // The refusal serializes to empty, which the server reads as "not
+        // latched" and widens to All. Deliberate: an unresolvable scope must
+        // not silently narrow a board nobody configured. `mux doctor` reports
+        // the refusal with its remedy.
+        let refused = BoardScope::Projects(HashSet::new());
+        assert_eq!(board_scope_wire(&refused), "");
     }
 
     #[test]

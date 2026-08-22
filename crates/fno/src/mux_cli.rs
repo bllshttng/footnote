@@ -1487,11 +1487,17 @@ fn gather_checks() -> Vec<Check> {
     checks
 }
 
-/// What the backlog board is scoped to, resolved the same way the mux server
-/// resolves it at birth (x-20f1). Read-only and advisory: a refusal is a `warn`
-/// because an unscoped-only board is a deliberate narrowing, not a fault - but
-/// it must be VISIBLE, since a board correctly scoped to a quiet project and a
-/// board that could not resolve one look identical from the outside.
+/// What the backlog board would be scoped to (x-20f1).
+///
+/// Resolves LIVE, the same way a client does at spawn, so this answers "what
+/// will a server started from here show". A server already running latched its
+/// scope when it was spawned; changing the config takes a `mux kill-server`,
+/// and this line is where that is visible.
+///
+/// Read-only and advisory: a refusal is a `warn` because an unscoped-only board
+/// is a deliberate narrowing, not a fault - but it must be VISIBLE, since a
+/// board correctly scoped to a quiet project and a board that could not resolve
+/// one look identical from the outside.
 fn board_scope_check() -> Check {
     let (scope, why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
     let refused = matches!(
