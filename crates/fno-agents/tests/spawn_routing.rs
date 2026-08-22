@@ -14,6 +14,8 @@ use std::time::Duration;
 // Serialize tests that mutate PATH so they don't race.
 static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
+const CLAUDE_SESSION_ID: &str = "12345678-1234-4234-8234-123456789abc";
+
 fn tmpdir(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!(
         "fno-spawn-routing-{}-{}-{}",
@@ -54,6 +56,10 @@ for a in "$@"; do
   if [ "$prev" = "--name" ]; then name="$a"; fi
   prev="$a"
 done
+if [ -n "$FAKE_CLAUDE_SESSIONS" ]; then
+  mkdir -p "$FAKE_CLAUDE_SESSIONS"
+  printf '%s\n' '{"jobId":"7c5dcf5d","kind":"bg","messagingSocketPath":"/tmp/fake-claude.sock","sessionId":"12345678-1234-4234-8234-123456789abc"}' > "$FAKE_CLAUDE_SESSIONS/999.json"
+fi
 printf 'backgrounded · 7c5dcf5d · %s\n' "$name"
 exit 0
 "#;
@@ -310,6 +316,7 @@ fn spawn_claude_receipt_byte_shape() {
     let bin = tmpdir("spawn-cl-bin");
     install_fake_claude(&bin);
     let path = path_with(&bin);
+    let sessions = ch.sessions_dir();
 
     let out = dispatch_claude_spawn(
         &home,
@@ -320,7 +327,10 @@ fn spawn_claude_receipt_byte_shape() {
         &cwd,
         false,
         None,
-        &[("PATH", path.as_str())],
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_SESSIONS", sessions.to_str().unwrap()),
+        ],
         None,
         None,
         None,
@@ -362,6 +372,12 @@ fn spawn_claude_receipt_byte_shape() {
         "short_id must be hex: {}",
         short_id
     );
+    let registry: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+    assert_eq!(
+        registry["agents"][0]["harness_session_id"],
+        CLAUDE_SESSION_ID
+    );
 }
 
 // x-85fe: surface_cwd=true appends the effective cwd as the LAST key (AC1-HP /
@@ -377,6 +393,7 @@ fn spawn_claude_receipt_surfaces_moved_cwd() {
     let bin = tmpdir("spawn-mv-bin");
     install_fake_claude(&bin);
     let path = path_with(&bin);
+    let sessions = ch.sessions_dir();
 
     let out = dispatch_claude_spawn(
         &home,
@@ -387,7 +404,10 @@ fn spawn_claude_receipt_surfaces_moved_cwd() {
         &cwd,
         false,
         None,
-        &[("PATH", path.as_str())],
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_SESSIONS", sessions.to_str().unwrap()),
+        ],
         None,
         None,
         None,
@@ -406,6 +426,46 @@ fn spawn_claude_receipt_surfaces_moved_cwd() {
     let v: serde_json::Value = serde_json::from_str(receipt).expect("receipt must be valid JSON");
     assert_eq!(v["cwd"], cwd.display().to_string());
     assert_eq!(v["status"], "live");
+    let registry: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.registry_json()).unwrap()).unwrap();
+    assert_eq!(
+        registry["agents"][0]["harness_session_id"],
+        CLAUDE_SESSION_ID
+    );
+}
+
+#[test]
+fn spawn_claude_unresolved_identity_stays_spawning_with_warning() {
+    use fno_agents::claude_ask::{dispatch_claude_spawn, ClaudeHome};
+
+    let home = AgentsHome::at(tmpdir("spawn-unresolved-home"));
+    let ch = ClaudeHome::at(tmpdir("spawn-unresolved-claude"));
+    let cwd = tmpdir("spawn-unresolved-cwd");
+    let bin = tmpdir("spawn-unresolved-bin");
+    install_fake_claude(&bin);
+    let path = path_with(&bin);
+
+    let out = dispatch_claude_spawn(
+        &home,
+        &ch,
+        "unresolved-spawn",
+        "hello",
+        "fno",
+        &cwd,
+        false,
+        None,
+        &[("PATH", path.as_str())],
+        None,
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+        false,
+    );
+
+    assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("harness_session_id"), "{}", out.stderr);
+    let receipt: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(receipt["status"], "spawning", "{}", out.stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,6 +1211,8 @@ fn client_spawn_pane_no_provider_falls_through() {
 #[test]
 fn client_spawn_bg_claude_happy_path_prints_receipt() {
     let home_dir = tmpdir("cli-spawn-claude-hp-home");
+    let claude_home = tmpdir("cli-spawn-claude-hp-claude");
+    let sessions = claude_home.join(".claude").join("sessions");
     let bin_dir = tmpdir("cli-spawn-claude-hp-bin");
     let cwd = tmpdir("cli-spawn-claude-hp-cwd");
     install_fake_claude(&bin_dir);
@@ -1176,6 +1238,8 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
+        .env("HOME", &claude_home)
+        .env("FAKE_CLAUDE_SESSIONS", &sessions)
         .env("PATH", path_with(&bin_dir))
         .current_dir(&cwd)
         .output()
@@ -1199,10 +1263,11 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
     );
     // And the registry row landed under the temp home.
     let registry_raw = fs::read_to_string(home_dir.join("registry.json")).unwrap_or_default();
-    assert!(
-        registry_raw.contains("\"hp-agent\"") && registry_raw.contains("7c5dcf5d"),
-        "registry must carry the spawned row: {registry_raw}"
-    );
+    let registry: serde_json::Value = serde_json::from_str(&registry_raw).unwrap();
+    let row = &registry["agents"][0];
+    assert_eq!(row["name"], "hp-agent");
+    assert_eq!(row["short_id"], "7c5dcf5d");
+    assert_eq!(row["harness_session_id"], CLAUDE_SESSION_ID);
 }
 
 /// AC5-EDGE (x-f54c): `host` was retired at G4 (interactive daemon PTY hosting
