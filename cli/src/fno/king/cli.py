@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import typer
 
@@ -181,7 +181,7 @@ def board_cmd(
         typer.echo(json.dumps(board, indent=2))
     else:
         _render(board, max_rows)
-    raise typer.Exit(board["exit_code"])
+    raise typer.Exit(cast(int, board["exit_code"]))
 
 
 @king_app.command("escalate")
