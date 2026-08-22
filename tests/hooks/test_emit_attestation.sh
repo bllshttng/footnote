@@ -27,7 +27,11 @@ trap 'rm -rf "$TMP"' EXIT
 # Stub the event sink and CAPTURE ITS ARGV: the assertion must read what was
 # actually handed to `doctor event emit`, not what the receipt claims (same rule as
 # tests/hooks/test_attest_model.sh).
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/last-emit.txt"\nexit 0\n' \
+# Discriminates on the verb, like tests/hooks/test_code_review_attest.sh's stub:
+# the emitter shells `fno` for more than the event sink now (it clears the
+# review hold once a verdict exists for the head), and a stub that captured
+# EVERY call overwrote the payload under assertion with the last unrelated one.
+printf '#!/usr/bin/env bash\nif [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then printf "%%s\\n" "$@" > "%s/last-emit.txt"; fi\nexit 0\n' \
   "$TMP" > "$TMP/fno-stub"
 chmod +x "$TMP/fno-stub"
 
@@ -183,6 +187,29 @@ got="$(stored '.branch')"
 [[ "$got" == "feature/x-e601" ]] \
   && pass "a reviewer worktree with no commits of its own still records the PR branch" \
   || fail "reviewer worktree: want feature/x-e601 (upstream), got '$got'"
+
+# 10. The review hold is released HERE, at the positive completion marker, so
+#     the release and the proof of completion are one event. A release wired to
+#     a separate "the tool returned" signal can fire while the review is still
+#     writing fixes, which is the defect the hold exists to prevent.
+ALL_CALLS="$TMP/all-calls.txt"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit 0\n' \
+  "$ALL_CALLS" > "$TMP/fno-all-stub"
+chmod +x "$TMP/fno-all-stub"
+: > "$ALL_CALLS"
+(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-all-stub" bash "$EMITTER" code-review pass) >/dev/null 2>&1
+grep -q "do pr review-hold release --branch feature/x-e601" "$ALL_CALLS" \
+  && pass "a landed verdict releases the review hold" \
+  || fail "no review-hold release after the attestation: $(cat "$ALL_CALLS")"
+
+# No --holder. The hook names the HARNESS session; this script's session_id is
+# grepped from target-state.md and falls back to "unknown". release_claim
+# no-ops SILENTLY on a mismatch, so a holder-matched release wedged the lane
+# for the full TTL under a receipt that said "released".
+grep -q -- "--holder" "$ALL_CALLS" \
+  && fail "the release passed a holder it cannot reconstruct" \
+  || pass "the release names no holder"
 
 echo ""
 echo "emit-attestation: $PASS passed, $FAIL failed"

@@ -15,6 +15,10 @@ from fno.config import AutoMergeBlock
 from fno.pr import _coverage_gate, _merge
 from fno.pr._proc import Result, ToolMissing
 
+# Captured at import, before conftest's autouse hermetic stub replaces the
+# attribute: the tests that exercise the in-flight gate itself need the real one.
+_REAL_IN_FLIGHT_REFUSAL = _merge._in_flight_review_refusal
+
 
 class FakeRun:
     """Dispatch canned Results by command, recording every call."""
@@ -2565,3 +2569,105 @@ def test_fidelity_guard_degrades_open_on_a_probe_crash(enabled, monkeypatch, cap
     monkeypatch.setattr(_merge, "run", fake)
     rc = _merge.run_merge(["42"], cwd=str(tmp_path))
     assert rc == 0  # degraded open, merge proceeded
+
+
+# ── x-a089: a review that is RUNNING must refuse the merge ───────────────────
+# The gate sits beside the plan hold and BEFORE the auto_merge gate, because
+# the auto-merge lane is not a separate caller - it is run_merge with
+# auto_merge.enabled, and it is the caller with no judgment to fall back on.
+
+
+def test_a_running_review_refuses_the_sanctioned_merge(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        _merge,
+        "_in_flight_review_refusal",
+        lambda pr, repo: "review_in_flight: a review is in flight on feature/x-a089: "
+        "held by reviewer:sess-1",
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert "reviewer:sess-1" in obj["reason"]
+
+
+def test_the_auto_merge_lane_refuses_identically(enabled, monkeypatch, capsys, tmp_path):
+    """The lane with no human to hold on judgment gets the same refusal.
+
+    `enabled` is auto_merge.enabled=True plus a working gh and a covered
+    review - everything the lane needs to merge. It must still refuse.
+    """
+    monkeypatch.setattr(
+        _merge,
+        "_in_flight_review_refusal",
+        lambda pr, repo: "worktree_dirty: /wt/x carries uncommitted changes to tracked files",
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert "uncommitted changes" in obj["reason"]
+    # The proof it fired BEFORE the merge, not merely alongside it.
+    assert not any("merge" in " ".join(c) for c in fake.calls if c[:1] == ["gh"])
+
+
+def test_an_unresolvable_head_branch_refuses_rather_than_merges(monkeypatch, tmp_path):
+    """An unprobed PR is not a clear one: the defect is a merge taken while
+    something unseen was still writing."""
+    monkeypatch.setattr(_merge, "_pr_head_ref_and_oid", lambda pr, repo: None)
+    reason = _REAL_IN_FLIGHT_REFUSAL(42, str(tmp_path))
+    assert reason is not None
+    assert "refusing to assume none is running" in reason
+
+
+def test_a_thrown_probe_refuses(monkeypatch, tmp_path):
+    def _boom(pr, repo):
+        raise RuntimeError("claims root unreadable")
+
+    monkeypatch.setattr(_merge, "_pr_head_ref_and_oid", _boom)
+    reason = _REAL_IN_FLIGHT_REFUSAL(42, str(tmp_path))
+    assert reason is not None
+    assert "refusing to assume no review is running" in reason
+
+
+def test_a_clear_probe_does_not_refuse(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123", "OPEN")
+    )
+    monkeypatch.setattr(
+        "fno.pr._review_hold.review_hold_refusal",
+        lambda branch, pr_head="", repo=None, root=None, runner=None: None,
+    )
+    assert _REAL_IN_FLIGHT_REFUSAL(42, str(tmp_path)) is None
+
+
+def test_the_branch_and_head_come_from_one_rest_read(monkeypatch, tmp_path):
+    """Never `gh pr view`: that bills the per-user GraphQL quota every watcher
+    on the machine shares. fetch_pr_info_rest already validates head.ref."""
+    seen = {}
+
+    def _fake_info(pr, cwd=None, runner=None, repo=None):
+        seen["called"] = True
+        return {"head_ref": "feature/x-a089", "head_sha": "abc123", "state": "OPEN"}, ""
+
+    monkeypatch.setattr("fno.pr._rest.fetch_pr_info_rest", _fake_info)
+    assert _merge._pr_head_ref_and_oid(42, str(tmp_path)) == (
+        "feature/x-a089",
+        "abc123",
+        "OPEN",
+    )
+    assert seen["called"] is True
+
+
+def test_a_terminal_pr_is_exempt(monkeypatch, tmp_path):
+    """The guard protects what WOULD merge. A merge that LANDED and then failed
+    during cleanup is retried, and without this it is held at exit 2 by a
+    worktree that is legitimately dirty, never reaching the merged answer."""
+    monkeypatch.setattr(
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123", "MERGED")
+    )
+    monkeypatch.setattr(
+        "fno.pr._review_hold.review_hold_refusal",
+        lambda *a, **kw: pytest.fail("a terminal PR must not be probed"),
+    )
+    assert _REAL_IN_FLIGHT_REFUSAL(42, str(tmp_path)) is None

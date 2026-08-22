@@ -48,6 +48,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import unquote
 
 # Footnote state lives under ${FNO_HOME:-~/.fno}, never under the harness
 # state dir (placement rule, ab-f063 Wave 2). This hook is stdlib-only and runs under bare
@@ -766,6 +767,58 @@ def _dispatch_hold_refusal(command=""):
         return None
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
     return detail[0] if detail else f"PR {pr_number}: dispatch hold state unreadable"
+
+
+def _review_hold_refusal(command=""):
+    """Deny a bare merge while any review hold is present in this repo.
+
+    A review that is RUNNING is invisible to every merge gate: coverage answers
+    what verdicts EXIST for a head, and a review still writing its fixes has
+    produced none. ``fno do pr merge`` consults the precise per-branch predicate;
+    this hook cannot.
+
+    NOT a third `fno` subprocess. The two vetoes above already spend 25s each
+    against a 60s harness budget with under 6s of margin, and a hook that gets
+    killed emits no verdict at all - so a third probe would let an unauthorized
+    merge through on the very storm state the guard exists for. A claim lockfile
+    is a file, so this reads the directory instead: microseconds, no budget.
+
+    Deliberately coarse in the safe direction. ANY review-hold lockfile in the
+    repo denies, without mapping the PR to its branch (which would need the
+    network call this function exists to avoid) and without judging expiry
+    (footnote's hybrid liveness can keep a TTL-lapsed hold LIVE, so a
+    TTL-only read here could ALLOW what the guard refuses - the one direction
+    this hook must never take). A wrong deny costs one command: `fno do pr
+    merge` is the sanctioned primitive, it is not gated by this hook, and it
+    reads the real predicate.
+    """
+    if not _parse_merge_pr(command) or _targets_other_repo(command):
+        return None
+    try:
+        toplevel = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if toplevel.returncode != 0 or not toplevel.stdout.strip():
+            return None
+        # --git-common-dir resolves to the CANONICAL checkout's .git even from a
+        # linked worktree, which is where claims_dir() puts a repo-local key, so
+        # a review running in a worktree is visible to a merge attempted anywhere.
+        claims = Path(toplevel.stdout.strip()).parent / ".fno" / "claims"
+        held = sorted(claims.glob("review%3Abranch%3A*.lock")) if claims.is_dir() else []
+    except Exception:  # noqa: BLE001 - a dead probe is not a refusal here; the
+        # sanctioned path still reads the real predicate, and this hook's own
+        # machinery failing must not become a merge outage.
+        return None
+    if not held:
+        return None
+    names = ", ".join(unquote(p.name[: -len(".lock")]) for p in held[:3])
+    return (
+        f"a review is registered as in flight in this repo ({names}); merging now "
+        "can ship the code the review is still fixing"
+    )
 
 
 def _check_pr_merge_allowed(command=""):
@@ -2204,6 +2257,17 @@ def main():
             _emit("deny", f"[fno do review-coverage] {covref}\n"
                           "Recovery: run `fno do pr merge`, which recomputes coverage "
                           "and is not gated by this hook.")
+            sys.exit(0)
+        # Beside the coverage veto, and ahead of the two-factor allow for the
+        # same reason it is: a session that satisfied its own ceremony has not
+        # thereby answered whether a review of this head is still executing.
+        revref = _review_hold_refusal(merge_seg)
+        if revref:
+            _emit("deny", f"[fno review-hold] {revref}\n"
+                          "Recovery: run `fno do pr merge`, which reads the precise "
+                          "per-branch hold and is not gated by this hook. To clear a "
+                          "finished review: `fno do pr review-hold release --branch <b> "
+                          "--holder <h>`.")
             sys.exit(0)
         allow_reason = _check_pr_merge_allowed(merge_seg)
         if allow_reason:

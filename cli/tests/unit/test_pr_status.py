@@ -15,10 +15,33 @@ import pytest
 from fno.pr import _reviews, _status
 from fno.pr._proc import Result
 
+# Captured at import, before the autouse stub below replaces the attribute:
+# the two tests that exercise the fail-closed wrapper need the real one.
+_REAL_REVIEW_ACTIVITY = _status._review_activity
+
 
 @pytest.fixture(autouse=True)
 def _no_dispatch_hold(monkeypatch):
     monkeypatch.setattr(_status, "_merge_hold_reason", lambda pr, cwd: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_review_activity(monkeypatch):
+    """Neutralize the in-flight-review probe unless a test steers it.
+
+    Its worktree layer shells `git`, and a status test must never read the
+    machine's real worktrees. Tests that exercise the conjunct patch it back.
+    """
+    from fno.pr._review_hold import ReviewActivity
+
+    monkeypatch.setattr(
+        _status,
+        "_review_activity",
+        lambda branch, head, cwd: ReviewActivity(
+            False, "", "", None,
+            {"probed": True, "path": None, "dirty": None, "head": None, "note": "stubbed"},
+        ),
+    )
 
 
 def test_all_pass_is_green():
@@ -558,6 +581,18 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "optional_reviews": [],
         "optional_reviews_unresolved": 0,
         "review_coverage": {"coverage": "covered", "reviewed_count": 2},
+        "review_activity": {
+            "blocker": "",
+            "detail": "",
+            "hold": None,
+            "worktree": {
+                "probed": True,
+                "path": None,
+                "dirty": None,
+                "head": None,
+                "note": "stubbed",
+            },
+        },
         "dispatch_hold": None,
         "ready": True,
         "ready_blockers": [],
@@ -1981,3 +2016,149 @@ def test_no_lane_repo_never_fires_the_recompute(monkeypatch, capsys, tmp_path):
     out = json.loads(capsys.readouterr().out)
     assert out["review_coverage"]["coverage"] == "unknown"
     assert out["ready"] is True
+
+
+# ── x-a089: merge readiness must see a review that is RUNNING ────────────────
+# `review_coverage` answers what verdicts EXIST for a head. It cannot see a
+# review that is executing right now, and three PRs on 2026-08-22 read
+# ready:true with an empty ready_blockers while one was still writing its fixes.
+
+
+def _green_rollup():
+    return [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+
+
+def _run_status_with_activity(monkeypatch, capsys, activity, *, state="OPEN"):
+    """run_status on a green PR whose review-activity reading is `activity`."""
+    seen = {}
+
+    def _patch(name, value):
+        monkeypatch.setattr(_status, name, value)
+
+    _patch(
+        "_fetch",
+        lambda pr, cwd: (
+            {
+                "state": state,
+                "statusCheckRollup": _green_rollup(),
+                "headRefOid": "abc123",
+                "headRefName": "feature/x-a089",
+                "mergeable": "MERGEABLE",
+            },
+            "",
+        ),
+    )
+    _patch(
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    _patch(
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 1, "head_sha": "abc123"},
+    )
+    _patch("_review_lane", lambda pr, cwd: False)
+
+    def _activity(branch, head, cwd):
+        seen["branch"] = branch
+        seen["head"] = head
+        return activity
+
+    _patch("_review_activity", _activity)
+    code = _status.run_status("42")
+    cap = capsys.readouterr()
+    return code, _json.loads(cap.out), cap.err, seen
+
+
+def test_a_running_review_blocks_ready_even_with_no_lane_configured(monkeypatch, capsys):
+    """The config makes this worse rather than better: with no review lane the
+    coverage conjunct opts out entirely, so `ready` was true while a review was
+    mid-flight. The in-flight conjunct is deliberately config-independent."""
+    from fno.pr._review_hold import ReviewActivity
+
+    _code, out, _err, seen = _run_status_with_activity(
+        monkeypatch,
+        capsys,
+        ReviewActivity(
+            True,
+            "review_in_flight",
+            "a review is in flight on feature/x-a089: held by reviewer:sess-1",
+            {"holder": "reviewer:sess-1", "state": "live"},
+            {"probed": False, "path": None, "dirty": None, "head": None, "note": "not reached"},
+        ),
+    )
+    assert out["ready"] is False
+    assert "review_in_flight" in out["ready_blockers"]
+    assert out["review_activity"]["hold"]["holder"] == "reviewer:sess-1"
+    # The branch is what the hold is keyed on; the sha is what the worktree
+    # conjunct compares against.
+    assert seen == {"branch": "feature/x-a089", "head": "abc123"}
+
+
+def test_the_verdict_and_exit_code_are_untouched_by_the_conjunct(monkeypatch, capsys):
+    """`ready` tightens; the CI verdict is authoritative and stays green."""
+    from fno.pr._review_hold import ReviewActivity
+
+    code, out, _err, _seen = _run_status_with_activity(
+        monkeypatch,
+        capsys,
+        ReviewActivity(True, "worktree_dirty", "…", None,
+                       {"probed": True, "path": "/wt/x", "dirty": True, "head": "abc123", "note": ""}),
+    )
+    assert code == 0
+    assert out["verdict"] == "green" and out["green"] is True
+    assert out["ready"] is False and out["ready_blockers"] == ["worktree_dirty"]
+
+
+def test_a_clear_reading_is_still_reported(monkeypatch, capsys):
+    """An empty `ready_blockers` was the whole complaint: a reader must be able
+    to see that both probes RAN, not just that nothing came back."""
+    from fno.pr._review_hold import ReviewActivity
+
+    _code, out, _err, _seen = _run_status_with_activity(
+        monkeypatch,
+        capsys,
+        ReviewActivity(False, "", "", None,
+                       {"probed": True, "path": None, "dirty": None, "head": None,
+                        "note": "no local worktree on this branch"}),
+    )
+    assert out["ready"] is True
+    assert out["review_activity"]["worktree"]["probed"] is True
+    assert out["review_activity"]["blocker"] == ""
+
+
+def test_a_terminal_pr_is_never_probed(monkeypatch, capsys):
+    """The guard protects what WOULD merge; a merged PR has no would-merge left."""
+    from fno.pr._review_hold import ReviewActivity
+
+    def _explode(branch, head, cwd):
+        raise AssertionError("a terminal PR must not run the review probes")
+
+    monkeypatch.setattr(_status, "_review_activity", _explode)
+    _code, out, _err, _seen = _run_status_with_activity(
+        monkeypatch,
+        capsys,
+        ReviewActivity(False, "", "", None, {}),
+        state="MERGED",
+    )
+    assert out["review_activity"]["worktree"]["note"] == "not asked: PR is terminal"
+
+
+def test_a_thrown_probe_blocks_rather_than_clearing(monkeypatch, capsys):
+    """Fail-closed, like every other hold read here."""
+    from fno.pr import _review_hold
+
+    monkeypatch.setattr(
+        _review_hold, "review_activity", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    activity = _REAL_REVIEW_ACTIVITY("feature/x-a089", "abc123", None)
+    assert activity.blocked is True
+    assert activity.blocker == _review_hold.REVIEW_HOLD_UNREADABLE
+    assert "refusing to assume no review is running" in activity.detail
+
+
+def test_a_missing_head_branch_is_a_missing_input_not_a_failed_probe(monkeypatch):
+    """A degraded fetch that omitted headRefName has no hold key and no
+    worktree to match. That is nothing to ask, not a probe that died."""
+    activity = _REAL_REVIEW_ACTIVITY("", "abc123", None)
+    assert activity.blocked is False
+    assert activity.worktree["note"] == "no head branch on the PR read"

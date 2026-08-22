@@ -40,7 +40,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 |-------------|--------------|
 | `fno doctor event emit\|audit` | events.jsonl writes + audit. |
 | `fno backlog ...` | graph.json mutations: intake, update, done, defer, supersede, find, get. |
-| `fno do pr status <n>` | Merge-readiness verdict. `statusCheckRollup` shows SUPERSEDED runs; `gh pr checks` ignores reviews. Reports `ready` + `optional_reviews_unresolved`. |
+| `fno do pr status <n>` | Merge-readiness verdict. `statusCheckRollup` shows SUPERSEDED runs; `gh pr checks` ignores reviews. Reports `ready` + `optional_reviews_unresolved` + `review_activity`. A review that is RUNNING now blocks `ready` (`review_in_flight`, `worktree_dirty`): coverage only knows what verdicts EXIST, and CI green reliably arrives before the review of that same head finishes. |
 | `fno do pr merge\|verify\|rebase` | PR ops with canonical guards. |
 | `fno do plan stamp\|graduate` | Plan frontmatter stamping at ship time. |
 | `fno do phase kill-check` | Plan kill-criteria evaluation. |

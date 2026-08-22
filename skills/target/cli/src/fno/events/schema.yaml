@@ -354,6 +354,26 @@ event_types:
           description: "The finding's node (echoed for observability; optional)."
     consumers: [fno-agents loop-check]
 
+  - name: review_hold_expired
+    description: "A merge surface read a review hold (review:branch:<branch>) whose TTL had lapsed with a dead holder, and cleared past it. The hold exists so a merge cannot land while a review of that head is still executing; a hold that outlives a crashed reviewer would wedge the lane permanently, so it ages out - but never silently, because a lane that clears with no receipt is indistinguishable from one that was never held. Emitted where the decision was taken, not by the reaper."
+    sources: [fno-loop]
+    data:
+      required: [key, holder]
+      properties:
+        key:
+          type: string
+          description: "The claim key, review:branch:<branch>."
+        holder:
+          type: string
+          description: "Who registered the hold, so a reader can find the reviewer that died."
+        head_sha:
+          type: string
+          description: "The head the expired review was reviewing; empty when the hold recorded none."
+        expires_at:
+          type: integer
+          description: "Epoch-ms TTL the hold passed."
+    consumers: [operator]
+
   - name: mission_started
     description: "Megatron mission entered RUNNING state."
     sources: [megatron]

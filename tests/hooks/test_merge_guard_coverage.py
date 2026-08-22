@@ -109,7 +109,7 @@ def test_dispatch_hold_veto_refuses_confirmed_hold(monkeypatch):
     )
     msg = git_protection._dispatch_hold_refusal("gh pr merge 900")
     assert msg == "dispatch-hold:x-5a5c: blocking; set_by=king"
-    assert seen["cmd"] == ["fno", "pr", "hold-check", "900"]
+    assert seen["cmd"] == ["fno", "do", "pr", "hold-check", "900"]
     assert seen["timeout"] <= 5
 
 
@@ -151,7 +151,7 @@ def test_dispatch_hold_veto_falls_back_to_source_cli(monkeypatch):
 
     monkeypatch.setattr(git_protection.subprocess, "run", fake_run)
     assert git_protection._dispatch_hold_refusal("gh pr merge 900") is None
-    assert calls[1][:4] == [sys.executable, "-m", "fno.cli", "pr"]
+    assert calls[1][:5] == [sys.executable, "-m", "fno.cli", "do", "pr"]
 
 
 @pytest.mark.parametrize(

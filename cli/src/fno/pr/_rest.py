@@ -180,8 +180,8 @@ def fetch_pr_rest(
 ) -> "tuple[Optional[dict], str]":
     """Same contract as the old GraphQL `_fetch`: `(pr_json, reason)`.
 
-    `pr_json` carries `state`, `statusCheckRollup`, `headRefOid`, `mergeable`
-    - the keys `run_status` reads. `reason` is empty on success and names the
+    `pr_json` carries `state`, `statusCheckRollup`, `headRefOid`, `headRefName`,
+    `mergeable` - the keys `run_status` reads. `reason` is empty on success and names the
     failure class otherwise; `(None, reason)` must reach the caller as a loud
     `verdict: error`, never as an absent answer.
     """
@@ -267,6 +267,12 @@ def fetch_pr_rest(
             "state": info["state"],
             "statusCheckRollup": rollup,
             "headRefOid": sha,
+            # The BRANCH, not just the sha: the in-flight-review guard keys its
+            # hold on the branch (registration happens in a PreToolUse hook that
+            # cannot afford a `gh` call to map one to a PR), so the merge side
+            # is where the mapping is paid. Already fetched - `fetch_pr_info_rest`
+            # validates head.ref on the same request.
+            "headRefName": info["head_ref"],
             "mergeable": info["mergeable"],
         },
         "",

@@ -50,6 +50,15 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/review-hold.sh acquire"
+          }
+        ]
       }
     ],
     "Notification": [

@@ -234,4 +234,30 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
 
+# The review has landed a verdict for this head, so the hold that said one was
+# RUNNING has nothing left to protect. Released HERE, at the positive completion
+# marker, so the release and the proof of completion are one event and cannot
+# drift: a release wired to a separate "the tool returned" signal fires while
+# the review is still writing fixes, which is the whole defect.
+#
+# NO --holder. The hold is a lane lock, not an ownership assertion, and this
+# script cannot reconstruct the acquiring holder: the hook names the HARNESS
+# session, while `session_id` here is grepped out of target-state.md and falls
+# back to "unknown". `release_claim` no-ops SILENTLY on a mismatch, so passing
+# one wedged the branch's merge lane for the full TTL under a receipt that said
+# "released".
+#
+# Both branch spellings, because they can differ. `branch` above is rewritten to
+# the upstream-derived name for a reviewer worktree, while the hook keys on the
+# local `rev-parse --abbrev-ref HEAD`. Releasing one name leaves the other held.
+#
+# Best-effort. A release failure leaves a hold that ages out on its TTL with a
+# receipt, and an attestation must never fail because a lockfile survived.
+for _b in "${branch:-}" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"; do
+  [[ -n "$_b" && "$_b" != "HEAD" ]] || continue
+  # Releasing the same name twice costs one no-op and says "no hold" the second
+  # time, which is cheaper than a dedup nobody reads.
+  "${FNO:-fno}" do pr review-hold release --branch "$_b" >/dev/null 2>&1 || true
+done
+
 echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset}" >&2

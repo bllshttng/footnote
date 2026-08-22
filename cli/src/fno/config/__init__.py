@@ -841,6 +841,14 @@ class ReviewBlock(BaseModel):
     # documented escape hatch. Read by the stop gate (loopcheck.rs) and mirrored
     # into the merge primitive so the two agree.
     self_review_required: bool = True
+    # How long a registered review hold (`review:branch:<branch>`, taken where a
+    # review is DISPATCHED) protects a PR from a merge before it ages out. A
+    # review is unbounded, so this is a wedge bound rather than an estimate:
+    # long enough that a real review never expires under itself, short enough
+    # that a crashed reviewer does not hold the lane for a working day. Clamped
+    # into the claim TTL bounds at use (`_review_hold.resolve_ttl_ms`), never at
+    # parse: a misconfigured TTL must not make the merge guard unreadable.
+    hold_ttl_minutes: int = 90
     # The INVOCATION list (Locked Decision 2): which AI reviewers /pr requests a
     # review from (gemini | codex | coderabbit | claude | none). Distinct from
     # required_bots (the GATE: which GitHub bot logins must have reviewed before

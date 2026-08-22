@@ -157,7 +157,15 @@ else
   # what drifted apart in the first place (the summary printed "unobserved"
   # while the row carried ""), so the assertion has to read what was actually
   # handed to `event emit`.
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/last-emit.txt"\nexit 0\n' \
+  #
+  # Discriminate on the verb, like tests/hooks/test_code_review_attest.sh's
+  # stub. The emitter shells `fno` for more than the event sink now (it clears
+  # the review hold once a verdict exists for the head), and a stub that
+  # captured EVERY call overwrote the payload under assertion with the last
+  # unrelated one - `.model` then read empty and a refused claim was
+  # indistinguishable from an absent one, which is the exact confusion the
+  # assertions below exist to refuse.
+  printf '#!/usr/bin/env bash\nif [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then printf "%%s\\n" "$@" > "%s/last-emit.txt"; fi\nexit 0\n' \
     "$TMP" > "$TMP/fno-stub"
   chmod +x "$TMP/fno-stub"
 
