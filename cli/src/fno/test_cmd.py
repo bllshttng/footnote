@@ -461,6 +461,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      "bash tests/ci/test_hermetic_lanes.sh"),
     ("preflight orchestration self-test", ".", "bash tests/ci/test_preflight.sh"),
     ("changed/full CI job-boundary guard", ".", "bash tests/ci/test_changed_smoke_workflow.sh"),
+    ("smoke duration reporter self-test", ".", "bash tests/ci/test_smoke_duration_report.sh"),
 )
 
 # Owned shell-harness trees: a new file here runs with zero registry edits.
