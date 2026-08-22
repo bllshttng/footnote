@@ -1675,6 +1675,48 @@ def test_mail_digest_project_recipient(monkeypatch, tmp_path):
     assert "--to-project" in seen["argv"] and "fno" in seen["argv"]
 
 
+def test_machine_report_uses_internal_transport_for_long_digest(monkeypatch, tmp_path):
+    import json as _json
+
+    (tmp_path / "watchdog-sweep.json").write_text(
+        _json.dumps({"source": "tick", "at": "x", "counts": {}, "signature": ""})
+    )
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: tmp_path / "watchdog-sweep.json")
+    sent = {}
+
+    from fno.agents import dispatch
+
+    def internal_send(name, message, **kwargs):
+        sent.update(name=name, message=message, kwargs=kwargs)
+        from fno.agents.dispatch import DispatchSendResult
+
+        return DispatchSendResult(msg_id="msg-4", delivery="durable", reason="offline")
+
+    monkeypatch.setattr(dispatch, "dispatch_send", internal_send)
+    payload = {
+        "verdicts": [
+            {
+                "row_id": f"row-{i}",
+                "name": f"worker-{i}",
+                "state": "blocked",
+                "verdict": WAKE,
+                "basis": "a measured watchdog basis with enough detail to exceed the authored word cap",
+                "action": "resume",
+            }
+            for i in range(7)
+        ],
+        "counts": {WAKE: 7},
+    }
+
+    ok, receipt = watchdog.mail_digest(payload, "king")
+
+    assert ok
+    assert receipt == "msg-4 queued (durable) [offline]"
+    assert sent["name"] == "king"
+    assert sent["kwargs"]["budget_enforce"] is False
+    assert len(sent["message"].split()) > 80
+
+
 def test_terminal_harness_residue_mails_even_when_every_verdict_is_leave(
     monkeypatch, tmp_path
 ):
