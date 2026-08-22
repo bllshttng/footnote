@@ -48,7 +48,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 | `fno do state` | State files. Only legal post-init target-manifest write: first-fill of empty `plan_path` via `fno do state set --field plan_path` (else exit 5). |
 | `fno-agents loop run --driver target` | The unified Rust loop; front door `scripts/run-target-loop.sh`. |
 | `fno whoami\|status` | Self-introspection; run when confused after compaction. |
-| `fno agents mail send\|reply\|unread\|ack` | Cross-project messaging over the jsonl bus; live-inject-first, durable fallback. |
+| `fno agents mail send\|reply\|unread\|ack` | Cross-project jsonl messaging; live-inject-first, durable fallback. |
 | `fno agents spawn\|ask\|peek\|attach\|resume\|wait` | Cross-CLI agent lifecycle; per-harness support in `docs/harness-command-matrix.md`. |
 | `fno carveout add` | Last resort: work too big for this PR. Else fix it here. |
 | `fno outstanding` / `fno backlog` | Awaiting a human: carve-outs + questions; `ask`/`clear`. `clear --answer` delivers the answer to the asker over mail, or states why it cannot. `backlog decide` records a ruling; `backlog decisions` recovers it (no subject = recent). |
