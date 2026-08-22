@@ -729,6 +729,20 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             f"{str(v.get('reviewed_sha') or 'an unknown commit')[:8]}, whose code no longer "
             "matches HEAD - that verdict does not count. Ask it to re-read.\n"
         )
+    if coverage.get("review_state") == "reviewer_refused":
+        raw_verdicts = coverage.get("verdicts")
+        verdicts = raw_verdicts if isinstance(raw_verdicts, list) else []
+        refused_names = [
+            str(verdict.get("name"))
+            for verdict in verdicts
+            if isinstance(verdict, dict)
+            and verdict.get("verdict") == "refused"
+            and verdict.get("name")
+        ]
+        who = ", ".join(refused_names) or "configured reviewer"
+        sys.stderr.write(
+            f"note: reviewer_refused: {who} declined to review; run a local review at HEAD.\n"
+        )
     # `unknown` from a degraded gh read and `unknown` from "nobody reviewed
     # this" are different facts; the recompute note is the only thing that
     # separates them, and the JSON field alone would never reach a terminal.

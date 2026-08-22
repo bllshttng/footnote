@@ -123,7 +123,12 @@ def _blockers(rollup, coverage=None):
         verdict == "green",
         verdict,
         0,
-        coverage or {"coverage": "covered", "reviewed_count": 2},
+        coverage
+        or {
+            "coverage": "covered",
+            "review_state": "reviewed",
+            "reviewed_count": 2,
+        },
         True,
         head="h" * 40,
         counts=counts,

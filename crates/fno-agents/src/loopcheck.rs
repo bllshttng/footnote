@@ -1060,10 +1060,6 @@ struct PrInfo {
     /// An EMPTY list with a non-empty `missing_bots` means "not classified" and
     /// is treated exactly like today (every missing bot idlable, today's string).
     bot_nudges: Vec<BotNudge>,
-    /// Required bots dropped from the gate because they are rate-limited (a
-    /// usage-limit comment, no review). Named in the terminal-allow message so
-    /// an operator sees why the gate proceeded without them (AC1-UI).
-    usage_limited: Vec<String>,
     /// Required bots whose best evidence READ AN OLDER COMMIT
     /// (`CoverageVerdict::Stale`): (login, reviewed sha). Same gate weight as
     /// `missing_bots` - a stale bot still fails `all_required_passed` - but a
@@ -2387,7 +2383,6 @@ fn read_pr_info(
             reviewed: false,
             missing_bots: Vec::new(),
             bot_nudges: Vec::new(),
-            usage_limited: Vec::new(),
             stale_bots: Vec::new(),
             unaddressed_findings: Vec::new(),
             review_skipped: false,
@@ -2461,7 +2456,6 @@ fn read_pr_info(
             reviewed: true,
             missing_bots: Vec::new(),
             bot_nudges: Vec::new(),
-            usage_limited: Vec::new(),
             stale_bots: Vec::new(),
             unaddressed_findings: Vec::new(),
             review_skipped: true,
@@ -2547,7 +2541,6 @@ fn read_pr_info(
         reviewed,
         missing_bots,
         bot_nudges,
-        usage_limited,
         stale_bots,
         unaddressed_findings,
         coverage,
@@ -2573,7 +2566,6 @@ fn read_pr_info(
         (
             "none".to_string(),
             reviewers_ok,
-            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -2729,16 +2721,25 @@ fn read_pr_info(
         // x-e703: the login gate AND the local-attestation reviewers gate must
         // both clear. reviewers is usually empty (vacuously true) so this is a
         // no-op for login-only configs.
-        let reviewed = info.all_required_passed() && unaddressed.is_empty() && reviewers_ok;
         // (a) Record the rate-limit drop so a post-hoc audit sees why the gate
         // proceeded without a required bot (AC1-UI). append_loop_event, not
         // Branch-B emit: these are target-stream events (see the doc comment on
         // append_loop_event), deliberately unregistered in KNOWN_EVENT_KINDS.
-        if !info.usage_limited.is_empty() {
+        let usage_limited: Vec<String> = info
+            .reviewer_refused
+            .iter()
+            .filter(|bot| {
+                review_comments
+                    .iter()
+                    .any(|comment| usage_limit_comment_by(bot, comment))
+            })
+            .cloned()
+            .collect();
+        if !usage_limited.is_empty() {
             append_loop_event(
                 events_path,
                 "review_gate_bot_usage_limited",
-                serde_json::json!({"pr": number, "bots": info.usage_limited.clone()}),
+                serde_json::json!({"pr": number, "bots": usage_limited}),
             );
         }
         // Coverage's github_app axis: configured required + optional logins
@@ -2772,12 +2773,21 @@ fn read_pr_info(
             &head_branch,
             head_sha,
         );
+        let local_recovery = !info.reviewer_refused.is_empty()
+            && info.missing_bots.is_empty()
+            && info.stale_bots.is_empty()
+            && coverage.verdicts.iter().any(|verdict| {
+                verdict.producer == CoverageProducer::LocalAttestation
+                    && verdict.verdict == CoverageVerdict::Reviewed
+            });
+        let reviewed = (info.all_required_passed() || local_recovery)
+            && unaddressed.is_empty()
+            && reviewers_ok;
         (
             activity_ts,
             reviewed,
             info.missing_bots,
             bot_nudges,
-            info.usage_limited,
             info.stale_bots,
             unaddressed,
             coverage,
@@ -2817,7 +2827,6 @@ fn read_pr_info(
         reviewed,
         missing_bots,
         bot_nudges,
-        usage_limited,
         stale_bots,
         unaddressed_findings,
         // Telemetry only (no decision reads this): "no review gate of any kind
@@ -2929,18 +2938,11 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     Ok(CiConclusion::Success)
 }
 
-/// True when a quota-bounced required bot is the ONLY unmet conjunct of
-/// `reviewed`, which is what `DoneAwaitingReview` claims when it fires (x-9ab2).
-///
-/// `reviewed` is `all_required_passed() && unaddressed.is_empty() &&
-/// reviewers_ok`, so reconstructing only `!usage_limited.is_empty()` fires the
-/// terminal on a PR the agent still has work on: a bot that has not reviewed
-/// YET is owed its nudge window (x-b167), a blocking finding is work to DO, and
-/// `unattested_reviewers` is `reviewers_ok` in `PrInfo` terms (x-e703, a
-/// configured local review that never ran). Any of them non-empty falls through
-/// to the existing hold, which is the fail-closed direction.
+/// True when explicit reviewer refusal is the only remaining review obstacle.
+/// Missing and stale reviewers still deserve a wait or re-read, while findings
+/// and unattested required local reviewers remain work for the agent.
 fn awaiting_review_only(pr: &PrInfo) -> bool {
-    !pr.usage_limited.is_empty()
+    pr.coverage.review_state() == Some(ReviewState::ReviewerRefused)
         && pr.missing_bots.is_empty()
         && pr.stale_bots.is_empty()
         && pr.unaddressed_findings.is_empty()
@@ -3463,6 +3465,10 @@ struct BotProfile {
     /// ISSUE-comment body markers this bot posts when it is rate-limited and will
     /// never post a review object (PR #214). Empty for a bot never seen to do so.
     usage_markers: &'static [&'static str],
+    /// Other characterized ISSUE-comment bodies that mean the bot declined to
+    /// review. Kept separate from quota markers because telemetry still names
+    /// quota exhaustion specifically.
+    refusal_markers: &'static [&'static str],
     /// Body markers for a CLEAN pass this bot posts as a plain issue comment
     /// rather than a review object. Codex submits a formal review only when it
     /// has findings (measured on PR #947: the clean pass is the comment `Codex
@@ -3487,6 +3493,7 @@ const BOT_PROFILES: &[BotProfile] = &[
         review_handle: "@codex review",
         reply_handle: "@chatgpt-codex-connector",
         usage_markers: &["usage limits for code reviews", "codex usage limits"],
+        refusal_markers: &["authentication failed"],
         clean_pass_markers: &[
             "didn't find any major issues",
             "didn\u{2019}t find any major issues",
@@ -3498,6 +3505,7 @@ const BOT_PROFILES: &[BotProfile] = &[
         review_handle: "",
         reply_handle: "@gemini-code-assist",
         usage_markers: &[],
+        refusal_markers: &[],
         clean_pass_markers: &[],
         nudgeable: false,
     },
@@ -4027,6 +4035,17 @@ pub(crate) fn body_is_usage_limit(body: &str) -> bool {
         .any(|m| lower.contains(m))
 }
 
+fn body_is_reviewer_refusal(body: &str) -> bool {
+    if body_is_usage_limit(body) {
+        return true;
+    }
+    let lower = body.trim().to_lowercase();
+    BOT_PROFILES
+        .iter()
+        .flat_map(|profile| profile.refusal_markers.iter())
+        .any(|marker| lower.starts_with(marker))
+}
+
 /// The clean-pass markers for a CONFIGURED login (may differ from the comment
 /// author by case or a `[bot]` suffix, and may be the config's short name -
 /// hence the SYMMETRIC correspond test, not the one-way matches). Empty for a
@@ -4095,7 +4114,7 @@ fn reviewed_commit_from_body(body: &str) -> &str {
 /// the author's login contains the configured name AND the author resolves
 /// to a known bot profile, so a config short name ("codex") cannot draft
 /// every human whose login contains it into the bot's marker lane.
-fn usage_comment_by(login: &str, c: &Value) -> bool {
+fn usage_limit_comment_by(login: &str, c: &Value) -> bool {
     let author = c
         .pointer("/author/login")
         .and_then(|v| v.as_str())
@@ -4103,6 +4122,16 @@ fn usage_comment_by(login: &str, c: &Value) -> bool {
     login_matches_bot(author, login)
         && profile_by_author(author).is_some()
         && body_is_usage_limit(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
+}
+
+fn refusal_comment_by(login: &str, c: &Value) -> bool {
+    let author = c
+        .pointer("/author/login")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    login_matches_bot(author, login)
+        && profile_by_author(author).is_some()
+        && body_is_reviewer_refusal(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
 }
 
 /// A comment's `createdAt`, empty when absent (empty orders as "unknown",
@@ -4320,7 +4349,7 @@ pub(crate) fn bot_verdict(
     if let Some((sha, fresh, clean_ts)) = clean.as_ref() {
         if fresh.counts() {
             let later_refusal = comments.iter().any(|c| {
-                if !usage_comment_by(login, c) {
+                if !refusal_comment_by(login, c) {
                     return false;
                 }
                 // ts_after, never a raw compare: offset-suffixed and Z-suffixed
@@ -4355,7 +4384,7 @@ pub(crate) fn bot_verdict(
         }
     };
     let refused = comments.iter().any(|c| {
-        usage_comment_by(login, c)
+        refusal_comment_by(login, c)
             && (comment_ts(c).is_empty()
                 || latest_evidence_ts.is_empty()
                 || ts_after(comment_ts(c), latest_evidence_ts))
@@ -4382,14 +4411,10 @@ struct ReviewInfo {
     /// (verified on PR #447; codex reviews once per PR and never re-reviews,
     /// so requiring a pass on HEAD would make the gate unsatisfiable).
     missing_bots: Vec<String>,
-    /// Required bots that posted only a usage-limit (quota) comment, never a
-    /// review. Such a bot has NOT reviewed, so `all_required_passed` is false
-    /// while this is non-empty: the gate fails closed instead of merging
-    /// unreviewed (x-9ab2). They are moved OUT of `missing_bots` (not scanned
-    /// for nudges) because the agent cannot make a rate-limited bot recover, so
-    /// a nudge/idle would wedge until budget death; the loop instead terminates
-    /// cleanly via `DoneAwaitingReview`. Scoped to the bot's OWN author.login.
-    usage_limited: Vec<String>,
+    /// Required bots that explicitly refused to review. A refusal is not a
+    /// pass, but it is also not pending: it stays out of `missing_bots` so the
+    /// stop gate can park the PR unless a fresh local review recovers it.
+    reviewer_refused: Vec<String>,
     /// Required bots whose best evidence pins a commit the freshness predicate
     /// no longer carries: (login, reviewed sha). Same gate weight as
     /// `missing_bots` - a stale bot still fails `all_required_passed` - but a
@@ -4399,14 +4424,13 @@ struct ReviewInfo {
 }
 
 impl ReviewInfo {
-    /// Every required bot has at least one completed pass. A bot that posted
-    /// only a usage-limit (quota) comment has NOT reviewed, so it counts as
-    /// not-passed: a quota bounce must fail the gate closed instead of letting
-    /// it proceed (x-9ab2). A bot that read an older commit is equally
-    /// not-passed - only the message differs, never the gate. The caller still
-    /// records the drop for telemetry.
+    /// Every required bot has at least one completed pass. Refused and stale
+    /// reviewers fail this predicate; the caller separately recognizes a fresh
+    /// local-review recovery from refusal.
     fn all_required_passed(&self) -> bool {
-        self.missing_bots.is_empty() && self.usage_limited.is_empty() && self.stale_bots.is_empty()
+        self.missing_bots.is_empty()
+            && self.reviewer_refused.is_empty()
+            && self.stale_bots.is_empty()
     }
 }
 
@@ -4461,28 +4485,26 @@ fn compute_review_info(
     // Each required bot's PRESENCE is the same question the coverage axis
     // asks, through the same ONE predicate (`bot_verdict`): a review object
     // that still counts, else a pinned clean-pass comment that still counts,
-    // else refusal on a usage-limit comment. Computing this with independent
+    // else an explicit refusal comment. Computing this with independent
     // scans is how `all_required_passed` reads true while coverage reads
     // `Refused` (or the inverse) and the run wedges between two gates that
     // never reconcile - the reader-divergence class x-e601 exists to delete.
     // A STALE verdict lands in `stale_bots`, keeping the sha it read: the
     // remedy is a re-read, a different one from "has not reviewed", and the
     // block message must be able to say which. The gate weight is
-    // identical either way. A quota refusal lands in `usage_limited` and
-    // FAILS the gate closed (x-9ab2): the PR does not merge on a quota
-    // bounce, and the loop terminates via DoneAwaitingReview instead of
-    // spinning (the PR #214 shape). Scoped to the bot's own evidence inside
-    // bot_verdict, so a stranger's comment never moves a required bot
-    // (AC1-ERR).
+    // identical either way. A refusal lands in `reviewer_refused`; without a
+    // fresh local review the loop terminates via DoneAwaitingReview instead of
+    // spinning. Scoped to the bot's own evidence inside bot_verdict, so a
+    // stranger's comment never moves a required bot.
     let mut missing_bots: Vec<String> = Vec::new();
-    let mut usage_limited: Vec<String> = Vec::new();
+    let mut reviewer_refused: Vec<String> = Vec::new();
     let mut stale_bots: Vec<(String, String)> = Vec::new();
     for bot in required_bots {
         let (verdict, read_sha, _) = bot_verdict(bot, reviews, comments, freshness);
         match verdict {
             CoverageVerdict::Reviewed => {}
             CoverageVerdict::Stale => stale_bots.push((bot.clone(), read_sha)),
-            CoverageVerdict::Refused => usage_limited.push(bot.clone()),
+            CoverageVerdict::Refused => reviewer_refused.push(bot.clone()),
             _ => missing_bots.push(bot.clone()),
         }
     }
@@ -4490,7 +4512,7 @@ fn compute_review_info(
     ReviewInfo {
         latest_ts: final_ts,
         missing_bots,
-        usage_limited,
+        reviewer_refused,
         stale_bots,
     }
 }
@@ -4675,6 +4697,14 @@ pub struct CoverageReport {
     pub verdicts: Vec<ReviewerVerdict>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewState {
+    Reviewed,
+    ReviewerRefused,
+    Unreviewed,
+}
+
 impl CoverageReport {
     /// Count of `reviewed` verdicts, excluding human approvals. This is the one
     /// place that decides whether a human GitHub approval counts; flip the
@@ -4702,6 +4732,35 @@ impl CoverageReport {
                     .count(),
             ),
         }
+    }
+
+    pub fn review_state(&self) -> Option<ReviewState> {
+        if matches!(self.coverage, Coverage::Unknown) {
+            return None;
+        }
+        if self
+            .verdicts
+            .iter()
+            .any(|verdict| verdict.verdict == CoverageVerdict::Reviewed && !verdict.human_approval)
+        {
+            return Some(ReviewState::Reviewed);
+        }
+        if self
+            .verdicts
+            .iter()
+            .any(|verdict| verdict.verdict == CoverageVerdict::Refused)
+        {
+            return Some(ReviewState::ReviewerRefused);
+        }
+        Some(ReviewState::Unreviewed)
+    }
+
+    pub fn refused_reviewers(&self) -> Vec<&str> {
+        self.verdicts
+            .iter()
+            .filter(|verdict| verdict.verdict == CoverageVerdict::Refused)
+            .map(|verdict| verdict.name.as_str())
+            .collect()
     }
 }
 
@@ -5153,6 +5212,9 @@ fn coverage_event_data(
         "verdicts": &rep.verdicts,
         "head_sha": head_sha,
     });
+    if let Some(review_state) = rep.review_state() {
+        data["review_state"] = serde_json::json!(review_state);
+    }
     if let Coverage::Covered(n) = &rep.coverage {
         data["reviewed_count"] = serde_json::json!(n);
         // How much of that count is the author reviewing its own diff. Nothing
@@ -7444,6 +7506,60 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     pr_info.reviewed,
                     probe_block.is_none() && fidelity_block.is_none(),
                 );
+                if pr_open
+                    && ci_ok
+                    && head_shipped
+                    && probes_passed
+                    && awaiting_review_only(&pr_info)
+                {
+                    let reviewers = pr_info.coverage.refused_reviewers().join(", ");
+                    let msg = format!(
+                        "PR #{} is green and shipped, but reviewer(s) {} refused to review; the review gate cannot be auto-satisfied. Run a local review at HEAD, wait for reviewer recovery, or merge manually after a real review.",
+                        pr_info.number, reviewers
+                    );
+                    emit(
+                        "termination",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "reason": "DoneAwaitingReview",
+                            "message": msg.clone()
+                        }),
+                    );
+                    emit(
+                        "loop_check",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "fingerprint": fingerprint,
+                            "fires": this_fire,
+                            "consecutive_unchanged": consecutive_after,
+                            "streak_window_secs": streak_window,
+                            "decision": "allow",
+                            "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
+                            "intent_source": intent_source,
+                            "pr_state": pr_info.state.as_str(),
+                            "ci": pr_info.ci_conclusion.render(),
+                            "reviewed": pr_info.reviewed,
+                            "review_skipped": pr_info.review_skipped,
+                            "unaddressed_blocking": pr_info.unaddressed_findings.len(),
+                            "review_state": "reviewer_refused",
+                            "fp_read_failed": fp_read_failed
+                        }),
+                    );
+                    best_effort_notify(
+                        &format!("PR #{} blocked - reviewer refused", pr_info.number),
+                        &msg,
+                    );
+                    return (
+                        0,
+                        allow_output(
+                            "allow",
+                            Some(TerminationReason::DoneAwaitingReview),
+                            &msg,
+                            this_fire,
+                            Some(fingerprint),
+                        ),
+                    );
+                }
                 if pr_passes(pr_open, ci_ok, reviewed, head_shipped, probes_passed) {
                     // Coverage gate (x-0eaf): the three pr_passes conjuncts all ask
                     // "did anyone object"; coverage asks "did anyone review". A
@@ -7656,69 +7772,6 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             );
                         }
                     }
-                }
-
-                // x-9ab2: a required bot posted only a usage-limit (quota)
-                // comment, so `reviewed` is false and the gate must NOT merge on
-                // it. The agent cannot make a rate-limited bot recover, so a hold
-                // would wedge to budget death (the PR #214 shape this replaces);
-                // terminate cleanly instead. Terminal but NOT a ship reason
-                // (mirrors DoneAwaitingMerge): a human merges after a real review,
-                // or the operator re-runs once quota recovers / a local review
-                // posts, then out-of-band-merge reconcile closes the node.
-                // This sits ABOVE every hold that handles a finding or a
-                // still-pending bot, so `awaiting_review_only` is load-bearing:
-                // anything looser parks work the agent should still be doing.
-                if pr_open && ci_ok && head_shipped && awaiting_review_only(&pr_info) {
-                    let bots = pr_info.usage_limited.join(", ");
-                    let msg = format!(
-                        "PR #{} is green and shipped, but required review bot(s) {} posted a usage-limit (quota) comment instead of a review; the review gate cannot be auto-satisfied. Wait for quota recovery or run a local review, then re-run; or merge manually after a real review.",
-                        pr_info.number, bots
-                    );
-                    emit(
-                        "termination",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "reason": "DoneAwaitingReview",
-                            "message": msg.clone()
-                        }),
-                    );
-                    emit(
-                        "loop_check",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "fingerprint": fingerprint,
-                            "fires": this_fire,
-                            "consecutive_unchanged": consecutive_after,
-                            "streak_window_secs": streak_window,
-                            "decision": "allow",
-                            "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
-                            "intent_source": intent_source,
-                            "pr_state": pr_info.state.as_str(),
-                            "ci": pr_info.ci_conclusion.render(),
-                            "reviewed": pr_info.reviewed,
-                            "review_skipped": pr_info.review_skipped,
-                            "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                            "fp_read_failed": fp_read_failed
-                        }),
-                    );
-                    best_effort_notify(
-                        &format!(
-                            "PR #{} blocked - required review bot rate-limited",
-                            pr_info.number
-                        ),
-                        &msg,
-                    );
-                    return (
-                        0,
-                        allow_output(
-                            "allow",
-                            Some(TerminationReason::DoneAwaitingReview),
-                            &msg,
-                            this_fire,
-                            Some(fingerprint),
-                        ),
-                    );
                 }
 
                 // ── Watching idle-allow (x-e2c8) ─────────────────────────────
@@ -12310,7 +12363,6 @@ mod tests {
             reviewed: false,
             missing_bots: vec![],
             bot_nudges: vec![],
-            usage_limited: vec![],
             stale_bots: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
@@ -12394,7 +12446,6 @@ mod tests {
             reviewed: false,
             missing_bots: vec![],
             bot_nudges: vec![],
-            usage_limited: vec![],
             stale_bots: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
@@ -12415,7 +12466,19 @@ mod tests {
     fn awaiting_review_only_requires_every_other_conjunct() {
         let bounced = || {
             let mut pr = watch_pr();
-            pr.usage_limited = vec!["chatgpt-codex-connector".to_string()];
+            pr.coverage = CoverageReport {
+                coverage: Coverage::Covered(0),
+                verdicts: vec![ReviewerVerdict {
+                    producer: CoverageProducer::GithubApp,
+                    name: "chatgpt-codex-connector".to_string(),
+                    verdict: CoverageVerdict::Refused,
+                    human_approval: false,
+                    attestation_origin: AttestationOrigin::Unknown,
+                    reviewed_sha: String::new(),
+                    freshness: None,
+                    scope: None,
+                }],
+            };
             pr
         };
         assert!(awaiting_review_only(&bounced()), "the terminal's own case");
@@ -16050,7 +16113,7 @@ mod tests {
         let info = compute_review_info(&json, &required, &fresh_at);
         assert!(info.all_required_passed());
         assert!(info.missing_bots.is_empty());
-        assert!(info.usage_limited.is_empty());
+        assert!(info.reviewer_refused.is_empty());
     }
 
     #[test]
@@ -16117,6 +16180,14 @@ mod tests {
         })
     }
 
+    fn authentication_failure_comment() -> Value {
+        serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Authentication failed while starting this code review",
+            "createdAt": "2026-08-17T03:00:00Z"
+        })
+    }
+
     fn stale_findings_review() -> Value {
         serde_json::json!({
             "author": {"login": "chatgpt-codex-connector[bot]"},
@@ -16170,9 +16241,90 @@ mod tests {
         let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
         assert!(!info.all_required_passed());
         assert_eq!(
-            info.usage_limited,
+            info.reviewer_refused,
             vec!["chatgpt-codex-connector".to_string()]
         );
+    }
+
+    #[test]
+    fn bot_verdict_authentication_failure_is_a_refusal() {
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict(
+            "chatgpt-codex-connector",
+            &[],
+            &[authentication_failure_comment()],
+            &fresh_at,
+        );
+        assert_eq!(verdict, CoverageVerdict::Refused);
+    }
+
+    #[test]
+    fn bot_verdict_empty_or_unrecognized_comment_is_absent() {
+        let fresh_at = fresh_at_head();
+        for body in [
+            "",
+            "Review request received",
+            "Review finding: authentication failed handling lacks a regression test",
+        ] {
+            let comment = serde_json::json!({
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": body,
+                "createdAt": "2026-08-17T03:00:00Z"
+            });
+            let (verdict, _, _) =
+                bot_verdict("chatgpt-codex-connector", &[], &[comment], &fresh_at);
+            assert_eq!(verdict, CoverageVerdict::Absent, "body: {body:?}");
+        }
+    }
+
+    #[test]
+    fn coverage_event_review_state_preserves_refusal_and_unknown_boundaries() {
+        let login = ["chatgpt-codex-connector".to_string()];
+        let fresh_at = fresh_at_head();
+
+        let unreviewed =
+            classify_coverage(&[], &[], "", &login, true, None, &fresh_at, "", "abc12345");
+        let unreviewed_event = coverage_event_data(1, &unreviewed, "abc12345", "", None);
+        assert_eq!(unreviewed_event["review_state"], "unreviewed");
+
+        let refused = classify_coverage(
+            &[],
+            &[usage_comment("2026-08-17T03:00:00Z")],
+            "",
+            &login,
+            true,
+            None,
+            &fresh_at,
+            "",
+            "abc12345",
+        );
+        let refused_event = coverage_event_data(1, &refused, "abc12345", "", None);
+        assert_eq!(refused_event["review_state"], "reviewer_refused");
+
+        let recovered = classify_coverage(
+            &[],
+            &[usage_comment("2026-08-17T03:00:00Z")],
+            &attestation_line("code-review", "abc12345", "pass"),
+            &login,
+            true,
+            Some("sess-author"),
+            &fresh_at,
+            "",
+            "abc12345",
+        );
+        let recovered_event = coverage_event_data(1, &recovered, "abc12345", "", None);
+        assert_eq!(recovered_event["review_state"], "reviewed");
+        assert!(recovered_event["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["verdict"] == "refused"));
+
+        let unknown =
+            classify_coverage(&[], &[], "", &login, false, None, &fresh_at, "", "abc12345");
+        let unknown_event = coverage_event_data(1, &unknown, "abc12345", "", None);
+        assert_eq!(unknown_event["coverage"], "unknown");
+        assert!(unknown_event.get("review_state").is_none());
     }
 
     #[test]
@@ -16647,7 +16799,7 @@ mod tests {
         // Detection still holds: the bot is classified rate-limited, not missing.
         assert!(info.missing_bots.is_empty());
         assert_eq!(
-            info.usage_limited,
+            info.reviewer_refused,
             vec!["chatgpt-codex-connector".to_string()]
         );
         // The gate decision: a usage-limit body does NOT satisfy the gate.
@@ -16675,7 +16827,7 @@ mod tests {
             info.missing_bots,
             vec!["chatgpt-codex-connector".to_string()]
         );
-        assert!(info.usage_limited.is_empty());
+        assert!(info.reviewer_refused.is_empty());
         assert!(!info.all_required_passed());
     }
 
@@ -16698,7 +16850,7 @@ mod tests {
         });
         let info = compute_review_info(&json, &required, &|_| Freshness::Fresh);
         assert!(info.missing_bots.is_empty());
-        assert!(info.usage_limited.is_empty());
+        assert!(info.reviewer_refused.is_empty());
         assert!(info.all_required_passed());
     }
 

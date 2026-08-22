@@ -236,7 +236,7 @@ def enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1}, ""),
+        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1}, ""),
     )
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
     # No 3am valve by default. The gate reads the override label on every
@@ -1741,6 +1741,30 @@ def test_coverage_zero_refuses(enabled, monkeypatch, capsys, tmp_path):
     assert _last_json(capsys, stream="err")["outcome"] == "blocked"
 
 
+def test_reviewed_state_proceeds_when_diagnostic_count_is_zero(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo, head=None: (
+            {
+                "coverage": "covered",
+                "review_state": "reviewed",
+                "reviewed_count": 0,
+                "head_sha": "abc",
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
 def test_coverage_unknown_refuses(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         _merge,
@@ -1751,6 +1775,36 @@ def test_coverage_unknown_refuses(enabled, monkeypatch, capsys, tmp_path):
     assert _last_json(capsys, stream="err")["outcome"] == "blocked"
 
 
+def test_coverage_reviewer_refused_names_the_reviewer(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo, head=None: (
+            {
+                "coverage": "uncovered",
+                "review_state": "reviewer_refused",
+                "reviewed_count": 99,
+                "head_sha": "abc",
+                "verdicts": [
+                    {
+                        "producer": "github_app",
+                        "name": "chatgpt-codex-connector",
+                        "verdict": "refused",
+                    }
+                ],
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    reason = _last_json(capsys, stream="err")["reason"]
+    assert "reviewer-refused" in reason
+    assert "chatgpt-codex-connector" in reason
+
+
 def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
     (tmp_path / ".fno").mkdir()
     fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
@@ -1758,7 +1812,15 @@ def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1, "head_sha": "abc"}, ""),
+        lambda pr, repo, head=None: (
+            {
+                "coverage": "covered",
+                "review_state": "reviewed",
+                "reviewed_count": 1,
+                "head_sha": "abc",
+            },
+            "",
+        ),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
@@ -1780,7 +1842,15 @@ def test_covered_merge_publishes_coverage_status(enabled, monkeypatch, capsys, t
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1, "head_sha": "abc"}, ""),
+        lambda pr, repo, head=None: (
+            {
+                "coverage": "covered",
+                "review_state": "reviewed",
+                "reviewed_count": 1,
+                "head_sha": "abc",
+            },
+            "",
+        ),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     monkeypatch.setattr(
@@ -1874,6 +1944,7 @@ def test_carried_local_attestation_still_satisfies_the_code_review_gate(
         "_review_coverage_for_pr",
         lambda pr, repo, head=None: ({
             "coverage": "covered",
+            "review_state": "reviewed",
             "reviewed_count": 1,
             "head_sha": "abc",
             "verdicts": [
@@ -1908,6 +1979,7 @@ def test_code_review_gate_rejects_unrelated_github_app_coverage(
         "_review_coverage_for_pr",
         lambda pr, repo, head=None: ({
             "coverage": "covered",
+            "review_state": "reviewed",
             "reviewed_count": 1,
             "head_sha": "abc",
             "verdicts": [
@@ -1942,6 +2014,7 @@ def test_code_review_gate_accepts_its_head_pinned_local_attestation(
         "_review_coverage_for_pr",
         lambda pr, repo, head=None: ({
             "coverage": "covered",
+            "review_state": "reviewed",
             "reviewed_count": 1,
             "head_sha": "abc",
             "verdicts": [
@@ -1964,7 +2037,7 @@ def test_coverage_stale_head_refuses(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead"}, ""),
+        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead"}, ""),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
@@ -1986,7 +2059,7 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1, "head_sha": "coveredSHA"}, ""),
+        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1, "head_sha": "coveredSHA"}, ""),
     )
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
     # Fresh coverage: the live PR head IS the covered head, so the gate passes
@@ -2017,7 +2090,7 @@ def test_stale_head_refusal_names_both_shas_and_the_action():
     function knew nothing about it and reported the count instead. Its output
     for a moved head was the self-contradiction `0 reviewed (covered count=2)`.
     Name the real cause and the fix instead."""
-    cov = {"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead0deadbeef"}
+    cov = {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead0deadbeef"}
     reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
     assert "oldhead0" in reason
     assert "newhead0" in reason
@@ -2027,7 +2100,7 @@ def test_stale_head_refusal_names_both_shas_and_the_action():
 def test_refusal_reason_never_claims_zero_when_the_count_is_positive():
     """The contradiction guard. `0 reviewed (covered count=2)` is not a message
     a reader can act on; it is a message a reader has to explain away."""
-    cov = {"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead"}
+    cov = {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead"}
     assert "0 reviewed" not in _merge._coverage_refused_reason(cov, "newhead")
 
 
@@ -2231,7 +2304,7 @@ def test_stale_head_blocked_receipt_carries_the_cause(enabled, monkeypatch, caps
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead0"}, ""),
+        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead0"}, ""),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead0")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
@@ -2273,6 +2346,7 @@ def _write_coverage(events_path, pr, *, repo=None, ts="2026-08-08T02:35:30Z", co
     data = {
         "pr": pr,
         "coverage": "covered",
+        "review_state": "reviewed",
         "reviewed_count": count,
         "head_sha": "a3f4b413b",
         "verdicts": [{

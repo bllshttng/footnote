@@ -1293,6 +1293,7 @@ fn set_posture(env: &Env, session_id: &str, approved: bool) {
 fn finalize_arms_auto_merge_on_approved_green_terminal() {
     let env = setup("S-arm", false);
     set_posture(&env, "S-arm", true);
+    write_auto_merge_config(&env, "[auto_merge]\nenabled = true\n");
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(
         out.status.success(),
@@ -1318,7 +1319,8 @@ fn write_auto_merge_config(env: &Env, body: &str) {
 fn configure_optional_codex(env: &Env) {
     write_auto_merge_config(
         env,
-        "[review]\noptional_apps = [\"chatgpt-codex-connector\"]\n",
+        "[auto_merge]\nenabled = true\n\
+         [review]\noptional_apps = [\"chatgpt-codex-connector\"]\n",
     );
 }
 
@@ -1445,6 +1447,30 @@ fn finalize_completed_review_wins_over_stale_usage_limit_comment() {
 }
 
 #[test]
+fn finalize_live_auto_merge_switch_vetoes_an_approved_run() {
+    let env = setup("S-live-switch-off", false);
+    set_posture(&env, "S-live-switch-off", true);
+    write_auto_merge_config(&env, "[auto_merge]\nenabled = true\n");
+    write_auto_merge_config(&env, "[auto_merge]\nenabled = false\n");
+
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("config.auto_merge.enabled=false"),
+        "stderr must name the live-switch veto: {stderr}"
+    );
+    let event = finalized_event(&env, "S-live-switch-off");
+    assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&false.into()));
+    assert_eq!(
+        event
+            .pointer("/data/auto_merge_blocked_reason")
+            .and_then(|v| v.as_str()),
+        Some("config.auto_merge.enabled=false")
+    );
+}
+
+#[test]
 fn finalize_optional_review_read_failure_withholds_arm() {
     for (session_id, gh) in [
         ("S-optional-read-failed", GH_OPTIONAL_READ_FAILS),
@@ -1535,7 +1561,7 @@ fn finalize_arms_with_the_configured_merge_strategy() {
         set_posture(&env, "S-strategy", true);
         write_auto_merge_config(
             &env,
-            &format!("[auto_merge]\nmerge_strategy = \"{strategy}\"\n"),
+            &format!("[auto_merge]\nenabled = true\nmerge_strategy = \"{strategy}\"\n"),
         );
         let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
         assert!(out.status.success());
@@ -1557,7 +1583,10 @@ fn finalize_arms_with_the_configured_merge_strategy() {
 fn finalize_arms_with_merge_on_an_invalid_strategy() {
     let env = setup("S-badstrategy", false);
     set_posture(&env, "S-badstrategy", true);
-    write_auto_merge_config(&env, "[auto_merge]\nmerge_strategy = \"octopus\"\n");
+    write_auto_merge_config(
+        &env,
+        "[auto_merge]\nenabled = true\nmerge_strategy = \"octopus\"\n",
+    );
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(out.status.success());
     let c = calls(&env);
@@ -1573,15 +1602,13 @@ fn finalize_arms_with_merge_on_an_invalid_strategy() {
 #[test]
 fn finalize_arm_never_carries_delete_branch() {
     for body in [
-        "", // absent config takes AutoMergeBlock's true default
-        "[auto_merge]\ndelete_branch_on_merge = true\n",
-        "[auto_merge]\ndelete_branch_on_merge = false\n",
+        "[auto_merge]\nenabled = true\n",
+        "[auto_merge]\nenabled = true\ndelete_branch_on_merge = true\n",
+        "[auto_merge]\nenabled = true\ndelete_branch_on_merge = false\n",
     ] {
         let env = setup("S-delbr", false);
         set_posture(&env, "S-delbr", true);
-        if !body.is_empty() {
-            write_auto_merge_config(&env, body);
-        }
+        write_auto_merge_config(&env, body);
         let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
         assert!(out.status.success());
         let c = calls(&env);
@@ -1616,6 +1643,7 @@ fn finalize_never_arms_auto_merge_when_posture_refuses() {
 #[test]
 fn finalize_never_arms_auto_merge_without_a_posture_key() {
     let env = setup("S-nokey", false);
+    write_auto_merge_config(&env, "[auto_merge]\nenabled = true\n");
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(out.status.success());
     assert!(
@@ -1633,6 +1661,7 @@ fn finalize_never_arms_auto_merge_on_a_non_green_terminal() {
     for reason in ["DoneAdvisory", "DoneAwaitingMerge", "Budget", "NoProgress"] {
         let env = setup("S-other", false);
         set_posture(&env, "S-other", true);
+        write_auto_merge_config(&env, "[auto_merge]\nenabled = true\n");
         let out = run_finalize_shimmed(&env, reason, GH_PR_358_LOGGING);
         assert!(out.status.success(), "{reason} must exit 0");
         assert!(

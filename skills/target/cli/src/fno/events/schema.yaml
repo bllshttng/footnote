@@ -244,7 +244,7 @@ event_types:
 
   - name: review_coverage
     retention: gate
-    description: "Per-reviewer coverage verdicts for one gate evaluation (x-0eaf). Coverage is the count of `reviewed` verdicts across two producer axes - github_app review objects and local_attestation head-pinned passes - and is distinct from the objection predicate (a quota refusal is not a pass, and silence is not coverage). Computed at read time from observed evidence, never cached. A head-pinned local pass makes coverage known even when the bot read failed, so a bot quota outage cannot wedge the autonomous path while a local lane reviewed."
+    description: "Per-reviewer coverage verdicts for one gate evaluation (x-0eaf). Coverage is the instrument result; review_state is the known outcome when that instrument succeeded. Counts remain diagnostic. A head-pinned local pass makes coverage known even when the bot read failed, so a bot quota outage cannot wedge the autonomous path while a local lane reviewed."
     sources: [target, hook]
     data:
       required: [pr, coverage, verdicts, head_sha]
@@ -256,6 +256,10 @@ event_types:
           type: string
           enum: [covered, uncovered, unknown]
           description: "`covered` (count > 0) carries a count in reviewed_count; `uncovered` is a real, known zero; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt). `uncovered` was added in x-5b99: a zero count previously serialized as the string `covered`, so `coverage: covered` and `reviewed_count: 0` co-occurred on three PRs in flight and the reassuring WORD sat beside the honest NUMBER. Additive for every reader, all of which already test `covered AND count > 0`, so a historical `covered` event with a zero count keeps reading as not-covered."
+        review_state:
+          type: string
+          enum: [reviewed, unreviewed, reviewer_refused]
+          description: "Known review outcome when the evidence read succeeded. reviewed wins when any current non-human verdict counts; otherwise reviewer_refused wins when a configured reviewer refused; otherwise unreviewed. Omitted when coverage is unknown so transport failure never becomes a known review outcome."
         reviewed_count:
           type: integer
           description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). A verdict counts only while its freshness is not `stale`. Present whenever coverage is covered or uncovered (omitted only on unknown)."

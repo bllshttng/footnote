@@ -135,6 +135,19 @@ fn coverage_exists(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn coverage_review_state(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| {
+            event.get("type").and_then(|value| value.as_str()) == Some("review_coverage")
+        })?
+        .pointer("/data/review_state")?
+        .as_str()
+        .map(str::to_string)
+}
+
 fn fixture(parent: &Path, name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
     let cwd = parent.join(name);
     fs::create_dir_all(cwd.join(".fno")).unwrap();
@@ -239,6 +252,12 @@ fn every_reachable_path_produces_an_event() {
                             coverage_exists(&project) || coverage_exists(&global),
                             "stop-hook path emitted no coverage event; decision: {json}"
                         );
+                        assert_eq!(
+                            coverage_review_state(&project)
+                                .or_else(|| coverage_review_state(&global))
+                                .as_deref(),
+                            Some("unreviewed")
+                        );
                         proven += 1;
                     }
                     "a human running the verb by hand" => {
@@ -261,6 +280,12 @@ fn every_reachable_path_produces_an_event() {
                         assert!(
                             coverage_exists(&project) || coverage_exists(&global),
                             "verb path emitted no coverage event"
+                        );
+                        assert_eq!(
+                            coverage_review_state(&project)
+                                .or_else(|| coverage_review_state(&global))
+                                .as_deref(),
+                            Some("unreviewed")
                         );
                         proven += 1;
                     }
@@ -386,6 +411,30 @@ fn new_reader_sites_must_join_the_table() {
         reviews.contains("\"review-coverage\""),
         "the recompute helper no longer invokes the review-coverage verb"
     );
+
+    let adapter = fs::read_to_string(pr_dir.join("_internal_gh.py")).unwrap();
+    assert!(
+        adapter.contains("_coverage_reviews")
+            && adapter.contains("/pulls/{number}/reviews")
+            && adapter.contains("/issues/{number}/comments"),
+        "coverage producer no longer composes both REST evidence surfaces"
+    );
+    let finalize = fs::read_to_string(manifest_dir.join("src/finalize.rs")).unwrap();
+    assert!(
+        finalize.contains("fno-gh-coverage") && finalize.contains("bot_verdict"),
+        "finalize fallback stopped consuming the shared normalized evidence and predicate"
+    );
+    for consumer in ["_status.py", "_merge.py"] {
+        let source = fs::read_to_string(pr_dir.join(consumer)).unwrap();
+        assert!(
+            source.contains("reviewer_refused"),
+            "{consumer} does not consume the aggregate reviewer-refused state"
+        );
+        assert!(
+            !source.contains("usage limits for code reviews"),
+            "{consumer} grew a second body classifier instead of consuming review_state"
+        );
+    }
 }
 
 /// Row-to-path: a row may not name a path that does not exist. The other two

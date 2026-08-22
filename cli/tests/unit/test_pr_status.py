@@ -550,7 +550,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
         "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42")
@@ -580,7 +580,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         },
         "optional_reviews": [],
         "optional_reviews_unresolved": 0,
-        "review_coverage": {"coverage": "covered", "reviewed_count": 2},
+        "review_coverage": {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
         "review_activity": {
             "blocker": "",
             "detail": "",
@@ -617,7 +617,7 @@ def test_dispatch_hold_removes_green_pr_from_ready_set(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
         "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2, "head_sha": "abc"},
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "abc"},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     monkeypatch.setattr(
@@ -684,6 +684,35 @@ def test_ready_is_false_when_coverage_is_uncovered(monkeypatch, capsys):
     assert "review_coverage_uncovered" in out["ready_blockers"]
 
 
+def test_ready_names_reviewer_refused_and_the_reviewer(monkeypatch, capsys):
+    import json
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "uncovered",
+            "review_state": "reviewer_refused",
+            "reviewed_count": 0,
+            "verdicts": [
+                {
+                    "producer": "github_app",
+                    "name": "chatgpt-codex-connector",
+                    "verdict": "refused",
+                }
+            ],
+        },
+    )
+    _status.run_status("42")
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert out["ready"] is False
+    assert "review_coverage_reviewer_refused" in out["ready_blockers"]
+    assert "chatgpt-codex-connector" in captured.err
+    assert "reviewer_refused" in captured.err
+
+
 def _coverage_status_projection_fetch(monkeypatch, posted_state="SUCCESS", *, state="OPEN"):
     monkeypatch.setattr(
         _status,
@@ -744,8 +773,23 @@ def test_status_reposts_a_stale_green_when_computed_coverage_is_uncovered(
 @pytest.mark.parametrize(
     "posted_state, coverage",
     [
-        ("SUCCESS", {"coverage": "covered", "reviewed_count": 1, "head_sha": "1" * 40}),
-        ("FAILURE", {"coverage": "uncovered", "reviewed_count": 0}),
+        (
+            "SUCCESS",
+            {
+                "coverage": "covered",
+                "review_state": "reviewed",
+                "reviewed_count": 1,
+                "head_sha": "1" * 40,
+            },
+        ),
+        (
+            "FAILURE",
+            {
+                "coverage": "uncovered",
+                "review_state": "unreviewed",
+                "reviewed_count": 0,
+            },
+        ),
     ],
 )
 def test_status_does_not_repost_when_the_posted_state_agrees(
@@ -844,7 +888,7 @@ def test_ready_is_false_when_coverage_is_unknown(monkeypatch, capsys):
 
 def test_ready_treats_a_legacy_covered_zero_as_uncovered(monkeypatch, capsys):
     """Historical events serialize a real zero as `covered` with count 0;
-    every consumer tests both, so ready does too."""
+    without validated verdict state, ready still fails closed."""
     import json
 
     _green_fetch(monkeypatch)
@@ -880,7 +924,7 @@ def test_ready_blockers_name_the_ci_conjunct_too(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
         "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     monkeypatch.setattr(
@@ -928,7 +972,7 @@ def test_ready_reflects_mergeable(
     monkeypatch.setattr(
         _status,
         "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
     )
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
@@ -1003,6 +1047,7 @@ def test_ready_requires_the_local_code_review_pass_merge_does(monkeypatch, capsy
         "read_review_coverage",
         lambda pr, cwd, **kw: {
             "coverage": "covered",
+            "review_state": "reviewed",
             "reviewed_count": 1,
             "verdicts": [
                 {
@@ -1032,6 +1077,7 @@ def test_ready_passes_with_the_local_code_review_pass_present(monkeypatch, capsy
         "read_review_coverage",
         lambda pr, cwd, **kw: {
             "coverage": "covered",
+            "review_state": "reviewed",
             "reviewed_count": 1,
             "head_sha": "h1",
             "verdicts": [
@@ -1098,6 +1144,7 @@ def test_ready_names_a_stale_head_pin(monkeypatch, capsys):
         "read_review_coverage",
         lambda pr, cwd, **kw: {
             "coverage": "covered",
+            "review_state": "reviewed",
             "reviewed_count": 1,
             "head_sha": "h1",
         },
@@ -1117,7 +1164,7 @@ def test_ready_does_not_crash_on_a_non_integer_reviewed_count(monkeypatch, capsy
     monkeypatch.setattr(
         _status,
         "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": "2"},
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": "2"},
     )
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
@@ -1149,6 +1196,7 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
         "data": {
             "pr": 42,
             "coverage": "covered",
+            "review_state": "reviewed",
             "reviewed_count": 1,
             "head_sha": "h1",
             "verdicts": [
@@ -1239,13 +1287,14 @@ def test_read_review_coverage_from_events(tmp_path):
     events.parent.mkdir(parents=True)
     events.write_text(
         json.dumps(
-            {"type": "review_coverage", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "head_sha": "a"}}
+            {"type": "review_coverage", "data": {"pr": 7, "coverage": "covered", "review_state": "reviewed", "reviewed_count": 1, "head_sha": "a"}}
         )
         + "\n",
         encoding="utf-8",
     )
     assert read_review_coverage(7, cwd=str(tmp_path)) == {
         "coverage": "uncovered",
+        "review_state": "unreviewed",
         "reviewed_count": 0,
         "self_attested_count": None,
         "head_sha": "a",
@@ -1260,6 +1309,67 @@ def test_read_review_coverage_from_events(tmp_path):
         "head_sha": None,
         "stale_verdicts": [],
     }
+
+
+def test_shape_review_coverage_derives_state_from_validated_verdicts():
+    cases = [
+        (
+            {
+                "coverage": "covered",
+                "verdicts": [
+                    {
+                        "producer": "local_attestation",
+                        "name": "code-review",
+                        "verdict": "reviewed",
+                        "reviewed_sha": "abc",
+                        "freshness": "fresh",
+                    },
+                    {
+                        "producer": "github_app",
+                        "name": "chatgpt-codex-connector",
+                        "verdict": "refused",
+                    },
+                ],
+            },
+            "reviewed",
+        ),
+        (
+            {
+                "coverage": "uncovered",
+                "verdicts": [
+                    {
+                        "producer": "github_app",
+                        "name": "chatgpt-codex-connector",
+                        "verdict": "refused",
+                    }
+                ],
+            },
+            "reviewer_refused",
+        ),
+        (
+            {
+                "coverage": "uncovered",
+                "verdicts": [
+                    {
+                        "producer": "github_app",
+                        "name": "chatgpt-codex-connector",
+                        "verdict": "absent",
+                    }
+                ],
+            },
+            "unreviewed",
+        ),
+    ]
+    for event, expected in cases:
+        shaped = _reviews._shape_review_coverage(event, None, None)
+        assert shaped["review_state"] == expected
+
+    unknown = _reviews._shape_review_coverage(
+        {"coverage": "unknown", "review_state": "unreviewed", "verdicts": []},
+        None,
+        None,
+    )
+    assert "review_state" not in unknown
 
 
 def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
@@ -1283,6 +1393,7 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
                 "data": {
                     "pr": 826,
                     "coverage": "covered",
+                    "review_state": "reviewed",
                     "reviewed_count": 1,
                     "self_attested_count": 1,
                     "head_sha": "89bc0b91",
@@ -1335,6 +1446,7 @@ def test_refused_verdict_without_freshness_is_not_reported_stale(tmp_path):
                 "data": {
                     "pr": 1006,
                     "coverage": "covered",
+                    "review_state": "reviewed",
                     "reviewed_count": 1,
                     "head_sha": head,
                     "verdicts": [
@@ -1398,6 +1510,7 @@ def test_malformed_verdict_cannot_hide_beside_fresh_review(
                 "data": {
                     "pr": 1007,
                     "coverage": "covered",
+                    "review_state": "reviewed",
                     "reviewed_count": 1,
                     "head_sha": head,
                     "verdicts": [
@@ -1442,6 +1555,7 @@ def _review_coverage_event(tmp_path, pr: int, head: str, verdict: dict) -> None:
                 "data": {
                     "pr": pr,
                     "coverage": "covered",
+                    "review_state": "reviewed",
                     "reviewed_count": 1,
                     "head_sha": head,
                     "verdicts": [verdict],
@@ -1796,7 +1910,7 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
     monkeypatch.setattr(
         _status,
         "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42")
@@ -1827,7 +1941,7 @@ def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys
     monkeypatch.setattr(
         _status,
         "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42")
@@ -1872,6 +1986,7 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
                 "ts": "2026-08-14T03:00:00Z",
                 "type": "review_coverage",
                 "data": {"pr": pr_number, "coverage": "covered",
+                         "review_state": "reviewed",
                          "reviewed_count": 1, "head_sha": "abc",
                          "verdicts": [{"name": "code-review",
                                        "producer": "local_attestation",
@@ -2054,7 +2169,7 @@ def _run_status_with_activity(monkeypatch, capsys, activity, *, state="OPEN"):
     )
     _patch(
         "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 1, "head_sha": "abc123"},
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1, "head_sha": "abc123"},
     )
     _patch("_review_lane", lambda pr, cwd: False)
 

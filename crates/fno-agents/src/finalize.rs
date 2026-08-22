@@ -866,13 +866,19 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // before the merge is handed to GitHub. Same log-only fatality as the two
     // stamps above.
     let approved = m.auto_merge_approved.unwrap_or(false);
-    let (auto_merge_armed, auto_merge_blocked_reason) = if should_arm_auto_merge(&reason, approved)
-    {
-        match optional_review_block_reason(&cwd) {
-            None => arm_auto_merge(&cwd),
-            Some(blocked) => {
-                eprintln!("finalize: native auto-merge withheld: {blocked}");
-                (false, Some(blocked))
+    let should_arm = should_arm_auto_merge(&reason, approved);
+    let (auto_merge_armed, auto_merge_blocked_reason) = if should_arm {
+        if !crate::agents_config::auto_merge_enabled(&cwd) {
+            let blocked = "config.auto_merge.enabled=false".to_string();
+            eprintln!("finalize: native auto-merge withheld: {blocked}");
+            (false, Some(blocked))
+        } else {
+            match optional_review_block_reason(&cwd) {
+                None => arm_auto_merge(&cwd),
+                Some(blocked) => {
+                    eprintln!("finalize: native auto-merge withheld: {blocked}");
+                    (false, Some(blocked))
+                }
             }
         }
     } else {
@@ -881,7 +887,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // Without this, "approved but this terminal is ineligible" and "never
     // approved" are the same silence, and the event's `auto_merge_armed: false`
     // cannot tell them apart either.
-    if approved && !should_arm_auto_merge(&reason, approved) {
+    if approved && !should_arm {
         // x-0eaf: name the coverage reason when the autonomous path is declined.
         // The generic "not an arming terminal" hides WHY behind a vocabulary
         // term; an operator who armed auto-merge and sees it not fire needs to

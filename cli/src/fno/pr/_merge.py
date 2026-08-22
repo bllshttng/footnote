@@ -352,6 +352,19 @@ def _coverage_refused_reason(
     # safe whichever they are.
     raw = cov.get("verdicts")
     verdicts = raw if isinstance(raw, list) else []
+    refused = [
+        str(v.get("name") or "")
+        for v in verdicts
+        if isinstance(v, dict) and v.get("verdict") == "refused" and v.get("name")
+    ]
+    if cov.get("review_state") == "reviewer_refused":
+        who = ", ".join(refused) or "configured reviewer"
+        suffix = f" - `{self_review_hint}`" if self_review_hint else ""
+        return (
+            prefix
+            + f"reviewer-refused: {who} declined to review; run the review verb at HEAD"
+            + suffix
+        )
     absent = [
         str(v.get("name") or "")
         for v in verdicts

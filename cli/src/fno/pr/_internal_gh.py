@@ -1,8 +1,8 @@
 """Fixed-purpose ``gh`` adapter for the Rust PR readers.
 
-Metadata and CI are translated from the REST helpers. The remaining GraphQL
-shapes run through the serialized quota broker with a purpose fixed by the
-executable name, so an environment variable cannot promote a discretionary
+Metadata, CI, and review coverage are translated from REST helpers. Remaining
+GraphQL shapes run through the serialized quota broker with a purpose fixed by
+the executable name, so an environment variable cannot promote a discretionary
 read into the coverage reserve.
 """
 from __future__ import annotations
@@ -22,6 +22,7 @@ _METADATA_FIELDS = {
     "mergeable",
     "baseRefName",
 }
+_COVERAGE_FIELDS = {"reviews", "comments", "headRefOid", "baseRefName"}
 
 
 def _option(args: Sequence[str], name: str) -> str | None:
@@ -122,6 +123,110 @@ def _checks(
     return Result(0, json.dumps(rows) + "\n", "")
 
 
+def _rest_pages(
+    endpoint: str,
+    label: str,
+    *,
+    cwd: str | None,
+    runner: Callable,
+) -> tuple[list[dict] | None, str]:
+    rows: list[dict] = []
+    for page in range(1, 101):
+        result = runner(
+            ["gh", "api", f"{endpoint}?per_page=100&page={page}"], cwd=cwd
+        )
+        if not result.ok:
+            return None, f"{label} read failed: {_rest._rest_reason(result)}"
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None, f"{label} returned output that is not JSON"
+        if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
+            return None, f"{label} returned a value that is not a JSON array of objects"
+        rows.extend(payload)
+        if len(payload) < 100:
+            return rows, ""
+    return None, f"{label} exceeded the 100-page safety limit"
+
+
+def _login(row: dict) -> str:
+    user = row.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    return login if isinstance(login, str) else ""
+
+
+def _coverage_reviews(
+    args: Sequence[str], *, cwd: str | None, real_gh: str, runner: Callable
+) -> Result:
+    rest_runner = _rest_runner(real_gh, runner)
+    number, reason = _pr_number(args, cwd=cwd, runner=rest_runner)
+    if number is None:
+        return Result(1, "", reason)
+    slug = _option(args, "--repo") or _rest._repo_slug(cwd, rest_runner)
+    if not slug:
+        return Result(1, "", "could not resolve owner/repo from `git remote get-url origin`")
+    info, reason = _rest.fetch_pr_info_rest(
+        str(number), cwd=cwd, runner=rest_runner, repo=slug
+    )
+    if info is None:
+        return Result(1, "", reason)
+
+    reviews, reason = _rest_pages(
+        f"repos/{slug}/pulls/{number}/reviews",
+        "pull reviews",
+        cwd=cwd,
+        runner=rest_runner,
+    )
+    if reviews is None:
+        return Result(1, "", reason)
+    comments, reason = _rest_pages(
+        f"repos/{slug}/issues/{number}/comments",
+        "issue comments",
+        cwd=cwd,
+        runner=rest_runner,
+    )
+    if comments is None:
+        return Result(1, "", reason)
+
+    normalized_reviews = [
+        {
+            "author": {"login": _login(row)},
+            "state": row.get("state") if isinstance(row.get("state"), str) else "",
+            "submittedAt": (
+                row.get("submitted_at")
+                if isinstance(row.get("submitted_at"), str)
+                else ""
+            ),
+            "commit": {
+                "oid": row.get("commit_id")
+                if isinstance(row.get("commit_id"), str)
+                else ""
+            },
+            "body": row.get("body") if isinstance(row.get("body"), str) else "",
+        }
+        for row in reviews
+    ]
+    normalized_comments = [
+        {
+            "author": {"login": _login(row)},
+            "createdAt": (
+                row.get("created_at")
+                if isinstance(row.get("created_at"), str)
+                else ""
+            ),
+            "body": row.get("body") if isinstance(row.get("body"), str) else "",
+        }
+        for row in comments
+    ]
+    payload = {
+        "reviews": normalized_reviews,
+        "comments": normalized_comments,
+        "headRefOid": info["head_sha"],
+        "baseRefName": info["base_ref"],
+    }
+    return Result(0, json.dumps(payload) + "\n", "")
+
+
 def execute(
     purpose: str,
     args: Sequence[str],
@@ -140,6 +245,12 @@ def execute(
             fields = set((_option(args, "--json") or "").split(","))
             if fields and fields <= _METADATA_FIELDS:
                 return _metadata(args, cwd=cwd, real_gh=gh, runner=runner)
+            if (
+                purpose == "coverage"
+                and {"reviews", "comments"} <= fields
+                and fields <= _COVERAGE_FIELDS
+            ):
+                return _coverage_reviews(args, cwd=cwd, real_gh=gh, runner=runner)
             return _quota.execute_graphql(
                 purpose, args, runner=runner, real_gh=gh, cwd=cwd
             )
