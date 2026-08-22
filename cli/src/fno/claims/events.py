@@ -198,6 +198,7 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
         "contended": int(summary["contended"]),
         "reap_failed": len(summary["reap_failed"]),
         "apply": bool(summary["apply"]),
+        "lock_mirror_cleared": int(summary["lock_mirror_cleared"]),
         "roots": [str(r) for r in summary["roots"]],
     }
     _emit(_build("claim_reap_swept", data))

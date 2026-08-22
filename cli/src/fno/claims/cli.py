@@ -1249,23 +1249,18 @@ def _node_settlement(reading: Optional[RosterReading] = None):
                     # wrong answer, and unknown keeps.
                     cache["terminal"] = None
                     return None
-                from fno.graph.statuses import TERMINAL_RUNGS
+                from fno.graph.statuses import is_terminal_entry
                 from fno.graph.store import read_graph
                 from fno.paths import graph_json
 
-                # Closure signals, not the status string: read_graph does not
-                # re-derive status, and a row written before a status
-                # vocabulary change still carries the field the derivation
-                # keys on.
+                # is_terminal_entry, not a bare completed_at test: read_graph
+                # does not run the recompute migration, so a legacy
+                # "deferred:<ts>" row still carries deferral inside
+                # completed_at, and deferral is a returnable rung.
                 cache["terminal"] = frozenset(
                     e.get("id")
                     for e in read_graph(graph_json())
-                    if isinstance(e, dict)
-                    and (
-                        e.get("completed_at")
-                        or e.get("superseded_by")
-                        or e.get("status") in TERMINAL_RUNGS
-                    )
+                    if is_terminal_entry(e)
                 )
             except Exception:  # noqa: BLE001 - an unreadable graph proves nothing
                 cache["terminal"] = None

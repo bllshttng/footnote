@@ -1636,8 +1636,11 @@ def reap_dead_claims(
     # worker's node keeps `locked_by` until LOCK_TTL_HOURS staleness clears
     # it lazily, reading `claimed` - held out of dispatch - for hours after
     # the reap. Dry runs never write, so they never reach this either.
+    # Default sweeps only: an explicit --root sweep reads SOMEONE ELSE'S
+    # claims tree, and this process's graph has no ownership relationship to
+    # those node ids.
     lock_mirror_cleared = 0
-    if apply and settled_nodes:
+    if apply and settled_nodes and roots is None:
         lock_mirror_cleared = _clear_lock_mirror_for_reaped(settled_nodes)
 
     summary: dict[str, Any] = {
@@ -1707,11 +1710,16 @@ def _clear_lock_mirror_for_reaped(node_ids: list[str]) -> int:
 
     def _clear(entries: list[dict]) -> list[dict]:
         from fno.claims.core import claim_path
+        from fno.claims.io import dedup_claims_roots
 
         for e in entries:
             if not (isinstance(e, dict) and e.get("id") in wanted):
                 continue
-            if claim_path(f"node:{e['id']}", root=claims_root_for(f"node:{e['id']}")).exists():
+            key = f"node:{e['id']}"
+            if any(
+                claim_path(key, root=r).exists()
+                for r, _d in dedup_claims_roots([claims_root_for(key), None])
+            ):
                 continue  # re-acquired between archive and this clear
             e["locked_by"] = None
             e["claimed_at"] = None

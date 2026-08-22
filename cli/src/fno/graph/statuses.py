@@ -44,6 +44,24 @@ TERMINAL_RUNGS: frozenset[str] = frozenset({"done", "superseded"})
 _LEGACY_DEFER_PREFIX = "deferred:"
 
 
+def is_terminal_entry(entry: object) -> bool:
+    """Is this entry closed for good (done/superseded), from its own fields?
+
+    The derived status string plus the two closure signals it keys on, minus
+    the legacy ``deferred:`` sentinel: a pre-migration row carries deferral
+    inside ``completed_at``, and deferral is a RETURNABLE rung, so a bare
+    truthiness check reads it as closed. ``read_graph`` does not run the
+    recompute migration, so a raw reader must use this helper, never a bare
+    ``completed_at`` test.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("status") in TERMINAL_RUNGS or entry.get("superseded_by"):
+        return True
+    completed = entry.get("completed_at")
+    return bool(completed) and not str(completed).startswith(_LEGACY_DEFER_PREFIX)
+
+
 def _rung_to_graph_status() -> dict:
     """Plan rung -> derived graph status. Total over ``Rung`` by construction.
 

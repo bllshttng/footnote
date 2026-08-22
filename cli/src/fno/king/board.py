@@ -645,6 +645,8 @@ def _read_claimed_nodes(
 
     nodes: list[dict] = []
     holders: set[str] = set()
+    from fno.graph.statuses import TERMINAL_RUNGS
+
     for node_id, holder in held:
         read = _run_json([*_fno(), "backlog", "get", node_id], timeout=timeout)
         if not read.ok:
@@ -655,6 +657,11 @@ def _read_claimed_nodes(
             continue
         node = read.payload if isinstance(read.payload, dict) else None
         if not node:
+            continue
+        # A terminal node's claim is a leak the closure release or the
+        # node-aware reaper owns. Drop it at the source so it never reaches a
+        # queue AND its holder never costs an activity transcript read.
+        if node.get("status") in TERMINAL_RUNGS:
             continue
         nodes.append(node)
         if node.get("priority") in KING_PRIORITIES:

@@ -154,14 +154,6 @@ class GitHubIssuesTracker:
             if any(frag in low for frag in _NOT_FOUND_FRAGMENTS):
                 raise NodeNotFound(id)
             raise TrackerError(f"gh issue close failed for {id}: {err.strip()}")
-        # This backend closes the issue without touching graph.json, so the
-        # store's closure-release hook never fires for it. Release the node
-        # claim here so closure frees the lock on this path too (x-94f8). The
-        # id is a GitHub issue ref, not a graph node id, so only the claim
-        # side is touched; there is no lock mirror to clear.
-        from fno.graph.store import release_node_claim_at_closure
-
-        release_node_claim_at_closure(id, rung="done")
 
     @staticmethod
     def _parse_id(id_str: str) -> tuple[str, str, int]:

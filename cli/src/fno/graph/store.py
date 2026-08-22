@@ -855,6 +855,9 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     from fno.paths import vault_root
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Terminal transitions this mutation collects for the post-flock claim
+    # release (see the closure hook near the recompute below).
+    closure_releases: list[tuple[str, str]] = []
     fd = _acquire_flock(_graph_lock_path(path))
     try:
         try:
@@ -942,8 +945,18 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         # and GraphTracker.close all persist through here, and the Rust daemon
         # shells out to `fno backlog done` - so the release lives here rather
         # than on any one caller, where the other N-1 paths would keep leaking.
+        # The ids are only COLLECTED here; the release itself runs after the
+        # flock drops, because it resolves claims roots (which can shell out
+        # to git) and waits on recovery mutexes - none of that belongs inside
+        # the untimeouted graph lock every backlog verb shares.
         from fno.graph.statuses import TERMINAL_RUNGS
 
+        try:
+            from fno.paths import graph_json as _configured_graph
+
+            _owns_graph = path.resolve() == _configured_graph().resolve()
+        except Exception:  # noqa: BLE001 - an unresolvable config owns nothing
+            _owns_graph = False
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -961,7 +974,12 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             # (_normalize_lock_fields keeps it for exactly that reason).
             entry["locked_by"] = None
             entry["claimed_at"] = None
-            release_node_claim_at_closure(entry_id, rung=rung)
+            # Only the process's CONFIGURED graph owns the global node-id
+            # space its claims coordinate on. A scratch or explicitly-passed
+            # graph (tests, capture flows) closing a node must not release a
+            # same-id claim belonging to the configured graph's fleet.
+            if _owns_graph:
+                closure_releases.append((entry_id, str(rung)))
         # Status-forward key order + fresh children index. Runs after
         # recompute_statuses so status (top-level and inside child summaries)
         # is already current.
@@ -1036,9 +1054,14 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             touch_nudge()
         except Exception:
             pass
-        return entries
+        result = entries
     finally:
         _release_flock(fd)
+    # Claim releases run AFTER the flock drops: root resolution and recovery
+    # mutexes never hold the graph lock (see the closure hook above).
+    for entry_id, rung in closure_releases:
+        release_node_claim_at_closure(entry_id, rung=rung)
+    return result
 
 
 def append_progress_note(

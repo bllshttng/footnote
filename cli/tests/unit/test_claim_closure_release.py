@@ -80,6 +80,10 @@ class TestClosureReleaseHook:
                 }
             ],
         )
+        # The release fires only when the mutated graph IS the process's
+        # configured graph (a scratch graph closing a same-id node must not
+        # release the configured fleet's claim).
+        monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
         _write_claim(
             "node:x-doen",
             holder=HOLDER,
@@ -88,6 +92,25 @@ class TestClosureReleaseHook:
             root=global_root,
         )
         return graph, global_root
+
+    def test_scratch_graph_closure_does_not_release(self, tmp_path, monkeypatch):
+        """A non-configured graph (tests, capture flows) owns no global claim:
+        its closure clears only its own mirror."""
+        graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "fno.paths.graph_json", lambda: tmp_path / "the-configured-one.json"
+        )
+
+        def _close(entries):
+            for e in entries:
+                if e["id"] == "x-doen":
+                    e["completed_at"] = "2026-08-21T03:16:00Z"
+            return entries
+
+        locked_mutate_graph(graph, _close)
+        assert read_graph(graph)[0]["status"] == "done"
+        assert read_graph(graph)[0]["locked_by"] is None
+        assert claim_path("node:x-doen", root=global_root).exists()
 
     def test_done_releases_claim_and_clears_mirror(self, tmp_path, monkeypatch):
         graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
@@ -235,6 +258,28 @@ class TestNodeSettlement:
         )
         assert verdict is True and bucket == ""
 
+    def test_legacy_defer_sentinel_is_not_terminal(self, tmp_path, monkeypatch):
+        """A pre-migration row carries deferral inside completed_at; deferral
+        is a RETURNABLE rung, and settling a live claim on it would hand the
+        node to a second worker mid-deferral."""
+        graph = _make_graph(
+            tmp_path,
+            [{"id": "x-gone", "completed_at": "deferred:2026-08-01T00:00:00Z"}],
+        )
+        monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+        settlement = _node_settlement(_reading({"x-gone": [_row()]}))
+        # The holder is on THIS node and the lease reads unexpired to the
+        # roster arm's gate; nothing here may settle.
+        claim = Claim(
+            key="node:x-gone",
+            holder="target-session:sid-a",
+            acquired_at=now_ms(),
+            expires_at=now_ms() + 3_600_000,
+            pid=os.getpid(),
+            host=socket.gethostname(),
+        )
+        assert settlement(claim, now=now_ms()) is None
+
     def test_holder_on_a_different_node_settles_an_expired_lease(self):
         settlement = _node_settlement(_reading({"x-other": [_row()]}))
         assert settlement(_expired_live_claim(), now=now_ms()) is True
@@ -369,6 +414,8 @@ def test_stalled_holder_still_names_a_live_open_node():
 
 class TestReapMirrorClear:
     def _dead_claim_and_graph(self, tmp_path, monkeypatch):
+        claims_root = tmp_path / "claims-home"
+        monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
         graph = _make_graph(
             tmp_path,
             [
@@ -388,22 +435,34 @@ class TestReapMirrorClear:
             holder=HOLDER,
             pid=_dead_pid(),
             expires_at_ms=now_ms() - 3_600_000,
-            root=tmp_path,
+            root=claims_root,
         )
-        return graph
+        return graph, claims_root
 
     def test_apply_clears_the_mirror(self, tmp_path, monkeypatch):
-        graph = self._dead_claim_and_graph(tmp_path, monkeypatch)
-        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+        graph, _root = self._dead_claim_and_graph(tmp_path, monkeypatch)
+        # No roots=: the DEFAULT sweep, which is the only sweep that owns
+        # this process's graph.
+        summary = reap_dead_claims(apply=True)
         assert summary["reaped"] == 1
         assert summary["lock_mirror_cleared"] == 1
         out = read_graph(graph)[0]
         assert out["locked_by"] is None
         assert out["claimed_at"] is None
 
+    def test_explicit_root_sweep_never_touches_the_graph(self, tmp_path, monkeypatch):
+        """--root sweeps someone else's claims tree; the mirror belongs to
+        this graph and stays."""
+        graph, claims_root = self._dead_claim_and_graph(tmp_path, monkeypatch)
+        summary = reap_dead_claims(roots=[claims_root], apply=True)
+        assert summary["reaped"] == 1
+        assert summary["lock_mirror_cleared"] == 0
+        out = read_graph(graph)[0]
+        assert out["locked_by"] == HOLDER
+
     def test_dry_run_never_touches_the_graph(self, tmp_path, monkeypatch):
-        graph = self._dead_claim_and_graph(tmp_path, monkeypatch)
-        summary = reap_dead_claims(roots=[tmp_path], apply=False)
+        graph, _root = self._dead_claim_and_graph(tmp_path, monkeypatch)
+        summary = reap_dead_claims(apply=False)
         assert summary["would_reap"] == 1
         assert summary["lock_mirror_cleared"] == 0
         out = read_graph(graph)[0]

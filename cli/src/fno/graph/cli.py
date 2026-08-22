@@ -7892,6 +7892,15 @@ def _done_via_seam(
     _cascade_close_external_parents(tracker, task_id)
     typer.echo(f"Marked {task_id} done")
 
+    # Closure releases the node claim at the SEAM, right after the one close,
+    # so every tracker backend inherits it (github today; the graph backend
+    # gets the same release from the store's closure hook, which an external
+    # close never reaches). Placing it in one backend's close() would be a
+    # guard on one of N reachable implementations.
+    from fno.graph.store import release_node_claim_at_closure
+
+    release_node_claim_at_closure(task_id, rung="done")
+
     if sc.plan_path and not skip_stamp:
         _stamp_and_graduate_plan(sc.plan_path, url=evidence_pr_url, session_id=None)
 

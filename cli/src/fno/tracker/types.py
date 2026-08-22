@@ -111,5 +111,12 @@ class NodeTracker(Protocol):
         This is the single write-back footnote makes to a tracker, issued at
         node closure. A PR link is a comment or a native issue-PR link, not a
         field write, so it does not appear on this interface.
+
+        INVARIANT on every implementation: closure releases the tracker
+        backend's own ``node:<id>`` claim. A backend that cannot inherit the
+        release from the graph store's closure hook (any external backend)
+        gets it from the seam caller right after this method returns - the
+        release is not the backend's job to remember, but closing without
+        releasing IS the leak this interface exists never to reintroduce.
         """
         ...

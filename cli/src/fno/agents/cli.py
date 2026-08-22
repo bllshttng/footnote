@@ -346,18 +346,26 @@ def _spawn_guard_decision(
             # invoke the real `fno agents spawn`, which runs this guard again
             # WITH a reservation, and the recovery happens there - at the moment
             # of launch, by the caller that is about to launch.
-            from fno.claims.cli import _abandonment_probe, _node_settlement, read_roster
+            from fno.claims.cli import (
+                RosterReading,
+                _abandonment_probe,
+                _node_settlement,
+                read_roster,
+            )
 
             # The roster is READ HERE, outside the recovery mutex. Reading it
             # under the lock shells out to the harness while holding a mutex
             # `compare_and_rebind` waits only five seconds for, so a peer's
             # probe could make the worker's own `fno do target init` handover fail
             # as claim-held-by-other. Handing the reading in leaves nothing
-            # under the lock but a dictionary lookup.
+            # under the lock but a dictionary lookup. A FAILED read is handed
+            # down as an honestly unconsulted reading for the same reason:
+            # both instruments would otherwise lazily re-read inside the
+            # mutex, and unknown keeps is the safe answer anyway.
             try:
                 reading = read_roster()
             except Exception:  # noqa: BLE001 - an unread roster proves nothing
-                reading = None
+                reading = RosterReading(False, 0, {}, "roster read failed before the guard")
             prior, _bucket = _reclaim_if_provably_dead(
                 node_key,
                 probe=_abandonment_probe(reading),
