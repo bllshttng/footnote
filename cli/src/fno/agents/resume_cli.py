@@ -500,6 +500,24 @@ def _resume_claude_wake(
     # reached Working as a success, the same pre-fix shape a sigma review
     # already caught below for the exec-based harnesses' chdir failure.
     if not skipped and after.lower() != _WAKE_TARGET_STATUS.lower():
+        # A wake cannot reach a session that has exited. An adopted row carries
+        # a uuid and a short_id but no answering supervisor, so it takes the
+        # live arm, burns every attempt against a process that is not there,
+        # and lands here reading "did not reach Working" -- which describes a
+        # sluggish session, not a dead one. `before` is read from the
+        # supervisor's own state map, and a short_id it has no row for reads
+        # "unknown": that is the positive marker for "nothing answered", not an
+        # inference from the failure itself. The liveness classifier upstream
+        # is deliberately left alone; widening or narrowing it moves every
+        # caller and risks a second writer on one transcript.
+        relaunch = ""
+        if before.lower() == "unknown" and session_id:
+            relaunch = (
+                f"\nNo process answered for {short_id}. A wake cannot reach a "
+                "session that has exited.\n"
+                "Relaunch the conversation instead: fno agents spawn --resume "
+                f"{session_id} --cwd {cwd}\n"
+            )
         return ResumeResult(
             exit_code=16,
             stderr=(
@@ -507,7 +525,8 @@ def _resume_claude_wake(
                 f"{_WAKE_TARGET_STATUS!r} after {_WAKE_ATTEMPTS} wake "
                 f"attempt(s): before={before!r} after={after!r}"
                 + (f" ({last_err})" if last_err else "")
-                + ".\n"
+                + "."
+                + (relaunch or "\n")
             ),
         )
 
