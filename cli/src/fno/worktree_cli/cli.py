@@ -19,7 +19,7 @@ from typing import Optional
 import typer
 
 from fno._subprocess_util import propagate_returncode
-from fno.paths import resolve_repo_root
+from fno.paths import resolve_plugin_script, resolve_repo_root
 
 app = typer.Typer(
     name="worktree",
@@ -30,7 +30,7 @@ app = typer.Typer(
 
 def _run_lifecycle(*args: str) -> int:
     repo_root = Path(resolve_repo_root())
-    script = repo_root / "scripts" / "lib" / "worktree-lifecycle.sh"
+    script = resolve_plugin_script("scripts/lib/worktree-lifecycle.sh")
     if not script.exists():
         typer.echo(f"worktree-lifecycle script not found at {script}", err=True)
         return 2
