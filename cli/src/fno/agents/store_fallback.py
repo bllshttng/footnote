@@ -498,6 +498,12 @@ def heal_from_harness_store(
             f"WARN: resolved {token!r} from the {hit.harness} store but could not "
             f"register it ({exc}); the row will appear on a later resolution.\n"
         )
+        # Same parent edge the registered row above now stamps (x-132c): the
+        # adopting session vouches for this row, and this fallback copy reaches
+        # the caller without passing register_session's stamping path.
+        from fno.agents.dispatch import _capture_parent_edge
+
+        _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()
         entry = AgentEntry(
             name=_fallback_name(hit.session_id),
             cwd=hit.cwd,
@@ -506,6 +512,9 @@ def heal_from_harness_store(
             harness_session_id=hit.session_id,
             status="orphaned",
             short_id=short_id,
+            spawned_by_session=_sb_session,
+            spawned_by_harness=_sb_harness,
+            spawned_by_cwd=_sb_cwd,
             # Same fact as the registered row above, and it has to be stated
             # here too: this one is handed straight back to the caller when
             # registration fails, so it reaches a reader without ever passing
