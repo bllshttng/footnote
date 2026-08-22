@@ -75,7 +75,7 @@ native plan that already contains a section is reused, never duplicated.
 
 1. A local atomic `mkdir` lock (`<sidecar>.consume.lock`) — race-safe even when
    `fno` is absent. Stale locks (>30s, holder died mid-flip) are stolen.
-2. An `fno claim` (`pending-plan:<slug>`) for cross-session/host coordination,
+2. An `fno agents claim` (`pending-plan:<slug>`) for cross-session/host coordination,
    **released once the flip lands** so a later same-slug re-approval is not
    falsely blocked by the 30m TTL.
 

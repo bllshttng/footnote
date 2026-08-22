@@ -1,4 +1,4 @@
-"""fno worker ship - idempotent PR creation.
+"""fno agents worker ship - idempotent PR creation.
 
 - Calls `gh pr list --head <branch>` first to detect an existing PR.
 - If found, updates artifact with existing PR number (no duplicate).

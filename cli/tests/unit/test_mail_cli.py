@@ -1,4 +1,4 @@
-"""Integration tests for the `fno mail` CLI surface (ab-cee91152).
+"""Integration tests for the `fno agents mail` CLI surface (ab-cee91152).
 
 Messaging is one namespace over the jsonl-canon bus log: `mail send` publishes
 a durable envelope; `mail unread`/`ack` are the per-recipient cursor consume;
@@ -72,16 +72,16 @@ def test_send_then_unread_then_ack(runner, mailbox):
     )
     assert sent.exit_code == 0, sent.output
 
-    listing = runner.invoke(app, ["mail", "unread", "--name", "web", "--json"])
+    listing = runner.invoke(app, ["agents", "mail", "unread", "--name", "web", "--json"])
     assert listing.exit_code == 0, listing.output
     msgs = json.loads(listing.stdout.strip().splitlines()[-1])
     assert [m["body"] for m in msgs] == ["build is green"]
     msg_id = msgs[0]["id"]
 
-    acked = runner.invoke(app, ["mail", "ack", msg_id, "--name", "web"])
+    acked = runner.invoke(app, ["agents", "mail", "ack", msg_id, "--name", "web"])
     assert acked.exit_code == 0, acked.output
 
-    after = runner.invoke(app, ["mail", "unread", "--name", "web", "--json"])
+    after = runner.invoke(app, ["agents", "mail", "unread", "--name", "web", "--json"])
     assert json.loads(after.stdout.strip().splitlines()[-1]) == []
 
 
@@ -161,7 +161,7 @@ def test_named_agent_heads_up_resolves_to_canonical_drain_handle(
     ]
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     assert [item["body"] for item in json.loads(drained.stdout)] == [
         f"Migration is ready\n{FNO_MAIL_TRAILER}"
@@ -296,7 +296,7 @@ def test_rebuild_render_regenerates_from_log(runner, mailbox):
         p.unlink()
     assert list(inbox.glob("*.md")) == []
 
-    res = runner.invoke(app, ["mail", "rebuild-render", "web", "--json"])
+    res = runner.invoke(app, ["agents", "mail", "rebuild-render", "web", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout.strip().splitlines()[-1])
     assert payload["threads"] == 1
@@ -344,14 +344,14 @@ def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
     _seed_bus_message(to="019f48e1", from_="claude-web", body="ack from K")
 
-    res = runner.invoke(app, ["mail", "drain-self", "--json"])
+    res = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout.strip().splitlines()[-1])
     assert [m["body"] for m in payload] == [f"ack from K\n{FNO_MAIL_TRAILER}"]
     assert payload[0]["to"] == "019f48e1"
 
     # Ack advanced the cursor: a second drain sees nothing (not re-surfaced).
-    again = runner.invoke(app, ["mail", "drain-self", "--json"])
+    again = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert json.loads(again.stdout.strip().splitlines()[-1]) == []
 
 
@@ -361,10 +361,10 @@ def test_drain_self_human_render_surfaces_id_and_reply_hint(runner, mailbox, mon
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
     h = _seed_bus_message(to="019f48e1", from_="claude-web", body="need a decision")
 
-    res = runner.invoke(app, ["mail", "drain-self"])  # human path (no --json)
+    res = runner.invoke(app, ["agents", "mail", "drain-self"])  # human path (no --json)
     assert res.exit_code == 0, res.output
     assert f"id:{h.thread_id}" in res.output
-    assert "fno mail reply --to <id>" in res.output
+    assert "fno agents mail reply --to <id>" in res.output
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +384,7 @@ def test_legacy_addressed_mail_is_not_drained(runner, mailbox, monkeypatch):
     _seed_bus_message(to="019f48e1", from_="web", body="canonical")
     _seed_bus_message(to="4bcf4ae4", from_="web", body="legacy suffix")
 
-    res = runner.invoke(app, ["mail", "drain-self", "--json"])
+    res = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     bodies = [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])]
     assert "retired form" not in bodies
@@ -412,7 +412,7 @@ def test_send_target_may_be_short_id_shaped(runner, mailbox):
 
     # End to end: the target resolves nowhere, so it must fail with the
     # unknown-handle error, NOT the name-shape one.
-    res = runner.invoke(app, ["mail", "send", "deadbeef", "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["agents", "mail", "send", "deadbeef", "hi", "--from-name", "web"])
     assert "must not match short-id shape" not in (res.stdout + (res.stderr or ""))
 
 
@@ -431,7 +431,7 @@ def test_drain_self_no_harness_env_is_noop(runner, mailbox, monkeypatch):
     for var in ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
                 "GEMINI_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
-    res = runner.invoke(app, ["mail", "drain-self"])
+    res = runner.invoke(app, ["agents", "mail", "drain-self"])
     assert res.exit_code == 0
     assert res.stdout.strip() == ""
 
@@ -492,7 +492,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
 
     # The codex session drains its own handle and sees the message.
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "019f48e1"
@@ -518,7 +518,7 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
 
     # The audit row is non-deliverable: drain-self sees nothing for the handle.
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload == []
@@ -590,7 +590,7 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     assert "ping" in calls[0][1]  # the wrapped <fno_mail> envelope, not raw text
 
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert json.loads(drained.stdout.strip().splitlines()[-1]) == []
 
 
@@ -614,7 +614,7 @@ def test_us7b_mux_pane_send_failure_falls_closed_to_durable(
     assert len(calls) == 1
 
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and "ping" in payload[0]["body"]
 
@@ -685,7 +685,7 @@ def test_us7b_non_live_entry_never_pane_sends(
     assert calls == []  # the stale pane was never written to
 
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and "ping" in payload[0]["body"]
 
@@ -732,7 +732,7 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
     assert "queued (durable)" in sent.output
 
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and "ping" in payload[0]["body"]
 
@@ -788,7 +788,7 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
 
     # The bg worker drains its own handle and sees the message (stamp == drain key).
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "9a063cd3"
@@ -811,7 +811,7 @@ def test_us3_rostered_claude_hosted_short_circuits_durable(
 
     # No durable thread was written.
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload == []
 
@@ -844,11 +844,11 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sender_sid)
 
     # No --from-name: from + model are auto-stamped from the invoking session.
-    sent = runner.invoke(app, ["mail", "send", "9a063cd3", "hello"])
+    sent = runner.invoke(app, ["agents", "mail", "send", "9a063cd3", "hello"])
     assert sent.exit_code == 0, sent.output
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
     assert 'from="abcd1234"' in body
     assert 'model="claude-opus-4-8"' in body
@@ -893,7 +893,7 @@ def test_mailbox_fixture_neutralizes_ambient_bus_dir(runner, monkeypatch, tmp_pa
     assert sent.exit_code == 0, sent.output
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "9a063cd3"
     assert "hi bg worker" in payload[0]["body"]
@@ -949,9 +949,9 @@ def test_full_and_legacy_ambient_self_queue_to_canonical_without_inject(
         "fno.agents.dispatch._mail_inject_codex",
         lambda *_a, **_k: pytest.fail("self-send attempted live injection"),
     )
-    sent = runner.invoke(app, ["mail", "send", token, "note", "--from-name", "web"])
+    sent = runner.invoke(app, ["agents", "mail", "send", token, "note", "--from-name", "web"])
     assert sent.exit_code == 0, sent.output
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "019fb417"
 
@@ -976,10 +976,10 @@ def test_unreadable_store_full_self_id_still_queues_to_canonical(
         lambda *_a, **_k: pytest.fail("self-send attempted live injection"),
     )
 
-    sent = runner.invoke(app, ["mail", "send", sid, "note", "--from-name", "web"])
+    sent = runner.invoke(app, ["agents", "mail", "send", sid, "note", "--from-name", "web"])
 
     assert sent.exit_code == 0, sent.output
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "019fb417"
 
@@ -1014,6 +1014,6 @@ def test_live_discovered_ambient_self_queues_canonical_without_inject_or_mux(
 
     cli._name_lane_send("note", from_name="web", resolved=own_session)
 
-    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
     assert payload and payload[0]["to"] == "019fb417"

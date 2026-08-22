@@ -43,7 +43,7 @@ caller parks and the predecessor's state and claims are preserved by
 construction.
 
 Continuation is allowed only when `revalidate` returns ok AND the successor
-acquires `node:<id>` through the canonical claim primitive (`fno claim` /
+acquires `node:<id>` through the canonical claim primitive (`fno agents claim` /
 `acquire_claim`). A free claim is ok (the successor acquires); a claim held by
 the receipt's own session is ok (idempotent re-acquire).
 

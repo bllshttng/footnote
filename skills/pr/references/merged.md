@@ -82,7 +82,7 @@ The verb absorbed four prior ritual bugs (each verified by a test in
 `cli/tests/`): **x-c4ff** (only real verbs are called - `skill-diff reconcile`,
 `pr sync-canonical` both exist; no dangling references), **x-fb99**
 (`parking_lot_path` resolved against the canonical root, never a worktree cwd),
-**x-adf9** (canonical-sync pipes closed + timeouted so a trailing `fno restart`
+**x-adf9** (canonical-sync pipes closed + timeouted so a trailing `fno agents restart`
 daemon cannot wedge it), **x-0d66** (the advance leg bounded + streamed).
 
 ## Step 3: Judgment residue (attended only)

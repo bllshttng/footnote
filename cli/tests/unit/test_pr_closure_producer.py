@@ -155,7 +155,7 @@ def test_the_gate_never_demands_an_id_spanning_a_slash(head_ref):
     assert _gate(ensure_closure_trailer("Summary.", head_ref, known_ids=KNOWN), head_ref) == 0
 
 
-# ---- Call site: fno worker ship ----
+# ---- Call site: fno agents worker ship ----
 
 def test_worker_ship_passes_the_trailer_to_gh(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)

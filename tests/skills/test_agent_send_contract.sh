@@ -23,9 +23,9 @@ require_text() {
   fi
 }
 
-require_text "agent default: live-first argv" 'fno mail send "<agent>" "<body>"'
-require_text "agent heads-up: explicit kind argv" 'fno mail send "<agent>" --kind heads-up "<body>"'
-require_text "project: explicit kind argv" 'fno mail send --to-project "<project>" --kind "<kind>" "<body>"'
+require_text "agent default: live-first argv" 'fno agents mail send "<agent>" "<body>"'
+require_text "agent heads-up: explicit kind argv" 'fno agents mail send "<agent>" --kind heads-up "<body>"'
+require_text "project: explicit kind argv" 'fno agents mail send --to-project "<project>" --kind "<kind>" "<body>"'
 require_text "grammar: only explicit token selects kind" 'Only an explicit `--kind` token selects a kind.'
 require_text "grammar: body suffix remains body" 'A final body word such as `question`, `heads-up`, or `fyi` remains body text.'
 require_text "guard: genuine CLI sees incompatible handle kind" 'Pass every syntactically valid explicit kind to the genuine CLI'

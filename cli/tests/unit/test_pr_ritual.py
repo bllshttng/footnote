@@ -58,7 +58,7 @@ class FakeRunner:
             return Result(0, "{}", "")
         # fno-py <sub> ...
         sub = argv[1] if len(argv) > 1 else ""
-        if sub == "claim" and "acquire" in argv:
+        if argv[1:3] == ["agents", "claim"] and "acquire" in argv:
             return Result(self._claim_rc, "acquired" if self._claim_rc == 0 else "held", "")
         if sub == "backlog" and "reconcile" in argv:
             import json
@@ -532,7 +532,7 @@ def test_run_skips_when_post_merge_disabled(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "post_merge.enabled is false" in out
     assert "step=reconcile" not in out  # no leg ran
-    assert not any(len(c) > 1 and c[1] == "claim" and "acquire" in c
+    assert not any(c[1:3] == ["agents", "claim"] and "acquire" in c
                    for c in runner.calls)  # mutex never acquired
 
 
@@ -776,7 +776,7 @@ def test_mutex_released_on_success(tmp_path):
     r.release_mutex()
     assert not r.ctx.owns_claim
     # a release call was made
-    assert any(len(c) > 1 and c[1] == "claim" and "release" in c for c in runner.calls)
+    assert any(c[1:3] == ["agents", "claim"] and "release" in c for c in runner.calls)
 
 
 def test_config_leg_reads_post_merge_off_settings_model(tmp_path, monkeypatch):

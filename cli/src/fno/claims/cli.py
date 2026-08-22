@@ -1,4 +1,4 @@
-"""fno claim - Typer surface for the work-claim verbs.
+"""fno agents claim - Typer surface for the work-claim verbs.
 
 Exit codes:
     0  success
@@ -233,12 +233,12 @@ def acquire(
         typer.echo("validation error: --holder is required", err=True)
         raise typer.Exit(code=2)
     # ponytail: an omitted --pid used to anchor to the TRANSIENT acquiring process
-    # (a one-shot `fno claim acquire` from a shell dies ~1s later, so the claim went
+    # (a one-shot `fno agents claim acquire` from a shell dies ~1s later, so the claim went
     # instantly STALE -- the footgun). Default instead to the durable session
     # (nearest harness ancestor: claude/codex/gemini/opencode/agy) when one
     # exists; degrade to the prior os.getpid() default when not (standalone use,
     # plain-shell, no agent session). Reuses the exact walk init-target-state.sh
-    # already runs via `fno claim session-pid`.
+    # already runs via `fno agents claim session-pid`.
     if pid is None:
         try:
             from .session_pid import resolve_session_pid
@@ -1086,7 +1086,7 @@ def list_cmd(
     """Enumerate claims under the claims directory.
 
     Both claims roots (global ~/.fno/claims and the cwd-local root) are
-    always read and merged in one run, --prefix or not - a bare `fno
+    always read and merged in one run, --prefix or not - a bare `fno agents
     claim list` used to resolve only whichever single root an empty
     prefix happened to fall to, silently missing the other store (measured:
     574 lockfiles in a root a bare `list` could never reach).
@@ -1475,7 +1475,7 @@ def session_pid(
         typer.echo(json.dumps({"session_pid": pid}))
     elif pid is not None:
         typer.echo(str(pid))
-    # else: emit nothing on stdout so `$(fno claim session-pid)` is empty.
+    # else: emit nothing on stdout so `$(fno agents claim session-pid)` is empty.
 
 
 def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> None:

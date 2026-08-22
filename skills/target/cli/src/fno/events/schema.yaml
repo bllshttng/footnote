@@ -200,7 +200,7 @@ event_types:
           type: integer
         detail:
           type: string
-    consumers: [scripts/ci/preflight.sh, fno do pr, fno worker ship, fno-agents verify-evidence]
+    consumers: [scripts/ci/preflight.sh, fno do pr, fno agents worker ship, fno-agents verify-evidence]
 
   - name: review_attestation
     retention: gate
@@ -1142,7 +1142,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_reap_swept
-    description: "One `fno claim reap --apply` run completed, including a run that reaped nothing. A silent sweep and a dead sweep must not look the same. Never fires for a dry-run: dry-run's own no-writes promise covers this event too."
+    description: "One `fno agents claim reap --apply` run completed, including a run that reaped nothing. A silent sweep and a dead sweep must not look the same. Never fires for a dry-run: dry-run's own no-writes promise covers this event too."
     sources: [fno-loop]
     data:
       required: [scanned, reaped, would_reap, kept_live, kept_suspect, kept_offhost, corrupted, vanished, contended, reap_failed, apply, lock_mirror_cleared, roots]
@@ -2196,7 +2196,7 @@ event_types:
     consumers: [operator]
 
   - name: operator_question
-    description: "An agent asked the operator something and needs an answer to proceed. Captured AT ASK TIME rather than derived later from transcript shape: session_truth classifies from the tail (records[-1]), so a question survives only while it is the last assistant turn, and in a mail-driven mesh where fno mail send injects user-shaped text the agent answers the mail and its own earlier question stops existing for the detector. A fact recorded when it is true does not evaporate. Deliberately NOT a carveout --kind question: the word is wrong for a question, and routing questions through that verb would raise carve-out volume, which is the thing the last-resort rewrite exists to lower. Folded by `fno inbox outstanding` and rendered in the SessionStart block; read unchanged by the `crates/fno-agents/src/needs.rs` fold arm that maps this to NeedKind::Decision in the mux needs-me queue."
+    description: "An agent asked the operator something and needs an answer to proceed. Captured AT ASK TIME rather than derived later from transcript shape: session_truth classifies from the tail (records[-1]), so a question survives only while it is the last assistant turn, and in a mail-driven mesh where fno agents mail send injects user-shaped text the agent answers the mail and its own earlier question stops existing for the detector. A fact recorded when it is true does not evaporate. Deliberately NOT a carveout --kind question: the word is wrong for a question, and routing questions through that verb would raise carve-out volume, which is the thing the last-resort rewrite exists to lower. Folded by `fno inbox outstanding` and rendered in the SessionStart block; read unchanged by the `crates/fno-agents/src/needs.rs` fold arm that maps this to NeedKind::Decision in the mux needs-me queue."
     sources: [target, hook, subagent, daemon, test]
     data:
       required: [question_id, question]
@@ -2302,7 +2302,7 @@ event_types:
 
   - name: agent_raw_inject
     retention: durable
-    description: "Provenance record for an UNWRAPPED injection: a payload delivered to a live session without the <fno_mail> envelope, so the transcript no longer carries the agent-authored marker. Emitted at the transport (the mail-inject binary and the mux pane send), keyed on 'payload does not start with <fno_mail', so it covers fno mail send --raw, a direct fno-agents mail-inject, and any future caller. Moves x-f26c's greppability property from the transcript to the ledger: an unwrapped injection has no envelope to grep, so this event is the audit trail. Best-effort; an events-write failure never breaks an injection."
+    description: "Provenance record for an UNWRAPPED injection: a payload delivered to a live session without the <fno_mail> envelope, so the transcript no longer carries the agent-authored marker. Emitted at the transport (the mail-inject binary and the mux pane send), keyed on 'payload does not start with <fno_mail', so it covers fno agents mail send --raw, a direct fno-agents mail-inject, and any future caller. Moves x-f26c's greppability property from the transcript to the ledger: an unwrapped injection has no envelope to grep, so this event is the audit trail. Best-effort; an events-write failure never breaks an injection."
     sources: [daemon]
     data:
       required: [target_session, payload, harness, lane]
@@ -2784,7 +2784,7 @@ event_types:
     consumers: [operator]
 
   - name: dispatch_failover
-    description: "Emitted by an autonomous launcher (`fno backlog advance`, `fno dispatch`, or the shell dispatcher `dispatch-node.sh`) when config.dispatch.on_exhaustion='failover' and the shared route selector chose a cutover instead of a defer: the node launched on the next healthy record in the active combo, which may be on another harness (claude->codex). Emitted only AFTER the spawn succeeds - a routing decision is not a completed cutover. From `backlog advance` it is paired with the following advance_dispatched (the receipt of the switch, not a competing decision); `fno dispatch` and the shell dispatcher report their launch in their own verdict line and emit this receipt alone. A whole-combo exhaustion, an unresolvable destination, or an explicit pin falls back to a quota-deferred skip instead."
+    description: "Emitted by an autonomous launcher (`fno backlog advance`, `fno agents dispatch`, or the shell dispatcher `dispatch-node.sh`) when config.dispatch.on_exhaustion='failover' and the shared route selector chose a cutover instead of a defer: the node launched on the next healthy record in the active combo, which may be on another harness (claude->codex). Emitted only AFTER the spawn succeeds - a routing decision is not a completed cutover. From `backlog advance` it is paired with the following advance_dispatched (the receipt of the switch, not a competing decision); `fno agents dispatch` and the shell dispatcher report their launch in their own verdict line and emit this receipt alone. A whole-combo exhaustion, an unresolvable destination, or an explicit pin falls back to a quota-deferred skip instead."
     sources: [backlog]
     data:
       required: [node_id, from, to]

@@ -1,7 +1,7 @@
 """fno's computed writable-directory grant: the set, and the three lanes that carry it.
 
 The defect these cover: a spawned worker on a bounded posture cannot write
-``~/.fno/claims``, so it holds no node claim and ``fno claim status`` answers
+``~/.fno/claims``, so it holds no node claim and ``fno agents claim status`` answers
 ``free`` while it works - a duplicate-dispatch trap the standing "check the claim
 first" rule cannot catch, because the check returns free.
 

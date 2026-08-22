@@ -42,9 +42,9 @@ cat > "$FAKEBIN/fno" <<'FAKE'
 #!/usr/bin/env bash
 echo "$*" >> "$FNO_CALL_LOG"
 _slug() { echo "$1" | tr '/:' '__'; }
-if [[ "${1:-}" == "claim" && "${2:-}" == "acquire" ]]; then
-    key="$3"; holder=""
-    shift 3
+if [[ "${1:-}" == "agents" && "${2:-}" == "claim" && "${3:-}" == "acquire" ]]; then
+    key="$4"; holder=""
+    shift 4
     while [[ $# -gt 0 ]]; do [[ "$1" == "--holder" ]] && holder="$2"; shift; done
     f="$FAKE_CLAIMS/$(_slug "$key")"
     if [[ -f "$f" ]]; then
@@ -59,8 +59,8 @@ if [[ "${1:-}" == "claim" && "${2:-}" == "acquire" ]]; then
     echo "{\"key\": \"$key\", \"holder\": \"$holder\"}"
     exit 0
 fi
-if [[ "${1:-}" == "claim" && "${2:-}" == "release" ]]; then
-    key="$3"; rm -f "$FAKE_CLAIMS/$(_slug "$key")"; exit 0
+if [[ "${1:-}" == "agents" && "${2:-}" == "claim" && "${3:-}" == "release" ]]; then
+    key="$4"; rm -f "$FAKE_CLAIMS/$(_slug "$key")"; exit 0
 fi
 if [[ "${1:-}" == "do" && "${2:-}" == "loops" && "${3:-}" == "status" ]]; then echo "not paused"; exit 0; fi
 if [[ "${1:-}" == "loops" && "${2:-}" == "status" ]]; then echo "deprecated loops root reached" >&2; exit 2; fi

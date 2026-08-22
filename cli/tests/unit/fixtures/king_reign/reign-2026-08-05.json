@@ -244,13 +244,13 @@
   },
   {
    "tool": "Bash",
-   "target": "fno mail send <handle> \"Context for x-9963: the node's acceptance is 'AC11 through AC15 from the source design'. That source design is NOT your linked plan - it is the origin doc:\n\n  ~/c3po/internal/fno/plans/20260802-guards-resolve-object-not-session.md\n\nThat plan was broken into 4 waves, each its own node and PR; you are wave 3 only. Read the origin doc to resolve AC11-AC15 verbatim, and read your own linked plan (20260805-wave-3-harness-agnostic-ceremony-x-9963.md) for the wave-3 scoping. Do not implement ACs outside 11-15.\" --from-self 2>&1 | tail -5",
+   "target": "fno agents mail send <handle> \"Context for x-9963: the node's acceptance is 'AC11 through AC15 from the source design'. That source design is NOT your linked plan - it is the origin doc:\n\n  ~/c3po/internal/fno/plans/20260802-guards-resolve-object-not-session.md\n\nThat plan was broken into 4 waves, each its own node and PR; you are wave 3 only. Read the origin doc to resolve AC11-AC15 verbatim, and read your own linked plan (20260805-wave-3-harness-agnostic-ceremony-x-9963.md) for the wave-3 scoping. Do not implement ACs outside 11-15.\" --from-self 2>&1 | tail -5",
    "index": 42,
    "kind": "tool_use"
   },
   {
    "tool": "Bash",
-   "target": "fno mail send <handle> \"RULING - authorization granted. From the Director crown over epic x-d7e4 (level 0, grantor: human operator, this session). This is the epic-scoped acceptance-contract call you asked for; it is mine to make and I am making it. Merge approval is NOT mine and remains the human's.\n\nAUTHORIZED: x-2388's delivery contract uses two modes.\n1. Strict audit - remains RED on all 9 existing violations plus the L0->L1->L0 cycle. Reachable by an explicit flag, and named in --help text so it is discoverable without reading the script.\n2. Baseline CI gate - the mode registered in 'fno doctor test'. Passes only when the violation set is unchanged or reduced; fails on any NEW or CHANGED violation. Reducing the set requires updating the baseline in the same PR, so it ratchets down and cannot",
+   "target": "fno agents mail send <handle> \"RULING - authorization granted. From the Director crown over epic x-d7e4 (level 0, grantor: human operator, this session). This is the epic-scoped acceptance-contract call you asked for; it is mine to make and I am making it. Merge approval is NOT mine and remains the human's.\n\nAUTHORIZED: x-2388's delivery contract uses two modes.\n1. Strict audit - remains RED on all 9 existing violations plus the L0->L1->L0 cycle. Reachable by an explicit flag, and named in --help text so it is discoverable without reading the script.\n2. Baseline CI gate - the mode registered in 'fno doctor test'. Passes only when the violation set is unchanged or reduced; fails on any NEW or CHANGED violation. Reducing the set requires updating the baseline in the same PR, so it ratchets down and cannot",
    "index": 43,
    "kind": "tool_use"
   },
@@ -640,7 +640,7 @@
   },
   {
    "tool": "Bash",
-   "target": "fno mail send <handle> \"DESIGN INPUT for AC11, from the operator, load-bearing. Read before implementing 'harness-native review is the default'.\n\nTHE TRAP: an in-session agent CANNOT invoke a harness's native review command. '/code-review' is a Claude Code BUILT-IN, not a footnote skill. Claude Code's own operating instructions state it is user-triggered and billed, that the agent cannot launch it itself, and specifically that it must not be attempted via Bash. It does not appear in an agent's invocable skill list, while '/fno:review' does. Assume codex '/review' is the same class: a harness built-in typed by a human, not something a running session can call.\n\nSo AC11-HP ('the harness's own native review runs') is NOT implementable as a call the review phase makes. If you implement it as o",
+   "target": "fno agents mail send <handle> \"DESIGN INPUT for AC11, from the operator, load-bearing. Read before implementing 'harness-native review is the default'.\n\nTHE TRAP: an in-session agent CANNOT invoke a harness's native review command. '/code-review' is a Claude Code BUILT-IN, not a footnote skill. Claude Code's own operating instructions state it is user-triggered and billed, that the agent cannot launch it itself, and specifically that it must not be attempted via Bash. It does not appear in an agent's invocable skill list, while '/fno:review' does. Assume codex '/review' is the same class: a harness built-in typed by a human, not something a running session can call.\n\nSo AC11-HP ('the harness's own native review runs') is NOT implementable as a call the review phase makes. If you implement it as o",
    "index": 111,
    "kind": "tool_use"
   },
@@ -651,7 +651,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\necho \"=== node ===\"; fno backlog get x-8a12 2>&1 | python3 -c \"\nimport json,sys; d=json.load(sys.stdin)\nprint('id:',d['id'],'status:',d['status'],'pr:',d.get('pr_number'))\nprint('title:',d['title'])\nfor s in d.get('sessions',[]): print('  session:',s)\nprint('source_harness:',d.get('source_harness'),'| source_session:',d.get('source_session_id'))\n\"\necho \"=== claim ===\"; fno claim status node:x-8a12 2>&1 | head -10",
+   "target": "cd .\necho \"=== node ===\"; fno backlog get x-8a12 2>&1 | python3 -c \"\nimport json,sys; d=json.load(sys.stdin)\nprint('id:',d['id'],'status:',d['status'],'pr:',d.get('pr_number'))\nprint('title:',d['title'])\nfor s in d.get('sessions',[]): print('  session:',s)\nprint('source_harness:',d.get('source_harness'),'| source_session:',d.get('source_session_id'))\n\"\necho \"=== claim ===\"; fno agents claim status node:x-8a12 2>&1 | head -10",
    "index": 113,
    "kind": "tool_use"
   },
@@ -808,7 +808,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .; fno mail reply --help 2>&1 | head -30",
+   "target": "cd .; fno agents mail reply --help 2>&1 | head -30",
    "index": 141,
    "kind": "tool_use"
   },
@@ -874,7 +874,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno mail send <handle> \"TEST INVALIDATED - my experimental design was broken, not your execution. Disregard my previous 'MY CLAIM WAS WRONG' message as a conclusion; its HOLD instruction still stands and now stands harder.\n\nWHY IT WAS INVALID, from the operator: 'fno mail send' injects its payload directly into the recipient pane's TEXT INPUT BOX, as though the operator typed it. So my instruction reached you as USER-SHAPED TEXT. /code-review is user-triggered. You were given a user-shaped trigger and you acted on it correctly.\n\nWhat the test therefore demonstrated is 'the operator asks for a code review, and it runs.' Nobody disputed that. It says nothing about the case AC11 actually needs: a PIPELINE STEP invoking review autonomously, mid-run, with n",
+   "target": "cd .\nfno mail send <handle> \"TEST INVALIDATED - my experimental design was broken, not your execution. Disregard my previous 'MY CLAIM WAS WRONG' message as a conclusion; its HOLD instruction still stands and now stands harder.\n\nWHY IT WAS INVALID, from the operator: 'fno agents mail send' injects its payload directly into the recipient pane's TEXT INPUT BOX, as though the operator typed it. So my instruction reached you as USER-SHAPED TEXT. /code-review is user-triggered. You were given a user-shaped trigger and you acted on it correctly.\n\nWhat the test therefore demonstrated is 'the operator asks for a code review, and it runs.' Nobody disputed that. It says nothing about the case AC11 actually needs: a PIPELINE STEP invoking review autonomously, mid-run, with n",
    "index": 152,
    "kind": "tool_use"
   },
@@ -892,7 +892,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno mail send <handle> \"NEW INFORMATION FROM THE OPERATOR - this is not another reversal of my reasoning, it is a mechanism I did not know. It likely CHANGES your AC11 design, so read before you push if you have not already.\n\nTHE MECHANISM: 'fno mail send' injects into the recipient pane's TEXT INPUT as user-shaped text. I framed that as the flaw that invalidated my test. The operator's point is that it is also a CAPABILITY: a user-triggered harness command can be triggered by mail, because mail is user-shaped by construction. The pipeline cannot self-trigger /code-review. A KING CAN, on the worker's behalf, and the review then launches inside the WORKER'S OWN HARNESS.\n\nTHE PATTERN the operator wants encoded:\n1. A worker reaches the point in its PR whe",
+   "target": "cd .\nfno mail send <handle> \"NEW INFORMATION FROM THE OPERATOR - this is not another reversal of my reasoning, it is a mechanism I did not know. It likely CHANGES your AC11 design, so read before you push if you have not already.\n\nTHE MECHANISM: 'fno agents mail send' injects into the recipient pane's TEXT INPUT as user-shaped text. I framed that as the flaw that invalidated my test. The operator's point is that it is also a CAPABILITY: a user-triggered harness command can be triggered by mail, because mail is user-shaped by construction. The pipeline cannot self-trigger /code-review. A KING CAN, on the worker's behalf, and the review then launches inside the WORKER'S OWN HARNESS.\n\nTHE PATTERN the operator wants encoded:\n1. A worker reaches the point in its PR whe",
    "index": 155,
    "kind": "tool_use"
   },
@@ -1692,7 +1692,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno backlog find \"harness native subagent registry\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"fno's agent model does not see harness-native subagents, so two agent systems run side by side and only one is addressable\" --details \"MEASURED 2026-08-05. A blueprint task was run twice by two different mechanisms and the difference was structural, not cosmetic.\n\nThe fno-spawned bg session (blueprint-x-9ae8) is a full mesh citizen: present in the fno agents registry, resolvable by peek, addressable by fno mail, transcript at the project root as a peer (~/.claude/projects/<proj>/<session-id>.jsonl), survivable across its spawner's death, and handoff-able to a successor king.\n\nThe harness-native subagent (blueprint-x-0eaf, launched through the harness Agent t",
+   "target": "cd .\nfno backlog find \"harness native subagent registry\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"fno's agent model does not see harness-native subagents, so two agent systems run side by side and only one is addressable\" --details \"MEASURED 2026-08-05. A blueprint task was run twice by two different mechanisms and the difference was structural, not cosmetic.\n\nThe fno-spawned bg session (blueprint-x-9ae8) is a full mesh citizen: present in the fno agents registry, resolvable by peek, addressable by fno agents mail, transcript at the project root as a peer (~/.claude/projects/<proj>/<session-id>.jsonl), survivable across its spawner's death, and handoff-able to a successor king.\n\nThe harness-native subagent (blueprint-x-0eaf, launched through the harness Agent t",
    "index": 298,
    "kind": "tool_use"
   },

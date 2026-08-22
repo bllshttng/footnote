@@ -6,14 +6,14 @@ This makes delivery push instead of pull, and closes the matching sender-side ho
 
 ## Two changes, one node
 
-**Receive (push).** The `UserPromptSubmit` hook, `hooks/inject-mail-notify.sh`, runs `fno mail notify-self` every turn and relays the complete framed durable messages as `additionalContext`.
-The payload includes each message id and `fno mail reply --to <id>` guidance, so the recipient sees the mail without discovering or running a drain command.
+**Receive (push).** The `UserPromptSubmit` hook, `hooks/inject-mail-notify.sh`, runs `fno agents mail notify-self` every turn and relays the complete framed durable messages as `additionalContext`.
+The payload includes each message id and `fno agents mail reply --to <id>` guidance, so the recipient sees the mail without discovering or running a drain command.
 `UserPromptSubmit` already fires every turn, so delivery uses an active boundary that already exists and adds no daemon or poll loop.
 
-**Send (honesty).** The same `notify-self` invocation also surfaces the session's *own* sent mail that no recipient has claimed past a TTL, both as a turn-boundary line and as `sent unclaimed: N` in `fno mail status`.
+**Send (honesty).** The same `notify-self` invocation also surfaces the session's *own* sent mail that no recipient has claimed past a TTL, both as a turn-boundary line and as `sent unclaimed: N` in `fno agents mail status`.
 Before this, `queued (durable)` was the last thing a sender ever heard, so silence read as delivered.
 
-## `fno mail notify-self` (hidden hook-output verb)
+## `fno agents mail notify-self` (hidden hook-output verb)
 
 The verb reuses `drain-self`'s identity path (`resolve_harness_identity` -> `canonical_handle` -> `scan_unread`) and the same forward-only consume cursor.
 It renders the complete `UserPromptSubmit` JSON envelope in the CLI, writes and flushes that envelope, and only then advances the cursor through the last rendered message.
@@ -21,7 +21,7 @@ The shell hook relays the already-valid JSON directly, so no command substitutio
 There is no notify cursor: `SessionStart` and `UserPromptSubmit` race on the one canonical cursor, and whichever successfully drains first makes the other silent.
 
 - **Inbound:** unread envelopes addressed to the canonical session handle -> complete bodies, ids, and reply guidance inside a hook-owned `<system-reminder>` frame, followed by acknowledgement after flush.
-- **Sent-unclaimed:** my sent mail still returned by `scan_unread(recipient)` (recipient's cursor has not passed it) AND strictly older than `config.inbox.unclaimed_ttl` (default 1800s) -> `N sent fno mail unclaimed (to <recipients>, >30m): recipient has not picked it up`. Computed live every call, so a just-consumed message stops being flagged immediately.
+- **Sent-unclaimed:** my sent mail still returned by `scan_unread(recipient)` (recipient's cursor has not passed it) AND strictly older than `config.inbox.unclaimed_ttl` (default 1800s) -> `N sent fno agents mail unclaimed (to <recipients>, >30m): recipient has not picked it up`. Computed live every call, so a just-consumed message stops being flagged immediately.
 
 Sent-unclaimed reporting remains stat-only and advances no recipient cursor.
 

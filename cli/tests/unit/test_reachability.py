@@ -69,7 +69,7 @@ def test_dead_session_below_the_stalled_threshold_is_unreachable() -> None:
 def test_busy_session_with_no_falsifier_stays_reachable() -> None:
     """The king's counter-example, failing in the OPPOSITE direction.
 
-    ``fno mail send`` reported an idle session for a worker whose transcript was
+    ``fno agents mail send`` reported an idle session for a worker whose transcript was
     32 seconds old. mail-inject's ``not-live`` is ``resolve_control_sock()``
     returning None, which measures INJECTABILITY, not liveness. A missing
     control socket must therefore never reach this function as a falsifier, and

@@ -1,4 +1,4 @@
-"""fno worker subcommands: blueprint, ship, review, reconcile."""
+"""fno agents worker subcommands: blueprint, ship, review, reconcile."""
 from __future__ import annotations
 
 import json

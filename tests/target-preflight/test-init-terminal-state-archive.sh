@@ -81,7 +81,7 @@ plant_claim_state() {
     } > "$dir/.fno/target-state.md"
 }
 
-# Stub `fno` on PATH so the reaper's `fno claim status <key> --json` is
+# Stub `fno` on PATH so the reaper's `fno agents claim status <key> --json` is
 # deterministic: a key containing "live" reports state live, anything else
 # reports free. No-input fresh init makes no other fno calls, so the stub need
 # not pass anything through.
@@ -90,10 +90,10 @@ make_fno_stub() {
     mkdir -p "$dir"
     cat > "$dir/fno" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$1" == "claim" && "$2" == "status" ]]; then
-    case "$3" in
-        *live*) printf '{"key": "%s", "state": "live"}\n' "$3" ;;
-        *)      printf '{"key": "%s", "state": "free"}\n' "$3" ;;
+if [[ "$1" == "agents" && "$2" == "claim" && "$3" == "status" ]]; then
+    case "$4" in
+        *live*) printf '{"key": "%s", "state": "live"}\n' "$4" ;;
+        *)      printf '{"key": "%s", "state": "free"}\n' "$4" ;;
     esac
     exit 0
 fi

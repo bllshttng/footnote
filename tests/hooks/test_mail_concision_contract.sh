@@ -21,8 +21,8 @@ payload = json.load(sys.stdin)
 context = payload["hookSpecificOutput"]["additionalContext"]
 required = (
     "## Relay compression contract",
-    "fno mail send",
-    "fno mail reply",
+    "fno agents mail send",
+    "fno agents mail reply",
     "fno mux pane send",
     "80 words or fewer",
     "Keep technical terms",

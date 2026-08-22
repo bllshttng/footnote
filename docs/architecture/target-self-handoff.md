@@ -91,7 +91,7 @@ This resolution is implemented in `scripts/lib/megawalk-lineage.sh` (the library
 
 ## Claims at canonical repo root
 
-Claims (`fno claim acquire/release`) resolve to the canonical repo root via `git rev-parse --git-common-dir`, following the pattern established by `carveouts.jsonl`. This is Locked Decision 9. Without it, a conductor worktree and the canonical checkout have separate `.fno/claims/` directories; the one-live-holder invariant would hold only via dispatch reservation plus parent vigilance. With canonical-root resolution, handoff children inheriting the parent's worktree cwd and any root-spawned session write to the same claims directory.
+Claims (`fno agents claim acquire/release`) resolve to the canonical repo root via `git rev-parse --git-common-dir`, following the pattern established by `carveouts.jsonl`. This is Locked Decision 9. Without it, a conductor worktree and the canonical checkout have separate `.fno/claims/` directories; the one-live-holder invariant would hold only via dispatch reservation plus parent vigilance. With canonical-root resolution, handoff children inheriting the parent's worktree cwd and any root-spawned session write to the same claims directory.
 
 If `git rev-parse --git-common-dir` fails (not in a git repo), the fallback is the cwd-relative `.fno/claims/` path (existing behavior, preserved).
 

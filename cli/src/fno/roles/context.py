@@ -51,7 +51,7 @@ def catalog_revision(artifacts: Mapping[str, object]) -> str:
     Derived from identifiers and their configured paths/sensitivities (not file
     contents), so it is stable across runs that read the same files and changes
     only when the configuration changes. The operator passes it to
-    ``fno roles resolve --snapshot`` so the catalog and the resolution agree on
+    ``fno agents roles resolve --snapshot`` so the catalog and the resolution agree on
     one alignment token.
     """
     payload = "|".join(

@@ -1,4 +1,4 @@
-"""`fno mail send --raw` (x-c24d Wave 3): fire a verb in a peer by injecting the
+"""`fno agents mail send --raw` (x-c24d Wave 3): fire a verb in a peer by injecting the
 payload unwrapped at the prompt line. Covers the refusal rules (shape, multiline,
 non-keystroke lane, unresolvable, self-send), the unwrapped inject, and the
 never-durable invariant (AC18/AC30).
@@ -968,12 +968,12 @@ def test_raw_injects_the_stripped_payload(mailbox, monkeypatch, capsys):
 
 
 def test_to_self_raw_derives_recipient_with_no_positional(runner, mailbox, monkeypatch):
-    """`fno mail send '<payload>' --to-self --raw`: one positional (the payload),
+    """`fno agents mail send '<payload>' --to-self --raw`: one positional (the payload),
     recipient derived from ambient identity, no <id> lookup. The self-ok path
     stamps the sender handle as sole provenance (AC27)."""
     injected = _seed_claude(mailbox, monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
-    res = runner.invoke(app, ["mail", "send", "/compact", "--to-self", "--raw"])
+    res = runner.invoke(app, ["agents", "mail", "send", "/compact", "--to-self", "--raw"])
     assert res.exit_code == 0, res.output + (res.stderr or "")
     assert "injected" in res.output
     assert injected == [(SID_CLAUDE, "/compact", SID_CLAUDE[:8])]
@@ -994,7 +994,7 @@ def test_to_self_raw_routes_codex_review_to_ambient_thread(
             "review_thread_id": "review-self",
         },
     )
-    res = runner.invoke(app, ["mail", "send", "/review", "--to-self", "--raw"])
+    res = runner.invoke(app, ["agents", "mail", "send", "/review", "--to-self", "--raw"])
     assert res.exit_code == 0, res.output + (res.stderr or "")
     assert calls == [(SID_CODEX, "baseBranch:origin/main")]
     assert "review/start target=baseBranch:origin/main" in res.output
@@ -1004,7 +1004,7 @@ def test_to_self_no_ambient_identity_exits_2(runner, mailbox, monkeypatch):
     """No ambient harness identity -> exit 2, never a silent floor. Mirrors the
     --from-self fail-closed branch."""
     _clear_harness_markers(monkeypatch)
-    res = runner.invoke(app, ["mail", "send", "/compact", "--to-self", "--raw"])
+    res = runner.invoke(app, ["agents", "mail", "send", "/compact", "--to-self", "--raw"])
     assert res.exit_code == 2
     assert "no ambient harness identity" in (res.output + (res.stderr or ""))
 
@@ -1026,7 +1026,7 @@ def test_to_self_refuses_contaminated_identity(runner, mailbox, monkeypatch):
     must refuse rather than inject into the parent."""
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
     monkeypatch.setenv("CODEX_THREAD_ID", SID_CODEX)
-    res = runner.invoke(app, ["mail", "send", "/compact", "--to-self", "--raw"])
+    res = runner.invoke(app, ["agents", "mail", "send", "/compact", "--to-self", "--raw"])
     assert res.exit_code == 2
     assert "multiple harness markers" in (res.output + (res.stderr or ""))
 

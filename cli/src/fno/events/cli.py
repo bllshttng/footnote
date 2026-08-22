@@ -203,9 +203,9 @@ def _push_to_parent(
     node: Optional[str],
     reason: Optional[str],
 ) -> bool:
-    """Push a blocked/run_summary notice to the parent via ``fno mail send``.
+    """Push a blocked/run_summary notice to the parent via ``fno agents mail send``.
 
-    `fno mail send` writes the envelope durably BEFORE attempting live delivery,
+    `fno agents mail send` writes the envelope durably BEFORE attempting live delivery,
     so the push is at-least-once for free (AC1-FR); the events.jsonl record was
     already written independently by the caller. Non-fatal: any failure logs one
     stderr note and returns False.
@@ -217,7 +217,7 @@ def _push_to_parent(
         msg += f": {reason}"
     try:
         result = subprocess.run(
-            ["fno", "mail", "send", parent, msg],
+            ["fno", "agents", "mail", "send", parent, msg],
             check=False,
             capture_output=True,
             timeout=20,

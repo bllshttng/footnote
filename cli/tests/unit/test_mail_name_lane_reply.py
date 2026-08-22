@@ -1,4 +1,4 @@
-"""Round-trip ACs for the name-lane ``fno mail reply`` (x-8045).
+"""Round-trip ACs for the name-lane ``fno agents mail reply`` (x-8045).
 
 A name-lane reply answers the original sender without re-typing their handle and
 threads the correlation via the bus ``in_reply_to`` (one token, also stamped as
@@ -109,7 +109,7 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
     msg = _seed_name_lane_inbound(
         to="claude-meeeeeee", from_="9a063cd3", body="ping"
     )
-    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
     # I never typed the sender handle on the command line; the reply still names it.
     assert "9a063cd3" in r.output
@@ -140,7 +140,7 @@ def test_session_lane_reply_uses_full_sender_provenance(
         from_session=sender_id,
     ).thread_id
 
-    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert result.exit_code == 0, result.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
@@ -191,7 +191,7 @@ def test_reply_refuses_when_unreadable_transcripts_hide_a_short_id_collision(
     try:
         if os.access(blocked, os.R_OK | os.X_OK):
             pytest.skip("test user can still enumerate mode-000 directories")
-        result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+        result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
     finally:
         blocked.chmod(0o700)
 
@@ -249,7 +249,7 @@ def test_us3_reply_to_live_injected_id_resolves_sender_from_transcript(
     runner, mailbox, monkeypatch, tmp_path
 ):
     # US3 / AC2-HP: a live-injected message wrote NO durable thread, so its id is
-    # not on the bus. `fno mail reply --to <id>` recovers the sender off this
+    # not on the bus. `fno agents mail reply --to <id>` recovers the sender off this
     # session's transcript and threads the correlation, addressed to that handle.
     sender = "9a063cd3"
     msg = "msg-live1"
@@ -263,7 +263,7 @@ def test_us3_reply_to_live_injected_id_resolves_sender_from_transcript(
         from_=sender, msg_id=msg,
     )
 
-    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "pong"])
+    r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "pong"])
     assert r.exit_code == 0, r.output
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
@@ -363,7 +363,7 @@ def test_reply_refuses_ambiguous_offline_sender_handle(
         to="claude-meeeeeee", from_="deadbeef", body="ping"
     )
 
-    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert result.exit_code != 0
     assert "ambiguous" in result.output.lower()
@@ -385,7 +385,7 @@ def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
 
     msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-9a063cd3", body="ping")
-    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert r.exit_code == 0, r.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
@@ -400,7 +400,7 @@ def test_reply_to_retired_sender_offline_fails_without_queuing_an_unsafe_prefix(
     _isolate_empty_discovery(monkeypatch, tmp_path)
     msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-deadbeef", body="ping")
 
-    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert r.exit_code != 0
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
@@ -434,7 +434,7 @@ def test_reply_to_retired_sender_cross_category_collision_fails_closed(
     msg = _seed_name_lane_inbound(
         to="meeeeeee", from_="claude-deadbeef", body="ping"
     )
-    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code != 0
     assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
 
@@ -475,7 +475,7 @@ def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path)
     msg = _seed_name_lane_inbound(
         to="claude-meeeeeee", from_="9a063cd3", body="ping"
     )
-    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
     assert "is not live" in (r.stderr or "")
     assert "may never" in (r.stderr or "")
@@ -496,7 +496,7 @@ def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_pat
     msg = _seed_name_lane_inbound(
         to="claude-meeeeeee", from_="9a063cd3", body="ping"
     )
-    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
     assert "delivered (hosted)" in r.stdout
     assert "no live pane" not in (r.stderr or "")
@@ -557,7 +557,7 @@ def _seeded_reply(runner, monkeypatch, tmp_path, argv_tail):
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
     msg = _seed_name_lane_inbound(to="claude-meeeeeee", from_="9a063cd3", body="ping")
-    return msg, runner.invoke(app, ["mail", "reply", "--to", msg] + argv_tail)
+    return msg, runner.invoke(app, ["agents", "mail", "reply", "--to", msg] + argv_tail)
 
 
 def test_a_positional_body_is_accepted_like_send(runner, mailbox, monkeypatch, tmp_path):

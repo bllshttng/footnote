@@ -46,7 +46,7 @@ You (planning session): /think + /blueprint  ->  node reaches status: ready
 Locked behaviors:
 - **Subscription lane only.** Dispatch is always `fno agents ask --provider claude`; never `--bare`/`-p` (those force the API-credit pool and strip skills/hooks).
 - **`no-merge` by default.** An autonomous fire-and-forget worker lands a PR for review, not an auto-merge. `--allow-merge` opts out.
-- **Claim guard.** The dispatcher skips a node only when `fno claim status node:<id>` reports `live`; a `stale` claim is left for the worker's own atomic init-acquire to reclaim (recovery). The worker's `fno do target init` is the real race-winner, so a narrow double-dispatch window still collapses to one execution.
+- **Claim guard.** The dispatcher skips a node only when `fno agents claim status node:<id>` reports `live`; a `stale` claim is left for the worker's own atomic init-acquire to reclaim (recovery). The worker's `fno do target init` is the real race-winner, so a narrow double-dispatch window still collapses to one execution.
 - **Fire-and-forget.** The dispatcher returns immediately and NEVER writes the planning session's `target-state.md`.
 - **No hard concurrency cap.** `--all-ready` surfaces the cost (`~Mx subscription quota while active`); quota is the throttle. `--max N` is an opt-in soft cap.
 

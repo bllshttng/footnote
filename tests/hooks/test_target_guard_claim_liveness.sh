@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_target_guard_claim_liveness.sh - x-6044: target_is_active() reads the node
-# CLAIM's liveness (via `fno claim status`), not the manifest `status:` field
+# CLAIM's liveness (via `fno agents claim status`), not the manifest `status:` field
 # (the writer no longer emits it) and NOT owner_pid (the transient init-wrapper
 # pid, dead ~1s after init returns, which reads a live session as inactive).
 set -uo pipefail
@@ -30,8 +30,8 @@ make_fno_stub() {
     mkdir -p "$dir/bin"
     cat > "$dir/bin/fno" <<STUB
 #!/usr/bin/env bash
-if [ "\$1" = "claim" ] && [ "\$2" = "status" ]; then
-  printf '{"key": "%s", "state": "%s", "pid": 111}\n' "\$3" "${STUB_STATE}"
+if [ "\$1" = "agents" ] && [ "\$2" = "claim" ] && [ "\$3" = "status" ]; then
+  printf '{"key": "%s", "state": "%s", "pid": 111}\n' "\$4" "${STUB_STATE}"
   exit 0
 fi
 exit 0

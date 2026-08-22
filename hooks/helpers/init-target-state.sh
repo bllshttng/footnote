@@ -561,7 +561,7 @@ _worktree_has_fresh_activity() {
 #      or resuming sibling still owns this slot and the claim-acquire layer
 #      below handles the collision - we must never clobber its live manifest
 #      (codex P1 on PR #61). A manifest with no claim key (free-text/plan run)
-#      is preserved conservatively. Degrade-safe: if `fno claim status` errors
+#      is preserved conservatively. Degrade-safe: if `fno agents claim status` errors
 #      or is unparseable, _CLAIM_STATE is empty and we do NOT reap.
 # This block only runs under TARGET_START (new-session intent).
 if [[ -f "$STATE_FILE" ]]; then
@@ -628,7 +628,7 @@ PYEOF
     fi
   fi
   if [[ -z "$_STALE_REASON" && -n "$_STALE_CLAIM_KEY" ]]; then
-    # `fno claim status --json` is single-line; parse `state`. The reap decision
+    # `fno agents claim status --json` is single-line; parse `state`. The reap decision
     # is now two-factor (x-ba4b), because a not-live claim ALONE is not proof the
     # slot is abandoned - the bug (x-e780) was a live session under a dead pid:
     #   live | suspect -> preserve. The claim is protected (suspect = TTL-
@@ -642,7 +642,7 @@ PYEOF
     # --no-roster: only `state` is read here, and this call hits the free/stale
     # branch in the common case, which is exactly where the cross-check spends
     # a harness subprocess on a field nothing downstream looks at.
-    _CLAIM_STATE=$(fno claim status "$_STALE_CLAIM_KEY" --json --no-roster 2>/dev/null \
+    _CLAIM_STATE=$(fno agents claim status "$_STALE_CLAIM_KEY" --json --no-roster 2>/dev/null \
       | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' || true)
     case "${_CLAIM_STATE:-}" in
       free|stale|corrupted)
@@ -1260,7 +1260,7 @@ PYEOF
     # STALE, which reads free and is the honest answer for a claim nobody is
     # renewing.
     _MULTI_TTL="${TARGET_CLAIM_MULTI_TTL:-30m}"
-    _MULTI_PID="$(fno claim session-pid --from-pid "$$" 2>/dev/null || true)"
+    _MULTI_PID="$(fno agents claim session-pid --from-pid "$$" 2>/dev/null || true)"
     _MULTI_PID_FLAGS=""
     [[ "$_MULTI_PID" =~ ^[0-9]+$ ]] && _MULTI_PID_FLAGS="--pid $_MULTI_PID"
     _MULTI_HANDOVER_FLAGS=""
@@ -1290,7 +1290,7 @@ PYEOF
       # single-node path carries it: a rebind keeps the PRIOR holder's harness
       # tag unless this call names the new one, so a claude worker inheriting a
       # codex spawner's claim would read as codex for the rest of its life.
-      if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "node:${_mnode}" \
+      if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "node:${_mnode}" \
             --holder "$_MULTI_HOLDER" --ttl "$_MULTI_TTL" $_MULTI_PID_FLAGS \
             $_MULTI_HANDOVER_FLAGS ${_CLAIM_HARNESS_FLAG:-} \
             --reason "target dispatch (multi-node payload)" >/dev/null 2>&1; then
@@ -1316,7 +1316,7 @@ PYEOF
           _MULTI_KEPT="$_mnode"
           continue
         fi
-        FNO_CLAIMS_ROOT="$HOME" fno claim release "node:${_mnode}" \
+        FNO_CLAIMS_ROOT="$HOME" fno agents claim release "node:${_mnode}" \
           --holder "$_MULTI_HOLDER" >/dev/null 2>&1 || true
       done
       _EXTRA_CLAIMED="$_MULTI_KEPT"
@@ -1340,13 +1340,13 @@ PYEOF
   fi
 
   if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then
-    # Does THIS session own the node? Set by `fno claim` below, the sole liveness
+    # Does THIS session own the node? Set by `fno agents claim` below, the sole liveness
     # authority (x-4af4). The TTL claim runs FIRST and the graph lock is stamped
     # only on its success, so a legitimate STALE steal never leaves a dead prior
     # owner on the node (the stale-locked-by-leak this reorder fixes).
     _NODE_OWNED=0
 
-    # fno claim acquire (global TTL lock; authoritative mutex)
+    # fno agents claim acquire (global TTL lock; authoritative mutex)
     if command -v fno >/dev/null 2>&1; then
       _CLAIM_KEY="node:${_NODE_ID}"
       _CLAIM_HOLDER="target-session:${claim_owner_id}"
@@ -1355,7 +1355,7 @@ PYEOF
       # nearest `claude` ancestor outlives the transient init subprocess, so an
       # alive-but-suspended session keeps its node claim past the TTL. Empty =>
       # omit --pid and degrade to TTL-only liveness, byte-for-byte as before.
-      _SESSION_PID="$(fno claim session-pid --from-pid "$$" 2>/dev/null || true)"
+      _SESSION_PID="$(fno agents claim session-pid --from-pid "$$" 2>/dev/null || true)"
       _PID_FLAGS=""; [[ "$_SESSION_PID" =~ ^[0-9]+$ ]] && _PID_FLAGS="--pid $_SESSION_PID"
       # Inherit the claim `fno agents spawn --node` took for this worker, rather
       # than colliding with it. The spawner claims the node before the worker
@@ -1372,7 +1372,7 @@ PYEOF
         _HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
       # Unquoted on purpose: empty => zero args (bash 3.2 set -u safe, unlike an
       # empty "${array[@]}"); the regex guarantees $_SESSION_PID is digits only.
-      if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
+      if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
             $_HANDOVER_FLAGS \
             $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
@@ -1408,23 +1408,23 @@ PYEOF
           # the re-check has now refused it. It does no work, so there is no
           # window to record and the open row would leave the node reading as
           # permanently in progress.
-          FNO_CLAIMS_ROOT="$HOME" fno claim release "$_CLAIM_KEY" \
+          FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --rollback-do >/dev/null 2>&1 && _REL_RC=0 || _REL_RC=$?
           if [[ "$_REL_RC" -ne 0 ]]; then
             # A stale fno predating --rollback-do REJECTS the flag (exit 2), and
             # an unretried failure strands a live claim for its full TTL on a
             # node nobody is building - worse than a stale row. Freeing the
             # claim outranks rolling it back: retry bare, and say so.
-            FNO_CLAIMS_ROOT="$HOME" fno claim release "$_CLAIM_KEY" \
+            FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$_CLAIM_KEY" \
               --holder "$_CLAIM_HOLDER" >/dev/null 2>&1 && _REL_RC=0 || _REL_RC=$?
             if [[ "$_REL_RC" -eq 0 ]]; then
-              echo "[init-target-state] note: \`fno claim release --rollback-do\` was rejected; the claim was freed but its open do row on $_NODE_ID stays, so the node reads as in progress. If this persists, run \`fno doctor --fix\` - a stale fno predates the flag." >&2
+              echo "[init-target-state] note: \`fno agents claim release --rollback-do\` was rejected; the claim was freed but its open do row on $_NODE_ID stays, so the node reads as in progress. If this persists, run \`fno doctor --fix\` - a stale fno predates the flag." >&2
             fi
           fi
           if [[ "$_REL_RC" -eq 0 ]]; then
             _REL_NOTE="claim released"
           else
-            _REL_NOTE="WARNING: claim release FAILED (rc=$_REL_RC) - $_CLAIM_KEY stays held until its $_CLAIM_TTL TTL expires; free it with \`fno claim release $_CLAIM_KEY --holder $_CLAIM_HOLDER\`"
+            _REL_NOTE="WARNING: claim release FAILED (rc=$_REL_RC) - $_CLAIM_KEY stays held until its $_CLAIM_TTL TTL expires; free it with \`fno agents claim release $_CLAIM_KEY --holder $_CLAIM_HOLDER\`"
           fi
           # Unlike every sibling refusal in this script, this one runs AFTER the
           # manifest was written, so it must remove it. A left-behind
@@ -1457,7 +1457,7 @@ PYEOF
         # own the node even if the legacy layer happened to win (the handoff
         # retry below re-sets this on a successful re-acquire).
         _NODE_OWNED=0
-        echo "target: WARNING: fno claim acquire failed (rc=$_acq_rc) for $_CLAIM_KEY" >&2
+        echo "target: WARNING: fno agents claim acquire failed (rc=$_acq_rc) for $_CLAIM_KEY" >&2
         [[ -s "$STATE_DIR/.claim-err" ]] && cat "$STATE_DIR/.claim-err" >&2
         if [[ "$_acq_rc" -eq 1 ]]; then
           # Check if this is a sanctioned handoff successor before cancelling.
@@ -1513,7 +1513,7 @@ PYEOF
               # interval still advances by 1 so the bounded wait terminates
               # (tests use INTERVAL=0 to skip wall-clock sleeps).
               _waited=$((_waited + (_WAIT_INTERVAL > 0 ? _WAIT_INTERVAL : 1)))
-              if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
+              if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "$_CLAIM_KEY" \
                     --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
                     $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
                 _claim_acquired=1

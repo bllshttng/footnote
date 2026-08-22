@@ -12,20 +12,20 @@ This is the ceremony the x-304c synthesis marked `ADD`: the retro interviews wer
 
 ## Delivery mechanics
 
-The interview is mailed. Assemble the prompt (below) with a quoted heredoc - it contains literal double quotes (e.g. `"the tooling"`) that would otherwise terminate the shell string and split the body into multiple arguments, and `fno mail send` takes only one:
+The interview is mailed. Assemble the prompt (below) with a quoted heredoc - it contains literal double quotes (e.g. `"the tooling"`) that would otherwise terminate the shell string and split the body into multiple arguments, and `fno agents mail send` takes only one:
 
 ```bash
 read -r -d '' prompt <<'PROMPT' || true
 <the prompt block below, verbatim>
 PROMPT
-fno mail send <builder-handle> "$prompt" --from-self
+fno agents mail send <builder-handle> "$prompt" --from-self
 ```
 
-Follow the [minion delivery doctrine](minion-clause.md) in full, **including its peek-before-resend guard**. Both `delivered (hosted)` and `delivered (woken)` (an asleep-but-resumable builder woken to receive it) are success; any other receipt is undelivered, so peek the handle and re-send only if the peek shows the interview did not land - a `queued (durable)` receipt can be a live inject whose confirmation timed out, and a blind resend duplicates the interview prompt. Resolve a live `<builder-handle>` from `fno agents discovered-json` / `top`. `fno mail send` wraps the body in its own `<fno_mail>` envelope, so the prompt below is body-only - do not add a second envelope.
+Follow the [minion delivery doctrine](minion-clause.md) in full, **including its peek-before-resend guard**. Both `delivered (hosted)` and `delivered (woken)` (an asleep-but-resumable builder woken to receive it) are success; any other receipt is undelivered, so peek the handle and re-send only if the peek shows the interview did not land - a `queued (durable)` receipt can be a live inject whose confirmation timed out, and a blind resend duplicates the interview prompt. Resolve a live `<builder-handle>` from `fno agents discovered-json` / `top`. `fno agents mail send` wraps the body in its own `<fno_mail>` envelope, so the prompt below is body-only - do not add a second envelope.
 
 ## The prompt (dogfooding lens baked in)
 
-Paste this as the `fno mail send` body (it is body-only; `fno mail send` supplies the `<fno_mail>` envelope), filling the epic/node slots and the session-specific block:
+Paste this as the `fno agents mail send` body (it is body-only; `fno agents mail send` supplies the `<fno_mail>` envelope), filling the epic/node slots and the session-specific block:
 
 ```
 Post-epic retro for <epic> (your node: <node>). You are one of several builders being interviewed; your first-person account becomes a filed project artifact, so be concrete and name ids/paths/commands.

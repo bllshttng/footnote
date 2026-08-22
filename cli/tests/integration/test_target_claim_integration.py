@@ -1,7 +1,7 @@
 """Integration tests for target claim wiring (Phase 02).
 
 Drives init-target-state.sh + target-stop-hook.sh against a temp repo and
-verifies the fno claim primitive is exercised end-to-end.
+verifies the fno agents claim primitive is exercised end-to-end.
 
 Note: set-gate.sh tests removed in Task 3.2 (control-plane collapse,
 ab-d0337fbc). The stop-hook structural claim-release check is retained.
@@ -123,14 +123,14 @@ def test_init_target_state_writes_a_state_file_for_a_node_input(tmp_path):
 # test_stop_hook_contains_fno_claim_release_block removed (ab-d0337fbc): the
 # stop hook is a read-only shim and no longer releases claims on exit; a dead
 # session's claim goes stale via PID-liveness and is recovered by the next
-# `fno claim acquire`. scripts/lib/claim-release.sh deleted with it.
+# `fno agents claim acquire`. scripts/lib/claim-release.sh deleted with it.
 
 
 def test_init_target_state_contains_fno_claim_acquire_block(tmp_path):
-    """init-target-state.sh must contain the PR1 fno claim acquire block."""
+    """init-target-state.sh must contain the PR1 fno agents claim acquire block."""
     init_text = INIT_SCRIPT.read_text(encoding="utf-8")
-    assert "fno claim acquire" in init_text, (
-        "init-target-state.sh does not invoke `fno claim acquire`"
+    assert "fno agents claim acquire" in init_text, (
+        "init-target-state.sh does not invoke `fno agents claim acquire`"
     )
     assert "target_claim_key" in init_text
     assert "target_claim_holder" in init_text

@@ -12,7 +12,7 @@ session's project and records that it was surfaced — so it appears exactly onc
 Idempotency uses a per-session set of already-nudged message ids, pruned each
 call to the currently-unread set (bounded, and re-surface-proof even if the bus
 consumer cursor moves under us). The bus consumer cursor is NEVER advanced here
-(that is `fno mail ack`'s job): surfacing a nudge is not the same as reading.
+(that is `fno agents mail ack`'s job): surfacing a nudge is not the same as reading.
 """
 from __future__ import annotations
 
@@ -74,14 +74,14 @@ def _render(envelope) -> str:
     label = "reply from" if getattr(envelope, "in_reply_to", None) else "from"
     return (
         f'inbox: {label} {sender}: "{body}" '
-        f"— read: fno mail unread; reply: fno mail send {sender} \"...\""
+        f"— read: fno agents mail unread; reply: fno agents mail send {sender} \"...\""
     )
 
 
 def _resolve_self_name(cwd: str) -> Optional[str]:
     """Best-effort: this worker's registry name, resolved by unique live cwd.
 
-    A sender addresses a worker by its registry name (``fno mail send <name>``),
+    A sender addresses a worker by its registry name (``fno agents mail send <name>``),
     so to drain by-name mail the worker must know its own name. We match the live
     registry entry whose cwd equals this worker's cwd (the worktree-per-worker
     norm makes this unique). Zero or many live entries at the same cwd -> return
@@ -126,7 +126,7 @@ def peek_nudge(session_id: str, cwd: str) -> Optional[str]:
 
         # Direct by-name mail to this worker (no self-echo by construction), plus
         # project broadcasts excluding this worker's own sends. Each scan honors
-        # its own per-recipient cursor (advanced by `fno mail ack`).
+        # its own per-recipient cursor (advanced by `fno agents mail ack`).
         matched: list = []
         if my_name:
             matched += scan_unread(my_name, warn=False)

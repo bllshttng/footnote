@@ -355,7 +355,7 @@ enum CoreMsg {
     },
     /// (v11, x-6f77) "Grab work" (prefix+g): dispatch the next ready node into a
     /// new pane. `id` is the requesting client (for the outcome notice). The
-    /// spawn runs OFF the core loop in a detached task (it shells `fno dispatch
+    /// spawn runs OFF the core loop in a detached task (it shells `fno agents dispatch
     /// one`); the pane appears via the existing registry reader, and only the
     /// no-work / lanes-full / failure outcomes come back as `DispatchResult`.
     DispatchNext {
@@ -1728,7 +1728,7 @@ pub(crate) fn fno_bin() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fno"))
 }
 
-/// Shell `fno dispatch one --session <s> --json`, bounded + fail-open (the
+/// Shell `fno agents dispatch one --session <s> --json`, bounded + fail-open (the
 /// digest_overlay idiom), and turn its verdict into the client notice. An empty
 /// return says nothing (the launched pane speaks for itself); every error path
 /// yields a visible notice rather than a silent no-op (x-6f77).
@@ -1744,7 +1744,14 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
     // A targeted node (a clicked work-queue card, x-a496) pins `--node`; without
     // it the porcelain picks the board's next ready node (prefix+g). The claim
     // race, lane cap, and verdict shape are identical either way.
-    let mut args = vec!["dispatch", "one", "--mux-session", session, "--json"];
+    let mut args = vec![
+        "agents",
+        "dispatch",
+        "one",
+        "--mux-session",
+        session,
+        "--json",
+    ];
     if let Some(n) = node {
         args.push("--node");
         args.push(n);
@@ -1846,7 +1853,7 @@ fn first_line_or(s: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-/// (x-9c5f) Shell `fno mail send <name> <text>` off-loop, bounded + capturing:
+/// (x-9c5f) Shell `fno agents mail send <name> <text>` off-loop, bounded + capturing:
 /// the CLI's one-line stdout verdict (`msg-<id> delivered|queued`) becomes the
 /// notice verbatim; a nonzero exit surfaces the first stderr line. Never silent
 /// (Locked Decision 6). Uses the `fno` porcelain; argv array only.
@@ -1855,7 +1862,7 @@ async fn run_mail_send(name: &str, text: &str) -> String {
     // `--` ends option parsing so operator text starting with `-` (e.g. a reply
     // of `--help`) is delivered as the message, not consumed as a CLI flag.
     let fut = tokio::process::Command::new(fno_bin())
-        .args(["mail", "send", "--", name, text])
+        .args(["agents", "mail", "send", "--", name, text])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
@@ -2165,7 +2172,7 @@ fn name_has_node_token(name: &str, node: &str) -> bool {
     false
 }
 
-/// Map a `fno dispatch one --json` verdict to the one-line client notice.
+/// Map a `fno agents dispatch one --json` verdict to the one-line client notice.
 /// Unparseable / unknown output fails open to a generic failure notice (never
 /// silent on an error).
 fn dispatch_notice(stdout: &str) -> String {
@@ -5033,7 +5040,7 @@ impl Core {
         });
     }
 
-    /// (x-9c5f) Shell `fno mail send <name> <text>` OFF the core loop, mirroring
+    /// (x-9c5f) Shell `fno agents mail send <name> <text>` OFF the core loop, mirroring
     /// `agent_action`: the CLI's one-line verdict routes back as a
     /// `DispatchResult` notice. `name` was catalog-validated and `text` sanitized
     /// by the caller.
@@ -7724,7 +7731,7 @@ impl Core {
                 // Targeted work-queue dispatch (a clicked card, x-a496). Reuses
                 // the prefix+g porcelain pinned to `--node`; the claim race
                 // (already-worked node bounces `already-dispatching`) and lane
-                // cap live in `fno dispatch one`. Routes through CoreMsg::Command,
+                // cap live in `fno agents dispatch one`. Routes through CoreMsg::Command,
                 // so the read-only-observer refusal already fired upstream.
                 //
                 // Re-check readiness against the server's OWN backlog snapshot
@@ -8329,7 +8336,7 @@ impl Core {
                 // (x-9c5f) Free-text reply from peek (`m`). Resolve fail-closed
                 // (mail to an EXITED row is legal - it queues durable; an external
                 // row is refused), sanitize the text (blank/over-cap refused,
-                // never truncated), then shell `fno mail send` off-loop.
+                // never truncated), then shell `fno agents mail send` off-loop.
                 match self.resolve_lifecycle_target(&name) {
                     Err(msg) => self.notice(client_id, msg),
                     Ok(_) => match sanitize_mail_text(&text) {

@@ -32,7 +32,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
 | `project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
 | `project.vision` | str (optional) | _(none)_ | always | One-paragraph statement of what this codebase is and why. |
-| `inbox.unclaimed_ttl` | int | `1800` | advanced | Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno mail status`). |
+| `inbox.unclaimed_ttl` | int | `1800` | advanced | Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno agents mail status`). |
 | `blueprint.max_prs_per_epic` | int | `4` | advanced | Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it. |
 | `backlog.maintain.staleness_days` | int | `30` | advanced | Age (days) before an idea is flagged stale. |
 | `backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |
@@ -48,7 +48,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `post_merge.maintainer_marker` | str (optional) | _(none)_ | advanced | Discriminator tag for maintainer-only post-merge items (e.g. '#maintainer'). Default empty: omit the tag entirely so a fresh install ships no one's initials. Honored by both the post-merge ritual and the capture parser; set per-repo only when the destination is a shared vault. |
 | `post_merge.enabled` | bool | `true` | advanced | Whether the post-merge ritual runs. |
 | `post_merge.self_reap` | bool | `false` | never | Whether a post-merge watcher self-reaps. |
-| `post_merge.sync_command` | str (optional) | _(none)_ | advanced | Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno doctor update && fno restart`). Unset = off. |
+| `post_merge.sync_command` | str (optional) | _(none)_ | advanced | Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno doctor update && fno agents restart`). Unset = off. |
 | `post_merge.sync_paths` | list[str] | `[]` | advanced | Repo-relative fnmatch globs gating the canonical sync (empty = always run; e.g. `["cli/**", "crates/**"]` skips a docs-only merge). |
 | `post_merge.auto_run` | bool | `false` | advanced | Let the pr-watch daemon (the sole merge detector) run `fno do pr ritual <pr> --autonomous` for a newly-merged PR (opt-in; default off). Reconcile no longer dispatches a ritual. |
 | `post_merge.catchup_window_days` | int | `3` | advanced | How far back the canonical-sync catch-up sweep looks for merges with no sync marker (default 3 days). Bounds the sweep so a fresh clone never re-syncs all history. |
@@ -151,7 +151,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `pr_watch.tick_timeout_seconds` | int (optional) | _(none)_ | never | Wall-clock ceiling for one PR-watcher tick; unset derives 0.8x the poll interval so a stalled tick can never suppress its successor. |
 | `pr_watch.graphql_min_remaining` | int | `200` | never | Skip the PR-watcher's per-PR dispatch pass when the shared GraphQL budget falls below this floor. |
 | `groom.enabled` | bool | `true` | never | Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true. |
-| `restart.enabled` | bool | `true` | never | Enable crash-recovery worker revival after `fno restart --mux` kills a server. Defaults true. |
+| `restart.enabled` | bool | `true` | never | Enable crash-recovery worker revival after `fno agents restart --mux` kills a server. Defaults true. |
 | `evals.enabled` | bool | `true` | never | Enable the headless eval-suite grading-worker spawn. Defaults true. |
 | `recovery.enabled` | bool | `true` | advanced | Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed. |
 | `recovery.idle_threshold_seconds` | int | `900` | never | How stale a bg session must be (seconds) before recovery acts on it. |

@@ -2,7 +2,7 @@
 
 Mail drains at exactly two moments in this codebase, SessionStart and
 UserPromptSubmit, and both need the operator to type. This test exercises the
-third trigger end to end: a REAL detached `fno mail hold-release` process wakes
+third trigger end to end: a REAL detached `fno agents mail hold-release` process wakes
 on its own clock, clears the flag, dedupes, and emits its marker. No prompt, no
 injected text, no user-shaped input anywhere in the run.
 
@@ -52,7 +52,7 @@ def _run_release(env, *, poll_s=1):
     """Start the release timer as its own process and wait for it to finish."""
     return subprocess.run(
         _FNO_ARGV
-        + ["mail", "hold-release", "--handle", HANDLE, "--poll-s", str(poll_s)],
+        + ["agents", "mail", "hold-release", "--handle", HANDLE, "--poll-s", str(poll_s)],
         env=env,
         capture_output=True,
         text=True,
@@ -126,7 +126,7 @@ def test_a_held_message_lands_after_expiry_with_no_operator_input(state, tmp_pat
     _send_to_held_session("first report", ts="2026-08-20T10:00:02Z")
 
     # Arm a two-second hold by writing the clock directly: this test is about
-    # the RELEASE trigger, and `fno mail hold` needs an ambient harness
+    # the RELEASE trigger, and `fno agents mail hold` needs an ambient harness
     # identity a subprocess does not have.
     deadline = _arm_clock(hold_dir, seconds_out=2)
 
@@ -166,7 +166,7 @@ def test_a_held_message_lands_after_expiry_with_no_operator_input(state, tmp_pat
 
 
 def test_the_timer_exits_quietly_when_the_hold_was_lifted_by_hand(state):
-    """`fno mail hold --off` already released, so the timer must not release twice."""
+    """`fno agents mail hold --off` already released, so the timer must not release twice."""
     env, home = state
 
     proc = _run_release(env)
@@ -194,7 +194,7 @@ def test_an_idle_rearm_extends_the_hold_past_the_original_deadline(state):
     first_deadline = _arm_clock(hold_dir, seconds_out=2)
     proc = subprocess.Popen(
         _FNO_ARGV
-        + ["mail", "hold-release", "--handle", HANDLE, "--poll-s", "1"],
+        + ["agents", "mail", "hold-release", "--handle", HANDLE, "--poll-s", "1"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

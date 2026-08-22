@@ -17,7 +17,7 @@ bound to ``node:``). This is deliberately NOT mere co-occurrence of the string
 ``node:`` in the file: ``backlog/advance.py`` carries a ``node:`` liveness probe
 AND a ``dispatch:`` reservation release in the same file and must NOT be flagged.
 Generic prefix-agnostic wrappers that release a ``key`` parameter (the
-``fno claim release`` CLI, ``advance._safe_release``, the pr_watch
+``fno agents claim release`` CLI, ``advance._safe_release``, the pr_watch
 ``ClaimAdapter``) and releasers of other prefixes
 (``session:`` / ``fleet:`` / ``dispatch:`` / ``pending-plan:`` / ``walker:``) are
 not node-release sites.
@@ -340,7 +340,7 @@ def test_matcher_classifies_keys_by_prefix():
     """AC1-ERR / AC1-EDGE: in-test fixtures, no tree mutation. The matcher flags
     a node: release and ignores other-prefix / generic-param releases."""
     # shell: node literal flagged; dispatch var ignored
-    assert _shell_node_release_lines('fno claim release "node:$ID" --holder x') == [1]
+    assert _shell_node_release_lines('fno agents claim release "node:$ID" --holder x') == [1]
     assert _shell_node_release_lines(
         'RES="dispatch:$ID"\nfno claim release "$RES" --holder x'
     ) == []

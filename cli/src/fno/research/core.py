@@ -386,7 +386,7 @@ def read_sources(path: Path) -> list[Source]:
 def _run_claim(args: list[str]) -> tuple[int, str]:
     try:
         proc = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "claim", *args], capture_output=True, text=True, check=False, timeout=10
+            [*_subprocess_util.fno_py_cmd(), "agents", "claim", *args], capture_output=True, text=True, check=False, timeout=10
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         # Missing binary OR a hung/contended lock: degrade to the single-process

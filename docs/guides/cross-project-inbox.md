@@ -2,7 +2,7 @@
 
 Send messages between agents in different projects without losing context across iterations.
 
-> **Note (2026-06):** the headless `fno watch` launchd drain daemon, its `fswatch` loop, and archive rotation were removed. The cross-session relay supersedes the autonomous-push use case; recipients now drain with `fno mail drain` (run manually or by an autonomous worker). Sections describing `fno watch install/status/uninstall` no longer apply.
+> **Note (2026-06):** the headless `fno watch` launchd drain daemon, its `fswatch` loop, and archive rotation were removed. The cross-session relay supersedes the autonomous-push use case; recipients now drain with `fno agents mail drain` (run manually or by an autonomous worker). Sections describing `fno watch install/status/uninstall` no longer apply.
 >
 > **Migration:** if you previously ran `fno watch install`, the launchd job is now orphaned (its plist points at the deleted `scripts/fno-watch.sh`). Remove it once: `launchctl bootout gui/$(id -u)/com.fno.watch.<project> 2>/dev/null; rm -f ~/Library/LaunchAgents/com.fno.watch.<project>.plist` (`<project>` = your `project:` name).
 
@@ -10,9 +10,9 @@ Send messages between agents in different projects without losing context across
 
 Onboarding is a single step: set the project name so peers can address you.
 
-**Set the project name.** Edit `<repo>/.fno/config.toml` and add (or confirm) `project: <name>` at the top. The name MUST match what peers will use in `fno mail send --to-project <name>` (example known names: `footnote`, `acme-backend`, `acme-web`, `acme-docs`, `acme-blog`, `marketing`). If the field is missing, every `fno mail` verb errors with `set 'project:' in .fno/config.toml or pass --from` (recipient verbs keep `--from`; the send verb is `fno mail send --from-name`).
+**Set the project name.** Edit `<repo>/.fno/config.toml` and add (or confirm) `project: <name>` at the top. The name MUST match what peers will use in `fno agents mail send --to-project <name>` (example known names: `footnote`, `acme-backend`, `acme-web`, `acme-docs`, `acme-blog`, `marketing`). If the field is missing, every `fno agents mail` verb errors with `set 'project:' in .fno/config.toml or pass --from` (recipient verbs keep `--from`; the send verb is `fno agents mail send --from-name`).
 
-Once named, peers can `fno mail send --to-project <you>` and you read with `fno mail unread` / drain with `fno mail drain`.
+Once named, peers can `fno agents mail send --to-project <you>` and you read with `fno agents mail unread` / drain with `fno agents mail drain`.
 
 ## Setup (one-time per project)
 
@@ -22,7 +22,7 @@ Each project must declare its identity in `.fno/config.toml`:
 project: acme-web
 ```
 
-Without this field, `fno mail` errors loudly. There is no fallback to cwd basename; the project name must be explicit.
+Without this field, `fno agents mail` errors loudly. There is no fallback to cwd basename; the project name must be explicit.
 
 Optional triage settings:
 
@@ -37,7 +37,7 @@ config:
 ## Send a message
 
 ```bash
-fno mail send --to-project acme-web --kind heads-up \
+fno agents mail send --to-project acme-web --kind heads-up \
     --body "New region data source live in PR 112"
 ```
 
@@ -54,15 +54,15 @@ Optional flags: `--reply-to <msg-id>`, `--ref-pr <N>`, `--ref-node ab-...`, `--r
 ## Read your inbox
 
 ```bash
-fno mail unread             # list unread messages (table format)
-fno mail unread --json       # machine-readable
-fno mail list --all          # full history including read messages
+fno agents mail unread             # list unread messages (table format)
+fno agents mail unread --json       # machine-readable
+fno agents mail list --all          # full history including read messages
 ```
 
 ## Acknowledge a message
 
 ```bash
-fno mail ack msg-a4f1b2 [--triaged-into ab-1234abcd]
+fno agents mail ack msg-a4f1b2 [--triaged-into ab-1234abcd]
 ```
 
 The `--triaged-into` flag links the inbox message to the graph node it produced (only relevant for triaged heads-ups).
@@ -70,7 +70,7 @@ The `--triaged-into` flag links the inbox message to the graph node it produced 
 ## Reply to a message
 
 ```bash
-fno mail reply --to msg-a4f1b2 --kind answer \
+fno agents mail reply --to msg-a4f1b2 --kind answer \
     --body "silent-failure-hunter HIGH on swallow_errors_in_dispatch.py"
 ```
 
@@ -79,7 +79,7 @@ The reply lands in the original sender's inbox with `reply_to` set. If the msg-i
 ## LLM triage (heads-ups only)
 
 ```bash
-fno mail triage msg-a4f1b2 --json
+fno agents mail triage msg-a4f1b2 --json
 ```
 
 Returns a structured plan:
@@ -136,28 +136,28 @@ See `skills/megawalk/references/inbox-handlers.md` for the per-kind dispatch tab
 ## Linting and recovering from corruption
 
 ```bash
-fno mail lint acme-web
+fno agents mail lint acme-web
 ```
 
 Reports any malformed message blocks, with line numbers, and exits non-zero if any errors are found. The malformed blocks themselves are skipped during normal `unread`/`list` calls (they appear in `inbox-errors.jsonl` but not in the user-facing output).
 
 ## Draining mail
 
-Read and process unread threads with `fno mail` - no daemon required:
+Read and process unread threads with `fno agents mail` - no daemon required:
 
 ```bash
-fno mail unread          # list threads addressed to you past your cursor
-fno mail drain --max 10  # process unread non-interrupting kinds and ack each
+fno agents mail unread          # list threads addressed to you past your cursor
+fno agents mail drain --max 10  # process unread non-interrupting kinds and ack each
 ```
 
 `kind: question` threads are never auto-handled: the drain leaves them unread for a human. Run the drain manually, or let an autonomous worker run it.
 
 ## Status
 
-`fno mail status` prints a one-screen health snapshot for the current project. Useful when you want to know "do I have unread mail" without grepping log files.
+`fno agents mail status` prints a one-screen health snapshot for the current project. Useful when you want to know "do I have unread mail" without grepping log files.
 
 ```bash
-fno mail status
+fno agents mail status
 ```
 
 ```
@@ -185,7 +185,7 @@ Add `--json` for machine-readable output. The same eight fields appear as top-le
 | `wake_signals` | Count of pending files in `<repo>/.fno/wake-signals/` |
 | `errors_24h` | Count of `inbox-errors.jsonl` entries with a parseable `ts` within the last 24 hours |
 
-`fno mail status` is informational and does not require the daemon to be loaded - it is safe to run even before step 3 of the [onboarding checklist](#onboarding-a-project-to-the-inbox-fleet).
+`fno agents mail status` is informational and does not require the daemon to be loaded - it is safe to run even before step 3 of the [onboarding checklist](#onboarding-a-project-to-the-inbox-fleet).
 
 ## Architecture reference
 

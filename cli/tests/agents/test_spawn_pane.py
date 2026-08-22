@@ -3728,7 +3728,7 @@ def test_claude_pane_argv_carries_the_worker_name(no_state_grant: None, tmp_path
 def test_a_terminal_row_does_not_own_its_name(tmp_path: Path, monkeypatch) -> None:
     """x-cdca: a dead pane must not deadlock the node that spawned it.
 
-    `fno dispatch one` releases its claim and lane on a failed spawn and retries
+    `fno agents dispatch one` releases its claim and lane on a failed spawn and retries
     under the SAME deterministic worker name. A status-blind collision guard
     therefore turned one dead pane into a permanently failed node until a human
     ran `fno agents rm`. A terminal row will never act again, so it does not

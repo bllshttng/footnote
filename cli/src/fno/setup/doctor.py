@@ -315,7 +315,7 @@ def check_state_root_writable() -> list[str]:
         return [
             f"the claim store at {store} is not writable by this session{who}: "
             f"{exc.strerror or exc}. A worker here takes no node claim, so "
-            f"`fno claim status` reports free while it works and a second worker "
+            f"`fno agents claim status` reports free while it works and a second worker "
             f"can be dispatched onto the same node. Remedy: {remedy}."
         ]
     return []

@@ -130,7 +130,7 @@ else
 fi
 
 # ── S5: foreign_claim ────────────────────────────────────────────────────────
-FNO_CLAIMS_ROOT="$CLAIMS_HOME" FNO claim acquire "node:$NODE" --holder other-session >/dev/null 2>&1
+FNO_CLAIMS_ROOT="$CLAIMS_HOME" FNO agents claim acquire "node:$NODE" --holder other-session >/dev/null 2>&1
 run_validate
 REASON="$(printf '%s' "$VAL" | field reason)"
 if [[ "$VAL_RC" -ne 0 && "$REASON" == "foreign_claim" ]]; then
@@ -138,7 +138,7 @@ if [[ "$VAL_RC" -ne 0 && "$REASON" == "foreign_claim" ]]; then
 else
   fail "S5: expected foreign_claim, got rc=$VAL_RC reason='$REASON'"
 fi
-FNO_CLAIMS_ROOT="$CLAIMS_HOME" FNO claim release "node:$NODE" --holder other-session >/dev/null 2>&1 || true
+FNO_CLAIMS_ROOT="$CLAIMS_HOME" FNO agents claim release "node:$NODE" --holder other-session >/dev/null 2>&1 || true
 
 # ── S6: duplicate_generation (delegated event from a foreign session) ────────
 printf '{"type":"delegated","ts":"2026-07-26T02:30:00Z","data":{"node_id":"%s","harness":"claude","generation":2,"from_session":"other"}}\n' "$NODE" >> "$TMP/.fno/events.jsonl"

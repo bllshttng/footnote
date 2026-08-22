@@ -343,7 +343,7 @@ def test_opencode_arbitrary_verb_renders_fno_prefix():
 
 def test_normalize_fallback_table_mirrors_harness_map():
     """Parity: normalize.sh's static command-surface fallback (used only when
-    `fno dispatch resolve` is unreachable) MUST mirror harness_map, the SoT - a
+    `fno agents dispatch resolve` is unreachable) MUST mirror harness_map, the SoT - a
     drift would dispatch the wrong spelling. Parses the shell case block and
     compares each provider's surface to capabilities()."""
     import re

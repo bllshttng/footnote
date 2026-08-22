@@ -54,7 +54,7 @@ _RECEIPT = '{"name":"tgt-2222aaaa","short_id":"abc12345","provider":"claude","st
 def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Isolate all claims + canonical-root resolution under tmp_path.
 
-    The journal is pinned as well as the root. `fno dispatch` writes its
+    The journal is pinned as well as the root. `fno agents dispatch` writes its
     cutover receipt through an unpathed `append_event`, which resolves through
     `paths.project_events_json()` and so honors `FNO_EVENTS_PATH` ahead of the
     root - and the hermetic sandbox sets that var for the whole pytest process.
@@ -1739,7 +1739,7 @@ def test_failover_racing_advances_dedup(iso, monkeypatch):
 # ---------------------------------------------------------------------------
 # x-2716: both autonomous launchers consume ONE route decision.
 #
-# `backlog advance` and `fno dispatch` used to disagree - advance could walk the
+# `backlog advance` and `fno agents dispatch` used to disagree - advance could walk the
 # combo onto another harness while dispatch could only defer or decline to
 # defer - so these pin that identical fixtures resolve to the identical
 # destination tuple, and that an unresolvable destination reaches neither spawn.
@@ -1750,7 +1750,7 @@ DISPATCH_NODE = {**NODE, "id": "ab-3333bbbb", "priority": "p2"}
 
 
 def _dispatch_one_capture(monkeypatch, tmp_path):
-    """Drive `fno dispatch`'s autonomous path, capturing its pane-spawn kwargs.
+    """Drive `fno agents dispatch`'s autonomous path, capturing its pane-spawn kwargs.
 
     Its own node id, so the sibling advance leg's live dispatch:<id> reservation
     does not read as this launcher already dispatching."""

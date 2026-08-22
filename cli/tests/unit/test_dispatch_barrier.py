@@ -309,8 +309,8 @@ def test_an_unprovable_wedge_refuses_and_names_the_way_out(monkeypatch, tmp_path
 
     verdict, _exit = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
     assert verdict["verdict"] == "already-running"
-    assert "fno claim release node:N --force" in verdict["remedy"]
-    assert "fno claim reap --apply" in verdict["remedy"]
+    assert "fno agents claim release node:N --force" in verdict["remedy"]
+    assert "fno agents claim reap --apply" in verdict["remedy"]
 
 
 def test_a_launch_window_holder_is_never_reported_as_a_wedge(monkeypatch, tmp_path):
@@ -376,7 +376,7 @@ def test_the_launch_path_still_names_the_way_out(monkeypatch, tmp_path):
     verdict, _exit = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
     assert verdict["reason"] == "suspect-claim"
     assert "recovery" not in verdict
-    assert "fno claim reap --apply" in verdict["remedy"]
+    assert "fno agents claim reap --apply" in verdict["remedy"]
 
 
 def test_a_blind_roster_never_clears_a_node_claim(monkeypatch, tmp_path):
@@ -400,7 +400,7 @@ def test_a_blind_roster_never_clears_a_node_claim(monkeypatch, tmp_path):
 
 def test_the_guard_claims_the_node_key_not_just_the_reservation(monkeypatch, tmp_path):
     """The measured defect: five workers spawned with an explicit --node and
-    `fno claim status node:<id>` read free for every one of them."""
+    `fno agents claim status node:<id>` read free for every one of them."""
     _route_to(monkeypatch, tmp_path)
     from fno.claims.core import claim_status
 
@@ -879,7 +879,7 @@ def test_a_failed_release_names_the_key_it_could_not_free(monkeypatch, capsys):
     assert "dispatch:x-abcd" in err
     assert "node:x-abcd" in err
     assert "stays held until its TTL expires" in err
-    assert "fno claim release" in err
+    assert "fno agents claim release" in err
 
 
 def test_a_successful_release_stays_quiet(monkeypatch, capsys):

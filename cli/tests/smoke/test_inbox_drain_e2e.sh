@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test: fno mail drain --json on the post-2026-05 thread layout.
+# Smoke test: fno agents mail drain --json on the post-2026-05 thread layout.
 # Sends one of each kind, drains, asserts per-kind side effects.
 set -euo pipefail
 
@@ -37,20 +37,20 @@ chmod +x "$STUB"
 
 # Inject one of each kind via the real CLI. Use --project so cwd stays at $WORK
 # (so drain's _git_root() / cwd resolves against $WORK/.fno/).
-FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
+FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py agents mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind heads-up \
   --body "please file as a graph node"
-FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
+FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py agents mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind question \
   --body "do we proceed with the rollback"
-FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
+FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py agents mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind fyi \
   --body "build complete in 4 minutes"
 
 # Drain (triage stub stands in for the LLM; graph writes land in $WORK/.fno).
 DRAIN_JSON=$(FNO_INBOX_ROOT="$INBOX_ROOT" \
   FNO_LLM_STUB="$STUB" \
-  uv run --project "$CLI_DIR" fno-py mail drain --from "$PROJECT" --json --max 10)
+  uv run --project "$CLI_DIR" fno-py agents mail drain --from "$PROJECT" --json --max 10)
 
 # 3 results, 3 distinct actions.
 echo "$DRAIN_JSON" | python3 -c "

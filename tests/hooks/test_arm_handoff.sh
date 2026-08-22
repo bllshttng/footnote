@@ -37,21 +37,21 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP + 1)); }
 
 TMP="$(mktemp -d -t arm-handoff-XXXXXX)"
-trap 'FNO_CLAIMS_ROOT="$TMP" fno claim release "node:x-test" >/dev/null 2>&1; rm -rf "$TMP"' EXIT
+trap 'FNO_CLAIMS_ROOT="$TMP" fno agents claim release "node:x-test" >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 SID="sess-xyz"
 
-# Hermetic claims root: `fno claim` reads/writes <root>/.fno/claims/.
+# Hermetic claims root: `fno agents claim` reads/writes <root>/.fno/claims/.
 export FNO_CLAIMS_ROOT="$TMP"
 # `fno` is the Rust binary and is not built in every CI lane. Rather than skip
 # the claim cases there - which would leave the load-bearing behavior unverified
 # on exactly the lane that gates merge - fall back to a deterministic stub that
-# emits the `fno claim status -J` shape for a fixed live key. The real binary is
+# emits the `fno agents claim status -J` shape for a fixed live key. The real binary is
 # preferred whenever present, so the stub can never be the ONLY thing that ever
 # ran; it exists so the parse and both branches are exercised everywhere.
 setup_claim_backend() {  # $1 = the key that should read live
   local live_key="$1"
   if command -v fno >/dev/null 2>&1 \
-     && fno claim acquire "$live_key" --holder "target-session:$SID" --ttl 1h >/dev/null 2>&1; then
+     && fno agents claim acquire "$live_key" --holder "target-session:$SID" --ttl 1h >/dev/null 2>&1; then
     CLAIM_BACKEND="real"
     return 0
   fi
@@ -59,7 +59,7 @@ setup_claim_backend() {  # $1 = the key that should read live
   mkdir -p "$TMP/bin"
   cat > "$TMP/bin/fno" <<STUB
 #!/usr/bin/env bash
-# Minimal stand-in for \`fno claim status <key> -J\`. Any key other than the one
+# Minimal stand-in for \`fno agents claim status <key> -J\`. Any key other than the one
 # live fixture reads free, which is what a never-acquired claim really returns.
 # Delegate \`fno context\` to the real implementation (x-7685 repointed
 # arm-handoff to fno context; a stub that exits 1 on it makes the probe
@@ -68,11 +68,11 @@ setup_claim_backend() {  # $1 = the key that should read live
 if [ "\$1" = "context" ] && [ -n "$FNO_PYTHON" ]; then
   exec "$FNO_PYTHON" -m fno.cli "\$@"
 fi
-[ "\$1" = "claim" ] && [ "\$2" = "status" ] || exit 1
-if [ "\$3" = "$live_key" ]; then
-  printf '{"key": "%s", "state": "live", "holder": "target-session:stub"}\\n' "\$3"
+[ "\$1" = "agents" ] && [ "\$2" = "claim" ] && [ "\$3" = "status" ] || exit 1
+if [ "\$4" = "$live_key" ]; then
+  printf '{"key": "%s", "state": "live", "holder": "target-session:stub"}\\n' "\$4"
 else
-  printf '{"key": "%s", "state": "free"}\\n' "\$3"
+  printf '{"key": "%s", "state": "free"}\\n' "\$4"
 fi
 STUB
   chmod +x "$TMP/bin/fno"

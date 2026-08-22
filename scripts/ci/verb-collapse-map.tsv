@@ -2,20 +2,52 @@ current-leaf	tier	post-collapse-typing	refs	reason-if-not-T1
 agents adopt	T1	agents adopt	6
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
+agents autonomy status	T1	agents autonomy status	9
+agents claim acquire	T1	agents claim acquire	27
+agents claim list	T1	agents claim list	9
+agents claim reap	T1	agents claim reap	1
+agents claim refresh	T1	agents claim refresh	5
+agents claim release	T1	agents claim release	38
+agents claim session-pid	T1	agents claim session-pid	2
+agents claim status	T1	agents claim status	32
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
 agents court	T1	agents court	3
 agents crown	T1	agents crown	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
+agents dispatch capabilities	T1	agents dispatch capabilities	0
+agents dispatch one	T1	agents dispatch one	9
+agents dispatch resolve	T1	agents dispatch resolve	23
 agents drive-authority	T1	agents drive-authority	9
 agents finalize	T1	agents finalize	26
 agents gate	T1	agents gate	6
 agents heal-token	T1	agents heal-token	8
 agents kill-check	T1	agents kill-check	4
+agents king escalate	T1	agents king escalate	1
+agents king init	T1	agents king init	7
 agents list	KEEP	agents list	81	deliberate readability slack for a high-traffic distinct operation
 agents logs	KEEP	agents logs	73	deliberate readability slack for a high-traffic distinct operation
 agents loop	KEEP	agents loop	61	deliberate readability slack for a high-traffic distinct operation
 agents loop-check	KEEP	agents loop-check	61	deliberate readability slack for a high-traffic distinct operation
+agents mail ack	T1	agents mail ack	10
+agents mail drain	T1	agents mail drain	10
+agents mail drain-self	T1	agents mail drain-self	6
+agents mail hold	T1	agents mail hold	0
+agents mail hold-release	T1	agents mail hold-release	1
+agents mail lint	T1	agents mail lint	1
+agents mail list	T1	agents mail list	15
+agents mail migrate-bus	T1	agents mail migrate-bus	0
+agents mail notify-self	T1	agents mail notify-self	4
+agents mail rebuild-render	T1	agents mail rebuild-render	1
+agents mail reply	T1	agents mail reply	18
+agents mail send	T1	agents mail send	184
+agents mail sent	T1	agents mail sent	2
+agents mail status	T1	agents mail status	9
+agents mail triage	T1	agents mail triage	8
+agents mail unread	T1	agents mail unread	16
+agents mail view	T1	agents mail view	2
+agents mail withdraw	T1	agents mail withdraw	2
+agents mcp send	T1	agents mcp send	10
 agents name	T1	agents name	5
 agents needs	KEEP	agents needs	11	ruled KEEP: fno-agents needs is coupled to needs_overlay
 agents nudge-peek	T1	agents nudge-peek	6
@@ -32,6 +64,10 @@ agents restart	T1	agents restart	6
 agents review-coverage	T1	agents review-coverage	34
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
 agents rm	KEEP	agents rm	56	deliberate readability slack for a high-traffic distinct operation
+agents roles context	T1	agents roles context	2
+agents roles ls	T1	agents roles ls	1
+agents roles resolve	T1	agents roles resolve	2
+agents roles show	T1	agents roles show	2
 agents spawn	KEEP	agents spawn	256	deliberate readability slack for a high-traffic distinct operation
 agents spawn-guard	T1	agents spawn-guard	5
 agents status	T1	agents status	5
@@ -45,6 +81,11 @@ agents verify-evidence	T1	agents verify-evidence	7
 agents wait	T1	agents wait	10
 agents watch	T1	agents watch	5
 agents whoami	T1	agents whoami	9
+agents worker blueprint	T1	agents worker blueprint	0
+agents worker external	T1	agents worker external	0
+agents worker reconcile	T1	agents worker reconcile	0
+agents worker review	T1	agents worker review	0
+agents worker ship	T1	agents worker ship	2
 annotate add	T1	annotate add	8
 annotate list	KEEP	annotate list	0	ruled KEEP: read-back half of the live annotate write path
 annotate resolve	T1	annotate resolve	5

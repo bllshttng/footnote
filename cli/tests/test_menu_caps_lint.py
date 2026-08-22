@@ -105,7 +105,7 @@ def test_shipped_sub_apps_within_cap():
 
 def test_menu_caps_enforces_cap_on_HIDDEN_top_level_groups():
     """Codex P2: the sub-app cap applies to every group, including one whose
-    top-level entry is hidden (e.g. `fno mail`). Regression guard for two bugs:
+    top-level entry is hidden (e.g. `fno agents mail`). Regression guard for two bugs:
     (1) iterating only advertised entries, and (2) the isinstance(click.Group)
     check that silently skipped ALL sub-apps because Typer bundles a vendored
     click (a TyperGroup is not a top-level click.Group instance)."""

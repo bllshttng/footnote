@@ -339,6 +339,21 @@ def test_doctor_fold_move_table_matches_the_approved_work_order():
     assert {name: VERB_MOVES[name].to for name in expected} == expected
 
 
+def test_agents_fold_move_table_matches_the_approved_work_order():
+    expected = {
+        "autonomy": "agents autonomy",
+        "claim": "agents claim",
+        "dispatch": "agents dispatch",
+        "king": "agents king",
+        "mail": "agents mail",
+        "mcp": "agents mcp",
+        "restart": "agents restart",
+        "roles": "agents roles",
+        "worker": "agents worker",
+    }
+    assert {name: VERB_MOVES[name].to for name in expected} == expected
+
+
 def test_help_all_lists_moved_spellings_under_their_own_heading():
     from fno.cli import app
 

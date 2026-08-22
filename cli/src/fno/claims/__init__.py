@@ -1,4 +1,4 @@
-"""fno claim - work-claim coordination primitive.
+"""fno agents claim - work-claim coordination primitive.
 
 Public surface for in-process callers (init-target-state.sh, megawalk,
 megatron). The CLI is in :mod:`fno.claims.cli`.

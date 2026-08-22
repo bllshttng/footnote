@@ -418,7 +418,7 @@ class TestSidecarChannelDelivery:
 
 
 class TestMcpSendCli:
-    """`fno mcp send` verb: stdin envelope -> send_to_channel, exit codes,
+    """`fno agents mcp send` verb: stdin envelope -> send_to_channel, exit codes,
     and the Typer single-command collapse guard."""
 
     def test_send_invokes_send_to_channel_with_stdin_envelope(self, monkeypatch) -> None:
@@ -486,7 +486,7 @@ class TestMcpSendCli:
 
     def test_send_is_a_real_subcommand_not_collapsed(self) -> None:
         """Typer collapses a lone command into the callback; the no-op
-        callback keeps `send` a real subcommand (`fno mcp send`)."""
+        callback keeps `send` a real subcommand (`fno agents mcp send`)."""
         from typer.testing import CliRunner
 
         from fno.mcp.cli import mcp_app
@@ -499,7 +499,7 @@ class TestMcpSendCli:
     def test_send_verb_delivers_to_registered_channel(
         self, short_home: Path, monkeypatch
     ) -> None:
-        """End-to-end: `fno mcp send` hands a stdin envelope across the
+        """End-to-end: `fno agents mcp send` hands a stdin envelope across the
         socket to a channel registered on the real sidecar."""
         from typer.testing import CliRunner
 

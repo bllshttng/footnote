@@ -1,4 +1,4 @@
-"""Unit tests for `fno restart` (x-69b3)."""
+"""Unit tests for `fno agents restart` (x-69b3)."""
 from __future__ import annotations
 
 import json
@@ -40,11 +40,23 @@ def test_restart_restarts_daemon_and_reports_mux(monkeypatch) -> None:
     monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
     monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main", "state": "live"}])
 
-    result = runner.invoke(app, ["restart"])
+    result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 0
     assert ["/cargo/bin/fno-agents", "restart"] in calls
     assert not any("kill-server" in c for c in calls), "must NOT kill mux without --mux"
     assert "live mux session" in result.output
+
+
+def test_agents_restart_force_preserves_the_daemon_break_glass_flag(monkeypatch) -> None:
+    _fake_daemon_binary(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart", "--force"])
+
+    assert result.exit_code == 0, result.output
+    assert ["/cargo/bin/fno-agents", "restart", "--force"] in calls
 
 
 def test_restart_mux_flag_kills_each_session(monkeypatch) -> None:
@@ -59,7 +71,7 @@ def test_restart_mux_flag_kills_each_session(monkeypatch) -> None:
         lambda: [{"session": "main", "state": "live"}, {"session": "work", "state": "live"}],
     )
 
-    result = runner.invoke(app, ["restart", "--mux"])
+    result = runner.invoke(app, ["agents", "restart", "--mux"])
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "mux", "kill-server", "main"] in calls
     assert ["/cargo/bin/fno", "mux", "kill-server", "work"] in calls
@@ -78,7 +90,7 @@ def test_restart_mux_skips_non_live_sessions(monkeypatch) -> None:
         lambda: [{"session": "live1", "state": "live"}, {"session": "dead", "state": "stale"}],
     )
 
-    result = runner.invoke(app, ["restart", "--mux"])
+    result = runner.invoke(app, ["agents", "restart", "--mux"])
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "mux", "kill-server", "live1"] in calls
     assert not any("dead" in c for c in calls), "must NOT kill a non-live session"
@@ -100,7 +112,7 @@ def test_restart_auto_restarts_stale_wire_server_without_mux(monkeypatch) -> Non
         ],
     )
 
-    result = runner.invoke(app, ["restart"])  # NO --mux
+    result = runner.invoke(app, ["agents", "restart"])  # NO --mux
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "mux", "kill-server", "old"] in calls, "stale auto-restarted"
     assert not any(
@@ -117,7 +129,7 @@ def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:
     )
     monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
 
-    result = runner.invoke(app, ["restart"])
+    result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 1
     assert "exited 3" in result.output
 
@@ -129,7 +141,7 @@ def test_restart_json_summary(monkeypatch) -> None:
     )
     monkeypatch.setattr(restart, "_mux_sessions", lambda: [{"session": "main", "state": "live"}])
 
-    result = runner.invoke(app, ["restart", "--json"])
+    result = runner.invoke(app, ["agents", "restart", "--json"])
     assert result.exit_code == 0
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
     assert payload["daemon"] == "restarted"
@@ -143,7 +155,7 @@ def test_restart_no_daemon_binary_is_non_fatal(monkeypatch) -> None:
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
 
-    result = runner.invoke(app, ["restart"])
+    result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 0
     assert "no installed fno-agents binary" in result.output
 
@@ -156,7 +168,7 @@ def test_restart_mux_json_nothing_running_completes(monkeypatch) -> None:
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     monkeypatch.setattr(restart, "_mux_sessions", lambda: [])
 
-    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
     assert result.exit_code == 0
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
     assert payload["mux_sessions"] == []
@@ -180,14 +192,14 @@ def test_restart_mux_kill_timeout_names_the_session(monkeypatch) -> None:
 
     monkeypatch.setattr(restart.subprocess, "run", _run)
 
-    result = runner.invoke(app, ["restart", "--mux"])
+    result = runner.invoke(app, ["agents", "restart", "--mux"])
     assert result.exit_code == 1
     assert "gave up on mux session 'wedged'" in result.output
 
 
 def test_restart_wedged_row_fails_and_names_session_and_log(monkeypatch) -> None:
     """A wedged mux row (holds the socket but not accepting) is an actionable
-    failure, not a benign non-live row: `fno restart` must exit non-zero and name
+    failure, not a benign non-live row: `fno agents restart` must exit non-zero and name
     the session + its log, never report ok:true over it (x-82c6). Fires WITHOUT
     --mux -- a wedged server is broken, not a restart target you opt into."""
     _fake_daemon_binary(monkeypatch)
@@ -198,7 +210,7 @@ def test_restart_wedged_row_fails_and_names_session_and_log(monkeypatch) -> None
         lambda: [{"session": "stuck", "state": "wedged", "log": "/tmp/mux/stuck.log"}],
     )
 
-    result = runner.invoke(app, ["restart"])
+    result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 1
     assert "WEDGED" in result.output
     assert "stuck" in result.output
@@ -238,7 +250,7 @@ def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
         [[orphan, survivor], [dict(orphan, status="exited"), survivor]],
     )
 
-    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
     assert [
@@ -255,7 +267,7 @@ def test_restart_no_revive_flag_skips_revival(monkeypatch) -> None:
     _revive_setup(monkeypatch, calls)
     monkeypatch.setattr(restart, "_agents_rows", lambda: [{"name": "w", "status": "live"}])
 
-    result = runner.invoke(app, ["restart", "--mux", "--no-revive"])
+    result = runner.invoke(app, ["agents", "restart", "--mux", "--no-revive"])
     assert result.exit_code == 0
     assert not any("spawn" in c or "reconcile" in c for c in calls)
 
@@ -268,7 +280,7 @@ def test_restart_config_disabled_skips_revival_without_the_flag(monkeypatch) -> 
     monkeypatch.setattr(restart, "_agents_rows", lambda: [{"name": "w", "status": "live"}])
     monkeypatch.setattr(restart, "_revive_enabled", lambda: False)
 
-    result = runner.invoke(app, ["restart", "--mux"])
+    result = runner.invoke(app, ["agents", "restart", "--mux"])
     assert result.exit_code == 0
     assert not any("spawn" in c or "reconcile" in c for c in calls)
 
@@ -284,7 +296,7 @@ def test_restart_explicit_revive_flag_wins_over_config_disabled(monkeypatch) -> 
     )
     monkeypatch.setattr(restart, "_revive_enabled", lambda: False)
 
-    result = runner.invoke(app, ["restart", "--mux", "--revive"])
+    result = runner.invoke(app, ["agents", "restart", "--mux", "--revive"])
     assert result.exit_code == 0
     assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
 
@@ -308,7 +320,7 @@ def test_restart_revive_skips_worker_without_resumable_session(monkeypatch) -> N
     row = {"name": "codexw", "status": "live", "harness": "codex", "session_id": None}
     _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
 
-    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
     assert result.exit_code == 0
     assert not any("spawn" in c for c in calls)
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
@@ -330,7 +342,7 @@ def test_restart_revive_failure_reported_not_fatal(monkeypatch) -> None:
     row = {"name": "worker1", "status": "live", "harness": "claude", "session_id": "uuid-1"}
     _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
 
-    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
     assert result.exit_code == 0
     assert "fno agents resume worker1" in result.output
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
@@ -366,7 +378,7 @@ def test_restart_wedged_row_not_killed_and_json_ok_false(monkeypatch) -> None:
         ],
     )
 
-    result = runner.invoke(app, ["restart", "--mux", "--json"])
+    result = runner.invoke(app, ["agents", "restart", "--mux", "--json"])
     assert result.exit_code == 1
     assert not any("stuck" in c for c in calls), "must NOT kill a wedged server (floor: report only)"
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])

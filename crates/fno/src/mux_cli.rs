@@ -19,7 +19,7 @@
 //! - `ls`: array of `{session, state: live|stale|unqueryable|unprobeable,
 //!   clients?, squads?, panes?, error?}` (`[]` when empty). A `live` row also
 //!   carries `stale` (x-1a85: on a wire version this binary can't handshake -
-//!   `fno restart` auto-restarts these) and `wire_version` (the server's
+//!   `fno agents restart` auto-restarts these) and `wire_version` (the server's
 //!   `.ver` sidecar value, `null` for a pre-sidecar server).
 //! - `kill-server`: `{session, killed: true, note, path}` on success, `path`
 //!   one of `graceful|stale-socket|sigterm|sigkill`.
@@ -295,7 +295,7 @@ fn session_rows() -> Result<Vec<SessionRow>, String> {
 }
 
 /// One `fno mux ls --json` row. The `state` string is the stable contract
-/// `fno restart --mux` reads (a `wedged` row is what makes restart report a
+/// `fno agents restart --mux` reads (a `wedged` row is what makes restart report a
 /// non-zero exit); a wedged row also carries its `log` path so the operator can
 /// find the stuck server. Pure, so the state contract is unit-testable.
 fn session_row_json(row: &SessionRow) -> serde_json::Value {
@@ -314,7 +314,7 @@ fn session_row_json(row: &SessionRow) -> serde_json::Value {
             "session": name, "state": "live",
             "clients": clients, "squads": squads, "panes": panes,
             // (x-1a85) `stale` = live but on a wire version the running binary
-            // can't handshake; `fno restart` auto-restarts these unconditionally.
+            // can't handshake; `fno agents restart` auto-restarts these unconditionally.
             // `wire_version` is null for a pre-sidecar (older) server.
             "stale": stale, "wire_version": wire_version,
         }),
@@ -365,7 +365,7 @@ pub fn ls(json: bool) -> i32 {
                 panes,
             } => {
                 // (x-1a85) A stale-wire live server is flagged: a current client
-                // can't attach it, and `fno restart` will auto-restart it.
+                // can't attach it, and `fno agents restart` will auto-restart it.
                 let tail = if stale {
                     " [stale wire - restart to reconnect]"
                 } else {
@@ -929,7 +929,7 @@ fn refusal(context: &str, reason: &str, sock: &Path) -> KillOutcome {
         path: KillPath::Unrecoverable,
         note: format!(
             "fno: {context}\nfno: {reason}\n     next: kill -9 $(lsof -t -U {}) 2>/dev/null; \
-             rm -f {rm}\n     then: fno doctor update && fno restart && fno",
+             rm -f {rm}\n     then: fno doctor update && fno agents restart && fno",
             shell_quote(sock),
         ),
     }
@@ -5170,7 +5170,7 @@ mod tests {
 
     #[test]
     fn mux_ls_json_state_contract() {
-        // The `state` string is the contract `fno restart --mux` reads; a wedged
+        // The `state` string is the contract `fno agents restart --mux` reads; a wedged
         // row is what flips restart to a non-zero exit (x-82c6), split from the
         // (still-live) unqueryable old-build row.
         assert_eq!(session_row_json(&live("s"))["state"], "live");
@@ -5186,7 +5186,7 @@ mod tests {
     fn mux_ls_flags_stale_wire_live_server() {
         // x-1a85: a live server whose sidecar version != the running binary's
         // (or is absent) is `stale` - a current client can't handshake it, so
-        // `fno restart` auto-restarts it. A current-version live server is not.
+        // `fno agents restart` auto-restarts it. A current-version live server is not.
         let current = live("cur"); // wire_version = PROTO_VERSION
         assert!(!current.wire_stale(), "same wire is not stale");
         assert_eq!(session_row_json(&current)["stale"], false);
@@ -5463,7 +5463,7 @@ mod tests {
             out.note
         );
         assert!(
-            out.note.contains("fno restart"),
+            out.note.contains("fno agents restart"),
             "refusal names the recovery chain: {}",
             out.note
         );

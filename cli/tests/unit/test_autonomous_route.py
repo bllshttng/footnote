@@ -294,7 +294,7 @@ def test_select_destination_no_active_combo_defers(monkeypatch):
 
 
 class TestAutonomousResolveRung:
-    """`fno dispatch resolve --autonomous`: the seam the shell dispatcher uses.
+    """`fno agents dispatch resolve --autonomous`: the seam the shell dispatcher uses.
 
     dispatch-node.sh reached only the pure resolver, so /target bg and blueprint
     auto-launch never saw a quota verdict. These pin the folded tuple.
@@ -428,7 +428,7 @@ class TestCutoverMergePosture:
     """Quota exhaustion must not change who may merge."""
 
     def test_cutover_command_keeps_no_merge_under_auto_merge_config(self, monkeypatch) -> None:
-        # `fno dispatch`'s normal path always spawns the no-merge `/target`. Routing
+        # `fno agents dispatch`'s normal path always spawns the no-merge `/target`. Routing
         # the cutover through the full resolver would read
         # config.dispatch.auto_merge and could hand the rerouted worker merge
         # authority the non-cutover launch never gets.
@@ -554,7 +554,7 @@ def test_an_explicit_account_is_the_record_that_gets_probed(monkeypatch, tmp_pat
 
 
 def test_a_launcher_that_hardcodes_its_harness_cannot_pin_on_the_config(monkeypatch) -> None:
-    """`fno dispatch one` hardcodes a claude pane, so config.dispatch.harness is
+    """`fno agents dispatch one` hardcodes a claude pane, so config.dispatch.harness is
     not a choice it honors. Pinning on it there would suppress a cutover to
     protect a setting the launch ignores."""
     import fno.config as cfg

@@ -1,4 +1,4 @@
-"""Unit tests for `fno dispatch one` (x-6f77): the mux leader+g porcelain.
+"""Unit tests for `fno agents dispatch one` (x-6f77): the mux leader+g porcelain.
 
 The lane slot is held for real against an isolated `FNO_CLAIMS_ROOT`, so the cap
 and the release-on-failure path are genuinely exercised. Selection (`_next_node`)
@@ -174,7 +174,7 @@ def test_bad_account_fails_before_spawn(monkeypatch, tmp_path):
     assert active_lane_count() == 0  # never took a slot
 
 
-# --- `fno dispatch resolve` --verb/--brief (US3) ---------------------------
+# --- `fno agents dispatch resolve` --verb/--brief (US3) ---------------------------
 
 
 def _resolve_cli(*args):
@@ -226,7 +226,7 @@ def test_resolve_brief_bytes_reported_in_kv():
 
 
 # ---------------------------------------------------------------------------
-# x-d1f4: `fno dispatch resolve` auto-resolves the brief from --node
+# x-d1f4: `fno agents dispatch resolve` auto-resolves the brief from --node
 # ---------------------------------------------------------------------------
 
 

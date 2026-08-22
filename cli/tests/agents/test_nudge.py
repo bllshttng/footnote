@@ -34,8 +34,8 @@ def test_ac3_hp_surfaces_one_line_nudge(tmp_path, monkeypatch):
     assert line is not None
     assert "think-abc1" in line
     assert "does advance" in line
-    assert "fno mail unread" in line
-    assert 'fno mail send think-abc1' in line
+    assert "fno agents mail unread" in line
+    assert 'fno agents mail send think-abc1' in line
     assert "\n" not in line  # exactly one line
 
 

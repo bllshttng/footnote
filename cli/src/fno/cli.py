@@ -556,7 +556,7 @@ command is about" and differs by family:
   fno config accounts add               -p priority   (-H harness, -a auth, -s scope)
   fno gate verify                       -p phase      (-s state, -x strict)
   fno doctor event emit                 -t type       (-d data, -s source)
-  fno mail send                         -k kind       (-b body; --to-project long-only)
+  fno agents mail send                  -k kind       (-b body; --to-project long-only)
   fno done                              -p pr-number  (-l link, -m note)
   fno carveout add                      -k kind       (-p priority)
 
@@ -702,8 +702,8 @@ def _render_group_full_menu(path: list[str]) -> Optional[str]:
         "counterpart to `--help`.\n\n"
         "Usage:\n"
         "  fno help                  show top-level help (same as `fno --help`)\n"
-        "  fno help claim            show `fno claim` help\n"
-        "  fno help claim acquire    show `fno claim acquire` help\n"
+        "  fno help claim            show `fno agents claim` help\n"
+        "  fno help claim acquire    show `fno agents claim acquire` help\n"
         "  fno help shorthands       show the short-flag legend\n"
         "  fno help --all            show every command, including hidden\n\n"
         "Equivalent to `fno <args> --help` but reads more naturally in "

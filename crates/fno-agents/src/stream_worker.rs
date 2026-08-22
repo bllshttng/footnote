@@ -964,7 +964,7 @@ pub async fn run(cfg: StreamWorkerConfig) -> Result<(), StreamWorkerError> {
     // already dead; without this the claim reads stale immediately and a live
     // human-TUI co-writing the transcript is never refused. Best-effort.
     if let Some(claim) = &cfg.session_claim {
-        // Run the blocking `fno claim acquire` off the async executor thread
+        // Run the blocking `fno agents claim acquire` off the async executor thread
         // (gemini review): spawn_blocking keeps `run` from stalling AND reaps the
         // short-lived child (a bare `Command::spawn` would leak a zombie here -
         // the worker has no idle-tick reaper, unlike the daemon).

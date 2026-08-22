@@ -44,7 +44,7 @@ def test_help_root_matches_dashdash_help():
 
 
 def test_help_subcommand_forwards():
-    """AC-HP: `fno help claim` forwards to `fno claim --help`.
+    """AC-HP: `fno help claim` forwards to `fno agents claim --help`.
 
     We can't easily monkeypatch subprocess here because Typer's CliRunner
     invokes the app in-process and the `help` command shells out to the
@@ -104,7 +104,7 @@ def test_help_subcommand_works_in_module_mode():
         f"expected rc=0, got rc={result.returncode}.\n"
         f"stdout={result.stdout}\nstderr={result.stderr}"
     )
-    # `fno claim --help` output mentions the subcommand verbs the claim
+    # `fno agents claim --help` output mentions the subcommand verbs the claim
     # app registers (acquire, release, ...). ("gate" died with ab-d0337fbc.)
     assert "acquire" in result.stdout
     assert "release" in result.stdout

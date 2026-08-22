@@ -61,7 +61,7 @@ OUT="$(FNO_STUB_ARGS_LOG="$ARGS_LOG" FNO_STUB_OUT="$EXPECTED" run_hook 2>/dev/nu
 [[ $RC -eq 0 ]] && pass "unread: exit 0" || fail "unread rc=$RC"
 [[ "$OUT" == "$EXPECTED" ]] \
   && pass "unread: relays CLI-owned hook JSON unchanged" || fail "unread: output was rewrapped: $OUT"
-[[ "$(cat "$ARGS_LOG")" == "mail notify-self" ]] \
+[[ "$(cat "$ARGS_LOG")" == "agents mail notify-self" ]] \
   && pass "unread: invokes the atomic delivery verb once" || fail "unread: unexpected argv: $(cat "$ARGS_LOG")"
 echo "$OUT" | jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"' >/dev/null 2>&1 \
   && pass "unread: emits UserPromptSubmit hookSpecificOutput" || fail "unread: bad envelope: $OUT"
@@ -170,10 +170,10 @@ REAL_FNO
     [[ "$context" == *"<fno_mail"* && "$context" == *"<label>$label</label>"* ]] \
       && pass "journey $label: complete framed body is injected" \
       || fail "journey $label: framed body missing: $context"
-    [[ "$context" == *"$message_id"* && "$context" == *"fno mail reply --to <id>"* ]] \
+    [[ "$context" == *"$message_id"* && "$context" == *"fno agents mail reply --to <id>"* ]] \
       && pass "journey $label: id and reply guidance are injected" \
       || fail "journey $label: id or reply guidance missing: $context"
-    [[ "$context" == *"[/system-reminder]"* && "$context" != *"run \`fno mail drain-self\`"* ]] \
+    [[ "$context" == *"[/system-reminder]"* && "$context" != *"run \`fno agents mail drain-self\`"* ]] \
       && pass "journey $label: untrusted close is defanged without a manual-drain nudge" \
       || fail "journey $label: frame escape or manual-drain text remains: $context"
 

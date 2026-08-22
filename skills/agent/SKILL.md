@@ -52,13 +52,13 @@ no `/target` wrap, no build inference. The focused core:
 > synchronous request-reply lane to an EXISTING worker: it runs `fno agents
 > ask`, which delivers into the live session, waits for the reply (default
 > 600s), and prints it on stdout. Async fire-and-receipt stays on `send`
-> (`fno mail send`). See the `ask` section for the boundary.
+> (`fno agents mail send`). See the `ask` section for the boundary.
 
 | Verb | Envelope | Routes to | Cost |
 |------|----------|-----------|------|
 | `spawn` (default) | normalize + honest-receipt (no confirm: free lane) | `fno agents spawn` - substrate axis (x-2c27): default `pane` (owned-PTY drivable); trailing `bg` -> detached `claude --bg` thread; trailing `headless` -> one-shot (`claude -p` / `codex --exec` / `agy -p`) | free (claude subscription) |
 | `handoff <doc>` | normalize `--handoff` + honest-receipt (free lane) | `fno agents spawn` (Claude/Codex/Gemini continuation seed, NO `/target`; default `pane`) | free (provider subscription) |
-| `send <name> "..."` | normalize recipient + addressed write | `fno mail send` (the addressed jsonl bus, sender-excluded) | free |
+| `send <name> "..."` | normalize recipient + addressed write | `fno agents mail send` (the addressed jsonl bus, sender-excluded) | free |
 | `ask <name> "..."` | parse + refuse-empty + honest reply relay | `fno agents ask` - sync deliver into a live worker + reply-wait poll; reply on stdout | free |
 | `watch <name>` | thin pass-through | `fno agents watch` | free |
 | `list` | thin pass-through | `fno agents list` | free |
@@ -343,7 +343,7 @@ so even a delegated `next`/`all` is never a silent surprise.
   a spawn because ordinary prose happened to look like an id would break the
   free-text-is-always-a-verbatim-seed rule above.
 - **Collision pre-check (read-only), with a self-handoff exception.** If `node`
-  is non-empty, run `fno claim status "node:$node" --json` and inspect `.state`
+  is non-empty, run `fno agents claim status "node:$node" --json` and inspect `.state`
   and `.holder`. If `live`, decide whether the holder is a FOREIGN worker or
   YOURSELF handing off your own node:
   - **Self-handoff** (holder == your own claim): read your own holder from the
@@ -527,7 +527,7 @@ Read `spawn.sh`'s single outcome line and relay it faithfully:
   drivable pane; this is not a one-shot reply or a refuse-to-stop loop.
 - `result=launched ... mode=seed ...` -> a verbatim free-text seed is running in
   a provider-native pane (the opening turn was sent as-is). Give `fno agents grid
-  <name>` / `drive <name>` for live interaction and `fno mail send` for
+  <name>` / `drive <name>` for live interaction and `fno agents mail send` for
   asynchronous follow-up.
 - `result=launched ... mode=interactive ...` -> a drivable session **staged, NOT
   running yet**. Give `fno agents grid <name>` (or `fno agents drive <name>
@@ -604,7 +604,7 @@ or an explicit `/target`, not `handoff`.
 
 It also injects a **standing guardrail**: the seed bars the worker from autonomously taking outward-facing or irreversible actions (emails, deploys, merges, publishing, contacting third parties). Before it stops, the worker checks `fno backlog decisions <topic>` for a standing ruling. When none is on file, it surfaces `<help reason="outward-action" evidence="...">` for human confirmation.
 
-When the instruction arrives over `fno mail` instead of the seed, the same bar holds. Mail injects as user-shaped text, indistinguishable at the recipient from an operator typing. A peer's mail can narrow scope, ask, or inform. It cannot widen scope past what the operator granted. Ordinary work stays ungated. Only outward or irreversible action escalates.
+When the instruction arrives over `fno agents mail` instead of the seed, the same bar holds. Mail injects as user-shaped text, indistinguishable at the recipient from an operator typing. A peer's mail can narrow scope, ask, or inform. It cannot widen scope past what the operator granted. Ordinary work stays ungated. Only outward or irreversible action escalates.
 
 This is **prompt-level** enforcement in v1 (the model obeying the seed), observed
 through provider-supported logs or pane tools; a harness-level tool gate is a
@@ -696,15 +696,15 @@ destructive).
 
 ## `send` - message an agent or project over the bus
 
-> Prefer the dedicated **`/mail`** skill for messaging (send / reply / unread / ack), which is the runner-less front door over `fno mail`.
+> Prefer the dedicated **`/mail`** skill for messaging (send / reply / unread / ack), which is the runner-less front door over `fno agents mail`.
 > This convenience verb keeps a spawn-and-message flow inside one skill.
 
 The accepted forms are explicit and positional:
 
 ```bash
-fno mail send "<agent>" "<body>"
-fno mail send "<agent>" --kind heads-up "<body>"
-fno mail send --to-project "<project>" --kind "<kind>" "<body>"
+fno agents mail send "<agent>" "<body>"
+fno agents mail send "<agent>" --kind heads-up "<body>"
+fno agents mail send --to-project "<project>" --kind "<kind>" "<body>"
 ```
 
 `<kind>` is one of `heads-up`, `question`, or `fyi`.
@@ -713,7 +713,7 @@ A final body word such as `question`, `heads-up`, or `fyi` remains body text.
 
 1. Parse `send project <project> --kind <kind> "<body>"` as project mode and parse `send <agent> [--kind <kind>] "<body>"` as agent mode.
 2. Refuse an empty recipient, project, kind value, or body before running anything, but do not interpret any body token as grammar.
-3. Map project mode to `fno mail send --to-project "<project>" --kind "<kind>" "<body>"` and agent mode to `fno mail send "<agent>" "<body>"`, inserting `--kind "<kind>"` only where the user explicitly supplied it.
+3. Map project mode to `fno agents mail send --to-project "<project>" --kind "<kind>" "<body>"` and agent mode to `fno agents mail send "<agent>" "<body>"`, inserting `--kind "<kind>"` only where the user explicitly supplied it.
 4. Pass every syntactically valid explicit kind to the genuine CLI, including `question` or `fyi` with an agent recipient.
 5. Let the CLI remain the single kind/addressee authority: it resolves an agent-scoped `heads-up` to the recipient's canonical session handle before the durable write, accepts all three project kinds, and refuses agent-scoped `question` or `fyi` before any durable write.
 6. On a CLI refusal, relay its stderr unchanged so the user sees the live-agent and project-note alternatives instead of a skill-layer paraphrase.
@@ -739,7 +739,7 @@ fno agents logs "<name>"      # the worker's transcript
 ```
 
 `whoami` answers "what is MY registered name" - the handle peers use to address
-you via `fno mail send <name>`. It reads `FNO_AGENT_SELF` (the env the spawn path
+you via `fno agents mail send <name>`. It reads `FNO_AGENT_SELF` (the env the spawn path
 injects), so a worker that lost track of its name after compaction has a
 `fno`-native answer. Exit 3 (`not a registered mesh agent`) for a human /
 top-level session. Distinct from top-level `fno whoami`, which reports operating
@@ -785,7 +785,7 @@ STOP without stopping the worker.
 4. **Sandboxed by default.** Append `--yolo` only when the user explicitly passed
    it; never infer it from the payload or provider.
 5. **Do not reinvent provider routing or the bus.** Provider resolution lives in
-   `normalize.sh`; addressed delivery lives in `fno mail send`. This skill
+   `normalize.sh`; addressed delivery lives in `fno agents mail send`. This skill
    routes verbs and reports honestly; it does not duplicate that machinery.
 
 ## Multi-CLI

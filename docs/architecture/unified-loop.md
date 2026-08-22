@@ -192,15 +192,15 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 A target driver asks whether its one deliverable shipped. A king has no PR, so pointing the target driver at one can never reach a clean terminal state. `done_probes` are additive only. A plan can add conjuncts and can never silence the PR, CI, and review conjuncts underneath. The run burns to `NoProgress` or `Budget` while looking like it is working. The king driver asks the king's question instead, which is whether the board is clean.
 
-`fno king board --json` reads seven queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted.
+`fno inbox board --json` reads seven queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted.
 
 | Queue | Read | King can shrink it |
 |---|---|---|
 | `operator_lane` | `cat ~/.fno/my-priorities.md` | yes, by filing a node or parking with a reason |
-| `undispatched` | `fno backlog ready --json` + `fno claim list -J` | yes, by spawning a worker |
+| `undispatched` | `fno backlog ready --json` + `fno agents claim list -J` | yes, by spawning a worker |
 | `stalled_holder` | the same two, plus the holder's activity reading | yes, by one wake per node |
 | `mergeable_pr` | `gh pr list` | only under `config.king.autonomous_merge` |
-| `stale_claim` | `fno claim list -J --include-stale` | yes, by `fno claim reap` |
+| `stale_claim` | `fno agents claim list -J --include-stale` | yes, by `fno agents claim reap` |
 | `operator_question` | `fno inbox outstanding --json` | no, a human answers it |
 | `unreachable_worker` | `fno agents needs --json` | not yet |
 
@@ -215,15 +215,15 @@ The split in that last column is what makes the loop converge. A queue only a hu
 - *In-session:* `hooks/target-stop-hook.sh` adds `.fno/king-state.md` as a second candidate after its target search comes up empty and forwards `--driver king`. When both are present the target manifest wins: a session holding one is a worker whatever else sits beside it. A king terminal skips `finalize`, which stamps a plan and graduates a node that a king does not have. `hooks/agy-target-stop-hook.sh` cannot gate a king, because the loop is claude-only in v1. It names the manifest and refuses rather than allowing the stop. A guard on one of two reachable paths is decorative.
 - *Cross-session:* there is none. A `KingQueue` walk arm was built and cut before it shipped. It had no working path. `run_loop`'s resume guard closed its unit without dispatching. The unit's `session_key` and the king's own termination event both used the manifest `fno_id`. It dispatched rarely, and dispatched the wrong thing. `CONTINUE_PROMPT` is hardcoded to `/target --resume` for every driver. `Unit.extra_env` is read by nothing. So the spawned session was a target resume with no idea it was a king. `fno-agents loop run --driver king` now refuses by name rather than falling through to the target walk.
 
-**A `NoProgress` terminal asks the operator, exactly once.** `NoWork` is the clean exit. `NoProgress` is different. It is the king giving up with the board still full. That is this feature's own failure arriving through a different door. Work is pending, nothing moves, and nobody is told. So every `NoProgress` terminal calls `fno king escalate --stalled <rows>`. The verb records one question in the operator queue. `king_decide` reaches NoProgress two ways: an unreadable board, and a board nothing cleared. So the call sits in the shared `terminate` closure rather than at one site. That covers a terminal added later without anyone remembering to wire it, and a guard on one of several terminals is decorative.
+**A `NoProgress` terminal asks the operator, exactly once.** `NoWork` is the clean exit. `NoProgress` is different. It is the king giving up with the board still full. That is this feature's own failure arriving through a different door. Work is pending, nothing moves, and nobody is told. So every `NoProgress` terminal calls `fno agents king escalate --stalled <rows>`. The verb records one question in the operator queue. `king_decide` reaches NoProgress two ways: an unreadable board, and a board nothing cleared. So the call sits in the shared `terminate` closure rather than at one site. That covers a terminal added later without anyone remembering to wire it, and a guard on one of several terminals is decorative.
 
 The dedupe key is a hash of the sorted stalled row set. It is not the session and not the fire. A later king meeting the same stalled board must not file a second question. A board that CHANGED is a different ask and gets its own question. Rows are queue-qualified, as in `undispatched:<id>`. The same node in two queues is two rows, and clearing one of them is real progress. An unreadable board escalates over an empty set. The question text names that case, so the operator never has to tell "no rows" from "could not see". A failed escalation is named on stderr and folded into the termination message. It never blocks the terminal. The king stops either way, and a terminal that refused to finish because the ask failed is strictly worse.
 
 **What a clean `NoWork` terminal means, and the edge it leaves open.** It means the king EXITS. When the board refills, NOTHING restarts it. This arm is a floor under an awake king and nothing more.
 
-That edge is wider than a missing trigger. Nothing crowns a king either. The `king-for-a-day` skill never calls `fno king init`. When a king dies, nothing deletes the manifest. And a spawn can transfer a crown with no verb to return it. Crown, respawn and expire are one lifecycle and none of the three exists. A respawn arm bolted on before that lifecycle has no king to respawn, which is why the walk arm was cut rather than repaired.
+That edge is wider than a missing trigger. Nothing crowns a king either. The `king-for-a-day` skill never calls `fno agents king init`. When a king dies, nothing deletes the manifest. And a spawn can transfer a crown with no verb to return it. Crown, respawn and expire are one lifecycle and none of the three exists. A respawn arm bolted on before that lifecycle has no king to respawn, which is why the walk arm was cut rather than repaired.
 
-Gated by `config.king.enabled` (default false), visible as the `king loop` row in `fno autonomy status`. It is the first row in that table that is a loop rather than a trigger. Every other one is woken by a PR merge, a launchd tick, a daemon tick, or a node's birth.
+Gated by `config.king.enabled` (default false), visible as the `king loop` row in `fno agents autonomy status`. It is the first row in that table that is a loop rather than a trigger. Every other one is woken by a PR merge, a launchd tick, a daemon tick, or a node's birth.
 
 ### `done_probes`: the operational-evidence conjunct
 
@@ -235,7 +235,7 @@ A plan may therefore declare `done_probes` in its frontmatter - up to 3 shell co
 
 ```yaml
 done_probes:
-  - "fno mail list --kind report --since 24h | grep -q groom"
+  - "fno agents mail list --kind report --since 24h | grep -q groom"
 ```
 
 `loop-check` runs them as the **final** conjunct, only once every other conjunct already holds, and refuses `DonePRGreen` until each exits 0.
@@ -448,7 +448,7 @@ Model-fallback is a deliberate drop, not an oversight. The loop contract is type
 
 - **`close()`**: shells `fno backlog done <id>` for `DonePRGreen | DoneAdvisory | DoneDelivery` evidence. Exit 0 yields `CloseOutcome::Closed`; exit 5 (PR OPEN, not merged) yields `CloseOutcome::AwaitingMerge`; other nonzero yields `CloseOutcome::Parked(stderr)`. `DoneAwaitingMerge` evidence maps directly to `CloseOutcome::AwaitingMerge` WITHOUT shelling `fno backlog done` (the reason already carries the fact - this fixes its earlier mis-handling as a held-claim Park). Other non-done evidence returns `CloseOutcome::Parked` without calling `fno backlog done`.
 
-**Claims.** Before returning a unit from `next()`, the queue calls `fno claim acquire node:<id> --holder target-session:<session_key> --ttl 2h`. Exit 0 records the claim and returns the unit. Exit 1, `ClaimHeldByOther`, lets the live-claims filter inside `fno backlog next` exclude the node on the next retry. The walker needs no skip-set. Claims and selection compose without walker-side coordination. Exit 2, or any other non-zero code, surfaces immediately as a `LoopError::Queue`. Sigma-review finding 1: the previous collapse of all non-zero exits to "retry" hid validation and corruption errors. The retry bound is `MAX_CLAIM_RETRIES = 5`. Exhaustion is a `LoopError::Queue`. `has_pending()` answers from the same live selection without acquiring. The outer budget check probes it before any dequeue. A unit the walk cannot afford never has its claim taken.
+**Claims.** Before returning a unit from `next()`, the queue calls `fno agents claim acquire node:<id> --holder target-session:<session_key> --ttl 2h`. Exit 0 records the claim and returns the unit. Exit 1, `ClaimHeldByOther`, lets the live-claims filter inside `fno backlog next` exclude the node on the next retry. The walker needs no skip-set. Claims and selection compose without walker-side coordination. Exit 2, or any other non-zero code, surfaces immediately as a `LoopError::Queue`. Sigma-review finding 1: the previous collapse of all non-zero exits to "retry" hid validation and corruption errors. The retry bound is `MAX_CLAIM_RETRIES = 5`. Exhaustion is a `LoopError::Queue`. `has_pending()` answers from the same live selection without acquiring. The outer budget check probes it before any dequeue. A unit the walk cannot afford never has its claim taken.
 
 **Park-exclusion.** On `CloseOutcome::Parked` or `Refused`, the claim is held (not released). The live-claims filter continues to exclude the parked node so the walker moves on to other ready work rather than re-picking the same stuck node. The claim TTL is refreshed via a same-holder re-acquire immediately after parking - the worker's `init-target-state.sh` rewrites `acquired_at` with the worker's (now-dead) pid, so the walker re-acquires to reset the window from the current time.
 
@@ -469,7 +469,7 @@ Three consequences flow from this:
 
    `find_termination` scans the project journal first, then falls back to the global mirror.
 
-2. The worker's `init-target-state.sh` calls `fno claim acquire node:<id> --holder target-session:<session_key>` with the same holder string the walker used. `core.py:acquire_claim` line 209 treats a same-holder re-acquire as idempotent - it refreshes `pid/host/acquired_at` without blocking, emitting `claim_idempotent_reacquired`.
+2. The worker's `init-target-state.sh` calls `fno agents claim acquire node:<id> --holder target-session:<session_key>` with the same holder string the walker used. `core.py:acquire_claim` line 209 treats a same-holder re-acquire as idempotent - it refreshes `pid/host/acquired_at` without blocking, emitting `claim_idempotent_reacquired`.
 
 3. The walker's `close()` releases the claim using the recorded `session_key`, matching the holder the worker registered.
 
@@ -483,7 +483,7 @@ Three consequences flow from this:
 
 **`--parallel-cap`.** The flag is accepted and passed through. Group 2 serializes regardless of cap value (`run_loop` is single-threaded; collision-conservative default, Claude's Discretion 3). When `cap > 1`, the walk prints one honest notice rather than silently dropping the flag.
 
-**Walker singleton.** At startup, `run_inner` acquires `walker:<cwd>` with holder `megawalk-loop:<pid>` and TTL 24h (`fno claim acquire`). A live claim means another megawalk is active for this project; the new invocation exits 1. The claim is released on every exit path including fatal loop errors.
+**Walker singleton.** At startup, `run_inner` acquires `walker:<cwd>` with holder `megawalk-loop:<pid>` and TTL 24h (`fno agents claim acquire`). A live claim means another megawalk is active for this project; the new invocation exits 1. The claim is released on every exit path including fatal loop errors.
 
 ### Hardened close (`fno backlog done` gh cross-check)
 

@@ -1,4 +1,4 @@
-"""``fno mail send --raw --check``: which verdict each lane deserves.
+"""``fno agents mail send --raw --check``: which verdict each lane deserves.
 
 The point of ``--check`` is that a caller can gate ADVICE on it, so a wrong yes
 is worse than no answer at all: the Stop hook that prescribes ``/compact`` reads
@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from functools import cache
 from pathlib import Path
 
 REPO_CLI = Path(__file__).resolve().parents[1]
@@ -48,10 +49,10 @@ def _run(args: list[str], env_extra: dict[str, str], tmp_path: Path):
         **env_extra,
     }
     proc = subprocess.run(
-        [sys.executable, "-m", "fno.cli", "mail", "send", *args],
+        [sys.executable, "-m", "fno.cli", "agents", "mail", "send", *args],
         capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=120,
     )
-    return proc.stdout.strip(), proc.returncode
+    return (proc.stdout.strip() or proc.stderr.strip()), proc.returncode
 
 
 def _write_registry(tmp_path: Path, rows: list[dict]) -> None:
@@ -76,6 +77,28 @@ SELF_SID = "sid-me"
 MUX = {"session": "fno", "pane_id": "%1"}
 
 
+@cache
+def _self_env() -> dict[str, str]:
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from fno.claims.session_pid import resolve_session_harness; "
+            "print(resolve_session_harness() or '')",
+        ],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(REPO_CLI / "src")},
+        check=True,
+    )
+    marker = (
+        "CODEX_THREAD_ID"
+        if probe.stdout.strip() == "codex"
+        else "CLAUDE_CODE_SESSION_ID"
+    )
+    return {marker: SELF_SID}
+
+
 def test_self_on_unguarded_mux_lane_is_injectable(tmp_path):
     """x-1904: the de-veto makes a self-directed mux pane a path again.
 
@@ -86,7 +109,7 @@ def test_self_on_unguarded_mux_lane_is_injectable(tmp_path):
     _write_registry(tmp_path, [_row(name="me", harness_session_id=SELF_SID, mux=MUX)])
     out, code = _run(
         ["/compact", "--to-self", "--raw", "--check"],
-        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        _self_env(),
         tmp_path,
     )
     assert code == 0, out
@@ -102,7 +125,7 @@ def test_peer_on_mux_lane_is_injectable(tmp_path):
     )
     out, code = _run(
         ["peer", "/code-review", "--raw", "--check"],
-        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        _self_env(),
         tmp_path,
     )
     assert code == 0, out
@@ -114,7 +137,7 @@ def test_no_registry_row_is_not_injectable(tmp_path):
     _write_registry(tmp_path, [_row(name="someone-else")])
     out, code = _run(
         ["/compact", "--to-self", "--raw", "--check"],
-        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        _self_env(),
         tmp_path,
     )
     assert code == 1, out
@@ -136,14 +159,14 @@ def test_non_keystroke_lane_is_not_injectable(tmp_path):
     )
     out, code = _run(
         ["cx", "/compact", "--raw", "--check"],
-        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        _self_env(),
         tmp_path,
     )
     assert code == 1, out
     assert "no prompt line" in out, out
     out, code = _run(
         ["cx", "/review", "--raw", "--check"],
-        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        _self_env(),
         tmp_path,
     )
     assert code == 1, out
@@ -169,7 +192,7 @@ def test_malformed_payload_is_a_usage_error_not_a_verdict(tmp_path):
     _write_registry(tmp_path, [_row(name="me", harness_session_id=SELF_SID)])
     out, code = _run(
         ["me", "not-a-slash-verb", "--raw", "--check"],
-        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        _self_env(),
         tmp_path,
     )
     assert code == 2, out
@@ -188,7 +211,7 @@ def test_unreadable_registry_is_unmeasurable_not_a_no_path(tmp_path):
     (tmp_path / ".fno" / "agents" / "registry.json").write_text("{ not json")
     out, code = _run(
         ["/compact", "--to-self", "--raw", "--check"],
-        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        _self_env(),
         tmp_path,
     )
     assert code == 3, out

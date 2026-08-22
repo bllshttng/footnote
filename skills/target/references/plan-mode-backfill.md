@@ -66,7 +66,7 @@ A same-session, in-TTL sidecar survives so `/target` can detect it.
   ignored; run bare /target to use it" note (AC3-HP). Explicit argument XOR
   sidecar -- never both consumed at once.
 - `consume` — flips `status: consumed` atomically, only after confirm-yes,
-  guarded by an `fno claim` node lock so two racing `/target` runs collapse to
+  guarded by an `fno agents claim` node lock so two racing `/target` runs collapse to
   one execution.
 
 ## Backfill (skills/target/scripts/backfill-plan.sh + the /target skill body)

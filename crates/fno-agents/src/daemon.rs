@@ -7494,7 +7494,7 @@ fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
             return Response::ok(req.id, json!({"routed": true}));
         }
     };
-    // Deliver via the Python sidecar (`fno mcp send`), inheriting its lazy-start
+    // Deliver via the Python sidecar (`fno agents mcp send`), inheriting its lazy-start
     // + socket discovery instead of reimplementing it in Rust. `delivered: true`
     // only when the sidecar accepted the envelope; on failure `reason` is
     // MANDATORY so a caller can tell route-exists from delivered.
@@ -7507,19 +7507,19 @@ fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
     }
 }
 
-/// Shell `fno mcp send --session <id>` with `envelope` on stdin (never argv - it
+/// Shell `fno agents mcp send --session <id>` with `envelope` on stdin (never argv - it
 /// can be large). Returns `Err(reason)` on any failure (spawn or non-zero exit),
 /// with the stderr tail as the reason.
 fn deliver_envelope(channel_id: &str, envelope: &Value) -> Result<(), String> {
     use std::io::Write;
     use std::process::Stdio;
     let mut child = crate::loop_dispatch::fno_cmd("fno")
-        .args(["mcp", "send", "--session-id", channel_id])
+        .args(["agents", "mcp", "send", "--session-id", channel_id])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("spawn `fno mcp send` failed: {e}"))?;
+        .map_err(|e| format!("spawn `fno agents mcp send` failed: {e}"))?;
     // Write + close stdin (drop => EOF) so the child's `stdin.read()` completes.
     {
         let mut stdin = child
@@ -7529,18 +7529,18 @@ fn deliver_envelope(channel_id: &str, envelope: &Value) -> Result<(), String> {
         let bytes = serde_json::to_vec(envelope).map_err(|e| format!("serialize envelope: {e}"))?;
         stdin
             .write_all(&bytes)
-            .map_err(|e| format!("write envelope to `fno mcp send`: {e}"))?;
+            .map_err(|e| format!("write envelope to `fno agents mcp send`: {e}"))?;
     }
     let out = child
         .wait_with_output()
-        .map_err(|e| format!("wait for `fno mcp send`: {e}"))?;
+        .map_err(|e| format!("wait for `fno agents mcp send`: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     let tail = stderr.trim().rsplit('\n').next().unwrap_or("").trim();
     Err(if tail.is_empty() {
-        format!("`fno mcp send` exited {}", out.status)
+        format!("`fno agents mcp send` exited {}", out.status)
     } else {
         tail.to_string()
     })
@@ -13298,7 +13298,7 @@ done
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let home = short_home("cle2e");
-        // Hermetic claims: point `fno claim` at the test home so the real
+        // Hermetic claims: point `fno agents claim` at the test home so the real
         // acquire (daemon, this process) AND the worker child (inherits this env)
         // write `session:uuid-e2e` under /tmp, never the canonical, shared
         // ~/.fno/claims. A panic before teardown then leaks at worst into a

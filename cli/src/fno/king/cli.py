@@ -1,4 +1,4 @@
-"""``fno king`` - board reads and session init for the king loop."""
+"""``fno agents king`` - board reads and session init for the king loop."""
 from __future__ import annotations
 
 import json
@@ -51,7 +51,7 @@ def init_cmd(
     # existence, so gating the manifest gates all three at one place. Gating
     # them individually is the corpus's "guard on one of N reachable paths",
     # and the version this replaces had N of zero: the flag was read only by
-    # `fno autonomy status`, so a default-off king still held sessions open.
+    # `fno agents autonomy status`, so a default-off king still held sessions open.
     if not king_loop_enabled():
         typer.echo(
             "king: config.king.enabled is false, so no king is crowned. "
@@ -186,6 +186,15 @@ def _render(board: dict, max_rows: int) -> None:
         typer.echo(f"      source: {q['source']}")
     for warning in board["warnings"]:
         typer.echo(f"warning: {warning}", err=True)
+
+
+agents_king_app = typer.Typer(
+    name="king",
+    help="The king session manifest and escalation controls.",
+    no_args_is_help=True,
+)
+agents_king_app.command("init")(init_cmd)
+agents_king_app.command("escalate")(escalate_cmd)
 
 
 def main() -> None:  # pragma: no cover - console-script shim

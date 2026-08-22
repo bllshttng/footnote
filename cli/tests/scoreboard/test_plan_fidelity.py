@@ -197,7 +197,7 @@ def test_read_diff_no_pr_number_returns_none():
 # --- AC3-HP: done_probes join declaration to evidence (x-e54c) ----------------
 _PROBE_PLAN = (
     "---\ntitle: p\ndone_probes:\n"
-    '  - "fno mail list --since 24h | grep -q groom"\n'
+    '  - "fno agents mail list --since 24h | grep -q groom"\n'
     '  - "test -n \\"$(fno backlog groom --status)\\""\n'
     "---\n\n# plan\n\n## Acceptance Criteria\n"
 )
@@ -219,7 +219,7 @@ def _probe_event(session_id, probes):
 
 def test_probes_join_declaration_to_delivery_evidence():
     events = [_probe_event("build-sess", {
-        "fno mail list --since 24h | grep -q groom": "pass",
+        "fno agents mail list --since 24h | grep -q groom": "pass",
         'test -n "$(fno backlog groom --status)"': "pass",
     })]
     pf = build_plan_fidelity(
@@ -235,7 +235,7 @@ def test_probes_join_declaration_to_delivery_evidence():
 
 def test_probes_count_only_passes_not_declarations():
     events = [_probe_event("build-sess", {
-        "fno mail list --since 24h | grep -q groom": "fail:1",
+        "fno agents mail list --since 24h | grep -q groom": "fail:1",
         'test -n "$(fno backlog groom --status)"': "pass",
     })]
     pf = build_plan_fidelity(
@@ -275,9 +275,9 @@ def test_probe_evidence_takes_the_last_fire():
     """A session that blocked on a failing probe then passed on a later fire is
     graded on the fire that granted done."""
     events = [
-        _probe_event("build-sess", {"fno mail list --since 24h | grep -q groom": "fail:1",
+        _probe_event("build-sess", {"fno agents mail list --since 24h | grep -q groom": "fail:1",
                                     'test -n "$(fno backlog groom --status)"': "fail:1"}),
-        _probe_event("build-sess", {"fno mail list --since 24h | grep -q groom": "pass",
+        _probe_event("build-sess", {"fno agents mail list --since 24h | grep -q groom": "pass",
                                     'test -n "$(fno backlog groom --status)"': "pass"}),
     ]
     pf = build_plan_fidelity(
@@ -293,7 +293,7 @@ def test_probe_evidence_takes_the_last_fire():
 
 def test_probe_evidence_ignores_another_sessions_events():
     events = [_probe_event("some-other-sess", {
-        "fno mail list --since 24h | grep -q groom": "pass",
+        "fno agents mail list --since 24h | grep -q groom": "pass",
         'test -n "$(fno backlog groom --status)"': "pass",
     })]
     pf = build_plan_fidelity(
@@ -324,7 +324,7 @@ def test_probe_evidence_reads_the_real_events_file_shape(tmp_path):
             "data": {
                 "session_id": "build-sess",
                 "done_probes": {
-                    "fno mail list --since 24h | grep -q groom": "pass",
+                    "fno agents mail list --since 24h | grep -q groom": "pass",
                     'test -n "$(fno backlog groom --status)"': "pass",
                 },
             },
@@ -367,7 +367,7 @@ def test_probe_evidence_skips_a_corrupt_event_without_crashing():
         {"type": "loop_check", "data": None},
         {"type": "loop_check", "data": ["also", "not", "a", "dict"]},
         _probe_event("build-sess", {
-            "fno mail list --since 24h | grep -q groom": "pass",
+            "fno agents mail list --since 24h | grep -q groom": "pass",
             'test -n "$(fno backlog groom --status)"': "pass",
         }),
     ]

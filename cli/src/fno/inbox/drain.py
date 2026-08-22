@@ -133,7 +133,7 @@ def _dispatch_thread(repo_root: Path, project: str, h: ThreadHandle) -> DrainRes
     if h.kind == Kind.FYI.value:
         return _handle_fyi(repo_root, h)
     if h.kind == Kind.SEND.value:
-        # Agent-to-agent envelope from `fno mail send` (bus Group 2):
+        # Agent-to-agent envelope from `fno agents mail send` (bus Group 2):
         # fyi semantics - surface the body and mark read (consumed). The
         # Group 3 bus log replaces this path with cursor-based drains.
         return _handle_fyi(repo_root, h)

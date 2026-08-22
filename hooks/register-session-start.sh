@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SessionStart hook (US7): register an operator-started session in the agent
-# registry so peers can `fno mail send` to it by name. A session a human
+# registry so peers can `fno agents mail send` to it by name. A session a human
 # started by hand has no spawn/host registry row; this hook creates one.
 #
 # Hook contract: NEVER blocks session start. The registration is fail-open
@@ -10,7 +10,7 @@
 #
 # Provider coverage: Claude wires this hook directly. Codex's shared
 # session-start wrapper invokes it once with CODEX_PLUGIN_ROOT hydrated, so the
-# durable CODEX_THREAD_ID is addressable through fno mail. Gemini remains
+# durable CODEX_THREAD_ID is addressable through fno agents mail. Gemini remains
 # best-effort and no-ops when its session-id environment is absent.
 set -euo pipefail
 

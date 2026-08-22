@@ -26,7 +26,7 @@ Receipts and manifest snapshots have each lied about a live session. Three reads
 | Question | The read that answers it |
 |---|---|
 | Real node status and bound plan | `fno backlog get <id>` |
-| Real claim holder | `fno claim status node:<id>` |
+| Real claim holder | `fno agents claim status node:<id>` |
 | Real base distance | `git fetch origin main`, then `git rev-list --count HEAD..origin/main` |
 
 The fetch is the point: a stale local `origin/main` ref answers zero for a branch that is dozens of commits behind.
@@ -106,13 +106,13 @@ Every other resume parses `-m` and drops the value: a dead Claude relaunch, a mu
 
 On the one path that forwards it, the warning `timed out after 3.0s, falling back to registry-only view` is noise. The roster probe times out, the command falls back to the registry view, and the message still lands.
 
-Everywhere else, resume first and deliver the instruction with `fno mail send <handle>`, then confirm it in the transcript.
+Everywhere else, resume first and deliver the instruction with `fno agents mail send <handle>`, then confirm it in the transcript.
 
-`fno mail send` can hang for minutes. A send that has not returned is pending, not failed.
+`fno agents mail send` can hang for minutes. A send that has not returned is pending, not failed.
 
 A receipt reading `queued (durable)` is NOT delivery. Verify by transcript content (`fno agents peek <handle>`), never by a roster field.
 
-Answer a message with `fno mail reply --to <msg-id>`. It threads the reply and resolves the sender itself. Never re-type a handle.
+Answer a message with `fno agents mail reply --to <msg-id>`. It threads the reply and resolves the sender itself. Never re-type a handle.
 
 | Receipt reads | What it means |
 |---|---|
@@ -122,7 +122,7 @@ Answer a message with `fno mail reply --to <msg-id>`. It threads the reply and r
 
 ## Mail style
 
-Every `fno mail send` runs the six-rule style gate first.
+Every `fno agents mail send` runs the six-rule style gate first.
 
 It blocks modals (`should` `would` `might` `could` lowercase `may`), contractions, and semicolons.
 

@@ -56,7 +56,7 @@ case "$enabled" in true|True|TRUE|1|yes|on) ;; *) exit 0 ;; esac
 
 # 1b. Master switch (x-aaaf wave 3 follow-up): config.autonomy.enabled
 # outranks this per-feature gate too, checked first like every other
-# resolver so `fno autonomy status` reporting this row disabled actually
+# resolver so `fno agents autonomy status` reporting this row disabled actually
 # means the dispatch below cannot fire.
 autonomy_enabled="true"
 if declare -F get_config >/dev/null 2>&1; then

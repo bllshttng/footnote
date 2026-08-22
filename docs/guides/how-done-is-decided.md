@@ -47,7 +47,7 @@ It prints the node, the plan path, and the merge flags.
 For the live claim holder, check the claim:
 
 ```bash
-fno claim status node:<id>
+fno agents claim status node:<id>
 ```
 
 For full run orientation:

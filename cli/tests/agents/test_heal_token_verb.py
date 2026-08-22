@@ -1,7 +1,7 @@
 """`fno agents heal-token` -- the registry-miss healer as a shellable verb (x-da8c).
 
 The Rust lifecycle verbs (logs/attach/resume) resolve against the registry file
-only, so a real session with no roster row is refused there while `fno mail`
+only, so a real session with no roster row is refused there while `fno agents mail`
 reaches it. This verb exposes the ONE x-9cc5 healer so Rust heals through the
 same probe instead of growing a second one; these tests pin the exit-code
 contract that shellout depends on (0 + row JSON / 13 miss / 3 ambiguous).

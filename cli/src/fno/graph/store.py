@@ -1354,7 +1354,7 @@ def append_session_record(
     # dir under the projects root and the model read seeks a 256KB tail, with a
     # full streaming scan on the rare inconclusive one. It is paid on every call
     # including the duplicate path and a missing node, which puts it on every
-    # `fno claim acquire` / `release`; that is affordable next to the graph
+    # `fno agents claim acquire` / `release`; that is affordable next to the graph
     # rewrite those already do, but it does not belong inside the lock.
     observed = _observe_model(harness, session_id)
 

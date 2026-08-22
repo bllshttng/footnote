@@ -3,7 +3,7 @@
 Lifecycle: CC spawns this as a subprocess per session via the fno
 plugin's ``.mcp.json``. CC owns stdin/stdout and tears the process down
 when the session exits. fno does NOT control this lifecycle (per spec
-LD16 — there is no ``fno mcp start`` or ``fno mcp stop`` for the
+LD16 — there is no ``fno agents mcp start`` or ``fno agents mcp stop`` for the
 channel server; restart requires restarting the CC session itself).
 
 What this process does:
@@ -36,7 +36,7 @@ Invocation:
         --channel-name <name>
 
 Both flags are required. ``--session-id`` is the Claude session this
-channel server is bound to (the fno dispatch layer sets this when
+channel server is bound to (the fno agents dispatch layer sets this when
 constructing the ``--mcp-config`` argv for ``claude --bg``). ``--channel-name``
 is the routing handle external ``fno agents ask`` calls use.
 
@@ -203,7 +203,7 @@ async def _sidecar_forward_loop(
         sock_path = await asyncio.to_thread(_client.ensure_sidecar)
     except _client.MCPSidecarUnreachable as exc:
         # NOTE: codex P3 review on PR #323 — the prior wording referenced
-        # `fno mcp restart`, but that subcommand is deferred to the
+        # `fno agents mcp restart`, but that subcommand is deferred to the
         # Slice B follow-up PR and does not yet exist. Until then,
         # operators recover by restarting their Claude Code session
         # (which respawns this channel_server, which re-attempts

@@ -18,7 +18,7 @@ Locked Decisions this module embodies:
      /target / /megatron all inherit auto-continue (no driver-specific code).
   4. Fire-and-forget dispatch: ``fno agents spawn`` -> ``/target [--no-merge] <id>``
      (the ``--no-merge`` flag is gated on ``config.auto_merge.grant``; x-4391/x-4be1).
-  5. Concurrency via ``fno claim``: honor ``walker:<root>`` (no double-dispatch
+  5. Concurrency via ``fno agents claim``: honor ``walker:<root>`` (no double-dispatch
      during a live walk); reserve ``dispatch:<id>`` (O_EXCL dedup + bridge token
      that outlives this short-lived process until the worker owns ``node:<id>``,
      LD#11 / AC1-CLAIM - mirrors handoff.sh + dispatch-node.sh).
@@ -418,7 +418,7 @@ def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
     the exact collision domain-lane parallelism exists to prevent). Each lane
     records its ``domain`` in slot metadata at acquire time, so peer-lane domains
     are readable here without a per-node lookup. A slot with no recorded domain
-    (e.g. one taken via a bare ``fno claim acquire --lane`` CLI) collapses to the
+    (e.g. one taken via a bare ``fno agents claim acquire --lane`` CLI) collapses to the
     ``_DOMAIN_UNSET`` bucket - conservatively blocking co-schedule with an
     unknown-domain lane rather than guessing it is safe.
     """
@@ -1580,7 +1580,7 @@ def dispatch_lanes(
 
 
 # ---------------------------------------------------------------------------
-# Claim helpers (route each key like the `fno claim` CLI's _node_aware_root)
+# Claim helpers (route each key like the `fno agents claim` CLI's _node_aware_root)
 # ---------------------------------------------------------------------------
 
 
@@ -1590,7 +1590,7 @@ def _claims_root_for(key: str):
     Global-id kinds (``node:``/``dispatch:``/``reconcile:``) live in the global
     ($HOME) root; repo-local keys use the cwd/env default (canonical repo root,
     honoring FNO_CLAIMS_ROOT). Delegating to fno.claims.io.claims_root_for keeps
-    advance, reconcile_dispatch, spawn-guard, and the `fno claim` CLI on ONE
+    advance, reconcile_dispatch, spawn-guard, and the `fno agents claim` CLI on ONE
     routing rule so they cannot drift -- and roots the boot-window dispatch:<id>
     token globally so cross-repo dispatchers dedup against each other."""
     from fno.claims.io import claims_root_for
@@ -1842,7 +1842,7 @@ def advance(
     #     defers. The node stays in ready (skip mutates nothing); the next tick
     #     after the reset dispatches it. Never fatal - a defer read failure just
     #     proceeds to dispatch.
-    #     The route decision itself is shared with `fno dispatch` so
+    #     The route decision itself is shared with `fno agents dispatch` so
     #     both autonomous launchers stay / defer / cut over identically; the
     #     tuple it returns is pinned for this attempt and the worker never
     #     re-switches. The dispatch_failover receipt is emitted after the spawn
@@ -1864,7 +1864,7 @@ def advance(
         # (eff_provider = provider arg -> node pin -> active default), so the
         # quota decision evaluates the provider the worker will actually run on,
         # not a mismatched active record (x-5d3e review). `effective_active` (not
-        # the raw `.active` pointer) is what `fno dispatch` probes: with managed
+        # the raw `.active` pointer) is what `fno agents dispatch` probes: with managed
         # rotation past the pointer the two launchers would otherwise probe
         # different records and disagree about the route.
         provider_id = (

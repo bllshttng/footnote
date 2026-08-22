@@ -98,7 +98,7 @@ async fn run(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    // `mail-inject` is the one-shot LIVE-DELIVERY verb `fno mail send` calls to
+    // `mail-inject` is the one-shot LIVE-DELIVERY verb `fno agents mail send` calls to
     // inject a turn into a live `claude --bg` session over the daemon control.sock
     // (node x-1f23). Binary-direct (Python `_deliver_live` subprocess), NOT a
     // routable `fno agents` verb -- matched with `matches!` (like `version`) so the
@@ -135,7 +135,7 @@ async fn run(args: Vec<String>) -> i32 {
     // Rust side of the lockfile protocol through it, and it doubles as an ops
     // escape hatch when the Python CLI is unavailable. Matched with `matches!`
     // (like `mail-inject`) so the routable-verb parity guard does not see it
-    // and it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS — `fno claim`
+    // and it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS — `fno agents claim`
     // remains the only operator CLI for claims.
     if matches!(verb, "claim") {
         return fno_agents::client_verbs::run_claim(&args[1..]);

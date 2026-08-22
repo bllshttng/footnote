@@ -75,7 +75,7 @@ catalog (`[context.artifacts]` in `.fno/config.toml`):
 Build the catalog and confirm all three are present and readable:
 
 ```bash
-fno roles context --json > .fno/campaigns/<slug>/catalog.json
+fno agents roles context --json > .fno/campaigns/<slug>/catalog.json
 ```
 
 If any of `product-truth`, `brand-voice`, or `brand-identity` is absent from
@@ -91,9 +91,9 @@ the facts, and the resolve call so they agree (a mismatch blocks with
 MIXED_REVISION):
 
 ```bash
-REV="$(fno roles show marketing --json \
+REV="$(fno agents roles show marketing --json \
   | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d[-1]["raw_definition"]["snapshot_revision"])')"
-fno roles context --json --snapshot "$REV" > .fno/campaigns/<slug>/catalog.json
+fno agents roles context --json --snapshot "$REV" > .fno/campaigns/<slug>/catalog.json
 ```
 
 For each role, write a capability-facts JSON covering that role's
@@ -115,7 +115,7 @@ every required field, scoped to this work order:
 Then resolve, passing the shared revision explicitly:
 
 ```bash
-fno roles resolve <role> --work-order <slug> --attempt <attempt> --snapshot "$REV" \
+fno agents roles resolve <role> --work-order <slug> --attempt <attempt> --snapshot "$REV" \
   --capabilities .fno/campaigns/<slug>/<role>-capabilities.json \
   --context .fno/campaigns/<slug>/catalog.json --json
 ```

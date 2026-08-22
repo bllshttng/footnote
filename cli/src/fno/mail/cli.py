@@ -1,4 +1,4 @@
-"""fno mail: durable polled mailbox CLI (ab-cee91152).
+"""fno agents mail: durable polled mailbox CLI (ab-cee91152).
 
 One namespace over the jsonl-canon bus log. Publish appends a durable envelope;
 consume is a per-recipient cursor scan over the log; the per-recipient markdown
@@ -79,7 +79,7 @@ class DaemonState(str, Enum):
 
 
 class StatusSnapshot(TypedDict):
-    """Public --json contract returned by `fno mail status`.
+    """Public --json contract returned by `fno agents mail status`.
 
     Nine keys; field names are part of the CLI surface that downstream
     tooling reads by name, so additions/removals are breaking changes.
@@ -1113,8 +1113,8 @@ def _print_thread_summary(h: ThreadHandle) -> None:
 # ---------------------------------------------------------------------------
 # Publish + cursor-consume (relocated from `fno agents`, ab-cee91152 Move B)
 # ---------------------------------------------------------------------------
-# `fno mail send` is the durable-first publish (the envelope lands on the bus
-# log before any live delivery is attempted). `fno mail unread`/`ack` are the
+# `fno agents mail send` is the durable-first publish (the envelope lands on the bus
+# log before any live delivery is attempted). `fno agents mail unread`/`ack` are the
 # cursor-based consume over that log: unread lists messages addressed to me
 # after my cursor; ack advances it. These supersede the retired agents
 # send/inbox/ack and inbox unread/ack verbs (the one messaging namespace).
@@ -1168,7 +1168,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "recovery only - a session must drain the project inbox to read this, "
             "and may never do so\n"
             "  this is NOT delivery. Address a live session instead: "
-            "`fno agents top` to find one, then `fno mail send <short-id>`"
+            "`fno agents top` to find one, then `fno agents mail send <short-id>`"
         )
     elif reason == LOCK_TIMEOUT_REASON:
         msg = (
@@ -1182,8 +1182,8 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "  in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n"
             "  copy still lands at the recipient's next drain:\n"
             f"    fno agents peek {target}     # still taking turns, or just stopped?\n"
-            "    fno mail withdraw <id>      # retract the queued copy FIRST\n"
-            f"    fno mail send {target} '<message>'  # then retry live\n"
+            "    fno agents mail withdraw <id>      # retract the queued copy FIRST\n"
+            f"    fno agents mail send {target} '<message>'  # then retry live\n"
             "  a withdraw that refuses because the recipient already claimed\n"
             "  the message is telling you it LANDED. Stop there: re-sending on\n"
             "  top of that is the double delivery this ladder exists to avoid."
@@ -1201,7 +1201,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             # The rung that was missing. Every option above tries to reach the
             # recipient; when none of them can, the sender was left holding a
             # message that nagged every turn and could not be taken back.
-            "    fno mail withdraw <id>      # none of the above? retract it"
+            "    fno agents mail withdraw <id>      # none of the above? retract it"
         )
     else:
         msg = (
@@ -1214,7 +1214,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             # The rung that was missing. Every option above tries to reach the
             # recipient; when none of them can, the sender was left holding a
             # message that nagged every turn and could not be taken back.
-            "    fno mail withdraw <id>      # none of the above? retract it"
+            "    fno agents mail withdraw <id>      # none of the above? retract it"
         )
     print(msg, file=sys.stderr)
 
@@ -1726,7 +1726,7 @@ def _name_lane_send(
         reason = "self-send" if self_send else (live_reason or "live-miss")
     hint = ""
     if hold_note:
-        hint = f" `fno mail withdraw {msg_id}` retracts it."
+        hint = f" `fno agents mail withdraw {msg_id}` retracts it."
     if not self_send and not bus_only and provider == "codex" and _codex_daemon_socket_absent():
         hint = (
             " codex app-server daemon not running: run "
@@ -1741,7 +1741,7 @@ def _name_lane_send(
     # rows (origin=None) never matched the attended lane, so a live miss to a
     # busy worker sat silently until a 30-min unclaimed hook surfaced it
     # (msg-133d96). Both escalate through the existing _escalate_to_human ->
-    # _sent_unclaimed / `fno mail status` path; no new pending indicator. The
+    # _sent_unclaimed / `fno agents mail status` path; no new pending indicator. The
     # change is which misses reach the send-time nudge, not a second mechanism.
     # Best-effort, never affects the send's exit code or receipt.
     attended = _recipient_is_attended(recipient)
@@ -2044,8 +2044,8 @@ def _escalate_to_human(
         one_line = summary.split("\n", 1)[0][:120]
         label = "missed you" if reason in ("attended-miss", "reachable-miss") else "question"
         code, _err = send_notification(
-            f"fno mail: {label} from {sender}",
-            f"{one_line} - run `fno mail drain-self`",
+            f"fno agents mail: {label} from {sender}",
+            f"{one_line} - run `fno agents mail drain-self`",
         )
     except Exception:  # noqa: BLE001 - a notifier failure never breaks the send
         code = 1
@@ -2111,7 +2111,7 @@ def _codex_review_target(
 
 
 def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
-    """``fno mail send --raw``: fire a verb in a peer by injecting ``payload``
+    """``fno agents mail send --raw``: fire a verb in a peer by injecting ``payload``
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
     REPL's slash parser runs it before the model sees it.
 
@@ -2251,9 +2251,9 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     if not (self_ok or check) and _self_recipient(name, resolved_session_id=session_id):
         _refused(
             "you addressed this session. For a plain self-note the envelope is "
-            "fine:\n    fno mail send <own-id> \"text\"\n"
+            "fine:\n    fno agents mail send <own-id> \"text\"\n"
             "To fire a verb at your own prompt line (no envelope, so the slash "
-            "parses):\n    fno mail send '<payload>' --to-self --raw"
+            "parses):\n    fno agents mail send '<payload>' --to-self --raw"
         )
 
     # 3b. Bus-only delivery policy (x-e21e): this recipient's mail belongs on
@@ -2656,8 +2656,8 @@ def cmd_send(
     Address it by the ADDRESS column of ``fno agents list`` (or the full session
     id). The NAME column is a spawn label and the discovered lane's LABEL is a
     friendly alias; neither is a mailbox, and a durable write keyed to one
-    queues under a key no drain reads. If a send does strand, ``fno mail sent
-    --unclaimed`` finds it and ``fno mail withdraw <id>`` retracts it.
+    queues under a key no drain reads. If a send does strand, ``fno agents mail sent
+    --unclaimed`` finds it and ``fno agents mail withdraw <id>`` retracts it.
 
     Stdout contract (US3 AC3-UI / US6 AC6-UI): exactly one line, either
     ``msg-<id> delivered (hosted)`` or ``msg-<id> queued (durable) [<reason>]``,
@@ -2815,7 +2815,7 @@ def cmd_send(
             content = message
         if not recipient or content is None:
             print(
-                "usage: fno mail send --to-project <project> --kind <kind> "
+                "usage: fno agents mail send --to-project <project> --kind <kind> "
                 "<message>",
                 file=sys.stderr,
             )
@@ -2985,7 +2985,7 @@ def cmd_send(
         content = message if message is not None else name
         if not content:
             print(
-                "usage: fno mail send --to-project <project> <message>",
+                "usage: fno agents mail send --to-project <project> <message>",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -3027,7 +3027,7 @@ def cmd_send(
                     f"{result.msg_id} queued (durable) for {result.recipient} "
                     f"[project {to_project}] "
                     f"[{_note or 'bus-only: recipient polls the bus at each turn boundary'}]"
-                    + (f" `fno mail withdraw {result.msg_id}` retracts it." if _note else "")
+                    + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
                 )
             else:
                 # The anycast lane reaches the SAME dispatch_send as the by-name
@@ -3058,7 +3058,7 @@ def cmd_send(
 
         if is_job_token(name):
             if message is None:
-                print(f"usage: fno mail send {name} <message>", file=sys.stderr)
+                print(f"usage: fno agents mail send {name} <message>", file=sys.stderr)
                 raise typer.Exit(code=2)
             _refuse_forged_envelope(message)
             _enforce_body_cap(message)
@@ -3069,7 +3069,7 @@ def cmd_send(
     # Name mode.
     if not name or message is None:
         print(
-            "usage: fno mail send <name> <message>  "
+            "usage: fno agents mail send <name> <message>  "
             "(or --to-project <project> <message>)",
             file=sys.stderr,
         )
@@ -3110,8 +3110,8 @@ def cmd_send(
         # control.sock (`mail-inject`); codex over the app-server daemon (US8). The
         # old claude->project re-route is gone; project anycast stays explicit via
         # --to-project. The body is <fno_mail>-wrapped with a truthful from/model
-        # so the recipient can reply by handle (`fno mail send <from>`) for a live
-        # message, or `fno mail reply --to <id>` when answering a drained one.
+        # so the recipient can reply by handle (`fno agents mail send <from>`) for a live
+        # message, or `fno agents mail reply --to <id>` when answering a drained one.
         if resolved is not None:
             # Live-inject-first with a durable floor addressed to the resolved
             # session's canonical handle. Shared with the name-lane reply path.
@@ -3190,7 +3190,7 @@ def cmd_send(
         print(
             f"{result.msg_id} queued (durable) "
             f"[{_note or 'bus-only: recipient polls the bus at each turn boundary'}]"
-            + (f" `fno mail withdraw {result.msg_id}` retracts it." if _note else "")
+            + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
         )
     else:
         reason_tok = result.reason or "live-miss"
@@ -3212,7 +3212,7 @@ def cmd_unread(
 
     "My inbox" is a cursor-bounded scan of the one global bus log filtered to
     ``to == name``: only messages after the consumer's cursor are shown,
-    regardless of which provider sent them. ``fno mail ack`` advances the
+    regardless of which provider sent them. ``fno agents mail ack`` advances the
     cursor. JSON when stdout is not a TTY or ``--json`` is passed.
     """
     from fno.bus.cursor import scan_unread
@@ -3236,7 +3236,7 @@ def cmd_unread(
     for m in msgs:
         excerpt = m.body.replace("\n", " ")[:100]
         print(f"{m.id}  {m.from_} -> {m.to}  [{m.kind}]  {excerpt}")
-    print('\nto answer one: fno mail reply --to <id> --body "..."')
+    print('\nto answer one: fno agents mail reply --to <id> --body "..."')
 
 
 @mail_app.command("sent")
@@ -3257,7 +3257,7 @@ def cmd_sent(
 ) -> None:
     """List mail THIS session sent, with claim state.
 
-    The outbound half of ``fno mail unread``. It exists because the sender could
+    The outbound half of ``fno agents mail unread``. It exists because the sender could
     previously see only a tally: ``mail status`` said "sent unclaimed: 1" and the
     every-prompt nudge repeated it, with no way to learn which message, to whom,
     or how old - so a strand was something you were told about hourly and could
@@ -3327,7 +3327,7 @@ def cmd_sent(
         lane = m.to_kind or "?"
         delivery = m.delivery or "durable"
         print(f"{m.id}  -> {m.to}  [{lane}/{delivery}]  {m.ts}  {state}")
-    print("\nto retract one: fno mail withdraw <id>")
+    print("\nto retract one: fno agents mail withdraw <id>")
 
 
 @mail_app.command("withdraw")
@@ -3444,7 +3444,7 @@ def cmd_bus_ack(
     The id is the positional; the cursor's owner is ``--name``/``-n``, NOT a
     second positional::
 
-        fno mail ack msg-a1b2c3 --name <handle>
+        fno agents mail ack msg-a1b2c3 --name <handle>
 
     Spelled out because the old one-liner read as if ``<name>`` came first and
     cost a reader two failed invocations before they resorted to ``--help``.
@@ -3464,7 +3464,7 @@ def cmd_bus_ack(
     if target is None:
         print(
             f"unknown message id {msg_id!r}: not found in the retained bus log; "
-            f"cursor not advanced (run `fno mail unread --name {name}` to see ids)",
+            f"cursor not advanced (run `fno agents mail unread --name {name}` to see ids)",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -3658,7 +3658,7 @@ def cmd_hold(
             # thing worth telling the operator.
             print(
                 f"{handle}: holding mail, but the clock disagrees with the "
-                "delivery gate - run `fno mail hold --off` to clear it"
+                "delivery gate - run `fno agents mail hold --off` to clear it"
             )
         else:
             print(f"{handle}: holding mail, lifts in {label.lstrip('~')}")
@@ -3714,7 +3714,7 @@ def cmd_hold(
     if binary:
         try:
             subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                [binary, "mail", "hold-release", "--handle", handle],
+                [binary, "agents", "mail", "hold-release", "--handle", handle],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -3897,12 +3897,12 @@ def cmd_drain_self(
         print(json.dumps(out, ensure_ascii=False))
     else:
         if to_print:
-            print(f"[fno mail] {len(to_print)} message(s) for {handle}:")
+            print(f"[fno agents mail] {len(to_print)} message(s) for {handle}:")
             for m in to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
                 print(_render_body(m.body))
         if job_to_print:
-            print(f"\n[fno mail] {len(job_to_print)} job message(s) for {job_addr}:")
+            print(f"\n[fno agents mail] {len(job_to_print)} job message(s) for {job_addr}:")
             for m in job_to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
                 print(_render_body(m.body))
@@ -3911,7 +3911,7 @@ def cmd_drain_self(
         # an FYI/broadcast needs none.
         if to_print or job_to_print:
             print(
-                '\n[fno mail] to answer one: fno mail reply --to <id> --body "..."'
+                '\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."'
             )
 
     # Inject-before-ack: advance the cursor to the last drained id only after
@@ -3990,7 +3990,7 @@ def _emit_drain_marker(
 
 # ---------------------------------------------------------------------------
 # Active-turn delivery helpers. The sent-unclaimed predicate remains stat-only
-# and is shared with `fno mail status`.
+# and is shared with `fno agents mail status`.
 # ---------------------------------------------------------------------------
 
 # Mail text is embedded inside a hook-owned <system-reminder> wrapper, so a
@@ -4156,7 +4156,7 @@ def cmd_notify_self() -> None:
 
     to_render = [m for m in unread if not _dup(m)]
     if to_render:
-        lines.append(f"[fno mail] {len(to_render)} message(s) for {handle}:")
+        lines.append(f"[fno agents mail] {len(to_render)} message(s) for {handle}:")
         for message in to_render:
             lines.extend(
                 (
@@ -4165,7 +4165,7 @@ def cmd_notify_self() -> None:
                 )
             )
         lines.append(
-            '\n[fno mail] to answer one: fno mail reply --to <id> --body "..."'
+            '\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."'
         )
 
     ttl = load_settings().inbox.unclaimed_ttl
@@ -4176,10 +4176,10 @@ def cmd_notify_self() -> None:
         # see which message it meant or to stop it, which is what made an
         # unclaimed message a standing tax on the sender rather than a notice.
         lines.append(
-            f"{len(unclaimed)} sent fno mail unclaimed (to {who}, >{ttl // 60}m): "
+            f"{len(unclaimed)} sent fno agents mail unclaimed (to {who}, >{ttl // 60}m): "
             "recipient has not picked it up; "
-            "`fno mail sent --unclaimed` to see them, "
-            "`fno mail withdraw <id>` to retract one"
+            "`fno agents mail sent --unclaimed` to see them, "
+            "`fno agents mail withdraw <id>` to retract one"
         )
 
     if not lines:

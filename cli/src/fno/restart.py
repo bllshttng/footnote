@@ -1,6 +1,6 @@
-"""fno restart - restart running fno processes onto freshly-installed binaries (x-69b3).
+"""fno agents restart - restart running fno processes onto freshly-installed binaries (x-69b3).
 
-`fno doctor update && fno restart` is the reboot loop: `update` installs new binaries,
+`fno doctor update && fno agents restart` is the reboot loop: `update` installs new binaries,
 `restart` swaps the RUNNING processes onto them.
 
 - Agents daemon: ALWAYS restarted - SIGTERM the stale daemon and lazy-start a
@@ -70,7 +70,7 @@ def _mux_sessions() -> Optional[list[dict[str, Any]]]:
         )
     except subprocess.TimeoutExpired:
         typer.echo(
-            "fno restart: `fno mux ls --json` gave up after 10s; skipped mux check "
+            "fno agents restart: `fno mux ls --json` gave up after 10s; skipped mux check "
             "(a wedged server? `fno mux doctor`).",
             err=True,
         )
@@ -148,7 +148,7 @@ def _revive_orphans(
         if not is_revivable(row):
             result["agents_revive_skipped"].append(name)
             say(
-                f"fno restart: worker '{name}' died with its mux server and has no "
+                f"fno agents restart: worker '{name}' died with its mux server and has no "
                 "resumable claude session; not revived.",
                 err=True,
             )
@@ -170,17 +170,23 @@ def _revive_orphans(
             rc = 1
         if rc == 0:
             result["agents_revived"].append(name)
-            say(f"fno restart: revived worker '{name}' onto session {session}.")
+            say(f"fno agents restart: revived worker '{name}' onto session {session}.")
         else:
             result["agents_revive_failed"].append(name)
             say(
-                f"fno restart: could not revive worker '{name}' (spawn --resume "
+                f"fno agents restart: could not revive worker '{name}' (spawn --resume "
                 f"exited {rc}); resume it manually: fno agents resume {name}",
                 err=True,
             )
 
 
 def restart_command(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-F",
+        help="Break-glass daemon restart: allow fno-agents to SIGKILL a wedged lock holder.",
+    ),
     mux: bool = typer.Option(
         False,
         "--mux",
@@ -229,28 +235,31 @@ def restart_command(
             typer.echo(msg)
 
     # 1. Agents daemon (safe: PTY workers survive). The primary action - an actual
-    # restart FAILURE fails the command so a chained `fno doctor update && fno restart`
+    # restart FAILURE fails the command so a chained `fno doctor update && fno agents restart`
     # surfaces it. An absent binary is "nothing to restart", not a failure.
     from fno import rust_binary
 
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
         result["daemon"] = "skipped-no-binary"
-        say("fno restart: no installed fno-agents binary; skipping daemon restart", err=True)
+        say("fno agents restart: no installed fno-agents binary; skipping daemon restart", err=True)
     else:
         try:
-            rc = subprocess.run([str(binary), "restart"], timeout=120).returncode
+            daemon_cmd = [str(binary), "restart"]
+            if force:
+                daemon_cmd.append("--force")
+            rc = subprocess.run(daemon_cmd, timeout=120).returncode
         except (OSError, subprocess.SubprocessError) as exc:
             result["daemon"] = "failed"
-            say(f"fno restart: could not run fno-agents restart ({exc})", err=True)
+            say(f"fno agents restart: could not run fno-agents restart ({exc})", err=True)
             failures.append(f"daemon: {exc}")
         else:
             if rc == 0:
                 result["daemon"] = "restarted"
-                say("fno restart: agents daemon restarted (PTY workers survive).")
+                say("fno agents restart: agents daemon restarted (PTY workers survive).")
             else:
                 result["daemon"] = f"failed:{rc}"
-                say(f"fno restart: fno-agents restart exited {rc}", err=True)
+                say(f"fno agents restart: fno-agents restart exited {rc}", err=True)
                 failures.append(f"daemon: exit {rc}")
 
     # 2. Mux servers. ONLY live sessions are restart targets; stale/unqueryable
@@ -258,7 +267,7 @@ def restart_command(
     # and could unlink a socket that `kill-server` owns).
     sessions = _mux_sessions()
     if sessions is None:
-        say("fno restart: mux front door unavailable; skipped mux check.")
+        say("fno agents restart: mux front door unavailable; skipped mux check.")
     else:
         live_rows = [
             s
@@ -278,7 +287,7 @@ def restart_command(
         # A wedged server holds its socket but never accepts (x-82c6): it is a
         # broken server, NOT a benign non-live socket. Reporting it as
         # "restart succeeded" is the ok:true lie this fixes -- surface each one
-        # (name + log) and fail the command so `fno restart` exits non-zero.
+        # (name + log) and fail the command so `fno agents restart` exits non-zero.
         wedged = [
             s
             for s in sessions
@@ -299,20 +308,20 @@ def restart_command(
             name = w["session"]
             log = w.get("log") or "(server log path unknown)"
             say(
-                f"fno restart: mux session '{name}' is WEDGED (holds its socket but is not "
+                f"fno agents restart: mux session '{name}' is WEDGED (holds its socket but is not "
                 f"accepting connections). `fno mux kill-server {name}` recovers it "
                 f"(escalates to SIGTERM/SIGKILL; its log: {log}).",
                 err=True,
             )
             failures.append(f"mux: {name} wedged")
         if other:
-            say(f"fno restart: {len(other)} non-live mux row(s) (not restarted): {other}.")
+            say(f"fno agents restart: {len(other)} non-live mux row(s) (not restarted): {other}.")
 
         # Always restart the stale-wire servers; add the current-wire ones only
         # when --mux is given.
         to_restart = list(stale_live) + (current_live if mux else [])
         if not live:
-            say("fno restart: no live mux sessions.")
+            say("fno agents restart: no live mux sessions.")
         # Snapshot live workers BEFORE the kill: the kill is what orphans them,
         # so this is the only moment their pre-kill liveness is observable.
         pre_live: dict[str, dict[str, Any]] = {}
@@ -326,7 +335,7 @@ def restart_command(
             fno = shutil.which("fno")
             if not fno:
                 say(
-                    "fno restart: mux session(s) need restarting but the `fno` mux binary is "
+                    "fno agents restart: mux session(s) need restarting but the `fno` mux binary is "
                     "not on PATH; cannot restart them.",
                     err=True,
                 )
@@ -345,7 +354,7 @@ def restart_command(
                             timeout=20,
                         ).returncode
                     except subprocess.TimeoutExpired:
-                        say(f"fno restart: gave up on mux session '{name}' after 20s.", err=True)
+                        say(f"fno agents restart: gave up on mux session '{name}' after 20s.", err=True)
                         failures.append(f"mux: kill {name} timed out")
                         continue
                     except (OSError, subprocess.SubprocessError):
@@ -353,11 +362,11 @@ def restart_command(
                     if kc == 0:
                         result["mux_restarted"].append(name)
                         say(
-                            f"fno restart: mux session '{name}' killed ({reason}); the next "
+                            f"fno agents restart: mux session '{name}' killed ({reason}); the next "
                             "attach starts a fresh server on the new binary."
                         )
                     else:
-                        say(f"fno restart: could not kill mux session '{name}' (exit {kc}).", err=True)
+                        say(f"fno agents restart: could not kill mux session '{name}' (exit {kc}).", err=True)
                         failures.append(f"mux: kill {name} exit {kc}")
         if revive and result["mux_restarted"] and pre_live:
             _revive_orphans(pre_live, say, result)
@@ -365,9 +374,9 @@ def restart_command(
         # restart them deliberately. Skipped when --mux already restarted them.
         if current_live and not mux:
             say(
-                f"fno restart: {len(current_live)} live mux session(s) on the current wire: "
+                f"fno agents restart: {len(current_live)} live mux session(s) on the current wire: "
                 f"{current_live}. Killing one ends its shells/panes; that stays opt-in. Do it "
-                "with `fno mux kill-server <name>`, or `fno restart --mux` for all."
+                "with `fno mux kill-server <name>`, or `fno agents restart --mux` for all."
             )
 
     result["ok"] = not failures

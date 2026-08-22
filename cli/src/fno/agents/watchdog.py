@@ -1928,7 +1928,7 @@ def digest_text(payload: dict, limit: int = 8) -> str:
     """One-screen digest of a sweep, house-style (one physical line per
     paragraph). The basis rides along so the king can falsify each call.
 
-    The verdict rows are LIST ITEMS, not bare lines: ``fno mail send`` runs the
+    The verdict rows are LIST ITEMS, not bare lines: ``fno agents mail send`` runs the
     style gate on the body and a bare line under a paragraph reads as an
     illegal mid-paragraph wrap (rule 6) - the first tick's digest was refused
     by exactly that, silently, and never delivered. A list marker starts a new
@@ -1967,7 +1967,7 @@ def mail_digest(
         return True, "all rows leave, nothing to say"
     if verdict_signature(payload) == _last_signature():
         return True, "unchanged since the last sweep, not mailed"
-    argv = [*_fno(), "mail", "send"]
+    argv = [*_fno(), "agents", "mail", "send"]
     if to.startswith("project:"):
         argv += ["--to-project", to[len("project:"):]]
     else:

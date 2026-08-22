@@ -50,6 +50,54 @@ RUNTIME_ENV = "FNO_AGENTS_RUNTIME"
 #: from the daemon's own codes (1/2/13/14/15/18) so the failure is legible.
 BIN_NOT_FOUND_EXIT = 127
 
+FOLDED_AGENT_SUBCOMMANDS = {
+    "autonomy": (
+        "fno.autonomy_cli:autonomy_app",
+        "Inspect every path that can start a session without an operator asking.",
+        {"hidden": True},
+    ),
+    "claim": (
+        "fno.claims.cli:cli",
+        "Work-claim coordination primitive",
+        {"hidden": True},
+    ),
+    "dispatch": (
+        "fno.dispatch:dispatch_app",
+        "Dispatch ready work into mux panes.",
+        {"hidden": True},
+    ),
+    "king": (
+        "fno.king.cli:agents_king_app",
+        "The king session manifest and escalation controls.",
+        {"hidden": True},
+    ),
+    "mail": (
+        "fno.mail.cli:mail_app",
+        "Durable polled mailbox: send/unread/ack/reply/drain/status.",
+        {"hidden": True},
+    ),
+    "mcp": (
+        "fno.mcp.cli:mcp_app",
+        "MCP sidecar client verbs.",
+        {"hidden": True},
+    ),
+    "restart": (
+        "fno.restart:restart_command",
+        "Restart running fno processes onto fresh binaries.",
+        {"hidden": True},
+    ),
+    "roles": (
+        "fno.roles.cli:roles_app",
+        "Inspect bounded business-role definitions and resolutions.",
+        {"hidden": True},
+    ),
+    "worker": (
+        "fno.worker.cli:cli",
+        "Manage delivery worker phases.",
+        {"hidden": True},
+    ),
+}
+
 #: Verbs the bundled ``fno-agents`` client implements end-to-end: the daemon
 #: request verbs in ``client.rs`` ``build_request`` plus the directly-dispatched
 #: verbs (``drive``, ``status``, and the client-side ``drive-authority``,
@@ -178,6 +226,10 @@ RUST_CLIENT_VERBS = frozenset(
 #: ``_resolve_ask_provider``) is gone; the ``AUTO_ROUTE_VERBS`` identity below is
 #: now the whole routing contract except for ``send``.
 PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
+    # The public restart command now folds the former top-level process restart
+    # under agents. It still invokes the Rust daemon restart internally, then
+    # applies the existing mux/revival policy in Python.
+    "restart",
     # Human-attended in-place crown grant. Pure shared-registry transaction;
     # spawn-time grant and succession remain on the Rust-backed spawn path.
     "crown",
@@ -187,8 +239,9 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     "court",
     # G2 Task 2.3: injection gate management; uses Python _daemon_rpc; no Rust port planned.
     "gate",
-    # Messaging (send/inbox/ack) moved OUT of `fno agents` into the dedicated
-    # `fno mail` namespace (ab-cee91152); the agents group is lifecycle-only.
+    # Messaging verbs are not direct agents actions. They live below the
+    # Python-owned `fno agents mail` subgroup and therefore never auto-route as
+    # direct send, inbox, or ack Rust verbs.
     # Epic ab-d3a1ae3e G2 Task 4.3: the stream-json observe surface. Pure Python;
     # polls the worker's stream.read_frames directly. No Rust client port (the
     # `--watch` worker-binary surface noted in client.rs is a separate lane), so
@@ -204,7 +257,7 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # bus via fno.agents.nudge); no Rust port.
     "nudge-peek",
     # x-73cc: the shared bg-dispatch guard verb. Pure-Python orchestration of
-    # `fno claim` (Guard 1 node-claim probe + Guard 2 dispatch:<id> reservation)
+    # `fno agents claim` (Guard 1 node-claim probe + Guard 2 dispatch:<id> reservation)
     # called by both dispatch-node.sh and spawn.sh. There is NO `spawn-guard` on
     # the Rust client, so it must never auto-route to the daemon (it would 404 /
     # be shadowed for installed users). Python owns it.
@@ -236,7 +289,7 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # RSS via psutil, over the same union the gate counts. Python-only by
     # design (LD8): no daemon involvement, no Rust port, never auto-routes.
     "top",
-    # x-05da: the read-only observe leg (twin of `fno mail send`). Reads a
+    # x-05da: the read-only observe leg (twin of `fno agents mail send`). Reads a
     # peer's on-disk transcript / status events via fno.agents.peek. No Rust
     # client port, so it must never auto-route to the daemon.
     "peek",
@@ -302,7 +355,6 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     # must not appear here (test_rust_only_verb_help_covers_unregistered_verbs
     # enforces the invariant).
     "status": "Report daemon liveness and per-agent state.",
-    "restart": "Restart a stale daemon (pick up a new build; PTY workers survive). --force is break-glass: SIGKILLs a wedged lock holder; plain restart is graceful.",
     "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output, --dry-run to rehearse (names the gate keeping every held-back row, mutates nothing).",
     "loop-check": "Stop-hook decision: external-truth done()/backstop check (read-only).",
     "loop": "Unified driver loop: run --driver target [options] (step 5).",
@@ -992,9 +1044,22 @@ def make_agents_group_cls() -> type:
     ``typer.core`` unless the agents sub-app is actually constructed — keeps the
     lazy-import startup budget intact.
     """
-    import typer.core
+    from fno._lazy_group import LazyTypeGroup, _LazyStub
 
-    class _AgentsRuntimeGroup(typer.core.TyperGroup):
+    class _AgentLazyStub(_LazyStub):
+        def list_commands(self, ctx):  # type: ignore[no-untyped-def]
+            real = self._load_real()
+            if not hasattr(real, "list_commands"):
+                return []
+            return list(real.list_commands(ctx))
+
+        def get_command(self, ctx, name):  # type: ignore[no-untyped-def]
+            real = self._load_real()
+            if not hasattr(real, "get_command"):
+                return None
+            return real.get_command(ctx, name)
+
+    class _AgentsRuntimeGroup(LazyTypeGroup):
         """Intercept ``fno agents <verb>`` before Typer parses the sub-command.
 
         Routing follows :func:`runtime_mode`:
@@ -1018,6 +1083,22 @@ def make_agents_group_cls() -> type:
         help listing (and into command resolution, for a legible fallback) without
         touching the routing decision in :meth:`make_context`.
         """
+
+        def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            super().__init__(
+                *args,
+                lazy_subcommands=FOLDED_AGENT_SUBCOMMANDS,
+                **kwargs,
+            )
+
+        def _make_stub(self, name):  # type: ignore[no-untyped-def]
+            import_path, short_help, options = FOLDED_AGENT_SUBCOMMANDS[name]
+            return _AgentLazyStub(
+                name=name,
+                help=short_help,
+                import_path=import_path,
+                hidden=bool(options.get("hidden", False)),
+            )
 
         def list_commands(self, ctx):  # type: ignore[no-untyped-def]
             """Python-registered verbs first, then the Rust-only verbs.

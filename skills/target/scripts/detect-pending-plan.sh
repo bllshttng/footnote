@@ -23,7 +23,7 @@
 #   consume [--sidecar PATH] [--holder ID]
 #       Atomically flip status: pending -> consumed so two racing /target runs
 #       collapse to a single execution. Serialized by a local atomic mkdir lock
-#       (race-safe even without fno) plus an `fno claim` for cross-session
+#       (race-safe even without fno) plus an `fno agents claim` for cross-session
 #       coordination; the claim is released once the flip lands. Call ONLY after
 #       the confirm-yes. Exit 0 = consumed by us; exit 3 = already consumed or
 #       being consumed by another run (caller must NOT proceed as the owner).
@@ -182,7 +182,7 @@ cmd_consume() {
   # Race guard, layer 1: a LOCAL atomic critical section. `mkdir` is atomic on
   # POSIX, so this serializes two racing consumes on the same host even when
   # `fno` is absent (the read-status-then-flip below is otherwise a TOCTOU, not
-  # a real CAS). The fno claim (layer 2) adds cross-session/host coordination.
+  # a real CAS). The fno agents claim (layer 2) adds cross-session/host coordination.
   local lock="$sidecar.consume.lock"
   if ! mkdir "$lock" 2>/dev/null; then
     # Held by a concurrent consume. The section is sub-second, so a lock older
@@ -198,12 +198,12 @@ cmd_consume() {
   fi
   trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 
-  # Race guard, layer 2: fno claim (cross-session). Non-fatal if fno is
+  # Race guard, layer 2: fno agents claim (cross-session). Non-fatal if fno is
   # unavailable or errors transiently (the mkdir lock still protects locally);
   # only a definite held-by-other (rc 1) aborts.
   local claimed=""
   if command -v fno >/dev/null 2>&1; then
-    if FNO_CLAIMS_ROOT="${FNO_CLAIMS_ROOT:-$HOME}" fno claim acquire "$claim_key" \
+    if FNO_CLAIMS_ROOT="${FNO_CLAIMS_ROOT:-$HOME}" fno agents claim acquire "$claim_key" \
          --holder "$holder" --ttl 30m >/dev/null 2>&1; then
       claimed="yes"
     else
@@ -220,7 +220,7 @@ cmd_consume() {
   # Compare-and-set under the lock: only flip if still pending.
   local status; status="$(_fm "$sidecar" status)"
   if [[ "$status" != "pending" ]]; then
-    [[ -n "$claimed" ]] && FNO_CLAIMS_ROOT="${FNO_CLAIMS_ROOT:-$HOME}" fno claim release "$claim_key" --holder "$holder" >/dev/null 2>&1 || true
+    [[ -n "$claimed" ]] && FNO_CLAIMS_ROOT="${FNO_CLAIMS_ROOT:-$HOME}" fno agents claim release "$claim_key" --holder "$holder" >/dev/null 2>&1 || true
     echo "detect-pending-plan: sidecar no longer pending (status=$status); not consuming" >&2
     exit 3
   fi
@@ -237,7 +237,7 @@ cmd_consume() {
   # Release the claim now: the section it protected (the flip) is done, and the
   # sidecar is now `consumed` so detect returns none to other runs. Holding the
   # 30m-TTL claim would falsely block a later same-slug re-approval.
-  [[ -n "$claimed" ]] && FNO_CLAIMS_ROOT="${FNO_CLAIMS_ROOT:-$HOME}" fno claim release "$claim_key" --holder "$holder" >/dev/null 2>&1 || true
+  [[ -n "$claimed" ]] && FNO_CLAIMS_ROOT="${FNO_CLAIMS_ROOT:-$HOME}" fno agents claim release "$claim_key" --holder "$holder" >/dev/null 2>&1 || true
 
   echo "consumed slug=$slug"
   exit 0

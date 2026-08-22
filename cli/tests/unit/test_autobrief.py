@@ -192,7 +192,7 @@ def test_envelope_from_uses_live_dispatcher_identity(tmp_path, monkeypatch):
             "source_session_id": "20260506T213611Z-58489-6764ea"}
     brief, _ = resolve_dispatch_brief(node, briefs_dir=tmp_path)
     assert 'from="athens"' in brief
-    assert "reply: fno mail send athens" in brief
+    assert "reply: fno agents mail send athens" in brief
 
 
 def test_envelope_from_falls_back_to_source_session(tmp_path):

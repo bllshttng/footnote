@@ -2,7 +2,7 @@
 
 Before this module the two autonomous target launchers disagreed: ``backlog
 advance`` could walk the active combo and land on another harness, while
-``fno dispatch`` could only defer or decline-to-defer on the Claude account
+``fno agents dispatch`` could only defer or decline-to-defer on the Claude account
 pool. So the all-accounts-walled case terminated in a wait of up to a week
 while an idle Codex subscription sat there.
 
@@ -281,7 +281,7 @@ def select_autonomous_route(
         # this whole path exists to delete. A pinned launch skips it - picking is
         # a reroute, and a pin forbids reroutes, not defers. This lives HERE and
         # not in one caller because the two launchers must reach the same
-        # verdict; when only `fno dispatch` had it, identical fixtures deferred
+        # verdict; when only `fno agents dispatch` had it, identical fixtures deferred
         # on one path and launched on the other.
         if not pinned and _healthy_alternate_exists(node_cwd):
             return AutonomousRoute(

@@ -139,7 +139,7 @@ Set `FNO_STYLE_ENFORCE` to 0 to disable the check in an emergency.
 
 ## Where the check runs
 
-- `fno mail send` rejects a body that breaks the rules.
+- `fno agents mail send` rejects a body that breaks the rules.
 - Run `fno doctor lint style --surface pr-body --stdin` to check a PR body by hand.
 - Run `fno doctor lint style --surface markdown --files <paths> --diff-base <base>` to check changed Markdown by hand.
 - A PR comment has no chokepoint. Run `fno doctor lint style --surface comment --stdin` yourself.

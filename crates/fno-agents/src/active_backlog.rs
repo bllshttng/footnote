@@ -452,7 +452,7 @@ fn reconcile_pending(
         p.ticks += 1;
         // `node:<id>` is a GLOBAL-id claim: it routes to $FNO_CLAIMS_ROOT (else
         // $HOME) by prefix, NOT under the project cwd, so the worker (which
-        // acquires it via `fno claim` with no explicit root) and this read must
+        // acquires it via `fno agents claim` with no explicit root) and this read must
         // resolve the SAME dir. Passing Some(cfg.cwd) would look in the wrong
         // place and never find the worker's claim (claim_status root mismatch).
         let (state, rec) = claims::status(&format!("node:{}", p.node_id), None);

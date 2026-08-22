@@ -109,7 +109,7 @@ _eval_sweep_run_stages() {
     _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor observer sweep  --skill review
     _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor skill-diff tick --skill blueprint
     _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor skill-diff tick --skill review
-    [[ -n "$claim_key" ]] && "$fno_cmd" claim release "$claim_key" --holder "$holder" >/dev/null 2>&1
+    [[ -n "$claim_key" ]] && "$fno_cmd" agents claim release "$claim_key" --holder "$holder" >/dev/null 2>&1
     return 0
 }
 
@@ -129,7 +129,7 @@ _eval_sweep_paused() {
 }
 
 # _eval_sweep_try_claim <fno_cmd> <key> <holder>
-# Acquire the singleton claim, classifying by `fno claim acquire`'s exit code
+# Acquire the singleton claim, classifying by `fno agents claim acquire`'s exit code
 # (claims/cli.py): 0 = acquired (we launch), 1 = someone else has this key
 # right now (either a live sibling holds it, or the recovery mutex on this
 # exact key is contended by concurrent activity) so skip, any other = claim
@@ -138,7 +138,7 @@ _eval_sweep_paused() {
 # per fire, so a still-held claim yields 1 rather than an idempotent re-acquire.
 _eval_sweep_try_claim() {
     local fno_cmd="$1" key="$2" holder="$3" rc
-    "$fno_cmd" claim acquire "$key" --holder "$holder" --ttl "$EVAL_SWEEP_CLAIM_TTL" >/dev/null 2>&1
+    "$fno_cmd" agents claim acquire "$key" --holder "$holder" --ttl "$EVAL_SWEEP_CLAIM_TTL" >/dev/null 2>&1
     rc=$?
     case "$rc" in
         0) echo "acquired" ;;

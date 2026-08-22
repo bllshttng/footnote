@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DP="$REPO_ROOT/skills/target/scripts/detect-pending-plan.sh"
 TMP=$(mktemp -d -t detect-pending.XXXXXX)
-# Isolate claim state so consume's `fno claim` never touches real ~/.fno.
+# Isolate claim state so consume's `fno agents claim` never touches real ~/.fno.
 export FNO_CLAIMS_ROOT="$TMP/claims-root"
 mkdir -p "$FNO_CLAIMS_ROOT"
 trap 'rm -rf "$TMP"' EXIT

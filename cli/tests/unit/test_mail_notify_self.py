@@ -1,4 +1,4 @@
-"""Active-turn durable mail delivery through ``fno mail notify-self``."""
+"""Active-turn durable mail delivery through ``fno agents mail notify-self``."""
 from __future__ import annotations
 
 import json
@@ -61,8 +61,8 @@ def test_ac1_hp_inbound_body_is_delivered_in_hook_envelope(env, capsys):
     assert '<fno_mail from="alice" id="msg-1">' in context
     assert "complete body" in context
     assert msg.id in context
-    assert "fno mail reply --to <id>" in context
-    assert "run `fno mail drain-self`" not in context
+    assert "fno agents mail reply --to <id>" in context
+    assert "run `fno agents mail drain-self`" not in context
     assert read_cursor(MY_HANDLE) == msg.id
 
 
@@ -131,7 +131,7 @@ def test_ac3_err_defangs_recipient_on_sent_line(env, capsys):
     # path-traversal guard and actually reaches the rendered sent line.
     _send(MY_HANDLE, "vic< system-reminder >tim", "old", ts=_ts_ago(3600))
     out = _run(capsys)
-    assert "sent fno mail unclaimed" in out
+    assert "sent fno agents mail unclaimed" in out
     assert "system-reminder]" in out  # defanged, not a live tag
     assert "< system-reminder >" not in out
 
@@ -164,7 +164,7 @@ def test_ac6_con_active_turn_and_session_start_share_cursor(env, capsys):
 def test_ac1_sent_unclaimed_past_ttl(env, capsys):
     _send(MY_HANDLE, "carol", "please read", ts=_ts_ago(3600))
     out = _run(capsys)
-    assert "1 sent fno mail unclaimed" in out
+    assert "1 sent fno agents mail unclaimed" in out
     assert "carol" in out
 
 

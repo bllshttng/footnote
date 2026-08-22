@@ -9,7 +9,7 @@
 //!
 //! The claim is **anchored to the long-lived HOLDER pid from the first acquire**
 //! (footnote's attach-holder process), so it is live from birth. The daemon's
-//! historical shell-out recorded the transient `fno claim` subprocess pid, so
+//! historical shell-out recorded the transient `fno agents claim` subprocess pid, so
 //! the claim went instantly `stale` and a concurrent adopter could reclaim it
 //! (the daemon-claim-reanchor lesson, PR#53; codex P1 on this PR); the native
 //! acquire records the holder pid directly and closes that window. The
@@ -159,7 +159,7 @@ pub enum ClaimOutcome {
 /// (the long-lived attach holder). Native `crate::claims` call — no subprocess.
 /// Pinning `--pid` to the long-lived holder from the very first acquire is what
 /// keeps the claim from being born `stale`; with the native path there is no
-/// transient `fno claim` subprocess to record in the first place, but the
+/// transient `fno agents claim` subprocess to record in the first place, but the
 /// explicit holder pid is preserved so the record still names the real writer
 /// (codex P1). `session:<uuid>` keys route to the host-global claims root, so
 /// two checkouts cannot take separate project-local claims for the same
@@ -182,7 +182,7 @@ pub fn acquire_pty_claim(uuid: &str, holder: &str, holder_pid: u32) -> ClaimOutc
 }
 
 /// Adopt a roster worker: take the `pty:<short>` single-writer claim ANCHORED to
-/// `holder_pid` (the long-lived caller, not the transient `fno claim` subprocess)
+/// `holder_pid` (the long-lived caller, not the transient `fno agents claim` subprocess)
 /// in one acquire, refusing if another live writer holds the session, THEN mint +
 /// upsert its fno registry row. The claim is secured before the row is published,
 /// so a concurrent adopter cannot reclaim the session in a stale window. Returns

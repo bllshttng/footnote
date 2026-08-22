@@ -98,7 +98,7 @@ PHASE2_LOWERCASE_MAP: dict[tuple[str, str], dict[str, str]] = {
         "--source": "-s", "--where": "-w", "--priority": "-p",
     },
     # cmd_send moved from agents/cli.py to mail/cli.py in ab-cee91152 (messaging
-    # extracted into the dedicated `fno mail` namespace); its lowercase shorts
+    # extracted into the dedicated `fno agents mail` namespace); its lowercase shorts
     # moved with it (-k --kind, -b --body, plus the pre-existing -p/-c).
     ("mail/cli.py", "cmd_send"): {
         "--kind": "-k", "--body": "-b", "--harness": "-H", "--cwd": "-c",

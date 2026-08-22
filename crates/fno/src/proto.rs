@@ -181,7 +181,7 @@ fn default_true() -> bool {
 /// v33 (x-c914): the account-scoped dispatch verbs carry the client's
 /// session-local active account. `ClientMsg::DispatchNext { account }` and
 /// `Command::DispatchNode { node, account }` append `--account <id>` to the
-/// server's `fno dispatch one` shell so a mux-initiated spawn bills the chosen
+/// server's `fno agents dispatch one` shell so a mux-initiated spawn bills the chosen
 /// claude account; `None` = today's default (no flag). `AgentRow { account }`
 /// carries the birth/roster account for the sideline glyph.
 ///
@@ -1264,7 +1264,7 @@ pub enum Command {
     },
     /// (v15) Start a targeted interactive session on a clicked work-queue card's
     /// node (id or slug), behind the client's one-keypress confirm. Reuses the
-    /// `DispatchNext` porcelain (`fno dispatch one`) pinned to `--node`, so the
+    /// `DispatchNext` porcelain (`fno agents dispatch one`) pinned to `--node`, so the
     /// lane cap, the same-node claim race (a node claimed between click and Enter
     /// bounces `already-dispatching`), and the "read-only observer refused"
     /// guarantee all hold exactly as prefix+g. Value over `DispatchNext`: the
@@ -1430,7 +1430,7 @@ pub enum Command {
     /// queues durable; an external row is refused - it is not in the fno
     /// registry), sanitizes `text` (strip control chars, trim, cap
     /// [`MAX_MAIL_TEXT`] - blank-after-sanitize or over-cap is refused with a
-    /// notice, never truncated), then shells `fno mail send <name> <text>`
+    /// notice, never truncated), then shells `fno agents mail send <name> <text>`
     /// OFF-loop and surfaces the CLI's one-line stdout verdict as the notice. The
     /// argv is an array (never a shell string); the client stays shell-free.
     MailAgent {
@@ -2665,7 +2665,7 @@ const PROBE_ALIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// Connect to an AF_UNIX SOCK_STREAM path with a bounded timeout. std's
 /// `UnixStream::connect` has no connect-timeout knob, so a live-but-wedged
 /// listener (dead accept loop, full backlog) blocks it indefinitely - the
-/// `fno restart --mux` hang. Nonblocking connect + `poll` for writability,
+/// `fno agents restart --mux` hang. Nonblocking connect + `poll` for writability,
 /// then blocking mode restored so the caller's read/write timeouts apply.
 ///
 /// The `ErrorKind::TimedOut` this returns means "wedged server" and callers

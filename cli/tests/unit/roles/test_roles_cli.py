@@ -113,8 +113,8 @@ def test_ac_r7_ui_ls_and_show_are_stable_and_keep_invalid_sources_visible(
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
     before_roles = _snapshot_tree(roles_root)
 
-    first = _invoke("roles", "ls")
-    second = _invoke("roles", "ls")
+    first = _invoke("agents", "roles", "ls")
+    second = _invoke("agents", "roles", "ls")
     assert first.exit_code == second.exit_code == 0
     assert first.output == second.output
     assert first.output == (
@@ -124,8 +124,8 @@ def test_ac_r7_ui_ls_and_show_are_stable_and_keep_invalid_sources_visible(
         "source=project/broken.json status=invalid\n"
     )
 
-    local_json = _invoke("roles", "ls", "-J")
-    root_json = _invoke("-J", "roles", "ls")
+    local_json = _invoke("agents", "roles", "ls", "-J")
+    root_json = _invoke("-J", "agents", "roles", "ls")
     assert local_json.exit_code == root_json.exit_code == 0
     assert local_json.output == root_json.output
     rows = _assert_pretty_sorted_json(local_json.output)
@@ -134,7 +134,7 @@ def test_ac_r7_ui_ls_and_show_are_stable_and_keep_invalid_sources_visible(
         ("broken", "invalid"),
     ]
 
-    shown = _invoke("roles", "show", "broken", "-J")
+    shown = _invoke("agents", "roles", "show", "broken", "-J")
     assert shown.exit_code == 0
     definitions = _assert_pretty_sorted_json(shown.output)
     assert len(definitions) == 1
@@ -144,8 +144,8 @@ def test_ac_r7_ui_ls_and_show_are_stable_and_keep_invalid_sources_visible(
     assert definitions[0]["disposition"] == "unchecked"
     assert definitions[0]["error"]
     assert definitions[0]["raw_definition"]["role"]["id"] == "broken"
-    shown_text = _invoke("roles", "show", "broken")
-    shown_text_again = _invoke("roles", "show", "broken")
+    shown_text = _invoke("agents", "roles", "show", "broken")
+    shown_text_again = _invoke("agents", "roles", "show", "broken")
     assert shown_text.exit_code == shown_text_again.exit_code == 0
     assert shown_text.output == shown_text_again.output
     assert "status=invalid disposition=unchecked" in shown_text.output
@@ -200,9 +200,9 @@ def test_ac_r7_ui_resolve_is_typed_inert_and_has_stable_exit_codes(
     monkeypatch.setattr(subprocess, "run", _dispatch_tripwire)
 
     args = ["resolve", "owner", "--work-order", "x-a8c0", "--attempt", "attempt-1"]
-    first = _invoke("roles", *args, "-J")
-    second = _invoke("roles", *args, "-J")
-    root_json = _invoke("-J", "roles", *args)
+    first = _invoke("agents", "roles", *args, "-J")
+    second = _invoke("agents", "roles", *args, "-J")
+    root_json = _invoke("-J", "agents", "roles", *args)
     assert first.exit_code == second.exit_code == root_json.exit_code == 0
     assert first.output == second.output == root_json.output
     resolved = _assert_pretty_sorted_json(first.output)
@@ -217,6 +217,7 @@ def test_ac_r7_ui_resolve_is_typed_inert_and_has_stable_exit_codes(
     assert len(resolved["context_bundle"]["digest"]) == 64
 
     blocked_result = _invoke(
+        "agents",
         "roles",
         "resolve",
         "unavailable",
@@ -238,6 +239,7 @@ def test_ac_r7_ui_resolve_is_typed_inert_and_has_stable_exit_codes(
     }
 
     not_found_result = _invoke(
+        "agents",
         "roles",
         "resolve",
         "missing",
@@ -252,7 +254,7 @@ def test_ac_r7_ui_resolve_is_typed_inert_and_has_stable_exit_codes(
     assert not_found["reason"] == "not_found"
     assert not_found["role"] == {"function_id": "unavailable", "id": "missing"}
 
-    malformed = _invoke("roles", "resolve", "owner")
+    malformed = _invoke("agents", "roles", "resolve", "owner")
     assert malformed.exit_code == 2
     assert dispatch_calls == []
     assert _snapshot_tree(graph_root) == before_graph
@@ -290,6 +292,7 @@ def test_resolve_fails_closed_when_an_unchecked_source_has_no_role_identity(
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
 
     resolved = _invoke(
+        "agents",
         "roles",
         *source_args,
         "resolve",
@@ -308,7 +311,7 @@ def test_resolve_fails_closed_when_an_unchecked_source_has_no_role_identity(
     assert blocked["source_id"] == expected_source
     assert blocked["detail"]
 
-    listed = _invoke("roles", *source_args, "ls", "-J")
+    listed = _invoke("agents", "roles", *source_args, "ls", "-J")
     assert listed.exit_code == 0
     rows = _assert_pretty_sorted_json(listed.output)
     assert any(
@@ -318,7 +321,7 @@ def test_resolve_fails_closed_when_an_unchecked_source_has_no_role_identity(
         for row in rows
     )
 
-    shown = _invoke("roles", *source_args, "show", "owner", "-J")
+    shown = _invoke("agents", "roles", *source_args, "show", "owner", "-J")
     assert shown.exit_code == 0
     shown_rows = _assert_pretty_sorted_json(shown.output)
     assert any(row["source"] == expected_source for row in shown_rows)
@@ -352,6 +355,7 @@ def test_resolve_fails_closed_when_identified_invalid_overlay_has_no_revision(
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
 
     resolved = _invoke(
+        "agents",
         "roles",
         "resolve",
         "owner",
@@ -389,6 +393,7 @@ def test_resolve_rejects_invalid_utf8_auxiliary_inputs(
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
 
     result = _invoke(
+        "agents",
         "roles",
         "resolve",
         "owner",
@@ -435,6 +440,7 @@ def test_resolve_fails_closed_when_a_layer_directory_cannot_be_enumerated(
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
 
     resolved = _invoke(
+        "agents",
         "roles",
         "resolve",
         "owner",
@@ -488,7 +494,7 @@ def test_default_discovery_is_anchored_to_repository_root(
     monkeypatch.delenv("FNO_ROLES_ROOT", raising=False)
     monkeypatch.setattr("fno.roles.registry.resolve_repo_root", lambda: project_root)
 
-    listed = _invoke("roles", "ls", "-J")
+    listed = _invoke("agents", "roles", "ls", "-J")
 
     assert listed.exit_code == 0
     rows = _assert_pretty_sorted_json(listed.output)

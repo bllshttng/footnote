@@ -57,7 +57,7 @@ setup_king() {
     TRANSCRIPT="${TMP_DIR}/transcript.jsonl"
     printf '{"message":{"role":"assistant","content":"working"}}\n' > "$TRANSCRIPT"
     # `harness_session_id` is the transcript basename, which is what the hook
-    # derives its own id from. A real `fno king init` writes it and now refuses
+    # derives its own id from. A real `fno agents king init` writes it and now refuses
     # without it, so a manifest lacking one is a state the system cannot reach.
     king_manifest_naming "transcript"
     ARGS_LOG="${TMP_DIR}/fno-agents.args"

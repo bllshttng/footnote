@@ -343,7 +343,7 @@ fi
 
 # Caller must hold node:<id> claim
 set +o pipefail
-_CLAIM_STATUS_OUT="$(FNO_CLAIMS_ROOT="$HOME" fno claim status "node:$NODE_ID" 2>/dev/null || true)"
+_CLAIM_STATUS_OUT="$(FNO_CLAIMS_ROOT="$HOME" fno agents claim status "node:$NODE_ID" 2>/dev/null || true)"
 _CLAIM_HOLDER_ACTUAL="$(printf '%s' "$_CLAIM_STATUS_OUT" | jq -r '.holder // ""' 2>/dev/null || true)"
 set -o pipefail
 if [ "$_CLAIM_HOLDER_ACTUAL" != "$CLAIM_HOLDER" ]; then
@@ -546,7 +546,7 @@ DISPATCH_KEY="dispatch:$NODE_ID"
 DISPATCH_HOLDER="handoff:$SESSION_ID"
 
 _DISPATCH_RC=0
-FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$DISPATCH_KEY" \
+FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "$DISPATCH_KEY" \
   --holder "$DISPATCH_HOLDER" --ttl 3m \
   --reason "handoff bridge for $SESSION_ID" >/dev/null 2>&1 || _DISPATCH_RC=$?
 
@@ -570,7 +570,7 @@ mv "$STATE_FILE" "$ARCHIVED_STATE" 2>/dev/null || _ARCHIVE_RC=$?
 
 if [ "$_ARCHIVE_RC" -ne 0 ]; then
   # Unwind: release dispatch reservation
-  FNO_CLAIMS_ROOT="$HOME" fno claim release "$DISPATCH_KEY" \
+  FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
   echo "parked $NODE_ID reason=\"failed to archive manifest (rc=$_ARCHIVE_RC)\""
   exit "$_EXIT_PARKED"
@@ -580,14 +580,14 @@ fi
 # Step 5: Release node claim
 # ---------------------------------------------------------------------------
 _RELEASE_RC=0
-FNO_CLAIMS_ROOT="$HOME" fno claim release "node:$NODE_ID" \
+FNO_CLAIMS_ROOT="$HOME" fno agents claim release "node:$NODE_ID" \
   --holder "$CLAIM_HOLDER" >/dev/null 2>&1 || _RELEASE_RC=$?
 
 if [ "$_RELEASE_RC" -ne 0 ]; then
   # Unwind: restore manifest, release dispatch reservation
   _RESTORE_RC=0
   mv "$ARCHIVED_STATE" "$STATE_FILE" 2>/dev/null || _RESTORE_RC=$?
-  FNO_CLAIMS_ROOT="$HOME" fno claim release "$DISPATCH_KEY" \
+  FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
 
   _emit_event "handoff_failed" \
@@ -673,14 +673,14 @@ if [ "$_ASK_RC" -ne 0 ]; then
   # Spawn failure: unwind in order
   #   (a) re-acquire node:<id> FIRST; capture the rc
   _REACQ_RC=0
-  FNO_CLAIMS_ROOT="$HOME" fno claim acquire "node:$NODE_ID" \
+  FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "node:$NODE_ID" \
     --holder "$CLAIM_HOLDER" --ttl "$CLAIM_TTL" >/dev/null 2>&1 || _REACQ_RC=$?
 
   if [ "$_REACQ_RC" -ne 0 ]; then
     # Re-acquire failed: another worker may now hold the claim.
     # Do NOT restore the manifest (leave it archived so this session closes
     # safely). Release the dispatch reservation and exit 12.
-    FNO_CLAIMS_ROOT="$HOME" fno claim release "$DISPATCH_KEY" \
+    FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
       --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
     _emit_event "handoff_failed" \
       "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"reacquire_failed\",\"detail\":\"spawn_failed + re-acquire node:$NODE_ID failed (rc=$_REACQ_RC); claim may be held by another worker\"}"
@@ -693,7 +693,7 @@ if [ "$_ASK_RC" -ne 0 ]; then
   mv "$ARCHIVED_STATE" "$STATE_FILE" 2>/dev/null || _RESTORE_RC=$?
 
   #   (c) release dispatch reservation
-  FNO_CLAIMS_ROOT="$HOME" fno claim release "$DISPATCH_KEY" \
+  FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
 
   _FAIL_DETAIL="spawn rc=$_ASK_RC${_ASK_ERR:+: $(printf '%s' "$_ASK_ERR" | tr '\n' ' ' | cut -c1-160)}"
@@ -748,14 +748,14 @@ if [ "$_CHILD_LIVE" -eq 0 ]; then
   # Verify failed: unwind in order
   #   (a) re-acquire node:<id> FIRST; capture the rc
   _REACQ_RC=0
-  FNO_CLAIMS_ROOT="$HOME" fno claim acquire "node:$NODE_ID" \
+  FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "node:$NODE_ID" \
     --holder "$CLAIM_HOLDER" --ttl "$CLAIM_TTL" >/dev/null 2>&1 || _REACQ_RC=$?
 
   if [ "$_REACQ_RC" -ne 0 ]; then
     # Re-acquire failed: another worker may now hold the claim.
     # Do NOT restore the manifest (leave it archived so this session closes
     # safely). Release the dispatch reservation and exit 12.
-    FNO_CLAIMS_ROOT="$HOME" fno claim release "$DISPATCH_KEY" \
+    FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
       --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
     _emit_event "handoff_failed" \
       "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"reacquire_failed\",\"detail\":\"verify_timeout + re-acquire node:$NODE_ID failed (rc=$_REACQ_RC); claim may be held by another worker\"}"
@@ -768,7 +768,7 @@ if [ "$_CHILD_LIVE" -eq 0 ]; then
   mv "$ARCHIVED_STATE" "$STATE_FILE" 2>/dev/null || _RESTORE_RC=$?
 
   #   (c) release dispatch reservation
-  FNO_CLAIMS_ROOT="$HOME" fno claim release "$DISPATCH_KEY" \
+  FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
 
   if [ "$_RESTORE_RC" -ne 0 ]; then

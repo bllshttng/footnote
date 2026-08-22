@@ -7,7 +7,7 @@
 #
 # A NEW site appearing anywhere the check scans is what trips CI. Every line
 # below is either an autonomy-status spawner name (matches a row in
-# `fno autonomy status`) or an explicit reason the site is NOT autonomous
+# `fno agents autonomy status`) or an explicit reason the site is NOT autonomous
 # (an operator-invoked command, or plain text/comment with no real call).
 #
 # Forgetting a gate is refused at runtime by config.autonomy.enabled.

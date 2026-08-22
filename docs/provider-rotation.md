@@ -83,7 +83,7 @@ description = "Personal secondary subscription"
 ### Agent-to-agent switchboard (`config.agents.a2a`)
 
 The session-to-session switchboard lets one held stream-json
-thread drive another: `fno mail send A->B` writes a turn into B and, by
+thread drive another: `fno agents mail send A->B` writes a turn into B and, by
 default, relays B's reply back into A as a literal user turn (true
 agent-to-agent), alternating until a turn ceiling stops it. These settings live
 under `config.agents.a2a`:
@@ -99,7 +99,7 @@ turn_ceiling = 6       # hard cap on total A<->B turns per exchange (>= 1)
 | `auto` | bool | `true` | When true, B's reply relays back into A (and A's back into B, …) as literal user turns — autonomous agent-to-agent. When false, **observed mode**: the turn is delivered to B and B's reply is surfaced, but nothing relays back (no autonomous exchange). |
 | `turn_ceiling` | int | `6` | Hard upper bound on total turns in one A<->B exchange. A **correctness** bound, not a preference: an unbounded relay burns plan credit forever, so the ceiling applies **regardless of `auto`** and must be `>= 1`. The exchange stops with a visible "loop ceiling reached" when it is hit. |
 
-Both keys are read by `fno mail send`'s switchboard fast lane; a malformed or
+Both keys are read by `fno agents mail send`'s switchboard fast lane; a malformed or
 absent block falls back to the defaults above. Turning `auto` off is the
 conservative posture for unattended fleets — turns still deliver and are
 observable via `fno agents watch`, but no autonomous back-and-forth runs.
@@ -1501,7 +1501,7 @@ horizon makes both predicates true for one `LOW` reset. Defer wins that overlap:
 a near reset is waited out rather than churning harnesses, which is the policy
 the horizon exists to express.
 
-Shell dispatchers reach the same decision through `fno dispatch resolve
+Shell dispatchers reach the same decision through `fno agents dispatch resolve
 --autonomous`, which folds the route into the resolved tuple and adds
 `route_action` / `route_account` / `route_source` / `route_retry_at`. Only the
 destination's record id crosses that boundary; `fno agents spawn

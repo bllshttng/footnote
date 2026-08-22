@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # normalize.sh - deterministic input normalizer for the /mail skill write verbs.
 #
-# The /mail skill is a runner-less front door over `fno mail`: an operator on a
+# The /mail skill is a runner-less front door over `fno agents mail`: an operator on a
 # phone types `/mail send target "..."` and the model (the runner) must extract a
-# clean recipient + body, refuse an empty one, and run the GENUINE `fno mail`
+# clean recipient + body, refuse an empty one, and run the GENUINE `fno agents mail`
 # command. This helper is the deterministic backstop for that parse so the
 # refusal (AC4-ERR) and the smart-quote stripping are not left to model judgment.
 #

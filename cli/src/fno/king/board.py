@@ -53,16 +53,16 @@ KING_PRIORITIES = frozenset({"p0", "p1"})
 #: and the cut is reported. A silent cap reads as full coverage.
 DEFAULT_MAX_ROWS = 25  # render bound only; see _queue
 
-#: Claim states that mean the lock outlived its holder. `fno claim list
+#: Claim states that mean the lock outlived its holder. `fno agents claim list
 #: --include-stale` returns both, and a corrupted lockfile is as unreapable by
 #: its owner as an expired one, so both belong in the queue the king clears
-#: with `fno claim reap`.
+#: with `fno agents claim reap`.
 _DEAD_CLAIM_STATES = frozenset({"stale", "corrupted"})
 
 #: The literal commands a reader can re-run. These strings ARE the checkability
 #: property, so they live beside the readers that run them.
 SRC_READY = "fno backlog ready --json"
-SRC_CLAIMS = "fno claim list -J --include-stale --prefix node:"
+SRC_CLAIMS = "fno agents claim list -J --include-stale --prefix node:"
 SRC_PRS = (
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup"
 )
@@ -672,7 +672,7 @@ def _read_claimed_nodes(
 def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     """Fetch every source. Never raises; every failure lands in a SourceRead."""
     ready = _run_json([*_fno(), "backlog", "ready", "--json"], timeout=timeout)
-    claims = _run_json([*_fno(), "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
+    claims = _run_json([*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
         timeout=timeout,
     )
     prs, warnings = _read_prs(timeout, max_pr_reads)

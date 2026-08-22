@@ -13,7 +13,7 @@ agent front door). Both were caught by a human noticing a worker echo them back,
 not by any gate. The live succession form is `fno agents spawn --crown <scope>`;
 the restored `fno agents crown` verb is human-attended promotion and must never
 be prescribed to a running agent. The review front door is
-`fno mail send '<verb>' --to-self --raw`.
+`fno agents mail send '<verb>' --to-self --raw`.
 
 Scope is the `fno` surface that `verb-baseline.txt` covers. `bash <script>` and
 harness builtins like `/compact` are separate surfaces (a foreign-verb allowlist
@@ -36,7 +36,7 @@ _OUTPUT_VAR = re.compile(r"^\s*(?:(?:REASON|ORPHAN_REASON|FLUSH_REASON)=|printf 
 _FNO = re.compile(r"\bfno\b\s+")
 _WORD = re.compile(r"[A-Za-z][\w-]*")
 # `fno-agents` binary verbs are a separate surface, hidden from the fno ratchet.
-# The front door `fno mail send --raw` routes to them; prescribing the binary
+# The front door `fno agents mail send --raw` routes to them; prescribing the binary
 # directly is the transport-not-front-door defect, so none should appear.
 _FNO_AGENTS = re.compile(r"\bfno-agents\b\s+(\S+)")
 
@@ -62,7 +62,7 @@ def _extract_fno_verbs(line: str, leaves: set[str], first_words: set[str]) -> li
 
     Captures word tokens after `fno` until a non-verb token (flag, quote,
     placeholder, path) and resolves to the longest prefix that is a real leaf,
-    so prose like 'fno mail send is the door' resolves to 'mail send' rather
+    so prose like 'fno agents mail send is the door' resolves to 'mail send' rather
     than over-capturing the trailing words.
 
     A mention whose first token is not any leaf's first word is prose about
@@ -109,7 +109,9 @@ def test_hook_output_commands_resolve() -> None:
     # Positive control: the scan reached real content, not an empty parse.
     # An absence here has two explanations and only the positive marker tells
     # them apart (assert-a-positive-marker).
-    assert "mail send" in prescribed, "expected the /compact front door in output"
+    emitted = "\n".join(lines)
+    assert "fno agents mail send" in emitted, "expected the /compact front door in output"
+    assert "agents" in prescribed, "collapsed agents dispatcher was not resolved"
     assert "agents spawn" in prescribed, "expected the spawn --crown path in output"
 
     bad = [v for v in prescribed if v not in leaves]
@@ -125,5 +127,5 @@ def test_hook_output_prescribes_no_dead_verbs_or_transport() -> None:
     # mail-inject is the daemon transport, not the agent front door.
     assert not _FNO_AGENTS.search(emitted), (
         "hook output prescribes the fno-agents transport binary directly; "
-        "the front door is `fno mail send --raw`"
+        "the front door is `fno agents mail send --raw`"
     )

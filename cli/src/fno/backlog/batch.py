@@ -7,7 +7,7 @@ driver is PR *volume*, not bad merges).
 State lives in `.fno/batches/<domain>.json`: **one open batch per domain**. The
 JSON file is the durable, cross-session state — a batch survives the session
 that opened it and is re-joined by domain, never by session id. Mutations are
-flock-guarded (the same OS primitive `fno claim` / the capture tier use) so two
+flock-guarded (the same OS primitive `fno agents claim` / the capture tier use) so two
 sessions joining the same domain serialize instead of clobbering each other.
 
 This module is pure state. Policy (join-or-start, close condition) lives with

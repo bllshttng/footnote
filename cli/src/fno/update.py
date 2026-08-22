@@ -460,7 +460,7 @@ def stale_mux_servers(
 ) -> list[str]:
     """Live mux sessions on a STALE WIRE VERSION: the running server predates the
     installed binary's ``PROTO_VERSION``, so a new client's handshake is rejected
-    and the server is already unreachable (the fix is `fno restart`, which now
+    and the server is already unreachable (the fix is `fno agents restart`, which now
     auto-cuts these over). The precise signal is the ``stale`` field
     ``fno mux ls --json`` computes from each server's ``.ver`` sidecar (x-1a85); a
     pre-sidecar server has no ``.ver`` and reads as stale, so the check works
@@ -468,7 +468,7 @@ def stale_mux_servers(
     ``socket mtime < binary mtime`` heuristic, which flagged EVERY server after
     any reinstall (a wire-agnostic false alarm). Best-effort and advisory: any
     missing binary / non-zero exit / unparseable JSON yields ``[]``. `fno doctor`
-    renders this; `fno doctor update` nudges on it; `fno restart` auto-restarts it."""
+    renders this; `fno doctor update` nudges on it; `fno agents restart` auto-restarts it."""
     fno = _cargo_installed_mux() or shutil.which("fno")
     if not fno:
         return []
@@ -653,7 +653,7 @@ def _build_update_guidance(
     if wire_bump:
         return (
             f"update ready {rev_label} - WIRE BUMP {_wire_label(running_wires)} -> "
-            f"{source_label} - `fno doctor update && fno restart --mux` ends {shells_ended} "
+            f"{source_label} - `fno doctor update && fno agents restart --mux` ends {shells_ended} "
             f"shell(s); --revive respawns {revivable} worker(s)"
         )
 
@@ -1122,7 +1122,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     for sess in stale_mux_servers():
         typer.echo(
             f"fno doctor update: note: mux server '{sess}' speaks an OLD wire version"
-            " (a new client can't attach it); run 'fno restart' to auto-cut it"
+            " (a new client can't attach it); run 'fno agents restart' to auto-cut it"
             " over (ends that session's panes)",
             err=True,
         )
@@ -1372,7 +1372,7 @@ def update_command(
     if shutil.which("uv"):
         # --refresh busts uv's build cache. Without it, a path source at an
         # unchanged version (fno stays 0.2.1 across rebuilds) can reinstall a
-        # stale cached wheel that predates newly-added modules, so `fno restart`
+        # stale cached wheel that predates newly-added modules, so `fno agents restart`
         # etc. crash with ModuleNotFoundError even after `fno doctor update`.
         # --compile-bytecode: ship the venv's own .pyc so no later process
         # writes into a tree a reinstall may be deleting

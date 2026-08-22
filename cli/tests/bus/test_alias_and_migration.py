@@ -1,6 +1,6 @@
-"""`fno mail send` over the one bus writer + legacy md migration.
+"""`fno agents mail send` over the one bus writer + legacy md migration.
 
-Post-cutover (ab-cee91152): `fno mail send` writes through the SAME bus writer
+Post-cutover (ab-cee91152): `fno agents mail send` writes through the SAME bus writer
 (one log line, no md-store divergence) and the existing drain finds it; pre-bus
 markdown threads still migrate into the log (no unread mail stranded invisibly),
 and the migration is idempotent.
@@ -19,7 +19,7 @@ from fno.mail.cli import mail_app
 def inbox_and_bus(tmp_path, monkeypatch):
     """Co-isolate the md store (FNO_INBOX_ROOT) and the bus log under tmp."""
     monkeypatch.setenv("FNO_INBOX_ROOT", str(tmp_path))
-    # `fno mail send` resolves the sender via settings.yaml; pin it.
+    # `fno agents mail send` resolves the sender via settings.yaml; pin it.
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".fno").mkdir(exist_ok=True)
     (tmp_path / ".fno" / "settings.yaml").write_text(
@@ -34,7 +34,7 @@ def runner() -> CliRunner:
 
 
 # ---------------------------------------------------------------------------
-# G4: the sender path (`fno mail send`, the alias's replacement) routes
+# G4: the sender path (`fno agents mail send`, the alias's replacement) routes
 # through the one bus writer (no divergence) and the drain still finds it.
 # ---------------------------------------------------------------------------
 

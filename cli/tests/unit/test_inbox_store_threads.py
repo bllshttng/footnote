@@ -273,7 +273,7 @@ def test_kind_enum_exact_membership():
     from fno.inbox.store import Kind, VALID_KINDS
 
     # "send" added by the cross-agent message bus Group 2 (ab-3bab5741):
-    # agent-to-agent envelopes written by `fno mail send` (US3).
+    # agent-to-agent envelopes written by `fno agents mail send` (US3).
     assert {k.value for k in Kind} == {"heads-up", "question", "fyi", "send"}
     assert VALID_KINDS == frozenset({"heads-up", "question", "fyi", "send"})
 

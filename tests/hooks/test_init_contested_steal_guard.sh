@@ -40,7 +40,7 @@ trap 'rm -rf "${_ALL_TMPS[@]}"' EXIT
 NODE="tst-steala"
 
 # Isolate the node:<id> claim under a per-repo FNO_CLAIMS_ROOT (node: keys route
-# there ahead of $HOME) so `fno claim status` reads `free` without touching the
+# there ahead of $HOME) so `fno agents claim status` reads `free` without touching the
 # real home. HOME is left REAL on purpose: faking it makes `fno` reprovision
 # from scratch (slow, and needs disk), whereas the claim root is all we must
 # isolate for this guard.

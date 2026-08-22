@@ -59,7 +59,7 @@ For each unambiguous (peer, surface) match where the peer is NOT in
 `messaged_peers`, send ONCE and update the plan:
 
 ```bash
-if fno mail send --to-project <peer> --kind heads-up \
+if fno agents mail send --to-project <peer> --kind heads-up \
      --body "shipped: <PR-TITLE>; touches surface <SURFACE-NAME>; PR: <PR-URL>" \
      --ref-pr <PR-NUMBER>; then
   # Append to messaged_peers: in the plan frontmatter so a future re-run

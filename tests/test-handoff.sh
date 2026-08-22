@@ -20,7 +20,7 @@
 #   $SCENARIO_DIR/fno-ask-rc      -> numeric rc for `fno agents spawn`
 #   $SCENARIO_DIR/fno-ask-out     -> stdout for `fno agents spawn`
 #   $SCENARIO_DIR/fno-list-out    -> stdout for `fno agents list` (JSON)
-#   $SCENARIO_DIR/fno-claim-rc    -> rc for every `fno claim` invocation
+#   $SCENARIO_DIR/fno-claim-rc    -> rc for every `fno agents claim` invocation
 #                                    (default 0; set to non-zero to fail selectively)
 #   $SCENARIO_DIR/fno-claim-acquire-rc -> rc for claim acquire only
 #   $SCENARIO_DIR/fno-claim-release-rc -> rc for claim release only
@@ -258,6 +258,12 @@ echo "fno $*" >> "$CALL_LOG"
 # Route by subcommand
 subcmd1="${1:-}"
 subcmd2="${2:-}"
+
+if [ "$subcmd1 $subcmd2" = "agents claim" ]; then
+  shift
+  subcmd1="${1:-}"
+  subcmd2="${2:-}"
+fi
 
 if [ "$subcmd1 $subcmd2 ${3:-}" = "do plan rung" ]; then
   # Delegate to the REAL implementation instead of stubbing a verdict. This

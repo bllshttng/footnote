@@ -2,7 +2,7 @@
 
 The inbox lets four agent roles (footnote, acme-web, example-pipeline, marketing) communicate across projects with traceable, idempotent message delivery. Megawalk drains each project's inbox at the top of every iteration so cross-project knowledge survives session compaction, project boundaries, and offline windows.
 
-> **Note (2026-06):** the headless `fno watch` launchd drain daemon (`scripts/fno-watch.sh`, the `com.fno.watch` plist, `install-drain-prompt.sh`), the in-session unread-mail wake hooks, and archive rotation (`inbox/archive.py`) were removed. The cross-session relay supersedes the autonomous-push use case; recipients drain with `fno mail drain` (manual or via an autonomous worker). The headless-drain subsection below is retained for historical context only. Megawalk itself was also cut earlier, so its Step 0 drain is historical too. Operators who previously ran `fno watch install` should remove the now-orphaned launchd job once; see the migration note in `docs/guides/cross-project-inbox.md`.
+> **Note (2026-06):** the headless `fno watch` launchd drain daemon (`scripts/fno-watch.sh`, the `com.fno.watch` plist, `install-drain-prompt.sh`), the in-session unread-mail wake hooks, and archive rotation (`inbox/archive.py`) were removed. The cross-session relay supersedes the autonomous-push use case; recipients drain with `fno agents mail drain` (manual or via an autonomous worker). The headless-drain subsection below is retained for historical context only. Megawalk itself was also cut earlier, so its Step 0 drain is historical too. Operators who previously ran `fno watch install` should remove the now-orphaned launchd job once; see the migration note in `docs/guides/cross-project-inbox.md`.
 
 ## Surfaces ownership: turning peer detection into a mechanical check
 
@@ -89,7 +89,7 @@ one-shot, idempotent rewrite that splits flat files into thread files
 and renames the original to `inbox-pre-migration.md` as a safety net.
 
 The two substrates never overlap: questions/fyi never become graph
-entries; only triaged heads-up threads do (via `fno mail triage` ->
+entries; only triaged heads-up threads do (via `fno agents mail triage` ->
 `fno backlog new --source-*`).
 
 ## Symmetric mailbox model
@@ -97,30 +97,30 @@ entries; only triaged heads-up threads do (via `fno mail triage` ->
 ```
         example-pipeline                      acme-web
                 |                                    |
-                |  fno mail send                   |
+                |  fno agents mail send                   |
                 |     --to-project acme-web -------> | append to web.md
                 |     --kind heads-up                |
-                |                                    | fno mail unread
+                |                                    | fno agents mail unread
                 |                                    |   sees new msg
-                |                                    | fno mail triage <id>
+                |                                    | fno agents mail triage <id>
                 |                                    |   -> claude -p
                 |                                    | fno backlog new --source-* ...
-                |                                    | fno mail ack <id>
+                |                                    | fno agents mail ack <id>
                 |                                    |
-                |  fno mail send                   |
+                |  fno agents mail send                   |
                 |     --to-project example-pipeline  |
                 |     --kind question <-------------- |
                 |     (interrupts mid-feature)       |
 ```
 
-Sender resolution: `resolve_project()` walks up from cwd looking for `.fno/config.toml` with a `project:` field. Without that field, every `fno mail` verb errors with the exact fix string `"set 'project:' in .fno/config.toml or pass --from"` (the reply/drain verbs keep `--from`; the cursor `unread`/`ack` take `--name`; the send verb `fno mail send` uses `--from-name`).
+Sender resolution: `resolve_project()` walks up from cwd looking for `.fno/config.toml` with a `project:` field. Without that field, every `fno agents mail` verb errors with the exact fix string `"set 'project:' in .fno/config.toml or pass --from"` (the reply/drain verbs keep `--from`; the cursor `unread`/`ack` take `--name`; the send verb `fno agents mail send` uses `--from-name`).
 
 ## Three message kinds (post-2026-05)
 
 | Kind | Action | Mid-feature? |
 |---|---|---|
 | `question` | drop a wake-signal, leave thread unread so a human handles it | YES (interrupts) |
-| `heads-up` | call `fno mail triage <msg-id>`; dispatch on action plan; mark thread read | NO (between features) |
+| `heads-up` | call `fno agents mail triage <msg-id>`; dispatch on action plan; mark thread read | NO (between features) |
 | `fyi` | dismiss, mark thread read | NO (between features) |
 | `fyi --persist memory` | write a recipient memory file with `auto_generated: true`, mark thread read | NO (between features) |
 
@@ -152,7 +152,7 @@ both get distinct files.
 
 ## LLM triage seam
 
-`fno mail triage <msg-id>` shells out to `claude -p` with a structured prompt and JSON schema, returning a typed `TriagePlan`:
+`fno agents mail triage <msg-id>` shells out to `claude -p` with a structured prompt and JSON schema, returning a typed `TriagePlan`:
 
 ```python
 @dataclass
@@ -173,10 +173,10 @@ If the drain dispatcher creates a graph node but crashes before acking the inbox
 ```python
 existing = query_by_source_inbox_msg(msg_id)
 if existing:
-    fno mail ack <msg-id> --triaged-into existing[0]['id']
+    fno agents mail ack <msg-id> --triaged-into existing[0]['id']
     # skip triage entirely
 else:
-    fno mail triage <msg-id>
+    fno agents mail triage <msg-id>
     # ... dispatch on plan
 ```
 
@@ -192,7 +192,7 @@ Megawalk's Step 0 only runs at the top of a target iteration. Projects without a
 
 ### The three pieces
 
-- **`fno mail drain --json --max 10`** - an LLM-side processor for the four non-interrupting message kinds: `heads-up`, `notification`, `lesson`, and `answer`. For each unread message it runs the appropriate handler (triage to `fno backlog new`, dismiss, extract to memory, integrate into context) and acks. A `kind: question` message is never handled here: the drain drops a wake-signal and leaves the message unread for a human to answer.
+- **`fno agents mail drain --json --max 10`** - an LLM-side processor for the four non-interrupting message kinds: `heads-up`, `notification`, `lesson`, and `answer`. For each unread message it runs the appropriate handler (triage to `fno backlog new`, dismiss, extract to memory, integrate into context) and acks. A `kind: question` message is never handled here: the drain drops a wake-signal and leaves the message unread for a human to answer.
 
 - **Per-project launchd daemon** (`scripts/fno-watch.sh`, opt-in via `config.inbox.watch.enabled: true`) - wraps the drain with an `fswatch` trigger loop. On each file-change event it calls `wake.detect.detect_session_state` to determine whether a human or target session is already active. When the project is IDLE it spawns `claude -p --bare` to run the drain. When a session is active it either drops a wake-signal (INTERACTIVE_ACTIVE) or does nothing at all (TARGET_ACTIVE, because megawalk Step 0 will pick the message up at the next iteration boundary).
 
@@ -228,7 +228,7 @@ By design, only `kind: question` ever reaches a human. The daemon and the drain 
 
 ### Cross-references
 
-- `docs/guides/cross-project-inbox.md` - operator-facing `fno mail` usage
+- `docs/guides/cross-project-inbox.md` - operator-facing `fno agents mail` usage
 - `cli/src/fno/inbox/drain.py` - drain command dispatch logic
 - `cli/src/fno/wake/signal.py` - wake-signal write, read, and delete substrate
 
@@ -243,7 +243,7 @@ The substrate ships as a single feature. Four follow-up backlog entries land in 
 ## Files
 
 - `cli/src/fno/inbox/store.py` - Markdown parser, `Message`/`Kind`/`Status`, filelock, monotonic transitions, `resolve_project()`
-- `cli/src/fno/mail/cli.py` - `fno mail` Typer verbs (send/unread/ack/reply/list/lint/drain/status) over the store data model
+- `cli/src/fno/mail/cli.py` - `fno agents mail` Typer verbs (send/unread/ack/reply/list/lint/drain/status) over the store data model
 - `cli/src/fno/inbox/triage.py` - `claude -p` subprocess wrapper with retry-once and env-stub override
 - `cli/src/fno/graph/store.py` - Provenance setdefaults in `_apply_graph_defaults`
 - `cli/src/fno/graph/load.py` - `query_by_source_inbox_msg` helper

@@ -48,7 +48,7 @@
 #   summary: launched=<n> parked=<n> already=<n> skipped=<n> done=<n> failed=<n> capped=<n>[ nothing-up-next]
 #
 # Invariants (Failure Modes section of the plan):
-#   - Provider + substrate come from `fno dispatch resolve` (the x-4d85
+#   - Provider + substrate come from `fno agents dispatch resolve` (the x-4d85
 #     harness-capability map), NOT a hardcode (x-567d). claude resolves to `bg`
 #     (the DETACHED `claude --bg` thread, x-2c27: auto-worktrees, runs unattended,
 #     shows in `claude agents`); every other harness resolves to `headless` (a
@@ -212,7 +212,7 @@ if [[ "$ALL_READY" -eq 1 ]]; then
 fi
 
 # ---- resolve provider + substrate from the harness-capability map (x-567d) ---
-# Provider + substrate are NO LONGER hardcoded claude/bg. `fno dispatch resolve`
+# Provider + substrate are NO LONGER hardcoded claude/bg. `fno agents dispatch resolve`
 # reads config.dispatch.harness and returns the autonomous substrate: claude->bg
 # (today's path, byte-identical) or codex/gemini/agy/opencode->headless. Three
 # outcomes, all LOUD, never a silent claude default:
@@ -222,9 +222,9 @@ fi
 #   - resolve fails      : an unknown/misconfigured harness has NO autonomous
 #     substrate -> hard fail naming config.dispatch.harness; every node stays
 #     ready, nothing launches, a failure event is recorded (epic AC2-ERR).
-# `fno dispatch resolve` / `fno doctor event emit` are top-level Python verbs (not in the
+# `fno agents dispatch resolve` / `fno doctor event emit` are top-level Python verbs (not in the
 # `agents` group), so they are immune to FNO_AGENTS_RUNTIME=rust - no pin needed.
-resolve_json="$(fno dispatch resolve --json 2>/dev/null)"; resolve_rc=$?
+resolve_json="$(fno agents dispatch resolve --json 2>/dev/null)"; resolve_rc=$?
 # jq `//` treats "" as truthy, so filter empties with select() before the
 # fallback (repo rule) - a resolver that ever returned "" must read as absent.
 DISPATCH_PROVIDER="$(printf '%s' "$resolve_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
@@ -337,7 +337,7 @@ for id in "${NODES[@]}"; do
   fi
 
   # ---- The shared quota route decision (same seam as backlog advance / fno
-  # dispatch). This shell rung used to reach only `fno dispatch resolve`, which
+  # dispatch). This shell rung used to reach only `fno agents dispatch resolve`, which
   # answers "which harness is configured", never "does that harness have quota
   # left" - so /target bg and blueprint auto-launch stayed on a walled account
   # while an idle harness sat there. `--autonomous` folds the route in.
@@ -354,7 +354,7 @@ for id in "${NODES[@]}"; do
   # is never rerouted onto another harness, which would discard the route.
   route_pin_args=()
   [[ -n "$ROUTE" ]] && route_pin_args=(--harness "$DISPATCH_PROVIDER_BASE")
-  route_json="$(fno dispatch resolve --autonomous --node "$id" "${route_pin_args[@]+"${route_pin_args[@]}"}" -J 2>/dev/null)"; route_rc=$?
+  route_json="$(fno agents dispatch resolve --autonomous --node "$id" "${route_pin_args[@]+"${route_pin_args[@]}"}" -J 2>/dev/null)"; route_rc=$?
   route_action="$(printf '%s' "$route_json" | jq -r '.route_action | select(. != null and . != "")' 2>/dev/null)"
   # Fail OPEN but never SILENT. A stale `fno` without --autonomous, or any
   # unreadable verdict, leaves quota routing off for this node - the pre-quota
@@ -568,7 +568,7 @@ for id in "${NODES[@]}"; do
   # spawn-guard is a Python-only verb (no Rust client impl). Pin the call to the
   # Python runtime so an operator with FNO_AGENTS_RUNTIME=rust exported does not
   # route it to the Rust binary (which lacks it -> 127 -> the guard fails closed
-  # and bg-dispatch breaks). The pre-refactor `fno claim` calls were never in the
+  # and bg-dispatch breaks). The pre-refactor `fno agents claim` calls were never in the
   # `agents` group so were immune; this restores that immunity (codex P2). The
   # inline override is scoped to this command; the real `fno agents spawn` below
   # routes normally. The default (unset) runtime already keeps spawn-guard Python.
@@ -631,7 +631,7 @@ for id in "${NODES[@]}"; do
       fi
       continue ;;
     corrupted)
-      # The worker's init-side `fno claim acquire` cannot reclaim a corrupted
+      # The worker's init-side `fno agents claim acquire` cannot reclaim a corrupted
       # claim, so launching would run WITHOUT the node:<id> mutex and leave the
       # corrupt lock in place (external review P2). Fail closed; an operator
       # force-releases/repairs it before re-dispatch.
@@ -675,7 +675,7 @@ for id in "${NODES[@]}"; do
   node_allow_merge="$(resolve_node_posture "$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)")"
 
   # ---- Build the worker command + resolve the launch cwd ----
-  # Command precedence, single source = `fno dispatch resolve`:
+  # Command precedence, single source = `fno agents dispatch resolve`:
   #   node dispatch_verb / dispatch_brief (US3, x-f78d)  >  per-harness builtin (x-567d)
   # A node verb/brief goes through the resolver (validates the verb allowlist,
   # caps the brief at 8 KB, emits TARGET_BRIEF); no override -> claude builds its
@@ -694,7 +694,7 @@ for id in "${NODES[@]}"; do
   # node's dispatch_brief), which avoids word-splitting a multi-word brief. An
   # oversized/refused explicit brief still fail-closes in the verb/brief branch's
   # own resolve below. Best-effort: a resolve failure / stale fno leaves it empty.
-  TARGET_BRIEF_ENV="$(fno dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" -J 2>/dev/null \
+  TARGET_BRIEF_ENV="$(fno agents dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" -J 2>/dev/null \
     | jq -r '.env.TARGET_BRIEF | select(. != "") // empty' 2>/dev/null)"
   if [[ -n "$dispatch_verb" || -n "$dispatch_brief" ]]; then
     # --harness so the resolver normalizes the verb per-harness (x-a5e4): a
@@ -707,7 +707,7 @@ for id in "${NODES[@]}"; do
     if [[ "$resolve_rc" -ne 0 ]] || ! printf '%s' "$resolved_json" | jq -e '.command' >/dev/null 2>&1; then
       # Refused verb / oversized brief (or a stale fno without the flags): fail
       # closed and leave the node re-dispatchable, never launch a wrong command.
-      fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
       echo "failed $id reason=\"dispatch resolve refused verb/brief (rc=$resolve_rc); node not dispatched\""
       n_failed=$((n_failed + 1))
       continue
@@ -756,7 +756,7 @@ for id in "${NODES[@]}"; do
     # guarded out by strip_no_merge's prefix check).
     [[ "$node_allow_merge" -eq 1 ]] && tgt_cmd="$(strip_no_merge "$tgt_cmd")"
   else
-    fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
     echo "failed $id reason=\"resolver returned no command for harness '$DISPATCH_PROVIDER'; update fno or set config.dispatch.command\""
     n_failed=$((n_failed + 1))
     continue
@@ -805,7 +805,7 @@ for id in "${NODES[@]}"; do
   # (parity with spawn.sh Guard 3, cv-dddd8ae5; sigma silent-failure-hunter).
   agents_json="$(fno agents list 2>/dev/null)"; list_rc=$?
   if [[ "$list_rc" -ne 0 ]] || ! printf '%s' "$agents_json" | jq -e 'has("agents")' >/dev/null 2>&1; then
-    fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
     echo "failed $id reason=\"agents-list probe failed (rc=$list_rc); not dispatching to avoid a double-launch\""
     n_failed=$((n_failed + 1))
     continue
@@ -813,7 +813,7 @@ for id in "${NODES[@]}"; do
   existing_status="$(printf '%s' "$agents_json" \
     | jq -r --arg n "$agent_name" '.agents[]? | select(.name==$n) | .status' 2>/dev/null | head -1)"
   if [[ "$existing_status" == "live" ]]; then
-    fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
     echo "already-running $id reason=\"a live agent $agent_name already exists (worker booting/running)\""
     n_already=$((n_already + 1))
     continue
@@ -962,7 +962,7 @@ for id in "${NODES[@]}"; do
     # pre-launch or spawn error, so this legacy-holder release is a safe no-op.
     # A name collision (exit 2, "already exists") means a worker beat us in the
     # registry-check window: report already-running, not failed.
-    fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
     if [[ "$spawn_rc" -eq 2 ]] && printf '%s' "$spawn_err" | grep -qF "already exists"; then
       echo "already-running $id reason=\"an agent named $agent_name already exists (spawn collision)\""
       n_already=$((n_already + 1))
@@ -985,7 +985,7 @@ for id in "${NODES[@]}"; do
     # exit 0 => no launch we can prove; report honestly + release the reservation.
     sid="$(printf '%s\n' "$spawn_out" | grep -F '"short_id"' | head -1 | jq -r '.short_id | select(. != null and . != "")' 2>/dev/null)"
     if [[ -z "$sid" ]]; then
-      fno claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
       reason="$(printf '%s' "${spawn_out:-$spawn_err}" | tr '\n' ' ' | sed 's/"/'"'"'/g' | cut -c1-200)"
       echo "failed $id reason=\"spawn exit 0 but no short_id receipt: $reason\""
       n_failed=$((n_failed + 1))

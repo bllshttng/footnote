@@ -351,8 +351,8 @@ def context_catalog(
     Reads the generic ``[context.artifacts]`` map and produces one observation
     per entry: a real sha256 and byte size for a readable file, or
     ``readable=false`` with a naming reason for an unreadable one. Composes
-    with ``resolve``: ``fno roles resolve --snapshot <rev> --context <(fno
-    roles context --json --snapshot <rev>) ...``.
+    with ``resolve``: ``fno agents roles resolve --snapshot <rev> --context <(fno
+    agents roles context --json --snapshot <rev>) ...``.
     """
     settings = load_settings()
     artifacts = settings.context.artifacts

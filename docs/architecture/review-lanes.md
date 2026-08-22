@@ -64,9 +64,9 @@ A forked review does not appear in `fno agents top --subagents` or in `claude ag
 
 This section is prose and stays prose. A gate needs a mechanical signal, and the whole defect is that no signal arrives.
 
-## Lane 2: raw-inject via `fno mail send --raw`
+## Lane 2: raw-inject via `fno agents mail send --raw`
 
-The documented operator front door for asking another session (or your own) to fire a raw verb is `fno mail send --raw`.
+The documented operator front door for asking another session (or your own) to fire a raw verb is `fno agents mail send --raw`.
 
 It routes by the recipient's live lane. It either fires the requested operation or names why that lane cannot fire it.
 
@@ -78,9 +78,9 @@ Use it to fire a verb in a live worker, or with `--to-self` to target the curren
 
 ```bash
 # Into a peer:
-fno mail send <peer> '/code-review <level> --comment' --raw
+fno agents mail send <peer> '/code-review <level> --comment' --raw
 # At your own prompt line (recipient derived from ambient identity):
-fno mail send '/code-review <level> --comment' --to-self --raw
+fno agents mail send '/code-review <level> --comment' --to-self --raw
 ```
 
 `<level>` is sized from the diff by `level_for_diff` in `cli/src/fno/review_capability.py` (never `ultra`: billed separately, and the builder rejects it). No surface needs to spell the invocation. `fno do target review-invocation` prints it rendered and sized for this session, and the coverage refusals (stop gate, merge guard, the `fno/review-coverage` status) embed that render.
@@ -102,12 +102,12 @@ gh api graphql -f query='mutation($t: ID!){resolveReviewThread(input:{threadId: 
 Thread ids come from `reviewThreads` on the `pullRequest`.
 `fno do pr status` prints this instruction on stderr whenever the counter is non-zero, so the fix travels with the number rather than living only here.
 
-Before you tell anyone else to run one of those, ask whether they can: `fno mail send '<payload>' --to-self --raw --check` (or `fno mail send <peer> '<payload>' --raw --check`) injects nothing and reports one of THREE answers, never two: `injectable: <lane>` (exit 0), `not-injectable: <reason>` (exit 1), or `unmeasurable: <reason>` (exit 3) when the evidence needed to decide could not be read at all.
+Before you tell anyone else to run one of those, ask whether they can: `fno agents mail send '<payload>' --to-self --raw --check` (or `fno agents mail send <peer> '<payload>' --raw --check`) injects nothing and reports one of THREE answers, never two: `injectable: <lane>` (exit 0), `not-injectable: <reason>` (exit 1), or `unmeasurable: <reason>` (exit 3) when the evidence needed to decide could not be read at all.
 Branch on all three. Collapsing `unmeasurable` into `not-injectable` states a verdict about a session the run never measured, and a deployed `fno-agents` too old to carry `--probe` answers `unmeasurable: probe-unavailable`.
 It answers whether a PATH exists, never whether the turn lands, since no probe can see whether the prompt line is idle.
 See [mail-live-inject](mail-live-inject.md) for what it resolves and why the Stop hook gates its compact advice on it.
 
-`fno mail send --raw` routes to the right transport per recipient, and that transport is not always the same binary.
+`fno agents mail send --raw` routes to the right transport per recipient, and that transport is not always the same binary.
 
 A mux-hosted session injects via `fno mux pane send`, regardless of harness. A mux-hosted Codex session is therefore a real prompt-line lane. It can fire `/compact`, `/review`, or any other TUI verb the Codex parser accepts.
 
@@ -117,7 +117,7 @@ A Codex app-server thread has no prompt line. The Python front door routes the e
 
 Other non-keystroke daemon lanes keep the generic refusal. A slash submitted through their model-turn RPC arrives as text and does not fire.
 
-`fno mail send --raw` is therefore the single documented raw-payload entry point. The `mail-inject` and `review-start` binaries remain low-level structured or STDIN expert doors, not alternative raw-payload routers.
+`fno agents mail send --raw` is therefore the single documented raw-payload entry point. The `mail-inject` and `review-start` binaries remain low-level structured or STDIN expert doors, not alternative raw-payload routers.
 
 The `mail-inject` binary remains reachable directly for scripting against a Claude daemon session outside the Python CLI, where its STDIN form suits a pipe:
 
@@ -125,7 +125,7 @@ The `mail-inject` binary remains reachable directly for scripting against a Clau
 printf '/code-review <level> --comment' | fno-agents mail-inject --harness claude --session <full-session-uuid>
 ```
 
-It reads the turn text from STDIN and enforces the brevity cap for a direct binary call. The raw lane itself is capped in Python at the `fno mail send --raw` front door. The binary holds the same ceiling for callers that bypass it.
+It reads the turn text from STDIN and enforces the brevity cap for a direct binary call. The raw lane itself is capped in Python at the `fno agents mail send --raw` front door. The binary holds the same ceiling for callers that bypass it.
 A shared `FNO_MAIL_BODY_WARN` / `FNO_MAIL_BODY_REFUSE` knob pair keeps the threshold identical to the wrapped-mail cap, so the direct binary is not a way around it.
 The cap skips framed envelopes: a `<fno_mail>` body is already capped in Python before it reaches here, and a `<cross-session-message>` relay hop is internal traffic, not authored mail, so neither is refused here.
 An over-cap unwrapped body is refused before it is delivered; the STDIN form is for piping the turn, not for moving a verbose payload.
@@ -142,28 +142,28 @@ That direct verb takes an already-structured target rather than a raw payload. T
 
 When the target repository has no `refs/remotes/origin/HEAD`, a bare `/review` or `/code-review` on a Codex app-server thread refuses and requires `--base`. The router derives `baseBranch` only from that authority. The `--uncommitted` flag remains the explicit working-tree target.
 
-**Discoverability note.** `mail-inject` is a `fno-agents` *binary* verb, not a `fno mail` or `fno agents` (Python CLI) verb.
+**Discoverability note.** `mail-inject` is a `fno-agents` *binary* verb, not a `fno agents mail` or `fno agents` (Python CLI) verb.
 It is matched with `matches!` in `crates/fno-agents/src/bin/client.rs`, deliberately, so the routable-verb parity guard does not see it; that keeps it out of `--help` and `CLIENT_VERB_USAGE`.
-So `fno mail --help`, `fno agents --help`, and a grep of the Python tree all report nothing, and a "does this exist?" probe against any of them answers false.
+So `fno agents mail --help`, `fno agents --help`, and a grep of the Python tree all report nothing, and a "does this exist?" probe against any of them answers false.
 
-When its explicit structured or STDIN contract is the point, use the hidden binary verb. Otherwise reach for `fno mail send --raw` for recipient-aware routing.
+When its explicit structured or STDIN contract is the point, use the hidden binary verb. Otherwise reach for `fno agents mail send --raw` for recipient-aware routing.
 Do not conclude the lane is absent from an empty `--help` or an empty Python-tree search; the binary verb is there.
 
 ## Lane 3: king-mediated mail (fallback)
 
 When neither self-invocation nor a raw inject is available - no live
 session to inject into, or a worker's harness lacks the verb - ask a
-king over `fno mail send`.
+king over `fno agents mail send`.
 The king's reply injects as user-shaped text and the worker's own
 harness serves the verb in response, or the king can fire the verb
 into the worker's live session directly via
-`fno mail send <worker> '<verb>' --raw` (Lane 2).
+`fno agents mail send <worker> '<verb>' --raw` (Lane 2).
 With no live king, fall back to advisory self-review or run the native
 verb by hand.
 
 ## Why (wrapped) mail cannot carry a verb
 
-A wrapped `fno mail send` cannot carry a verb. It writes an `<fno_mail ...>` envelope at character 0 of the input. The slash command therefore never sits at the start and never parses. Mail carries **instructions** ("review my diff"), not invocations (a sized `/code-review` order). `--raw` (Lane 2) is the deliberate exception. It strips the envelope so the slash parses, and that is the cost the wrapper exists to impose.
+A wrapped `fno agents mail send` cannot carry a verb. It writes an `<fno_mail ...>` envelope at character 0 of the input. The slash command therefore never sits at the start and never parses. Mail carries **instructions** ("review my diff"), not invocations (a sized `/code-review` order). `--raw` (Lane 2) is the deliberate exception. It strips the envelope so the slash parses, and that is the cost the wrapper exists to impose.
 
 ## Do not assert a cause for a refusal
 
@@ -186,12 +186,12 @@ text, and the worker retried many times with no findings.
 So the refusal can be environment-wide across session types in a given
 window, not a property of one session's arg shape.
 The refusal text names the escape: it applies to MODEL invocation, and
-`fno mail send --raw` (Lane 2) is the user-invocation path that lands the verb
+`fno agents mail send --raw` (Lane 2) is the user-invocation path that lands the verb
 as user-role text, so it is not subject to that refusal - reach for it
 when self-invocation is refused.
 The one environment-wide window predates the raw-inject lane's verification
 (confirmed separately, the next day) and was not exercised there, so
-treat that window as open; if `fno mail send --raw` fails it too, report the
+treat that window as open; if `fno agents mail send --raw` fails it too, report the
 exact refusal text and surface it to a human rather than burning cycles
 re-invoking.
 
@@ -201,12 +201,12 @@ Guard the value, not a correlate.
 
 The Skill-tool success record (three workers) and a self-initiated
 refusal record sit side by side, and no cause has held up.
-`fno mail send --raw` (Lane 2) is the most reliable trigger and the one to
+`fno agents mail send --raw` (Lane 2) is the most reliable trigger and the one to
 reach for when self-invocation is refused: it is the user-invocation
 path, so the model-invocation refusal does not apply to it.
 Short of that, the king-mail loop fires often but not always (refused
 twice in one session with an order in hand).
-Treat self-invocation as the lane worth trying first, `fno mail send --raw` as
+Treat self-invocation as the lane worth trying first, `fno agents mail send --raw` as
 the reliable fallback, and king-mail as the asynchronous one - not a
 closed either/or.
 The king-mediated path, the per-harness verbs, and the never-substitute-

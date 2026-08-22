@@ -248,7 +248,7 @@ def test_e2e_merge_syncs_canonical_not_worktree_and_dedups(tmp_path, capsys):
 def test_claim_key_is_canonical_wide_not_per_sha(tmp_path, monkeypatch):
     """Two different merges must contend for ONE lock.
 
-    The claim's job is that two `fno restart`s never overlap in a checkout. A
+    The claim's job is that two `fno agents restart`s never overlap in a checkout. A
     per-SHA key does not deliver that: a catch-up for one merge and a merge-time
     sync for another would take different locks and pull, update, and restart
     concurrently. Exactly-once-per-SHA is the marker's job, not the claim's.
@@ -276,7 +276,7 @@ def test_claim_key_is_canonical_wide_not_per_sha(tmp_path, monkeypatch):
 # --- x-adf9: _default_shell_runner detaches daemons + is bounded ---------
 
 def test_default_shell_runner_captures_without_leaking_to_parent(tmp_path, capsys):
-    # x-adf9: a `fno restart` in sync_command detaches a daemon that inherits
+    # x-adf9: a `fno agents restart` in sync_command detaches a daemon that inherits
     # the runner's stdout and never closes it, wedging subprocess.run on wait.
     # Output is captured to temp FILES (not PIPE), so the child's output never
     # reaches the parent's stdout (a detached child cannot hold a pipe open and

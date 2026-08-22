@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario A: ETL project sends a heads-up to web project.
-# Exercises: fno mail send -> triage -> fno backlog new (with provenance) -> fno mail ack
+# Exercises: fno agents mail send -> triage -> fno backlog new (with provenance) -> fno agents mail ack
 # Also verifies: idempotent triage (crash-recovery) and typo-recipient detection.
 #
 # Bash 3.2 compatible (macOS default). No mapfile, no associative arrays,
@@ -80,7 +80,7 @@ echo "TMP=$TMP"
 # Step 1: ETL sends heads-up to acme-web
 echo ""
 echo "--- Step 1: send heads-up from ETL to web ---"
-SEND_OUT=$(cd "$ETL_DIR" && run_fno mail send \
+SEND_OUT=$(cd "$ETL_DIR" && run_fno agents mail send \
     --to-project acme-web \
     --kind heads-up \
     --body "region data source live in PR 112" \
@@ -126,7 +126,7 @@ echo "OK: message present with correct from/kind/status"
 # 3a: unread check
 echo ""
 echo "--- Step 3a: verify unread returns the message ---"
-UNREAD_JSON=$(cd "$WEB_DIR" && run_fno mail unread --json --name acme-web)
+UNREAD_JSON=$(cd "$WEB_DIR" && run_fno agents mail unread --json --name acme-web)
 if ! echo "$UNREAD_JSON" | python3 -c "import json,sys; msgs=json.load(sys.stdin); assert any(m['msg_id']=='$MSG_ID' for m in msgs), 'msg not in unread'"; then
     echo "FAIL: message not in unread JSON output"
     echo "$UNREAD_JSON"
@@ -137,7 +137,7 @@ echo "OK: message is in unread list"
 # 3b: triage the message
 echo ""
 echo "--- Step 3b: triage heads-up ---"
-TRIAGE_JSON=$(cd "$WEB_DIR" && run_fno mail triage "$MSG_ID" --json --from acme-web)
+TRIAGE_JSON=$(cd "$WEB_DIR" && run_fno agents mail triage "$MSG_ID" --json --from acme-web)
 echo "Triage result: $TRIAGE_JSON"
 ACTION=$(echo "$TRIAGE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['action'])")
 TITLE=$(echo "$TRIAGE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['title'])")
@@ -169,7 +169,7 @@ echo "Captured AB_ID=$AB_ID"
 # 3d: ack the message
 echo ""
 echo "--- Step 3d: ack message with triaged-into ---"
-cd "$WEB_DIR" && run_fno mail ack "$MSG_ID" --triaged-into "$AB_ID" --name acme-web
+cd "$WEB_DIR" && run_fno agents mail ack "$MSG_ID" --triaged-into "$AB_ID" --name acme-web
 
 # Step 4: Verify graph.json has node with all four provenance fields
 echo ""
@@ -202,7 +202,7 @@ print('OK: all four provenance fields correct')
 # Step 5: Verify inbox message has status:read and triaged_into
 echo ""
 echo "--- Step 5: verify inbox message is acked ---"
-LIST_JSON=$(cd "$WEB_DIR" && run_fno mail list --all --json --from acme-web)
+LIST_JSON=$(cd "$WEB_DIR" && run_fno agents mail list --all --json --from acme-web)
 python3 -c "
 import json, sys
 msgs = json.load(sys.stdin)
@@ -237,7 +237,7 @@ echo '{"entries":[]}' > "$HOME_OVERRIDE/.fno/graph.json"
 # Send a new heads-up
 echo ""
 echo "--- CR: send second heads-up ---"
-SEND_OUT2=$(cd "$ETL_DIR" && run_fno mail send \
+SEND_OUT2=$(cd "$ETL_DIR" && run_fno agents mail send \
     --to-project acme-web \
     --kind heads-up \
     --body "crash recovery test message" \
@@ -253,7 +253,7 @@ echo "Captured MSG2_ID=$MSG2_ID"
 # Triage it
 echo ""
 echo "--- CR: triage second message ---"
-TRIAGE2=$(cd "$WEB_DIR" && run_fno mail triage "$MSG2_ID" --json --from acme-web)
+TRIAGE2=$(cd "$WEB_DIR" && run_fno agents mail triage "$MSG2_ID" --json --from acme-web)
 TITLE2=$(echo "$TRIAGE2" | python3 -c "import json,sys; print(json.load(sys.stdin)['title'])")
 PRI2=$(echo "$TRIAGE2" | python3 -c "import json,sys; print(json.load(sys.stdin)['priority'])")
 
@@ -288,7 +288,7 @@ fi
 echo "OK: existing node found: $EXISTING_ID - skipping re-triage"
 
 # Ack without creating a second node
-cd "$WEB_DIR" && run_fno mail ack "$MSG2_ID" --triaged-into "$EXISTING_ID" --name acme-web
+cd "$WEB_DIR" && run_fno agents mail ack "$MSG2_ID" --triaged-into "$EXISTING_ID" --name acme-web
 echo "Acked $MSG2_ID --triaged-into $EXISTING_ID"
 
 # Verify exactly ONE node for MSG2_ID
@@ -309,8 +309,8 @@ echo "=== CRASH-RECOVERY PASSED ==="
 
 # ---------------------------------------------------------------------------
 # AC4-EDGE removed: typo recipient detection ("did you mean") was a property of
-# the old `fno mail send` (_check_recipient). The bus epic G4 moved sending to
-# `fno mail send --to-project`, which anycasts over the registry and does not
+# the old `fno agents mail send` (_check_recipient). The bus epic G4 moved sending to
+# `fno agents mail send --to-project`, which anycasts over the registry and does not
 # suggest typo corrections; the step is dropped with the send-side helper.
 # ---------------------------------------------------------------------------
 

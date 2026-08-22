@@ -240,23 +240,23 @@ def test_heredoc_opener_after_shell_comment_is_ignored():
 
 def test_multiline_quoted_body_mentioning_merge_is_not_a_command():
     assert _merge_segment(
-        'fno mail send x "line one\ngh pr merge --auto is the bug\nline three"') is None
+        'fno agents mail send x "line one\ngh pr merge --auto is the bug\nline three"') is None
 
 
 def test_multiline_quoted_body_mentioning_push_is_not_a_command():
     assert _git_segments(
-        'fno mail send x "intro\ngit push --force origin main is blocked\nend"') == []
+        'fno agents mail send x "intro\ngit push --force origin main is blocked\nend"') == []
 
 
 def test_multiline_single_quoted_body_is_not_a_command():
     assert _git_segments(
-        "fno mail send x 'intro\ngit push origin main\nend'") == []
+        "fno agents mail send x 'intro\ngit push origin main\nend'") == []
 
 
 def test_escaped_quote_inside_multiline_body_does_not_end_the_quote():
     # The \" is data; the argument stays open, so the push line is still content.
     assert _git_segments(
-        'fno mail send x "he said \\"hi\\"\ngit push origin main\nend"') == []
+        'fno agents mail send x "he said \\"hi\\"\ngit push origin main\nend"') == []
 
 
 def test_real_push_on_next_line_outside_quotes_still_caught():
@@ -342,7 +342,7 @@ def test_singleline_substitution_hiding_a_push_is_caught():
 
 def test_substitution_inside_single_quotes_is_not_executed():
     # No expansion in single quotes, so this really is inert prose.
-    assert _git_segments('fno mail send x \'see "$(git push origin main)"\'') == []
+    assert _git_segments('fno agents mail send x \'see "$(git push origin main)"\'') == []
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@
 
 Two runtimes serve the surface. The **Rust client** (`fno-agents`, the shipped default) intercepts most verbs; **Python** owns a handful (`whoami`, `top`, `peek`, `watch`, plus internal helpers) and is the fallback when no binary is installed (`FNO_AGENTS_RUNTIME=python`). Routing is automatic - you type `fno agents <verb>` either way. Notably, **pane spawns are Python-owned by design**: the mux-hosted back half lives in the Python `cmd_spawn` path, and the router keeps every pane spawn there even when Rust mode is requested - so the default substrate works identically under both runtimes.
 
-Messaging note: `send` / `inbox` / `ack` are **not** `fno agents` verbs anymore - they moved to the dedicated `fno mail` namespace. The agents group is lifecycle-only.
+Messaging note: `send` / `inbox` / `ack` are not direct lifecycle actions. They live under the `fno agents mail` subgroup.
 
 ## The harness model
 
@@ -27,7 +27,7 @@ agy pane spawns trust the exact cwd before launch. The shared gate clears remain
 
 ## Machine-readable interactive capabilities
 
-Run `fno dispatch capabilities <h> --json` to read one harness without dispatch configuration. The JSON includes versioned data for permissions, sessions, readiness, input, stop, and removal. Missing or malformed fields stop contract loading. A harness never inherits Claude defaults.
+Run `fno agents dispatch capabilities <h> --json` to read one harness without dispatch configuration. The JSON includes versioned data for permissions, sessions, readiness, input, stop, and removal. Missing or malformed fields stop contract loading. A harness never inherits Claude defaults.
 
 | Harness | Permission response | Positive ready rule | Paste submission | Interactive resume | `stop` | `rm` harness cleanup |
 |---|---|---|---|---|---|---|
@@ -64,7 +64,7 @@ Retired creation verbs (each prints a pointer and exits non-zero, never a silent
 | Verb | claude | codex | gemini | agy | opencode | What it does |
 |------|:---:|:---:|:---:|:---:|:---:|---|
 | `ask <name> <msg>` | id-bearing rows | id-bearing rows | id-bearing rows | no | no | Continue a registered session. A mux follow-up requires a pinned submit contract. Claude has one. Codex does not. Unsupported panes receive no bytes. |
-| `fno mail send <name> "<text>"` | yes | daemon or durable | yes | mux pane | mux pane | Send asynchronously. Confirmed live delivery skips the bus. Unsupported or unconfirmed panes use the durable queue. |
+| `fno agents mail send <name> "<text>"` | yes | daemon or durable | yes | mux pane | mux pane | Send asynchronously. Confirmed live delivery skips the bus. Unsupported or unconfirmed panes use the durable queue. |
 | `watch <name>` | yes | no | no | no | no | Observe a held stream-json thread's turns in real time. claude-only transport. |
 | `peek <name>` | yes | yes | mux scrollback or status | mux scrollback or status | mux scrollback or status | Read-only. Pane rows use mux scrollback. Paneless rows use transcript or normalized status events. |
 | `attach <name>` | yes | no | no | no | no | Re-exec your terminal into the running session's own TUI (`claude attach <short_id>`). Requires the session to be **live**. |
@@ -141,7 +141,7 @@ You rarely type these by hand - hooks and drivers do - but they live under `fno 
 | `drive` | `fno mux pane send <pane> ...`, or type into the pane in `fno mux`. `--text` fills the composer without submitting - see [Submitting a pane send](#submitting-a-pane-send). |
 | `host` | `fno agents spawn --name <n> --substrate pane`. |
 | `promote` | Same - the mux hosts agent panes now. |
-| `send` / `inbox` / `ack` | The `fno mail` namespace (`fno mail send`, `fno mail inbox`, ...). |
+| `send` / `inbox` / `ack` | The `fno agents mail` namespace (`fno agents mail send`, `fno agents mail inbox`, ...). |
 
 Retired verbs print these pointers and exit non-zero, so scripts fail loud rather than silently succeeding.
 

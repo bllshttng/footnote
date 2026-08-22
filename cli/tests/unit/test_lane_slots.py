@@ -150,7 +150,7 @@ def test_count_ignores_other_claim_kinds(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# CLI surface (fno claim acquire --lane / release --lane)
+# CLI surface (fno agents claim acquire --lane / release --lane)
 # ---------------------------------------------------------------------------
 
 import json  # noqa: E402

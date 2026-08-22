@@ -49,7 +49,7 @@ cli.add_typer(_triage_cli, name="triage")
 
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
-# `fno mail` (cross-project messaging).
+# `fno agents mail` (cross-project messaging).
 #
 # `inbox` was a SECOND registration of this same app, so all nine of its
 # subcommands were duplicates and the surface paid for them twice. It is gone;
@@ -3691,7 +3691,7 @@ def _release_node_lockfile(node_id: str) -> str:
         if state == "corrupted":
             typer.echo(
                 f"warning: lockfile {key} is corrupted; graph claim cleared but "
-                f"lockfile left intact. Use `fno claim release {key} --force -R <why>` "
+                f"lockfile left intact. Use `fno agents claim release {key} --force -R <why>` "
                 f"to repair.",
                 err=True,
             )
@@ -3709,7 +3709,7 @@ def _release_node_lockfile(node_id: str) -> str:
         typer.echo(
             f"warning: lockfile {key} held by LIVE holder {holder!r}; graph claim "
             f"cleared but lockfile left intact. Use "
-            f"`fno claim release {key} --force -R <why>` to override.",
+            f"`fno agents claim release {key} --force -R <why>` to override.",
             err=True,
         )
         return "lockfile left (live foreign holder)"
@@ -4624,7 +4624,7 @@ def cmd_lanes(
 
     Joins each live lane-slot claim with its graph node (slug, status, PR) so
     the operator reviews the fleet's shape - which nodes hold lanes, in which
-    domains - without stitching ``fno claim list`` to the board by hand. The
+    domains - without stitching ``fno agents claim list`` to the board by hand. The
     grid's BgRoster tiles show the workers themselves; this is the aggregated
     outcome view. Read-only.
     """

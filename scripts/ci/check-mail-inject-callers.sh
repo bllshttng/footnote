@@ -72,7 +72,7 @@ if [[ -n "$ADDED" ]]; then
   echo "check-mail-inject-callers: NEW mail-inject argv site(s) not in the baseline:" >&2
   printf '  %s\n' $ADDED >&2
   echo "  Add each to scripts/ci/mail-inject-callers-baseline.txt with a reason the" >&2
-  echo "  payload is framed or a slash command, or route the prose through fno mail send." >&2
+  echo "  payload is framed or a slash command, or route the prose through fno agents mail send." >&2
 fi
 if [[ -n "$REMOVED" ]]; then
   echo "check-mail-inject-callers: baseline lists site(s) no longer present:" >&2

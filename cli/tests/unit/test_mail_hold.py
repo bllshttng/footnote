@@ -109,7 +109,7 @@ def test_a_corrupt_clock_reads_as_no_clock_and_keeps_holding():
     """An unreadable clock is not evidence the hold ended, so the flag stands.
 
     The hold then lifts at the recipient's next turn boundary (notify-self
-    tidies it) or on `fno mail hold --off`. A stall, and a bounded one.
+    tidies it) or on `fno agents mail hold --off`. A stall, and a bounded one.
     """
     hold_mod.arm(HANDLE, 5)
     hold_mod.hold_path(HANDLE).write_text("{not json", encoding="utf-8")

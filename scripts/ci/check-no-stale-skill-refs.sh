@@ -191,7 +191,7 @@ for old in "${RENAMED_OLD_NAMES[@]}"; do
 done
 
 # --- Retired command surfaces (ab-cee91152) --------------------------------
-# Messaging consolidated into the `fno mail` namespace: the `fno inbox <verb>`
+# Messaging consolidated into the `fno agents mail` namespace: the `fno inbox <verb>`
 # surface and the `fno agents send` verb are deleted clean (no shim). A stale
 # caller in production code would break at runtime, so reject any surviving
 # invocation. The inbox pattern is verb-anchored so a documentation mention of
@@ -223,7 +223,7 @@ for pat in "${CUT_SURFACE_PATTERNS[@]}"; do
   done <<<"$raw"
   if [[ -n "$filtered" ]]; then
     FAILURES+=("$pat")
-    echo "AUDIT FAIL: stale reference to a retired messaging surface (now \`fno mail\`):"
+    echo "AUDIT FAIL: stale reference to a retired messaging surface (now \`fno agents mail\`):"
     echo "$filtered" | sed 's/^/  /'
     echo ""
     fail=1

@@ -1560,7 +1560,7 @@ class TestMissionComplete:
 
 class TestRedispatch:
     """x-370f residual 1: failover respawn frees the dead session's claim via
-    ``fno claim release --force`` before spawning, skips an already-done node, and
+    ``fno agents claim release --force`` before spawning, skips an already-done node, and
     bails to the nudge (False) when the claim cannot be freed."""
 
     def _cand(self):
@@ -1628,7 +1628,7 @@ class TestRedispatch:
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand()) is True
 
-        fr = self._index_of(calls, ["fno-py", "claim", "release", "--force"])
+        fr = self._index_of(calls, ["fno-py", "agents", "claim", "release", "--force"])
         spawn = self._index_of(calls, ["fno-py", "agents", "spawn"])
         assert fr is not None and spawn is not None
         assert fr < spawn                      # claim freed strictly before spawn
@@ -1646,7 +1646,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, stop_rc=1)
         assert recovery._redispatch(self._cand()) is False
-        assert self._index_of(calls, ["fno-py", "claim", "release", "--force"]) is None
+        assert self._index_of(calls, ["fno-py", "agents", "claim", "release", "--force"]) is None
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
         assert self._index_of(calls, ["backlog", "update", "--locked-by"]) is None
 
@@ -1671,7 +1671,7 @@ class TestRedispatch:
             calls, ["fno-py", "mux", "pane", "kill", "--session", "main", "10"]
         )
         assert kill is not None, "the named pane-kill verb ran"
-        fr = self._index_of(calls, ["fno-py", "claim", "release", "--force"])
+        fr = self._index_of(calls, ["fno-py", "agents", "claim", "release", "--force"])
         spawn = self._index_of(calls, ["fno-py", "agents", "spawn"])
         assert fr is not None and spawn is not None
         assert kill < fr < spawn
@@ -1752,7 +1752,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, spawn_rc=1)
         assert recovery._redispatch(self._cand()) is False
-        lr = self._index_of(calls, ["fno-py", "claim", "release", "--lane"])
+        lr = self._index_of(calls, ["fno-py", "agents", "claim", "release", "--lane"])
         assert lr is not None
         assert "x-370f" in calls[lr]
 
@@ -1762,7 +1762,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand()) is True
-        assert self._index_of(calls, ["fno-py", "claim", "release", "--lane"]) is None
+        assert self._index_of(calls, ["fno-py", "agents", "claim", "release", "--lane"]) is None
 
     def test_unresolvable_node_returns_false(self, monkeypatch):
         # No node id in the worktree manifest → nothing to re-dispatch.
@@ -1780,7 +1780,7 @@ class TestRedispatch:
         assert recovery._redispatch(
             self._cand(), pre_spawn=lambda: calls.append(["MATERIALIZE"]) or True) is True
         stop = self._index_of(calls, ["fno-py", "agents", "stop"])
-        fr = self._index_of(calls, ["fno-py", "claim", "release", "--force"])
+        fr = self._index_of(calls, ["fno-py", "agents", "claim", "release", "--force"])
         mat = next((i for i, c in enumerate(calls) if c == ["MATERIALIZE"]), None)
         spawn = self._index_of(calls, ["fno-py", "agents", "spawn"])
         assert None not in (stop, fr, mat, spawn)
@@ -1794,7 +1794,7 @@ class TestRedispatch:
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand(), pre_spawn=lambda: False) is False
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
-        assert self._index_of(calls, ["fno-py", "claim", "release", "--lane"]) is not None
+        assert self._index_of(calls, ["fno-py", "agents", "claim", "release", "--lane"]) is not None
         clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
         assert clear is not None and calls[clear][-1] == "null"
 

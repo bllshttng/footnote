@@ -7,7 +7,7 @@
 # risk here: nine-plus spawners span cli/src (Python) and skills/*/scripts +
 # hooks (shell). A Python-only lint would miss every shell caller. This gate
 # enumerates both and fails CI the moment a new site appears, until someone
-# records it in the baseline naming which `fno autonomy status` spawner it
+# records it in the baseline naming which `fno agents autonomy status` spawner it
 # belongs to, or an explicit reason it is not autonomous.
 #
 # Run: bash scripts/ci/check-autonomy-registry.sh
@@ -114,7 +114,7 @@ if [[ -n "$ADDED" ]]; then
   echo "check-autonomy-registry: NEW spawn-shaped call site(s) not in the baseline:" >&2
   printf '  %s\n' $ADDED >&2
   echo "  Add each to scripts/ci/autonomy-registry-baseline.txt naming the" >&2
-  echo "  fno autonomy status spawner it belongs to, add a status row via" >&2
+  echo "  fno agents autonomy status spawner it belongs to, add a status row via" >&2
   echo "  cli/src/fno/autonomy_cli.py if it is a genuinely new spawner, or" >&2
   echo "  record why it is not autonomous (an explicit operator command)." >&2
 fi

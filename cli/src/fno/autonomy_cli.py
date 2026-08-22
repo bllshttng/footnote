@@ -1,4 +1,4 @@
-"""fno autonomy status - one table listing every path that can start a
+"""fno agents autonomy status - one table listing every path that can start a
 session without an operator asking: its trigger, its gate key, its resolved
 value, and the precedence rank that supplied it (x-aaaf wave 1).
 
@@ -252,12 +252,12 @@ def _restart_status(project_root: Optional[Path]) -> SpawnerStatus:
             project_root, lambda: _settings_for(project_root).restart.enabled
         )
         return SpawnerStatus(
-            "restart (_revive_orphans)", "orphan sweep (fno restart --mux)",
+            "restart (_revive_orphans)", "orphan sweep (fno agents restart --mux)",
             "config.restart.enabled", armed, rank,
         )
     except Exception:  # noqa: BLE001
         return SpawnerStatus(
-            "restart (_revive_orphans)", "orphan sweep (fno restart --mux)",
+            "restart (_revive_orphans)", "orphan sweep (fno agents restart --mux)",
             "config.restart.enabled", False, "default",
         )
 
@@ -369,5 +369,5 @@ def status_command(
         rows = collect_status(project_root)
         typer.echo(format_table(rows))
     except Exception as exc:  # noqa: BLE001 - AC9-ERR: introspection must not raise
-        typer.echo(f"fno autonomy status: degraded read ({exc})", err=True)
+        typer.echo(f"fno agents autonomy status: degraded read ({exc})", err=True)
     raise typer.Exit(code=0)
