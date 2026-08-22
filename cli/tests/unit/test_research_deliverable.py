@@ -8,6 +8,7 @@ fail loud, never guess).
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -183,6 +184,68 @@ def test_deliver_no_sources_still_ships(tmp_path: Path) -> None:
     assert res.terminated == "DoneAdvisory"
     assert (out / "nothing-found-topic.md").is_file()
     assert "no sources found" in (out / "nothing-found-topic.md").read_text().lower()
+
+
+# --------------------------------------------------------------------------- #
+# deliver(node=...) - x-953b Change 4: bind the shipped doc to its node
+# --------------------------------------------------------------------------- #
+
+
+def test_deliver_with_no_node_binds_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No node in scope: behaves exactly as before, no subprocess call made."""
+    cache = tmp_path / "c" / "topic.sources.jsonl"
+    _write_sources(cache, [_verified("https://a.example/p", "finding p")])
+
+    def _unexpected_run(argv, **kwargs):
+        raise AssertionError(f"subprocess.run should not be called with no node: {argv}")
+
+    monkeypatch.setattr(deli.subprocess, "run", _unexpected_run)
+
+    res = deli.deliver("topic words", sources_path=cache, stopped="declared", output_dir=str(tmp_path / "out"))
+
+    assert res.bind_warning is None
+
+
+def test_deliver_with_node_binds_plan_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A node in scope: deliver shells out to `fno backlog update --plan-path`."""
+    cache = tmp_path / "c" / "topic.sources.jsonl"
+    _write_sources(cache, [_verified("https://a.example/p", "finding p")])
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(deli.subprocess, "run", fake_run)
+
+    res = deli.deliver(
+        "topic words", sources_path=cache, stopped="declared", output_dir=str(tmp_path / "out"), node="x-abcd"
+    )
+
+    assert res.bind_warning is None
+    assert calls == [["fno", "backlog", "update", "x-abcd", "--plan-path", res.brief_path]]
+
+
+def test_deliver_bind_failure_warns_but_keeps_the_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed bind is non-fatal: the brief still ships, the warning names it."""
+    cache = tmp_path / "c" / "topic.sources.jsonl"
+    _write_sources(cache, [_verified("https://a.example/p", "finding p")])
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "no node resolves to 'x-abcd'")
+
+    monkeypatch.setattr(deli.subprocess, "run", fake_run)
+
+    res = deli.deliver(
+        "topic words", sources_path=cache, stopped="declared", output_dir=str(tmp_path / "out"), node="x-abcd"
+    )
+
+    assert Path(res.brief_path).is_file()
+    assert res.bind_warning is not None
+    assert "x-abcd" in res.bind_warning
+    assert "no node resolves" in res.bind_warning
 
 
 def test_emit_done_advisory_uses_coordinated_append(
