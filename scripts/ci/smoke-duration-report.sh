@@ -32,13 +32,38 @@ set -uo pipefail
 
 # Fraction of the cap at which a run starts warning. 80 percent of a 30-minute
 # cap is 24 minutes. The slower shard sits near 19m and gains roughly 0.45
-# minutes a day, so 80 gives about eleven days of notice. 70 percent would be
-# 21 minutes, about four days out, so it would fire almost immediately and
-# become permanent noise. A warning that is always on is a warning nobody
-# reads, which is the defect this script exists to remove.
-WARN_PCT="${SMOKE_WARN_PCT:-80}"
+# minutes a day, so 80 gives about eleven days of notice. 70 percent is 21
+# minutes, about four days out, so it fires almost immediately and becomes
+# permanent noise. A warning that is always on is a warning nobody reads,
+# which is the defect this script exists to remove.
+WARN_PCT_RAW="${SMOKE_WARN_PCT:-80}"
 
 say() { printf 'smoke-duration: %s\n' "$*"; }
+
+# Every number this script reads is forced to base 10. Bash arithmetic treats a
+# leading zero as octal, so a caller passing `08` aborted the script under
+# `set -u` before it printed any verdict, which is the one output a reader
+# needs. A digit-only string check is not enough on its own.
+as_int() { printf '%s' "$((10#${1#0}))" 2>/dev/null || printf '0'; }
+
+is_digits() { case "${1:-}" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# The knob is the one input with no caller to blame, so it validates itself and
+# FALLS BACK rather than aborting. An invalid value used to kill the script
+# mid-run under `set -u`; inside the CI trap `|| true` then hid the exit code
+# and the only symptom was a vanished verdict line, which is exactly the
+# "did it run, or was it fine?" ambiguity this script exists to remove.
+WARN_PCT=80
+if is_digits "$WARN_PCT_RAW"; then
+    _pct="$(as_int "$WARN_PCT_RAW")"
+    if [ "$_pct" -ge 1 ] && [ "$_pct" -le 100 ]; then
+        WARN_PCT="$_pct"
+    else
+        say "SMOKE_WARN_PCT=$WARN_PCT_RAW is out of the 1-100 range; using 80."
+    fi
+else
+    say "SMOKE_WARN_PCT=$WARN_PCT_RAW is not a number; using 80."
+fi
 
 if [ "$#" -gt 3 ]; then
     say "refusing $# arguments: this reporter measures ONE shard."
@@ -57,25 +82,22 @@ if [ -z "$shard" ]; then
     exit 0
 fi
 
-case "$secs" in
-    '' | *[!0-9]*)
-        say "shard=$shard got a non-numeric duration (${secs:-empty}); nothing measured."
-        exit 0
-        ;;
-esac
+if ! is_digits "$secs"; then
+    say "shard=$shard got a non-numeric duration (${secs:-empty}); nothing measured."
+    exit 0
+fi
 
-case "$cap_min" in
-    '' | *[!0-9]* | 0)
-        say "shard=$shard got a bad cap (${cap_min:-empty}); nothing measured."
-        exit 0
-        ;;
-esac
+if ! is_digits "$cap_min" || [ "$(as_int "$cap_min")" -le 0 ]; then
+    say "shard=$shard got a bad cap (${cap_min:-empty}); nothing measured."
+    exit 0
+fi
 
 # The original emitter, unchanged. Anything already grepping this keeps
 # matching, so this script is additive rather than a replacement.
 printf '%s-duration-seconds=%s\n' "$shard" "$secs"
 
-cap_secs=$((cap_min * 60))
+secs="$(as_int "$secs")"
+cap_secs=$(( $(as_int "$cap_min") * 60 ))
 pct=$((secs * 100 / cap_secs))
 threshold=$((cap_secs * WARN_PCT / 100))
 
@@ -93,8 +115,13 @@ if [ "$verdict" = approaching ]; then
     # log. That visibility is the entire difference between this and the line
     # it sits beside.
     printf '::warning title=smoke shard approaching its cap::%s\n' "$msg"
-    if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -w "$(dirname "$GITHUB_STEP_SUMMARY")" ]; then
-        printf '**smoke duration**: %s\n' "$msg" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null
+    # Attempt the append rather than probing for permission. A `-w` test on the
+    # containing DIRECTORY passes while the file itself is unwritable, and the
+    # redirect then fails silently, leaving no summary entry and no reason why.
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        if ! printf '**smoke duration**: %s\n' "$msg" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null; then
+            say "could not append to GITHUB_STEP_SUMMARY ($GITHUB_STEP_SUMMARY); the annotation above still stands."
+        fi
     fi
 fi
 

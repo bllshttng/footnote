@@ -119,6 +119,63 @@ check "$([[ $rc -eq 0 ]] && echo 1)" \
       "exit status was $rc, not 0 - the reporter reddened a green run"
 
 
+# --- numbers with a leading zero -------------------------------------------
+# Bash arithmetic reads a leading zero as octal. `08` used to abort the script
+# under `set -u`, exiting 1 and printing NO verdict line, which breaks both of
+# the contracts stated at the top of the reporter. A digit-only string check
+# does not catch it; forcing base 10 does.
+for pair in "1063 08" "08 30" "0000001063 30"; do
+  set -- $pair
+  out="$(bash "$SCRIPT" smoke-rest "$1" "$2" 2>&1)"; rc=$?
+  check "$([[ $rc -eq 0 ]] && echo 1)" \
+        "a zero-padded input ($1 $2) still exits 0" \
+        "a zero-padded input ($1 $2) exited $rc"
+  check "$(grep -q 'verdict=' <<<"$out" && echo 1)" \
+        "a zero-padded input ($1 $2) still reports a verdict" \
+        "a zero-padded input ($1 $2) printed no verdict - indistinguishable from never running"
+done
+
+# A cap of zero is a genuine rejection, so it has no verdict - but it must
+# still say something under the same prefix, or it reads as silence.
+out="$(bash "$SCRIPT" smoke-rest 1063 00 2>&1)"; rc=$?
+check "$([[ $rc -eq 0 ]] && echo 1)" \
+      "a zero cap exits 0" "a zero cap exited $rc"
+check "$(grep -q '^smoke-duration:' <<<"$out" && echo 1)" \
+      "a zero cap still prints a smoke-duration line" \
+      "a zero cap was silent"
+
+# --- the warn fraction is the one knob, so it validates itself -------------
+# It has no caller to blame. An invalid value used to kill the script mid-run
+# under `set -u`; inside the CI trap the `|| true` then hid the exit code and
+# the only symptom was a vanished verdict line.
+for pct in "abc" "0; echo pwned" "0" "101" ""; do
+  out="$(SMOKE_WARN_PCT="$pct" bash "$SCRIPT" smoke-rest 1063 30 2>&1)"; rc=$?
+  check "$([[ $rc -eq 0 ]] && echo 1)" \
+        "a bad SMOKE_WARN_PCT (${pct:-empty}) still exits 0" \
+        "a bad SMOKE_WARN_PCT (${pct:-empty}) exited $rc"
+  check "$(grep -q 'verdict=' <<<"$out" && echo 1)" \
+        "a bad SMOKE_WARN_PCT (${pct:-empty}) still reports a verdict" \
+        "a bad SMOKE_WARN_PCT (${pct:-empty}) printed no verdict"
+  # Whole-line match. The rejection diagnostic quotes the offending value back
+  # to the operator, so a substring test matched its own error message and
+  # reported an injection that never happened. Execution would print `pwned`
+  # on a line of its own; being NAMED in a diagnostic is the safe outcome.
+  check "$(grep -qx 'pwned' <<<"$out" || echo 1)" \
+        "a bad SMOKE_WARN_PCT (${pct:-empty}) is not evaluated as shell" \
+        "SMOKE_WARN_PCT was evaluated as shell"
+done
+
+# An ACCEPTED override must actually take effect. Every case above feeds the
+# validator something it rejects, so without this the knob could be dead and
+# every assertion would still pass.
+out="$(SMOKE_WARN_PCT=50 bash "$SCRIPT" smoke-rest 1063 30 2>&1)"
+check "$(grep -q 'verdict=approaching' <<<"$out" && echo 1)" \
+      "an accepted SMOKE_WARN_PCT changes the verdict" \
+      "SMOKE_WARN_PCT=50 did not make 1063s of a 30m cap approaching - the knob is dead"
+check "$(grep -q 'warns at 50%' <<<"$out" && echo 1)" \
+      "the warning reports the fraction actually in force" \
+      "the warning did not name the overridden fraction"
+
 # --- the cap in the trap must match the job's real ceiling ----------------
 # The cap now lives in two places per shard: `timeout-minutes` on the job, and
 # the third argument to the reporter, because GitHub does not expose
@@ -137,40 +194,67 @@ except ImportError:
              "this guard must not silently pass")
 
 jobs = yaml.safe_load(open(".github/workflows/cli-ci.yml"))["jobs"]
+
+# A shard is the INTERSECTION of two facts: the gate waits on it, and it runs
+# the smoke runner. Either half alone selects the wrong set. The gate's `needs`
+# alone would red this self-test the day a lint or packaging job joins the
+# gate, blaming the duration reporter for a change that has nothing to do with
+# it. "Runs the runner" alone picks up `changed-smoke`, the early partial-
+# feedback job, which deliberately carries no reporter and never gates a merge.
+RUNNER = "fno-py doctor test smoke"
 needs = jobs["smoke"].get("needs") or []
 if isinstance(needs, str):
     needs = [needs]
 
-bad = 0
-if not needs:
-    print("  FAIL: the smoke gate needs no shard jobs; nothing to check")
-    bad += 1
-
-checked = 0
+shards = {}
 for name in needs:
-    job = jobs.get(name, {})
+    job = jobs.get(name)
+    if job is None:
+        print(f"  FAIL: the gate needs {name}, which does not exist")
+        continue
     run = "\n".join(st.get("run", "") for st in job.get("steps", []))
-    # The cap is the integer immediately before the trap's `|| true`; the
-    # arithmetic expansion in between rules out a positional match.
-    m = re.search(r"smoke-duration-report\.sh\s+\S+\s+.*?(\d+)\s*\|\|\s*true", run)
-    if not m:
-        print(f"  FAIL: {name} never calls the duration reporter")
+    if RUNNER in run:
+        shards[name] = (job, run)
+
+bad = 0
+checked = 0
+
+for name in sorted(shards):
+    job, run = shards[name]
+    # The reporter's own invocation line, isolated. Reading the whole job's
+    # concatenated run text let an unrelated `|| true` in any other step
+    # satisfy the guard below.
+    call = next((ln for ln in run.splitlines() if "smoke-duration-report.sh" in ln), None)
+    if call is None:
+        print(f"  FAIL: {name} times a shard but never calls the duration reporter")
         bad += 1
         continue
-    arg_cap, job_cap = int(m.group(1)), job.get("timeout-minutes")
+
+    # The cap is the last bare integer on the call line. Parsed WITHOUT
+    # anchoring on `|| true`, so the two assertions below stay independent:
+    # anchored, dropping the guard made this report "no reporter" instead of
+    # "no guard", which names the wrong defect.
+    caps = re.findall(r"(?<![\w$])(\d+)(?![\w)])", call.split("smoke-duration-report.sh", 1)[1])
+    if not caps:
+        print(f"  FAIL: {name} calls the reporter with no cap argument")
+        bad += 1
+        continue
+    arg_cap, job_cap = int(caps[-1]), job.get("timeout-minutes")
     if job_cap != arg_cap:
         print(f"  FAIL: {name} timeout-minutes={job_cap} but reporter cap={arg_cap}")
         bad += 1
     else:
         print(f"  ok: {name} cap agrees ({job_cap}m in both places)")
         checked += 1
-    # A trap that can redden a green suite defeats the reporter's contract.
-    if "|| true" not in run:
-        print(f"  FAIL: {name} calls the reporter without '|| true'")
+
+    # Independent of the cap parse, and tolerant of `||true`, which is
+    # functionally identical and was reported as missing before.
+    if not re.search(r"\|\|\s*true", call):
+        print(f"  FAIL: {name} calls the reporter without a '|| true' guard")
         bad += 1
 
-# Assert a positive count, not merely the absence of failures: an empty needs
-# list or a renamed job would otherwise report a clean pass having read nothing.
+# Assert a positive count, not merely the absence of failures: no shard jobs at
+# all would otherwise report a clean pass having read nothing.
 if checked == 0:
     print("  FAIL: no shard job was actually checked")
     bad += 1
