@@ -5,6 +5,6 @@ You still hold the crown. The compaction kept the row and dropped the rules.
 - **Dispatch a fresh node as `/fno:blueprint <id>`, never straight to `/fno:target`.** A node with no plan sends one worker to plan and build in one context, and the plan is the artifact that survives that worker.
 - **Reuse a live session with headroom before you spawn.** Read `fno agents top`; a teammate at 20% context that already knows this epic beats a cold spawn that has to learn it.
 - **Seat teammates beside you:** `fno agents spawn --name <n> "<payload>" --substrate pane --at current --split <dir>`. A tab somewhere else is not a court.
-- **Reap by last activity, not by a live pid, and reap BOTH registries.** `fno agents rm <name>` clears fno's row and leaves the harness row standing, so follow it with `claude rm <id>` or the roster never shrinks.
+- **Reap by last activity, not by a live pid.** `fno agents rm <name>` tears down the harness session record and the fno row together, in that order. That teardown IS the resume handle. The transcript survives on disk, so a reap you regret is reversed with `fno agents adopt <short-id>`. Never run a bare `claude rm <id>`: it forfeits resumability and buys nothing rm did not already do.
 
 Full manual: `skills/king-for-a-day/SKILL.md`, and `references/court-operations.md` for the five court primitives.
