@@ -353,20 +353,29 @@ pub fn recover(
     Ok(report)
 }
 
-/// A live process's start time, used to distinguish "our worker" from a recycled
-/// PID (ab-d19e6458). `None` if the process is gone or the lookup is
-/// unsupported/failed. The value is a per-host, per-boot quantity compared only
-/// for equality against a value captured for the SAME pid, so the differing
-/// units across platforms (Linux ticks vs macOS microseconds) do not matter.
+/// A live process's start time in EPOCH MICROSECONDS, used to distinguish "our
+/// worker" from a recycled PID (ab-d19e6458). `None` if the process is gone or
+/// the lookup is unsupported/failed.
+///
+/// This used to return raw clock ticks since boot on Linux, and its own comment
+/// argued the unit did not matter because the value was compared only for
+/// equality against a capture for the SAME pid. That invariant held until
+/// `liveness_origin` began comparing the token to `created_at` as a wall clock.
+/// A tick count is a small integer, `row_timestamp` refuses anything at or below
+/// the epoch-micros floor, and so the field read null on every Linux row while a
+/// reader took null to mean the process had no recorded start.
+///
+/// Both platforms now return the same unit, so a later consumer cannot inherit
+/// that trap. One-time cost on Linux: a row stamped with ticks before this
+/// change compares unequal to a fresh probe, so it reads as a recycled pid once
+/// and is re-probed. That is the fail-closed direction.
 #[cfg(target_os = "linux")]
 pub fn process_start_time(pid: u32) -> Option<u64> {
-    // /proc/<pid>/stat field 22 (1-based) is `starttime` in clock ticks since
-    // boot. The comm field (2) can contain spaces and parens, so split on the
-    // LAST ')' and index from there. After "comm)" the space-separated fields are
-    // [state, ppid, ...], with starttime the 20th (0-based index 19).
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after = stat.rsplit_once(')')?.1;
-    after.split_whitespace().nth(19)?.parse::<u64>().ok()
+    // Delegate rather than re-derive: claims.rs already folds `/proc/stat`
+    // btime with the tick count exactly as psutil does, and a second copy of
+    // that arithmetic in this file is how the units drifted apart to begin with.
+    let ms = crate::claims::process_create_time_ms(i32::try_from(pid).ok()?)?;
+    u64::try_from(ms).ok()?.checked_mul(1_000)
 }
 
 /// macOS: `proc_pidinfo(PROC_PIDTBSDINFO)` fills a `proc_bsdinfo` whose
@@ -4720,22 +4729,58 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
         );
     }
 
-    let has_pid = row.get("pid").is_some_and(|value| !value.is_null());
-    let liveness_origin = if !has_pid {
-        Value::Null
-    } else if let (Some(created_at), Some(pid_started_at)) = (
-        row_timestamp(row.get("created_at")),
-        row_timestamp(row.get("pid_start_time")),
-    ) {
-        if (pid_started_at - created_at).num_seconds() > 600 {
-            json!("resumed")
-        } else {
-            json!("survivor")
-        }
-    } else {
-        Value::Null
-    };
+    let (liveness_origin, liveness_origin_basis) = liveness_origin(row);
     row.insert("liveness_origin".into(), liveness_origin);
+    if let Some(basis) = liveness_origin_basis {
+        row.insert("liveness_origin_basis".into(), json!(basis));
+    }
+}
+
+/// Parse one row timestamp into `(value, basis)`, separating absent from
+/// unreadable. Mirrors `_read_field` in cli/src/fno/agents/row_contradiction.py.
+///
+/// Folding the two together is what let `liveness_origin: null` mean four
+/// different things at once, so a reader holding one null could not tell
+/// "nothing was recorded" from "something this parser cannot read".
+fn row_field_with_basis<'a>(
+    row: &Map<String, Value>,
+    key: &str,
+    label: &'a str,
+) -> (Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
+    match row.get(key) {
+        None | Some(Value::Null) => (None, Some(format!("{label}-absent"))),
+        raw => match row_timestamp(raw) {
+            Some(parsed) => (Some(parsed), None),
+            None => (None, Some(format!("{label}-unreadable"))),
+        },
+    }
+}
+
+/// Return `(liveness_origin, basis)` for one row. Mirrors `_liveness_origin`
+/// in cli/src/fno/agents/row_contradiction.py, and the shared fixture at
+/// schemas/agents-row-contradiction.json drives both.
+///
+/// THE PID GATE COMES FIRST. This producer already checked it and the Python
+/// one did not, so a pidless row read `survivor` there and null here: one
+/// field, two reachable implementations, one guard. A non-null origin carries
+/// no basis, because the value is its own evidence.
+fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
+    if !row.get("pid").is_some_and(|value| !value.is_null()) {
+        return (Value::Null, Some("pid-absent".to_string()));
+    }
+    let (created_at, basis) = row_field_with_basis(row, "created_at", "created-at");
+    let Some(created_at) = created_at else {
+        return (Value::Null, basis);
+    };
+    let (pid_started_at, basis) = row_field_with_basis(row, "pid_start_time", "pid-start");
+    let Some(pid_started_at) = pid_started_at else {
+        return (Value::Null, basis);
+    };
+    if (pid_started_at - created_at).num_seconds() > 600 {
+        (json!("resumed"), None)
+    } else {
+        (json!("survivor"), None)
+    }
 }
 
 fn rendered_status_from_truth(
