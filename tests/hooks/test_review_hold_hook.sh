@@ -93,7 +93,7 @@ run_hook acquire "$(skill_call "fno:review")"
 expect_registered "skill=fno:review"
 run_hook acquire "$(skill_call "/code-review")"
 expect_registered "skill=/code-review"
-run_hook acquire "$(skill_call "/code-review high --comment")"
+run_hook acquire "$(skill_call "/code-review <level> --comment")"
 expect_registered "skill=/code-review with args"
 
 echo "-- a name that merely CONTAINS review registers nothing --"
