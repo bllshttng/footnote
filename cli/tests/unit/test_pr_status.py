@@ -622,6 +622,16 @@ def test_verdict_line_spells_out_mergeable_unknown():
     )
 
 
+def test_verdict_line_distinguishes_unavailable_from_computing():
+    """An absent `mergeable` is a different fact from an explicit UNKNOWN:
+    the error payload and the terminal-PR arm never asked GitHub, so
+    "not yet computed" would claim a computation nothing is running."""
+    unavailable = _status.verdict_line(_line_payload(mergeable=None))
+    computing = _status.verdict_line(_line_payload(mergeable="UNKNOWN"))
+    assert "mergeable-unavailable(no-answer)" in unavailable
+    assert unavailable != computing
+
+
 def test_verdict_line_carries_a_head_mismatch_without_arithmetic():
     """AC4-ERR: coverage computed at another commit renders both commits at
     12 characters in one line. A matching coverage head renders nothing, so

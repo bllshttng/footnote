@@ -303,14 +303,18 @@ def verdict_line(payload: dict) -> str:
     # `_map_mergeable` turns GitHub's null (still computing) into the string
     # UNKNOWN before it reaches the payload; the parenthetical replaces the
     # reader's interpretation with the meaning, which was the fourth
-    # misreading.
-    raw_mergeable = str(payload.get("mergeable") or "")
+    # misreading. An ABSENT value is a different fact: the error payload and
+    # the terminal-PR arm never asked GitHub, so "not yet computed" would
+    # claim a computation nothing is running.
+    raw_mergeable = payload.get("mergeable")
     if raw_mergeable == "MERGEABLE":
         mergeable_slot = "mergeable"
     elif raw_mergeable == "CONFLICTING":
         mergeable_slot = "CONFLICTING"
-    else:
+    elif raw_mergeable == "UNKNOWN":
         mergeable_slot = "mergeable-unknown(not-yet-computed)"
+    else:
+        mergeable_slot = "mergeable-unavailable(no-answer)"
     head = str(payload.get("head") or "")
     coverage = payload.get("review_coverage") or {}
     cov_head = str(coverage.get("head_sha") or "")
