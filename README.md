@@ -96,6 +96,7 @@ Each agent runs its own loop and they coordinate over a message bus. Claude, Cod
 
 - A six-agent review panel reads the diff before it ships, analyzing integration and UX-flow, not just unit tests, via `/review`.
 - Provider rotation with failover and per-model lockout, so a flaky or rate-limited model doesn't stall the loop.
+- A read-only browser view of any running pane, via `fno mux serve --web`. Open the URL on your phone and watch an agent work. Nothing to install on the viewing device. The bridge releases its socket write half at attach, so no keystroke reaches your terminal. [docs/guides/web-view.md](docs/guides/web-view.md)
 
 ## What it is
 
@@ -116,6 +117,7 @@ Live board: **[footnote.sh/roadmap](https://footnote.sh/roadmap)** - rendered fr
 - [Think and plan](docs/guides/think-and-plan.md): design exploration and planning
 - [PR lifecycle](docs/guides/pr-lifecycle.md): review, create, check, merged
 - [Agents quickstart](docs/guides/agents-quickstart.md): spawn and message peer agents
+- [Browser view](docs/guides/web-view.md): watch panes from a phone, read-only
 - [Best practices](docs/best-practices.md): reliable, cost-bounded runs
 - [Troubleshooting](docs/troubleshooting.md): when it breaks
 - [Security posture](docs/security-posture.md): what it will and won't do
