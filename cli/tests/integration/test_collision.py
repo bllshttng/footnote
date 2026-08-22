@@ -468,6 +468,9 @@ def test_supersede_records_pending_evidence_without_terminalizing(tmp_graph, tmp
     assert old["supersession"] == {
         "successor": "ab-new",
         "cause": "old implementation replaced",
+        # No --reason was passed, so the slot is present and empty rather than
+        # absent: readers get one shape either way.
+        "reason": None,
         "surfaces": ["src/old.py"],
         "verified_at": None,
         "evidence_pr": None,
