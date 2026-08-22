@@ -3002,9 +3002,12 @@ def cmd_send(
         None,
         help=(
             "Agent name, short-id (first 8 of the session id), or full session "
-            "id. An ambiguous short-id fails and asks for the full id; codex "
-            "session ids are time-prefixed so their first-8 collides across "
-            "same-window sessions, so codex is often addressed by full id."
+            "id. Codex: use the full session_id or pane; never head-8. A codex "
+            "session id is UUIDv7, so its first 8 characters are a "
+            "65.536-second timestamp bucket rather than random - siblings "
+            "spawned in one minute share them - and a head-8 aimed at a codex "
+            "row is refused outright, not merely when it happens to be "
+            "ambiguous today. Claude ids are UUIDv4, so either form works there."
         ),
     ),
     message: str | None = typer.Argument(

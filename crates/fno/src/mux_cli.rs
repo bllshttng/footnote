@@ -2156,13 +2156,24 @@ pub const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|bre
 pub const PANE_REFERENCE_USAGE: &str =
     "pane refs are <pane-id> or <session>:<pane-id>; --session overrides the prefix";
 
+/// `pane send`'s one non-obvious flag, stated where an operator looks for it
+/// (node x-3a64). The default is the surprising half, so name it first and show
+/// the raw case with a real payload rather than a placeholder: an envelope
+/// around the character `1` is the nonsense the flag exists to avoid.
+pub const PANE_SEND_RAW_HELP: &str = "pane send wraps the text in an <fno_mail> envelope by \
+default, so a worker can tell a peer's message from its operator's, and refuses a pane showing \
+an option prompt. --raw types the bytes verbatim for genuine keystrokes: \
+`fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit.";
+
 pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
         .and_then(|a| a.to_str())
         .ok_or_else(|| format!("pane needs a verb: {PANE_VERBS}"))?;
     if matches!(verb, "-h" | "--help") {
-        return Err(format!("{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}"));
+        return Err(format!(
+            "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}"
+        ));
     }
 
     // `run` is special: leading options/directives, then the command argv
@@ -5080,7 +5091,8 @@ mod tests {
                 pane: 9,
                 source: SendSource::Text("hi".into()),
                 guarded: false,
-                submit: false
+                submit: false,
+                raw: false
             }
         );
     }
@@ -5980,6 +5992,7 @@ mod tests {
                 source: SendSource::Text("hi\r".into()),
                 guarded: false,
                 submit: false,
+                raw: false,
             }
         );
         assert_eq!(
@@ -5989,6 +6002,7 @@ mod tests {
                 source: SendSource::Stdin,
                 guarded: false,
                 submit: false,
+                raw: false,
             }
         );
         // --guarded opts the send into the server-side turn-taken interlock.
@@ -6001,6 +6015,7 @@ mod tests {
                 source: SendSource::Stdin,
                 guarded: true,
                 submit: false,
+                raw: false,
             }
         );
         assert_eq!(
@@ -6012,11 +6027,41 @@ mod tests {
                 source: SendSource::Text("hi".into()),
                 guarded: false,
                 submit: true,
+                raw: false,
+            }
+        );
+        // --raw opts OUT of the envelope (node x-3a64). Default false is the
+        // load-bearing half: an opt-in flag would leave every existing caller
+        // unattributed and fix nothing.
+        assert_eq!(
+            parse_pane_args(&os(&["send", "2", "--text", "1", "--raw", "--submit"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Text("1".into()),
+                guarded: false,
+                submit: true,
+                raw: true,
             }
         );
         // Neither / both are usage errors.
         assert!(parse_pane_args(&os(&["send", "2"])).is_err());
         assert!(parse_pane_args(&os(&["send", "2", "--text", "x", "--stdin"])).is_err());
+        // --raw pairs only with send: on any other verb it is a usage error, not
+        // a silently ignored flag that reads as "the envelope was skipped".
+        assert!(parse_pane_args(&os(&["read", "2", "--raw"])).is_err());
+    }
+
+    #[test]
+    fn mux_pane_send_help_names_the_envelope_default_and_the_raw_opt_out() {
+        // The DEFAULT is the surprising half, so the help must state it. An
+        // operator who only learns `--raw` exists still does not know what a
+        // plain send now carries.
+        let err = parse_pane_args(&os(&["--help"])).unwrap_err();
+        assert!(err.contains("--raw"), "{err}");
+        assert!(err.contains("<fno_mail>"), "{err}");
+        assert!(err.contains("option prompt"), "{err}");
     }
 
     #[test]

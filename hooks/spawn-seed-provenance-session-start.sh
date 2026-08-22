@@ -44,9 +44,12 @@ if [[ -z "${FNO_SEED_PROV_SEED_B64:-}" ]]; then
     exit 0
 fi
 
-command -v fno >/dev/null 2>&1 || { echo '{}'; exit 0; }
+# FNO_BIN, the same override every other fno subprocess caller honors, so a
+# split install or a source checkout renders with the fno it means to.
+FNO_BIN="${FNO_BIN:-fno}"
+command -v "$FNO_BIN" >/dev/null 2>&1 || { echo '{}'; exit 0; }
 
-ENVELOPE="$(fno mail seed-provenance 2>/dev/null)" || {
+ENVELOPE="$("$FNO_BIN" mail seed-provenance 2>/dev/null)" || {
     echo "spawn-seed-provenance: renderer refused; the seed stays unattributed" >&2
     echo '{}'
     exit 0

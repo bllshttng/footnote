@@ -1496,19 +1496,10 @@ PROVENANCE_KEYS: tuple[str, ...] = (
     "FNO_NODE_CLAIM_HOLDER",
 )
 
-#: The seed-provenance env keys (x-3a64), as one set, for the same set-or-clear
-#: reason as ``PROVENANCE_KEYS``: an inherited half of this group would attribute
-#: a child's seed to its parent's sender. Named here rather than imported into
-#: the wrapper so the clear list cannot drift from the module that writes them.
-SEED_PROVENANCE_KEYS: tuple[str, ...] = (
-    "FNO_SEED_PROV_SEED_B64",
-    "FNO_SEED_PROV_FROM",
-    "FNO_SEED_PROV_FROM_SESSION",
-    "FNO_SEED_PROV_HARNESS",
-    "FNO_SEED_PROV_MODEL",
-    "FNO_SEED_PROV_NODE",
-    "FNO_SEED_PROV_MSG_ID",
-)
+#: Re-exported (x-3a64), never redefined: the clear list must not drift from the
+#: module that writes the fields, and this module's `_mesh_env_wrapper` is one of
+#: several callers that clear them.
+from fno.mail.seed_provenance import SEED_PROVENANCE_KEYS  # noqa: E402
 
 
 def _seed_provenance_env(

@@ -44,6 +44,20 @@ ENV_MODEL = "FNO_SEED_PROV_MODEL"
 ENV_NODE = "FNO_SEED_PROV_NODE"
 ENV_MSG_ID = "FNO_SEED_PROV_MSG_ID"
 
+#: The whole group, for callers that must SET-OR-CLEAR it together. A child
+#: inheriting half of it attributes its own seed to whoever seeded its parent,
+#: so the clear list must never drift from the write list -- hence one tuple,
+#: here, beside the writer.
+SEED_PROVENANCE_KEYS: tuple[str, ...] = (
+    ENV_SEED_B64,
+    ENV_FROM,
+    ENV_FROM_SESSION,
+    ENV_HARNESS,
+    ENV_MODEL,
+    ENV_NODE,
+    ENV_MSG_ID,
+)
+
 #: Decoded-seed ceiling. A spawn payload is a handoff and the house contract caps
 #: one at 80 words; 16 KiB is far above any honest seed and still small enough
 #: that an environment block stays sane. Over it, :func:`build_env` refuses

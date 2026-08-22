@@ -71,7 +71,7 @@ def prompt_refusal(
     session: str,
     pane_id: int,
     harness: str,
-    runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    runner: Optional[Callable[..., "subprocess.CompletedProcess[str]"]] = None,
 ) -> Optional[str]:
     """Read the pane and return a refusal reason when it is showing an option prompt.
 
@@ -90,6 +90,13 @@ def prompt_refusal(
         _evaluate_manifest_screen,
         _run_mux,
     )
+
+    # Resolved at CALL time, not bound as a default argument. A default binds
+    # the original function object at import, so a caller (or a test) that
+    # replaces ``subprocess.run`` afterwards would be silently ignored and this
+    # gate would shell out for real while every other call in the same lane went
+    # to the replacement.
+    runner = runner if runner is not None else subprocess.run
 
     try:
         frame = _run_mux(
@@ -178,7 +185,7 @@ def prepare(
     sender: Optional[str] = None,
     to: Optional[str] = None,
     gate: bool = True,
-    runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    runner: Optional[Callable[..., "subprocess.CompletedProcess[str]"]] = None,
 ) -> str:
     """Gate, then wrap. Returns the bytes an enveloped pane send should type.
 
