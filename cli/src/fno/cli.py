@@ -259,7 +259,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     ),
     "done": (
         "fno.done.cli:done_command",
-        "Deprecated done shim; use fno backlog done (same operation).",
+        "Deprecated done shim; PR-metadata rollup that fno backlog done lacks.",
         {"hidden": True},
     ),
     "research": (
@@ -560,9 +560,11 @@ def callback(
         raise typer.Exit(code=0)
 
 
-# Shorthand legend (short-flags Phase 3, ab-a04f3f1a). The convention's
-# source of truth is cli/tests/test_short_flag_convention.py; keep this
-# text in sync when the register or the per-command maps change.
+# Shorthand legend (short-flags Phase 3). The legend is prose and no gate
+# recomputes it, so every row here was re-checked against `--help` on the
+# live command tree; keep doing that when the register or a per-command map
+# changes. `cli/tests/test_short_flag_dispatch.py` exercises the dispatch,
+# not this text.
 SHORTHAND_LEGEND = """\
 fno shorthand legend (short-flag convention)
 
@@ -578,15 +580,14 @@ UPPERCASE = global register. One fixed meaning on every command:
 lowercase = per-command value flags. -p is "the primary thing this
 command is about" and differs by family:
 
-  fno agents ask                        -p provider   (-c cwd, -t timeout)
+  fno agents ask                        -H harness    (-c cwd, -t timeout)
   fno backlog add/idea/update/intake    -p priority   (-c cwd, -d details, -t type/title)
   fno backlog next/ready/find           -p project    (find: -s status, -d domain)
   fno backlog capture add               -p priority   (-s source, -w where)
   fno config accounts add               -p priority   (-H harness, -a auth, -s scope)
-  fno gate verify                       -p phase      (-s state, -x strict)
   fno doctor event emit                 -t type       (-d data, -s source)
   fno agents mail send                  -k kind       (-b body; --to-project long-only)
-  fno backlog done                      -p pr-number  (-l link, -m note)
+  fno done (deprecated root)            -p pr-number  (-l link, -m note)
   fno backlog carveout add              -k kind       (-p priority)
 
 Unix-entrenched lowercase stays put: -h help, -n tail / -f follow
@@ -595,6 +596,10 @@ Unix-entrenched lowercase stays put: -h help, -n tail / -f follow
 
 Canonical spellings: --session-id and --pr-number. The old --session /
 --pr spellings still work as hidden deprecated aliases.
+
+`fno backlog done` is a different command from the deprecated root
+`fno done` and shares none of its flags: it takes --skip-stamp,
+-F --force and -R --reason only.
 
 Run `fno help <command>` for any command's full flag list.\
 """
