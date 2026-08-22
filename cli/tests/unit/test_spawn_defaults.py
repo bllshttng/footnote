@@ -1465,6 +1465,58 @@ def test_explicit_route_with_cross_vendor_model_is_silent():
     assert "implies vendor" not in err.getvalue()
 
 
+def test_injected_cross_vendor_model_refuses_and_names_the_config_key():
+    # The specimen, 2026-08-21: agents.defaults.model was a gpt-* id, every
+    # spawn that named no model inherited it, and the worker started, reported
+    # live, and died on its first inference. Nobody typed that pairing, so the
+    # spawn refuses instead of warning. The message must name the config key,
+    # because a caller who typed nothing has no other half to edit.
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as excinfo:
+        _inject(["spawn", "--name", "w", "hi"], err=err, model="gpt-5.6")
+    assert excinfo.value.code == 2
+    msg = err.getvalue()
+    assert "agents.defaults.model" in msg
+    assert "openai" in msg and "anthropic" in msg
+
+
+def test_typed_cross_vendor_model_still_warns_and_proceeds():
+    # The other half of the same predicate, and the one that must NOT change.
+    # A caller who types a cross-vendor model means it; passthrough is
+    # deliberate and documented. Config also names a model here, so this pins
+    # that the refusal keys on what was INJECTED, not on config being present.
+    err = io.StringIO()
+    out = _inject(["spawn", "--name", "w", "-m", "gpt-5.6", "hi"], err=err, model="opus")
+    assert "gpt-5.6" in out
+    msg = err.getvalue()
+    assert "implies vendor" in msg
+    assert "refusing to spawn" not in msg
+
+
+def test_injected_model_matching_the_lane_is_silent():
+    # The negative on the refusal path: an injected model whose vendor MATCHES
+    # the lane is the ordinary case and must neither warn nor refuse. Without
+    # this, a refusal that fired on every injected model would pass the test
+    # above while stopping the fleet spawning.
+    err = io.StringIO()
+    out = _inject(["spawn", "--name", "w", "hi"], err=err, model="opus")
+    assert "opus" in out
+    assert err.getvalue() == "" or "implies vendor" not in err.getvalue()
+
+
+def test_injected_cross_vendor_model_with_explicit_route_proceeds():
+    # --route names the lane, so the caller chose both halves even though the
+    # model arrived by injection. Refusing here would break a legal override.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--route", "openai/gpt-5.6", "hi"],
+        err=err,
+        model="gpt-5.6",
+    )
+    assert "refusing to spawn" not in err.getvalue()
+    assert out[0] == "spawn"
+
+
 def test_lane_vendor_resolves_unrouted_harness_from_final_argv():
     assert resolve_lane_vendor(["codex", "-C", "/tmp/workspace"]) == "openai"
 
@@ -1481,6 +1533,9 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
         stderr=err,
         env={},
     )
+    # `model_source` and `outcome` ride the event because the measurement is
+    # useless without them: a warned typed pairing and a refused injected one
+    # are different facts, and the old payload rendered them identically.
     assert emitted == [
         (
             "model_vendor_mismatch",
@@ -1488,6 +1543,38 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
                 "model": "opus",
                 "implied_vendor": "anthropic",
                 "resolved_vendor": "openai",
+                "model_source": "explicit",
+                "outcome": "warned",
+            },
+        )
+    ]
+
+
+def test_refused_mismatch_event_names_the_config_key_that_supplied_the_model(
+    monkeypatch,
+):
+    """The refusal is measurable as a refusal, not just as a mismatch.
+
+    Reading these events later, the question is which spawns were STOPPED and
+    which config key stopped them. An `outcome` that always read the same word
+    could not answer it.
+    """
+    emitted = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+    with pytest.raises(SystemExit):
+        _inject(["spawn", "--name", "w", "hi"], err=io.StringIO(), model="gpt-5.6")
+    assert emitted == [
+        (
+            "model_vendor_mismatch",
+            {
+                "model": "gpt-5.6",
+                "implied_vendor": "openai",
+                "resolved_vendor": "anthropic",
+                "model_source": "agents.defaults.model",
+                "outcome": "refused",
             },
         )
     ]
