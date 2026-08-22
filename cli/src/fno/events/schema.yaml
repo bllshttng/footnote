@@ -1145,7 +1145,7 @@ event_types:
     description: "One `fno claim reap --apply` run completed, including a run that reaped nothing. A silent sweep and a dead sweep must not look the same. Never fires for a dry-run: dry-run's own no-writes promise covers this event too."
     sources: [fno-loop]
     data:
-      required: [scanned, reaped, would_reap, kept_live, kept_suspect, kept_offhost, corrupted, vanished, contended, reap_failed, apply, roots]
+      required: [scanned, reaped, would_reap, kept_live, kept_suspect, kept_offhost, corrupted, vanished, contended, reap_failed, apply, lock_mirror_cleared, roots]
       properties:
         scanned:
           type: integer
@@ -1178,6 +1178,9 @@ event_types:
           description: "Count of files that classified reapable but the post-archive re-read did not confirm the move."
         apply:
           type: boolean
+        lock_mirror_cleared:
+          type: integer
+          description: "Graph entries whose locked_by/claimed_at mirror was cleared for reaped node claims. Default sweeps only: an explicit --root sweep owns someone else's claims tree, not this graph."
         roots:
           type: array
           items:

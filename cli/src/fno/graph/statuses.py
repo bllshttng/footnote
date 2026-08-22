@@ -29,12 +29,37 @@ VALID_STATUSES: frozenset[str] = frozenset(
 # the system speaks (idea -> design -> ready -> in_progress -> in_review -> done).
 STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 
+# The rungs past which a node can never again be dispatched. `done` (work
+# shipped) and `superseded` (replaced) are terminal; every other rung is a
+# state a node can return from. One spelling shared by the store's
+# closure-release hook, the tracker backends' closed set, and the reaper's
+# node settlement, so they cannot drift (x-94f8).
+TERMINAL_RUNGS: frozenset[str] = frozenset({"done", "superseded"})
+
 # Sentinel prefix used by the pre-feature workaround that overloaded
 # ``completed_at`` to encode deferral. Detected once in ``recompute_statuses``
 # and migrated to the dedicated ``deferred_at`` field, after which the prefix
 # never appears again. Lives here so the migration logic and the parsing logic
 # share a single source of truth.
 _LEGACY_DEFER_PREFIX = "deferred:"
+
+
+def is_terminal_entry(entry: object) -> bool:
+    """Is this entry closed for good (done/superseded), from its own fields?
+
+    The derived status string plus the two closure signals it keys on, minus
+    the legacy ``deferred:`` sentinel: a pre-migration row carries deferral
+    inside ``completed_at``, and deferral is a RETURNABLE rung, so a bare
+    truthiness check reads it as closed. ``read_graph`` does not run the
+    recompute migration, so a raw reader must use this helper, never a bare
+    ``completed_at`` test.
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("status") in TERMINAL_RUNGS or entry.get("superseded_by"):
+        return True
+    completed = entry.get("completed_at")
+    return bool(completed) and not str(completed).startswith(_LEGACY_DEFER_PREFIX)
 
 
 def _rung_to_graph_status() -> dict:

@@ -249,8 +249,15 @@ def build_board(
     # start from the CLAIM and look the node up, which is the opposite
     # direction from every other queue here.
     stalled: list[dict] = []
+    from fno.graph.statuses import TERMINAL_RUNGS
+
     for node in inputs.claimed_nodes.rows():
         if node.get("priority") not in KING_PRIORITIES:
+            continue
+        # A terminal node's claim is a leak the closure release or the
+        # node-aware reaper owns, not a wedged worker. Reporting it here sent
+        # the king at done work (x-94f8's stalled_holder queue).
+        if node.get("status") in TERMINAL_RUNGS:
             continue
         claim = claim_by_node.get(str(node.get("id")))
         if claim is None or claim.get("state") in _DEAD_CLAIM_STATES:
@@ -638,6 +645,8 @@ def _read_claimed_nodes(
 
     nodes: list[dict] = []
     holders: set[str] = set()
+    from fno.graph.statuses import TERMINAL_RUNGS
+
     for node_id, holder in held:
         read = _run_json([*_fno(), "backlog", "get", node_id], timeout=timeout)
         if not read.ok:
@@ -648,6 +657,11 @@ def _read_claimed_nodes(
             continue
         node = read.payload if isinstance(read.payload, dict) else None
         if not node:
+            continue
+        # A terminal node's claim is a leak the closure release or the
+        # node-aware reaper owns. Drop it at the source so it never reaches a
+        # queue AND its holder never costs an activity transcript read.
+        if node.get("status") in TERMINAL_RUNGS:
             continue
         nodes.append(node)
         if node.get("priority") in KING_PRIORITIES:

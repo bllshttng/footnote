@@ -285,6 +285,14 @@ A `dispatch:` reservation looks like it never needed SUSPECT's protection, since
 
 The one exception is a **launch window**. A claim held under `spawn-handover:<worker>` is exempt from the probe. Between the spawn and the worker's first `fno do target init` there is no worktree manifest and no ledger row. So the roster cannot see that worker BY CONSTRUCTION. Nothing is stranded by the exemption: that claim is TTL-bound, and an expired claim is provably dead on its own.
 
+### Node closure releases the claim and the reaper settles node-aware
+
+Measured 2026-08-21: a live session finished one node and moved to the next. Its claim on the done node read LIVE for 16 hours, past its own TTL. The reaper only asked whether the holder was alive. Two fixes, both at single choke points.
+
+**Closure releases.** Every Python closure path persists through `locked_mutate_graph`. That covers `fno backlog done`, `fno done`, reconcile, the epic sweep, and `GraphTracker.close`. The Rust daemon shells out to `fno backlog done`. So the store's post-recompute hook is the one place a release covers every path. On a transition into a terminal rung the hook clears the entry's `locked_by`/`claimed_at` mirror. Terminal rungs are `done` and `superseded`, shared as `TERMINAL_RUNGS`. `session_id` stays: on a done node it is cost provenance, not a lock. The hook also force-releases the `node:<id>` claim at both claims roots, holder-agnostic, best-effort. The GitHub tracker backend closes an issue without touching the graph store. Its `close()` calls the same helper. A release failure is a named stderr line, never a failed closure. The reaper is the backstop.
+
+**The sweep settles node-aware.** `sweep_verdict` is the single reap decision. It runs a settlement reading FIRST on every `node:` claim. A node the graph closed under the claim is positive abandonment. So is an expired lease whose holder's roster row resolves to a DIFFERENT node. Both are reaped. An unexpired lease is never settled away from a live holder. Every unreadable instrument answers unknown: graph, roster, absent row, unresolved node. Unknown KEEPS. The settlement travels with every producer: the hand-typed verb, the unattended reconcile sweep, the spawn guard's targeted reclaim. Reap apply also clears the graph lock mirror for reaped node claims. A reaped worker's node then stops reading `claimed` before `LOCK_TTL_HOURS` passes.
+
 ### Renewal re-anchors, and PID-reuse detection survives
 
 `claims::renew` used to preserve the recorded pid while moving `expires_at`. A respawned worker renewing under a new pid then left a claim byte-identical to a dead worker's: dead pid, unexpired TTL, SUSPECT. Nothing on disk separated a live session from a corpse. So every reader that must not steal from the first was forced to protect the second.

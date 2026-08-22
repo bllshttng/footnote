@@ -169,7 +169,7 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
         "scanned", "reaped", "would_reap", "kept_live", "kept_suspect",
         "kept_suspect_alive", "kept_suspect_unprobed",
         "kept_offhost", "corrupted", "vanished", "contended", "reap_failed",
-        "apply", "roots",
+        "apply", "lock_mirror_cleared", "roots",
     }
     extra_keys = summary.keys() - known_keys
     if extra_keys:
@@ -198,6 +198,7 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
         "contended": int(summary["contended"]),
         "reap_failed": len(summary["reap_failed"]),
         "apply": bool(summary["apply"]),
+        "lock_mirror_cleared": int(summary["lock_mirror_cleared"]),
         "roots": [str(r) for r in summary["roots"]],
     }
     _emit(_build("claim_reap_swept", data))

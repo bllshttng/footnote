@@ -1214,6 +1214,107 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
     return _probe
 
 
+def _node_settlement(reading: Optional[RosterReading] = None):
+    """The closure-shaped reading ``sweep_verdict`` runs FIRST on a node claim
+    (x-94f8): is this claim's own node still the holder's workplace?
+
+    Two positive findings, both proven by FINDING things, never by failing to:
+
+      * The claim's node is terminal in the graph (done/superseded). The
+        closure release should have dropped the claim already; one that
+        outlived its node (pre-fix leaks, a closer that crashed mid-release)
+        protects nothing whoever holds it. Holder-independent evidence.
+      * The lease is EXPIRED and the holder's roster row resolves to a
+        DIFFERENT node. An expired lease is the holder's own statement that
+        it stopped renewing; a row on another node is where it went. An
+        unexpired lease is never settled away from a live holder.
+
+    Everything else answers None, and None keeps: an unreadable graph, an
+    unconsulted roster, an absent row (not-found is not gone), a row whose
+    node did not resolve, an unparseable holder, a handover launch window.
+    Mirrors ``_abandonment_probe``: never raises, instruments read lazily and
+    cached across the sweep, one roster reading shareable from a caller that
+    already took it outside whatever lock it holds.
+    """
+    cache: dict = {}
+
+    def _terminal_ids():
+        if "terminal" not in cache:
+            try:
+                from fno.tracker import active_backend_name
+
+                if active_backend_name() != "graph":
+                    # graph.json is not the store under an external tracker
+                    # backend; a terminal reading taken from it would be a
+                    # wrong answer, and unknown keeps.
+                    cache["terminal"] = None
+                    return None
+                from fno.graph.statuses import is_terminal_entry
+                from fno.graph.store import read_graph
+                from fno.paths import graph_json
+
+                # is_terminal_entry, not a bare completed_at test: read_graph
+                # does not run the recompute migration, so a legacy
+                # "deferred:<ts>" row still carries deferral inside
+                # completed_at, and deferral is a returnable rung.
+                cache["terminal"] = frozenset(
+                    e.get("id")
+                    for e in read_graph(graph_json())
+                    if is_terminal_entry(e)
+                )
+            except Exception:  # noqa: BLE001 - an unreadable graph proves nothing
+                cache["terminal"] = None
+        return cache["terminal"]
+
+    def _probe(claim, now=None) -> Optional[bool]:
+        node_id = claim.key[len("node:"):]
+        terminal = _terminal_ids()
+        if terminal is not None and node_id in terminal:
+            return True
+        from .staleness import is_expired
+
+        if not is_expired(claim, now=now):
+            return None
+        if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
+            # A launch window, never a settled abandonment: same reasoning as
+            # the suspect probe below.
+            return None
+        session_id = _holder_session_id(claim.holder)
+        if not session_id:
+            return None
+        if "reading" not in cache:
+            cache["reading"] = (
+                reading
+                if reading is not None
+                else read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
+            )
+        seen: RosterReading = cache["reading"]
+        if not seen.consulted:
+            return None
+        if seen.row_for_session(session_id) is None:
+            # Not found is not gone. See _abandonment_probe.
+            return None
+        # The roster indexes rows BY node; invert it for this session. A row
+        # present but under no node (never ran target init) says the holder
+        # is alive but nothing about THIS claim.
+        holder_node = next(
+            (
+                nid
+                for nid, rows in seen.workers_by_node.items()
+                for r in rows
+                if r.get("row_id") == session_id
+            ),
+            None,
+        )
+        if holder_node is None:
+            return None
+        # A different node is positive abandonment; the same node falls
+        # through to liveness, which keeps it.
+        return True if holder_node != node_id else None
+
+    return _probe
+
+
 def _transcript_activity(session_id: str, cwd: str):
     """Tri-state: True finished, False still moving, None unreadable.
 
@@ -1303,6 +1404,11 @@ def reap_cmd(
         POSITIVE roster finding: the join ran, scanned at least one row, and no
         row resolves to that node. A join that could not run yields unknown, and
         unknown keeps the claim.
+      * A `node:` claim is also settled node-aware, before liveness is even
+        asked: a claim on a node the graph closed (done/superseded), or a claim
+        whose EXPIRED lease's holder is provably working a DIFFERENT node, is
+        positive abandonment and is reaped. An unexpired lease is never settled
+        away from a live holder.
 
     Dry-run by default; `--apply` archives to `.expired/` and re-reads the store
     to confirm each move before counting it `reaped` - an exit code alone is not
@@ -1312,6 +1418,7 @@ def reap_cmd(
         roots=list(root) if root else None,
         apply=apply,
         abandonment_probe=_abandonment_probe(),
+        node_settlement=_node_settlement(),
     )
 
     if json_output:

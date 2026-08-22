@@ -7892,6 +7892,15 @@ def _done_via_seam(
     _cascade_close_external_parents(tracker, task_id)
     typer.echo(f"Marked {task_id} done")
 
+    # Closure releases the node claim at the SEAM, right after the one close,
+    # so every tracker backend inherits it (github today; the graph backend
+    # gets the same release from the store's closure hook, which an external
+    # close never reaches). Placing it in one backend's close() would be a
+    # guard on one of N reachable implementations.
+    from fno.graph.store import release_node_claim_at_closure
+
+    release_node_claim_at_closure(task_id, rung="done")
+
     if sc.plan_path and not skip_stamp:
         _stamp_and_graduate_plan(sc.plan_path, url=evidence_pr_url, session_id=None)
 
@@ -9677,7 +9686,7 @@ def cmd_reconcile(
     # sweep.
     claim_reap: dict = {"outcome": "not-run"}
     try:
-        from fno.claims.cli import _abandonment_probe
+        from fno.claims.cli import _abandonment_probe, _node_settlement
         from fno.claims.core import reap_dead_claims
 
         # The probe travels with the sweep, not only with the hand-typed verb.
@@ -9685,8 +9694,13 @@ def cmd_reconcile(
         # abandonment reap existed on exactly one path an operator has to type,
         # and the SessionStart sweep that actually runs kept every abandoned
         # claim until its TTL. A producer on one of N paths is the same defect
-        # as a guard on one of N, from the other side.
-        _reap = reap_dead_claims(apply=not dry_run, abandonment_probe=_abandonment_probe())
+        # as a guard on one of N, from the other side. Same for the
+        # node_settlement (x-94f8).
+        _reap = reap_dead_claims(
+            apply=not dry_run,
+            abandonment_probe=_abandonment_probe(),
+            node_settlement=_node_settlement(),
+        )
         claim_reap = {"outcome": "ok", **_reap}
         _count = _reap["would_reap"] if dry_run else _reap["reaped"]
         _failed = _reap.get("reap_failed") or []

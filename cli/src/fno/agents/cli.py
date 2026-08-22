@@ -105,7 +105,9 @@ _REMEDIABLE_BUCKETS = frozenset({"release-failed", "suspect", "suspect_unprobed"
 _HOLDER_ALIVE = "live"
 
 
-def _reclaim_if_provably_dead(key: str, *, probe=None) -> tuple[str | None, str]:
+def _reclaim_if_provably_dead(
+    key: str, *, probe=None, settlement=None
+) -> tuple[str | None, str]:
     """Force-release KEY when its holder is PROVABLY dead.
 
     Returns ``(prior_holder, bucket)``. ``prior_holder`` is None whenever the
@@ -178,7 +180,11 @@ def _reclaim_if_provably_dead(key: str, *, probe=None) -> tuple[str | None, str]
             provably_dead, bucket = True, ""
         else:
             try:
-                provably_dead, bucket = sweep_verdict(claim, abandonment_probe=probe)
+                provably_dead, bucket = sweep_verdict(
+                    claim,
+                    abandonment_probe=probe,
+                    node_settlement=settlement,
+                )
             except Exception:  # noqa: BLE001 - a probe blowing up clears nothing
                 return None, "unprobed"
         if not provably_dead:
@@ -340,20 +346,32 @@ def _spawn_guard_decision(
             # invoke the real `fno agents spawn`, which runs this guard again
             # WITH a reservation, and the recovery happens there - at the moment
             # of launch, by the caller that is about to launch.
-            from fno.claims.cli import _abandonment_probe, read_roster
+            from fno.claims.cli import (
+                RosterReading,
+                _abandonment_probe,
+                _node_settlement,
+                read_roster,
+            )
 
             # The roster is READ HERE, outside the recovery mutex. Reading it
             # under the lock shells out to the harness while holding a mutex
             # `compare_and_rebind` waits only five seconds for, so a peer's
             # probe could make the worker's own `fno do target init` handover fail
             # as claim-held-by-other. Handing the reading in leaves nothing
-            # under the lock but a dictionary lookup.
+            # under the lock but a dictionary lookup. A FAILED read is handed
+            # down as an honestly unconsulted reading for the same reason:
+            # both instruments would otherwise lazily re-read inside the
+            # mutex, and unknown keeps is the safe answer anyway.
             try:
                 reading = read_roster()
             except Exception:  # noqa: BLE001 - an unread roster proves nothing
-                reading = None
+                reading = RosterReading(False, 0, {}, "roster read failed before the guard")
             prior, _bucket = _reclaim_if_provably_dead(
-                node_key, probe=_abandonment_probe(reading)
+                node_key,
+                probe=_abandonment_probe(reading),
+                # Same reading, same reason: the settlement's roster lookups
+                # must stay outside the recovery mutex too (x-94f8).
+                settlement=_node_settlement(reading),
             )
             if prior is not None:
                 _emit_reaped_abandoned(node_id, prior, observation.truth_status)
