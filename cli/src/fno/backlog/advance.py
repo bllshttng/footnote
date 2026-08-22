@@ -1346,6 +1346,11 @@ def _ensure_lane_worktree(
     a non-claude harness at the external base. A `never` project returns the repo
     root (guarded below) regardless of the harness.
     """
+    # Deliberately the PRE-FOLD spelling. `fno_py_cmd()` resolves the INSTALLED
+    # fno-py off PATH, not this source, and the shim only forwards old to new.
+    # `worktree ensure` therefore runs on an install from either side of the
+    # fold; `workspace worktree ensure` hard-fails an install that predates it.
+    # A cross-process caller migrates LAST, once the window closes.
     proc = subprocess.run(
         [*_subprocess_util.fno_py_cmd(), "worktree", "ensure",
          "--repo", str(canonical_root), "--name", node_id, "--harness", harness],

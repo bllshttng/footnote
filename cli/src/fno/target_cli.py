@@ -2841,6 +2841,14 @@ def start(
     # READ-ONLY (x-20f1 LD5): selects a worktree LOCATION. Nothing durable
     # records this harness, and a wrong guess costs a path, not an identity.
     ambient_harness = resolve_harness_identity().harness
+    # Deliberately the PRE-FOLD spelling, and the reason generalizes to every
+    # cross-process fno call. `_resolve_fno_cmd()` resolves the INSTALLED fno-py
+    # off PATH, never this source, and the verb shim only forwards old to new.
+    # So `worktree ensure` runs on an install from either side of the fold,
+    # while `workspace worktree ensure` dies with "No such command 'workspace'"
+    # on any install that predates it - here, at step 1 of a cold start, which
+    # is the worst place to learn the deployed CLI is behind. A cross-process
+    # caller migrates LAST, after the window closes and the shim is removed.
     ensure_cmd = fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name]
     if ambient_harness:
         ensure_cmd += ["--harness", ambient_harness]

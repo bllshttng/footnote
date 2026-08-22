@@ -13,7 +13,8 @@ prompt: |
   Run /fno:growth-launch to draft a campaign for the function-pack launch.
 
   Requirements:
-  - activation-gate: the skill refuses with the exact fno plugins activate line
+  - activation-gate: the skill refuses with the exact fno config plugins activate
+    line
     when growth-studio is inactive.
   - resolution-gate: the orchestrator resolves each role for the work order
     before dispatch, so capability and context gates are enforced at launch time.

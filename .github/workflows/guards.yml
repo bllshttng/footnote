@@ -262,6 +262,37 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-no-skill-local-evals.sh
 
+      # The growth-studio pack declares its scenarios in plugin.yaml, and pack
+      # verification only checks that each command is runnable - it never
+      # executes one. So the pack's own behavior assertions ran nowhere, and a
+      # verb rename in SKILL.md left the activation gate asserting a string
+      # that no longer existed while every check stayed green.
+      #
+      # The commands are read from the manifest rather than hardcoded here: a
+      # scenario added or renamed there would otherwise run nowhere, which is
+      # the same hole one directory over. An empty list is an error, not a
+      # pass, so a manifest that stops declaring scenarios cannot read as one.
+      - name: growth-studio pack scenarios
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'PY'
+          import pathlib, shlex, subprocess, sys, yaml
+
+          pack = pathlib.Path("plugins/growth-studio")
+          scenarios = yaml.safe_load((pack / "plugin.yaml").read_text()).get("scenarios") or []
+          if not scenarios:
+              sys.exit(f"no scenarios declared in {pack}/plugin.yaml")
+          for scenario in scenarios:
+              print(f"::group::{scenario['id']}", flush=True)
+              rc = subprocess.run(shlex.split(scenario["command"]), cwd=pack).returncode
+              print("::endgroup::", flush=True)
+              if rc:
+                  sys.exit(f"scenario {scenario['id']} failed with exit {rc}")
+          print(f"{len(scenarios)} scenario(s) passed")
+          PY
+
       # From tracker-partition.yml.
       - name: Tracker partition gate + self-test
         if: ${{ !cancelled() }}
