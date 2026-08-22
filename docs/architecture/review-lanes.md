@@ -499,12 +499,18 @@ Neither layer covers the specimens alone. The probe cannot see the window betwee
 
 | Site | Registers | Why it is the one that matters |
 |---|---|---|
-| `PreToolUse` on the Skill tool (`hooks/review-hold.sh acquire`) | yes | all three specimens were reviews the worker self-invoked through this tool, which is not footnote code and cannot register on its own |
-| `PostToolUse` on the Skill tool (`hooks/review-hold.sh release`) | releases | the tool call returned |
-| `skills/review/scripts/emit-attestation.sh` | releases | the positive completion marker: a verdict now exists for this head, so the release and the proof are one event |
-| a human or an unhooked harness | no | the named residual gap, covered only by the worktree probe |
+| `PreToolUse` on the Skill tool (`hooks/review-hold.sh`) | takes it | all three specimens were reviews the worker self-invoked through this tool, which is not footnote code and cannot register on its own |
+| `skills/review/scripts/emit-attestation.sh` | releases it | the positive completion marker: a verdict now exists for this head, so the release and the proof are one event |
+| the TTL | ages it out | the reviewer died. See the receipt rule below |
+| a human or an unhooked harness | takes nothing | the named residual gap, covered only by the worktree probe |
 
 Registration NEVER blocks a review from starting. The probe still covers a review that runs unheld. A review that refuses to start because a lockfile write failed is strictly worse.
+
+A `PostToolUse` release was wired here and removed. For an INLINE skill the Skill tool returns the SKILL.md body, and the review runs AFTERWARDS. So the release fired within milliseconds, and the hold covered nothing. That is exactly the dispatched-but-not-yet-edited window layer 2 cannot see. The guard was decorative for its own specimen.
+
+So a review that finds findings holds the lane until a clean re-review attests. That is the intended behavior: the findings are unfixed. To merge before then, release by hand.
+
+The release never names a holder, and `--holder` is optional on the verb for that reason. The hold is a lane lock, not an ownership assertion. Each release site derives its own holder string, and `release_claim` no-ops SILENTLY on a mismatch. A holder-matched release wedged the lane for the full TTL under a receipt that said "released".
 
 ### Who reads it
 
@@ -524,6 +530,8 @@ That coarseness is deliberate, in the safe direction. Any review hold in the rep
 A missing hold is never by itself the clear answer. It clears only after the worktree enumeration RAN and answered. Four readings block instead: a corrupted lockfile, an unreadable claims root, a failed `git worktree list`, and a PR whose head branch will not resolve. An unprobed PR is not a clear one.
 
 A hold that outlives a crashed reviewer wedges the merge lane permanently. That is worse than the defect it prevents. So it ages out on `config.review.hold_ttl_minutes`, which defaults to 90. It never ages out silently. The surface that clears past a lapsed hold prints the holder and the expiry, and emits `review_hold_expired`. A lane that clears with no receipt reads exactly like a lane nobody ever held.
+
+That same arm DELETES the lockfile, in one breath with the receipt. A lapsed file stops blocking the Python readers, which judge expiry, and keeps blocking the stdlib hook, which cannot. One crashed reviewer otherwise denies every bare `gh pr merge` in the repo, for every PR, until someone notices. The claims reaper does collect it eventually, but it is config-gated, so this path cannot lean on it.
 
 There is no self-exemption. An author who merges over its own uncommitted fixes loses them, exactly as a stranger does. A caller-relative `ready` also means two readers of one payload get different answers.
 

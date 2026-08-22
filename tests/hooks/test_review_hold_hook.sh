@@ -123,13 +123,14 @@ mkdir -p "$TMP/norepo"
 run_hook acquire "$(skill_call "code-review" "$TMP/norepo")"
 expect_silent "cwd is not a repo"
 
-echo "-- release fires on the same names --"
+echo "-- the hook only ever acquires --"
+# A PostToolUse release was wired here and removed. For an INLINE skill the
+# Skill tool returns the SKILL.md body and the review runs AFTERWARDS, so the
+# release fired within milliseconds and the hold covered nothing - precisely
+# the window layer 2 cannot see. The release lives at the attestation and the
+# TTL instead.
 run_hook release "$(skill_call "code-review")"
-if grep -q "release" "$RECORDED" 2>/dev/null; then
-  pass "release: cleared the hold"
-else
-  fail "release: no release recorded"
-fi
+expect_silent "action=release"
 
 echo "-- acquire pins the head it is reviewing --"
 run_hook acquire "$(skill_call "code-review")"

@@ -46,6 +46,11 @@ def _worktree_list(entries):
 
 NO_WORKTREE = _fake_git({"worktree": _worktree_list([])})
 
+# A listed worktree whose directory is GONE is skipped, not probed (git keeps
+# listing it until someone prunes), so every fixture that expects a probe needs
+# a path that really exists.
+WT_PATH = Path(__file__).resolve().parent
+
 
 def test_key_is_branch_scoped_and_repo_local():
     key = _review_hold.review_hold_key("feature/x-a089")
@@ -144,7 +149,7 @@ def test_expired_hold_clears_but_never_silently(tmp_path: Path, monkeypatch, cap
 def test_tracked_modifications_block_the_merge(tmp_path: Path):
     runner = _fake_git(
         {
-            "worktree": _worktree_list([("/wt/x", "abc123", "feature/x")]),
+            "worktree": _worktree_list([(str(WT_PATH), "abc123", "feature/x")]),
             "status": Result(returncode=0, stdout=" M cli/src/fno/pr/_merge.py\n", stderr=""),
         }
     )
@@ -153,7 +158,7 @@ def test_tracked_modifications_block_the_merge(tmp_path: Path):
     )
     assert activity.blocked is True
     assert activity.blocker == "worktree_dirty"
-    assert "/wt/x" in activity.detail
+    assert str(WT_PATH) in activity.detail
 
 
 def test_untracked_scratch_never_blocks(tmp_path: Path):
@@ -163,7 +168,7 @@ def test_untracked_scratch_never_blocks(tmp_path: Path):
     def runner(cmd, *, cwd=None, env=None, input_text=None, timeout=None):
         seen.append(list(cmd))
         if "worktree" in cmd:
-            return _worktree_list([("/wt/x", "abc123", "feature/x")])
+            return _worktree_list([(str(WT_PATH), "abc123", "feature/x")])
         return Result(returncode=0, stdout="", stderr="")
 
     activity = _review_hold.review_activity(
@@ -177,7 +182,7 @@ def test_untracked_scratch_never_blocks(tmp_path: Path):
 def test_worktree_head_mismatch_blocks(tmp_path: Path):
     runner = _fake_git(
         {
-            "worktree": _worktree_list([("/wt/x", "localsha", "feature/x")]),
+            "worktree": _worktree_list([(str(WT_PATH), "localsha", "feature/x")]),
             "status": Result(returncode=0, stdout="", stderr=""),
         }
     )
@@ -192,7 +197,7 @@ def test_worktree_head_mismatch_blocks(tmp_path: Path):
 def test_head_conjunct_is_skipped_without_a_pr_head(tmp_path: Path):
     runner = _fake_git(
         {
-            "worktree": _worktree_list([("/wt/x", "localsha", "feature/x")]),
+            "worktree": _worktree_list([(str(WT_PATH), "localsha", "feature/x")]),
             "status": Result(returncode=0, stdout="", stderr=""),
         }
     )
@@ -222,7 +227,7 @@ def test_a_dead_probe_blocks_rather_than_clearing(tmp_path: Path, failure):
 def test_a_status_probe_failure_blocks(tmp_path: Path):
     runner = _fake_git(
         {
-            "worktree": _worktree_list([("/wt/x", "abc123", "feature/x")]),
+            "worktree": _worktree_list([(str(WT_PATH), "abc123", "feature/x")]),
             "status": Result(returncode=128, stdout="", stderr="fatal: bad object"),
         }
     )
@@ -324,3 +329,85 @@ def test_no_refusal_when_clear(tmp_path: Path):
         )
         is None
     )
+
+
+# ── round 2: what the self-review found ─────────────────────────────────────
+
+
+def test_a_removed_worktree_is_skipped_not_probed(tmp_path: Path):
+    """`git worktree list` keeps listing a removed worktree until someone
+    prunes, and `git -C <gone path> status` fails. Reading that as a dead
+    instrument held every post-merge retry at exit 2 forever."""
+    gone = tmp_path / "archived-worktree"
+
+    def runner(cmd, *, cwd=None, env=None, input_text=None, timeout=None):
+        if "worktree" in cmd:
+            return _worktree_list([(str(gone), "abc123", "feature/x")])
+        raise AssertionError("a worktree that is not on disk must not be probed")
+
+    activity = _review_hold.review_activity(
+        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=runner
+    )
+    assert activity.blocked is False
+    assert activity.worktree["note"] == "no local worktree on this branch"
+
+
+def test_release_does_not_require_the_acquiring_holder(tmp_path: Path):
+    """The hold is a lane lock, not an ownership assertion. Every release site
+    derives its own holder string, and `release_claim` no-ops SILENTLY on a
+    mismatch, so a holder-matched release left the hold sitting for its TTL."""
+    from fno.claims.core import claim_status
+
+    _review_hold.acquire_review_hold(
+        "feature/x", head="abc123", holder="review-session:acquired-by", root=tmp_path
+    )
+    assert _review_hold.release_review_hold("feature/x", root=tmp_path) is True
+    assert claim_status(_review_hold.review_hold_key("feature/x"), root=tmp_path)["state"] == "free"
+
+
+def test_release_reports_whether_anything_was_there(tmp_path: Path):
+    """False for an absent hold. Reporting success either way asserts an
+    absence, on the one recovery command an operator has."""
+    assert _review_hold.release_review_hold("feature/x", root=tmp_path) is False
+    _review_hold.acquire_review_hold(
+        "feature/x", head="abc123", holder="r", root=tmp_path
+    )
+    assert _review_hold.release_review_hold("feature/x", root=tmp_path) is True
+
+
+def test_release_clears_a_corrupted_lockfile(tmp_path: Path):
+    """A corrupted claim has no readable holder, so no release_claim call can
+    name one. Leaving it is the worse outcome: every read classifies it
+    CORRUPTED, which BLOCKS, forever."""
+    from fno.claims.io import claim_path
+
+    path = claim_path(_review_hold.review_hold_key("feature/x"), root=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ not a claim", encoding="utf-8")
+    assert _review_hold.release_review_hold("feature/x", root=tmp_path) is True
+    assert not path.exists()
+
+
+def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """The lapsed lockfile stops blocking HERE but still blocks the stdlib hook,
+    which cannot judge expiry and denies on the file's mere presence. One
+    crashed reviewer would deny every bare `gh pr merge` in the repo until
+    someone noticed."""
+    from fno.claims.core import claim_status
+    from fno.claims.io import claim_path
+
+    key = _review_hold.review_hold_key("feature/x")
+    acquire_claim(key, "reviewer:sess-1", ttl_ms=60_000, pid=DEAD_PID, root=tmp_path)
+    from fno.claims import staleness
+
+    monkeypatch.setattr(staleness, "now_ms", lambda: 99_999_999_999_999)
+
+    activity = _review_hold.review_activity(
+        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE
+    )
+    assert activity.blocked is False
+    assert "expired" in capsys.readouterr().err
+    assert not claim_path(key, root=tmp_path).exists()
+    assert claim_status(key, root=tmp_path)["state"] == "free"

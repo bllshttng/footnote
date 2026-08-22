@@ -203,6 +203,14 @@ grep -q "do pr review-hold release --branch feature/x-e601" "$ALL_CALLS" \
   && pass "a landed verdict releases the review hold" \
   || fail "no review-hold release after the attestation: $(cat "$ALL_CALLS")"
 
+# No --holder. The hook names the HARNESS session; this script's session_id is
+# grepped from target-state.md and falls back to "unknown". release_claim
+# no-ops SILENTLY on a mismatch, so a holder-matched release wedged the lane
+# for the full TTL under a receipt that said "released".
+grep -q -- "--holder" "$ALL_CALLS" \
+  && fail "the release passed a holder it cannot reconstruct" \
+  || pass "the release names no holder"
+
 echo ""
 echo "emit-attestation: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

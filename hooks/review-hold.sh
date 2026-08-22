@@ -17,11 +17,24 @@
 # runs unheld - the worktree layer of the guard covers exactly that case. Every
 # failure path here exits 0 with no permission decision.
 #
-# Usage: review-hold.sh acquire|release   (hook JSON on stdin)
+# ACQUIRE ONLY, deliberately. A PostToolUse release was wired here and removed:
+# for an INLINE skill the Skill tool returns the SKILL.md body and the review
+# runs AFTERWARDS, so the release fired within milliseconds and the hold covered
+# nothing. That is precisely the dispatched-but-not-yet-edited window layer 2
+# cannot see, and the window PR 1072 was merge-ready in - the guard would have
+# been decorative for its own specimen.
+#
+# The release therefore lives at the two markers that mean the review is REALLY
+# done: `skills/review/scripts/emit-attestation.sh` (a verdict now exists for
+# this head) and the TTL (the reviewer died). A review that found findings holds
+# the lane until a clean re-review attests, which is the intended behavior: the
+# findings are unfixed.
+#
+# Usage: review-hold.sh acquire   (hook JSON on stdin)
 set -uo pipefail
 
 action="${1:-}"
-[[ "$action" == "acquire" || "$action" == "release" ]] || exit 0
+[[ "$action" == "acquire" ]] || exit 0
 # FNO overrides the binary, matching emit-attestation.sh: tests point it at a
 # stub so an assertion reads a file the test owns.
 FNO_BIN="${FNO:-fno}"
@@ -73,13 +86,8 @@ esac
 session="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
 holder="review-session:${session:-unknown}"
 
-if [[ "$action" == "acquire" ]]; then
-  head="$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)"
-  "$FNO_BIN" do pr review-hold acquire \
-    --branch "$branch" --head "$head" --holder "$holder" --verb "/$skill" \
-    --repo "$cwd" >/dev/null 2>&1 || true
-else
-  "$FNO_BIN" do pr review-hold release \
-    --branch "$branch" --holder "$holder" --repo "$cwd" >/dev/null 2>&1 || true
-fi
+head="$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)"
+"$FNO_BIN" do pr review-hold acquire \
+  --branch "$branch" --head "$head" --holder "$holder" --verb "/$skill" \
+  --repo "$cwd" >/dev/null 2>&1 || true
 exit 0

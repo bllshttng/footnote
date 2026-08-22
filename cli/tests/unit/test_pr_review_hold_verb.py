@@ -27,7 +27,7 @@ def _invoke(*args):
 
 def test_check_is_clear_when_nothing_is_running(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "fno.pr._merge._pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123")
+        "fno.pr._merge._pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123", "OPEN")
     )
     monkeypatch.setattr(
         _review_hold, "review_hold_refusal", lambda *a, **kw: None
@@ -39,7 +39,7 @@ def test_check_is_clear_when_nothing_is_running(monkeypatch, tmp_path):
 
 def test_check_exits_3_while_a_review_is_running(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "fno.pr._merge._pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123")
+        "fno.pr._merge._pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123", "OPEN")
     )
     monkeypatch.setattr(
         _review_hold,
@@ -73,9 +73,16 @@ def test_acquire_then_release_round_trips(tmp_path):
     assert acquired.exit_code == 0
     assert claim_status(key, root=tmp_path)["state"] == "live"
 
-    released = _invoke("release", "--branch", "feature/x-a089", "--holder", "reviewer:sess-1")
+    released = _invoke("release", "--branch", "feature/x-a089")
     assert released.exit_code == 0
+    assert "released" in released.stdout
     assert claim_status(key, root=tmp_path)["state"] == "free"
+
+    # Say which happened. A "released" printed over an absent hold is the
+    # absence-as-success shape, on the one recovery command an operator has.
+    again = _invoke("release", "--branch", "feature/x-a089")
+    assert again.exit_code == 0
+    assert "no hold on" in again.stdout
 
 
 def test_a_failed_acquire_still_exits_zero(monkeypatch, tmp_path):
@@ -100,9 +107,33 @@ def test_acquire_honors_an_explicit_ttl(tmp_path):
     assert row["expires_at"] - row["acquired_at"] == 5 * 60_000
 
 
-def test_acquire_and_release_require_a_branch_and_holder(tmp_path):
+def test_acquire_needs_a_branch_and_a_holder(tmp_path):
     assert _invoke("acquire", "--head", "abc123").exit_code == 1
-    assert _invoke("release", "--branch", "feature/x-a089").exit_code == 1
+    assert _invoke("acquire", "--branch", "feature/x-a089").exit_code == 1
+
+
+def test_release_needs_only_the_branch(tmp_path):
+    """The refusal an operator reads prints exactly `--branch <b>`. Requiring a
+    holder too would make the one documented recovery command exit 1."""
+    assert _invoke("release").exit_code == 1
+    assert _invoke("release", "--branch", "feature/x-a089").exit_code == 0
+
+
+def test_release_clears_a_hold_taken_by_someone_else(tmp_path):
+    """The acquire side names the harness session; every release side derives
+    its own string. `release_claim` no-ops SILENTLY on a mismatch, so a
+    holder-matched release left the hold sitting for the full TTL with a
+    "released" receipt printed over it."""
+    from fno.claims.core import claim_status
+
+    _review_hold.acquire_review_hold(
+        "feature/x-a089", head="abc123", holder="review-session:some-other-session",
+        root=tmp_path,
+    )
+    result = _invoke("release", "--branch", "feature/x-a089")
+    assert result.exit_code == 0
+    assert "released" in result.stdout
+    assert claim_status(_review_hold.review_hold_key("feature/x-a089"), root=tmp_path)["state"] == "free"
 
 
 def test_an_unknown_action_is_a_usage_error(tmp_path):

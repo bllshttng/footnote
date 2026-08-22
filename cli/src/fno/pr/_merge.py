@@ -184,12 +184,14 @@ def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     return str(info.get("head_sha") or "").strip() or None
 
 
-def _pr_head_ref_and_oid(pr_number: int, repo: str) -> Optional[Tuple[str, str]]:
-    """``(branch, head_sha)`` for a PR, or None when the read failed.
+def _pr_head_ref_and_oid(pr_number: int, repo: str) -> Optional[Tuple[str, str, str]]:
+    """``(branch, head_sha, state)`` for a PR, or None when the read failed.
 
-    One REST request answers both, the same one ``_pr_head_oid`` already makes.
-    Deliberately NOT ``_pr_base_head_refs``: that reads through ``gh pr view``,
-    which bills the per-user GraphQL quota every watcher on the machine shares.
+    One REST request answers all three, the same one ``_pr_head_oid`` already
+    makes. Deliberately NOT ``_pr_base_head_refs``: that reads through ``gh pr
+    view``, which bills the per-user GraphQL quota every watcher on the machine
+    shares. The state rides along because it is already in the payload, and the
+    in-flight guard needs it to exempt a terminal PR.
     """
     from fno.pr._rest import fetch_pr_info_rest
 
@@ -200,7 +202,7 @@ def _pr_head_ref_and_oid(pr_number: int, repo: str) -> Optional[Tuple[str, str]]
     sha = str(info.get("head_sha") or "").strip()
     if not branch or not sha:
         return None
-    return branch, sha
+    return branch, sha, str(info.get("state") or "").upper()
 
 
 def _in_flight_review_refusal(pr_number: int, repo: str) -> Optional[str]:
@@ -222,7 +224,14 @@ def _in_flight_review_refusal(pr_number: int, repo: str) -> Optional[str]:
                 "and sha, so no in-flight review could be ruled out; "
                 "refusing to assume none is running"
             )
-        branch, head = refs
+        branch, head, state = refs
+        # The same terminal exemption `fno do pr status` takes: this guard
+        # protects what WOULD merge, and a merged or closed PR has no
+        # would-merge left. Without it, a merge that LANDED and then failed
+        # during cleanup is retried, held at exit 2 by a worktree that is
+        # legitimately dirty, and never reaches the already-merged answer.
+        if state in ("MERGED", "CLOSED"):
+            return None
         return review_hold_refusal(branch, pr_head=head, repo=repo)
     except Exception as exc:  # noqa: BLE001 - matches the plan-hold polarity
         return f"review-activity-unreadable: {exc}; refusing to assume no review is running"

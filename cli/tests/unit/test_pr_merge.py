@@ -2632,7 +2632,7 @@ def test_a_thrown_probe_refuses(monkeypatch, tmp_path):
 
 def test_a_clear_probe_does_not_refuse(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123")
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123", "OPEN")
     )
     monkeypatch.setattr(
         "fno.pr._review_hold.review_hold_refusal",
@@ -2648,8 +2648,26 @@ def test_the_branch_and_head_come_from_one_rest_read(monkeypatch, tmp_path):
 
     def _fake_info(pr, cwd=None, runner=None, repo=None):
         seen["called"] = True
-        return {"head_ref": "feature/x-a089", "head_sha": "abc123"}, ""
+        return {"head_ref": "feature/x-a089", "head_sha": "abc123", "state": "OPEN"}, ""
 
     monkeypatch.setattr("fno.pr._rest.fetch_pr_info_rest", _fake_info)
-    assert _merge._pr_head_ref_and_oid(42, str(tmp_path)) == ("feature/x-a089", "abc123")
+    assert _merge._pr_head_ref_and_oid(42, str(tmp_path)) == (
+        "feature/x-a089",
+        "abc123",
+        "OPEN",
+    )
     assert seen["called"] is True
+
+
+def test_a_terminal_pr_is_exempt(monkeypatch, tmp_path):
+    """The guard protects what WOULD merge. A merge that LANDED and then failed
+    during cleanup is retried, and without this it is held at exit 2 by a
+    worktree that is legitimately dirty, never reaching the merged answer."""
+    monkeypatch.setattr(
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123", "MERGED")
+    )
+    monkeypatch.setattr(
+        "fno.pr._review_hold.review_hold_refusal",
+        lambda *a, **kw: pytest.fail("a terminal PR must not be probed"),
+    )
+    assert _REAL_IN_FLIGHT_REFUSAL(42, str(tmp_path)) is None

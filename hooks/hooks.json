@@ -150,15 +150,6 @@
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/capture-plan-mode.sh"
           }
         ]
-      },
-      {
-        "matcher": "Skill",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/review-hold.sh release"
-          }
-        ]
       }
     ],
     "SubagentStart": [

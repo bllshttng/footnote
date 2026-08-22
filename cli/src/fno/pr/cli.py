@@ -361,15 +361,33 @@ def review_hold(
                 err=True,
             )
             raise typer.Exit(code=4)
-        refusal = _review_hold.review_hold_refusal(refs[0], pr_head=refs[1], repo=cwd)
+        branch, head, _state = refs
+        refusal = _review_hold.review_hold_refusal(branch, pr_head=head, repo=cwd)
         if refusal:
             typer.echo(refusal, err=True)
             raise typer.Exit(code=3)
-        typer.echo(f"PR {pr_number}: no review in flight on {refs[0]}")
+        typer.echo(f"PR {pr_number}: no review in flight on {branch}")
         raise typer.Exit(code=0)
 
-    if not branch or not holder:
-        typer.echo(f"review-hold {action} needs --branch and --holder", err=True)
+    if not branch:
+        typer.echo(f"review-hold {action} needs --branch", err=True)
+        raise typer.Exit(code=1)
+    if action == "release":
+        # --holder is OPTIONAL here, and omitting it is the normal case: this is
+        # a lane lock, not an ownership assertion. The refusal an operator reads
+        # prints exactly `--branch <b>`, so requiring more would make the one
+        # documented recovery command exit 1.
+        released = _review_hold.release_review_hold(branch, holder=holder)
+        # Say which happened. "released" printed over an absent hold is the
+        # absence-as-success shape, on the one recovery path there is.
+        typer.echo(
+            f"review-hold: released {branch}"
+            if released
+            else f"review-hold: no hold on {branch}"
+        )
+        raise typer.Exit(code=0)
+    if not holder:
+        typer.echo("review-hold acquire needs --holder", err=True)
         raise typer.Exit(code=1)
     if action == "acquire":
         claim = _review_hold.acquire_review_hold(
@@ -388,10 +406,6 @@ def review_hold(
             typer.echo(f"review-hold: not registered on {branch}", err=True)
             raise typer.Exit(code=0)
         typer.echo(f"review-hold: holding {branch} at {head or 'an unrecorded head'}")
-        raise typer.Exit(code=0)
-    if action == "release":
-        _review_hold.release_review_hold(branch, holder=holder)
-        typer.echo(f"review-hold: released {branch}")
         raise typer.Exit(code=0)
     typer.echo(f"unknown review-hold action: {action}", err=True)
     raise typer.Exit(code=1)

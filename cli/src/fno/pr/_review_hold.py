@@ -148,14 +148,41 @@ def acquire_review_hold(
 
 
 def release_review_hold(
-    branch: str, *, holder: str, root: Optional[Path] = None
+    branch: str, *, holder: Optional[str] = None, root: Optional[Path] = None
 ) -> bool:
-    """Release this holder's hold. Idempotent; never raises."""
-    from fno.claims.core import release_claim
+    """Clear the branch's review hold. Returns whether one was actually there.
 
+    ``holder`` is OPTIONAL, and omitting it is the normal case. This is a lane
+    lock, not an ownership assertion: a landed verdict for this head clears
+    whatever hold the branch carries, whoever took it. Requiring a match made
+    the release unreachable in practice, because the acquire side names the
+    harness session and the release sides derive their own strings - and
+    ``release_claim`` no-ops SILENTLY on a mismatch, so the hold sat for the
+    full TTL with a "released" receipt printed over it.
+
+    The return value is the honest one. ``release_claim`` returns None for an
+    absent claim, a corrupted one, and a holder mismatch alike, so a caller that
+    reported success on every path was asserting an absence (the AGENTS.md
+    pitfall) on the one recovery command an operator has.
+    """
+    from fno.claims.core import claim_status, release_claim
+    from fno.claims.types import ClaimState
+
+    key = review_hold_key(branch)
     try:
-        release_claim(review_hold_key(branch), holder, root=root)
-        return True
+        status = claim_status(key, root=root)
+        state = status.get("state")
+        if state == ClaimState.FREE.value:
+            return False
+        # A corrupted lockfile has no readable holder, so no release_claim call
+        # can name one; unlink it directly. Leaving it is the worse outcome:
+        # every read classifies it CORRUPTED, which BLOCKS, forever.
+        if state == ClaimState.CORRUPTED.value:
+            from fno.claims.io import claim_path
+
+            claim_path(key, root=root).unlink(missing_ok=True)
+            return True
+        return release_claim(key, holder or status.get("holder") or "", root=root) is not None
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"review-hold: could not release hold on {branch}: {exc}\n")
         return False
@@ -244,8 +271,19 @@ def _worktree_probe(
         )
 
     reading["probed"] = True
+    # A worktree removed from disk stays in this listing until someone prunes,
+    # and `git -C <gone path> status` then fails - which this function would
+    # read as a dead instrument and BLOCK on. That is the post-merge state:
+    # archive-worktree.sh removes the directory, and the next merge retry would
+    # be held at exit 2 forever. A path that is not there has nothing local to
+    # see, which is an answer, so it is skipped rather than probed.
     match = next(
-        (e for e in _parse_worktree_list(listed.stdout) if e.get("branch") == branch), None
+        (
+            e
+            for e in _parse_worktree_list(listed.stdout)
+            if e.get("branch") == branch and os.path.isdir(e.get("path") or "")
+        ),
+        None,
     )
     if match is None:
         reading["note"] = "no local worktree on this branch"
@@ -339,7 +377,8 @@ def review_activity(
             f"a review is in flight on {branch}: held by {status.get('holder')} "
             f"at {held_head}. Merging now ships the code the review is still fixing. "
             f"Clear it with `fno do pr review-hold release --branch {branch}` once the "
-            "review has landed its findings.",
+            "review has landed its findings. A clean re-review clears it on its own, "
+            "through the attestation.",
             status,
             not_reached,
         )
@@ -358,6 +397,15 @@ def review_activity(
             head=(status.get("metadata") or {}).get("head_sha") or "",
             expires_at=status.get("expires_at"),
         )
+        # DELETE it, in the same breath as the receipt. A lapsed lockfile that
+        # nobody removes stops blocking here (this arm falls through) while it
+        # still blocks the stdlib hook, which cannot judge expiry and denies on
+        # the file's mere presence. One crashed reviewer would then deny every
+        # bare `gh pr merge` in the repo, for every PR, until someone noticed -
+        # the permanent wedge this whole design refuses. The claims reaper does
+        # eventually collect it, but it is config-gated, so it is not a
+        # guarantee this path can lean on.
+        release_review_hold(branch, root=root)
 
     if runner is None:
         from fno.pr._proc import run as runner  # type: ignore[assignment]
