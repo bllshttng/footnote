@@ -67,7 +67,14 @@ manifest_rules = [
   { id = "idle_prompt", state = "idle" },
   { id = "approval_prompt", state = "blocked" },
 ]
-send_keys_enter_delay_ms = 0
+# Measured 2026-08-23 on a live mux pane (x-4b0b): floor 0. Every D in
+# {0,100,200,400,800} ms, 3 trials each, submitted both idle and mid-turn,
+# payloads 0.7-2.0 KB, codex-cli 0.148.0; confirmed by probe token in the
+# rollout transcript. The operator pile-up (six queued envelopes, table read
+# 0) did NOT reproduce, so 800 is a margin, not a floor: it matches the
+# claude row and CR_SETTLE_MS (mux pane send --submit), the two shipped
+# settles never observed to lose a CR. Do not lower without a repro.
+send_keys_enter_delay_ms = 800
 submit_keys = ["enter"]
 stop_strategy = "registry-noop"
 remove_strategy = "codex-session-index"
@@ -164,7 +171,13 @@ slash_prefix = ""
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = []
-send_keys_enter_delay_ms = 0
+# Measured 2026-08-23 on a live mux pane (x-4b0b): floor 0. Every D in
+# {0,100,200,400,800} ms, 3 trials each, submitted at idle, payloads 0.7 and
+# 1.2 KB, agy 1.1.19; judged by the model's ACK answer appearing after the
+# probe token (agy keeps no local transcript store). 800 is a margin, not a
+# floor, matching the claude row and CR_SETTLE_MS; do not lower without a
+# repro of the lost-CR regime.
+send_keys_enter_delay_ms = 800
 submit_keys = ["enter"]
 stop_strategy = "registry-noop"
 remove_strategy = "registry-only"

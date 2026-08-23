@@ -237,6 +237,8 @@ def test_control_socket_inject_passes_the_same_contract_delay(monkeypatch) -> No
     from fno.agents import harness_map
 
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/bin/fno-agents"))
+    # Hermetic + the unresolved-recipient case: no roster row for "session".
+    monkeypatch.setattr(dispatch_mod, "_roster_entry_for_session", lambda session: None)
     original = harness_map.capabilities
 
     def caps(harness):
@@ -255,6 +257,54 @@ def test_control_socket_inject_passes_the_same_contract_delay(monkeypatch) -> No
     assert dispatch_mod._mail_inject_claude("session", "<fno_mail>hi</fno_mail>")
     argv = next(argv for argv in seen if "mail-inject" in argv)
     assert argv[argv.index("--enter-delay-ms") + 1] == "321"
+
+
+def test_control_socket_inject_delay_follows_the_recipient_harness(monkeypatch) -> None:
+    """x-4b0b: the ``--enter-delay-ms`` argv value is the RECIPIENT's table row,
+    not a claude constant. Three resolution paths, one expected value: the
+    caller-held row (``harness=`` kwarg), the roster lookup by session id, and
+    - patched to None by the sibling test above - the claude fallback."""
+    import json
+    from types import SimpleNamespace
+
+    from fno import rust_binary
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import harness_map
+
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/bin/fno-agents"))
+    original = harness_map.capabilities
+
+    def caps(harness):
+        value = dict(original(harness))
+        value["send_keys_enter_delay_ms"] = 321 if harness == "claude" else 654
+        return value
+
+    monkeypatch.setattr(harness_map, "capabilities", caps)
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_roster_entry_for_session",
+        lambda session: SimpleNamespace(harness="codex"),
+    )
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"delivered": True}), "")
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", run)
+
+    def _delay_of(call) -> str:
+        seen.clear()
+        assert dispatch_mod._mail_inject_claude("session", "<fno_mail>hi</fno_mail>", **call)
+        argv = next(argv for argv in seen if "mail-inject" in argv)
+        return argv[argv.index("--enter-delay-ms") + 1]
+
+    # Roster lookup resolves the codex row.
+    assert _delay_of({}) == "654"
+    # The caller-held row wins without touching the roster.
+    assert _delay_of({"harness": "codex"}) == "654"
+    # An explicit claude row is honored, not overridden by the roster patch.
+    assert _delay_of({"harness": "claude"}) == "321"
 
 
 def _capture_audits(monkeypatch) -> list[tuple[dict, object]]:

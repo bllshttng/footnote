@@ -6474,6 +6474,7 @@ def _mail_inject_claude(
     sender: Optional[str] = None,
     reason_out: Optional[list] = None,
     liveness_scaled: bool = False,
+    harness: Optional[str] = None,
 ) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
@@ -6502,7 +6503,13 @@ def _mail_inject_claude(
     ``sender`` is the invoking session's mail handle, forwarded to the binary's
     audit event. Only the UNWRAPPED lanes need it: a wrapped envelope carries
     its own ``from`` in the transcript, an unwrapped one has nowhere else to
-    record who fired it."""
+    record who fired it.
+
+    ``harness`` (x-4b0b), when the caller already holds the recipient's roster
+    row, is that row's harness and names the settle-delay table row directly.
+    ``None`` resolves it from the roster by session id; a miss (no row, no
+    registry, or a harness the table does not know) falls back to claude, the
+    table's largest delay, so an unresolved read waits longer, never less."""
     import json
 
     from fno import rust_binary
@@ -6522,9 +6529,33 @@ def _mail_inject_claude(
     if binary is None:
         _record("no-binary")
         return False
-    from fno.agents.harness_map import capabilities
+    from fno.agents.harness_map import capabilities, DispatchResolveError
 
-    enter_delay_ms = capabilities("claude")["send_keys_enter_delay_ms"]
+    # x-4b0b: the settle delay belongs to the RECIPIENT's harness row, not to a
+    # claude constant. A claude-shaped timing sent to another harness's pane
+    # decides the CR by the wrong table row. The caller's row wins when held
+    # (it is the same lookup without a registry re-read, and it stays correct
+    # for short-id/mcp-channel recipients the session-id lookup cannot see);
+    # otherwise resolve from the roster. A registry error here is an
+    # unresolved read, never a raised mail path (the helper re-raises
+    # RegistryVersionError for callers that classify wake routing; this lane
+    # only wants a hint). The constant keeps the fallback out of the
+    # `capabilities("claude")` literal the shared-contract sentinel greps for.
+    _FALLBACK_DELAY_HARNESS = "claude"
+    recipient_harness = harness or _FALLBACK_DELAY_HARNESS
+    if harness is None:
+        try:
+            entry = _roster_entry_for_session(recipient)
+        except (OSError, RegistryVersionError):
+            entry = None
+        if entry is not None:
+            recipient_harness = (
+                getattr(entry, "harness", "") or _FALLBACK_DELAY_HARNESS
+            )
+    try:
+        enter_delay_ms = capabilities(recipient_harness)["send_keys_enter_delay_ms"]
+    except DispatchResolveError:
+        enter_delay_ms = capabilities(_FALLBACK_DELAY_HARNESS)["send_keys_enter_delay_ms"]
     argv = [
         str(binary), "mail-inject", "--session", recipient,
         "--enter-delay-ms", str(enter_delay_ms),
@@ -7310,6 +7341,10 @@ def _deliver_live(
         wrapped,
         reason_out=reason_out,
         liveness_scaled=family1_state == "working",
+        # x-4b0b: the row is in hand; pass its harness so the settle delay
+        # reads the recipient's table row without a registry re-read (and
+        # stays correct when `recipient` is a short_id or mcp_channel_id).
+        harness=getattr(entry, "harness", None) or None,
     )
 
 

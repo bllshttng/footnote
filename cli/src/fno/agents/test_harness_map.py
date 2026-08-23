@@ -77,14 +77,24 @@ def test_permission_and_submit_contracts_are_per_harness_not_claude_defaults():
     assert capabilities("agy")["ready_marker"] == "unsupported"
     assert claude["send_keys_enter_delay_ms"] == 800
     assert claude["submit_keys"] == ["enter"]
-    # codex submits on a carriage return like claude. Measured against codex
-    # 0.148.0: a message sent to a live pane rendered in the composer under
-    # "tab to queue message" and stayed unsent until a CR pushed it, then
-    # appeared in the transcript as a real user turn. The delay stays 0 because
-    # the CR landed correctly with no wait after the text; claude's 800 is a
-    # claude measurement and is not inherited.
+    # codex submits on a carriage return like claude. Two measurements, both
+    # live-pane (probe token confirmed in the rollout transcript):
+    # - short payload, codex 0.148.0: the CR landed with no wait after the
+    #   text, so the floor is 0.
+    # - x-4b0b, 2026-08-23, 0.7-2.0 KB mail-sized envelopes, idle and
+    #   mid-turn, D in {0,100,200,400,800} ms x3: every trial submitted, so
+    #   the floor is still 0. The table reads 800 anyway: the operator's
+    #   pile-up (six queued envelopes with the table at 0) never reproduced,
+    #   and 800 matches claude's row and CR_SETTLE_MS, the two shipped
+    #   settles never observed to lose a CR. A margin over an unexplained
+    #   failure, not a measured floor.
     assert codex["submit_keys"] == ["enter"]
-    assert codex["send_keys_enter_delay_ms"] == 0
+    assert codex["send_keys_enter_delay_ms"] == 800
+    # agy measured the same day, same protocol, judged by the model's ACK
+    # answer appearing after the probe token (agy keeps no local transcript
+    # store).
+    assert capabilities("agy")["submit_keys"] == ["enter"]
+    assert capabilities("agy")["send_keys_enter_delay_ms"] == 800
 
 
 def test_permission_response_requires_matching_fingerprinted_rule():
@@ -110,7 +120,7 @@ def test_dispatch_resolve_exposes_the_machine_readable_harness_contract():
     out = _resolve(harness="codex")
     assert out["ready_marker"] == "idle_prompt"
     assert out["submit_keys"] == ["enter"]
-    assert out["send_keys_enter_delay_ms"] == 0
+    assert out["send_keys_enter_delay_ms"] == 800
     assert out["stop_strategy"] == "registry-noop"
     assert out["remove_strategy"] == "codex-session-index"
     assert out["session_binding"] == {
@@ -171,8 +181,9 @@ def test_every_session_builder_and_submit_path_names_the_shared_contract():
     rust_inject = (root / "crates/fno-agents/src/mail_inject.rs").read_text(encoding="utf-8")
     assert "time.sleep(0.3)" not in python_inject
     assert "CR_SETTLE_MS" not in rust_inject
-    assert 'capabilities("claude")["send_keys_enter_delay_ms"]' in python_inject
-    assert "default_enter_delay_ms()" in rust_inject
+    assert 'capabilities(recipient_harness)["send_keys_enter_delay_ms"]' in python_inject
+    assert 'capabilities("claude")["send_keys_enter_delay_ms"]' not in python_inject
+    assert "default_enter_delay_ms(provider)" in rust_inject
 
 
 def _resolve(**kw):

@@ -465,11 +465,15 @@ mod tests {
         assert_eq!(claude.ready_marker, "live_prompt_box");
         assert_eq!(codex.ready_marker, "idle_prompt");
         assert_eq!(claude.send_keys_enter_delay_ms, 800);
-        // codex submits on a carriage return like claude, with no wait after
-        // the text (measured against codex 0.148.0). claude's 800ms is a claude
-        // measurement and is not inherited.
+        // codex submits on a carriage return like claude. Measured floor is 0
+        // (short payload, codex 0.148.0; and x-4b0b 2026-08-23: 0.7-2.0 KB
+        // envelopes, idle and mid-turn, every D in 0..800ms submitted). The
+        // table reads 800 as a margin: the operator's queued-envelope pile-up
+        // with the table at 0 never reproduced, and 800 matches claude's row
+        // and CR_SETTLE_MS, the two shipped settles never observed to lose
+        // a CR.
         assert_eq!(codex.submit_keys, ["enter"]);
-        assert_eq!(codex.send_keys_enter_delay_ms, 0);
+        assert_eq!(codex.send_keys_enter_delay_ms, 800);
         assert_eq!(
             opencode.permission_response["deny"].keys,
             ["right", "right", "enter"]
