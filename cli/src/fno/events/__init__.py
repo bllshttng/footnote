@@ -472,6 +472,24 @@ def validate(event: dict[str, Any]) -> None:
                 f"(allowed: {allowed_data_sources})"
             )
 
+    if type_name == "termination":
+        allowed = type_spec["data"]["properties"]["reason"]["enum"]
+        reason = data.get("reason")
+        if reason not in allowed:
+            raise ValidationError(
+                f"unknown termination data.reason: {reason!r} (allowed: {allowed})"
+            )
+
+    if type_name == "transition_rejected":
+        type_props = type_spec["data"]["properties"]
+        for field in ("kind", "event", "from"):
+            allowed = type_props[field]["enum"]
+            if field in data and data[field] not in allowed:
+                raise ValidationError(
+                    f"unknown transition_rejected data.{field}: {data[field]!r} "
+                    f"(allowed: {allowed})"
+                )
+
     # Same chokepoint rationale as session_satisfied above: the generic emit
     # CLI is the only writer for two of the three human_touch emitters (the mux
     # shells out), so a typo'd source/resolution must fail here, not land.

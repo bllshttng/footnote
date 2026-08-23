@@ -488,6 +488,91 @@ fn finalize_ledger_every_exit() {
     );
 }
 
+#[test]
+fn finalize_binary_closes_the_shadow_run_after_success() {
+    let run = "20260823T060900Z-cx73523-e04109";
+    let env = setup(run, false);
+    let run_log = env.cwd.join(".fno/run-log.jsonl");
+    fno_agents::run_state::append_transition(
+        &run_log,
+        run,
+        fno_agents::run_state::RunEvent::DispatchClassified,
+    )
+    .unwrap();
+    fno_agents::run_state::append_transition(
+        &run_log,
+        run,
+        fno_agents::run_state::RunEvent::TerminalDecided,
+    )
+    .unwrap();
+
+    let out = run_finalize(&env, "DonePRGreen");
+    assert!(out.status.success(), "finalize must succeed: {:?}", out);
+    assert_eq!(
+        fno_agents::run_state::fold_run_state(&run_log, run).unwrap(),
+        fno_agents::run_state::RunState::Closed
+    );
+}
+
+#[test]
+fn finalize_binary_repairs_a_prior_ship_before_returning() {
+    let run = "20260823T060900Z-cx73523-e04109";
+    let env = setup(run, false);
+    let run_log = env.cwd.join(".fno/run-log.jsonl");
+    fno_agents::run_state::append_transition(
+        &run_log,
+        run,
+        fno_agents::run_state::RunEvent::DispatchClassified,
+    )
+    .unwrap();
+    fno_agents::run_state::append_transition(
+        &run_log,
+        run,
+        fno_agents::run_state::RunEvent::TerminalDecided,
+    )
+    .unwrap();
+    fs::write(
+        &env.events,
+        format!(
+            "{{\"type\":\"session_finalized\",\"data\":{{\"session_id\":\"{run}\",\"ship\":true}}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let out = run_finalize(&env, "DonePRGreen");
+    assert!(
+        out.status.success(),
+        "repair finalize must succeed: {:?}",
+        out
+    );
+    assert_eq!(
+        fno_agents::run_state::fold_run_state(&run_log, run).unwrap(),
+        fno_agents::run_state::RunState::Closed
+    );
+}
+
+#[test]
+fn observer_rejection_does_not_change_legacy_finalize_success() {
+    let run = "20260823T060900Z-cx73523-e04109";
+    let env = setup(run, false);
+    let run_log = env.cwd.join(".fno/run-log.jsonl");
+    fno_agents::run_state::append_transition(
+        &run_log,
+        run,
+        fno_agents::run_state::RunEvent::DispatchClassified,
+    )
+    .unwrap();
+
+    let out = run_finalize(&env, "Budget");
+    assert!(
+        out.status.success(),
+        "observer rejection must not change legacy success: {:?}",
+        out
+    );
+    assert_eq!(count_event(&env.events, "session_finalized", run), 1);
+    assert_eq!(count_event(&env.events, "session_finalize_failed", run), 0);
+}
+
 /// x-8fc0: a ship reason now gets a completion eval too (the trigger fires on
 /// every reason but NoWork), but its body is the lighter eval prose, never
 /// the stuck-triage "(stuck: exited without shipping)" wording. NoWork is the

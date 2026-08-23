@@ -999,7 +999,10 @@ EOF
     if [[ -n "$local_sid_entropy" ]]; then
       local_session_id="$(date -u +%Y%m%dT%H%M%SZ)-${_prov_infix}${local_owner_pid}-${local_sid_entropy}"
     else
-      local_session_id="$(date -u +%Y%m%dT%H%M%SZ)-${_prov_infix}${local_owner_pid}-${RANDOM:-0}${RANDOM:-0}"
+      local_sid_random_a="${RANDOM:-0}"
+      local_sid_random_b="${RANDOM:-0}"
+      local_sid_entropy="$(printf '%06x' "$(( ((local_sid_random_a << 15) | local_sid_random_b) % 16777216 ))")"
+      local_session_id="$(date -u +%Y%m%dT%H%M%SZ)-${_prov_infix}${local_owner_pid}-${local_sid_entropy}"
     fi
   fi
   if [[ -n "${TARGET_SESSION_ID:-}" ]]; then

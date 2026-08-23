@@ -25,6 +25,7 @@
 # x-7f52 harness-neutral foreign-session guard:
 #   T13  codex-authored manifest + a CLAUDE stop -> exit 0, binary not called
 #   T14  codex-authored manifest + that codex session's own stop -> binary called
+#   T15  canonical fno_id keys the unavailable retry counter
 #
 # Each test feeds the shim stdin JSON: {"transcript_path":"<tmp>/<uuid>.jsonl"}
 # and runs the shim from a tmp cwd containing .fno/target-state.md.
@@ -575,6 +576,41 @@ STUB_EOF
         fail "T14: expected exit 2 (block honored), got $HOOK_RC"; t14_ok=false
     fi
     [[ "$t14_ok" == "true" ]] && pass "T14: codex owner's own stop reached the gate"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T15: fno_id is canonical even when session_id appears first
+# ─────────────────────────────────────────────────────────────────────────────
+log "T15: canonical fno_id keys the unavailable retry counter"
+{
+    setup_env "dddd-0015"
+    cat > "$STATE_FILE" <<STATE
+---
+session_id: legacy-session
+fno_id: canonical-session
+created_at: 2026-06-05T00:00:00Z
+claude_transcript_id: dddd-0015
+attended: true
+status: IN_PROGRESS
+---
+STATE
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" \
+        "HOME=${HOME_DIR}" "PATH=$(safe_path)" "FNO_AGENTS_BIN=/nonexistent"
+
+    t15_ok=true
+    [[ "$HOOK_RC" -eq 2 ]] || {
+        fail "T15: expected exit 2 (bounded block), got $HOOK_RC"; t15_ok=false
+    }
+    [[ -f "${TMP_DIR}/.fno/.loop-check-unavail-canonical-session" ]] || {
+        fail "T15: canonical fno_id did not key the retry counter"; t15_ok=false
+    }
+    [[ ! -f "${TMP_DIR}/.fno/.loop-check-unavail-legacy-session" ]] || {
+        fail "T15: legacy session_id incorrectly keyed the retry counter"; t15_ok=false
+    }
+    [[ "$t15_ok" == "true" ]] && pass "T15: canonical fno_id wins for retry identity"
     cleanup
 }
 

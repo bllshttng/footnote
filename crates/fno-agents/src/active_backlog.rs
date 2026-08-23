@@ -66,6 +66,7 @@ use crate::loop_runtime::{
     CloseOutcome, Evidence, GlobalJournalPath, Journal, ProjectJournalPath, UnitResult,
 };
 use crate::loopcheck::TerminationReason;
+use crate::run_outcome::classify;
 
 /// Cross-tick per-node consecutive-failure counter (the circuit breaker).
 ///
@@ -274,13 +275,14 @@ fn map_outcome(
     };
 
     let node = last.unit_id.clone();
+    let predicates = classify(last.evidence.reason.clone()).projection();
 
     // Batch-lane: a member that terminated DoneBatched succeeded - its commits
     // are on the shared batch branch and it ships via the batch PR, so the node
     // closes at merge by `fno backlog reconcile`, not here. For the daemon that
     // is a SUCCESSFUL dispatch, not a failure. Recognize it in the keep-set so a
     // batched member never trips the cross-tick circuit breaker.
-    if matches!(last.evidence.reason, TerminationReason::DoneBatched) {
+    if predicates.batch_member {
         breaker.record_success(&node);
         let _ = journal.append(
             "active_backlog_dispatched",
@@ -297,10 +299,7 @@ fn map_outcome(
     // at the human merge by `fno backlog reconcile`, exactly like DoneBatched.
     // Keep them out of the cross-tick circuit breaker (mirror the DoneBatched
     // keep-set).
-    if matches!(
-        last.evidence.reason,
-        TerminationReason::DoneAwaitingMerge | TerminationReason::DoneAwaitingReview
-    ) {
+    if predicates.circuit_breaker_success {
         breaker.record_success(&node);
         let _ = journal.append(
             "active_backlog_dispatched",
@@ -314,7 +313,7 @@ fn map_outcome(
     // path, exactly like DoneAwaitingMerge. Keep it out of the cross-tick
     // circuit breaker so an unreviewed-but-green terminal does not auto-defer
     // the node as if it had failed.
-    if matches!(last.evidence.reason, TerminationReason::DoneUnreviewed) {
+    if predicates.awaiting_review_notify {
         breaker.record_success(&node);
         let _ = journal.append(
             "active_backlog_dispatched",
@@ -431,12 +430,7 @@ const BOOT_GRACE_TICKS: u32 = 3;
 /// doc delivery). `DoneBatched`/`DoneAwaitingMerge` are NOT here - they close at
 /// merge and are recognized as success by `map_outcome`'s keep-set instead.
 fn is_done_reason(r: &TerminationReason) -> bool {
-    matches!(
-        r,
-        TerminationReason::DonePRGreen
-            | TerminationReason::DoneAdvisory
-            | TerminationReason::DoneDelivery
-    )
+    classify(r.clone()).projection().node_closable
 }
 
 /// Poll each in-flight dispatch and retire the ones that finished, updating the
@@ -473,7 +467,7 @@ fn reconcile_pending(
                 Ok(Some(ev)) => {
                     // A ref-less DonePRGreen may just be racing finalize's stamp;
                     // keep the entry and re-read on a later tick before deciding.
-                    if matches!(ev.reason, TerminationReason::DonePRGreen)
+                    if classify(ev.reason.clone()).projection().merge_armable
                         && !node_has_pr_ref(cfg, &p.node_id)
                         && p.stamp_waits < PR_STAMP_GRACE_TICKS
                     {
@@ -521,7 +515,7 @@ fn resolve_dispatch(
     // Park a dead dispatch BEFORE `fno backlog done`: its merged-PR cross-check
     // only runs when refs already exist, so a ref-less node would otherwise
     // close exit 0 and score the dead dispatch as a win.
-    let close = if matches!(ev.reason, TerminationReason::DonePRGreen)
+    let close = if classify(ev.reason.clone()).projection().merge_armable
         && !node_has_pr_ref(cfg, node_id)
     {
         CloseOutcome::Parked(

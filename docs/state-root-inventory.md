@@ -148,3 +148,9 @@ Not state-root writers, listed here because they are the other family of session
 Target state is write-once after init. King state is atomically refreshed at coronation and both gate a stop hook.
 
 A king runs in the canonical checkout. A target manifest can sit there too. So the king gets its own file rather than a `driver:` field on the target one. A manifest whose name says target and whose contents say king is how two sessions come to share one discriminator.
+
+## Project-relative run journal
+
+| Entry | Writer | Lifetime |
+|---|---|---|
+| `.fno/run-log.jsonl` | `crates/fno-agents/src/loopcheck.rs` through `run_state::append_transition` | append-only per checkout; retained as the lifecycle fold and deleted with a disposable worktree |

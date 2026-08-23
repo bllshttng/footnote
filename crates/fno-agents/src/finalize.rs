@@ -52,29 +52,11 @@
 //! its Rust-only dependency surface (Domain Pitfall).
 
 use crate::loopcheck::{emit_to_both, now_rfc3339_utc};
+use crate::run_outcome::classify_legacy;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Terminal reasons that ran an actual ship (PR landed or advisory-complete).
-/// Only these run the completion side-effects (stamp/graduate/handoff); every
-/// terminal reason runs the ledger record. `DoneBatched` and `DoneAwaitingMerge`
-/// are deliberately ABSENT: both are terminal-but-not-ship (the batch PR ships a
-/// batched member; a human merge past pre-existing main-red closes an
-/// awaiting-merge node via reconcile) - they get the always-branch ledger row
-/// but must never stamp/graduate the plan.
-const SHIP_REASONS: &[&str] = &["DonePRGreen", "DoneAdvisory"];
-
-/// Terminal reasons that signal a STUCK session: the loop-check verb saw no
-/// forward progress, or the budget cap tripped, and let the session exit
-/// without shipping. `write_postmortem` branches its body on this set - a
-/// stuck session gets the failure-triage prose, everything else gets a
-/// lighter completion-eval prose - but it no longer GATES whether an eval is
-/// written at all (see `eval_should_fire`). Interrupted/Aborted are in the
-/// set: a session that gave up mid-wedge or got cancelled is
-/// stuck-but-differently-terminated and belongs in the failure-shaped corpus.
-const STUCK_REASONS: &[&str] = &["NoProgress", "Budget", "Interrupted", "Aborted"];
 
 /// Whether a completion eval fires for this termination reason (x-8fc0).
 ///
@@ -91,7 +73,15 @@ const STUCK_REASONS: &[&str] = &["NoProgress", "Budget", "Interrupted", "Aborted
 /// ship reason, every stuck reason, `DoneBatched`/`DoneAwaitingMerge`/
 /// `DoneUnreviewed`/`DoneAwaitingReview`/`DonePlanned` alike - gets an eval.
 fn eval_should_fire(reason: &str) -> bool {
-    reason != "NoWork"
+    classify_legacy(reason)
+        .map(|record| record.projection().record_ledger)
+        .unwrap_or(false)
+}
+
+fn is_stuck_reason(reason: &str) -> bool {
+    classify_legacy(reason)
+        .map(|record| record.projection().stuck)
+        .unwrap_or(false)
 }
 
 // ── arg parsing ─────────────────────────────────────────────────────────────
@@ -149,6 +139,9 @@ Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMer
 struct ManifestFields {
     /// Target-minted session id: idempotency key, handoff filename, event data.
     session_id: Option<String>,
+    /// Canonical target-minted id, retained separately so it wins regardless of
+    /// manifest key order over the one-release `session_id` fallback.
+    fno_id: Option<String>,
     /// Claude transcript UUID: positional arg to fno.cost._session_cost / _register.
     claude_transcript_id: Option<String>,
     /// Plan to stamp/graduate (ship branch only). Empty/absent -> skip.
@@ -272,10 +265,10 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             }
         };
         match k {
-            // fno_id is the canonical target-minted id; session_id is the
-            // pre-rename fallback. `set` keeps the first non-empty, so fno_id
-            // (written first in the manifest) wins.
-            "fno_id" | "session_id" => set(&mut m.session_id, v),
+            // fno_id is canonical regardless of key order; session_id is the
+            // pre-rename fallback.
+            "fno_id" => set(&mut m.fno_id, v),
+            "session_id" => set(&mut m.session_id, v),
             // Current key is claude_session_id; accept the pre-rename
             // claude_transcript_id as a fallback for one release. `set` keeps the
             // first non-empty value, so the current key (written first) wins.
@@ -304,7 +297,16 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             _ => {}
         }
     }
+    if m.fno_id.is_some() {
+        m.session_id = m.fno_id.clone();
+    }
     m
+}
+
+fn canonical_session_id(m: &ManifestFields) -> Option<String> {
+    m.session_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
 }
 
 // ── idempotency ─────────────────────────────────────────────────────────────
@@ -510,7 +512,15 @@ pub fn run_finalize(args: &[String]) -> i32 {
         eprintln!("finalize: --state, --cwd and --reason are required\n{HELP}");
         return 2;
     };
-    let delivery_ship = reason == "DoneDelivery";
+    let classification = match classify_legacy(&reason) {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("finalize: {error}\n{HELP}");
+            return 2;
+        }
+    };
+    let predicates = classification.projection();
+    let delivery_ship = predicates.delivery_ship;
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let project_events = a.events.unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
@@ -534,16 +544,12 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     };
     let m = parse_manifest_fields(&content);
-    let Some(session_id) = m
-        .session_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(session_id) = canonical_session_id(&m) else {
         eprintln!("finalize: manifest has no session_id; skipping (cannot dedup)");
         return i32::from(delivery_ship);
     };
 
-    let legacy_ship = SHIP_REASONS.contains(&reason.as_str());
+    let legacy_ship = predicates.ship_reason;
     let ship = legacy_ship || delivery_ship;
 
     // Idempotency, ship-aware (sigma-review HIGH): a prior COMPLETED ship means
@@ -554,6 +560,14 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // the same session would otherwise never get stamped/graduated/handed off.
     let mut skip_ledger = false;
     match prior_finalize_ship(&project_events, &session_id) {
+        Some(true) if shadow_run_needs_finalize_done(&cwd, &session_id) => {
+            if record_finalize_done(&cwd, &session_id, &project_events, &global_events) {
+                eprintln!("finalize: repaired shadow closure for previously finalized session {session_id}");
+            } else {
+                eprintln!("finalize: shadow closure observer rejected previously finalized session {session_id}; legacy finalize remains complete");
+            }
+            return 0;
+        }
         Some(true) => {
             eprintln!("finalize: session {session_id} already finalized (ship); early-return");
             return 0;
@@ -563,7 +577,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // hits Budget and then resumes to DoneAwaitingMerge would silently lose
         // its do stamp - the same "correct wiring, missing coverage" failure this
         // backstop exists to fix. Everything downstream is idempotent.
-        Some(false) if !ship && !is_do_stamp_terminal(&reason) => {
+        Some(false) if !ship && !predicates.do_stamp_terminal => {
             eprintln!(
                 "finalize: session {session_id} ledger already recorded (non-ship); early-return"
             );
@@ -634,7 +648,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
             let expected = derive_expected_url_count(&cwd, &plan, m.cross_project);
             // Graduate only for the merge-less advisory terminal; a cross-project
             // advisory still waits for a derivable count (never graduate early).
-            let do_graduate = reason == "DoneAdvisory" && (!m.cross_project || expected.is_some());
+            let do_graduate = predicates.graduate && (!m.cross_project || expected.is_some());
             match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate, None) {
                 Ok(()) => stamped = true,
                 Err(step) => {
@@ -791,7 +805,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // that gets a postmortem, with an operator-directed question in its last
     // message and nothing already filed for this session, gets it filed here.
     let mut outstanding_filed = false;
-    if STUCK_REASONS.contains(&reason.as_str()) {
+    if predicates.stuck {
         let question = a
             .transcript
             .as_deref()
@@ -892,7 +906,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // The generic "not an arming terminal" hides WHY behind a vocabulary
         // term; an operator who armed auto-merge and sees it not fire needs to
         // learn the diff was unreviewed, not decode a terminal name.
-        let why = if reason == "DoneUnreviewed" {
+        let why = if predicates.awaiting_review_notify {
             "the PR is unreviewed (coverage 0); review the diff then re-run, or merge by hand"
         } else {
             "not an arming terminal"
@@ -940,8 +954,10 @@ pub fn run_finalize(args: &[String]) -> i32 {
             failed.push("delivery_terminal".into());
         }
     }
-    let delivery_retry = delivery_ship && !failed.is_empty();
     if failed.is_empty() {
+        // Wave 3 is observer-only: telemetry rejection cannot change the
+        // legacy finalization result or turn a successful terminal into retry.
+        let _ = record_finalize_done(&cwd, &session_id, &project_events, &global_events);
         emit_to_both(&project_events, &global_events, "session_finalized", data);
     } else {
         data["failed_steps"] = json!(failed);
@@ -954,11 +970,48 @@ pub fn run_finalize(args: &[String]) -> i32 {
             data,
         );
     }
-    if delivery_retry {
+    let should_retry = delivery_ship && !failed.is_empty();
+    if should_retry {
         1
     } else {
         0
     }
+}
+
+fn shadow_run_needs_finalize_done(cwd: &Path, run: &str) -> bool {
+    let path = cwd.join(".fno/run-log.jsonl");
+    if !path.exists() {
+        return false;
+    }
+    !matches!(
+        crate::run_state::fold_run_state(&path, run),
+        Ok(crate::run_state::RunState::Closed | crate::run_state::RunState::Aborted)
+    )
+}
+
+fn record_finalize_done(
+    cwd: &Path,
+    run: &str,
+    project_events: &Path,
+    global_events: &Path,
+) -> bool {
+    let path = cwd.join(".fno/run-log.jsonl");
+    if !path.exists() {
+        return true;
+    }
+    if matches!(
+        crate::run_state::fold_run_state(&path, run),
+        Ok(crate::run_state::RunState::Closed | crate::run_state::RunState::Aborted)
+    ) {
+        return true;
+    }
+    crate::loopcheck::observe_shadow_transition(
+        &path,
+        run,
+        crate::run_state::RunEvent::FinalizeDone,
+        project_events,
+        global_events,
+    )
 }
 
 // ── ledger (always) ─────────────────────────────────────────────────────────
@@ -1882,7 +1935,10 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
 /// human performs past pre-existing main-red - arming either would merge
 /// something no gate greened.
 fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
-    auto_merge_approved && reason == "DonePRGreen"
+    auto_merge_approved
+        && classify_legacy(reason)
+            .map(|record| record.projection().merge_armable)
+            .unwrap_or(false)
 }
 
 /// Return why configured optional-review evidence forbids native auto-merge,
@@ -2284,10 +2340,9 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
 /// ship authors no branch commits, so reusing that constant here would stamp
 /// every doc ship. The two sets disagree on purpose.
 fn is_do_stamp_terminal(reason: &str) -> bool {
-    matches!(
-        reason,
-        "DonePRGreen" | "DoneAwaitingMerge" | "DoneUnreviewed" | "DoneAwaitingReview"
-    )
+    classify_legacy(reason)
+        .map(|record| record.projection().do_stamp_terminal)
+        .unwrap_or(false)
 }
 
 /// Guarded `do` lifecycle stamp (x-0469). `/execute` Step 1.5 is the earlier truthful
@@ -2663,7 +2718,7 @@ fn write_postmortem(
     // heading word, the termination-line suffix, the trailing section name,
     // and its prose differ. Share the scaffold, branch only what differs
     // (was two ~20-line near-identical format! blocks).
-    let stuck = STUCK_REASONS.contains(&reason);
+    let stuck = is_stuck_reason(reason);
     let (heading, term_suffix, section, prose): (&str, &str, &str, String) = if stuck {
         (
             "Postmortem",
@@ -2920,6 +2975,20 @@ mod tests {
         assert_eq!(m.claude_transcript_id.as_deref(), Some("de977b03-aaaa"));
         assert_eq!(m.graph_node_id.as_deref(), Some("ab-f8e5f214"));
         assert_eq!(m.input.as_deref(), Some("ab-f8e5f214 no-merge"));
+    }
+
+    #[test]
+    fn canonical_fno_id_wins_when_manifest_keys_are_reversed() {
+        let m = parse_manifest_fields(
+            "---\n\
+             session_id: legacy-run\n\
+             fno_id: 20260823T060900Z-cx73523-e04109\n\
+             ---\n",
+        );
+        assert_eq!(
+            m.session_id.as_deref(),
+            Some("20260823T060900Z-cx73523-e04109")
+        );
     }
 
     #[test]
@@ -3474,10 +3543,20 @@ mod tests {
 
     #[test]
     fn ship_reasons_gate() {
-        assert!(SHIP_REASONS.contains(&"DonePRGreen"));
-        assert!(SHIP_REASONS.contains(&"DoneAdvisory"));
+        assert!(
+            classify_legacy("DonePRGreen")
+                .unwrap()
+                .projection()
+                .ship_reason
+        );
+        assert!(
+            classify_legacy("DoneAdvisory")
+                .unwrap()
+                .projection()
+                .ship_reason
+        );
         for non_ship in ["Budget", "NoProgress", "Interrupted", "Aborted", "NoWork"] {
-            assert!(!SHIP_REASONS.contains(&non_ship));
+            assert!(!classify_legacy(non_ship).unwrap().projection().ship_reason);
         }
     }
 
@@ -3485,9 +3564,67 @@ mod tests {
     fn done_planned_is_benign_terminal() {
         // A plan-only terminal graduates nothing, but (x-8fc0) it DOES still
         // get a completion eval - only NoWork is exempt from the eval.
-        assert!(!SHIP_REASONS.contains(&"DonePlanned"));
-        assert!(!STUCK_REASONS.contains(&"DonePlanned"));
+        let planned = classify_legacy("DonePlanned").unwrap().projection();
+        assert!(!planned.ship_reason);
+        assert!(!planned.stuck);
         assert!(eval_should_fire("DonePlanned"));
+    }
+
+    #[test]
+    fn finalize_done_closes_a_sealing_shadow_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = "20260823T060900Z-cx73523-e04109";
+        let log = dir.path().join(".fno/run-log.jsonl");
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        crate::run_state::append_transition(
+            &log,
+            run,
+            crate::run_state::RunEvent::DispatchClassified,
+        )
+        .unwrap();
+        crate::run_state::append_transition(&log, run, crate::run_state::RunEvent::TerminalDecided)
+            .unwrap();
+
+        let events = dir.path().join("events.jsonl");
+        assert!(record_finalize_done(dir.path(), run, &events, &events));
+
+        assert_eq!(
+            crate::run_state::fold_run_state(&log, run).unwrap(),
+            crate::run_state::RunState::Closed
+        );
+    }
+
+    #[test]
+    fn finalize_done_is_already_complete_for_an_aborted_shadow_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = "20260823T060900Z-cx73523-e04109";
+        let log = dir.path().join(".fno/run-log.jsonl");
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        crate::run_state::append_transition(
+            &log,
+            run,
+            crate::run_state::RunEvent::DispatchClassified,
+        )
+        .unwrap();
+        crate::run_state::append_transition(&log, run, crate::run_state::RunEvent::Abort).unwrap();
+
+        let events = dir.path().join("events.jsonl");
+        assert!(record_finalize_done(dir.path(), run, &events, &events));
+        assert_eq!(
+            crate::run_state::fold_run_state(&log, run).unwrap(),
+            crate::run_state::RunState::Aborted
+        );
+        assert!(!events.exists(), "aborted runs need no finalize transition");
+    }
+
+    #[test]
+    fn finalize_preserves_canonical_fno_id_for_legacy_writes() {
+        let manifest =
+            parse_manifest_fields("---\nfno_id: short-run\nsession_id: valid-fallback\n---\n");
+        assert_eq!(
+            canonical_session_id(&manifest),
+            Some("short-run".to_string())
+        );
     }
 
     #[test]
@@ -3813,10 +3950,10 @@ mod tests {
     #[test]
     fn stuck_reasons_classify_the_eval_body_not_whether_it_fires() {
         for stuck in ["NoProgress", "Budget", "Interrupted", "Aborted"] {
-            assert!(STUCK_REASONS.contains(&stuck));
+            assert!(is_stuck_reason(stuck));
         }
         for not_stuck in ["DonePRGreen", "DoneAdvisory", "DoneDelivery", "NoWork"] {
-            assert!(!STUCK_REASONS.contains(&not_stuck));
+            assert!(!is_stuck_reason(not_stuck));
         }
     }
 
