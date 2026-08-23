@@ -87,8 +87,8 @@ cp "$PRISTINE_KILL_READER" "$KILL_READER"
 
 ROGUE_READER="$FIXTURE_ROOT/crates/fno-agents/src/rogue_reader.rs"
 cat > "$ROGUE_READER" <<'EOF'
-fn forbidden(plan_path: &std::path::Path) {
-    let document = std::fs::read_to_string(&plan_path).unwrap();
+fn forbidden(path: &std::path::Path) {
+    let document = std::fs::read_to_string(&path).unwrap();
     let mapping: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(&document).unwrap();
     let _ = mapping.get("status");
 }
@@ -115,8 +115,8 @@ struct PlanHeader {
     status: String,
 }
 
-fn forbidden(plan_path: &std::path::Path) {
-    let document = std::fs::read_to_string(plan_path).unwrap();
+fn forbidden(path: &std::path::Path) {
+    let document = std::fs::read_to_string(path).unwrap();
     let _: PlanHeader = serde_yaml_ng::from_str(&document).unwrap();
 }
 EOF

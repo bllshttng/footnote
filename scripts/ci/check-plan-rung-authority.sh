@@ -140,10 +140,111 @@ fi
 echo "--- Rust: no plan-status reader ---"
 EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/delivery_completion.rs
 crates/fno-agents/src/kill_criteria.rs"
+
+# The spelling detector below catches ordinary plan readers. This semantic
+# fallback correlates a file read, YAML deserialize, and status extraction inside
+# one Rust function, so a generic local name cannot hide the prohibited flow.
+# A flow split across helper functions remains outside a shell check's reach.
+rust_status_deserializer_types() {
+    awk '
+        /Deserialize/ { derives_deserialize = 1 }
+        derives_deserialize && /struct[[:space:]]+[[:alnum:]_]+/ {
+            name = $0
+            sub(/^.*struct[[:space:]]+/, "", name)
+            sub(/[^[:alnum:]_].*$/, "", name)
+            in_struct = 1
+            depth = 0
+            opened = 0
+            has_status = 0
+            derives_deserialize = 0
+        }
+        in_struct {
+            if ($0 ~ /^[[:space:]]*(pub[[:space:]]+)?status[[:space:]]*:/) {
+                has_status = 1
+            }
+            open_line = $0
+            close_line = $0
+            opens = gsub(/{/, "", open_line)
+            closes = gsub(/}/, "", close_line)
+            if (opens > 0) opened = 1
+            depth += opens - closes
+            if (opened && depth <= 0) {
+                if (has_status) print name
+                in_struct = 0
+            }
+        }
+    ' "$1"
+}
+
+rust_reads_frontmatter_status() {
+    local source="$1"
+    local status_types
+    status_types="$(rust_status_deserializer_types "$source" | tr '\n' ' ')"
+
+    awk -v status_types="$status_types" '
+        function reset_function() {
+            reads_file = 0
+            parses_yaml = 0
+            reads_status = 0
+            uses_status_type = 0
+        }
+        function finish_function() {
+            if (reads_file && parses_yaml && (reads_status || uses_status_type)) {
+                found = 1
+            }
+            reset_function()
+        }
+        BEGIN {
+            type_count = split(status_types, status_type, " ")
+            reset_function()
+        }
+        {
+            line = $0
+            if (!in_function && line ~ /(^|[[:space:]])fn[[:space:]]+[[:alnum:]_]+/) {
+                in_function = 1
+                function_depth = depth
+                function_opened = 0
+                reset_function()
+            }
+            if (in_function) {
+                if (line ~ /((std::)?fs::read(_to_string)?|[.]read_to_string)[[:space:]]*\(/) {
+                    reads_file = 1
+                }
+                if (line ~ /serde_yaml(_ng)?::from_str/) parses_yaml = 1
+                if (line ~ /"status"/) reads_status = 1
+                for (i = 1; i <= type_count; i++) {
+                    if (status_type[i] != "" &&
+                        line ~ ("(^|[^[:alnum:]_])" status_type[i] "([^[:alnum:]_]|$)")) {
+                        uses_status_type = 1
+                    }
+                }
+            }
+
+            open_line = line
+            close_line = line
+            opens = gsub(/{/, "", open_line)
+            closes = gsub(/}/, "", close_line)
+            depth += opens - closes
+            if (in_function && opens > 0) function_opened = 1
+            if (in_function && function_opened && depth <= function_depth) {
+                finish_function()
+                in_function = 0
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$source"
+}
+
 actual=$(
-    git ls-files -z -- 'crates/**/*.rs' 2>/dev/null \
-        | xargs -0 grep -lE '((std::)?fs::read(_to_string)?\([^)]*plan|read_to_string\([^)]*plan|read_plan|load_plan|parse_plan)' 2>/dev/null \
-        | grep -v '/tests/' | LC_ALL=C sort || true
+    while IFS= read -r source; do
+        [ -n "$source" ] || continue
+        if grep -qE '((std::)?fs::read(_to_string)?\([^)]*plan|read_to_string\([^)]*plan|read_plan|load_plan|parse_plan)' "$source" \
+            || rust_reads_frontmatter_status "$source"; then
+            echo "$source"
+        fi
+    done <<EOF
+$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' | LC_ALL=C sort || true)
+EOF
 )
 if [ "$actual" != "$EXPECTED_RUST_PLAN_READERS" ]; then
     violation "the set of Rust sources reading a plan document changed" \
