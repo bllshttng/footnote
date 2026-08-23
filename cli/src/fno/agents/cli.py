@@ -965,6 +965,105 @@ def cmd_court(
     print(render_court(json_output))
 
 
+def _stamp_spawned_session_row(
+    *,
+    node: "str | None",
+    message: str,
+    phase: str,
+    worker_name: "str | None",
+    worker_harness: "str | None",
+    worker_session_uuid: "str | None",
+) -> None:
+    """Open the node's sessions row for a spawned contributor (x-4342).
+
+    A spawned reviewer never holds the claim, so it crosses none of the
+    mechanical stamping chokepoints (claim acquire/release, plan-bind, PR-link)
+    and its work lands in no sessions array. This stamp runs spawn-side, where
+    the receipt already knows the node and the worker's identity, and is
+    best-effort with a named stderr skip - matching the claim-path stamps, a
+    provenance miss must never fail the spawn.
+
+    The row's identity is the WORKER's harness-native session id (the registry
+    row's harness_session_id; the receipt's session uuid as fallback), never
+    the spawning session's id and never a prefix-shaped short id: the
+    observed_model reader refuses those, so the row would be born unreadable.
+    The row closes via `fno backlog session reap-open --phase <phase>` when the
+    observer proves the worker dead (fill, not remove - the provenance stands).
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph._constants import extract_node_ids
+    from fno.graph.fuzzy import resolve_node
+    from fno.graph.store import append_session_record, read_graph
+    from fno.paths import graph_json
+
+    # --node wins; else the first node-id-shaped token in the prompt (the
+    # operator's review spawn names the node in the message). extract_node_ids
+    # is liberal by design; resolve_node does the graph filtering.
+    candidate = node
+    if candidate is None:
+        ids = extract_node_ids(message or "")
+        if not ids:
+            return  # ad-hoc spawn: no node named anywhere, nothing to say
+        candidate = ids[0]
+    try:
+        entries = read_graph(graph_json())
+        match = resolve_node(candidate, entries)
+    except Exception as exc:  # noqa: BLE001 - provenance never fails the spawn
+        print(f"spawn: session row open skipped for {candidate}: {exc}", file=sys.stderr)
+        return
+    if match.kind != "exact":
+        print(
+            f"spawn: session row open skipped for {candidate} "
+            f"(node not in graph); the row was not written. Skipped.",
+            file=sys.stderr,
+        )
+        return
+    node_id = match.candidates[0]["id"]
+
+    harness = None
+    session_id = None
+    if worker_name:
+        try:
+            from fno.agents.registry import load_registry
+
+            row = next((r for r in load_registry() if r.name == worker_name), None)
+        except Exception:  # noqa: BLE001 - fall through to the receipt fallback
+            row = None
+        if row is not None:
+            harness = row.harness
+            session_id = row.harness_session_id
+    if not session_id:
+        # A pane binds its session uuid after the registry row exists, and a
+        # one-shot tears its row down before returning; the receipt's own uuid
+        # is the remaining honest source.
+        harness = worker_harness
+        session_id = worker_session_uuid
+    if not harness or not session_id:
+        print(
+            f"spawn: session row open skipped for {node_id} "
+            f"(no harness session id at spawn); the row was not written. Skipped.",
+            file=sys.stderr,
+        )
+        return
+
+    started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        found, _added = append_session_record(
+            graph_json(), node_id, phase=phase,
+            harness=harness, session_id=session_id, started_at=started,
+        )
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
+        print(f"spawn: session row open skipped for {node_id}: {exc}", file=sys.stderr)
+        return
+    if not found:
+        print(
+            f"spawn: session row open skipped for {node_id} "
+            f"(node not in graph); the row was not written. Skipped.",
+            file=sys.stderr,
+        )
+
+
 @agents_app.command("spawn")
 def cmd_spawn(
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
@@ -1305,6 +1404,17 @@ def cmd_spawn(
     ),
     plan: str | None = typer.Option(
         None, "--plan", help="Provenance FNO_PLAN override (skips the graph read)."
+    ),
+    session_phase: str = typer.Option(
+        "review",
+        "--session-phase",
+        help=(
+            "Lifecycle phase for the sessions row a node-bearing spawn opens on "
+            "the node (x-4342): a spawned contributor that never holds the claim "
+            "crosses no stamping chokepoint, so spawn opens the row itself. "
+            "Validated against the graph phase enum; default review. No node "
+            "resolved (--node or a node id in the prompt) means no row."
+        ),
     ),
     force: bool = typer.Option(
         False,
@@ -1824,6 +1934,19 @@ def cmd_spawn(
     # Resolve node provenance once for every substrate. A node-bearing spawn is
     # itself a dispatcher route, so it must cross the same family-2 decision and
     # dispatch reservation as advance, reconcile, and the shell entry points.
+    # x-4342: the same node-bearing spawn opens a sessions row on the node.
+    # Validate the phase before anything spawns (fail-closed, like the guards
+    # above); the stamp itself is best-effort after the launch succeeds.
+    from fno.graph.types import SESSION_PHASES
+
+    if session_phase not in SESSION_PHASES:
+        print(
+            f"--session-phase must be one of {sorted(SESSION_PHASES)} "
+            f"(got {session_phase!r})",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
     from fno.agents.mux_spawn import resolve_provenance
 
     prov_env = resolve_provenance(node, slug, plan)
@@ -2189,6 +2312,15 @@ def cmd_spawn(
             receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
+            # x-4342: the node this pane works gets its sessions row now, while
+            # the receipt holds the worker identity. Runs before the exit-22
+            # check on purpose: an unverified seed still left a live pane, and
+            # that pane's provenance is real whether its payload landed or not.
+            _stamp_spawned_session_row(
+                node=node, message=message, phase=session_phase,
+                worker_name=pane_result.name, worker_harness=pane_result.provider,
+                worker_session_uuid=pane_result.session_uuid,
+            )
             # Exit 22 means one thing: a receipt WAS written and something on it
             # is unverified - the seed, or the pane the seed was handed to. Both
             # leave a caller holding a row it cannot trust, which is what exit 22
@@ -2306,6 +2438,16 @@ def cmd_spawn(
                 os.environ.pop(_k, None)
             else:
                 os.environ[_k] = _v
+
+    # x-4342: bg/headless lane - reached only on a successful dispatch (every
+    # failure above exits). The registry row the dispatch minted carries the
+    # worker's full harness session id; a one-shot whose row was torn down or
+    # whose uuid never resolved skips with a named line, not a bad row.
+    _stamp_spawned_session_row(
+        node=node, message=message, phase=session_phase,
+        worker_name=result.name, worker_harness=result.provider,
+        worker_session_uuid=None,
+    )
 
     if result.kind == "created":
         # claude plain spawn: compact hand-rolled JSON receipt on stdout.
