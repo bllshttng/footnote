@@ -36,26 +36,17 @@ _QUICK_PLACEHOLDERS = (
     "replace me",
     "fill in",
 )
-_RUNNABLE_COMMANDS = frozenset(
-    """
-    [ bash bazel black bun bundle cargo cd cmake composer ctest curl deno diff
-    docker dotnet eslint fno fno-agents flutter git go gradle grep gh helm java
-    javac jest jq just kubectl make mvn mypy node npm npx php pip pip3 pipenv
-    pnpm podman poetry pre-commit prettier psql pytest python python3 rake rg
-    rspec ruby ruff rustc sh shellcheck swift terraform test tofu tox tsc uv
-    vitest wget xcodebuild yarn yq zsh
-    """.split()
-)
 # Command names that are also ordinary English verbs, so a prose line can lead
 # with one, plus the determiners that follow them in a sentence but never in an
 # invocation. Matching the PAIR is what keeps `cargo check` and `make test`
 # runnable while `make sure the button works` is not.
-_AMBIGUOUS_COMMANDS = frozenset("cd go java just make node test".split())
+_AMBIGUOUS_COMMANDS = frozenset("cd go java just make manually node test".split())
 # No `all`: `make all` is a real default target, and it outranks `make all the
 # tests pass` as a thing an author writes.
 _PROSE_FOLLOWERS = frozenset(
-    "a an each every it its my that the this to into your sure".split()
+    "a an each every inspect it its my that the this to into your sure".split()
 )
+_PROSE_ONLY_COMMANDS = frozenset("handwave manually".split())
 _COMMAND_WRAPPERS = frozenset({"command", "env", "gtimeout", "sudo", "timeout"})
 _CONVENTIONAL_FILENAMES = frozenset(
     """
@@ -102,18 +93,20 @@ def _runs_a_command(tokens: list[str]) -> bool:
     if not tokens:
         return False
     command = tokens[0]
+    command_lower = command.lower()
     if (
-        command in _AMBIGUOUS_COMMANDS
+        command_lower in _AMBIGUOUS_COMMANDS
         and len(tokens) > 1
         and tokens[1].lower() in _PROSE_FOLLOWERS
     ):
         return False
-    if command in _RUNNABLE_COMMANDS:
-        return True
-    # A path-shaped first token is a command only if it could be executed;
-    # `docs/verify.md describes the check` is prose that happens to lead with a
-    # path.
-    return "/" in command and not command.lower().endswith(_NON_EXECUTABLE_SUFFIXES)
+    if command_lower in _PROSE_ONLY_COMMANDS or command.startswith("-"):
+        return False
+    if _FILE_REJECT_RE.search(command):
+        return False
+    # A document-shaped first token is prose that happens to lead with a path;
+    # other bare tokens remain valid without an ecosystem-specific inventory.
+    return not command_lower.endswith(_NON_EXECUTABLE_SUFFIXES)
 
 
 def _is_runnable_verify(value: str) -> bool:
