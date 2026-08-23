@@ -142,7 +142,13 @@ def roster_sessions() -> list[dict]:
     never raises. Roster PRESENCE surfaces the row -- the ``mail-inject`` connect
     is the authoritative liveness gate, so a stale row costs one failed inject and
     a durable floor, never a wrong delivery. A bg worker leaves no pid-sidecar, so
-    this is the only source that surfaces it (the send-resolve bug this fixes)."""
+    this is the only source that surfaces it (the send-resolve bug this fixes).
+
+    The pid is resolved to the process that IS the session (x-3f84 W2): the
+    daemon's recorded pid for a bg row names the PTY HOST, so each row joins
+    through the rendezvous socket farm before leaving here. A join miss keeps
+    the recorded pid -- an operator-run interactive session has no rv socket
+    and its recorded pid is already the session."""
     try:
         raw = json.loads((_daemon_dir() / "roster.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError, UnicodeDecodeError):
@@ -150,6 +156,12 @@ def roster_sessions() -> list[dict]:
     workers = raw.get("workers") if isinstance(raw, dict) else None
     if not isinstance(workers, dict):
         return []
+    try:
+        from fno.agents.session_procs import bg_socket_pid_map
+
+        sock_map = bg_socket_pid_map()
+    except Exception:  # noqa: BLE001 — discovery never breaks on the join
+        sock_map = {}
     rows: list[dict] = []
     seen: set[str] = set()
     for w in workers.values():
@@ -163,11 +175,12 @@ def roster_sessions() -> list[dict]:
             pid = int(w.get("pid"))  # type: ignore[arg-type]  # None/bad -> caught below
         except (TypeError, ValueError):
             pid = 0
+        short_id = claude_transport_short_id(sid)
         rows.append(
             {
                 "session_id": sid,
-                "short_id": claude_transport_short_id(sid),
-                "pid": pid,
+                "short_id": short_id,
+                "pid": sock_map.get(short_id) or pid,
                 "cwd": str(w.get("cwd") or ""),
                 "status": None,
                 "agent": "claude",

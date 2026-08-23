@@ -1,9 +1,13 @@
-"""``fno agents top`` (x-c5cc): every live worker process with RSS.
+"""``fno agents top`` (x-c5cc): every live worker process with tree RSS.
 
 One table over the SAME union the spawn gate counts (imported from
 ``spawn_gate.census`` - never duplicated), so the debugging surface and the
 enforcement surface can never disagree. Python-only by design (LD8): RSS via
-psutil, no daemon involvement, kept out of the Rust client verb list.
+psutil, no daemon involvement, kept out of the Rust client verb list. The cost
+column is the worker's whole process TREE off the resolved session pid
+(:func:`fno.agents.session_procs.tree_rss_mb`, x-3f84 W2) - a row's recorded
+pid alone prices the PTY host on a bg row and misses the per-session MCP
+servers every worker forks.
 
 With ``--subagents`` (x-af92), appends a read-only section listing
 harness-native subagents (sidechain 'limbs') that the pid/registry census
@@ -22,18 +26,8 @@ from fno.agents.discover import (
     _subagent_live_seconds,
     discover_subagents,
 )
+from fno.agents.session_procs import tree_rss_mb
 from fno.agents.spawn_gate import LiveWorker, census
-
-
-def _rss_mb(pid: Optional[int]) -> Optional[int]:
-    if not pid:
-        return None
-    try:
-        import psutil
-
-        return int(psutil.Process(pid).memory_info().rss / (1024 * 1024))
-    except Exception:
-        return None
 
 
 def _crown_map() -> dict[str, str]:
@@ -148,8 +142,12 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # read as running on claude. Same rename as the list row.
                 "harness": w.harness,
                 "substrate": w.substrate,
-                "pid": w.pid,
-                "rss_mb": _rss_mb(w.pid),
+                # The process that IS the session (x-3f84 W2): for a bg row the
+                # recorded `w.pid` names the PTY HOST, and this column once
+                # priced the host while the worker's own memory never appeared
+                # in the one view built to show it.
+                "pid": w.session_pid or w.pid,
+                "rss_mb": tree_rss_mb(w.session_pid or w.pid),
                 "status": w.status,
                 # The orthogonal axis beside `status`: null for a foreign
                 # claude row this view has no harness/route context to judge.

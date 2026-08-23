@@ -202,6 +202,11 @@ class LiveWorker:
     #: is the LAST 8 -- and an operator comparing them by eye finds no overlap.
     #: That is how a census once got read as "all agents are dead".
     session_id: Optional[str] = None
+    #: The pid of the process that IS the session (x-3f84 W2), resolved through
+    #: the claude bg rendezvous sockets when the row is a bg session. ``pid``
+    #: above keeps the RECORDED pid, which for a bg row names the PTY HOST;
+    #: cost readers (``agents top``, the process-cost gate) must use this one.
+    session_pid: Optional[int] = None
 
 
 @dataclass
@@ -247,6 +252,17 @@ def census() -> LiveCensus:
     counted_short_ids: set[str] = set()
     live_registry_names: set[str] = set()
 
+    # One socket-farm read per census (x-3f84 W2): every claude row below joins
+    # through this map so no consumer re-runs lsof, and the recorded pid stays
+    # on the row beside the resolved one. An empty map is "unknown", never
+    # "no bg sessions" - rows then keep their recorded (host) pid.
+    from fno.agents.session_procs import bg_socket_pid_map
+
+    try:
+        sock_map = bg_socket_pid_map()
+    except Exception:  # noqa: BLE001 — a broken join must not break the census
+        sock_map = {}
+
     # claude roster first: display + dedup key for adopted sessions. Kept in the
     # union for `fno agents top`, but excluded from the slot cap (see slot_count).
     roster_workers: dict[str, dict] = {}
@@ -282,6 +298,7 @@ def census() -> LiveCensus:
                     pid=pid,
                     status="live",
                     session_id=session_id,
+                    session_pid=sock_map.get(short_id) or pid,
                 )
             )
 
@@ -352,6 +369,13 @@ def census() -> LiveCensus:
                 pid=row.pid,
                 status=str(row.status),
                 session_id=row.harness_session_id,
+                session_pid=(
+                    sock_map.get(row.short_id or "")
+                    or sock_map.get((row.harness_session_id or "")[:8])
+                    or row.pid
+                )
+                if row.harness == "claude"
+                else row.pid,
             )
         )
 
