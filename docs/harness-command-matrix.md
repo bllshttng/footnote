@@ -29,12 +29,12 @@ agy pane spawns trust the exact cwd before launch. The shared gate clears remain
 
 `spawn --harness opencode --substrate bg` (x-d9f9) is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted:
 
-- fno-agents manages one shared `opencode serve` per agents home (state file `opencode-serve.json`, health-gated reuse). The serve starts with a generated `OPENCODE_CONFIG` granting `permission."*" = "allow"` - the unattended posture every other worker lane gets from its own bypass flag; an unanswered permission `ask` on a headless server is a hang, not a refusal.
+- fno-agents manages one shared `opencode serve` per agents home (state file `opencode-serve.json`, health-gated reuse). The serve starts with a generated `OPENCODE_CONFIG`. That config grants `permission."*" = "allow"`, the unattended posture other worker lanes get from their own bypass flag. An unanswered permission `ask` on a headless server is a hang, not a refusal.
 - The spawn mints a session with `POST /session?directory=<cwd>`, so one serve hosts workers across worktrees.
-- The computed writable-dirs set (`FNO_WORKER_ADD_DIRS`, published by the Python seam for every non-pane spawn) rides `PATCH /session/:id` as per-session `external_directory` allow rules - the codex `--add-dir` pattern through opencode's native cell, closing the claim-writes double-writer hazard.
-- A detached `opencode run --attach <serve> --session <id> --format json` writer drives the initial turn with native command-template expansion and streams structured events to the registry row's log path. No pane scraping, no template text duplicated into fno-agents.
-- Registry identity: `harness_session_id` = the `ses_` id; reachability is the existing store-membership probe (serve sessions share the global opencode store).
-- Steering over the API (mail inject, ask, peek, resume) is a filed follow-up; the `ask` verb still refuses with the pane-send pointer.
+- The computed writable-dirs set rides `PATCH /session/:id`. The Python seam publishes it as `FNO_WORKER_ADD_DIRS` for every non-pane spawn. The set lands as per-session `external_directory` allow rules. This is the codex `--add-dir` pattern through opencode's native cell. It closes the claim-writes double-writer hazard.
+- A detached `opencode run --attach <serve> --session <id> --format json` writer drives the initial turn. Command-template expansion is native, and structured events stream to the registry row's log path. No pane scraping, no template text duplicated into fno-agents.
+- Registry identity: `harness_session_id` = the `ses_` id. Reachability is the existing store-membership probe (serve sessions share the global opencode store).
+- Steering over the API is a filed follow-up: mail inject, ask, peek, resume. Until it lands, the `ask` verb still refuses with the pane-send pointer.
 
 ## Machine-readable interactive capabilities
 
