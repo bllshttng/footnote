@@ -450,11 +450,6 @@ _PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
 _PAYLOAD_CACHE_TTL = 120.0
 _CACHE_BOUND = 256
 
-# The floor predicate's memo: keyed by its own decision inputs (repo,
-# manifest mtime, ambient marker FAMILIES), bounded for long-lived surfaces.
-_FLOOR_CACHE: dict[tuple[str, int, tuple[str, ...]], bool] = {}
-
-
 def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     """Whether the PR's diff carries a code payload.
 
@@ -534,28 +529,6 @@ def _harness_can_self_review(repo: str) -> bool:
     from fno.harness_names import KNOWN_HARNESSES
     from fno.review_capability import harness_can_self_review
 
-    # Memoized on the predicate's own inputs: the two gate predicates each
-    # consult this per fire, and each miss costs a git rev-parse plus a
-    # manifest parse on the status/merge polling path. The ambient FAMILIES
-    # (marker values are session noise) and the manifest's mtime ARE the
-    # decision inputs, so an input change is a key change and never a stale
-    # answer - a TTL would return a wrong floor across a manifest rewrite.
-    from pathlib import Path
-
-    from fno.harness_identity import present_harness_markers
-
-    manifest_path = Path(_repo_state_dir(repo)) / "target-state.md"
-    try:
-        mtime = manifest_path.stat().st_mtime_ns
-    except OSError:
-        mtime = 0
-    ambient_sig = tuple(
-        sorted({h for _m, h, _v in present_harness_markers()})
-    )
-    cache_key = (repo, mtime, ambient_sig)
-    hit = _FLOOR_CACHE.get(cache_key)
-    if hit is not None:
-        return hit
     harness = _manifest_harness(repo)
     ambient = _ambient_harness()
     if harness is None:
@@ -578,9 +551,6 @@ def _harness_can_self_review(repo: str) -> bool:
         else:
             # An unrecognized spelling is still an unattributed run: floors.
             applies = harness not in verbless
-    if len(_FLOOR_CACHE) >= _CACHE_BOUND:
-        _FLOOR_CACHE.pop(next(iter(_FLOOR_CACHE)))
-    _FLOOR_CACHE[cache_key] = applies
     return applies
 
 
