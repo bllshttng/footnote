@@ -755,6 +755,10 @@ def _release_claim_bounded(key: str, holder: str) -> bool:
 class GateRefused(SystemExit):
     """Raised (as SystemExit subclass) when the gate refuses the spawn."""
 
+    def __init__(self, code: int, receipt: Optional[dict[str, object]] = None) -> None:
+        super().__init__(code)
+        self.receipt = receipt
+
 
 def _acquire_gate_mutex(holder: str, *, fail_closed: bool = False) -> bool:
     """One attempt at the spawn-gate mutex. True = held. Errors fail open."""
@@ -822,9 +826,7 @@ def _refuse_provider_cap(
         "count": current,
         "current_count": current,
     }
-    sys.stdout.write(json.dumps(receipt) + "\n")
-    sys.stdout.flush()
-    raise GateRefused(EXIT_PROVIDER_CAP)
+    raise GateRefused(EXIT_PROVIDER_CAP, receipt)
 
 
 def _check_ram_floor(floor_gb: float) -> None:
@@ -846,9 +848,7 @@ def _check_ram_floor(floor_gb: float) -> None:
             "available_gb": avail,
             "min_free_gb": floor_gb,
         }
-        sys.stdout.write(json.dumps(receipt) + "\n")
-        sys.stdout.flush()
-        raise GateRefused(EXIT_RAM_REFUSED)
+        raise GateRefused(EXIT_RAM_REFUSED, receipt)
 
 
 def _check_load_ceiling(max_load_per_cpu: float) -> None:
@@ -1089,9 +1089,7 @@ def run_gate(
                     "reason": "no_wait_mutex_held",
                     "max_live": cap,
                 }
-                sys.stdout.write(json.dumps(receipt) + "\n")
-                sys.stdout.flush()
-                raise GateRefused(EXIT_NO_WAIT)
+                raise GateRefused(EXIT_NO_WAIT, receipt)
             if now - mutex_blocked_since >= MUTEX_WAIT_BUDGET_S:
                 _warn(
                     f"spawn-gate: gate mutex still held after "
@@ -1181,9 +1179,7 @@ def run_gate(
                     "count": slots,
                     "current_count": slots,
                 }
-                sys.stdout.write(json.dumps(receipt) + "\n")
-                sys.stdout.flush()
-                raise GateRefused(EXIT_NO_WAIT)
+                raise GateRefused(EXIT_NO_WAIT, receipt)
             now = time.monotonic()
             if not announced:
                 _warn(
@@ -1213,9 +1209,7 @@ def run_gate(
                 "count": slots,
                 "current_count": slots,
             }
-            sys.stdout.write(json.dumps(receipt) + "\n")
-            sys.stdout.flush()
-            raise GateRefused(EXIT_QUEUE_TIMEOUT)
+            raise GateRefused(EXIT_QUEUE_TIMEOUT, receipt)
         time.sleep(QUEUE_POLL_S)
 
 

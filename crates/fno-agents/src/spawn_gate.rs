@@ -1076,15 +1076,17 @@ MemAvailable:    8000000 kB\n";
         let dir = std::env::temp_dir().join(format!("fno-gate-qos-{}", std::process::id()));
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
 
         std::fs::write(
             fnodir.join("config.toml"),
             "[agents]\nworker_qos = \"off\"\n",
         )
         .unwrap();
-        // `sh` resolves on every CI platform (a non-resolving argv[0] is
-        // deliberately left unwrapped so NotFound/127 semantics survive).
-        let argv = vec!["sh".to_string(), "-c".to_string(), "true".to_string()];
+        // Use an absolute executable so this assertion is independent of a
+        // harness-restricted PATH. A non-resolving argv[0] is covered below.
+        let argv = vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()];
         assert_eq!(qos_wrap(&dir, argv.clone()), argv, "off = identity");
 
         std::fs::write(
@@ -1110,6 +1112,10 @@ MemAvailable:    8000000 kB\n";
         // caller's error, not taskpolicy's).
         let ghost = vec!["definitely-not-a-real-cli-xyz".to_string()];
         assert_eq!(qos_wrap(&dir, ghost.clone()), ghost);
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
     }
 
     #[test]

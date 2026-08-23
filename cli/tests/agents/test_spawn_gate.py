@@ -344,7 +344,7 @@ class TestRunGate:
         guard.release()
 
     def test_queue_timeout_is_distinct_and_loud(self, monkeypatch, capsys):
-        """AC1-ERR: timeout exit code is the gate's own, message names top, stdout emits receipt."""
+        """AC1-ERR: reusable gate returns refusal data without writing stdout."""
         _settings(monkeypatch, max_live=1)
         w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
         monkeypatch.setattr(
@@ -358,7 +358,8 @@ class TestRunGate:
         captured = capsys.readouterr()
         assert "fno agents top" in captured.err
         assert exc.value.code not in (2, 13, 14, 15, 18, 127)
-        receipt = json.loads(captured.out.strip())
+        assert captured.out == ""
+        receipt = exc.value.receipt
         assert receipt["status"] == "refused"
         assert receipt["reason"] == "queue_timeout"
         assert receipt["max_live"] == 1
