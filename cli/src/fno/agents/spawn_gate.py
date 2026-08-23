@@ -760,6 +760,16 @@ def _refuse_provider_cap(
         f"spawn-gate: provider {provider}, cap {cap}, current count "
         f"{current_text}{detail}; refusing immediately; no worker launched"
     )
+    receipt = {
+        "status": "refused",
+        "reason": "provider_cap",
+        "provider": provider,
+        "cap": cap,
+        "count": current,
+        "current_count": current,
+    }
+    sys.stdout.write(json.dumps(receipt) + "\n")
+    sys.stdout.flush()
     raise GateRefused(EXIT_PROVIDER_CAP)
 
 
@@ -776,6 +786,14 @@ def _check_ram_floor(floor_gb: float) -> None:
             f"spawn-gate: available RAM {avail:.1f}GB is below the min_free_gb "
             f"floor {floor_gb:.1f}GB; refusing to spawn (--force to bypass)"
         )
+        receipt = {
+            "status": "refused",
+            "reason": "ram_floor",
+            "available_gb": avail,
+            "min_free_gb": floor_gb,
+        }
+        sys.stdout.write(json.dumps(receipt) + "\n")
+        sys.stdout.flush()
         raise GateRefused(EXIT_RAM_REFUSED)
 
 
@@ -876,6 +894,7 @@ def run_gate(
     started = time.monotonic()
     last_progress = started
     announced = False
+    slots: int = 0
     #: start of the current UNBROKEN run of failed acquisitions (None = holding
     #: or not yet contended). Reset on every success so a long legitimate queue
     #: never accumulates into a spurious fail-open.
@@ -914,6 +933,13 @@ def run_gate(
                     "spawn-gate: another spawner holds the gate mutex; refusing "
                     "(--no-wait). See `fno agents top`."
                 )
+                receipt = {
+                    "status": "refused",
+                    "reason": "no_wait_mutex_held",
+                    "max_live": cap,
+                }
+                sys.stdout.write(json.dumps(receipt) + "\n")
+                sys.stdout.flush()
                 raise GateRefused(EXIT_NO_WAIT)
             if now - mutex_blocked_since >= MUTEX_WAIT_BUDGET_S:
                 _warn(
@@ -995,6 +1021,15 @@ def run_gate(
                     f"spawn-gate: {slots} live worker slots >= max_live {cap}; "
                     f"refusing (--no-wait). See `fno agents top`."
                 )
+                receipt = {
+                    "status": "refused",
+                    "reason": "no_wait",
+                    "max_live": cap,
+                    "count": slots,
+                    "current_count": slots,
+                }
+                sys.stdout.write(json.dumps(receipt) + "\n")
+                sys.stdout.flush()
                 raise GateRefused(EXIT_NO_WAIT)
             now = time.monotonic()
             if not announced:
@@ -1018,6 +1053,15 @@ def run_gate(
                 f"max_live {cap}; inspect live workers with `fno agents top`, "
                 f"or retry with --no-wait/--force"
             )
+            receipt = {
+                "status": "refused",
+                "reason": "queue_timeout",
+                "max_live": cap,
+                "count": slots,
+                "current_count": slots,
+            }
+            sys.stdout.write(json.dumps(receipt) + "\n")
+            sys.stdout.flush()
             raise GateRefused(EXIT_QUEUE_TIMEOUT)
         time.sleep(QUEUE_POLL_S)
 
