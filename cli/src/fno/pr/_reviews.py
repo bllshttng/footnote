@@ -548,9 +548,16 @@ def _base_commit_of(base_ref: str, cwd: Optional[str]) -> str:
 def _identity_of(
     sha: str, base_ref: str, cwd: Optional[str]
 ) -> "Optional[tuple[str, frozenset[str]]]":
-    key = (sha, _base_commit_of(base_ref, cwd) or base_ref, cwd or "")
+    base_commit = _base_commit_of(base_ref, cwd)
+    key = (sha, base_commit or base_ref, cwd or "")
+    # The diff runs against the RESOLVED COMMIT, the same object the key
+    # names. Diffing the live ref would let a base rewrite inside the
+    # base-commit TTL compare two identities built against different bases
+    # under one key; pinning both sides to one commit keeps the comparison
+    # coherent even when the TTL serves the pre-rewrite resolution.
+    effective_base = base_commit or base_ref
     if key not in _IDENTITY_CACHE:
-        value = _pr_code_diff_identity(sha, base_ref, cwd)
+        value = _pr_code_diff_identity(sha, effective_base, cwd)
         if value is not None:
             # Only successes memoize: None means the git read failed (or the
             # code diff is empty), and either recomputes cheaply. Pinning a

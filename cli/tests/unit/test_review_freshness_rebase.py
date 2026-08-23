@@ -276,3 +276,36 @@ def test_base_absorbed_subset_rebase_keeps_the_attestation(tmp_path):
     repo, reviewed, head = _rebased_repo_variant(tmp_path, "subset")
     shaped = _shaped(repo, reviewed, head)
     assert shaped["verdicts"][0]["freshness"] != "stale"
+
+
+def test_identity_is_computed_against_the_resolved_base_commit(tmp_path):
+    """The identity diff runs against the base's RESOLVED COMMIT, the same
+    object the cache key names. Diffing the live ref would let a base
+    rewrite inside the base-commit TTL compare identities built against two
+    different bases under one key."""
+    import time as _time
+
+    repo, reviewed, head = _repo_with_feature_branch(
+        tmp_path, conflicting_base=False
+    )
+    fresh = _reviews._base_commit_of("origin/main", str(repo))
+    assert fresh, "precondition: the base resolves"
+    # Serve the PRE-rewrite resolution from the TTL cache, then force-push
+    # the base (amend the tip) so the live ref disagrees with the cached
+    # commit and the merge base moves.
+    _reviews._BASE_COMMIT_CACHE[("origin/main", str(repo))] = (
+        _time.monotonic(),
+        fresh,
+    )
+    _sh("git", "checkout", "-q", "main", cwd=repo)
+    _sh("git", "commit", "-q", "--amend", "-m", "rewritten base", cwd=repo)
+    new_tip = _sh("git", "rev-parse", "HEAD", cwd=repo)
+    assert new_tip != fresh, "precondition: the rewrite moved the base"
+    _sh("git", "update-ref", "refs/remotes/origin/main", new_tip, cwd=repo)
+    _sh("git", "checkout", "-q", "feature", cwd=repo)
+    # The identity must equal a diff against the CACHED commit, not the
+    # moved ref: key and computation stay one object.
+    direct = _reviews._pr_code_diff_identity(head, fresh, str(repo))
+    via_cache = _reviews._identity_of(head, "origin/main", str(repo))
+    assert via_cache is not None and direct is not None
+    assert via_cache[0] == direct[0]

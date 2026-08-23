@@ -161,14 +161,17 @@ def _read_state_field(state_file: str, field: str) -> str:
                 if not ln.startswith(field + ":"):
                     # Any key opening an unclosed quote starts a multi-line
                     # scalar; its body lines are not fields. Like the Rust
-                    # scan, blank, comment, and marker lines never open one.
+                    # scan, blank, comment, and marker lines never open one,
+                    # and a lone opening quote is not its own terminator
+                    # (the len >= 2 guard, so `input: "` opens the scalar).
                     _k, sep, raw = ln.partition(":")
+                    raw = raw.strip()
                     if (
                         sep
                         and not ln.startswith("#")
                         and ln.strip() != "---"
-                        and raw.strip().startswith('"')
-                        and not _closes_quoted_scalar(raw.strip())
+                        and raw.startswith('"')
+                        and not (len(raw) >= 2 and _closes_quoted_scalar(raw))
                     ):
                         in_scalar = True
                     continue
@@ -510,9 +513,15 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
         names = hit[1]
     else:
         names = _pr_file_paths(pr_number, repo)
-        if len(_PAYLOAD_CACHE) >= _CACHE_BOUND:
-            _PAYLOAD_CACHE.pop(next(iter(_PAYLOAD_CACHE)))
-        _PAYLOAD_CACHE[key] = (now, names)
+        if names is None or any(not _is_documentation_path(p) for p in names):
+            # Only a CODE answer (or a failed read, which fails closed to
+            # code) memoizes: the cached key is (repo, pr), not the head, so
+            # a cached docs-only answer could suppress the floor for up to
+            # the TTL after new code lands on the PR. A stale code answer
+            # only demands a review that a fresh read would also demand.
+            if len(_PAYLOAD_CACHE) >= _CACHE_BOUND:
+                _PAYLOAD_CACHE.pop(next(iter(_PAYLOAD_CACHE)))
+            _PAYLOAD_CACHE[key] = (now, names)
     if names is None:
         return True
     if not names:
@@ -570,8 +579,12 @@ def _harness_can_self_review(repo: str) -> bool:
     is not permission to skip its review. The pre-x-129b shape read ONLY
     ambient markers and treated multi-family ambiguity as 'no floor', which
     silently disengaged review on any claude session started from a codex
-    shell. Mirrors self_review_floor_applies in loopcheck.rs so the merge
-    gate and the stop gate cannot disagree on the same PR."""
+    shell. Mirrors self_review_floor_applies in loopcheck.rs: the two gates
+    agree wherever both read the same run. One residual divergence is
+    deliberate and safe - a stale VERBFUL manifest floors a merge performed
+    by a verbless session whose own stop gate would not floor, because the
+    manifest names the run the PR belongs to; that direction only demands a
+    review, never drops one."""
     from fno.harness_names import KNOWN_HARNESSES
     from fno.review_capability import harness_can_self_review
 
@@ -642,7 +655,8 @@ def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
         # No configured lane: a code payload still requires review (the
         # self-review floor), unless the install opted out with
         # config.review.self_review_required = false. Mirrors the loop-check
-        # floor so the merge gate and the stop gate cannot disagree.
+        # floor so a stock install cannot merge a code PR the stop gate
+        # would have demanded review for.
         if (
             getattr(r, "self_review_required", True)
             and pr_number

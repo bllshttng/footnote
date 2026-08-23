@@ -983,6 +983,13 @@ def test_manifest_reader_ignores_keys_inside_a_multiline_input_scalar(
         encoding="utf-8",
     )
     assert _merge._manifest_harness(str(tmp_path)) is None
+    # The lone-quote shape: `input: "` OPENS the scalar (the Rust parser's
+    # len >= 2 guard), so the forged line is still scalar body, not a field.
+    (state / "target-state.md").write_text(
+        "---\n" 'input: "\n' "harness: gemini\n" 'see docs"\n' "---\n",
+        encoding="utf-8",
+    )
+    assert _merge._manifest_harness(str(tmp_path)) is None
 
 
 def test_review_floor_is_caller_independent_across_env_shapes(
