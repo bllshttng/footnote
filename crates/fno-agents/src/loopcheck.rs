@@ -6761,7 +6761,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
             // as "gh not found" and Interrupt an unattended session; the
             // downstream reads are themselves bounded.
             Err(GhReadError {
-                kind: ReadErrorKind::Failed,
+                kind: ReadErrorKind::Failed | ReadErrorKind::Unrunnable,
                 ..
             }) => false,
             Err(_) => true,
