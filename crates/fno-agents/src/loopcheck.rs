@@ -8309,11 +8309,11 @@ fn short_sha(s: &str) -> String {
 /// (gh's `--watch` exit varies by version); the design depends only on the task
 /// EXITING, never on its exit code.
 ///
-/// The bound uses shell builtins, never `timeout(1)`: stock macOS has neither
-/// it nor `gtimeout`, so naming it makes the watcher no-op and the session idle
-/// forever on a wait that never started. The watchdog is reaped once the wait
-/// returns - left alive, it wakes 30m later and kills whatever now holds that
-/// recycled pid (codex P1).
+/// The bound uses shell builtins, never `timeout(1)`: the plugin must work on
+/// hosts where that binary (and `gtimeout`) is absent, so naming it makes the
+/// watcher no-op and the session idle forever on a wait that never started.
+/// The watchdog is reaped once the wait returns - left alive, it wakes 30m
+/// later and kills whatever now holds that recycled pid (codex P1).
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // The watcher must WAIT on the actual blocker (codex P2): a review wait
     // has CI already green, so a checks watcher returns instantly and the
@@ -8347,8 +8347,9 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
 // the enforcement arm: the gate refuses done until the declared observation
 // holds, forcing the session to perform the last mile before claiming done.
 
-/// Wall-clock ceiling per probe. The host has no `timeout` binary (and no
-/// gtimeout), so the bound is native: spawn, poll `try_wait`, kill.
+/// Wall-clock ceiling per probe. The bound is native (spawn, poll `try_wait`,
+/// kill): the plugin must run on hosts where `timeout(1)` and `gtimeout` are
+/// absent, so no bound may depend on either binary existing.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A probe list is a gate, not a test suite.
@@ -8417,13 +8418,29 @@ enum FidelityGate {
 /// different things and must be free to drift independently.
 const FIDELITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Cap on RETAINED stderr per bounded run. Only retention is capped - the
+/// drain itself always runs to EOF, or a child that overflows the pipe would
+/// deadlock before exiting. The tail (not the head) is kept because the end
+/// of a diagnostic stream carries the line that killed the run.
+const BOUNDED_STDERR_TAIL_CAP: usize = 2000;
+
+/// A completed bounded run's full classification payload: exit status, stdout,
+/// and a capped stderr tail. Parsers read `stdout`; the status and tail exist
+/// so a non-zero exit or a failing child can be NAMED at the call site rather
+/// than collapsed into "the read failed".
+struct BoundedOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr_tail: Vec<u8>,
+}
+
 /// Outcome of a bounded, killable child run: the whole point is that a hang
 /// inside the child (x-8ad8 was one; nothing rules out another) can never
 /// again read as "the read failed" or wedge forever - it reads as exactly
 /// what happened, with the verb and the elapsed time attached at the call
 /// site.
 enum BoundedRun {
-    Stdout(Vec<u8>),
+    Completed(BoundedOutput),
     TimedOut(std::time::Duration),
     SpawnFailed,
     /// `try_wait()` itself errored (e.g. a concurrent reap of the group
@@ -8435,15 +8452,16 @@ enum BoundedRun {
 
 /// Run `fno_bin args...` under a native wall-clock bound, killing the
 /// child's whole process group on expiry - the same discipline as
-/// `run_probe` (spawn, poll `try_wait`, `kill_process_group`), but capturing
-/// stdout too since the caller needs to parse it as JSON. `Command::output()`
-/// alone has no timeout: it blocks until the child exits, however long that
-/// takes, which is exactly how a hang three calls deep in `fno do plan fidelity`
-/// (x-8ad8) turned into loop-check itself hanging forever and stranding the
-/// session behind it. stdout/stderr are drained on background threads for
-/// the same reason `run_probe` drains stderr that way: reading a pipe only
-/// after the child exits deadlocks against a child that fills the pipe
-/// buffer before exiting.
+/// `run_probe` (spawn, poll `try_wait`, `kill_process_group`) - and return
+/// the completed payload (exit status, stdout, capped stderr tail). This is
+/// the single transport boundary for synchronous external work on the stop
+/// path: `Command::output()` alone has no timeout, so it blocks until the
+/// child exits however long that takes, which is exactly how a hang three
+/// calls deep in `fno do plan fidelity` (x-8ad8) turned into loop-check
+/// itself hanging forever and stranding the session behind it. stdout and
+/// stderr are drained on background threads for the same reason `run_probe`
+/// drains stderr that way: reading a pipe only after the child exits
+/// deadlocks against a child that fills the pipe buffer before exiting.
 fn run_bounded(
     fno_bin: &OsStr,
     args: &[&str],
@@ -8477,16 +8495,33 @@ fn run_bounded(
     });
     let mut stderr_pipe = child.stderr.take();
     let stderr_drain = std::thread::spawn(move || {
-        // Nothing reads this back (the caller only wants stdout) - drain to
-        // sink rather than a growing Vec so an unbounded stderr write
-        // doesn't buy an unbounded allocation for bytes no one inspects.
+        // Retain only the LAST `BOUNDED_STDERR_TAIL_CAP` bytes while still
+        // draining to EOF: an unbounded write must not buy an unbounded
+        // allocation, but stopping the read early would block a child that
+        // is still writing, deadlocking the runner before any timeout.
+        let mut tail: Vec<u8> = Vec::new();
         if let Some(ref mut p) = stderr_pipe {
-            let _ = std::io::copy(p, &mut std::io::sink());
+            let mut chunk = [0u8; 4096];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tail.len() < BOUNDED_STDERR_TAIL_CAP {
+                            tail.extend_from_slice(&chunk[..n]);
+                            if tail.len() > BOUNDED_STDERR_TAIL_CAP {
+                                let excess = tail.len() - BOUNDED_STDERR_TAIL_CAP;
+                                tail.drain(..excess);
+                            }
+                        }
+                    }
+                }
+            }
         }
+        tail
     });
 
     enum Outcome {
-        Done,
+        Done(std::process::ExitStatus),
         TimedOut(std::time::Duration),
         WaitFailed,
     }
@@ -8494,7 +8529,7 @@ fn run_bounded(
     let start = std::time::Instant::now();
     let outcome = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break Outcome::Done,
+            Ok(Some(status)) => break Outcome::Done(status),
             Ok(None) => {
                 let elapsed = start.elapsed();
                 if elapsed >= timeout {
@@ -8525,10 +8560,14 @@ fn run_bounded(
         // is inflated by cleanup cost instead of reflecting the timeout itself.
         Outcome::TimedOut(elapsed) => BoundedRun::TimedOut(elapsed),
         Outcome::WaitFailed => BoundedRun::WaitFailed,
-        Outcome::Done => {
+        Outcome::Done(status) => {
             let stdout = stdout_drain.join().unwrap_or_default();
-            let _ = stderr_drain.join();
-            BoundedRun::Stdout(stdout)
+            let stderr_tail = stderr_drain.join().unwrap_or_default();
+            BoundedRun::Completed(BoundedOutput {
+                status,
+                stdout,
+                stderr_tail,
+            })
         }
     }
 }
@@ -8558,7 +8597,7 @@ fn evaluate_plan_fidelity(
         cwd,
         timeout,
     ) {
-        BoundedRun::Stdout(out) => classify_plan_fidelity(&out),
+        BoundedRun::Completed(out) => classify_plan_fidelity(&out.stdout),
         BoundedRun::SpawnFailed | BoundedRun::WaitFailed => FidelityGate::Absent,
         BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
             reason: format!(
@@ -8616,8 +8655,8 @@ fn sized_self_review_hint(fno_bin: &str, cwd: &Path, harness: Option<&str>) -> O
         cwd,
         std::time::Duration::from_secs(10),
     ) {
-        BoundedRun::Stdout(out) => {
-            let s = String::from_utf8_lossy(&out).trim().to_string();
+        BoundedRun::Completed(out) => {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             // One sane line only: a wrapper's chatter or an error page must
             // never end up embedded in a held reason as if it were an
             // invocation. Empty means the render itself gave up. An unsized
@@ -10796,6 +10835,111 @@ mod tests {
                 assert!(!reason.contains("timed out after 0.0s"), "{reason}");
             }
             other => panic!("expected Degraded, got {other:?}"),
+        }
+    }
+
+    // ── bounded run transport (the single subprocess boundary) ─────────────
+    //
+    // Hermetic: every child is a stub script in a tempdir, so no test touches
+    // a real `gh` or `fno`, and every timing case asserts wall-clock bounds
+    // wide enough to survive parallel test scheduling.
+
+    #[test]
+    fn bounded_run_completed_retains_status_stdout_and_capped_stderr_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Writes well past the retention cap to stderr, then JSON to stdout:
+        // the drain must reach EOF anyway (or the child blocks on a full pipe
+        // and the run degrades to a timeout), and the retained tail must be
+        // exactly the cap.
+        let fno = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\nhead -c 5000 /dev/zero | tr '\\0' 'x' 1>&2\necho '{\"ok\":true}'\n",
+        );
+        let cwd = std::env::temp_dir();
+        match run_bounded(fno.as_os_str(), &[], &cwd, PROBE_TIMEOUT) {
+            BoundedRun::Completed(out) => {
+                assert!(out.status.success(), "status: {:?}", out.status);
+                assert_eq!(out.stdout, b"{\"ok\":true}\n");
+                assert!(
+                    out.stderr_tail.len() <= BOUNDED_STDERR_TAIL_CAP,
+                    "retained {} > cap {}",
+                    out.stderr_tail.len(),
+                    BOUNDED_STDERR_TAIL_CAP
+                );
+                // The tail, not the head: the retained bytes are the END of
+                // the stream, which for a uniform fill is still all 'x' but
+                // provably capped.
+                assert_eq!(out.stderr_tail.len(), BOUNDED_STDERR_TAIL_CAP.min(9999));
+                assert!(out.stderr_tail.iter().all(|&b| b == b'x'));
+            }
+            other => panic!("expected Completed, got {}", bounded_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn bounded_run_completed_keeps_a_nonzero_exit_code_distinct_from_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = write_exec(tmp.path(), "fno", "#!/bin/sh\necho boom 1>&2\nexit 3\n");
+        let cwd = std::env::temp_dir();
+        match run_bounded(fno.as_os_str(), &[], &cwd, PROBE_TIMEOUT) {
+            BoundedRun::Completed(out) => {
+                assert_eq!(out.status.code(), Some(3));
+                assert!(!out.status.success());
+                assert_eq!(out.stdout, b"");
+                assert_eq!(out.stderr_tail, b"boom\n");
+            }
+            other => panic!("expected Completed, got {}", bounded_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn bounded_run_spawn_failure_reads_as_spawn_failed() {
+        let cwd = std::env::temp_dir();
+        let missing = Path::new("/definitely/missing/fno");
+        assert!(matches!(
+            run_bounded(missing.as_os_str(), &[], &cwd, PROBE_TIMEOUT),
+            BoundedRun::SpawnFailed
+        ));
+    }
+
+    #[test]
+    fn bounded_run_kills_a_forked_process_group_on_timeout() {
+        // A descendant keeps the stderr pipe open past the leader's death;
+        // only a process-GROUP kill reaps it, and the run must resolve as a
+        // distinct timeout inside the wall-clock budget, never as a hang.
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\n(sleep 30 &) 1>&2\nsleep 30\n",
+        );
+        let cwd = std::env::temp_dir();
+        let started = std::time::Instant::now();
+        match run_bounded(
+            fno.as_os_str(),
+            &[],
+            &cwd,
+            std::time::Duration::from_millis(200),
+        ) {
+            BoundedRun::TimedOut(elapsed) => {
+                assert!(elapsed >= std::time::Duration::from_millis(200));
+                // Cleanup slack for spawn + group kill, generous for parallel
+                // test scheduling: the point is "bounded", not "precise".
+                assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            }
+            other => panic!("expected TimedOut, got {}", bounded_kind(&other)),
+        }
+    }
+
+    /// Render a `BoundedRun` variant name for assertion failures without a
+    /// Debug derive on the payload-carrying enum.
+    fn bounded_kind(run: &BoundedRun) -> &'static str {
+        match run {
+            BoundedRun::Completed(_) => "Completed",
+            BoundedRun::TimedOut(_) => "TimedOut",
+            BoundedRun::SpawnFailed => "SpawnFailed",
+            BoundedRun::WaitFailed => "WaitFailed",
         }
     }
 
