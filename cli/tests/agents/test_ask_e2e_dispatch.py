@@ -38,27 +38,14 @@ from pathlib import Path
 import pytest
 
 from fno.paths_testing import use_tmpdir
+from fno.rust_binary import find_dev_binary
 
 
 # --------------------------------------------------------------------------- #
-# Rust binary discovery (mirrors test_rust_verb_parity._find_rust_bin).
+# Rust binary discovery (mirrors test_rust_verb_parity).
 # --------------------------------------------------------------------------- #
 
-def _find_rust_bin() -> Path | None:
-    """Locate the compiled ``fno-agents`` client (release preferred, then debug)."""
-    start = Path(__file__).resolve().parent
-    for parent in [start, *start.parents]:
-        crate = parent / "crates" / "fno-agents"
-        if crate.is_dir():
-            for profile in ("release", "debug"):
-                cand = crate / "target" / profile / "fno-agents"
-                if cand.is_file():
-                    return cand
-            return None
-    return None
-
-
-RUST_BIN = _find_rust_bin()
+RUST_BIN = find_dev_binary()
 requires_rust = pytest.mark.skipif(
     RUST_BIN is None,
     reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",

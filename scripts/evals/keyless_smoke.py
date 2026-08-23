@@ -10,8 +10,14 @@ import tempfile
 from pathlib import Path
 
 
+# The canonical scrub lists live in cli/src/fno/hermetic.py and
+# cli/src/fno/agents/mux_spawn.py; keep this tuple aligned with their
+# credential set. AUTH_TOKEN and BASE_URL are here for the same reason they
+# are there: a token or a redirected base URL makes a green PASS a lie.
 KEYS = (
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
@@ -28,13 +34,19 @@ def _write_executable(path: Path, body: str) -> None:
 def _rows(path: Path) -> list[dict]:
     if not path.exists():
         return []
-    return [
-        value
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-        for value in [json.loads(line)]
-        if isinstance(value, dict)
-    ]
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            # A malformed line (partial write, stray log) must end in a FAIL
+            # receipt naming the missing marker, never a traceback.
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
 
 
 def _event_type(row: dict) -> str:
@@ -62,6 +74,10 @@ def _fail(effect: str, detail: str) -> int:
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
+    # Resolve before the dispatch runs: on a box without the binary the run
+    # must fail here with the build guidance, not after dispatch has spent
+    # its whole budget.
+    agents_bin = _fno_agents_bin()
     with tempfile.TemporaryDirectory(prefix="fno-keyless-smoke-") as raw_root:
         root = Path(raw_root)
         project = root / "project"
@@ -179,7 +195,7 @@ esac
         loop_events = project / ".fno" / "events.jsonl"
         terminal = subprocess.run(
             [
-                _fno_agents_bin(), "loop-check", "--state", str(loop / "target-state.md"),
+                agents_bin, "loop-check", "--state", str(loop / "target-state.md"),
                 "--transcript", str(loop / "transcript.jsonl"), "--cwd", str(project),
                 "--events", str(loop_events), "--global-events", str(root / "global-events.jsonl"),
                 "--settings", str(loop / "settings.toml"), "--global-settings", str(root / "none.toml"),

@@ -26,6 +26,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from fno.rust_binary import find_dev_binary
+
 
 @functools.lru_cache(maxsize=1)
 def _fno_shim_dir() -> str | None:
@@ -51,25 +53,7 @@ def _fno_shim_dir() -> str | None:
     return d
 
 
-def _find_rust_bin() -> Path | None:
-    """Locate the compiled ``fno-agents`` client (release preferred, then debug).
-
-    Walks up to the workspace root (the ancestor with ``crates/fno-agents``),
-    mirroring ``test_rust_runtime._find_repo_root``.
-    """
-    start = Path(__file__).resolve().parent
-    for parent in [start, *start.parents]:
-        crate = parent / "crates" / "fno-agents"
-        if crate.is_dir():
-            for profile in ("release", "debug"):
-                cand = crate / "target" / profile / "fno-agents"
-                if cand.is_file():
-                    return cand
-            return None
-    return None
-
-
-RUST_BIN = _find_rust_bin()
+RUST_BIN = find_dev_binary()
 requires_rust = pytest.mark.skipif(
     RUST_BIN is None,
     reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",

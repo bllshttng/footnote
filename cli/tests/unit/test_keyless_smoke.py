@@ -5,21 +5,10 @@ from pathlib import Path
 
 import pytest
 
-
-def _find_rust_bin() -> Path | None:
-    start = Path(__file__).resolve().parent
-    for parent in [start, *start.parents]:
-        crate = parent / "crates" / "fno-agents"
-        if crate.is_dir():
-            for profile in ("release", "debug"):
-                cand = crate / "target" / profile / "fno-agents"
-                if cand.is_file():
-                    return cand
-            return None
-    return None
+from fno.rust_binary import find_dev_binary
 
 
-RUST_BIN = _find_rust_bin()
+RUST_BIN = find_dev_binary()
 requires_rust = pytest.mark.skipif(
     RUST_BIN is None,
     reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
