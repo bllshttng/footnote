@@ -5993,6 +5993,7 @@ def _mux_pane_send(
     confirm: bool = False,
     raw: bool = False,
     gate: Optional[bool] = None,
+    failure_out: Optional[list[str]] = None,
 ) -> bool:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
@@ -6045,15 +6046,21 @@ def _mux_pane_send(
     lane's own ``<fno_mail>`` / ``<cross-session-message>`` bodies are unchanged
     and only gain the gate.
     """
+    def _record_failure(reason: str) -> None:
+        if failure_out is not None:
+            failure_out.append(reason)
+
     mux = entry.mux or {}
     session = mux.get("session")
     pane_id = mux.get("pane_id")
     if not session or pane_id is None:
+        _record_failure("pre-submit")
         return False
     # x-e21e: the entry IS the row, so the bus-only gate reads it directly --
     # a bus-only recipient never gets a pane paste, same as the control.sock
     # and codex lanes.
     if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+        _record_failure("pre-submit")
         return False
     from fno.agents.harness_map import capabilities
 
@@ -6075,6 +6082,7 @@ def _mux_pane_send(
             f"a transport failure; the message falls back to the durable queue.",
             file=sys.stderr,
         )
+        _record_failure("pre-submit")
         return False
     submit_bytes = {
         "enter": "\r", "tab": "\t", "left": "\x1b[D", "right": "\x1b[C",
@@ -6084,6 +6092,7 @@ def _mux_pane_send(
         submit_text = [submit_bytes.get(key, key) for key in submit_keys]
         enter_delay_s = input_caps["send_keys_enter_delay_ms"] / 1000
     except (KeyError, TypeError):
+        _record_failure("pre-submit")
         return False
     # Envelope by default (node x-3a64): every agent-to-agent pane drive carries
     # the same attribution the mail lane produces, and the read-back gate refuses
@@ -6130,6 +6139,7 @@ def _mux_pane_send(
             )
         except PaneSendRefused as exc:
             print(f"mux pane {pane_id} send refused: {exc}", file=sys.stderr)
+            _record_failure("pre-submit")
             return False
 
     # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
@@ -6227,18 +6237,22 @@ def _mux_pane_send(
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"mux pane {pane} identity check failed: {exc}", file=sys.stderr)
+            _record_failure("pre-submit")
             return False
         if proc.returncode != 0:
             detail = (proc.stderr or "").strip() or "pane ls returned non-zero"
             print(f"mux pane {pane} identity check refused: {detail}", file=sys.stderr)
+            _record_failure("pre-submit")
             return False
         try:
             rows = json.loads(proc.stdout)
         except (TypeError, ValueError) as exc:
             print(f"mux pane {pane} identity check refused: invalid pane ls JSON: {exc}", file=sys.stderr)
+            _record_failure("pre-submit")
             return False
         if not isinstance(rows, list):
             print("mux pane identity check refused: pane ls JSON was not a list", file=sys.stderr)
+            _record_failure("pre-submit")
             return False
         matches = [row for row in rows if isinstance(row, dict) and row.get("pane_id") == pane_id]
         if len(matches) != 1:
@@ -6246,6 +6260,7 @@ def _mux_pane_send(
                 f"mux pane {pane} identity check refused: expected one pane row, found {len(matches)}",
                 file=sys.stderr,
             )
+            _record_failure("pre-submit")
             return False
         row = matches[0]
         actual_name = row.get("name")
@@ -6259,10 +6274,14 @@ def _mux_pane_send(
                 f"({actual_fno_id or '-'})",
                 file=sys.stderr,
             )
+            _record_failure("pre-submit")
             return False
         return True
 
+    last_attempt_phase = "pre-submit"
+
     def _paste_then_submit() -> bool:
+        nonlocal last_attempt_phase
         # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
         # --raw: this function already ran the gate and the wrap above, so the
         # Rust verb types these bytes verbatim rather than preparing them a
@@ -6287,6 +6306,7 @@ def _mux_pane_send(
                     file=sys.stderr,
                 )
             return False
+        last_attempt_phase = "submitted"
         # The CR is unguarded: the guarded paste already proved the pane idle, and
         # guarding the submit could strand a pasted-but-unsent prompt.
         time.sleep(enter_delay_s)
@@ -6312,6 +6332,8 @@ def _mux_pane_send(
 
     if guarded:
         sent = _paste_then_submit()
+        if not sent:
+            _record_failure(last_attempt_phase)
         _audit_raw_inject(sent)
         return sent
 
@@ -6385,6 +6407,10 @@ def _mux_pane_send(
             sent = confirm_transcript is not None and confirm_baseline is not None and (
                 _mux_content_confirm(confirm_transcript, marker, confirm_baseline)
             )
+            if not sent:
+                _record_failure("unconfirmed")
+        elif not sent:
+            _record_failure(last_attempt_phase)
         _audit_raw_inject(sent)
         return sent
     finally:
@@ -7360,6 +7386,7 @@ def _deliver_live(
         # (the body is already enveloped, so `prepare` passes it through) and it
         # stops this call site from depending on that staying true.
         for attempt in (1, 2):
+            attempt_failure: list[str] = []
             mux_delivered = _mux_pane_send(
                 entry,
                 wrapped,
@@ -7374,14 +7401,21 @@ def _deliver_live(
                 # advances the cursor and retires every held message unread.
                 gate=True,
                 sender=from_name or None,
+                failure_out=attempt_failure,
             )
             if mux_delivered:
                 return True
-            _record(f"mux-send-failed-attempt-{attempt}")
+            failure_reason = attempt_failure[0] if attempt_failure else "unknown"
+            _record(f"mux-send-failed-attempt-{attempt}:{failure_reason}")
             # A pane ref is still a live route only while the selected registry
             # row remains non-terminal. One retry covers the measured mid-turn
             # inject miss; no loop can turn a stale ref into a storm.
-            if attempt == 2 or getattr(entry, "exited", False) or not entry.mux:
+            if (
+                attempt == 2
+                or failure_reason != "pre-submit"
+                or getattr(entry, "exited", False)
+                or not entry.mux
+            ):
                 break
         return False
 

@@ -248,7 +248,14 @@ def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
     monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
     _install_fake_run(monkeypatch, [0, 0, 0, 0])
 
-    assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
+    failure: list[str] = []
+    assert (
+        dispatch._mux_pane_send(
+            _entry(), "hi", guarded=False, confirm=True, failure_out=failure
+        )
+        is False
+    )
+    assert failure == ["unconfirmed"]
 
 
 def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):

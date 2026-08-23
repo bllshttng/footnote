@@ -7251,15 +7251,25 @@ impl Core {
                     })
                 })
                 .collect();
-            let registry_identity = matches
+            let mut occupants: Vec<&RegistryAgent> = Vec::new();
+            for row in matches {
+                let equivalent = occupants.iter().any(|existing| {
+                    existing.name == row.name
+                        && existing.effective_identity() == row.effective_identity()
+                });
+                if !equivalent {
+                    occupants.push(row);
+                }
+            }
+            let registry_identity = occupants
                 .first()
                 .and_then(|row| row.effective_identity())
                 .unwrap_or("<unknown>");
-            if matches.len() != 1
+            if occupants.len() != 1
                 || registry_identity != expected
-                || matches.first().is_some_and(|row| row.name != host)
+                || occupants.first().is_some_and(|row| row.name != host)
             {
-                let registry = matches
+                let registry = occupants
                     .iter()
                     .map(|a| a.name.as_str())
                     .collect::<Vec<_>>()
@@ -12165,6 +12175,28 @@ mod tests {
             }
             other => panic!("expected identity refusal before typing, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pane_send_deduplicates_equivalent_registry_occupants() {
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("worker".into());
+        let mut first = agent_in("sess", pane, Some(AgentBadge::Done), false);
+        first.name = "worker".into();
+        first.harness_session_id = Some("target-id".into());
+        let duplicate = first.clone();
+
+        assert!(matches!(
+            core.pane_send(
+                pane,
+                b"payload",
+                false,
+                Some("target-id"),
+                Some(vec![first, duplicate]),
+            ),
+            ServerMsg::Ok
+        ));
     }
 
     #[test]
