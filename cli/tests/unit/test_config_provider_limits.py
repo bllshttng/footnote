@@ -48,6 +48,21 @@ def test_modern_spelling_is_silent(capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_provider_limits_table_reads_both_spellings():
+    # The ONE accessor every reader routes through: new spelling wins, the
+    # legacy one still reads (a pre-rename embedded settings object), and a
+    # bare object with neither yields an empty table, never a raise.
+    from types import SimpleNamespace
+
+    from fno.config import provider_limits_table
+
+    modern = {"zai": {"lanes": 5, "subagents": 1}}
+    assert provider_limits_table(SimpleNamespace(provider_limits=modern)) == modern
+    legacy = {"zai": 5}
+    assert provider_limits_table(SimpleNamespace(max_lanes=legacy)) == legacy
+    assert provider_limits_table(SimpleNamespace()) == {}
+
+
 def test_gate_reads_provider_limits_not_the_legacy_leaf(monkeypatch, capsys):
     """AC3-HP: the spawn gate applies the provider_limits cap exactly as
     max_lanes was applied before the rename. Proven on the provider-cap

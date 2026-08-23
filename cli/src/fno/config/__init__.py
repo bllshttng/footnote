@@ -658,6 +658,22 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
     ),
 }
 
+def provider_limits_table(agents: object) -> Mapping[str, object]:
+    """The per-provider budget table off an AgentsBlock-shaped object.
+
+    `provider_limits` since x-3f84 W5, with the legacy `max_lanes` spelling
+    honored for a pre-rename embedded settings object - without the fallback
+    such an object reads as no table and silently un-caps. ONE accessor, not
+    a getattr chain per reader: a chain per reader is how the scoreboard
+    missed the rename and rendered cap-less while the gate enforced one.
+    """
+    return (
+        getattr(agents, "provider_limits", None)
+        or getattr(agents, "max_lanes", {})
+        or {}
+    )
+
+
 def provider_subagent_budget(
     provider: Optional[str], settings: Optional["SettingsModel"] = None
 ) -> Optional[int]:
@@ -675,15 +691,7 @@ def provider_subagent_budget(
         return None
     try:
         resolved = load_settings() if settings is None else settings
-        # provider_limits since x-3f84 W5, with the legacy max_lanes spelling
-        # honored for a pre-rename embedded settings object - without the
-        # fallback such an object raises here, fails open, and silently
-        # un-caps in-session fan-out on exactly the shared account this
-        # budget protects.
-        table = getattr(
-            resolved.agents, "provider_limits", None
-        ) or getattr(resolved.agents, "max_lanes", {})
-        budget = table.get(provider)
+        budget = provider_limits_table(resolved.agents).get(provider)
     except Exception:  # noqa: BLE001 - fail open; see the docstring
         return None
     subagents = getattr(budget, "subagents", None)
