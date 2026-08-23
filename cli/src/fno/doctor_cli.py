@@ -12,6 +12,7 @@ import typer.core
 from fno.bundle import bundle_app
 from fno.codemap_cli import app as codemap_app
 from fno.doctor import doctor_command
+from fno.doctor_footprint import footprint_command
 from fno.evals.cli import evals_app
 from fno.events.cli import cli as event_app
 from fno.lint_cli import lint
@@ -56,6 +57,7 @@ doctor_app.add_typer(codemap_app, name="codemap")
 doctor_app.add_typer(evals_app, name="evals")
 doctor_app.add_typer(doctor_event_app, name="event")
 doctor_app.command("lint")(lint)
+doctor_app.command("footprint", hidden=True)(footprint_command)
 doctor_app.add_typer(observer_app, name="observer")
 doctor_app.add_typer(skill_diff_app, name="skill-diff")
 # test and update resolve the SAME command objects as the root spellings
