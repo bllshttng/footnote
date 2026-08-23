@@ -609,13 +609,18 @@ def _verdicts_with_current_freshness(
     verdicts = data.get("verdicts")
     if not isinstance(verdicts, list):
         return []
+    # Narrowed once for the closure below (mypy cannot carry the loop's
+    # truthiness guard into it): the closure is only invoked under `head`.
+    current_head = head or ""
     base_ref: Optional[Optional[str]] = None
     head_identity: "Optional[tuple[str, frozenset[str]]]" = None
     head_identity_resolved = False
 
     def _describes(reviewed_sha: str) -> bool:
         nonlocal base_ref, head_identity, head_identity_resolved
-        if _reviewed_sha_is_ancestor(reviewed_sha, head, cwd):
+        if not current_head:
+            return False
+        if _reviewed_sha_is_ancestor(reviewed_sha, current_head, cwd):
             return True
         if base_ref is None:
             base_ref = _resolve_base_ref(cwd, pr_number)
@@ -624,10 +629,10 @@ def _verdicts_with_current_freshness(
         if not base_ref:
             return False
         if not head_identity_resolved:
-            head_identity = _pr_code_diff_identity(head, base_ref, cwd)
+            head_identity = _pr_code_diff_identity(current_head, base_ref, cwd)
             head_identity_resolved = True
         return _reviewed_sha_still_describes_head(
-            reviewed_sha, head, cwd, base_ref or None, head_identity
+            reviewed_sha, current_head, cwd, base_ref or None, head_identity
         )
 
     describes: dict[str, bool] = {}
