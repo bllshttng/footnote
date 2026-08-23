@@ -136,6 +136,36 @@ def test_backlog_decide_receipts_same_caller_live_claim(
     assert "another session holds the node" not in result.stderr
 
 
+def test_backlog_decide_receipts_driver_assigned_claim_uses_target_session_id(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness_session = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    target_session = "20260823T152504Z-mw12345-abcdef"
+    _patch_claim_receipt_identity(monkeypatch, tmp_path, harness_session)
+    monkeypatch.setenv("TARGET_SESSION_ID", target_session)
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, *, root: {
+            "key": key,
+            "state": "live",
+            "holder": f"target-session:{target_session}",
+        },
+    )
+
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "rule on driver-owned node"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "this caller holds the node" in result.stderr
+    assert "another session holds the node" not in result.stderr
+
+
 def test_backlog_decide_receipts_free_claim(
     root: Path,
     tmp_graph: Path,

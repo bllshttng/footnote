@@ -11,6 +11,7 @@ decision id, or the decision history as JSON), guidance goes to stderr.
 from __future__ import annotations
 
 import json
+import os
 from typing import List, Optional
 
 import typer
@@ -61,11 +62,16 @@ def _render_claim_receipt(node_id: str, event: dict) -> None:
     comparison = "caller comparison unavailable"
     if state in {"live", "suspect"} and isinstance(holder, str):
         prefix, separator, holder_session = holder.partition(":")
-        try:
-            identity = resolve_self_identity()
-            caller_session = (identity.session_id or "").strip()
-        except Exception:  # noqa: BLE001 - missing identity is an honest unknown
-            caller_session = ""
+        # Target init gives the driver-assigned run id precedence over the
+        # harness session id when it stamps a target-session claim. Keep that
+        # precedence here so the receipt does not call the current run foreign.
+        caller_session = os.environ.get("TARGET_SESSION_ID", "").strip()
+        if not caller_session:
+            try:
+                identity = resolve_self_identity()
+                caller_session = (identity.session_id or "").strip()
+            except Exception:  # noqa: BLE001 - missing identity is an honest unknown
+                caller_session = ""
         if prefix == "target-session" and separator and holder_session and caller_session:
             if holder_session == caller_session:
                 comparison = "this caller holds the node"
