@@ -3104,13 +3104,20 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
     }
     let list: Value = match serde_json::from_slice(&list_out.stdout) {
         Ok(value) => value,
-        Err(_) => {
-            let error = GhReadError::parse_failed("main_run_list_parse");
+        Err(parse_error) => {
+            let error = GhReadError::failed("main_run_list_parse", parse_error.to_string());
             log_bounded_read_error("main-head", &error);
             return None;
         }
     };
-    let arr = list.as_array()?;
+    let arr = match list.as_array() {
+        Some(array) => array,
+        None => {
+            let error = GhReadError::parse_failed("main_run_list_shape");
+            log_bounded_read_error("main-head", &error);
+            return None;
+        }
+    };
     // Zero completed runs (new/quiet repo) is not proof -> unknown.
     // The newest run's headSha IS the current main HEAD; classify against only
     // that commit's runs so a failure fixed on a later commit never counts.
@@ -3144,8 +3151,8 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
         }
         let view: Value = match serde_json::from_slice(&view_out.stdout) {
             Ok(value) => value,
-            Err(_) => {
-                let error = GhReadError::parse_failed("main_run_view_parse");
+            Err(parse_error) => {
+                let error = GhReadError::failed("main_run_view_parse", parse_error.to_string());
                 log_bounded_read_error("main-head", &error);
                 return None;
             }
@@ -8833,9 +8840,11 @@ fn clamp_to_fire_budget(
 /// command), and conflating them is how a hang reads as a blip forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadErrorKind {
-    /// Non-zero exit, unparseable payload, or the process never ran. The
-    /// ordinary vocabulary ("gh read '<name>' failed; retrying next fire").
+    /// Non-zero exit or unparseable payload. The ordinary vocabulary
+    /// ("gh read '<name>' failed; retrying next fire").
     Failed,
+    /// The process could not be spawned or waited on.
+    Unrunnable,
     /// The child outlived its bound and the process group was killed.
     TimedOut,
 }
@@ -8876,7 +8885,12 @@ impl GhReadError {
     }
 
     fn unrunnable(read: &str, detail: &str) -> Self {
-        Self::failed(read, detail.to_string())
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::Unrunnable,
+            stderr_tail: detail.to_string(),
+            elapsed: None,
+        }
     }
 
     fn render(&self) -> String {
@@ -8890,6 +8904,10 @@ impl GhReadError {
                 "gh read '{}' failed; retrying next fire. {}",
                 self.read, self.stderr_tail
             ),
+            ReadErrorKind::Unrunnable => format!(
+                "external read '{}' could not run; retrying next fire. {}",
+                self.read, self.stderr_tail
+            ),
         }
     }
 
@@ -8900,6 +8918,7 @@ impl GhReadError {
         match self.kind {
             ReadErrorKind::TimedOut => "timeout",
             ReadErrorKind::Failed => "failed",
+            ReadErrorKind::Unrunnable => "unrunnable",
         }
     }
 }
@@ -10193,6 +10212,9 @@ pub(crate) fn read_king_board(
         ReadErrorKind::Failed => {
             format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
         }
+        ReadErrorKind::Unrunnable => {
+            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
+        }
     })?;
     let stdout = String::from_utf8_lossy(&read.stdout);
     parse_king_board(&stdout).ok_or_else(|| {
@@ -11353,7 +11375,7 @@ mod tests {
         let spawn = GhReadError::unrunnable("git_status", "spawn failed");
         let rendered = bounded_read_diagnostic("payload", &spawn);
         assert!(rendered.contains("git_status"), "{rendered}");
-        assert!(rendered.contains("outcome=failed"), "{rendered}");
+        assert!(rendered.contains("outcome=unrunnable"), "{rendered}");
         assert!(rendered.contains("spawn failed"), "{rendered}");
     }
 
