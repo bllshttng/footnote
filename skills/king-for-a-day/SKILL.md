@@ -487,6 +487,10 @@ These bound the **pass** shape - the abdicate-at-kickoff reign. Court explicitly
 - **Not a driver (both shapes).** You may `peek` at anything, and a court king mails rulings - but neither shape attaches and steers a worker's pane. Driving means burning frontier tokens on work a builder already owns, and a human at the wheel of a session outranks the crown: peek before you send, and never inject a ruling into a session a human is actively driving.
 - **Not a decider of unknowns (pass only).** In a pass, a question you cannot answer from the track goes to the triage pile (`fno backlog defer <id> -R "<question>"`), not into a guessed edge. In court, answering a teammate's in-scope question is the job; a question outside your crown's scope still escalates rather than guesses.
 
+## Known Limitations and Deferred Work
+
+- A pass abdicates instead of supervising workers. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## Done when
 
 The tail dispatches in the intended order from graph state alone, with no reference to this session's transcript, and the mission shows in the sideline.

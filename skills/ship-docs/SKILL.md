@@ -50,6 +50,10 @@ Target invokes this skill as the docs phase. It passes:
 - **Keep current** - Update existing docs, don't duplicate
 - **Roles from config** - Only generate for configured roles
 
+## Known Limitations and Deferred Work
+
+- Docs shipping follows configured roles and paths. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## Completion contract
 
 Docs files written to disk are the proof this phase happened. No artifact write and no `fno gate` call is needed. If no docs were written (no affected roles configured), report that clearly so the operator can provide explicit role configuration and re-run.

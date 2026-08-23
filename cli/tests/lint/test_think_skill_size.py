@@ -30,16 +30,17 @@ def _tracked_files() -> list[Path]:
 def test_think_payload_stays_under_the_byte_pin() -> None:
     files = _tracked_files()
     total = sum(f.stat().st_size for f in files)
-    offenders = sorted(str(f.relative_to(ROOT)) for f in files if f.name != "SKILL.md")
+    allowed = {"SKILL.md", "LIMITATIONS.md"}
+    offenders = sorted(str(f.relative_to(ROOT)) for f in files if f.name not in allowed)
     assert total <= BYTE_LIMIT, (
         f"skills/think/ payload is {total} bytes (limit {BYTE_LIMIT}). "
         f"Offending files beyond SKILL.md: {offenders}"
     )
 
 
-def test_skill_md_is_the_only_tracked_file() -> None:
+def test_skill_md_and_limitations_are_the_only_tracked_files() -> None:
     files = _tracked_files()
     names = sorted(f.relative_to(THINK_DIR).as_posix() for f in files)
-    assert names == ["SKILL.md"], (
-        f"skills/think/ must contain only SKILL.md, found: {names}"
+    assert names == ["LIMITATIONS.md", "SKILL.md"], (
+        f"skills/think/ must contain only SKILL.md and LIMITATIONS.md, found: {names}"
     )

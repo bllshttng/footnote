@@ -198,3 +198,7 @@ wizard ever surfaces a key that is not a real model leaf.
 If RTK is detected (e.g. `~/code/dotfiles/bin/rtk-claude-hook.sh`), note that it
 is already wired and do NOT run `rtk init -g` (it would double-wire). This is
 informational only; it is not a `config.toml` key.
+
+## Known Limitations and Deferred Work
+
+- New policy waits for a shipped schema field. See [LIMITATIONS.md](LIMITATIONS.md).

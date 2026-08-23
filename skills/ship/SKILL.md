@@ -67,6 +67,10 @@ This is a **router**, not a monolith. Parse the first argument token:
 
   and stop with a non-zero result. This is the locked router contract: an unknown or empty type never silently falls through to an action.
 
+## Known Limitations and Deferred Work
+
+- Merge consent and review must hold at merge time. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## Multi-CLI
 
 Claude-Code primary. `ship pr` needs everything `/pr` needs (`fno`, `gh`, `git`, a Haiku-capable provider for `create`). `ship doc` needs `fno` (the `research` + `evals grade` verbs). If a dependency is missing, the type fails loud and reports it - it never fakes a PR, a brief, or a grade.
