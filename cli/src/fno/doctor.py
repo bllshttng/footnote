@@ -1137,7 +1137,10 @@ def _read_posture_stamp() -> Optional[dict[str, Any]]:
         return None
 
 
-def _silent_switch_report(plugin_cache: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def _silent_switch_report(
+    plugin_cache: Optional[dict[str, Any]] = None,
+    armed_manifests: Optional[dict[str, int]] = None,
+) -> dict[str, Any]:
     """Both directions of the silent-switch rule.
 
     Direction "inaction": a default-off switch silently producing nothing while
@@ -1210,7 +1213,14 @@ def _silent_switch_report(plugin_cache: Optional[dict[str, Any]] = None) -> dict
     # that state is a false alarm; the kill-switch-off inaction finding above
     # already names that state. Only when the switch is ON do armed manifests
     # become a live, silent irreversible action worth a doctor line.
-    armed = _auto_merge_armed_manifests()
+    # Shared scan (see the plugin_cache note at the call site): a caller that
+    # already read the armed manifests passes them in so the silent-switch
+    # lines and the review-gap check quote ONE count within one report.
+    armed = (
+        armed_manifests
+        if armed_manifests is not None
+        else _auto_merge_armed_manifests()
+    )
     if armed and am is True:
         total = sum(armed.values())
         # Name WHICH layer set each posture (x-9d11): "24 manifests" hides that
@@ -1245,6 +1255,78 @@ def _silent_switch_report(plugin_cache: Optional[dict[str, Any]] = None) -> dict
                 )
         findings.append(finding)
     return {"findings": findings, "posture": _read_posture_stamp()}
+
+
+def _auto_merge_review_gap(
+    armed_manifests: Optional[dict[str, int]] = None,
+) -> Optional[dict[str, Any]]:
+    """The x-0888 pair check: auto_merge armed while the merge gate's own lane
+    predicate requires no review for a code payload.
+
+    Doctor already prints the armed half (the silent-switch lines) and stays
+    silent on lanes. The combination is the defect: armed with a lane is
+    operator policy, armed with zero lanes merges unreviewed code and nothing
+    says so. The verdict comes from ``_review_lane_configured`` itself, asked
+    about a hypothetical code payload - a doctor-side recount of its lane
+    logic would be the same bug one level up, the reason the predicate already
+    mirrors loopcheck.rs. The pairing reads the two layers the merge path
+    reads: global ``auto_merge.enabled`` (``_load_auto_merge``) and the
+    INVOKING project's repo-resolved review config (the same cwd-to-toplevel
+    resolution ``fno do pr status`` uses), never the fno source checkout. A
+    config the predicate cannot read fail-closes to True inside it, so a
+    broken config never warns here.
+
+    ``unknown`` in the armed breakdown is its own answer (x-9d11), never
+    folded into a default origin. Zero armed manifests still reports: the
+    enabled switch alone means the next run can be approved.
+    """
+    try:
+        from fno.config import load_settings
+
+        enabled = getattr(
+            getattr(load_settings(), "auto_merge", None), "enabled", None
+        )
+        if enabled is not True:
+            return None
+        # The project doctor runs IN, resolved the same way the predicate
+        # resolves it (rev-parse from cwd). Never the fno source checkout:
+        # the lanes that matter are the invoking repo's, and an install with
+        # no source checkout at all (plugin, PyPI) is exactly the install
+        # this check protects - a source-rooted read no-ops there.
+        from fno.pr._merge import _repo_state_dir, _review_lane_configured
+
+        root = Path(_repo_state_dir(os.getcwd())).parent
+        if _review_lane_configured(str(root), code_payload=True):
+            return None
+        from fno.config import load_settings_for_repo
+
+        review = load_settings_for_repo(root).review
+    except Exception:  # noqa: BLE001 - advisory; never crash doctor
+        return None
+    keys = [
+        f"review.self_review_required={bool(getattr(review, 'self_review_required', True))}",
+        f"review.required_bots={list(review.required_bots or [])}",
+        f"review.reviewers={list(review.reviewers or [])}",
+        "no identity-free review.peers",
+    ]
+    if getattr(review, "peer_identity", None):
+        keys.append(f"review.peer_identity={review.peer_identity}")
+    armed = (
+        armed_manifests
+        if armed_manifests is not None
+        else _auto_merge_armed_manifests()
+    )
+    return {
+        "keys": keys,
+        "manifests": sum(armed.values()),
+        "breakdown": ", ".join(
+            f"{n} {src}" for src, n in sorted(armed.items(), key=lambda kv: -kv[1])
+        ),
+        "remedy": (
+            "fno config set review.self_review_required true (or name a lane "
+            "via review.required_bots / review.reviewers)"
+        ),
+    }
 
 
 def _bounded_command(argv: list[str]) -> Optional[tuple[int, str, str]]:
@@ -1904,6 +1986,24 @@ def _emit_human(
             )
         if f.get("cause"):
             out(f"  cause: {f['cause']}")
+
+    # The pair the ARMED lines above never made (x-0888): armed with ZERO
+    # lanes merges a code PR unreviewed. Advisory, never changes the exit code.
+    gap = result.get("auto_merge_review_gap")
+    if gap:
+        manifests = gap.get("manifests", 0)
+        breakdown = gap.get("breakdown") or ""
+        label = (
+            f"{manifests} armed manifest(s): {breakdown}"
+            if breakdown
+            else f"{manifests} armed manifest(s)"
+        )
+        out(
+            f"fno doctor: auto_merge is ARMED with zero review lanes - the "
+            f"merge gate requires no review for a code payload "
+            f"({'; '.join(gap.get('keys') or [])}; {label}). "
+            f"Remedy: {gap.get('remedy')}"
+        )
 
     # Deployed claude plugin cache (x-4be1): the hooks actually executed by
     # Claude sessions. Advisory, same vocabulary as the wheel/rust legs.
@@ -3341,7 +3441,16 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # two invocations would run the registry read and the git probes twice and
     # could disagree about the same cache within one report.
     plugin_cache = _plugin_cache_report()
-    result["silent_switches"] = _silent_switch_report(plugin_cache=plugin_cache)
+    # The armed-manifest scan is likewise computed ONCE and shared: the
+    # silent-switch lines and the review-gap pair check must quote the same
+    # count (see _auto_merge_review_gap, x-0888).
+    armed_manifests = _auto_merge_armed_manifests()
+    result["silent_switches"] = _silent_switch_report(
+        plugin_cache=plugin_cache, armed_manifests=armed_manifests
+    )
+    result["auto_merge_review_gap"] = _auto_merge_review_gap(
+        armed_manifests=armed_manifests
+    )
 
     # Advisory deployed-plugin-cache freshness (x-4be1): the hooks Claude
     # sessions actually run. Never changes status/exit.

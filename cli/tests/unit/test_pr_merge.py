@@ -955,6 +955,41 @@ def test_review_lane_configured_floors_a_code_payload(monkeypatch, tmp_path):
     assert _merge._review_lane_configured(str(tmp_path), 42) is False
 
 
+def test_review_lane_configured_answers_a_hypothetical_code_payload(
+    monkeypatch, tmp_path
+):
+    """code_payload=True answers the doctor pair check (x-0888): the floor for
+    a payload KNOWN to be code, with no PR to probe and no pr_number. The
+    incident shape (zero lanes + self_review_required=false) must read False so
+    doctor can warn; a verbful harness with the floor on must read True."""
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-test-session")
+    # Incident shape: no lane, floor opted out -> the gate demands no review.
+    _point_lane_read_at(monkeypatch, self_review_required=False)
+    assert _merge._review_lane_configured(str(tmp_path), code_payload=True) is False
+    # Floor on + verbful harness: a code payload is floored with no PR probe.
+    _point_lane_read_at(monkeypatch)
+    assert _merge._review_lane_configured(str(tmp_path), code_payload=True) is True
+    # A configured lane answers True regardless of the payload assumption.
+    _point_lane_read_at(monkeypatch, reviewers=["code-review"])
+    assert _merge._review_lane_configured(str(tmp_path), code_payload=True) is True
+    # Default off: with no pr_number the floor stays unengaged, as today.
+    _point_lane_read_at(monkeypatch)
+    assert _merge._review_lane_configured(str(tmp_path)) is False
+
+
+def test_review_lane_configured_refuses_pr_number_with_code_payload(tmp_path):
+    """code_payload=True answers a HYPOTHETICAL payload; combined with a real
+    pr_number it would silently skip the payload probe and floor a docs-only
+    PR. The ValueError sits outside the fail-closed try so misuse surfaces
+    instead of reading as 'review required'."""
+    with pytest.raises(ValueError):
+        _merge._review_lane_configured(str(tmp_path), 42, code_payload=True)
+
+
 def test_manifest_reader_ignores_keys_inside_a_multiline_input_scalar(
     tmp_path,
 ):

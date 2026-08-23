@@ -7,6 +7,7 @@ irreversible action owes one too. Advisory only, never changes the exit code.
 from __future__ import annotations
 
 import types
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -238,3 +239,173 @@ def test_doctor_names_drain_off_with_missions(monkeypatch: pytest.MonkeyPatch) -
     assert "31 manifest(s)" in out
     # Advisory: does not change the exit code.
     assert "up to date" in out or "status unknown" in out
+
+
+# ---------------------------------------------------------------------------
+# Pair check (x-0888): auto_merge armed vs the merge gate's own lane predicate
+# ---------------------------------------------------------------------------
+
+
+def _fake_review(
+    *,
+    self_review_required: bool = False,
+    peers: list | None = None,
+    peer_identity: str | None = None,
+) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        self_review_required=self_review_required,
+        required_bots=None,
+        optional_apps=None,
+        reviewers=None,
+        peers=peers or [],
+        peer_identity=peer_identity,
+    )
+
+
+def _patch_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    settings: types.SimpleNamespace,
+    repo: Path,
+    lane: bool,
+    review: types.SimpleNamespace | None = None,
+    armed: dict[str, int] | int = 0,
+    source_points_elsewhere: Path | None = None,
+) -> list[dict]:
+    """Stub the gap check's collaborators; return the lane-predicate calls so
+    tests can pin the reuse contract (doctor asks the gate, never recounts)."""
+    armed_value = armed if isinstance(armed, dict) else {"config": armed}
+    calls: list[dict] = []
+
+    def fake_lane(repo_arg, pr_number=0, code_payload=False):
+        calls.append({"repo": repo_arg, "pr_number": pr_number, "code_payload": code_payload})
+        return lane
+
+    monkeypatch.setattr("fno.config.load_settings", lambda: settings)
+    # The gap resolves the INVOKING repo (cwd -> toplevel), never the fno
+    # source checkout: point _resolve_source somewhere wrong and require the
+    # predicate still receive the cwd-derived repo (x-0888 review finding 1).
+    if source_points_elsewhere is not None:
+        monkeypatch.setattr(
+            doctor, "_resolve_source", lambda _source: source_points_elsewhere
+        )
+    monkeypatch.setattr(
+        "fno.pr._merge._repo_state_dir", lambda _cwd: str(repo / ".fno")
+    )
+    monkeypatch.setattr("fno.pr._merge._review_lane_configured", fake_lane)
+    if review is not None:
+        monkeypatch.setattr(
+            "fno.config.load_settings_for_repo",
+            lambda _path: types.SimpleNamespace(review=review),
+        )
+    monkeypatch.setattr(doctor, "_auto_merge_armed_manifests", lambda: armed_value)
+    return calls
+
+
+def test_gap_fires_on_armed_with_zero_lanes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    elsewhere = tmp_path / "fno-source-checkout"
+    calls = _patch_gap(
+        monkeypatch,
+        settings=_fake_settings(auto_merge=True),
+        repo=tmp_path,
+        lane=False,
+        review=_fake_review(self_review_required=False),
+        armed={"config": 16, "unknown": 3},
+        source_points_elsewhere=elsewhere,
+    )
+    gap = doctor._auto_merge_review_gap()
+    # Reuse contract: the verdict is the merge gate's own predicate, asked
+    # about a hypothetical code payload - never a doctor-side lane recount.
+    # And the repo is the INVOKING project, never the fno source checkout.
+    assert calls == [{"repo": str(tmp_path), "pr_number": 0, "code_payload": True}]
+    assert gap is not None
+    assert gap["keys"] == [
+        "review.self_review_required=False",
+        "review.required_bots=[]",
+        "review.reviewers=[]",
+        "no identity-free review.peers",
+    ]
+    assert gap["manifests"] == 19
+    assert "16 config" in gap["breakdown"]
+    # An unknown source is its own answer, never folded into a default.
+    assert "3 unknown" in gap["breakdown"]
+    assert gap["remedy"].startswith("fno config set review.self_review_required true")
+
+
+def test_gap_names_peer_identity_when_it_released_the_floor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    _patch_gap(
+        monkeypatch,
+        settings=_fake_settings(auto_merge=True),
+        repo=tmp_path,
+        lane=False,
+        review=_fake_review(self_review_required=True, peer_identity="fno-peer-bot"),
+        armed=0,
+    )
+    gap = doctor._auto_merge_review_gap()
+    assert gap is not None
+    assert "review.self_review_required=True" in gap["keys"]
+    assert "review.peer_identity=fno-peer-bot" in gap["keys"]
+    # Zero armed manifests is still reported: the config-level risk stands.
+    assert gap["manifests"] == 0
+
+
+def test_gap_silent_when_a_lane_covers_or_the_switch_is_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    _patch_gap(
+        monkeypatch,
+        settings=_fake_settings(auto_merge=True),
+        repo=tmp_path,
+        lane=True,
+        review=_fake_review(self_review_required=True),
+    )
+    assert doctor._auto_merge_review_gap() is None
+    # Kill switch off: manifests and lanes are inert, matching the ARMED lines.
+    _patch_gap(
+        monkeypatch,
+        settings=_fake_settings(auto_merge=False),
+        repo=tmp_path,
+        lane=False,
+        review=_fake_review(self_review_required=False),
+    )
+    assert doctor._auto_merge_review_gap() is None
+
+
+def test_doctor_names_armed_auto_merge_with_zero_review_lanes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_quiet_machine(monkeypatch)
+    _patch_silent(
+        monkeypatch,
+        settings=_fake_settings(auto_merge=True, grant="dispatch"),
+        armed={"config": 16, "unknown": 3},
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_auto_merge_review_gap",
+        lambda armed_manifests=None: {
+            "keys": [
+                "review.self_review_required=False",
+                "review.required_bots=[]",
+                "review.reviewers=[]",
+                "no identity-free review.peers",
+            ],
+            "manifests": 19,
+            "breakdown": "16 config, 3 unknown",
+            "remedy": (
+                "fno config set review.self_review_required true (or name a lane "
+                "via review.required_bots / review.reviewers)"
+            ),
+        },
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "auto_merge is ARMED with zero review lanes" in out
+    assert "review.self_review_required=False" in out
+    assert "19 armed manifest(s): 16 config, 3 unknown" in out
+    assert "fno config set review.self_review_required true" in out

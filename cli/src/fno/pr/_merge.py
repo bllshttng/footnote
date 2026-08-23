@@ -615,7 +615,9 @@ def _harness_can_self_review(repo: str) -> bool:
     return applies
 
 
-def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
+def _review_lane_configured(
+    repo: str, pr_number: int = 0, *, code_payload: bool = False
+) -> bool:
     """Whether review is required for this PR: a configured lane, OR a code
     payload on a stock install (the self-review floor).
 
@@ -631,7 +633,20 @@ def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
     merge gate and the loop-check gate agree on whether a lane exists for one
     PR - otherwise the loop ships DonePRGreen (no lane) while merge refuses as
     unreviewed (lane), wedging the pipeline on the same config.
+
+    code_payload=True answers a HYPOTHETICAL code payload (no PR to probe, no
+    pr_number): the doctor pair check (x-0888) asks this gate whether auto_merge
+    is armed with zero lanes, instead of a second lane implementation that can
+    drift from this one. The lane logic is untouched, so the loopcheck.rs
+    mirror still holds; the stop gate always has a real PR and never passes it.
     """
+    # Outside the try on purpose: this is caller misuse, not a degraded read,
+    # and the try's fail-closed True would misread it as "review required".
+    if code_payload and pr_number:
+        raise ValueError(
+            "code_payload=True answers a hypothetical payload; pass it with "
+            "no pr_number, or probe a real PR with code_payload=False"
+        )
     try:
         from pathlib import Path
 
@@ -659,9 +674,9 @@ def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
         # would have demanded review for.
         if (
             getattr(r, "self_review_required", True)
-            and pr_number
+            and (pr_number or code_payload)
             and _harness_can_self_review(repo)
-            and _pr_payload_is_code(repo, pr_number)
+            and (code_payload or _pr_payload_is_code(repo, pr_number))
         ):
             return True
         return False
