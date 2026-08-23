@@ -353,10 +353,24 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
     AUTO_MERGE_ENABLED="false"
   }
 fi
+# The env grant is the OPERATOR's attended lever (x-3855): TARGET_AUTO_MERGE
+# reaches a child only by inheritance, and a worker that exports it before
+# spawning would mint merge authority no config granted - the same self-grant
+# trap TARGET_BEASTMODE is scrubbed for. An unattended run ignores it and
+# config decides; the autonomous grant is auto_merge.grant = dispatch, never
+# this variable.
+_AUTO_MERGE_ENV_GRANT="false"
+if [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
+  if [[ "$_attended" == "true" ]]; then
+    _AUTO_MERGE_ENV_GRANT="true"
+  else
+    echo "[init-target-state] note: TARGET_AUTO_MERGE=1 ignored on an unattended run; config decides (autonomous grant: auto_merge.grant = dispatch)" >&2
+  fi
+fi
 if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="false"
   AUTO_MERGE_SOURCE="flag-no-merge"
-elif [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
+elif [[ "$_AUTO_MERGE_ENV_GRANT" == "true" ]]; then
   AUTO_MERGE_APPROVED="true"
   AUTO_MERGE_SOURCE="env-target-auto-merge"
 elif _is_true "$AUTO_MERGE_ENABLED"; then

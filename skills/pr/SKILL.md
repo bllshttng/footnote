@@ -47,7 +47,7 @@ Parse the first argument token:
     /pr merged     run the post-merge ritual on an already-merged PR
   ```
 
-  If the caller meant `fno do pr merge` and the verb REFUSES, read the refusal text. It names the sanctioned override. Take that path or escalate to the king/operator. Never route around a gate refusal. Do not synthesize a config file. Do not flip a shared config key for the call's duration. Do not export a merge-time env var. Two workers improvised exactly those moves within sixty seconds of each other on 2026-08-19. One left a global merge switch ON machine-wide mid-merge. That exposure is not reversible the way a merge is.
+  If the caller meant `fno do pr merge` and the verb REFUSES, read the refusal text. It names the sanctioned override. Those levers are the operator's. A worker escalates to the king/operator instead of pulling one. Never route around a gate refusal. Do not synthesize a config file. Do not flip a shared config key for the call's duration. Do not export a merge-time env var. Do not export TARGET_AUTO_MERGE before spawning a run. Unattended runs scrub it anyway. Two workers improvised the first three moves within sixty seconds of each other on 2026-08-19. One left a global merge switch ON machine-wide mid-merge. That exposure is not reversible the way a merge is.
 
 - **any other non-empty token** -> this is an unknown mode (likely a typo). Do NOT default, do NOT guess. Print:
 

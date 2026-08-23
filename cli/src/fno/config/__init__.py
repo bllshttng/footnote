@@ -2368,19 +2368,24 @@ class AutoMergeBlock(BaseModel):
     rather than failing the whole settings load - false-enabled is the dangerous
     direction for a merge opt-in.
 
-    Scope-ordered to read like the AND chain ``fno do pr merge`` enforces
-    (``pr/_merge.py`` step 1/1b): ``enabled`` is PROJECT scope (the master
-    switch, checked first); ``grant`` is ACTOR scope (who may merge once
-    ``enabled`` passes); the policy keys below only matter once both do.
+    Scope-ordered to read like the AND chain ``fno do pr merge`` enforces:
+    ``enabled`` is PROJECT scope (the standing arm, re-read live at merge and
+    arm time so an operator disarm mid-flight still withholds, x-2270);
+    ``grant`` is ACTOR scope (who may merge once ``enabled`` passes); the
+    policy keys below only matter once both do.
 
     RUN scope is deliberately not a key here. ``fno do target init`` folds
     ``enabled`` plus ``grant`` plus ``--allow-merge`` / ``--no-merge`` plus the
     ``/target bg`` injected default into ``auto_merge_approved`` in
     ``.fno/target-state.md``, with ``auto_merge_source`` naming the decider.
-    That fold is one-directional: a run can withhold merge authority, never
-    grant it (``cli/src/fno/pr/_merge.py`` step 1b). The review rung of the
-    same chain is ``config.review.required_bots`` / ``config.review.reviewers``,
-    enforced at the coverage guard in ``_merge.py``.
+    The fold withholds and it grants: a per-run refusal (``false``) outranks
+    every grant at the merge gate (``pr/_merge.py``), and an attended
+    ``TARGET_AUTO_MERGE=1`` grant (``env-target-auto-merge``) satisfies the
+    standing arm on its own (x-01b9) - honored on attended runs only, scrubbed
+    on unattended ones so a spawned child cannot mint what no config granted.
+    The review rung of the same chain is ``config.review.required_bots`` /
+    ``config.review.reviewers``, enforced at the coverage guard in
+    ``_merge.py``.
     """
 
     model_config = ConfigDict(extra="ignore")

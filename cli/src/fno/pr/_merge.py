@@ -139,6 +139,18 @@ def _closes_quoted_scalar(raw: str) -> bool:
     return not raw[:-1].endswith("\\")
 
 
+def _approved_true(value: Optional[str]) -> bool:
+    """The truthy spellings every posture reader accepts for
+    ``auto_merge_approved``. One helper, not a re-typed literal per gate: the
+    two reads inside ``run_merge`` and the git-protection hook's authorize
+    path must not drift apart on a hand-edited manifest. ``finalize.rs``
+    accepts only the literal ``true`` (init never writes another spelling);
+    the wider set here is tolerance, and it can only refuse less on spellings
+    init does not produce.
+    """
+    return value is not None and value.strip().lower() in ("true", "yes", "1")
+
+
 def _read_state_field(state_file: str, field: str) -> str:
     """Read ``field:`` from frontmatter, dequoting a matched pair (parser parity).
 
@@ -1671,10 +1683,14 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     auto_merge = _load_auto_merge()
     state_file = os.path.join(_repo_state_dir(repo), "target-state.md")
     approved = _read_state_field(state_file, "auto_merge_approved")
-    if approved and approved.strip().lower() not in ("true", "yes", "1"):
+    if approved and not _approved_true(approved):
         # Name WHICH input set the posture (x-9d11): the operator's first
         # question on this refusal is "what layer said no". A pre-provenance
         # manifest carries no source; that reads as unknown, never a guess.
+        # The override names levers that exist for the source it names: a
+        # flag-no-merge run was refused by its dispatcher (the `/target bg`
+        # default), not by anything typed by hand, so "without --no-merge"
+        # alone would point at a door that is not there.
         source = (
             _read_state_field(state_file, "auto_merge_source") or ""
         ).strip() or "unknown (pre-provenance manifest)"
@@ -1684,25 +1700,31 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             f"per-run no-merge (manifest auto_merge_approved is not true; "
             f"auto_merge_source: {source}); sanctioned override: an "
             "out-of-band merge by the operator (any such merge satisfies "
-            "done()), or re-dispatch the run without --no-merge",
+            "done()), or re-arm the run's dispatch (attended and without "
+            "--no-merge, or auto_merge.grant = dispatch)",
             "none",
             err=False,
         )
         return 2
     if not auto_merge.enabled and not (
-        approved
-        and approved.strip().lower() in ("true", "yes", "1")
+        _approved_true(approved)
         and (_read_state_field(state_file, "auto_merge_source") or "").strip()
         == "env-target-auto-merge"
     ):
+        # "resolves enabled=false", not "is set false": the same refusal fires
+        # on a stock install with no key and on a malformed block degraded to
+        # defaults, and prescribing `config set true` against a parse error
+        # masks it. The named levers are the OPERATOR's; a worker reading this
+        # escalates rather than pulling either one (skills/pr hard rule).
         _emit(
             pr_number,
             "skipped",
-            "auto_merge disabled (config auto_merge.enabled=false); "
-            "sanctioned override: `fno config set auto_merge.enabled true`, "
-            "or spawn the run with TARGET_AUTO_MERGE=1 (per-run grant, folded "
-            "into the manifest at init; not a merge-time env var and never a "
-            "synthesized config)",
+            "auto_merge disabled (live config resolves auto_merge.enabled="
+            "false); sanctioned override (operator levers): `fno config set "
+            "auto_merge.enabled true`, or spawn an attended run with "
+            "TARGET_AUTO_MERGE=1. The env grant is folded into the manifest "
+            "at init - honored on attended runs only, never a merge-time "
+            "variable, and never a synthesized config",
             "none",
             err=False,
         )

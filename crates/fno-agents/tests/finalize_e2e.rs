@@ -1454,14 +1454,13 @@ fn finalize_completed_review_wins_over_stale_usage_limit_comment() {
 fn finalize_live_auto_merge_switch_vetoes_an_approved_run() {
     let env = setup("S-live-switch-off", false);
     set_posture(&env, "S-live-switch-off", true);
-    write_auto_merge_config(&env, "[auto_merge]\nenabled = true\n");
     write_auto_merge_config(&env, "[auto_merge]\nenabled = false\n");
 
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("config.auto_merge.enabled=false"),
+        stderr.contains("auto_merge.enabled=false"),
         "stderr must name the live-switch veto: {stderr}"
     );
     let event = finalized_event(&env, "S-live-switch-off");
@@ -1473,7 +1472,7 @@ fn finalize_live_auto_merge_switch_vetoes_an_approved_run() {
         .pointer("/data/auto_merge_blocked_reason")
         .and_then(|v| v.as_str())
         .expect("live-switch veto must record a blocked reason");
-    assert!(blocked.starts_with("config.auto_merge.enabled=false"));
+    assert!(blocked.contains("auto_merge.enabled=false"));
     assert!(blocked.contains("sanctioned override"));
     assert!(blocked.contains("TARGET_AUTO_MERGE=1"));
 }

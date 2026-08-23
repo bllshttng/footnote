@@ -880,10 +880,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
     let env_grant = approved && m.auto_merge_source.as_deref() == Some("env-target-auto-merge");
     let (auto_merge_armed, auto_merge_blocked_reason) = if should_arm {
         if !env_grant && !crate::agents_config::auto_merge_enabled(&cwd) {
-            let blocked = "config.auto_merge.enabled=false; sanctioned override: \
-arm the standing switch (`fno config set auto_merge.enabled true`) or re-spawn \
-the run with TARGET_AUTO_MERGE=1 (per-run grant, folded into the manifest at \
-init; never synthesized config or a merge-time env var)"
+            let blocked = "live config resolves auto_merge.enabled=false; sanctioned \
+override (operator levers): arm the standing switch (`fno config set \
+auto_merge.enabled true`) or spawn an attended run with TARGET_AUTO_MERGE=1"
                 .to_string();
             eprintln!("finalize: native auto-merge withheld: {blocked}");
             (false, Some(blocked))

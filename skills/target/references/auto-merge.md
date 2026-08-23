@@ -42,7 +42,7 @@ Pass the positional `no-merge` modifier at invocation time to revoke merge autho
 /megawalk once no-merge
 ```
 
-Enabling per-run is deliberately NOT symmetric. A positional `auto-merge` grants nothing on its own. To allow merging, set `auto_merge.enabled` in config. Or spawn the run with `TARGET_AUTO_MERGE=1`. The env grant is folded into the manifest at init. Exporting it on a merge command line grants nothing.
+Enabling per-run is deliberately NOT symmetric. A positional `auto-merge` grants nothing on its own. To allow merging, set `auto_merge.enabled` in config. Or spawn the run with `TARGET_AUTO_MERGE=1`. The env grant is folded into the manifest at init. It is honored on attended runs only. An unattended or dispatched run scrubs it, so a spawned child cannot mint a grant no config gave. Exporting it on a merge command line grants nothing.
 
 ## Resolution Order (First Match Wins)
 
