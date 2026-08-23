@@ -160,6 +160,7 @@ def test_doctor_managed_block_flags_stale(tmp_path: Path, monkeypatch) -> None:
     from fno import doctor
 
     monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
     # No block -> silent (empty report).
     (tmp_path / "AGENTS.md").write_text(_USER, encoding="utf-8")
     assert doctor._managed_block_report() == {}

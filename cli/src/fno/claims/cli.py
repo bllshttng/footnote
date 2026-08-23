@@ -60,6 +60,7 @@ from typing import List, Mapping, NamedTuple, Optional
 
 import typer
 
+from . import core as _core
 from .core import (
     HANDOVER_HOLDER_PREFIX as _HANDOVER_HOLDER_PREFIX,
     ClaimContended,
@@ -68,13 +69,6 @@ from .core import (
     ClaimHeldByOther,
     ClaimValidationError,
     HolderMismatch,
-    acquire_claim,
-    claim_status,
-    force_release_claim,
-    list_claims_with_counts,
-    reap_dead_claims,
-    refresh_claim,
-    release_claim,
 )
 from .io import dedup_claims_roots, global_claims_root
 from fno.tombstones import tombstone_group_cls
@@ -252,10 +246,8 @@ def acquire(
     # acquire then applies its own rules, including refusing a live foreign
     # claim. So a wrong or stale --handover-from never widens what can be taken.
     if handover_from and key:
-        from .core import RebindRefused, compare_and_rebind
-
         try:
-            claim, mode = compare_and_rebind(
+            claim, mode = _core.compare_and_rebind(
                 key,
                 handover_from,
                 new_holder=holder,
@@ -273,7 +265,7 @@ def acquire(
                 ttl_ms=_parse_ttl(ttl),
                 root=_node_aware_root(key),
             )
-        except RebindRefused:
+        except _core.RebindRefused:
             pass
         else:
             # The MODE decides, not the absence of an exception. A rebind that
@@ -301,7 +293,7 @@ def acquire(
                 )
                 return
     try:
-        claim = acquire_claim(
+        claim = _core.acquire_claim(
             key=key,
             holder=holder,
             reason=reason or None,
@@ -458,7 +450,7 @@ def release(
         )
         raise typer.Exit(code=2)
     try:
-        released = release_claim(
+        released = _core.release_claim(
             key=key, holder=holder, strict=strict, root=_node_aware_root(key)
         )
     except HolderMismatch as exc:
@@ -700,7 +692,7 @@ def refresh(
 ) -> None:
     """Extend a TTL claim's expires_at. No-op for PID-liveness claims."""
     try:
-        result = refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
+        result = _core.refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
@@ -1001,7 +993,7 @@ def status(
     compute a field it discards would tax every tool call to answer a question
     it never asked.
     """
-    info = claim_status(key=key, root=_node_aware_root(key))
+    info = _core.claim_status(key=key, root=_node_aware_root(key))
     node_id = key[len("node:"):] if key.startswith("node:") else ""
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
@@ -1044,7 +1036,7 @@ def _merge_claims_across_roots(
     best_row: dict[str, Optional[dict]] = {}
 
     for candidate_root, cdir in deduped_roots:
-        rows, _counts, states_by_key = list_claims_with_counts(
+        rows, _counts, states_by_key = _core.list_claims_with_counts(
             prefix=prefix or None, include_stale=include_stale, root=candidate_root,
         )
         row_by_key = {r["key"]: r for r in rows}
@@ -1414,7 +1406,7 @@ def reap_cmd(
     to confirm each move before counting it `reaped` - an exit code alone is not
     evidence. Exits 1 when any reapable file's move could not be confirmed.
     """
-    summary = reap_dead_claims(
+    summary = _core.reap_dead_claims(
         roots=list(root) if root else None,
         apply=apply,
         abandonment_probe=_abandonment_probe(),
@@ -1520,7 +1512,7 @@ def _release_lane(*, lane: str, json_output: bool) -> None:
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:
     """The former `claim force-release`. Archived to .expired/."""
     try:
-        force_release_claim(key=key, reason=reason, root=_node_aware_root(key))
+        _core.force_release_claim(key=key, reason=reason, root=_node_aware_root(key))
     except ClaimValidationError as exc:
         typer.echo(f"validation error: {exc}", err=True)
         raise typer.Exit(code=2)
