@@ -37,7 +37,7 @@ envelope:
       # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
       # pattern sources, validated by both the Python and bash validators via the
       # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -2544,6 +2544,40 @@ event_types:
         reason:
           type: string
           description: "Machine-readable reconstruction reason when the failure came from a later lifecycle seam."
+    consumers: [operator, megawalk]
+
+  - name: unit_interrupted
+    description: "Emitted by the unified loop runtime after a dispatched session exits without a termination event, recording what the harness transcript proved about tool calls before the unit is re-dispatched. This is observational and does not choose retry or abort policy."
+    sources: [loop]
+    data:
+      required: [session_id, unit_id, iteration, exit_code, resolution]
+      properties:
+        session_id:
+          type: string
+          description: "Correlation key for the session that exited unexpectedly."
+        unit_id:
+          type: string
+          description: "Identifier of the unit whose session exited unexpectedly."
+        iteration:
+          type: integer
+          description: "Walk iteration at which this interruption was classified."
+        exit_code:
+          type: integer
+          description: "Exit code returned by the interrupted session."
+        resolution:
+          type: string
+          enum: [classified, nothing_in_flight, unresolved]
+          description: "What the transcript classifier resolved: one unknown call, no call in flight, or no trustworthy transcript."
+        calls_in_flight:
+          type: array
+          description: "Tool names proven to have no durable result; omitted when none were safely identified."
+          items:
+            type: object
+            required: [name]
+            properties:
+              name:
+                type: string
+                description: "Tool name only; arguments are never journaled."
     consumers: [operator, megawalk]
 
   - name: walk_paused
