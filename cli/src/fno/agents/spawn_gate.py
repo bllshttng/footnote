@@ -37,6 +37,7 @@ EXIT_NO_WAIT = 76
 EXIT_RAM_REFUSED = 77
 EXIT_PROVIDER_CAP = 78
 EXIT_LOAD_REFUSED = 79
+EXIT_KING_SHARE = 80
 
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
@@ -208,6 +209,11 @@ class LiveWorker:
     #: above keeps the RECORDED pid, which for a bg row names the PTY HOST;
     #: cost readers (``agents top``, the process-cost gate) must use this one.
     session_pid: Optional[int] = None
+    #: The session id of the KING that spawned this worker (x-3f84 W4): the
+    #: row's ``spawned_by_session``, None for an operator-run or legacy row.
+    #: Cost is attributed through this field so a shared ceiling can be
+    #: divided without minting a second budget record.
+    spawned_by: Optional[str] = None
 
 
 @dataclass
@@ -220,6 +226,11 @@ class LiveCensus:
     #: (dedup-independent) so the slot cap mirrors the Rust gate exactly — see
     #: :attr:`slot_count`.
     fno_slot_workers: int = 0
+    #: live slot-holding rows per king session id (x-3f84 W4). None keys the
+    #: rows no king is attributable to (operator-run / pre-lineage rows): they
+    #: still consume ``max_live`` but never divide the share, because an
+    #: unknown lineage must not shrink everyone else's share to hide in it.
+    king_counts: dict[Optional[str], int] = field(default_factory=dict)
 
     @property
     def count(self) -> int:
@@ -352,6 +363,9 @@ def census() -> LiveCensus:
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
         out.fno_slot_workers += 1
+        out.king_counts[row.spawned_by_session] = (
+            out.king_counts.get(row.spawned_by_session, 0) + 1
+        )
         live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
@@ -370,6 +384,7 @@ def census() -> LiveCensus:
                 pid=row.pid,
                 status=str(row.status),
                 session_id=row.harness_session_id,
+                spawned_by=row.spawned_by_session,
                 session_pid=(
                     sock_map.get(row.short_id or "")
                     or sock_map.get((row.harness_session_id or "")[:8])
@@ -832,6 +847,49 @@ def _check_load_ceiling(max_load_per_cpu: float) -> None:
         raise GateRefused(EXIT_LOAD_REFUSED)
 
 
+def _king_share(cap: int, king_counts: dict[Optional[str], int], caller: str) -> int:
+    """One king's fair share of the ceiling: a DIVISOR, never a second record.
+
+    ``max_live`` stays the one ceiling; the share is ``cap // kings`` where
+    kings are the distinct attributed spawners among live rows, plus the
+    caller (a king spawning its FIRST worker still counts, or N kings with
+    live rows would admit an unbounded N+1th). Unattributed rows (None) never
+    divide the share - an unknown lineage must not shrink everyone else's
+    share to hide inside it. The floor of 1 keeps a crowded fleet able to
+    start one worker per king.
+    """
+    kings = {k for k in king_counts if k is not None}
+    kings.add(caller)
+    return max(1, cap // len(kings))
+
+
+def _check_king_share(
+    census_obj: "LiveCensus", cap: int, *, caller_session: Optional[str]
+) -> None:
+    """Refuse (never queue) when the calling king holds its full share (x-3f84 W4).
+
+    Six kings dispatching into one undivided ``max_live`` converge on the cap
+    by construction, however reasonable each king is alone. The share divides
+    THAT ceiling, and only for a caller whose session identity resolved: an
+    operator terminal or cron job has no lineage and is not competing for the
+    commons, so an unattributed caller skips the check. Waiting cannot help -
+    only the caller's own workers dying frees its share - so this refuses like
+    the provider cap rather than queueing.
+    """
+    if not caller_session:
+        return
+    share = _king_share(cap, census_obj.king_counts, caller_session)
+    held = census_obj.king_counts.get(caller_session, 0)
+    if held >= share:
+        kings = len({k for k in census_obj.king_counts if k is not None} | {caller_session})
+        _warn(
+            f"spawn-gate: king {caller_session[:8]} holds {held} of max_live {cap} "
+            f"across {kings} kings (share {share}); refusing to spawn -- waiting "
+            f"cannot help while your own workers hold the share (--force to bypass)"
+        )
+        raise GateRefused(EXIT_KING_SHARE)
+
+
 def _acquire_worker_slot(
     guard: GateGuard,
     name: str,
@@ -913,6 +971,17 @@ def run_gate(
         else None
     )
 
+    # The calling king's session id (x-3f84 W4), resolved through the same
+    # self-identity source that stamps `spawned_by_session` onto the spawned
+    # row, so the gate attributes a spawn exactly the way the row will.
+    try:
+        from fno.claims.self_identity import resolve_self_identity
+
+        caller_session = resolve_self_identity().session_id
+    except Exception:  # noqa: BLE001 — no identity, no share check (an
+        # operator-run spawn is not competing for the commons)
+        caller_session = None
+
     holder = f"spawn-gate:{os.getpid()}:{name}"
     guard = GateGuard(
         _route_provider=route_provider,
@@ -922,7 +991,7 @@ def run_gate(
     )
 
     if force and provider_cap is None:
-        _warn("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)")
+        _warn("spawn-gate: forced past cap, RAM floor, load ceiling, and king share (--force)")
         if substrate == "headless":
             _acquire_worker_slot(guard, name, holder, route_provider)
         return guard
@@ -995,8 +1064,8 @@ def run_gate(
                     )
             if force:
                 _warn(
-                    "spawn-gate: forced past cap, RAM floor, and load ceiling "
-                    "(--force); provider cap remains enforced"
+                    "spawn-gate: forced past cap, RAM floor, load ceiling, and king "
+                    "share (--force); provider cap remains enforced"
                 )
                 if substrate == "headless":
                     try:
@@ -1022,6 +1091,7 @@ def run_gate(
                 try:
                     _check_ram_floor(floor_gb)
                     _check_load_ceiling(max_load_per_cpu)
+                    _check_king_share(c, cap, caller_session=caller_session)
                 except GateRefused:
                     guard.release()
                     raise

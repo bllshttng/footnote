@@ -142,6 +142,10 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # read as running on claude. Same rename as the list row.
                 "harness": w.harness,
                 "substrate": w.substrate,
+                # The king that spawned this worker (x-3f84 W4): first 8 of the
+                # spawner's session id, None for operator-run / legacy rows.
+                # The column an operator reads to see WHICH king owns the cost.
+                "king": (w.spawned_by or "")[:8] or None,
                 # The process that IS the session (x-3f84 W2): for a bg row the
                 # recorded `w.pid` names the PTY HOST, and this column once
                 # priced the host while the worker's own memory never appeared
@@ -428,7 +432,7 @@ def render_top(
     out.extend(c.warnings)
     header = (
         f"{'SOURCE':<7} {'NAME':<24} {'HARNESS':<9} {'SUBSTRATE':<10} "
-        f"{'PID':>7} {'RSS_MB':>7} {'PROGRESS':<17} STATUS"
+        f"{'KING':<9} {'PID':>7} {'RSS_MB':>7} {'PROGRESS':<17} STATUS"
     )
     out.append(header)
     if not rows:
@@ -443,7 +447,7 @@ def render_top(
             name_cell += f" ={r['handle']}"
         out.append(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
-            f"{r['substrate']:<10} {r['pid'] or '-':>7} "
+            f"{r['substrate']:<10} {r['king'] or '-':<9} {r['pid'] or '-':>7} "
             f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} "
             f"{r['progress'] or '-':<17} {r['status']}"
         )
