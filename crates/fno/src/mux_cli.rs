@@ -3093,6 +3093,30 @@ fn candidate_key(a: &crate::agents_view::RegistryAgent) -> &str {
     a.effective_identity().unwrap_or(a.name.as_str())
 }
 
+fn ambiguity_candidates(
+    tier: &[&crate::agents_view::RegistryAgent],
+    now: u64,
+    distinguish_panes: bool,
+) -> Vec<Candidate> {
+    let mut seen: Vec<(String, Option<(String, u64)>)> = Vec::new();
+    let mut candidates = Vec::new();
+    for a in tier {
+        let key = candidate_key(a).to_string();
+        let pane = a.mux.clone();
+        let dedup = (key.clone(), distinguish_panes.then(|| pane.clone()).flatten());
+        if seen.contains(&dedup) {
+            continue;
+        }
+        seen.push(dedup);
+        candidates.push(Candidate {
+            name: a.name.clone(),
+            pane,
+            age_s: a.updated_at.map(|t| now.saturating_sub(t)),
+        });
+    }
+    candidates
+}
+
 /// The one selector resolver shared by `view`, `pane focus` and `where`
 /// (x-b80d, Locked Decision 2: a resolver wired into one door is the
 /// decorative-guard pitfall). Tiers, first non-empty tier wins; ambiguity
@@ -3146,21 +3170,30 @@ fn resolve_selector(
         // One line per DISTINCT candidate - dedup by the same identity key the
         // ambiguity count used, never by name: two identities can share a
         // name, and printing "matches 1 agents" while refusing is a lie.
-        let mut seen: Vec<&str> = Vec::new();
-        let mut candidates: Vec<Candidate> = Vec::new();
-        for a in &tier {
-            let key = candidate_key(a);
-            if seen.contains(&key) {
-                continue;
-            }
-            seen.push(key);
-            candidates.push(Candidate {
-                name: a.name.clone(),
-                pane: a.mux.clone(),
-                age_s: a.updated_at.map(|t| now.saturating_sub(t)),
-            });
-        }
-        return Resolution::Ambiguous(candidates);
+        return Resolution::Ambiguous(ambiguity_candidates(&tier, now, false));
+    }
+    let live_pane_refs: Vec<(String, u64)> = tier
+        .iter()
+        .filter(|a| !a.exited)
+        .filter_map(|a| a.mux.clone())
+        .collect();
+    let mut distinct_live_pane_refs = live_pane_refs.clone();
+    distinct_live_pane_refs.sort_unstable();
+    distinct_live_pane_refs.dedup();
+    let has_paneless_live_row = tier.iter().any(|a| !a.exited && a.mux.is_none());
+    let has_any_pane_ref = tier.iter().any(|a| a.mux.is_some());
+    let stale_pane_refs_disagree = tier
+        .iter()
+        .filter(|a| a.exited)
+        .filter_map(|a| a.mux.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        > 1;
+    if distinct_live_pane_refs.len() > 1
+        || (distinct_live_pane_refs.is_empty() && has_paneless_live_row && has_any_pane_ref)
+        || stale_pane_refs_disagree
+    {
+        return Resolution::Ambiguous(ambiguity_candidates(&tier, now, true));
     }
     // One identity, possibly several rows. No writer clears `mux` on exit, so
     // an exited spelling can carry a stale pane ref: prefer a LIVE pane-hosted
@@ -5344,6 +5377,21 @@ mod tests {
                 assert_eq!(r.mux, Some(("work".to_string(), 13)));
             }
             other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_selector_refuses_a_paneless_live_row_over_a_stale_pane_ref() {
+        // A live paneless row and an exited row disagree about the mux ref.
+        // The stale ref is not a safe fallback: selecting it can address a
+        // different worker after the pane id was reused.
+        let paneless = reg_row("t-x919-finish", Some("aaaa1111"));
+        let mut stale = reg_row("t-x919-finish", Some("aaaa1111"));
+        stale.exited = true;
+        stale.mux = Some(("work".into(), 12));
+        match resolve_selector(&[paneless, stale], "finish", 0) {
+            Resolution::Ambiguous(candidates) => assert_eq!(candidates.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
         }
     }
 
