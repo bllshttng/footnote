@@ -59,6 +59,7 @@ fn pane_send(scratch: &Scratch, pane: u64, bytes: &[u8]) {
                 pane,
                 bytes: bytes.to_vec(),
                 guarded: false,
+                expected_identity: None,
             },
         },
     )

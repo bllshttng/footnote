@@ -257,7 +257,12 @@ fn default_true() -> bool {
 /// flat; the bump names the skew so the handshake restarts an old server
 /// instead. (Numbered one past the x-5f7f resume-gesture v49 it rebases
 /// onto.)
-pub const PROTO_VERSION: u32 = 50;
+///
+/// v51 (x-588a): pane reads and sends carry the pane's captured identity and
+/// the registry identity used to address it. Additive fields remain defaulted,
+/// but the send identity is a safety contract, so the handshake must reject an
+/// older peer rather than let it type into an unverified pane.
+pub const PROTO_VERSION: u32 = 51;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -598,6 +603,11 @@ pub enum ControlVerb {
         bytes: Vec<u8>,
         #[serde(default)]
         guarded: bool,
+        /// (v51, x-588a) The addressed pane identity. When present, the server
+        /// refuses before typing unless the pane's captured name and registry
+        /// row agree with this value.
+        #[serde(default)]
+        expected_identity: Option<String>,
     },
     /// Block until the pane's output settles (`quiet_ms` with no new output),
     /// matches `pattern` (regex over the visible grid), the child exits, or
@@ -1813,6 +1823,13 @@ pub enum ServerMsg {
         text: String,
         #[serde(default)]
         block: Option<BlockMeta>,
+        /// (v51, x-588a) Identity captured from the pane's spawn argv.
+        #[serde(default)]
+        pane_name: Option<String>,
+        /// (v51, x-588a) The registry identity joined to this pane ref, not a
+        /// fact owned by the pane itself.
+        #[serde(default)]
+        registry_fno_id: Option<String>,
     },
     /// Answer to [`ControlVerb::PaneRun`]: the fresh pane's id, machine-read
     /// by the CLI so scripts compose. `placement` (v44, x-6928) carries the
@@ -1988,6 +2005,9 @@ pub struct PaneInfo {
     /// direction of `where` (Locked Decision 6).
     #[serde(default)]
     pub fno_id: Option<String>,
+    /// (v51, x-588a) The pane's spawn-captured `FNO_AGENT_SELF` identity.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Why a [`ControlVerb::PaneWait`] returned. The CLI maps each to a distinct
@@ -2075,6 +2095,9 @@ pub mod err_code {
     /// pane is gone" and "nobody is watching" are different problems, and
     /// collapsing them leaves the operator unable to tell which one they have.
     pub const NO_CLIENT: u32 = 13;
+    /// (v51, x-588a) The addressed identity disagrees with the pane's captured
+    /// identity or its unique registry occupant; no bytes were typed.
+    pub const TARGET_IDENTITY_MISMATCH: u32 = 14;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -3053,7 +3076,8 @@ mod tests {
         // clickable links (x-a2d0) bumped it 44 -> 45; pane focus (x-3e17) 45 ->
         // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47; the
         // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
-        // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50.
+        // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
+        // pane identity receipts (x-588a) bumped it 50 -> 51.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3062,7 +3086,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 50);
+        assert_eq!(PROTO_VERSION, 51);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -3496,6 +3520,7 @@ mod tests {
                 pane: 5,
                 bytes: b"hello\r".to_vec(),
                 guarded: true,
+                expected_identity: None,
             },
             ControlVerb::PaneWait {
                 pane: 5,
@@ -3567,12 +3592,15 @@ mod tests {
                     child_pid: Some(4242),
                     title: None,
                     fno_id: None,
+                    name: None,
                 }],
             },
             ServerMsg::PaneText {
                 pane_id: 4,
                 text: "marker-42\n$ ".into(),
                 block: None,
+                pane_name: None,
+                registry_fno_id: None,
             },
             ServerMsg::PaneText {
                 pane_id: 4,
@@ -3584,6 +3612,8 @@ mod tests {
                     truncated: false,
                     implicit: false,
                 }),
+                pane_name: None,
+                registry_fno_id: None,
             },
             ServerMsg::PaneSpawned {
                 pane_id: 9,

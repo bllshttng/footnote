@@ -447,6 +447,9 @@ enum CoreMsg {
         lines: Option<u16>,
         /// (v6) Select an OSC 133 command block instead of a plain read.
         block: Option<BlockSel>,
+        /// Fresh registry snapshot used to label the read with the registry
+        /// identity joined to this pane.
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     /// `squad_key` was resolved OFF the core loop (like `Attach`); `cwd` is the
@@ -467,6 +470,7 @@ enum CoreMsg {
         pane: u64,
         bytes: Vec<u8>,
         guarded: bool,
+        expected_identity: Option<String>,
         /// Fresh registry snapshot for a guarded send, read off-loop in
         /// `handle_control`. `None` means either the read failed (guarded ->
         /// fail closed) or the send is unguarded (unused). `Some(rows)` is the
@@ -2483,7 +2487,7 @@ impl Core {
     /// every later squad's shell in the first client's directory). Empty /
     /// vanished dirs degrade to the server cwd inside `PtyShell::spawn`.
     fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
-        let id = self.next_pane_id;
+        let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn(
             &self.shells,
@@ -2519,7 +2523,7 @@ impl Core {
         let name = agent_self_from_argv(argv);
         let cmd = cmd_from_argv(argv);
         let account = account_from_argv(argv);
-        let id = self.next_pane_id;
+        let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn_cmd(
             argv,
@@ -2546,7 +2550,23 @@ impl Core {
         Ok(id)
     }
 
-    /// Record a freshly-spawned pane: bump the id, insert its VT grid, and
+    fn reserve_pane_id(&mut self) -> Result<u64, String> {
+        #[cfg(test)]
+        {
+            let id = self.next_pane_id;
+            self.next_pane_id = id.saturating_add(1);
+            return Ok(id);
+        }
+        #[cfg(not(test))]
+        {
+            let id = crate::squad_store::reserve_next_pane_id(self.next_pane_id)
+                .map_err(|e| format!("pane id reservation failed: {e}"))?;
+            self.next_pane_id = id.saturating_add(1);
+            Ok(id)
+        }
+    }
+
+    /// Record a freshly-spawned pane: advance the id floor, insert its VT grid, and
     /// arm its output watch (dropped receiver, so the watch costs nothing
     /// until a `PaneWait` subscribes).
     #[allow(clippy::too_many_arguments)]
@@ -2562,7 +2582,7 @@ impl Core {
         cmd: Option<String>,
         account: Option<String>,
     ) {
-        self.next_pane_id += 1;
+        self.next_pane_id = self.next_pane_id.max(id.saturating_add(1));
         e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
         let stats = Arc::new(PaneCounters::default());
         self.panes.insert(
@@ -2680,6 +2700,7 @@ impl Core {
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
+                    name: entry.name.clone(),
                     // (x-d865) The fno_id join: the registry row whose mux ref
                     // points at this pane in THIS session carries the durable
                     // identity. Server-owned (self.agents is the cached read).
@@ -2712,12 +2733,17 @@ impl Core {
     }
 
     fn fno_id_for_pane_with_agents(&self, pid: u64, agents: &[RegistryAgent]) -> Option<String> {
-        agents.iter().find_map(|a| match &a.mux {
-            Some((sess, pane)) if sess == &self.session_name && *pane == pid => {
-                a.effective_identity().map(str::to_owned)
+        let mut ids = std::collections::BTreeSet::new();
+        for a in agents {
+            if let Some((sess, pane)) = &a.mux {
+                if sess == &self.session_name && *pane == pid {
+                    if let Some(identity) = a.effective_identity() {
+                        ids.insert(identity.to_string());
+                    }
+                }
             }
-            _ => None,
-        })
+        }
+        (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
 
     fn resolve_placement_target(
@@ -7201,11 +7227,56 @@ impl Core {
         pane: u64,
         bytes: &[u8],
         guarded: bool,
+        expected_identity: Option<&str>,
         agents: Option<Vec<RegistryAgent>>,
     ) -> ServerMsg {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
         };
+        if let Some(expected) = expected_identity {
+            let host = entry.name.as_deref().unwrap_or("<unknown>");
+            let Some(rows) = agents.as_deref() else {
+                return ServerMsg::Err {
+                    code: err_code::TARGET_IDENTITY_MISMATCH,
+                    msg: format!(
+                        "addressed {expected}, pane hosts {host}; agent registry unreadable"
+                    ),
+                };
+            };
+            let matches: Vec<&RegistryAgent> = rows
+                .iter()
+                .filter(|a| {
+                    a.mux.as_ref().is_some_and(|(session, pane_id)| {
+                        session == &self.session_name && *pane_id == pane
+                    })
+                })
+                .collect();
+            let registry_identity = matches
+                .first()
+                .and_then(|row| row.effective_identity())
+                .unwrap_or("<unknown>");
+            if matches.len() != 1
+                || registry_identity != expected
+                || matches.first().is_some_and(|row| row.name != host)
+            {
+                let registry = matches
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return ServerMsg::Err {
+                    code: err_code::TARGET_IDENTITY_MISMATCH,
+                    msg: format!(
+                        "addressed {expected}, pane hosts {host}; registry fno_id {registry_identity}; occupants: {}",
+                        if registry.is_empty() {
+                            "<none>"
+                        } else {
+                            &registry
+                        }
+                    ),
+                };
+            }
+        }
         if guarded {
             let Some(rows) = agents.as_deref() else {
                 return ServerMsg::Err {
@@ -9459,37 +9530,47 @@ impl Core {
                 pane,
                 lines,
                 block,
+                agents,
                 reply,
             } => {
                 let msg = match self.panes.get(&pane) {
-                    Some(entry) => match block {
-                        // Block mode: `lines` is ignored; an unanswerable block
-                        // is BLOCK_UNAVAILABLE, never empty/stale text.
-                        Some(sel) => match entry.vt.read_block(sel) {
-                            Ok(read) => ServerMsg::PaneText {
-                                pane_id: pane,
-                                text: read.text.clone(),
-                                block: Some(read.meta()),
+                    Some(entry) => {
+                        let pane_name = entry.name.clone();
+                        let registry_fno_id = self
+                            .fno_id_for_pane_with_agents(pane, agents.as_deref().unwrap_or(&[]));
+                        match block {
+                            // Block mode: `lines` is ignored; an unanswerable block
+                            // is BLOCK_UNAVAILABLE, never empty/stale text.
+                            Some(sel) => match entry.vt.read_block(sel) {
+                                Ok(read) => ServerMsg::PaneText {
+                                    pane_id: pane,
+                                    text: read.text.clone(),
+                                    block: Some(read.meta()),
+                                    pane_name,
+                                    registry_fno_id,
+                                },
+                                Err(()) => ServerMsg::Err {
+                                    code: err_code::BLOCK_UNAVAILABLE,
+                                    msg: format!("pane {pane}: no such block"),
+                                },
                             },
-                            Err(()) => ServerMsg::Err {
-                                code: err_code::BLOCK_UNAVAILABLE,
-                                msg: format!("pane {pane}: no such block"),
-                            },
-                        },
-                        // Plain read: `lines` reaches into history (v6, US5);
-                        // no `--lines` keeps the visible-grid behavior (AC5-UI).
-                        None => {
-                            let text = match lines {
-                                Some(n) => entry.vt.read_tail(n),
-                                None => frame_text(&entry.vt.frame()),
-                            };
-                            ServerMsg::PaneText {
-                                pane_id: pane,
-                                text,
-                                block: None,
+                            // Plain read: `lines` reaches into history (v6, US5);
+                            // no `--lines` keeps the visible-grid behavior (AC5-UI).
+                            None => {
+                                let text = match lines {
+                                    Some(n) => entry.vt.read_tail(n),
+                                    None => frame_text(&entry.vt.frame()),
+                                };
+                                ServerMsg::PaneText {
+                                    pane_id: pane,
+                                    text,
+                                    block: None,
+                                    pane_name,
+                                    registry_fno_id,
+                                }
                             }
                         }
-                    },
+                    }
                     None => dead_pane(pane),
                 };
                 let _ = reply.send(msg);
@@ -9553,10 +9634,12 @@ impl Core {
                 pane,
                 bytes,
                 guarded,
+                expected_identity,
                 agents,
                 reply,
             } => {
-                let msg = self.pane_send(pane, &bytes, guarded, agents);
+                let msg =
+                    self.pane_send(pane, &bytes, guarded, expected_identity.as_deref(), agents);
                 let _ = reply.send(msg);
                 Flow::Continue
             }
@@ -10087,7 +10170,7 @@ async fn serve(
         pane_stats: Arc::new(RwLock::new(HashMap::new())),
         pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
         clients: Vec::new(),
-        next_pane_id: 1,
+        next_pane_id: crate::squad_store::load().next_pane_id.max(1),
         next_squad_id: 1,
         tab_areas: HashMap::new(),
         session_name,
@@ -10900,11 +10983,13 @@ async fn handle_control(
                 .await
         }
         ControlVerb::PaneRead { pane, lines, block } => {
+            let agents = read_guard_agents().await;
             core_tx
                 .send(CoreMsg::PaneRead {
                     pane,
                     lines,
                     block,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -10938,6 +11023,7 @@ async fn handle_control(
             pane,
             bytes,
             guarded,
+            expected_identity,
         } => {
             // A guarded send reads the agents registry FRESH here, off the core
             // loop: the server's own overlay cache (`self.agents`) is parked
@@ -10946,7 +11032,7 @@ async fn handle_control(
             // into a busy agent. Reading on the server (its own registry path)
             // is what closes the client/server HOME-divergence gap; passing the
             // snapshot into the core loop keeps the check + inject atomic.
-            let agents = if guarded {
+            let agents = if guarded || expected_identity.is_some() {
                 read_guard_agents().await
             } else {
                 None
@@ -10956,6 +11042,7 @@ async fn handle_control(
                     pane,
                     bytes,
                     guarded,
+                    expected_identity,
                     agents,
                     reply: reply_tx,
                 })
@@ -12054,6 +12141,30 @@ mod tests {
 
     fn agent(pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         agent_in("main", pane, badge, exited)
+    }
+
+    #[test]
+    fn pane_send_refuses_when_registry_name_disagrees_with_pane_identity() {
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
+        let mut addressed = agent_in("sess", pane, Some(AgentBadge::Done), false);
+        addressed.name = "addressed".into();
+        addressed.harness_session_id = Some("target-id".into());
+
+        match core.pane_send(
+            pane,
+            b"payload",
+            false,
+            Some("target-id"),
+            Some(vec![addressed]),
+        ) {
+            ServerMsg::Err { msg, .. } => {
+                assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
+                assert!(msg.contains("hosted"), "refusal names pane host: {msg}");
+            }
+            other => panic!("expected identity refusal before typing, got {other:?}"),
+        }
     }
 
     #[test]
@@ -14284,8 +14395,10 @@ mod tests {
     fn pane_ls_can_join_a_fresh_registry_snapshot_without_viewers() {
         let (mut core, pane_id) = template_core();
         core.session_name = "sess".into();
+        core.panes.get_mut(&pane_id).unwrap().name = Some("worker".into());
         let mut fresh = agent_in("sess", pane_id, None, false);
         fresh.harness_session_id = Some("019fb024-fresh".into());
+        fresh.name = "worker".into();
         core.panes
             .get_mut(&pane_id)
             .unwrap()
@@ -14302,6 +14415,8 @@ mod tests {
             ServerMsg::PaneList { panes } => {
                 let pane = panes.iter().find(|pane| pane.pane_id == pane_id).unwrap();
                 assert_eq!(pane.title.as_deref(), Some("⠋ Working"));
+                assert_eq!(pane.name.as_deref(), Some("worker"));
+                assert_eq!(pane.fno_id.as_deref(), Some("019fb024-fresh"));
             }
             other => panic!("pane ls should carry OSC title, got {other:?}"),
         }

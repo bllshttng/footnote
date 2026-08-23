@@ -261,6 +261,30 @@ def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
     assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
 
 
+def test_mail_delivery_refuses_when_pane_ls_names_a_different_occupant(monkeypatch):
+    entry = _entry(session_id="addressed-id")
+    entry.name = "addressed"
+    calls: list[list[str]] = []
+
+    def _run(argv, **_kwargs):
+        calls.append(list(argv))
+        if argv[1:4] == ["mux", "pane", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{
+                    "pane_id": 3,
+                    "name": "different",
+                    "fno_id": "different-id",
+                }]),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _run)
+    assert dispatch._mux_pane_send(entry, "hi", guarded=False, raw=True) is False
+    assert [call[3] for call in calls if len(call) > 3 and call[1:3] == ["mux", "pane"]] == ["ls"]
+
+
 @pytest.mark.parametrize("harness", ["gemini", "opencode"])
 def test_non_claude_recipient_refuses_unpinned_submit_contract(harness, monkeypatch):
     """A successful byte write is not delivery when the harness-specific
