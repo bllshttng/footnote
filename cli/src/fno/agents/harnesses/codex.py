@@ -849,6 +849,7 @@ def resume(
     output_path: Path,
     timeout: Optional[float] = None,
     headless_yolo: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> CodexResult:
     """Spawn ``codex exec resume <session_id> --json ...`` from ``cwd``.
 
@@ -862,6 +863,7 @@ def resume(
         cwd: registry-recorded cwd for the agent; the call-time cwd is
             ignored (parent design domain pitfall: cwd-pinned sessions).
         yolo: sandbox bypass; default False.
+        reasoning_effort: create-time effort restored from the registry.
 
     Raises:
         :class:`CodexInvocationError`: codex exits non-zero (e.g. session
@@ -877,8 +879,15 @@ def resume(
     from fno.agents.harness_map import render_session_argv
 
     identity = render_session_argv("codex", "headless_resume", session_id)
+    effort_args = (
+        ["-c", f"model_reasoning_effort={reasoning_effort}"]
+        if reasoning_effort
+        else []
+    )
     argv = [
-        *identity,
+        identity[0],
+        *effort_args,
+        *identity[1:],
         "--json",
         "--skip-git-repo-check",
         *sandbox_flag_resume(eff_yolo),

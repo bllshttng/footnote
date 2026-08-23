@@ -118,6 +118,7 @@ def test_create_codex_routes_to_provider_and_registers(workdir, fake_codex_creat
         from_name="fno",
         yolo=False,
         timeout_sec=10.0,
+        effort="low",
         lock_handle=_FakeLockHandle(),
     )
 
@@ -140,6 +141,7 @@ def test_create_codex_routes_to_provider_and_registers(workdir, fake_codex_creat
     assert e.harness_session_id == "codex-sid-abc"
     assert e.cwd == str(workdir)
     assert e.status == "live"
+    assert e.effort == "low"
 
 
 def test_create_codex_treats_identity_collision_as_registry_failure(
@@ -341,6 +343,7 @@ def test_followup_codex_routes_to_resume_and_bumps_last_message_at(
             harness_session_id="real-uuid",
             created_at="2026-05-21T00:00:00Z",
             status="live",
+            effort="low",
             last_message_at=None,
         )
     ])
@@ -361,6 +364,7 @@ def test_followup_codex_routes_to_resume_and_bumps_last_message_at(
     # AC2-EDGE: cwd comes from registry, not workdir.
     assert call.kwargs["cwd"] == Path("/Users/foo/proj")
     assert call.kwargs["session_id"] == "real-uuid"
+    assert call.kwargs["reasoning_effort"] == "low"
 
     # last_message_at bumped.
     entries = load_registry()

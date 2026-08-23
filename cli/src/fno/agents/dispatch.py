@@ -1193,6 +1193,7 @@ def _codex_followup_path(
             yolo=yolo,
             output_path=output_path,
             timeout=timeout_sec,
+            reasoning_effort=existing.effort,
         )
     except codex_mod.CodexTimeoutError as exc:
         events.emit(

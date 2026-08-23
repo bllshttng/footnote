@@ -313,6 +313,7 @@ fn build_argv_resume_default_no_sandbox_flag() {
         "sess-uuid-1234",
         "msg to resume",
         false,
+        None,
     );
     // codex exec resume <session_id> --json --skip-git-repo-check <prompt>
     assert_eq!(argv[0], "codex");
@@ -331,14 +332,22 @@ fn build_argv_resume_default_no_sandbox_flag() {
 
 #[test]
 fn build_argv_resume_yolo_adds_bypass() {
-    let argv = build_argv_resume(&PathBuf::from("/x"), "s123", "p", true);
+    let argv = build_argv_resume(&PathBuf::from("/x"), "s123", "p", true, None);
     assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+}
+
+#[test]
+fn build_argv_resume_forwards_reasoning_effort() {
+    let argv = build_argv_resume(&PathBuf::from("/x"), "s123", "p", false, Some("low"));
+    assert!(argv
+        .windows(2)
+        .any(|pair| pair == ["-c", "model_reasoning_effort=low"]));
 }
 
 #[test]
 fn build_argv_resume_no_cd_flag() {
     // Resume sets cwd via Popen(cwd=...) not -C argv token
-    let argv = build_argv_resume(&PathBuf::from("/x"), "s123", "p", false);
+    let argv = build_argv_resume(&PathBuf::from("/x"), "s123", "p", false, None);
     assert!(!argv.contains(&"-C".to_string()));
 }
 
@@ -360,7 +369,7 @@ fn build_argv_resume_repins_the_bounded_posture_in_a_repo() {
         .output()
         .unwrap();
 
-    let argv = build_argv_resume(dir.path(), "s123", "p", false);
+    let argv = build_argv_resume(dir.path(), "s123", "p", false, None);
     assert!(argv.contains(&"sandbox_mode=workspace-write".to_string()));
     let roots = argv
         .iter()
@@ -375,7 +384,7 @@ fn build_argv_resume_repins_the_bounded_posture_in_a_repo() {
     assert_eq!(argv.iter().filter(|a| *a == "-c").count(), 2);
 
     // Full yolo is already unsandboxed: there is no posture to re-pin.
-    let yolo = build_argv_resume(dir.path(), "s123", "p", true);
+    let yolo = build_argv_resume(dir.path(), "s123", "p", true, None);
     assert!(!yolo.iter().any(|a| a == "-c"));
 }
 
