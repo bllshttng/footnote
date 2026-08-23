@@ -5025,9 +5025,10 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
 
     Honesty is the acceptance criterion (node x-015c): a phase with no row
     renders 'not recorded'; a row with an end but no start renders 'end only';
-    neither renders as a duration, and the total states how many of the four
-    phases contributed a duration rather than summing silently over gaps. Start
-    reads ``started_at`` (canonical) with ``claimed_at`` as the legacy fallback.
+    neither renders as a duration, and the total states how many of the
+    lifecycle phases contributed a duration rather than summing silently over
+    gaps. Start reads ``started_at`` (canonical) with ``claimed_at`` as the
+    legacy fallback.
     """
     from datetime import datetime
 
@@ -5433,8 +5434,8 @@ def cmd_provenance(
     # Lifecycle roster (x-b6e4, x-015c): per-phase start/end/duration + an
     # honest total. Distinct from the birth/spawn edges above -- those are
     # single parent pointers; this is the per-phase who-did-what across sessions
-    # and harnesses. All four phases always render (not recorded / end only for
-    # gaps) so a roster never reads "nobody touched this" by omission.
+    # and harnesses. Every lifecycle phase always renders (not recorded / end
+    # only for gaps) so a roster never reads "nobody touched this" by omission.
     lines.append("  lifecycle:")
     lines.extend(roster_lines)
 

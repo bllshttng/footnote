@@ -40,12 +40,16 @@ def graph(tmp_path, monkeypatch):
         return g
 
     import fno.graph._constants as gc
+    import fno.graph.cli as gcli
     import fno.graph.store as gs
 
-    # Patch the resolver FUNCTIONS, never the lazy module attrs: GRAPH_JSON is
-    # __getattr__-provided, so monkeypatching the name pins the resolved path
-    # into the module dict at teardown and every later _graph_path() reader in
-    # the process sees this tmp graph forever.
+    # Pin the CLI boundary directly: _graph_path is a concrete function, so
+    # monkeypatch restores it exactly. The lazy GRAPH_JSON attr is unusable
+    # here - ten sibling fixtures setattr it at teardown, which pins a
+    # concrete value into the module dict and silences __getattr__ for the
+    # rest of the process, so a resolver-function patch never fires when this
+    # file runs after any of them.
+    monkeypatch.setattr(gcli, "_graph_path", lambda: g)
     monkeypatch.setattr(gc, "_graph_json", lambda: g)
     monkeypatch.setattr(gc, "_graph_md", lambda: tmp_path / "graph.md")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)

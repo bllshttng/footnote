@@ -6,8 +6,9 @@ landed in no sessions array. Coverage:
 
   - AC1: `spawn --node X --substrate bg` with a resolvable worker uuid opens a
     row carrying the WORKER's harness session id (never the spawner's, never
-    the 8-hex short id). Phase: /target-family message stamps do (the worker's
-    claim-acquire stamp fills the same row), anything else stamps review.
+    the 8-hex short id). Phase: a /target-family message stamps do (the
+    worker's claim-acquire stamp fills the same row), anything else stamps
+    review.
   - AC1-fallback: a review-verb prompt naming exactly ONE node id (no --node)
     opens the same row; prose or a two-id prompt arms nothing.
   - AC1-ERR: a review prompt naming an unresolvable id exits 0 with a named
@@ -82,6 +83,26 @@ def _node_rows() -> list[dict]:
     return next(e for e in read_graph(paths.graph_json()) if e["id"] == NODE).get(
         "sessions", []
     )
+
+
+@pytest.fixture
+def graph_cli_home(tmp_path: Path, monkeypatch) -> Path:
+    """Graph-side CLI tests: tmp home, seeded node, and the CLI graph path
+    pinned to that tmp graph.
+
+    The pin matters: sibling suites setattr the lazy GRAPH_JSON module attr,
+    whose monkeypatch teardown plants a concrete value in the module dict and
+    silences __getattr__ for the rest of the process - without the pin, these
+    tests read whatever graph the previous file pinned (changed-smoke runs
+    its whole changed subset in one process).
+    """
+    import fno.graph.cli as graph_cli
+    from fno import paths
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_graph()
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda: paths.graph_json())
+    return tmp_path
 
 
 @pytest.fixture
@@ -278,6 +299,26 @@ def test_spawn_target_family_stamps_do(workdir_claude, resolvable_uuid) -> None:
     assert rows[0]["session_id"] == FULL_UUID
 
 
+def test_spawn_unlabelable_verb_skips_named(workdir_claude, resolvable_uuid) -> None:
+    """A /think worker with --node is neither do nor review; a guessed label
+    would lie on an append-only record, so nothing stamps and the skip names
+    the escape hatch."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "think-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "/fno:think deep",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert _node_rows() == []
+    assert "session row open skipped" in result.stderr
+    assert "--session-phase" in result.stderr
+
+
 def test_spawn_no_node_anywhere_writes_nothing_and_stays_silent(
     workdir_claude, resolvable_uuid
 ) -> None:
@@ -318,12 +359,9 @@ def test_spawn_bad_session_phase_refuses_before_spawn(workdir_claude) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_session_add_accepts_review_phase(tmp_path: Path, monkeypatch) -> None:
+def test_session_add_accepts_review_phase(graph_cli_home) -> None:
     """`session add --phase review` stamps and exits 0 (exit 2 before x-4342)."""
     import fno.graph.cli as graph_cli
-
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_graph()
 
     result = CliRunner().invoke(
         graph_cli.cli,
@@ -339,12 +377,10 @@ def test_session_add_accepts_review_phase(tmp_path: Path, monkeypatch) -> None:
     assert len(rows) == 1 and rows[0]["phase"] == "review"
 
 
-def test_roster_renders_review_between_do_and_ship(tmp_path: Path, monkeypatch) -> None:
+def test_roster_renders_review_between_do_and_ship(graph_cli_home) -> None:
     """The lifecycle roster gains a review slot between do and ship."""
     import fno.graph.cli as graph_cli
 
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_graph()
     CliRunner().invoke(
         graph_cli.cli,
         ["session", "add", NODE, "--phase", "do",
@@ -373,7 +409,7 @@ def test_roster_renders_review_between_do_and_ship(tmp_path: Path, monkeypatch) 
     assert text.index("do") < text.index("review") < text.index("ship")
     phases = [p["phase"] for p in summary["phases"] if isinstance(p, dict)] if isinstance(
         summary.get("phases"), list) else []
-    assert phases == ["do", "review", "ship"] or "review" in phases
+    assert "review" in phases
 
 
 # ---------------------------------------------------------------------------
@@ -381,11 +417,9 @@ def test_roster_renders_review_between_do_and_ship(tmp_path: Path, monkeypatch) 
 # ---------------------------------------------------------------------------
 
 
-def test_reap_open_fills_review_row_and_keeps_it(tmp_path: Path, monkeypatch) -> None:
+def test_reap_open_fills_review_row_and_keeps_it(graph_cli_home) -> None:
     import fno.graph.cli as graph_cli
 
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_graph()
     CliRunner().invoke(
         graph_cli.cli,
         ["session", "add", NODE, "--phase", "review",
@@ -411,13 +445,11 @@ def test_reap_open_fills_review_row_and_keeps_it(tmp_path: Path, monkeypatch) ->
     assert rows[0]["phase"] == "review"
 
 
-def test_reap_open_all_closes_every_open_row(tmp_path: Path, monkeypatch) -> None:
+def test_reap_open_all_closes_every_open_row(graph_cli_home) -> None:
     """The death-cascade spelling: one session holding a do window AND a review
     window settles both - the do row removed, the review row filled."""
     import fno.graph.cli as graph_cli
 
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_graph()
     for phase in ("do", "review"):
         CliRunner().invoke(
             graph_cli.cli,
@@ -442,12 +474,10 @@ def test_reap_open_all_closes_every_open_row(tmp_path: Path, monkeypatch) -> Non
     assert rows[0]["phase"] == "review" and rows[0]["ended_at"]
 
 
-def test_reap_open_do_default_still_removes(tmp_path: Path, monkeypatch) -> None:
+def test_reap_open_do_default_still_removes(graph_cli_home) -> None:
     """The do flavor keeps its remove semantics (status unwedge), default phase."""
     import fno.graph.cli as graph_cli
 
-    use_tmpdir(monkeypatch, tmp_path)
-    _seed_graph()
     CliRunner().invoke(
         graph_cli.cli,
         ["session", "add", NODE, "--phase", "do",

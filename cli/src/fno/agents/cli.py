@@ -1031,6 +1031,16 @@ def _stamp_spawned_session_row(
             file=sys.stderr,
         )
         return
+    if not phase:
+        # A verb cmd_spawn could not label (a /think worker is neither do nor
+        # review). A guessed label would lie on an append-only record.
+        print(
+            f"spawn: session row open skipped for {node_id} "
+            f"(phase unknown for the message verb; pass --session-phase); "
+            f"the row was not written. Skipped.",
+            file=sys.stderr,
+        )
+        return
 
     harness = None
     session_id = None
@@ -1968,9 +1978,12 @@ def cmd_spawn(
     # x-4342: the sessions row a node-bearing spawn opens. An explicit
     # --session-phase is the operator's label and wins; empty infers from the
     # work's own shape - a /target-family message names a do worker (whose
-    # claim-acquire stamp duplicate-fills the same row), anything else defaults
-    # to review, the contributor shape that motivated the stamp. Fail-closed on
-    # an unknown explicit value, like the guards above, before anything spawns.
+    # claim-acquire stamp duplicate-fills the same row), a review verb names
+    # the contributor shape that motivated the stamp, prose defaults to review.
+    # Any OTHER leading verb is a label this code cannot guess (a /think worker
+    # stamped review would lie on an append-only record), so it stamps nothing
+    # and says so. Fail-closed on an unknown explicit value, like the guards
+    # above, before anything spawns.
     from fno.graph.types import SESSION_PHASES
 
     if session_phase:
@@ -1983,7 +1996,13 @@ def cmd_spawn(
             raise typer.Exit(code=2)
         stamp_phase = session_phase
     else:
-        stamp_phase = "do" if is_target_family(message) else "review"
+        _verb = (message or "").lstrip().split(maxsplit=1)[0] if message else ""
+        if is_target_family(message):
+            stamp_phase = "do"
+        elif _verb.startswith(_REVIEW_VERB_PREFIXES) or not _verb.startswith("/"):
+            stamp_phase = "review"
+        else:
+            stamp_phase = ""  # unlabelable verb: the helper skips, named
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
     # destination the revived worker will actually use.
