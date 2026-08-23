@@ -8428,6 +8428,69 @@ fn external_read_timeout_fingerprint_read_names_the_read() {
     assert_timeout_block(code, &d, elapsed, "fingerprint_pr_view", &events);
 }
 
+/// A wedged LOCAL git read (the external-diff-driver shape) must not hang
+/// the fire either: the stop-gate git calls route through the same bounded
+/// transport, and a killed read degrades to each caller's conservative
+/// no-answer instead of wedging the stop gate.
+#[test]
+fn wedged_git_read_degrades_bounded_instead_of_hanging() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest = cwd.join("target-state.md");
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest,
+        new_manifest("sess-gitwedge", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+    let bins = TempDir::new().unwrap();
+    // Everything answers green except the payload-classify diff (the
+    // three-dot range), which sleeps past any test bound.
+    let git = make_script(
+        bins.path(),
+        "git",
+        r#"if echo "$*" | grep -q -- "--version"; then exit 0; fi
+if [ "$1" = "diff" ] && echo "$*" | grep -q "\.\.\."; then sleep 30; fi
+if [ "$1" = "rev-parse" ]; then
+  if echo "$*" | grep -q "HEAD"; then echo "deadbeefdeadbeefdeadbeefdeadbeef00000001"; exit 0; fi
+  echo "cafecafecafecafecafecafecafecafe00000001"; exit 0
+fi
+[ "$1" = "merge-base" ] && exit 1
+[ "$1" = "status" ] && exit 0
+[ "$1" = "branch" ] && { echo "feature/x"; exit 0; }
+exit 0"#,
+    );
+    let gh = MockBins::green().gh;
+    let started = std::time::Instant::now();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest.to_str().unwrap(),
+        "--transcript",
+        transcript.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--read-timeout-ms=1000",
+    ]);
+    let elapsed = started.elapsed();
+    assert_eq!(code, 0, "a degraded git read still decides: {d:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "a wedged git read must not hang the fire, took {elapsed:?}"
+    );
+    assert!(
+        !d.message.is_empty(),
+        "the fire must emit a decision message, not die silently: {d:?}"
+    );
+}
+
 /// The king driver's one external read (the board) is bounded too, and a
 /// wedged board blocks with the killed-timeout wording rather than hanging
 /// the king's fire.
@@ -8438,7 +8501,14 @@ fn external_read_timeout_king_board_blocks_named() {
     let state = king_manifest(cwd, "k-wedge");
     let events = cwd.join("events.jsonl");
     let bins = TempDir::new().unwrap();
-    let fno = make_script(bins.path(), "fno-king-mock", "sleep 30");
+    // The mock must answer the harness's `--version` probe instantly: an
+    // unconditional sleep costs the setup 30s before the fire even starts
+    // (make_script probe-runs every generated script once).
+    let fno = make_script(
+        bins.path(),
+        "fno-king-mock",
+        "[ \"$1\" = \"--version\" ] && exit 0\nsleep 30",
+    );
 
     let started = std::time::Instant::now();
     let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[

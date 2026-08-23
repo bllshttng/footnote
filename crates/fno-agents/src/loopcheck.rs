@@ -1242,25 +1242,24 @@ fn floor_self_review(
 /// stale pre-migration sibling would size the payload from a whole era.
 fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
     for base in ["origin/main", "origin/master"] {
-        let verify = Command::new(git_bin)
-            .args([
+        match git_bounded(
+            git_bin,
+            &[
                 "rev-parse",
                 "--verify",
                 "--quiet",
                 &format!("{base}^{{commit}}"),
-            ])
-            .current_dir(cwd)
-            .output();
-        match verify {
-            Ok(v) if v.status.success() => {}
+            ],
+            cwd,
+        ) {
+            Some(v) if v.status.success() => {}
             _ => continue,
         }
-        let range = format!("{base}...HEAD");
-        let out = Command::new(git_bin)
-            .args(["diff", "--name-only", &range])
-            .current_dir(cwd)
-            .output();
-        if let Ok(o) = out {
+        if let Some(o) = git_bounded(
+            git_bin,
+            &["diff", "--name-only", &format!("{base}...HEAD")],
+            cwd,
+        ) {
             if o.status.success() {
                 let paths = String::from_utf8_lossy(&o.stdout)
                     .lines()
@@ -1470,17 +1469,17 @@ fn pr_code_diff_identity(
     base: &str,
     sha: &str,
 ) -> Option<CodeDiffIdentity> {
-    let out = Command::new(git_bin)
-        .args([
+    let out = git_bounded(
+        git_bin,
+        &[
             "diff",
             "--raw",
             "--no-abbrev",
             "--no-renames",
             &format!("{base}...{sha}"),
-        ])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+        ],
+        cwd,
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -1507,11 +1506,7 @@ fn pr_code_diff_identity(
 
 /// Paths differing between two TREES (two-dot), or `None` on git failure.
 fn git_tree_paths(git_bin: &str, cwd: &Path, a: &str, b: &str) -> Option<Vec<String>> {
-    let out = Command::new(git_bin)
-        .args(["diff", "--name-only", "--no-renames", a, b])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    let out = git_bounded(git_bin, &["diff", "--name-only", "--no-renames", a, b], cwd)?;
     if !out.status.success() {
         return None;
     }
@@ -1606,12 +1601,8 @@ impl<'a> FreshnessResolver<'a> {
 }
 
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
-    let out = Command::new(git_bin)
-        .args(["rev-parse", "HEAD"])
-        .current_dir(cwd)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    match git_bounded(git_bin, &["rev-parse", "HEAD"], cwd) {
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => "unknown".to_string(),
     }
 }
@@ -1626,11 +1617,10 @@ fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
 /// A git that cannot answer reads as DIRTY, so an unreadable tree never
 /// widens what counts as shipped.
 fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
-    let out = Command::new(git_bin)
-        .args(["status", "--porcelain"])
-        .current_dir(cwd)
-        .output();
-    matches!(out, Ok(o) if o.status.success() && o.stdout.is_empty())
+    matches!(
+        git_bounded(git_bin, &["status", "--porcelain"], cwd),
+        Some(o) if o.status.success() && o.stdout.is_empty()
+    )
 }
 
 /// True when local HEAD carries nothing the base does not already have.
@@ -1649,27 +1639,26 @@ fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
 /// [`head_is_shipped`].
 fn git_head_on_base(git_bin: &str, cwd: &Path) -> bool {
     for base in ["origin/main", "origin/master"] {
-        let verify = Command::new(git_bin)
-            .args([
+        match git_bounded(
+            git_bin,
+            &[
                 "rev-parse",
                 "--verify",
                 "--quiet",
                 &format!("{base}^{{commit}}"),
-            ])
-            .current_dir(cwd)
-            .output();
-        match verify {
-            Ok(v) if v.status.success() => {}
+            ],
+            cwd,
+        ) {
+            Some(v) if v.status.success() => {}
             _ => continue,
         }
         // `--is-ancestor` exits 0 when HEAD is reachable from base, 1 when it
         // is not, and >1 on a real error. Only a clean 0 counts, so an errored
         // probe reads as "not shipped" rather than as consent to terminate.
-        let out = Command::new(git_bin)
-            .args(["merge-base", "--is-ancestor", "HEAD", base])
-            .current_dir(cwd)
-            .output();
-        return matches!(out, Ok(o) if o.status.success());
+        return matches!(
+            git_bounded(git_bin, &["merge-base", "--is-ancestor", "HEAD", base], cwd),
+            Some(o) if o.status.success()
+        );
     }
     false
 }
@@ -1704,11 +1693,7 @@ fn head_is_shipped(pr: &PrInfo, local_head: &str, git_bin: &str, cwd: &Path) -> 
 }
 
 fn git_head_branch(git_bin: &str, cwd: &Path) -> Option<String> {
-    let out = Command::new(git_bin)
-        .args(["branch", "--show-current"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    let out = git_bounded(git_bin, &["branch", "--show-current"], cwd)?;
     if !out.status.success() {
         return None;
     }
@@ -3227,15 +3212,8 @@ fn is_code_review_reviewer(name: &str) -> bool {
     normalize_reviewer(name) == "code-review"
 }
 
-fn successful_output_text(out: std::io::Result<std::process::Output>) -> Option<String> {
-    let out = out.ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// `successful_output_text` for a bounded run: the completed payload's stdout
-/// when the child exited zero. A timeout or unrunnable child is not a success
+/// A bounded run's successful stdout: the completed payload's stdout when
+/// the child exited zero. A timeout or unrunnable child is not a success
 /// (None), which preserves each caller's degrade semantics.
 fn bounded_success_text(result: Result<BoundedOutput, GhReadError>) -> Option<String> {
     let out = result.ok()?;
@@ -6422,13 +6400,17 @@ pub fn decide(args: &[String]) -> (i32, String) {
             return (2, out.to_string());
         }
     };
-    // Publish the test override before any read can fire. Zero (and absent)
-    // both mean "the production default", so a fire without the flag always
-    // runs at the real bound no matter what an earlier test set.
-    READ_TIMEOUT_OVERRIDE_MS.store(
-        parsed.read_timeout_ms.unwrap_or(0),
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    // Publish the per-thread read bound and the fire's budget deadline before
+    // any read can fire. Zero (and absent) both mean "the production
+    // default". Thread-local, not process-global: the test harness fires
+    // `decide` in-process on parallel threads, and one fire must never reset
+    // or inherit a neighboring fire's injected bound mid-read.
+    STOPGATE_READS.with(|cell| {
+        *cell.borrow_mut() = (
+            parsed.read_timeout_ms.unwrap_or(0),
+            Some(std::time::Instant::now() + STOPGATE_FIRE_BUDGET),
+        );
+    });
 
     // The king asks a different question of a different manifest, so it routes
     // BEFORE the target-shaped manifest read below. Branching inside that read
@@ -7105,9 +7087,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
     };
 
     // A killed fingerprint read blocks this fire with its own name and bound,
-    // exactly like a hard done() read error: the carry-forward streak logic
-    // below still runs (fp_read_failed), but the operator-facing decision
-    // must say what was killed, not report a generic continue.
+    // exactly like a hard done() read error. The NoProgress backstop stays
+    // safe because the loop_check row this path emits carries
+    // fp_read_failed=true, which read_prior_fires skips - the streak survives
+    // without the carry-forward logic below ever running (the return exits
+    // before it), so this comment must not point a maintainer at "logic
+    // below" as the mechanism.
     if let Some(err) = &fp_timeout {
         let quota = probe_graphql_quota(gh_bin, &cwd);
         emit(
@@ -7628,7 +7613,11 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         manifest.plan_path.as_deref(),
                         &fno_bin,
                         &cwd,
-                        FIDELITY_TIMEOUT,
+                        // The 60s ceiling, clamped to the fire budget: a
+                        // fidelity probe is a stop-gate read like any other,
+                        // and one read must not spend more than the fire
+                        // still has before the harness kills the hook.
+                        clamp_to_fire_deadline(FIDELITY_TIMEOUT),
                     ) {
                         FidelityGate::Refused { reason } => fidelity_block = Some(reason),
                         // Degraded fails OPEN on the stop decision (same as Absent - a
@@ -8662,12 +8651,14 @@ fn run_bounded(
                 match p.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if tail.len() < BOUNDED_STDERR_TAIL_CAP {
-                            tail.extend_from_slice(&chunk[..n]);
-                            if tail.len() > BOUNDED_STDERR_TAIL_CAP {
-                                let excess = tail.len() - BOUNDED_STDERR_TAIL_CAP;
-                                tail.drain(..excess);
-                            }
+                        // Always append, THEN trim: a guard on append would
+                        // freeze the buffer at whatever the first chunks
+                        // carried, which for a stream longer than one chunk
+                        // keeps the head, not the tail.
+                        tail.extend_from_slice(&chunk[..n]);
+                        if tail.len() > BOUNDED_STDERR_TAIL_CAP {
+                            let excess = tail.len() - BOUNDED_STDERR_TAIL_CAP;
+                            tail.drain(..excess);
                         }
                     }
                 }
@@ -8728,29 +8719,76 @@ fn run_bounded(
     }
 }
 
-/// Wall-clock ceiling for every synchronous `gh` and `fno` stop-gate read:
-/// PR metadata, checks, reviews, inline comments, commits, quota, coverage
-/// reads, fingerprint reads, nudges/coverage writes, and the king board. One
-/// named bound so a single wedged child can never outlive the stop fire; the
-/// fidelity ceiling (60s) and the advisory-hint ceiling (10s) stay separate
-/// because they gate different things and drift independently.
+/// Wall-clock ceiling for ONE synchronous stop-gate read: PR metadata,
+/// checks, reviews, inline comments, commits, quota, coverage reads,
+/// fingerprint reads, nudges/coverage writes, the king board, and every
+/// local `git` read the gate makes. One named bound so a single wedged child
+/// can never outlive the stop fire; the fidelity ceiling (60s) and the
+/// advisory-hint ceiling (10s) stay separate because they gate different
+/// things and drift independently.
 const STOPGATE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Test-injected override for `STOPGATE_READ_TIMEOUT`, set from
-/// `--read-timeout-ms` at fire start. Process-global like every other env or
-/// arg pin this verb takes in-process: a test sets it, fires, and restores,
-/// and concurrent healthy fires answer in milliseconds either way, so the
-/// shortened bound never binds a fire that did not ask for it.
-static READ_TIMEOUT_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+/// Aggregate wall-clock budget for ONE fire's external reads. The harness
+/// kills the stop hook at 60s (hooks/git-protection.py records the budget and
+/// the Stop hook carries no override), so N sequential reads each legal at
+/// 30s could burn multiples of that and die mid-fire with no decision -
+/// recreating the exact no-decision path this transport exists to close.
+/// Reads that start after the budget is spent still run, but at the floor
+/// bound, so the fire ends fast with a decision naming what it could not
+/// wait for.
+const STOPGATE_FIRE_BUDGET: std::time::Duration = std::time::Duration::from_secs(50);
 
+/// A spent budget must still bound every remaining read, so the effective
+/// ceiling never reaches zero: this floor keeps a late read killable in
+/// bounded time instead of degenerating into an unbounded wait.
+const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration::from_millis(250);
+
+thread_local! {
+    /// The fire's read-bound override (from `--read-timeout-ms`, 0 meaning
+    /// the production default) and its budget deadline, stamped when `decide`
+    /// begins. Thread-local, not process-global: the test harness fires
+    /// `decide` in-process on parallel threads, and one fire must never reset
+    /// or inherit a neighboring fire's injected bound mid-read.
+    static STOPGATE_READS: std::cell::RefCell<(u64, Option<std::time::Instant>)> =
+        const { std::cell::RefCell::new((0, None)) };
+}
+
+/// Effective bound for one stop-gate read: the configured ceiling (flag or
+/// production default) clamped to whatever remains of this fire's aggregate
+/// budget, floored so the answer is always a positive killable bound.
 fn stopgate_read_timeout() -> std::time::Duration {
-    let ms = READ_TIMEOUT_OVERRIDE_MS.load(std::sync::atomic::Ordering::Relaxed);
-    if ms > 0 {
-        std::time::Duration::from_millis(ms)
-    } else {
-        STOPGATE_READ_TIMEOUT
-    }
+    STOPGATE_READS.with(|cell| {
+        let (override_ms, _) = *cell.borrow();
+        let configured = if override_ms > 0 {
+            std::time::Duration::from_millis(override_ms)
+        } else {
+            STOPGATE_READ_TIMEOUT
+        };
+        clamp_to_fire_deadline(configured)
+    })
+}
+
+/// Clamp a configured read ceiling to this fire's budget deadline, so no
+/// single long read can spend more than the fire still has. Used both for
+/// stop-gate reads (via `stopgate_read_timeout`) and for the fidelity
+/// probe's separate 60s ceiling - the budget is the fire's, not the read's.
+fn clamp_to_fire_deadline(configured: std::time::Duration) -> std::time::Duration {
+    STOPGATE_READS.with(|cell| match cell.borrow().1 {
+        Some(d) => {
+            let remaining = d.saturating_duration_since(std::time::Instant::now());
+            clamp_to_fire_budget(configured, remaining)
+        }
+        None => configured,
+    })
+}
+
+/// Pure clamp so the deadline math is testable without a clock: never above
+/// what remains of the budget, never below the floor.
+fn clamp_to_fire_budget(
+    configured: std::time::Duration,
+    remaining: std::time::Duration,
+) -> std::time::Duration {
+    configured.min(remaining).max(STOPGATE_BOUND_FLOOR)
 }
 
 /// How an external stop-gate read failed. `TimedOut` is its own kind so a
@@ -8851,10 +8889,28 @@ fn bounded_read(
     }
 }
 
-/// The `stderr_tail` byte helper applied to a bounded run's already-capped
-/// retention: lossy string for events and reason text.
-fn bounded_stderr(out: &BoundedOutput) -> String {
-    String::from_utf8_lossy(&out.stderr_tail).trim().to_string()
+/// One bounded local-`git` read. Every stop-gate git call routes here for
+/// the same reason the gh reads route through `bounded_read`: an external
+/// diff driver, a locked index, or a stalled mount can hang `git` exactly
+/// the way a wedged network child hangs `gh`, and an unbounded `.output()`
+/// turns that into a fire that never decides. A timeout or unrunnable git is
+/// named on stderr (the shim's forensic log) and reads as "no answer";
+/// every caller already treats no-answer as its conservative outcome
+/// (unshipped, dirty, unknown branch), so the degrade direction is the same
+/// one each caller documented for a failing git.
+fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<BoundedOutput> {
+    match run_bounded(OsStr::new(git_bin), args, cwd, stopgate_read_timeout()) {
+        BoundedRun::Completed(out) => Some(out),
+        BoundedRun::TimedOut(elapsed) => {
+            eprintln!(
+                "loop-check: git read {:?} timed out after {:.1}s and was killed; reading as no-answer",
+                args.first().unwrap_or(&"?"),
+                elapsed.as_secs_f64()
+            );
+            None
+        }
+        BoundedRun::SpawnFailed | BoundedRun::WaitFailed => None,
+    }
 }
 
 /// Run `fno do plan fidelity --json` for the bound plan and classify the decision.
@@ -11197,6 +11253,54 @@ mod tests {
     }
 
     #[test]
+    fn bounded_run_retains_the_last_stderr_bytes_not_the_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A uniform fill followed by a marker at the END of the stream: the
+        // retained bytes must carry the marker. A cap that freezes at the
+        // first chunks (head-keeping) drops exactly this marker, and the
+        // uniform-fill sibling above cannot tell head from tail - only this
+        // shape distinguishes them.
+        let fno = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\nhead -c 5000 /dev/zero | tr '\\0' 'x' 1>&2\necho TAIL_MARKER 1>&2\necho '{\"ok\":true}'\n",
+        );
+        let cwd = std::env::temp_dir();
+        match run_bounded(fno.as_os_str(), &[], &cwd, PROBE_TIMEOUT) {
+            BoundedRun::Completed(out) => {
+                let tail = String::from_utf8_lossy(&out.stderr_tail);
+                assert!(tail.ends_with("TAIL_MARKER\n"), "retained {tail:?}");
+                assert_eq!(
+                    out.stderr_tail.len(),
+                    BOUNDED_STDERR_TAIL_CAP,
+                    "a stream past the cap retains exactly the cap"
+                );
+            }
+            other => panic!("expected Completed, got {}", bounded_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn fire_budget_clamp_stays_under_remaining_and_above_the_floor() {
+        let s = std::time::Duration::from_secs(30);
+        // Budget-rich: the configured ceiling stands.
+        assert_eq!(
+            clamp_to_fire_budget(s, s + std::time::Duration::from_secs(1)),
+            s
+        );
+        // Budget-poor: what remains stands.
+        assert_eq!(
+            clamp_to_fire_budget(s, std::time::Duration::from_millis(500)),
+            std::time::Duration::from_millis(500)
+        );
+        // Budget spent: every read still gets a positive, killable bound.
+        assert_eq!(
+            clamp_to_fire_budget(s, std::time::Duration::ZERO),
+            STOPGATE_BOUND_FLOOR
+        );
+    }
+
+    #[test]
     fn bounded_run_completed_keeps_a_nonzero_exit_code_distinct_from_success() {
         let tmp = tempfile::tempdir().unwrap();
         let fno = write_exec(tmp.path(), "fno", "#!/bin/sh\necho boom 1>&2\nexit 3\n");
@@ -12909,14 +13013,19 @@ mod tests {
     /// the ratchet test can drive it with a mutated fixture instead of trusting
     /// a zero-hit scan that never ran.
     ///
-    /// A bypass is `Command::new(gh_bin|fno_bin)` whose statement (the next
-    /// 300 chars, cut at the next `fn ` boundary so one chain cannot bleed into
-    /// the next function) calls `.output()`, `.wait()`, or `.status()` - the
-    /// three synchronous waits. The transport's own `.spawn()` chain and the
-    /// one deliberately detached notifier spawn are not waits and pass.
+    /// A bypass is `Command::new(gh_bin|fno_bin|git_bin)` whose statement (the
+    /// next 300 chars, cut at the next `fn ` boundary so one chain cannot
+    /// bleed into the next function) calls `.output()`, `.wait()`, or
+    /// `.status()` - the three synchronous waits. The transport's own
+    /// `.spawn()` chain and the one deliberately detached notifier spawn are
+    /// not waits and pass.
     fn direct_wait_bypasses(source: &str) -> Vec<String> {
         let mut hits = Vec::new();
-        for marker in ["Command::new(gh_bin", "Command::new(fno_bin"] {
+        for marker in [
+            "Command::new(gh_bin",
+            "Command::new(fno_bin",
+            "Command::new(git_bin",
+        ] {
             for tail in source.split(marker).skip(1) {
                 let stmt: String = tail
                     .chars()
@@ -12954,10 +13063,14 @@ mod tests {
             production.matches("bounded_read(").count() >= 10,
             "the bounded transport must carry its registered read sites"
         );
+        assert!(
+            production.matches("git_bounded(").count() >= 10,
+            "the bounded transport must carry the stop-gate git read sites"
+        );
         let bypasses = direct_wait_bypasses(production);
         assert!(
             bypasses.is_empty(),
-            "direct synchronous gh/fno waits outside the bounded runner: {bypasses:?}"
+            "direct synchronous gh/fno/git waits outside the bounded runner: {bypasses:?}"
         );
     }
 
@@ -12978,6 +13091,22 @@ bounded_read(); bounded_read();";
         let hits = direct_wait_bypasses(fixture);
         assert_eq!(hits.len(), 1, "exactly the injected bypass: {hits:?}");
         assert!(hits[0].contains("Command::new(gh_bin"), "{hits:?}");
+        // The git marker is under test too: a direct git wait is the same
+        // hang shape with a different binary, and the detector must name it.
+        let git_fixture = "fn g() {
+    let out = Command::new(git_bin)
+        .args([\"status\"])
+        .output()?;
+}
+fn run_bounded() {}
+git_bounded();";
+        let git_hits = direct_wait_bypasses(git_fixture);
+        assert_eq!(
+            git_hits.len(),
+            1,
+            "exactly the injected git bypass: {git_hits:?}"
+        );
+        assert!(git_hits[0].contains("Command::new(git_bin"), "{git_hits:?}");
         // And the wait call is what flagged it, not the spawn shape: the same
         // fixture without the wait passes clean.
         let clean = fixture.replace(".output()", ".spawn()");
