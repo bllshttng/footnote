@@ -27,7 +27,7 @@ agy pane spawns trust the exact cwd before launch. The shared gate clears remain
 
 ## The opencode bg serve lane
 
-`spawn --harness opencode --substrate bg` (x-d9f9) is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted:
+`spawn --harness opencode --substrate bg` is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted:
 
 - fno-agents manages one shared `opencode serve` per agents home (state file `opencode-serve.json`, health-gated reuse). The serve starts with a generated `OPENCODE_CONFIG`. That config grants `permission."*" = "allow"`, the unattended posture other worker lanes get from their own bypass flag. An unanswered permission `ask` on a headless server is a hang, not a refusal.
 - The spawn mints a session with `POST /session?directory=<cwd>`, so one serve hosts workers across worktrees.
