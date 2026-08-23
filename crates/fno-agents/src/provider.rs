@@ -1216,7 +1216,7 @@ const OPENCODE_PROBE_MIN_BUDGET: Duration = Duration::from_secs(2);
 /// True iff `s` is a well-formed opencode session id (`ses_` + ASCII
 /// alphanumerics). Gates SQL interpolation in the probe: no quote, space, or
 /// shell metacharacter can reach the subprocess.
-fn is_opencode_session_id(s: &str) -> bool {
+pub(crate) fn is_opencode_session_id(s: &str) -> bool {
     match s.strip_prefix("ses_") {
         Some(tail) => !tail.is_empty() && tail.chars().all(|c| c.is_ascii_alphanumeric()),
         None => false,
