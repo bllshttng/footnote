@@ -57,20 +57,15 @@ workspace_bin=""
 build_test_binary() {
     local key="$1" manifest="$2" test_name="$3"
     local build_log="$log_root/build-${key}.log"
-    local target_dir candidate
-
-    target_dir="$(cargo metadata --manifest-path "$manifest" --no-deps --format-version 1 2>"$build_log" | jq -r '.target_directory' 2>>"$build_log")" || {
-        echo "stress_setup=unavailable binary=$key log=$build_log" >&2
-        exit 2
-    }
-    if ! cargo test --manifest-path "$manifest" --test "$test_name" --no-run >>"$build_log" 2>&1; then
+    local candidate
+    if ! cargo test --manifest-path "$manifest" --test "$test_name" --no-run --message-format=json >>"$build_log" 2>&1; then
         echo "stress_setup=unavailable binary=$key log=$build_log" >&2
         if rg -q 'Blocking waiting for file lock|could not acquire.*lock|resource temporarily unavailable' "$build_log"; then
             echo "stress_setup_note=cargo-artifact-lock-contention (not counted as a test failure)" >&2
         fi
         exit 2
     fi
-    candidate="$(find "$target_dir/debug/deps" -maxdepth 1 -type f -name "${test_name}-*" -perm -111 -print | sort | tail -1)"
+    candidate="$(jq -Rr --arg test_name "$test_name" 'fromjson? | select(.reason == "compiler-artifact" and .target.name == $test_name and (.executable // null) != null) | .executable' "$build_log" | tail -1)"
     [[ -n "$candidate" && -x "$candidate" ]] || {
         echo "stress_setup=unavailable binary=$key reason=compiled-test-binary-not-found log=$build_log" >&2
         exit 2
