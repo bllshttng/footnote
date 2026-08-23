@@ -9,7 +9,8 @@
 use std::path::Path;
 
 use fno_agents::agy_ask::{
-    build_argv_once, classify_failure, inject_from_name, parse_response, AgyAskError,
+    build_argv_once, build_argv_once_with_effort, classify_failure, inject_from_name,
+    parse_response, AgyAskError,
 };
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,13 @@ fn argv_once_with_model() {
     assert_eq!(argv[m_idx + 1], "Gemini 3.5 Flash (High)");
     // --model precedes -p (which stays last).
     assert!(m_idx < argv.iter().position(|a| a == "-p").unwrap());
+}
+
+#[test]
+fn argv_once_with_effort_forwards_the_native_flag() {
+    let argv = build_argv_once_with_effort("hi", Path::new("/r"), None, Some("high"), None);
+    let effort = argv.iter().position(|arg| arg == "--effort").unwrap();
+    assert_eq!(&argv[effort..effort + 2], ["--effort", "high"]);
 }
 
 #[test]
