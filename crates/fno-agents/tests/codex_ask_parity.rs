@@ -331,6 +331,7 @@ fn rust_codex_resume(
         yolo,
         output_path,
         Some(std::time::Duration::from_secs(timeout_sec)),
+        None,
     );
 
     match old_path {

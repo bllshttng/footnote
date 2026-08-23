@@ -42,6 +42,7 @@ fn tmpdir(tag: &str) -> PathBuf {
 /// - `FAKE_CODEX_BAD_UTF8`: if set, emit an invalid-UTF-8 line then exit 0 WITHOUT turn.completed (cv-54a67325).
 /// - `FAKE_CODEX_SLEEP`: if set, sleep this many seconds before turn.completed (timeout / SIGINT tests).
 /// - `FAKE_CODEX_SIGINT_SENTINEL`: if set, trap SIGINT/SIGTERM, write "caught" to this path, exit 130 (ab-e7fdbcb6).
+/// - `FAKE_CODEX_ARGV_DUMP`: if set, write every argv item to this path.
 fn install_fake_codex(bin_dir: &Path) {
     let script = r#"#!/bin/sh
 set -e
@@ -52,6 +53,9 @@ fi
 if [ -n "$FAKE_CODEX_PROMPT_DUMP" ]; then
   for arg in "$@"; do last_arg="$arg"; done
   printf '%s' "$last_arg" > "$FAKE_CODEX_PROMPT_DUMP"
+fi
+if [ -n "$FAKE_CODEX_ARGV_DUMP" ]; then
+  printf '%s\n' "$@" > "$FAKE_CODEX_ARGV_DUMP"
 fi
 if [ -n "$FAKE_CODEX_EXIT" ] && [ "$FAKE_CODEX_EXIT" != "0" ]; then
   # Emit nothing and exit with error code
@@ -384,6 +388,52 @@ fn codex_resume_happy_path_returns_reply() {
     );
     assert_eq!(outcome.exit_code, 0, "stderr: {}", outcome.stderr);
     assert_eq!(outcome.stdout, "resumed reply");
+}
+
+#[test]
+fn codex_resume_reuses_registry_reasoning_effort() {
+    let home = AgentsHome::at(tmpdir("r-effort-home"));
+    let bin_dir = tmpdir("r-effort-bin");
+    let cwd = tmpdir("r-effort-cwd");
+    let argv_dump = cwd.join("resume-argv.txt");
+    let argv_dump_str = argv_dump.to_string_lossy().to_string();
+    install_fake_codex(&bin_dir);
+
+    seed_codex_registry(
+        &home,
+        "effort-agent",
+        "ddddeeee-1111-2222-3333-444455556669",
+        cwd.to_str().unwrap(),
+    );
+    let registry_path = home.registry_json();
+    let body = fs::read_to_string(&registry_path).unwrap();
+    fs::write(
+        &registry_path,
+        body.replace(
+            "\"status\":\"live\"",
+            "\"effort\":\"low\",\"status\":\"live\"",
+        ),
+    )
+    .unwrap();
+
+    let outcome = dispatch_with_fake_codex(
+        &home,
+        &bin_dir,
+        "effort-agent",
+        "follow up",
+        "fno",
+        &cwd,
+        false,
+        Some(Duration::from_secs(10)),
+        &[
+            ("FAKE_CODEX_REPLY", "resumed reply"),
+            ("FAKE_CODEX_ARGV_DUMP", argv_dump_str.as_str()),
+        ],
+    );
+
+    assert_eq!(outcome.exit_code, 0, "stderr: {}", outcome.stderr);
+    let argv = fs::read_to_string(argv_dump).unwrap();
+    assert!(argv.contains("-c\nmodel_reasoning_effort=low\n"), "{argv}");
 }
 
 #[test]

@@ -1,5 +1,8 @@
 """Live integration smoke against the real `codex` CLI (CODEX_SMOKE=1).
 
+Cache reuse coverage also needs ``CODEX_SMOKE_HOME`` set to an authenticated
+Codex home because the agents test suite otherwise isolates that directory.
+
 Verifies that the JSONL event-type strings the running codex actually
 emits match the constants pinned in harnesses/codex.py's _EVENT_TYPES
 dict. This is the discriminator for Locked Decision 14 (warn-on-drift):
@@ -11,8 +14,10 @@ Gated by CODEX_SMOKE=1 so CI hosts without codex installed skip it.
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -78,7 +83,6 @@ def test_smoke_event_types_match_pinned_constants():
     """
     seen = _run_capture_script()
     expected_event_types = set(codex_mod._EVENT_TYPES.values())
-    expected_item_types = set(codex_mod._ITEM_TYPES.values())
 
     # All pinned event types MUST appear in the live capture.
     missing_event = expected_event_types - seen["event"]
@@ -135,3 +139,47 @@ def test_smoke_create_with_from_name_succeeds():
         # The tee captured the JSONL stream.
         assert out_file.exists()
         assert "thread.started" in out_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.smoke
+def test_smoke_resume_with_same_effort_grows_cache_read(tmp_path):
+    """Create and resume keep one cache partition when effort is unchanged."""
+    smoke_home = os.environ.get("CODEX_SMOKE_HOME")
+    if not smoke_home:
+        pytest.skip("set CODEX_SMOKE_HOME to an authenticated Codex home")
+    out_file = tmp_path / "output.jsonl"
+    code = """
+import json, os
+from pathlib import Path
+from fno.agents.harnesses import codex
+
+out = Path(os.environ["CACHE_SMOKE_OUTPUT"])
+prompt = "Return only CACHE_EFFORT_SMOKE. Do not call tools."
+first = codex.create(cwd=Path.cwd(), prompt=prompt, from_name="cache-smoke", yolo=False, output_path=out, timeout=120.0, reasoning_effort="low")
+codex.resume(session_id=first.session_id, cwd=Path.cwd(), prompt=prompt, from_name="cache-smoke", yolo=False, output_path=out, timeout=120.0, reasoning_effort="low")
+usages = [event["usage"] for line in out.read_text(encoding="utf-8").splitlines() if line.startswith("{") for event in [json.loads(line)] if event.get("type") == "turn.completed"]
+print(json.dumps({"first": usages[0]["cached_input_tokens"], "second": usages[1]["cached_input_tokens"]}))
+"""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if "pytest-" not in value and "fno-test-sandbox" not in value
+    }
+    env.update(
+        HOME=str(Path(smoke_home).parent),
+        CODEX_HOME=smoke_home,
+        CACHE_SMOKE_OUTPUT=str(out_file),
+        PYTHONPATH=str(Path.cwd() / "cli" / "src"),
+    )
+    env.pop("PYTEST_CURRENT_TEST", None)
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300.0,
+    )
+    assert proc.returncode == 0, proc.stderr
+    usage = json.loads(proc.stdout.splitlines()[-1])
+    assert usage["second"] > usage["first"]

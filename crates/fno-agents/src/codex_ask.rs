@@ -198,15 +198,20 @@ pub fn build_argv_resume(
     session_id: &str,
     full_prompt: &str,
     yolo: bool,
+    reasoning_effort: Option<&str>,
 ) -> Vec<String> {
-    let mut argv = vec![
-        "codex".to_string(),
+    let mut argv = vec!["codex".to_string()];
+    if let Some(effort) = reasoning_effort.filter(|effort| !effort.is_empty()) {
+        argv.push("-c".to_string());
+        argv.push(format!("model_reasoning_effort={effort}"));
+    }
+    argv.extend([
         "exec".to_string(),
         "resume".to_string(),
         session_id.to_string(),
         "--json".to_string(),
         "--skip-git-repo-check".to_string(),
-    ];
+    ]);
     argv.extend(sandbox_flag_resume(yolo));
     if !yolo {
         argv.extend(crate::provider::codex_sandbox_config_args_resume(cwd));
@@ -795,6 +800,7 @@ pub fn codex_resume(
     yolo: bool,
     output_path: &Path,
     timeout: Option<Duration>,
+    reasoning_effort: Option<&str>,
 ) -> Result<CodexResult, CodexAskError> {
     let effective_prompt = normalize_codex_command(prompt);
     let full_prompt = inject_from_name(&effective_prompt, from_name);
@@ -815,7 +821,7 @@ pub fn codex_resume(
             message,
         });
     }
-    let argv = build_argv_resume(cwd, session_id, &full_prompt, eff);
+    let argv = build_argv_resume(cwd, session_id, &full_prompt, eff, reasoning_effort);
     run_codex(&argv, output_path, timeout, false, Some(cwd), None)
 }
 
@@ -1192,7 +1198,7 @@ fn dispatch_create(
         legacy_provider: String::new(),
         provider: Some("openai".to_string()),
         model: None,
-        effort: None,
+        effort: reasoning_effort.map(str::to_string),
         harness: Some("codex".to_string()),
         harness_session_id: Some(session_id.clone()),
         cwd: cwd.to_string_lossy().to_string(),
@@ -1384,6 +1390,7 @@ fn dispatch_resume(
         yolo,
         &log_path,
         Some(timeout_sec),
+        entry.effort.as_deref(),
     ) {
         Ok(r) => r,
         Err(e) => {

@@ -15,9 +15,9 @@ Plan ACs covered:
 """
 from __future__ import annotations
 
+import inspect
 import subprocess
 from pathlib import Path
-from typing import IO
 from unittest.mock import MagicMock
 
 import pytest
@@ -113,6 +113,7 @@ def test_resume_argv_pin(tmp_path, fake_popen):
     # headless_yolo=False pins the explicit sandboxed (no-bypass) resume shape.
     # The autonomous lane now DEFAULTS to no-prompt (ab-994222ee); this test
     # pins the structural argv, so it opts out deterministically.
+    assert "reasoning_effort" in inspect.signature(codex_mod.resume).parameters
     out = codex_mod.resume(
         session_id="abc-uuid-1234",
         cwd=Path("/Users/foo/proj"),
@@ -121,13 +122,15 @@ def test_resume_argv_pin(tmp_path, fake_popen):
         yolo=False,
         output_path=tmp_path / "output.jsonl",
         headless_yolo=False,
+        reasoning_effort="low",
     )
 
     assert isinstance(out, CodexResult)
     call = fake_popen.call_args
     argv = call.args[0]
     # `codex exec resume <id> --json --skip-git-repo-check <prompt>`
-    assert argv[:4] == ["codex", "exec", "resume", "abc-uuid-1234"]
+    exec_index = argv.index("exec")
+    assert argv[exec_index : exec_index + 3] == ["exec", "resume", "abc-uuid-1234"]
     assert "--json" in argv
     assert "--skip-git-repo-check" in argv
     # Resume MUST NOT pass --cd / -C; the cwd-pinning is via Popen cwd kw.
@@ -139,6 +142,8 @@ def test_resume_argv_pin(tmp_path, fake_popen):
     # With the opt-out, the no-prompt bypass is NOT emitted either (inherits
     # the original session's sandbox).
     assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    effort_index = argv.index("model_reasoning_effort=low")
+    assert argv[effort_index - 1] == "-c"
     # Last positional is the prompt with from-name prefix.
     assert argv[-1] == "[from: fno]\n\nfollow up"
 
