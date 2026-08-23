@@ -7410,13 +7410,14 @@ impl View {
                 DisplayRow::Agent(a) if self.density == Density::Extended => {
                     let layout =
                         table_layout.expect("extended density has an admitted table layout");
+                    let depth = row_depths.get(i).copied().unwrap_or(0);
                     let st = agent_lattice_state(a);
                     let style = lattice_style(st, self.theme.accent);
                     let mut flags = style.flags;
                     if a.external && st != LatticeState::Blocked {
                         flags |= cell_flags::DIM;
                     }
-                    (table_row_text(a, layout, 0, now), flags, style.fg)
+                    (table_row_text(a, layout, depth, now), flags, style.fg)
                 }
                 DisplayRow::Agent(a) => {
                     // The unified icon lattice (x-df4c): exit beats badge beats
@@ -27915,6 +27916,24 @@ mod tests {
         assert!(rows[backlog..]
             .iter()
             .any(|r| matches!(r, DisplayRow::Card(c) if c.id == "x-ready")));
+    }
+
+    #[test]
+    fn extended_table_preserves_lineage_depth_in_rendered_agent_names() {
+        let mut v = wide_view(vec![
+            lineage_row("parent", 4, None),
+            lineage_row("child", 5, Some("sid-parent")),
+        ]);
+        set_density(&mut v, Density::Extended);
+        let rendered = frame_text(&v.compose());
+        let child_line = rendered
+            .lines()
+            .find(|line| line.contains("child"))
+            .unwrap();
+        assert!(
+            child_line.contains("  child"),
+            "child keeps lineage indent: {child_line:?}"
+        );
     }
 
     #[test]
