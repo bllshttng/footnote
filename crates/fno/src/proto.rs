@@ -2682,10 +2682,9 @@ pub enum BindOutcome {
 /// Bind the session socket, treating the bind itself as the lock.
 ///
 /// - Fresh path: bind wins atomically.
-/// - `AddrInUse`: connect-probe. A successful connect means a live server
-///   (`AlreadyRunning`). Refused/failed connects (retried briefly, so a server
-///   between its bind and listen syscalls is not misread as dead) mean a stale
-///   socket from a dead server: unlink it and bind again.
+/// - `AddrInUse`: query-probe. A `ServerMsg::Info` response means a live server
+///   (`AlreadyRunning`). A refused, failed, or markerless probe means a stale
+///   socket from a dead or unresponsive server: unlink it and bind again.
 ///
 /// ponytail: unlink-then-rebind has a tiny two-racers-over-a-stale-socket
 /// window (both probe dead, both unlink+bind; the second unlink can orphan the
@@ -2727,10 +2726,8 @@ fn socket_in_use(e: &std::io::Error) -> bool {
     )
 }
 
-/// Connect bound for liveness probes at bind time. Generous next to a socket
-/// round-trip; a wedged predecessor times out in ~1s and reads as alive on the
-/// first attempt (the refused-connect retry loop below only re-tries a dead
-/// socket), so server startup never hangs forever on it.
+/// Query timeout for liveness probes at bind time. Generous next to a socket
+/// round-trip, but bounded so a markerless predecessor never blocks startup.
 const PROBE_ALIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Connect to an AF_UNIX SOCK_STREAM path with a bounded timeout. std's
@@ -2874,20 +2871,28 @@ pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> std::io::Result<U
     }
 }
 
-/// True if something accepts connections at `path`. Retries a few times so a
-/// server that has bound but not yet reached `listen` is not declared dead.
-/// A connect TIMEOUT counts as alive: only a refused connect proves the
-/// server is dead, and unlinking a wedged-but-live server's socket would
-/// orphan it (still running, unreachable by name, invisible to ls).
+/// True if a live server answers the frozen pre-Attach query with its positive
+/// liveness marker. A bare connect is not enough: a stale socket can still
+/// accept one residual connection after its listener dies. A timeout is also
+/// not enough: no response is not evidence of life.
 fn probe_alive(path: &Path) -> bool {
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(50));
         }
-        match connect_unix_timeout(path, PROBE_ALIVE_CONNECT_TIMEOUT) {
-            Ok(_) => return true,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return true,
-            Err(_) => {}
+        let Ok(mut stream) = connect_unix_timeout(path, PROBE_ALIVE_CONNECT_TIMEOUT) else {
+            continue;
+        };
+        let _ = stream.set_read_timeout(Some(PROBE_ALIVE_CONNECT_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(PROBE_ALIVE_CONNECT_TIMEOUT));
+        if write_msg_sync(&mut stream, &ClientMsg::Query).is_err() {
+            continue;
+        }
+        if matches!(
+            read_msg_sync::<_, ServerMsg>(&mut stream),
+            Ok(ServerMsg::Info { .. })
+        ) {
+            return true;
         }
     }
     false
