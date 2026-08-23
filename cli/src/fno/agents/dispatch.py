@@ -6226,7 +6226,10 @@ def _mux_pane_send(
         except (TypeError, ValueError) as exc:
             print(f"mux pane {pane} identity check refused: invalid pane ls JSON: {exc}", file=sys.stderr)
             return False
-        matches = [row for row in rows if row.get("pane_id") == pane_id]
+        if not isinstance(rows, list):
+            print("mux pane identity check refused: pane ls JSON was not a list", file=sys.stderr)
+            return False
+        matches = [row for row in rows if isinstance(row, dict) and row.get("pane_id") == pane_id]
         if len(matches) != 1:
             print(
                 f"mux pane {pane} identity check refused: expected one pane row, found {len(matches)}",
