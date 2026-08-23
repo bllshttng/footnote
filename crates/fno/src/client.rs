@@ -66,56 +66,92 @@ const MIN_SLIM_PANEL_W: u16 = 8;
 /// Below this many content columns the sideline auto-hides (AC6-EDGE).
 const MIN_CONTENT_COLS: u16 = 40;
 
-/// (x-b186) Extended-table column widths in display columns, render order:
-/// status glyph, name, message tail, PR, relative last-update. Each includes
-/// its trailing separator space, so the table width is their sum.
+/// Extended-table column widths in display columns, render order: status glyph,
+/// agent, last message, PR, and relative last-update age. The first and last
+/// three cells are fixed; the agent and message cells share the remainder.
 const COL_STATUS: u16 = 2;
-const COL_NAME: u16 = 20;
-const COL_TAIL: u16 = 34;
 const COL_PR: u16 = 7;
 const COL_TIME: u16 = 6;
+const COL_MIN_NAME: u16 = 12;
+const COL_MAX_NAME: u16 = 24;
+const COL_MIN_TAIL: u16 = 8;
 
-/// (x-b186) Which extended-table columns fit a given panel width.
-///
-/// Dropping is by PRIORITY, not by truncation: the tail goes first, then the
-/// last-update time (Discretion 4). Status, name, and PR always render - a
-/// table that cannot show which agent a row is would be worse than no table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TableCols {
-    tail: bool,
-    time: bool,
+struct ColumnSpan {
+    start: u16,
+    width: u16,
 }
 
-impl TableCols {
-    /// The widest column set that fits `text_w` display columns.
-    fn fitting(text_w: u16) -> TableCols {
-        let base = COL_STATUS + COL_NAME + COL_PR;
-        if text_w >= base + COL_TAIL + COL_TIME {
-            TableCols {
-                tail: true,
-                time: true,
-            }
-        } else if text_w >= base + COL_TIME {
-            TableCols {
-                tail: false,
-                time: true,
-            }
-        } else {
-            TableCols {
-                tail: false,
-                time: false,
-            }
+/// The one geometry authority for the extended table. Header text, row text,
+/// and header hit testing all consume these spans, so age stays right-anchored
+/// when the panel width changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TableLayout {
+    text_w: u16,
+    status: ColumnSpan,
+    agent: ColumnSpan,
+    tail: Option<ColumnSpan>,
+    pr: ColumnSpan,
+    age: ColumnSpan,
+}
+
+impl TableLayout {
+    fn fitting(text_w: u16) -> Option<Self> {
+        let fixed = COL_STATUS + COL_PR + COL_TIME;
+        let flexible = text_w.checked_sub(fixed)?;
+        if flexible < COL_MIN_NAME {
+            return None;
         }
+
+        let requested_name = (flexible / 3).clamp(COL_MIN_NAME, COL_MAX_NAME);
+        let (name_w, tail_w) = if flexible.saturating_sub(requested_name) >= COL_MIN_TAIL {
+            (requested_name, Some(flexible - requested_name))
+        } else {
+            (flexible, None)
+        };
+        let status = ColumnSpan {
+            start: 0,
+            width: COL_STATUS,
+        };
+        let agent = ColumnSpan {
+            start: status.start + status.width,
+            width: name_w,
+        };
+        let tail = tail_w.map(|width| ColumnSpan {
+            start: agent.start + agent.width,
+            width,
+        });
+        let pr_start = tail
+            .map(|span| span.start + span.width)
+            .unwrap_or(agent.start + agent.width);
+        let pr = ColumnSpan {
+            start: pr_start,
+            width: COL_PR,
+        };
+        let age = ColumnSpan {
+            start: text_w - COL_TIME,
+            width: COL_TIME,
+        };
+        debug_assert_eq!(age.start, pr.start + pr.width);
+        debug_assert_eq!(age.start + age.width, text_w);
+        Some(Self {
+            text_w,
+            status,
+            agent,
+            tail,
+            pr,
+            age,
+        })
     }
 }
 
 /// (x-b186) The full extended-table panel width (every column plus the divider),
 /// what entering `Extended` widens to before any clamp.
-const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_TAIL + COL_PR + COL_TIME + 1;
-/// (x-b186) The narrowest useful extended panel: status + name + PR, every
-/// droppable column gone, plus the divider. Below this the panel hides rather
-/// than rendering a table with no room for a name.
-const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_PR + 1;
+const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 1;
+/// The narrowest useful extended panel: fixed status/PR/age cells, a readable
+/// agent cell, and the divider. The message cell is omitted only below its
+/// eight-column floor; age is never dropped from an admitted table.
+const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_MIN_NAME + COL_PR + COL_TIME + 1;
 
 /// (x-b186) Columns the top-right density button reserves on the sideline's
 /// first row: the state glyph plus a trailing pad (x-2e86) so it does not sit
@@ -7225,7 +7261,7 @@ impl View {
         // row's age is relative to the same instant, so a mid-paint tick cannot
         // make one row read older than the row above it.
         let now = crate::digest_overlay::now_secs();
-        let table_cols = TableCols::fitting(text_w as u16);
+        let table_layout = TableLayout::fitting(text_w as u16);
         // Composition width for the top row: text_w minus the density button.
         let btn_reserved = match self.density_button_range(panel_w) {
             Some(r) => r.start,
@@ -7338,13 +7374,15 @@ impl View {
                 // (x-b186) In Extended an agent row IS a table row: same lattice
                 // style and external DIM modifier, different text composition.
                 DisplayRow::Agent(a) if self.density == Density::Extended => {
+                    let layout =
+                        table_layout.expect("extended density has an admitted table layout");
                     let st = agent_lattice_state(a);
                     let style = lattice_style(st, self.theme.accent);
                     let mut flags = style.flags;
                     if a.external && st != LatticeState::Blocked {
                         flags |= cell_flags::DIM;
                     }
-                    (table_row_text(a, table_cols, now), flags, style.fg)
+                    (table_row_text(a, layout, 0, now), flags, style.fg)
                 }
                 DisplayRow::Agent(a) => {
                     // The unified icon lattice (x-df4c): exit beats badge beats
@@ -7510,7 +7548,10 @@ impl View {
                 // (x-b186) The extended table's column header: DIM like the
                 // other inert labels, so it reads as chrome rather than a row.
                 DisplayRow::TableHead => (
-                    table_head_text(table_cols, self.agent_sort),
+                    table_head_text(
+                        table_layout.expect("extended density has an admitted table layout"),
+                        self.agent_sort,
+                    ),
                     cell_flags::DIM,
                     Color::Default,
                 ),
@@ -9327,29 +9368,33 @@ fn humanize_age(secs: Option<u64>) -> String {
 /// truncated (via `pad_to`) so a long tail ellipsizes on one line rather than
 /// wrapping - a wrapped cell would paint two lines for one display row and break
 /// the x-260a single-enumeration invariant.
-fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
+fn table_row_text(a: &AgentRow, layout: TableLayout, depth: usize, now_secs: u64) -> String {
     let glyph = lattice_glyph(agent_lattice_state(a)).0;
-    let mut out = format!("{glyph} {}", pad_cols(&a.name, COL_NAME as usize - 1));
-    if cols.tail {
-        let tail = a.tail.as_deref().unwrap_or("");
-        out.push_str(&pad_cols(tail, COL_TAIL as usize - 1));
-        out.push(' ');
+    let name = if depth == 0 {
+        a.name.clone()
+    } else {
+        format!("{}{name}", "  ".repeat(depth), name = a.name)
+    };
+    let mut out = pad_cols(&format!("{glyph} "), layout.status.width as usize);
+    out.push_str(&pad_cols(&name, layout.agent.width as usize));
+    if let Some(tail) = layout.tail {
+        out.push_str(&pad_cols(
+            a.tail.as_deref().unwrap_or(""),
+            tail.width as usize,
+        ));
     }
     let pr = a.pr.map(|n| format!("#{n}")).unwrap_or_default();
-    out.push_str(&pad_cols(&pr, COL_PR as usize - 1));
-    out.push(' ');
-    if cols.time {
-        // The probe's transcript age is the honest reading; `updated_at` is a
-        // registry stamp that reconciliation can refresh with no worker
-        // activity behind it, so it is only the fallback for a server too old
-        // to send the triple. Fixed-width so the column never reflows.
-        let age = match (a.last_activity_age_s, a.updated_at) {
-            (Some(s), _) => humanize_age(Some(s)),
-            (None, Some(u)) => humanize_age(Some(now_secs.saturating_sub(u))),
-            (None, None) => humanize_age(None),
-        };
-        out.push_str(&pad_cols(&age, COL_TIME as usize - 1));
-    }
+    out.push_str(&pad_cols(&pr, layout.pr.width as usize));
+    let age = match (a.last_activity_age_s, a.updated_at) {
+        (Some(s), _) => humanize_age(Some(s)),
+        (None, Some(u)) => humanize_age(Some(now_secs.saturating_sub(u))),
+        (None, None) => humanize_age(None),
+    };
+    out.push_str(&pad_cols(&age, layout.age.width as usize));
+    debug_assert_eq!(
+        out.chars().map(glyph_cols).sum::<usize>(),
+        layout.text_w as usize
+    );
     out
 }
 
@@ -9358,32 +9403,18 @@ fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
 /// Carries the active sort label, which is what makes the sort toggle visible
 /// even when the two orders coincide (one agent, or every row in one band): the
 /// rows may not move, but this line always changes, so no press is inert.
-fn table_head_text(cols: TableCols, sort: AgentSort) -> String {
-    let (long, short) = match sort {
-        AgentSort::Squad => ("sort: workspace", "·wksp"),
-        AgentSort::Attention => ("sort: attention", "·attn"),
-    };
-    // With the tail column dropped the label has no column of its own, so it
-    // rides the NAME header instead of being appended past the end of the row.
-    // Appending overflowed the panel by 12 columns and the painter simply cut
-    // it, which left the toggle invisible at exactly the widths where the table
-    // is hardest to read - and a press with no visible effect reads as a dead
-    // control. The name column always renders, so the marker always survives.
-    let name = if cols.tail {
-        "agent".to_string()
-    } else {
-        format!("agent {short}")
-    };
-    let mut out = format!("  {}", pad_cols(&name, COL_NAME as usize - 1));
-    if cols.tail {
-        out.push_str(&pad_cols(long, COL_TAIL as usize - 1));
-        out.push(' ');
+fn table_head_text(layout: TableLayout, _sort: AgentSort) -> String {
+    let mut out = pad_cols("st", layout.status.width as usize);
+    out.push_str(&pad_cols("agent", layout.agent.width as usize));
+    if let Some(tail) = layout.tail {
+        out.push_str(&pad_cols("last message", tail.width as usize));
     }
-    out.push_str(&pad_cols("pr", COL_PR as usize - 1));
-    out.push(' ');
-    if cols.time {
-        out.push_str(&pad_cols("age", COL_TIME as usize - 1));
-    }
+    out.push_str(&pad_cols("pr", layout.pr.width as usize));
+    out.push_str(&pad_cols("age", layout.age.width as usize));
+    debug_assert_eq!(
+        out.chars().map(glyph_cols).sum::<usize>(),
+        layout.text_w as usize
+    );
     out
 }
 
@@ -27509,13 +27540,12 @@ mod tests {
         let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
         set_density(&mut v, Density::Extended);
         assert_eq!(v.panel_w(), EXTENDED_PANEL_W, "wide terminal: every column");
-        assert_eq!(
-            TableCols::fitting(EXTENDED_PANEL_W - 1),
-            TableCols {
-                tail: true,
-                time: true
-            }
+        let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        assert!(
+            layout.tail.is_some(),
+            "wide table includes the message cell"
         );
+        assert_eq!(layout.age.start + layout.age.width, layout.text_w);
 
         // Narrow enough that the full table cannot fit beside a usable pane.
         v.term = (24, MIN_EXTENDED_PANEL_W + MIN_CONTENT_COLS + 3);
@@ -27526,13 +27556,30 @@ mod tests {
             "the work pane keeps its minimum: term {} panel {w}",
             v.term.1
         );
-        // Tail goes first, then the age - status/name/pr always survive.
-        assert!(!TableCols::fitting(w - 1).tail, "tail drops first");
+        // The message cell gives its space to the agent name, while age stays
+        // visible and right-anchored.
+        let layout = TableLayout::fitting(w - 1).unwrap();
+        assert!(layout.tail.is_none(), "message cell drops below its floor");
+        assert_eq!(layout.age.start + layout.age.width, layout.text_w);
 
         // Narrower still: the panel hides rather than rendering a nameless table.
         v.term = (24, MIN_CONTENT_COLS + 4);
         assert_eq!(v.panel_w(), 0);
         assert!(v.content_dims().1 >= 1, "never a zero-width content area");
+    }
+
+    #[test]
+    fn responsive_table_layout_anchors_age_and_shares_flexible_space() {
+        let narrow = TableLayout::fitting(MIN_EXTENDED_PANEL_W - 1).unwrap();
+        assert_eq!(narrow.agent.width, COL_MIN_NAME);
+        assert!(narrow.tail.is_none(), "message is omitted below its floor");
+        assert_eq!(narrow.age.start + narrow.age.width, narrow.text_w);
+
+        let wide = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        let tail = wide.tail.unwrap();
+        assert_eq!(wide.agent.width + tail.width, 54);
+        assert!(wide.agent.width > COL_MIN_NAME);
+        assert!(tail.width > COL_MIN_TAIL);
     }
 
     // AC5-EDGE at startup: a persisted Extended restored onto a now-narrow
@@ -27612,49 +27659,10 @@ mod tests {
     // looked like a dead control exactly where the table is hardest to read.
     #[test]
     fn sort_label_survives_every_column_configuration() {
-        for cols in [
-            TableCols {
-                tail: true,
-                time: true,
-            },
-            TableCols {
-                tail: false,
-                time: true,
-            },
-            TableCols {
-                tail: false,
-                time: false,
-            },
-        ] {
-            let by_squad = table_head_text(cols, AgentSort::Squad);
-            let by_attention = table_head_text(cols, AgentSort::Attention);
-            assert_ne!(
-                by_squad, by_attention,
-                "{cols:?}: the header must change when the sort does"
-            );
-            // The header must FIT: anything past the panel width is painted away,
-            // which is how the label went missing in the first place.
-            let panel_text_w = match cols {
-                TableCols { tail: true, .. } => EXTENDED_PANEL_W - 1,
-                TableCols { time: true, .. } => COL_STATUS + COL_NAME + COL_PR + COL_TIME - 1,
-                _ => MIN_EXTENDED_PANEL_W - 1,
-            };
-            let squad_label = if cols.tail { "workspace" } else { "·wksp" };
-            for (label, head) in [(squad_label, &by_squad), ("att", &by_attention)] {
-                assert!(
-                    head.chars().count() <= panel_text_w as usize,
-                    "{cols:?}: header overflows {panel_text_w} cols: {head:?}"
-                );
-                // And the surviving text still names the order.
-                let visible: String = head.chars().take(panel_text_w as usize).collect();
-                assert!(
-                    visible.contains(label),
-                    "{cols:?}: {label:?} not visible in {visible:?}"
-                );
-            }
-            if !cols.tail {
-                assert!(by_squad.contains("agent ·wksp"), "{cols:?}: {by_squad:?}");
-            }
+        for text_w in [EXTENDED_PANEL_W - 1, MIN_EXTENDED_PANEL_W - 1] {
+            let layout = TableLayout::fitting(text_w).unwrap();
+            let head = table_head_text(layout, AgentSort::Squad);
+            assert_eq!(head.chars().map(glyph_cols).sum::<usize>(), text_w as usize);
         }
     }
 
@@ -27708,12 +27716,9 @@ mod tests {
         let mut wide_name = agent_row("☰☰☰ menu", 4, Some(AgentBadge::Working), false);
         wide_name.pr = Some(7);
         let plain = agent_row("ascii", 5, Some(AgentBadge::Working), false);
-        let cols = TableCols {
-            tail: true,
-            time: false,
-        };
-        let a = table_row_text(&wide_name, cols, 0);
-        let b = table_row_text(&plain, cols, 0);
+        let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        let a = table_row_text(&wide_name, layout, 0, 0);
+        let b = table_row_text(&plain, layout, 0, 0);
         let width = |s: &str| s.chars().map(glyph_cols).sum::<usize>();
         assert_eq!(
             width(&a),
