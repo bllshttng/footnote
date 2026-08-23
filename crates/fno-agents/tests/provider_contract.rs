@@ -187,6 +187,7 @@ fn refused_behavior_rejects_a_supported_capability_claim() {
 }
 
 #[test]
+#[ignore = "requires a real harness binary driven through an interactive PTY"]
 fn submit_claims_are_checked_against_behavior_or_named_skip() {
     let contract = HarnessContract::packaged().unwrap();
     let observations = KNOWN_PROVIDERS

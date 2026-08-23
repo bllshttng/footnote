@@ -139,7 +139,7 @@ The accepted user-facing vocabulary is `minimal`, `low`, `medium`, `high`,
 | Codex | `minimal`, `low`, `medium`, `high` | pane, headless |
 | OpenCode | superset, subject to the selected model | pane; persists the model variant |
 | Gemini | none | rejected before spawn |
-| Agy | `low`, `medium`, `high` | pane |
+| Agy | `low`, `medium`, `high` | pane, headless |
 
 Unsupported pairs fail with exit 2 before a pane or worker is created. For
 OpenCode, the selected effort becomes the persisted variant for that explicit
