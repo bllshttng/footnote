@@ -36,6 +36,7 @@ EXIT_QUEUE_TIMEOUT = 75
 EXIT_NO_WAIT = 76
 EXIT_RAM_REFUSED = 77
 EXIT_PROVIDER_CAP = 78
+EXIT_LOAD_REFUSED = 79
 
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
@@ -803,6 +804,34 @@ def _check_ram_floor(floor_gb: float) -> None:
         raise GateRefused(EXIT_RAM_REFUSED)
 
 
+def _check_load_ceiling(max_load_per_cpu: float) -> None:
+    """Refuse (never queue) above the CPU ceiling (x-3f84 W3).
+
+    The ceiling is `max_load_per_cpu x cpu count` on the 1-min loadavg, so one
+    number ports across machines without an edit. Measured motivation: load 309
+    on 12 CPUs while the RAM floor held ten times its margin - the one machine
+    guard was reading the one resource that was never scarce. Same contract as
+    :func:`_check_ram_floor`: <= 0 disables, unreadable skips, refuse never
+    queues.
+    """
+    if max_load_per_cpu <= 0:
+        return
+    try:
+        load1 = os.getloadavg()[0]
+    except OSError:
+        _warn("spawn-gate: could not read load average; skipping the load check")
+        return
+    cpus = os.cpu_count() or 1
+    ceiling = max_load_per_cpu * cpus
+    if load1 > ceiling:
+        _warn(
+            f"spawn-gate: 1-min load {load1:.1f} exceeds max_load_per_cpu "
+            f"{max_load_per_cpu:g} x {cpus} cpus = {ceiling:.1f}; refusing to "
+            f"spawn (--force to bypass)"
+        )
+        raise GateRefused(EXIT_LOAD_REFUSED)
+
+
 def _acquire_worker_slot(
     guard: GateGuard,
     name: str,
@@ -869,9 +898,10 @@ def run_gate(
         agents_cfg = load_settings().agents
         cap = int(agents_cfg.max_live)
         floor_gb = float(agents_cfg.min_free_gb)
+        max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
         max_lanes = dict(getattr(agents_cfg, "max_lanes", {"zai": 5}))
     except Exception:
-        cap, floor_gb = 3, 4.0
+        cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
         # The same lanes number the built-in ProviderBudget carries.
         # `provider_lanes_cap` reads either spelling, so this fail-safe path
         # cannot disagree with the configured one about zai's lane cap.
@@ -892,7 +922,7 @@ def run_gate(
     )
 
     if force and provider_cap is None:
-        _warn("spawn-gate: forced past cap and RAM floor (--force)")
+        _warn("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)")
         if substrate == "headless":
             _acquire_worker_slot(guard, name, holder, route_provider)
         return guard
@@ -965,8 +995,8 @@ def run_gate(
                     )
             if force:
                 _warn(
-                    "spawn-gate: forced past cap and RAM floor (--force); "
-                    "provider cap remains enforced"
+                    "spawn-gate: forced past cap, RAM floor, and load ceiling "
+                    "(--force); provider cap remains enforced"
                 )
                 if substrate == "headless":
                     try:
@@ -991,6 +1021,7 @@ def run_gate(
             if slots < cap:
                 try:
                     _check_ram_floor(floor_gb)
+                    _check_load_ceiling(max_load_per_cpu)
                 except GateRefused:
                     guard.release()
                     raise

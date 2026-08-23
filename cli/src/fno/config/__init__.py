@@ -1757,6 +1757,14 @@ class AgentsBlock(BaseModel):
     #                 built-in zai budget is lanes 5, subagents 1. A bare
     #                 integer is still legal and coerces to `lanes`.
     #   min_free_gb — available-RAM floor for spawn preflight; <= 0 disables.
+    #   max_load_per_cpu — CPU ceiling for spawn preflight: refuse when the
+    #                 1-min loadavg exceeds this factor times the CPU count
+    #                 (x-3f84 W3). Measured 2026-08-22: load 309 on 12 CPUs
+    #                 while the RAM floor held ten times its margin - the one
+    #                 machine guard read the one resource that was never scarce.
+    #                 A machine dimension, so a scalar on agents.* and never a
+    #                 field on ProviderBudget (a machine is not an account).
+    #                 <= 0 disables.
     #   worker_qos  — utility (demote workers to background QoS) | off.
     max_live: int = 3
     max_lanes: dict[str, ProviderBudget] = Field(
@@ -1766,6 +1774,7 @@ class AgentsBlock(BaseModel):
     )
     pane_group_max: int = 4
     min_free_gb: float = 4.0
+    max_load_per_cpu: float = 8.0
     worker_qos: str = "utility"
     # Default permission/approval mode for AUTONOMOUS dispatchers only
     # (dispatch-node.sh / `fno backlog advance` / `/think dispatch`). Defaults to
@@ -1911,6 +1920,23 @@ class AgentsBlock(BaseModel):
             except ValueError:
                 return 4.0
         return 4.0
+
+    @field_validator("max_load_per_cpu", mode="before")
+    @classmethod
+    def _coerce_max_load_per_cpu(cls, v: object) -> object:
+        """Coerce a non-numeric max_load_per_cpu to the default (8.0); never
+        raise. Same contract as :meth:`_coerce_min_free_gb`: <= 0 is a VALID
+        value (guard disabled), so only unparseable input falls back."""
+        if isinstance(v, bool):
+            return 8.0
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v.strip())
+            except ValueError:
+                return 8.0
+        return 8.0
 
     @field_validator("worker_qos", mode="before")
     @classmethod
