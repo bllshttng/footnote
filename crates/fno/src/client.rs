@@ -10940,8 +10940,10 @@ enum StdinFlow {
 /// Only the shared Chrome esc hit cancels; outside clicks are swallowed so they
 /// cannot dismiss the modal or reach a pane underneath it.
 fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
-    if view.modal_release_swallow && matches!(rep.kind, MouseKind::Release(MouseButton::Left)) {
-        view.modal_release_swallow = false;
+    if view.modal_release_swallow {
+        if matches!(rep.kind, MouseKind::Release(MouseButton::Left)) {
+            view.modal_release_swallow = false;
+        }
         return true;
     }
     let Some(layout) = view.active_overlay_layout() else {
@@ -10996,16 +10998,15 @@ async fn handle_stdin(
         // entirely. On a terminal that marks releases with Shift, every plain
         // click on a workspace, section or card row would become a no-op, and
         // the reaper would later open a menu nobody asked for.
-        // A close-chip release is also release-owned state. Let it reach
-        // `modal_mouse` even when the terminal marks it as Shift-modified.
         let ends_a_drag = matches!(rep.kind, MouseKind::Release(MouseButton::Left))
             && (view.pane_drag.is_some()
                 || view.seam_drag.is_some()
                 || view.tab_drag.is_some()
                 || view.row_drag.is_some()
-                || view.press_hold.is_some()
-                || view.modal_release_swallow);
-        if rep.shift && !ends_a_drag {
+                || view.press_hold.is_some());
+        // A close-chip gesture is also release-owned state. Let every event in
+        // it reach `modal_mouse`, even when the terminal marks it as Shift.
+        if rep.shift && !ends_a_drag && !view.modal_release_swallow {
             continue;
         }
         // A pointer action - click/press/wheel/drag, anything but passive hover
@@ -21038,6 +21039,54 @@ mod tests {
             "the shifted release clears the latch"
         );
         assert!(buf.is_empty(), "the shifted release never reaches the pane");
+    }
+
+    #[test]
+    fn esc_chip_close_swallows_drag_until_left_release() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let click = crate::mouse::MouseReport {
+            row: (layout.origin.0 + line) as u16,
+            col: (layout.origin.1 + offset + len / 2) as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        assert!(modal_mouse(&mut view, click));
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                kind: MouseKind::Drag(MouseButton::Left),
+                ..click
+            },
+        ));
+        assert!(
+            view.modal_release_swallow,
+            "drag keeps the closing gesture armed"
+        );
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                kind: MouseKind::Release(MouseButton::Left),
+                ..click
+            },
+        ));
+        assert!(
+            !view.modal_release_swallow,
+            "left release ends the closing gesture"
+        );
     }
 
     #[test]
