@@ -425,6 +425,36 @@ def test_daemon_drift_probe_uses_installed_status_and_relays_canonical_warning(
     ]
 
 
+def test_daemon_drift_probe_uses_forced_runtime_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fno import rust_binary
+
+    warning = (
+        "fno agents: the running daemon is an older build than the installed binary; "
+        "run `fno agents restart` to pick up the new build."
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "rust")
+    monkeypatch.setenv("FNO_AGENTS_BIN", "/custom/fno-agents")
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/custom/fno-agents"))
+    monkeypatch.setattr(
+        rust_binary,
+        "resolve_installed_binary",
+        lambda: (_ for _ in ()).throw(AssertionError("default resolver must not run")),
+    )
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "run",
+        lambda cmd, **kwargs: type(
+            "Completed",
+            (),
+            {"returncode": 0, "stdout": '{"daemon": {}}', "stderr": warning},
+        )(),
+    )
+
+    assert doctor._daemon_drift_warning() == warning
+
+
 @pytest.mark.parametrize(
     "returncode,stdout,stderr",
     [

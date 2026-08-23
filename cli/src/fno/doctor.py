@@ -407,9 +407,12 @@ def _daemon_drift_warning() -> Optional[str]:
     version data.
     """
     try:
-        from fno.rust_binary import resolve_installed_binary
+        from fno import rust_binary
 
-        binary = resolve_installed_binary()
+        if os.environ.get("FNO_AGENTS_RUNTIME", "auto").strip().lower() == "rust":
+            binary = rust_binary.resolve_binary()
+        else:
+            binary = rust_binary.resolve_installed_binary()
     except Exception:
         return None
     if binary is None:
