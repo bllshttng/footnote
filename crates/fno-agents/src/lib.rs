@@ -65,6 +65,7 @@ pub mod gc;
 pub mod gemini_ask;
 pub mod harness_capabilities;
 mod identity;
+pub mod interrupt_classify;
 pub mod kill_criteria;
 pub mod logs;
 pub mod logs_client;
@@ -815,7 +816,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "approvals", "backlog", "daemon", "fno-loop", "hook", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "approvals", "backlog", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

@@ -305,6 +305,62 @@ impl Dispatcher for MockDispatcher {
     }
 }
 
+/// Dispatcher fixture for the positive interrupted-call proof. The first
+/// dispatch records a Claude tool-use with no result; the second records the
+/// terminal event and captures the context that would reach the resumed worker.
+struct InterruptedTranscriptDispatcher {
+    journal_path: PathBuf,
+    cwd: PathBuf,
+    transcript_path: PathBuf,
+    dispatch_count: AtomicU64,
+    contexts: Mutex<Vec<Option<String>>>,
+}
+
+impl Dispatcher for InterruptedTranscriptDispatcher {
+    fn run(&self, unit: &Unit, ctx: &DispatchCtx) -> Result<Box<dyn Session>, LoopError> {
+        self.run_with_resume_context(unit, ctx, None)
+    }
+
+    fn run_with_resume_context(
+        &self,
+        unit: &Unit,
+        ctx: &DispatchCtx,
+        resume_context: Option<&str>,
+    ) -> Result<Box<dyn Session>, LoopError> {
+        let _ = ctx;
+        self.contexts
+            .lock()
+            .unwrap()
+            .push(resume_context.map(str::to_string));
+        let dispatch = self.dispatch_count.fetch_add(1, Ordering::SeqCst);
+        if dispatch == 0 {
+            fs::write(
+                &self.transcript_path,
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":{}}]}}\n",
+            )
+            .unwrap();
+            Ok(Box::new(ExitSession { exit_code: 137 }))
+        } else {
+            seed_termination_event(&self.journal_path, &unit.session_key, "DonePRGreen");
+            Ok(Box::new(ExitSession { exit_code: 0 }))
+        }
+    }
+
+    fn transcript_cwd(&self) -> Option<&Path> {
+        Some(&self.cwd)
+    }
+}
+
+struct ExitSession {
+    exit_code: i32,
+}
+
+impl Session for ExitSession {
+    fn wait(&mut self) -> Result<i32, LoopError> {
+        Ok(self.exit_code)
+    }
+}
+
 // ── test 1: empty queue terminates with NoWork, dispatcher not called ─────────
 
 #[test]
@@ -432,6 +488,87 @@ fn no_event_exit_emits_node_failed_then_redispatches() {
         count_events(&project_events, "loop_unit_dispatched"),
         2,
         "expected two loop_unit_dispatched events"
+    );
+}
+
+#[test]
+fn kill_mid_tool_call_prepends_unknown_outcome_and_journals_event() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    let cwd = dir.path().join("worktree");
+    fs::create_dir_all(&cwd).unwrap();
+    let projects = dir.path().join("claude-projects");
+    let slug = cwd.to_string_lossy().replace('/', "-").replace('.', "-");
+    let project_dir = projects.join(slug);
+    fs::create_dir_all(&project_dir).unwrap();
+    let transcript_path = project_dir.join("dead-session.jsonl");
+
+    let previous_projects = std::env::var_os("FNO_CLAUDE_PROJECTS_DIR");
+    std::env::set_var("FNO_CLAUDE_PROJECTS_DIR", &projects);
+
+    let dispatcher = InterruptedTranscriptDispatcher {
+        journal_path: project_events.clone(),
+        cwd,
+        transcript_path,
+        dispatch_count: AtomicU64::new(0),
+        contexts: Mutex::new(vec![]),
+    };
+    let unit = make_unit("ab-interrupted", "sess-interrupted");
+    let mut queue = FixedQueue::new(vec![unit]);
+    let budget = LoopBudget::new(3).unwrap();
+    let journal = Journal::new_raw(project_events.clone(), global_events);
+
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+
+    match previous_projects {
+        Some(value) => std::env::set_var("FNO_CLAUDE_PROJECTS_DIR", value),
+        None => std::env::remove_var("FNO_CLAUDE_PROJECTS_DIR"),
+    }
+
+    assert_eq!(
+        outcome.units[0].evidence.reason,
+        TerminationReason::DonePRGreen
+    );
+    assert_eq!(dispatcher.dispatch_count.load(Ordering::SeqCst), 2);
+    let contexts = dispatcher.contexts.lock().unwrap();
+    assert!(contexts[0].is_none());
+    let resume = contexts[1]
+        .as_deref()
+        .expect("classified context on redispatch");
+    assert!(
+        resume.contains("`Bash`"),
+        "resume prompt must name Bash: {resume}"
+    );
+    assert!(
+        resume.contains("first verify external state or ask the user"),
+        "resume prompt must preserve verify-before-retry instruction: {resume}"
+    );
+
+    let events = read_jsonl(&project_events);
+    let interrupted = events
+        .iter()
+        .find(|event| event["type"].as_str() == Some("unit_interrupted"))
+        .expect("unit_interrupted event");
+    assert_eq!(
+        interrupted["data"]["resolution"].as_str(),
+        Some("classified")
+    );
+    assert_eq!(
+        interrupted["data"]["calls_in_flight"][0]["name"].as_str(),
+        Some("Bash")
+    );
+    let interrupted_index = events
+        .iter()
+        .position(|event| event["type"].as_str() == Some("unit_interrupted"))
+        .unwrap();
+    let failed_index = events
+        .iter()
+        .position(|event| event["type"].as_str() == Some("node_failed"))
+        .unwrap();
+    assert!(
+        interrupted_index < failed_index,
+        "classification precedes node_failed"
     );
 }
 

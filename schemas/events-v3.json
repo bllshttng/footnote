@@ -18,7 +18,7 @@
       "type": "string",
       "anyOf": [
         {
-          "enum": ["active-backlog", "approvals", "backlog", "daemon", "fno-loop", "hook", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"]
+          "enum": ["active-backlog", "approvals", "backlog", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"]
         },
         {
           "pattern": "^(worker|stream-worker):.+$"

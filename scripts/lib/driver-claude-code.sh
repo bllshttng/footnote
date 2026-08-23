@@ -11,6 +11,7 @@
 #   BUDGET_USD      per-session dollar cap
 #   MODEL_FLAG      optional "--model NAME" string
 #   CONTINUE_PROMPT the slash command to resume (/target --resume etc.)
+#   RESUME_CONTEXT optional classifier guidance prepended to CONTINUE_PROMPT
 #   CLI             optional alias name from --cli flag ("claude" | "opencode");
 #                   used to pick the binary when $CLAUDE_CLI is not set.
 
@@ -31,13 +32,18 @@ driver_invoke() {
   if ! command -v "$cli" &>/dev/null; then
     return 77
   fi
+  local prompt="${CONTINUE_PROMPT:-/target --resume}"
+  if [[ -n "${RESUME_CONTEXT:-}" ]]; then
+    prompt="${prompt}
+${RESUME_CONTEXT}"
+  fi
   # shellcheck disable=SC2086
   "$cli" --print \
     --max-turns "${MAX_TURNS:-15}" \
     --max-budget-usd "${BUDGET_USD:-25}" \
     --dangerously-skip-permissions \
     ${MODEL_FLAG:-} \
-    "${CONTINUE_PROMPT:-/target --resume}" > "${OUTPUT_FILE}" 2>&1
+    "$prompt" > "${OUTPUT_FILE}" 2>&1
 }
 
 driver_check_promise() {

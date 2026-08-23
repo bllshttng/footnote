@@ -23,6 +23,7 @@ use crate::loop_runtime::{DispatchCtx, Dispatcher, LoopError, Session, Unit};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::Mutex;
 
 // ── public API ─────────────────────────────────────────────────────────────────
 
@@ -425,6 +426,8 @@ pub struct ShelloutDispatcher {
     env: Vec<(String, String)>,
     /// Working directory for the bash process.
     cwd: PathBuf,
+    /// Effective Claude config's projects directory for transcript discovery.
+    effective_projects_dir: Mutex<PathBuf>,
 }
 
 impl ShelloutDispatcher {
@@ -432,16 +435,37 @@ impl ShelloutDispatcher {
     /// (from `preflight`); `env` is the static passthrough list; `cwd` is the
     /// project root.
     pub fn new(driver_lib: PathBuf, env: Vec<(String, String)>, cwd: PathBuf) -> Self {
+        let projects_dir = env
+            .iter()
+            .find(|(key, value)| key == PICKED_ENV_KEY && !value.is_empty())
+            .map(|(_, value)| PathBuf::from(value).join("projects"))
+            .or_else(|| {
+                std::env::var_os(PICKED_ENV_KEY)
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .map(|path| path.join("projects"))
+            })
+            .unwrap_or_else(crate::claude_drive::claude_projects_dir);
         Self {
             driver_lib,
             env,
             cwd,
+            effective_projects_dir: Mutex::new(projects_dir),
         }
     }
 }
 
 impl Dispatcher for ShelloutDispatcher {
-    fn run(&self, _unit: &Unit, ctx: &DispatchCtx) -> Result<Box<dyn Session>, LoopError> {
+    fn run(&self, unit: &Unit, ctx: &DispatchCtx) -> Result<Box<dyn Session>, LoopError> {
+        self.run_with_resume_context(unit, ctx, None)
+    }
+
+    fn run_with_resume_context(
+        &self,
+        _unit: &Unit,
+        ctx: &DispatchCtx,
+        resume_context: Option<&str>,
+    ) -> Result<Box<dyn Session>, LoopError> {
         let lib_str = self
             .driver_lib
             .to_str()
@@ -464,6 +488,11 @@ impl Dispatcher for ShelloutDispatcher {
         cmd.arg("-c").arg(script);
         cmd.env("FNO_DRIVER_LIB", lib_str);
         cmd.env("CURRENT_ITER", ctx.iteration.to_string());
+        if let Some(resume_context) = resume_context {
+            cmd.env("RESUME_CONTEXT", resume_context);
+        } else {
+            cmd.env_remove("RESUME_CONTEXT");
+        }
         cmd.current_dir(&self.cwd);
 
         // Passthrough static env vars.
@@ -523,6 +552,14 @@ impl Dispatcher for ShelloutDispatcher {
                         } else {
                             cmd.env(key, value);
                         }
+                        if key == PICKED_ENV_KEY {
+                            let projects_dir = if value.is_empty() {
+                                crate::claude_drive::claude_projects_dir()
+                            } else {
+                                PathBuf::from(value).join("projects")
+                            };
+                            *self.effective_projects_dir.lock().unwrap() = projects_dir;
+                        }
                     }
                 }
                 Err(reason) => {
@@ -544,6 +581,14 @@ impl Dispatcher for ShelloutDispatcher {
             .map(|(_, v)| PathBuf::from(v));
 
         Ok(Box::new(ShelloutSession { child, output_file }))
+    }
+
+    fn transcript_cwd(&self) -> Option<&std::path::Path> {
+        Some(&self.cwd)
+    }
+
+    fn transcript_projects_dir(&self) -> Option<PathBuf> {
+        Some(self.effective_projects_dir.lock().unwrap().clone())
     }
 }
 
