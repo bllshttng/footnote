@@ -268,11 +268,11 @@ def census() -> LiveCensus:
     # through this map so no consumer re-runs lsof, and the recorded pid stays
     # on the row beside the resolved one. An empty map is "unknown", never
     # "no bg sessions" - rows then keep their recorded (host) pid.
-    from fno.agents.session_procs import bg_socket_pid_map
+    from fno.agents.session_procs import bg_socket_pid_map, resolve_session_pid
 
     try:
         sock_map = bg_socket_pid_map()
-    except Exception:  # noqa: BLE001 — a broken join must not break the census
+    except Exception:  # noqa: BLE001 - a broken join must not break the census
         sock_map = {}
 
     # claude roster first: display + dedup key for adopted sessions. Kept in the
@@ -310,7 +310,12 @@ def census() -> LiveCensus:
                     pid=pid,
                     status="live",
                     session_id=session_id,
-                    session_pid=sock_map.get(short_id) or pid,
+                    session_pid=resolve_session_pid(
+                        harness="claude",
+                        short_id=short_id,
+                        pid=pid,
+                        socket_map=sock_map,
+                    ),
                 )
             )
 
@@ -369,7 +374,16 @@ def census() -> LiveCensus:
         live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
-            continue  # already shown as its roster row in the display union
+            # Already shown as its roster row in the display union. That roster
+            # row carries no lineage of its own, so the KING the fno row
+            # attributes this cost to rides onto it here - without the backfill
+            # the one view built to show ownership names '-' for exactly the
+            # rows the king-share gate counts (review finding, x-3f84).
+            for w in out.workers:
+                if w.source == "claude" and w.name == dedup_key:
+                    w.spawned_by = row.spawned_by_session
+                    break
+            continue
         if dedup_key:
             counted_short_ids.add(dedup_key)
         substrate = "pane" if getattr(row, "mux", None) else (
@@ -385,13 +399,13 @@ def census() -> LiveCensus:
                 status=str(row.status),
                 session_id=row.harness_session_id,
                 spawned_by=row.spawned_by_session,
-                session_pid=(
-                    sock_map.get(row.short_id or "")
-                    or sock_map.get((row.harness_session_id or "")[:8])
-                    or row.pid
-                )
-                if row.harness == "claude"
-                else row.pid,
+                session_pid=resolve_session_pid(
+                    harness=row.harness,
+                    short_id=row.short_id,
+                    session_id=row.harness_session_id,
+                    pid=row.pid,
+                    socket_map=sock_map,
+                ),
             )
         )
 
@@ -833,10 +847,15 @@ def _check_load_ceiling(max_load_per_cpu: float) -> None:
         return
     try:
         load1 = os.getloadavg()[0]
-    except OSError:
+    except (OSError, AttributeError):
+        # OSError: unreadable. AttributeError: the platform has no getloadavg
+        # at all (the Rust gate cfg-guards the same case).
         _warn("spawn-gate: could not read load average; skipping the load check")
         return
-    cpus = os.cpu_count() or 1
+    # Affinity/cgroup-aware where available (mirrors the Rust gate's
+    # available_parallelism, so the two gates compute the same ceiling on a
+    # constrained host instead of a 4x disagreement).
+    cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 1
     ceiling = max_load_per_cpu * cpus
     if load1 > ceiling:
         _warn(
@@ -984,7 +1003,7 @@ def run_gate(
         from fno.claims.self_identity import resolve_self_identity
 
         caller_session = resolve_self_identity().session_id
-    except Exception:  # noqa: BLE001 — no identity, no share check (an
+    except Exception:  # noqa: BLE001 - no identity, no share check (an
         # operator-run spawn is not competing for the commons)
         caller_session = None
 

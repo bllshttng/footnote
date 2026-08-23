@@ -452,9 +452,14 @@ def _worktree_ensure_for_launch(
     except (OSError, subprocess.SubprocessError):
         return None
     if repo.returncode != 0:
-        # Not a git repo (a vault project, worktree.policy=never by design):
-        # the recorded cwd IS the launch cwd, which is the never-policy answer.
-        return str(recorded_cwd)
+        # ONLY a genuine "not a repository" answer means launch-in-place (a
+        # vault project, worktree.policy=never by design). Any other git
+        # failure - dubious ownership, a corrupted .git, a missing cwd - must
+        # HOLD, not silently fall back to the canonical checkout this change
+        # exists to keep workers off (review finding, x-3f84).
+        if "not a git repository" in (repo.stderr or ""):
+            return str(recorded_cwd)
+        return None
     canonical = repo.stdout.strip()
     try:
         ensured = subprocess.run(
@@ -612,12 +617,22 @@ def _dispatch_one(
     )
     if guard.get("verdict") != "dispatchable":
         reason = str(guard.get("reason") or guard.get("verdict") or "unknown")
-        outcome = "already-dispatching" if reason in ("already-claimed", "reservation-held") else reason
+        if reason in ("already-claimed", "reservation-held"):
+            outcome = "already-dispatching"
+        elif guard.get("verdict") in ("error", "corrupted"):
+            # An infrastructure fault (claims store unreadable, corrupted
+            # claim) is a FAILURE, not a benign no-op class: the old raised
+            # path answered exit 1 and the mux's failed arm renders the
+            # detail, so an exit-0 verdict here would read as success to any
+            # caller keying on the exit code (review finding, x-3f84).
+            outcome = "failed"
+        else:
+            outcome = reason
         return {
             "outcome": outcome,
             "node": node_id,
             "slug": slug or "",
-            "detail": str(guard.get("detail") or "")[:200] or None,
+            "detail": str(guard.get("detail") or reason)[:200] or None,
         }
     dispatch_key = str(guard.get("reservation_key") or f"dispatch:{node_id}")
     dispatch_holder = str(guard.get("reservation_holder") or f"dispatch-one:{os.getpid()}")
@@ -685,9 +700,15 @@ def _dispatch_one(
         # does, through this same call.
         from fno.agents.spawn_gate import run_gate
 
+        # no_wait: prefix+g is an interactive keystroke, and the operator
+        # wants an answer now - a silent detached task parked for the full
+        # 10-minute queue timeout (the old instant lanes-full replaced by a
+        # block) is the worse trade. A full fleet answers instantly with the
+        # gate's own refusal exit code and its stderr reason.
         gate = run_gate(
             _worker_agent_name(node_id, slug),
             "pane",
+            no_wait=True,
         )
         # Everything from here to the spawn runs with the gate HELD (pane
         # substrate keeps the mutex until the registry row exists), so every

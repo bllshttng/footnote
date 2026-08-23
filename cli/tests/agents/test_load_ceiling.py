@@ -14,6 +14,10 @@ from fno.agents import spawn_gate
 @pytest.fixture(autouse=True)
 def _fixed_cpus(monkeypatch):
     monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+    # Preferred on 3.13+ (affinity-aware, mirrors the Rust gate); patch both
+    # spellings so the fixture holds on either interpreter.
+    if hasattr(spawn_gate.os, "process_cpu_count"):
+        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12)
 
 
 def _load(load1: float):
@@ -55,11 +59,17 @@ def test_ceiling_scales_with_cpu_count(monkeypatch):
     """One factor ports across machines: the same load flips verdicts either
     side of the per-cpu line as the cpu count changes."""
     monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(20.0))
-    monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 8)
+    _set_cpus(monkeypatch, 8)
     with pytest.raises(spawn_gate.GateRefused):
         spawn_gate._check_load_ceiling(2.0)  # 20 > 2 x 8
-    monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 16)
+    _set_cpus(monkeypatch, 16)
     spawn_gate._check_load_ceiling(2.0)  # 20 <= 2 x 16: passes
+
+
+def _set_cpus(monkeypatch, n):
+    monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: n)
+    if hasattr(spawn_gate.os, "process_cpu_count"):
+        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: n)
 
 
 def test_config_default_and_coercion():

@@ -157,10 +157,10 @@ def roster_sessions() -> list[dict]:
     if not isinstance(workers, dict):
         return []
     try:
-        from fno.agents.session_procs import bg_socket_pid_map
+        from fno.agents.session_procs import bg_socket_pid_map, resolve_session_pid
 
         sock_map = bg_socket_pid_map()
-    except Exception:  # noqa: BLE001 — discovery never breaks on the join
+    except Exception:  # noqa: BLE001 - discovery never breaks on the join
         sock_map = {}
     rows: list[dict] = []
     seen: set[str] = set()
@@ -180,7 +180,9 @@ def roster_sessions() -> list[dict]:
             {
                 "session_id": sid,
                 "short_id": short_id,
-                "pid": sock_map.get(short_id) or pid,
+                "pid": resolve_session_pid(
+                    harness="claude", short_id=short_id, pid=pid, socket_map=sock_map
+                ),
                 "cwd": str(w.get("cwd") or ""),
                 "status": None,
                 "agent": "claude",

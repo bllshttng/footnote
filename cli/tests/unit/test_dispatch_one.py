@@ -178,8 +178,8 @@ def test_seed_verified_survives_an_observed_pane(monkeypatch, tmp_path, observat
 def test_full_fleet_refuses_in_the_gate_not_a_verdict(monkeypatch, tmp_path):
     """The positive marker x-68fd asked for, as a test: `agents.max_live` at 1
     with one live registry row held must refuse, and the census must still
-    report 1. `lanes-full` is gone from the vocabulary; a full fleet blocks in
-    run_gate and surfaces the gate's own exit code."""
+    report 1. `lanes-full` is gone from the vocabulary; a full fleet refuses
+    instantly (no_wait) with the gate's own exit code."""
     from fno.agents import spawn_gate
     from fno.agents.registry import AgentEntry
 
@@ -211,13 +211,11 @@ def test_full_fleet_refuses_in_the_gate_not_a_verdict(monkeypatch, tmp_path):
     monkeypatch.setattr("fno.agents.session_procs.bg_socket_pid_map", lambda root=None: {})
     census = spawn_gate.census()
     monkeypatch.setattr(spawn_gate, "census", lambda: census)
-    monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
-    monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
 
     with pytest.raises(SystemExit) as exc:
         dispatch._dispatch_one(session="s", node=None, project=None)
 
-    assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
+    assert exc.value.code == spawn_gate.EXIT_NO_WAIT
     assert census.slot_count == 1  # the held row is still the only live slot
 
 

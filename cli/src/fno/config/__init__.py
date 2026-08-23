@@ -675,7 +675,15 @@ def provider_subagent_budget(
         return None
     try:
         resolved = load_settings() if settings is None else settings
-        budget = resolved.agents.provider_limits.get(provider)
+        # provider_limits since x-3f84 W5, with the legacy max_lanes spelling
+        # honored for a pre-rename embedded settings object - without the
+        # fallback such an object raises here, fails open, and silently
+        # un-caps in-session fan-out on exactly the shared account this
+        # budget protects.
+        table = getattr(
+            resolved.agents, "provider_limits", None
+        ) or getattr(resolved.agents, "max_lanes", {})
+        budget = table.get(provider)
     except Exception:  # noqa: BLE001 - fail open; see the docstring
         return None
     subagents = getattr(budget, "subagents", None)
