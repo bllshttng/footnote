@@ -24,6 +24,7 @@ not a maintained Python dispatch provider.
 from __future__ import annotations
 
 import contextvars
+import json
 import os
 import re
 import select
@@ -6201,6 +6202,63 @@ def _mux_pane_send(
             )
         return proc
 
+    def _verify_pane_occupant() -> bool:
+        """Prove the pane still hosts the row selected by the resolver."""
+        expected_name = getattr(entry, "name", None)
+        if not expected_name:
+            return True
+        expected_fno_id = getattr(entry, "harness_session_id", None) or getattr(
+            entry, "session_id", None
+        )
+        try:
+            proc = subprocess.run(
+                [
+                    fno_bin,
+                    "mux",
+                    "pane",
+                    "ls",
+                    "--json",
+                    "--session",
+                    str(session),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_MAIL_INJECT_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"mux pane {pane} identity check failed: {exc}", file=sys.stderr)
+            return False
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip() or "pane ls returned non-zero"
+            print(f"mux pane {pane} identity check refused: {detail}", file=sys.stderr)
+            return False
+        try:
+            rows = json.loads(proc.stdout)
+        except (TypeError, ValueError) as exc:
+            print(f"mux pane {pane} identity check refused: invalid pane ls JSON: {exc}", file=sys.stderr)
+            return False
+        matches = [row for row in rows if row.get("pane_id") == pane_id]
+        if len(matches) != 1:
+            print(
+                f"mux pane {pane} identity check refused: expected one pane row, found {len(matches)}",
+                file=sys.stderr,
+            )
+            return False
+        row = matches[0]
+        actual_name = row.get("name")
+        actual_fno_id = row.get("fno_id")
+        if actual_name != expected_name or (
+            expected_fno_id is not None and actual_fno_id != expected_fno_id
+        ):
+            print(
+                f"mux pane {pane} identity mismatch: addressed {expected_name} "
+                f"({expected_fno_id or '-'}) pane hosts {actual_name or '<unknown>'} "
+                f"({actual_fno_id or '-'})",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
     def _paste_then_submit() -> bool:
         # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
         # --raw: this function already ran the gate and the wrap above, so the
@@ -6208,6 +6266,11 @@ def _mux_pane_send(
         # second time (a second pass would re-read the pane and re-decide a
         # question this one already answered).
         send_args = ["send", pane, "--stdin", "--raw"]
+        expected_fno_id = getattr(entry, "harness_session_id", None) or getattr(
+            entry, "session_id", None
+        )
+        if expected_fno_id:
+            send_args.extend(["--fno-id", str(expected_fno_id)])
         if guarded:
             send_args.append("--guarded")
         pasted = _run(send_args, stdin_text=text)
@@ -6226,7 +6289,20 @@ def _mux_pane_send(
         time.sleep(enter_delay_s)
         # A submit key is a control byte, never a message: always --raw.
         return all(
-            (proc := _run(["send", pane, "--text", key, "--raw"])) is not None
+            (proc := _run(
+                [
+                    "send",
+                    pane,
+                    "--text",
+                    key,
+                    "--raw",
+                    *(
+                        ["--fno-id", str(expected_fno_id)]
+                        if expected_fno_id
+                        else []
+                    ),
+                ]
+            )) is not None
             and proc.returncode == 0
             for key in submit_text
         )
@@ -6235,6 +6311,10 @@ def _mux_pane_send(
         sent = _paste_then_submit()
         _audit_raw_inject(sent)
         return sent
+
+    if not _verify_pane_occupant():
+        _audit_raw_inject(False)
+        return False
 
     # Baseline BEFORE the paste (not after): the confirm below scans only lines
     # appended past this offset, so it never matches something already in the
@@ -7276,24 +7356,31 @@ def _deliver_live(
         # `sender` is passed for the wrapped case too. It costs nothing there
         # (the body is already enveloped, so `prepare` passes it through) and it
         # stops this call site from depending on that staying true.
-        mux_delivered = _mux_pane_send(
-            entry,
-            wrapped,
-            guarded=False,
-            confirm=True,
-            raw=mail is None,
-            # Verbatim, but STILL GATED. `raw` alone skipped `prepare` whole,
-            # and `prepare` is where the read-back gate lives, so a digest or a
-            # ritual went into a pane nobody had looked at. On a codex auth wall
-            # the CR takes the wall's default, the payload is discarded, and the
-            # bytes-written verdict still reads True -- so the hold release then
-            # advances the cursor and retires every held message unread.
-            gate=True,
-            sender=from_name or None,
-        )
-        if not mux_delivered:
-            _record("mux-send-failed")
-        return mux_delivered
+        for attempt in (1, 2):
+            mux_delivered = _mux_pane_send(
+                entry,
+                wrapped,
+                guarded=False,
+                confirm=True,
+                raw=mail is None,
+                # Verbatim, but STILL GATED. `raw` alone skipped `prepare` whole,
+                # and `prepare` is where the read-back gate lives, so a digest or a
+                # ritual went into a pane nobody had looked at. On a codex auth wall
+                # the CR takes the wall's default, the payload is discarded, and the
+                # bytes-written verdict still reads True -- so the hold release then
+                # advances the cursor and retires every held message unread.
+                gate=True,
+                sender=from_name or None,
+            )
+            if mux_delivered:
+                return True
+            _record(f"mux-send-failed-attempt-{attempt}")
+            # A pane ref is still a live route only while the selected registry
+            # row remains non-terminal. One retry covers the measured mid-turn
+            # inject miss; no loop can turn a stale ref into a storm.
+            if attempt == 2 or getattr(entry, "exited", False) or not entry.mux:
+                break
+        return False
 
     # Route key is the canonical harness, legacy provider as fallback (x-ec59):
     # an unknown harness with no inject lane (e.g. opencode) falls through to the
@@ -7429,6 +7516,7 @@ def _queue_durable_fallback(
     msg_id: Optional[str] = None,
     reason: Optional[str] = None,
     mail_ctx: "Optional[_MailCtx]" = None,
+    owner: Optional[str] = None,
 ) -> "tuple[str, str]":
     """Write the <fno_mail> envelope to the durable bus.
 
@@ -7515,7 +7603,7 @@ def _queue_durable_fallback(
             provider_to=entry.harness,
             provider_from=provider_from,
             from_session=from_session,
-            owner=DurableOwner.WAKE_DAEMON.value,
+            owner=owner or DurableOwner.WAKE_DAEMON.value,
             # Count the raw body, not the wire wrapper: Rule 7 and the rolling
             # budget read the same string, so the row must too.
             word_count=_style.word_count(message),
@@ -7927,6 +8015,9 @@ def dispatch_send(
             )
 
             live_attempted = False
+            from fno.inbox.store import DurableOwner, classify_durable_owner
+
+            durable_owner = DurableOwner.WAKE_DAEMON.value
 
             def _write_durable() -> None:
                 """Write the durable FALLBACK envelope: the pending-queue for an
@@ -7946,6 +8037,7 @@ def dispatch_send(
                         entries,
                         msg_id=msg_id,
                         mail_ctx=mail_ctx,
+                        owner=durable_owner,
                     )
                 except Exception:
                     if not live_attempted:
@@ -7975,6 +8067,11 @@ def dispatch_send(
 
                 family1_state = _registered_family1_state(existing)
                 family1_live = family1_state in {"working", "watching", "your-move"}
+                durable_owner = classify_durable_owner(
+                    param_forced=False,
+                    recipient_live=family1_live,
+                    recipient_resumable=not family1_live,
+                ).value
                 # Unknown is hands-off, not dead. A registered peer still has a
                 # confirmable transport, so try it once and let delivery's ack
                 # decide; failure falls through to the durable bus.
@@ -8051,7 +8148,9 @@ def dispatch_send(
                                 file=sys.stderr,
                             )
                     else:
-                        live_miss_reason = _live_reason[0] if _live_reason else None
+                        live_miss_reason = ";".join(_live_reason) if _live_reason else None
+                        if live_miss_reason and existing.mux:
+                            live_miss_reason = f"{live_miss_reason};owner={durable_owner}"
                 if _bus_only:
                     live_miss_reason = BUS_ONLY_POLICY
                 if not _live_delivered and (durable_recipient is None or family1_attemptable):

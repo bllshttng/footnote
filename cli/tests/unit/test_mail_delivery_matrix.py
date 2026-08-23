@@ -305,6 +305,35 @@ def test_cell4_failed_wake_demotes_durably_with_lane_receipt(
     assert _drain_as(runner, monkeypatch, ASLEEP_SID), "durable copy is not drainable"
 
 
+def test_cell3_live_pane_miss_retries_once_and_names_both_attempts(monkeypatch):
+    from types import SimpleNamespace
+
+    import fno.agents.dispatch as dispatch_mod
+
+    entry = SimpleNamespace(
+        name="worker",
+        harness="claude",
+        mux={"session": "main", "pane_id": 7},
+        exited=False,
+    )
+    attempts: list[int] = []
+    reasons: list[str] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_mux_pane_send",
+        lambda *_args, **_kwargs: attempts.append(1) or False,
+    )
+
+    assert dispatch_mod._deliver_live(
+        entry,
+        "hi",
+        "sender",
+        reason_out=reasons,
+    ) is False
+    assert len(attempts) == 2
+    assert reasons == ["mux-send-failed-attempt-1", "mux-send-failed-attempt-2"]
+
+
 def test_cell4_receipt_names_every_failed_lane(runner, mailbox, monkeypatch, tmp_path):
     """A delivery bug must be diagnosable from the sender's terminal alone."""
     _seed_asleep_transcript(monkeypatch, tmp_path)

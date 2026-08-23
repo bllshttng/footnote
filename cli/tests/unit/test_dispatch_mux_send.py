@@ -98,6 +98,41 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
     assert "peer mail" in paste, "the authority trailer is the point, not decoration"
 
 
+def test_read_receipt_identity_mismatch_refuses_before_typing(monkeypatch, capsys):
+    calls: list[dict] = []
+    entry = _entry()
+    entry.name = "worker"
+    monkeypatch.setattr(
+        "fno.mail.pane_transport._pane_entry",
+        lambda _session, _pane: entry,
+    )
+    _detector(monkeypatch, [])
+
+    def run(argv, **kwargs):
+        calls.append({"argv": list(argv), "input": kwargs.get("input")})
+        if argv[1:4] == ["mux", "pane", "read"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"pane_id":7,"text":"$ ","pane_name":"caller",'
+                '"registry_fno_id":"caller-session"}',
+                stderr="",
+            )
+        if argv[1:4] == ["mux", "pane", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='[{"pane_id":7,"name":"worker","fno_id":"worker-session"}]',
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+
+    assert dispatch._mux_pane_send(entry, "status?", guarded=False) is False
+    assert not any(call["argv"][1:4] == ["mux", "pane", "send"] for call in calls)
+    assert "identity mismatch" in capsys.readouterr().err
+
+
 def test_raw_send_is_byte_identical_and_still_audits(monkeypatch):
     """`raw=True` types exactly the caller's bytes and keeps the audit row.
 
