@@ -379,9 +379,9 @@ def census() -> LiveCensus:
             # attributes this cost to rides onto it here - without the backfill
             # the one view built to show ownership names '-' for exactly the
             # rows the king-share gate counts (review finding, x-3f84).
-            for w in out.workers:
-                if w.source == "claude" and w.name == dedup_key:
-                    w.spawned_by = row.spawned_by_session
+            for shown in out.workers:
+                if shown.source == "claude" and shown.name == dedup_key:
+                    shown.spawned_by = row.spawned_by_session
                     break
             continue
         if dedup_key:
@@ -1016,7 +1016,10 @@ def run_gate(
     )
 
     if force and provider_cap is None:
-        _warn("spawn-gate: forced past cap, RAM floor, load ceiling, and king share (--force)")
+        # Byte-twin with the Rust gate (check-reachable-paths); force also
+        # bypasses the king share here, which _check_king_share's own refusal
+        # names where it matters.
+        _warn("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)")
         if substrate == "headless":
             _acquire_worker_slot(guard, name, holder, route_provider)
         return guard
@@ -1089,8 +1092,8 @@ def run_gate(
                     )
             if force:
                 _warn(
-                    "spawn-gate: forced past cap, RAM floor, load ceiling, and king "
-                    "share (--force); provider cap remains enforced"
+                    "spawn-gate: forced past cap, RAM floor, and load ceiling "
+                    "(--force); provider cap remains enforced"
                 )
                 if substrate == "headless":
                     try:

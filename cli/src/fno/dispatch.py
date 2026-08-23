@@ -451,6 +451,11 @@ def _worktree_ensure_for_launch(
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    if not recorded_cwd.is_dir():
+        # A missing recorded cwd is the spawn's own error to surface (the old
+        # behavior passed it through verbatim); it is not a worktree-policy
+        # refusal, and holding here would break every scratch-cwd fixture.
+        return str(recorded_cwd)
     if repo.returncode != 0:
         # ONLY a genuine "not a repository" answer means launch-in-place (a
         # vault project, worktree.policy=never by design). Any other git
