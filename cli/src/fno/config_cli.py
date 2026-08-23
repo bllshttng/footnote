@@ -346,7 +346,7 @@ def _repo_root() -> Path:
 def _jsonable_container(node: object) -> object:
     """Reduce records nested inside a container the way a leaf is reduced.
 
-    A block read (`fno config get agents.max_lanes`) returns a dict whose
+    A block read (`fno config get agents.provider_limits`) returns a dict whose
     VALUES can be models, and `json.dumps` renders one as its repr. A machine
     consumer of `--json` then gets a string it cannot parse for exactly the
     key that grew a record.
@@ -787,7 +787,7 @@ def get_cmd(
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())
     elif isinstance(node, (dict, list)):
-        # A container can now hold RECORDS (`agents.max_lanes` maps a provider
+        # A container can now hold RECORDS (`agents.provider_limits` maps a provider
         # to a ProviderBudget), and `default=str` renders one as its repr. A
         # reader cannot paste that back into config.toml, so dump the record.
         typer.echo(

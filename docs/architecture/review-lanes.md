@@ -21,7 +21,7 @@ Opt out with `config.review.self_review_required = false`.
 
 A lane is how a review is triggered. This is about how WIDE it is allowed to be, and it is decided before any of the lanes below.
 
-`config.agents.max_lanes.<provider>` is a `ProviderBudget` record. `lanes` caps concurrent spawned workers on that account, and `subagents` caps in-session fan-out. The built-in zai budget is `lanes = 5, subagents = 1`, because that account is shared. A provider absent from the table is uncapped in both dimensions, which is what a dedicated account gets.
+`config.agents.provider_limits.<provider>` (renamed from `max_lanes`) is a `ProviderBudget` record. `lanes` caps concurrent spawned workers on that account, and `subagents` caps in-session fan-out. The built-in zai budget is `lanes = 5, subagents = 1`, because that account is shared. A provider absent from the table is uncapped in both dimensions, which is what a dedicated account gets.
 
 `fno.review_capability` reads the budget in the `subagent-dispatch` branch, before the harness check. Under a `subagent budget` below 2, `sigma` resolves `unavailable` and the reason names the provider, the number, and the route that runs instead. The verdict records `resolves_to = code-review`, stops blocking, and prints a `resolved route:` line in `fno config doctor --review` and in the `fno do target init` receipt. So the receipt shows which route this worker GOT, not which one the config asked for.
 

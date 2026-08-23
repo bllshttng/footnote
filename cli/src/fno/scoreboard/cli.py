@@ -192,13 +192,15 @@ def scoreboard_command(
         from fno.agents.registry import load_registry
         from fno.config import load_settings
 
+        from fno.config import provider_limits_table
+
         settings = load_settings()
         lane_view = build_lanes(
             rows,
             read_graph_nodes(graph_path),
             [asdict(row) for row in load_registry(path=_paths.agents_registry_path())],
             read_jsonl_events(events_paths, {"provider_rate_limited"}),
-            dict(getattr(settings.agents, "max_lanes", {})),
+            dict(provider_limits_table(settings.agents)),
             since_days=since,
             now=datetime.now(),
         )

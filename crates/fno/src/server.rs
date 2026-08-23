@@ -393,7 +393,7 @@ enum CoreMsg {
     /// new pane. `id` is the requesting client (for the outcome notice). The
     /// spawn runs OFF the core loop in a detached task (it shells `fno agents dispatch
     /// one`); the pane appears via the existing registry reader, and only the
-    /// no-work / lanes-full / failure outcomes come back as `DispatchResult`.
+    /// no-work / refusal / failure outcomes come back as `DispatchResult`.
     DispatchNext {
         id: u64,
         /// (x-c914) The requesting client's session-local active account, so
@@ -2431,6 +2431,10 @@ fn dispatch_notice(stdout: &str) -> String {
         Some("launched") if label.is_empty() => String::new(),
         Some("launched") => format!("dispatched {label}"),
         Some("no-work") => "no ready work".to_string(),
+        // Retired with the lane slot (x-3f84 W5): a full fleet now blocks in
+        // the spawn gate, which raises its own exit code instead of returning
+        // a verdict. Kept for one release so a mixed-version porcelain that
+        // still emits it renders sensibly.
         Some("lanes-full") => "lanes full".to_string(),
         // The node is already being dispatched/worked (same-node race loser or an
         // in-flight node) - a benign no-op, not a failure.
@@ -5443,11 +5447,12 @@ impl Core {
     }
 
     /// "Grab work" (prefix+g, x-6f77): dispatch the next ready backlog node into
-    /// a new pane. Selection + claim + spawn is the Python porcelain's job (`fno
-    /// dispatch one`), shelled OFF the core loop in a detached task so a slow
-    /// backlog read never stalls a pane. The launched pane appears through the
-    /// existing registry reader; the outcome (dispatched / no-work / lanes-full
-    /// / failure) routes back as `DispatchResult` for a one-line notice.
+    /// a new pane. Selection + guard + gate + spawn is the Python porcelain's
+    /// job (`fno agents dispatch one`), shelled OFF the core loop in a detached
+    /// task so a slow backlog read never stalls a pane. The launched pane
+    /// appears through the existing registry reader; the outcome (dispatched /
+    /// no-work / refusal / failure) routes back as `DispatchResult` for a
+    /// one-line notice.
     fn dispatch_next(&self, id: u64, node: Option<String>, account: Option<String>) {
         let session = self.session_name.clone();
         let core_tx = self.self_tx.clone();

@@ -259,7 +259,7 @@ class TestRamFloor:
         assert "skipping the floor check" in capsys.readouterr().err
 
 
-def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None):
+def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None, max_load_per_cpu=0.0):
     """Point run_gate at fixed knobs without touching real settings."""
 
     class _A:
@@ -268,7 +268,8 @@ def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None):
     a = _A()
     a.max_live = max_live
     a.min_free_gb = min_free_gb
-    a.max_lanes = {"zai": 5} if max_lanes is None else max_lanes
+    a.max_load_per_cpu = max_load_per_cpu  # 0 = the CPU guard stays off in tests
+    a.provider_limits = {"zai": 5} if max_lanes is None else max_lanes
 
     class _S:
         pass
@@ -288,6 +289,20 @@ class TestRunGate:
         guard = spawn_gate.run_gate("w2", "bg")
         assert capsys.readouterr().err == ""
         guard.release()
+
+    def test_over_load_ceiling_refuses_under_cap(self, monkeypatch, capsys):
+        """x-3f84 W3 wiring: the CPU guard fires beside the RAM floor, with
+        slots FREE - a machine can be oversubscribed while under cap, which is
+        the whole reason the dimension exists."""
+        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("w2", "bg", no_wait=True)
+        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
 
     def test_at_cap_no_wait_refuses(self, monkeypatch, capsys):
         _settings(monkeypatch, max_live=1)

@@ -30,6 +30,7 @@ use crate::AgentStatus;
 pub const EXIT_QUEUE_TIMEOUT: i32 = 75;
 pub const EXIT_NO_WAIT: i32 = 76;
 pub const EXIT_RAM_REFUSED: i32 = 77;
+pub const EXIT_LOAD_REFUSED: i32 = 79;
 
 /// Queue mechanics (Claude's Discretion 2: targets, not contracts).
 const QUEUE_POLL: Duration = Duration::from_secs(2);
@@ -402,6 +403,7 @@ pub fn run_gate(
     }
     let cap = agents_config::max_live(config_cwd) as usize;
     let floor_gb = agents_config::min_free_gb(config_cwd);
+    let load_ceiling = agents_config::max_load_per_cpu(config_cwd);
     let holder = format!("spawn-gate:{}:{}", std::process::id(), name);
     let root = gate_claims_root();
 
@@ -412,7 +414,7 @@ pub fn run_gate(
     };
 
     if flags.force {
-        eprintln!("spawn-gate: forced past cap and RAM floor (--force)");
+        eprintln!("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)");
         if substrate == "headless" {
             acquire_worker_slot(&mut guard, name, &holder);
         }
@@ -489,6 +491,10 @@ pub fn run_gate(
                     guard.release();
                     return Err(code);
                 }
+                if let Err(code) = check_load_ceiling(load_ceiling) {
+                    guard.release();
+                    return Err(code);
+                }
                 if substrate == "headless" {
                     acquire_worker_slot(&mut guard, name, &holder);
                     // Slot claim is visible to concurrent gates: the mutex has
@@ -558,6 +564,64 @@ fn check_ram_floor(floor_gb: f64) -> Result<(), i32> {
             Ok(())
         }
     }
+}
+
+/// 1-min load average, or `None` where the platform has no reading (guard
+/// skipped, fail open). `libc::getloadavg` is POSIX; the cfg guards keep the
+/// crate building on platforms without it.
+#[cfg(unix)]
+fn loadavg_1m() -> Option<f64> {
+    let mut loads = [0.0f64; 3];
+    // SAFETY: `loads` is a valid 3-f64 array for getloadavg to fill.
+    let n = unsafe { libc::getloadavg(&mut loads as *mut f64, 3) };
+    if n >= 1 {
+        Some(loads[0])
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn loadavg_1m() -> Option<f64> {
+    None
+}
+
+/// CPU ceiling check (Layer 2, x-3f84 W3): refuse when the 1-min loadavg
+/// exceeds `max_load_per_cpu x cpu count` (never queue). Same contract as
+/// [`check_ram_floor`]: `<= 0` disables, unreadable load skips (fail open).
+/// Measured motivation: load 309 on 12 CPUs while the RAM floor held ten
+/// times its margin, so the one machine guard was reading the one resource
+/// that was never scarce.
+fn check_load_ceiling(max_load_per_cpu: f64) -> Result<(), i32> {
+    if max_load_per_cpu <= 0.0 {
+        return Ok(());
+    }
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let ceiling = max_load_per_cpu * cpus as f64;
+    match loadavg_1m() {
+        Some(load1) if !load_over_ceiling(load1, max_load_per_cpu, cpus) => Ok(()),
+        Some(load1) => {
+            eprintln!(
+                "spawn-gate: 1-min load {load1:.1} exceeds max_load_per_cpu \
+                 {max_load_per_cpu} x {cpus} cpus = {ceiling:.1}; refusing to spawn \
+                 (--force to bypass)"
+            );
+            Err(EXIT_LOAD_REFUSED)
+        }
+        None => {
+            eprintln!("spawn-gate: could not read load average; skipping the load check");
+            Ok(())
+        }
+    }
+}
+
+/// The ceiling verdict as a pure function: 1-min loadavg vs factor x cpus.
+/// At exactly the ceiling the spawn passes (the floor uses the same
+/// inclusive-boundary convention).
+fn load_over_ceiling(load1: f64, max_load_per_cpu: f64, cpus: usize) -> bool {
+    load1 > max_load_per_cpu * cpus as f64
 }
 
 fn acquire_worker_slot(guard: &mut GateGuard, name: &str, holder: &str) {
@@ -747,6 +811,34 @@ MemAvailable:    8000000 kB\n";
         assert_eq!(parse_meminfo(text), Some(8_000_000 * 1024));
         assert_eq!(parse_meminfo("MemTotal: 1 kB\n"), None);
         assert_eq!(parse_meminfo("MemAvailable: banana kB\n"), None);
+    }
+
+    /// x-3f84 W3: the CPU dimension beside min_free_gb. The measured
+    /// emergency was load 309 on 12 CPUs while the RAM floor held ten times
+    /// its margin.
+    #[test]
+    fn load_ceiling_math_and_disabled() {
+        // The measured night: 309 on 12 cpus at factor 8 (ceiling 96) refuses.
+        assert!(load_over_ceiling(309.0, 8.0, 12));
+        // A healthy fleet passes with margin.
+        assert!(!load_over_ceiling(24.0, 8.0, 12));
+        // Exactly at the ceiling passes (inclusive boundary, like the floor).
+        assert!(!load_over_ceiling(96.0, 8.0, 12));
+        // One factor ports across machines: 20 refuses an 8-cpu box, passes 16.
+        assert!(load_over_ceiling(20.0, 2.0, 8));
+        assert!(!load_over_ceiling(20.0, 2.0, 16));
+        // Disabled (`<= 0`) never refuses, whatever the machine reads.
+        assert!(check_load_ceiling(0.0).is_ok());
+        assert!(check_load_ceiling(-1.0).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loadavg_1m_reads_a_positive_number_on_a_live_host() {
+        // A positive control that the libc join itself works: a live unix
+        // host always answers something >= 0.
+        let load = loadavg_1m().expect("getloadavg must answer on unix");
+        assert!(load >= 0.0);
     }
 
     /// Mirrors `test_no_wait_refuses_fast_when_the_mutex_is_contended` on the

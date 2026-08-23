@@ -6,13 +6,16 @@ so the Rust caller renders a notice from a single exec instead of stitching
 machinery:
 
 - selection: ``advance._next_node`` (the same board order ``fno backlog next`` uses)
-- concurrency cap: the atomic ``acquire_lane_slot`` over ``config.parallel.max_lanes``
+- admission: the SHARED family-2 guard (``_spawn_guard_decision``) plus the
+  spawn gate (``run_gate`` over ``agents.max_live`` / ``min_free_gb`` /
+  ``max_load_per_cpu``), the same gate every ``fno agents spawn`` passes -
+  exactly one fleet ceiling, not two disjoint caps each blind to the other's
+  workers (x-3f84 W5)
 - spawn: ``dispatch_spawn_pane`` (pane substrate, into THIS session)
 
-Never double-claims: the lane slot is the concurrency authority, and the spawned
-worker's own ``fno do target start`` claims ``node:<id>`` and re-anchors the slot to
-its lifecycle (target_cli._maybe_reconcile_lane_slot) - identical to the daemon
-``dispatch-lanes`` path, so the slot frees when the worker ends.
+Never double-claims: the guard takes ``dispatch:<id>`` and the handover
+``node:<id>`` claim, and the spawned worker's own ``fno do target start``
+re-anchors the node claim to its lifecycle.
 """
 
 from __future__ import annotations
@@ -28,14 +31,9 @@ import typer
 
 from fno.agents.mux_spawn import dispatch_spawn_pane, resolve_provenance
 from fno.backlog.advance import (
-    _DISPATCH_TTL_MS,
-    _claims_root_for,
     _next_node,
     _worker_agent_name,
 )
-from fno.claims import CLAIM_UNAVAILABLE, acquire_claim, release_claim
-from fno.claims.lanes import acquire_lane_slot, release_lane_slot
-from fno.config import load_settings
 
 dispatch_app = typer.Typer(no_args_is_help=True, help="Dispatch ready work into mux panes.")
 
@@ -67,11 +65,12 @@ def cmd_one(
         False, "--json", "-J", help="Emit a one-line JSON verdict."
     ),
 ) -> None:
-    """Dispatch one ready node into a new pane in SESSION, respecting the lane cap.
+    """Dispatch one ready node into a new pane in SESSION, through the spawn gate.
 
-    Verdict ``outcome`` is one of ``launched | no-work | lanes-full | failed``.
-    Exit 0 for the first three (a full cap / empty backlog is not an error the
-    caller retries); exit 1 for ``failed``.
+    Verdict ``outcome`` is one of ``launched | no-work | already-dispatching |
+    quota-deferred | failed`` (plus the guard's own refusal reasons). A full
+    fleet no longer returns a verdict: the spawn gate queues inside ``run_gate``
+    or refuses with its own exit code. Exit 0 for everything but ``failed``.
     """
     verdict = _dispatch_one(session=session, node=node, project=project, account=account)
     if json_output:
@@ -425,6 +424,73 @@ def _emit_quota_deferred(node_id: str, provider: str, state: str, retry_at: Opti
         pass
 
 
+def _worktree_ensure_for_launch(
+    recorded_cwd: Path, agent_name: str, harness: str
+) -> Optional[str]:
+    """Resolve the launch cwd through the worktree verb (x-3f84 W5, change 5).
+
+    The node's recorded cwd is the canonical checkout for every organically
+    filed node, and launching there puts a code worker on the protected branch
+    that sibling terminals share. ``fno workspace worktree ensure`` owns the
+    policy resolution (per-project policy > global > harness-native); it
+    prints the resolved root and exits 0, or prints nothing and exits non-zero
+    on a refusal/misconfig - the caller HOLDS on that answer rather than
+    falling back to canonical main. Returns the path to launch in (the repo
+    root itself is the legal ``policy = never`` in-place answer), or None.
+    """
+    import subprocess
+
+    from fno.agents.mux_spawn import _fno_bin
+
+    try:
+        repo = subprocess.run(
+            ["git", "-C", str(recorded_cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not recorded_cwd.is_dir():
+        # A missing recorded cwd is the spawn's own error to surface (the old
+        # behavior passed it through verbatim); it is not a worktree-policy
+        # refusal, and holding here would break every scratch-cwd fixture.
+        return str(recorded_cwd)
+    if repo.returncode != 0:
+        # ONLY a genuine "not a repository" answer means launch-in-place (a
+        # vault project, worktree.policy=never by design). Any other git
+        # failure - dubious ownership, a corrupted .git, a missing cwd - must
+        # HOLD, not silently fall back to the canonical checkout this change
+        # exists to keep workers off (review finding, x-3f84).
+        if "not a git repository" in (repo.stderr or ""):
+            return str(recorded_cwd)
+        return None
+    canonical = repo.stdout.strip()
+    try:
+        ensured = subprocess.run(
+            [
+                _fno_bin(),
+                "workspace",
+                "worktree",
+                "ensure",
+                "--repo",
+                canonical,
+                "--name",
+                agent_name,
+                "--harness",
+                harness,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if ensured.returncode != 0:
+        return None
+    return ensured.stdout.strip() or None
+
+
 def _dispatch_one(
     *,
     session: str,
@@ -509,7 +575,7 @@ def _dispatch_one(
         )
         if route.action == "cutover":
             # Render the destination's own command HERE, before any claim or
-            # lane slot is taken: an unresolvable harness must fall back to the
+            # reservation is taken: an unresolvable harness must fall back to the
             # defer floor rather than reach the spawn with a claude command.
             cutover_command = _cutover_command(route.harness, node_id)
             if cutover_command:
@@ -536,74 +602,84 @@ def _dispatch_one(
                 "retry_at": route.retry_at,
             }
 
-    # 2. Boot-window dedup (mirrors advance()): a node already being worked
-    #    (live node:<id>) or already mid-dispatch (live dispatch:<id>) is NOT
-    #    re-dispatched. The create-only dispatch:<id> reservation is what closes
-    #    the same-node race: two fast leader+g both resolve _next_node to the same
-    #    node before the first worker claims it; without this reservation both
-    #    would share ONE (idempotent) lane slot and the loser's spawn-failure
-    #    would free the winner's live slot, defeating the cap. Only the winner of
-    #    the O_EXCL reservation proceeds; the loser reports already-dispatching.
-    from fno.backlog.advance import _node_dispatch_block_reason
+    # 2. The SHARED family-2 pre-birth guard (x-3f84 W5, plan change 1): the
+    #    same `_spawn_guard_decision` every `fno agents spawn` passes, not a
+    #    hand-rolled `_node_dispatch_block_reason` + raw `acquire_claim` pair.
+    #    It takes the `dispatch:<id>` reservation (closing the same-node race:
+    #    two fast leader+g both resolve _next_node to the same node, and only
+    #    the O_EXCL winner proceeds) AND the handover `node:<id>` claim (so the
+    #    node reads as worked from dispatch), and its verdict keeps this verb's
+    #    one-JSON-outcome contract: map a non-dispatchable verdict onto the
+    #    outcome vocabulary instead of printing.
+    from fno.agents.cli import _spawn_guard_decision
+    from fno.claims.cli import HANDOVER_HOLDER_PREFIX
 
-    block_reason = _node_dispatch_block_reason(node_id, cwd)
-    if block_reason:
-        outcome = "already-dispatching" if block_reason == "already-claimed" else block_reason
+    guard, _guard_exit = _spawn_guard_decision(
+        node_id,
+        f"dispatch-one:{os.getpid()}",
+        cwd=cwd,
+        handover_holder=f"{HANDOVER_HOLDER_PREFIX}{_worker_agent_name(node_id, slug)}",
+    )
+    if guard.get("verdict") != "dispatchable":
+        reason = str(guard.get("reason") or guard.get("verdict") or "unknown")
+        if reason in ("already-claimed", "reservation-held"):
+            outcome = "already-dispatching"
+        elif guard.get("verdict") in ("error", "corrupted"):
+            # An infrastructure fault (claims store unreadable, corrupted
+            # claim) is a FAILURE, not a benign no-op class: the old raised
+            # path answered exit 1 and the mux's failed arm renders the
+            # detail, so an exit-0 verdict here would read as success to any
+            # caller keying on the exit code (review finding, x-3f84).
+            outcome = "failed"
+        else:
+            outcome = reason
         return {
             "outcome": outcome,
             "node": node_id,
             "slug": slug or "",
+            "detail": str(guard.get("detail") or reason)[:200] or None,
         }
-    dispatch_key = f"dispatch:{node_id}"
-    dispatch_holder = f"dispatch-one:{os.getpid()}"
-    dispatch_root = _claims_root_for(dispatch_key)
-    try:
-        acquire_claim(
-            dispatch_key,
-            dispatch_holder,
-            ttl_ms=_DISPATCH_TTL_MS,
-            reason=f"mux dispatch for {node_id}",
-            root=dispatch_root,
-        )
-    except CLAIM_UNAVAILABLE:
-        # Neither cause reads exception attributes, so this command's
-        # one-JSON-verdict contract (the mux's `leader+g` shells this
-        # expecting a single exec, never a Python stack trace on stderr)
-        # gets one verdict for both instead of an uncaught traceback.
-        return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
+    dispatch_key = str(guard.get("reservation_key") or f"dispatch:{node_id}")
+    dispatch_holder = str(guard.get("reservation_holder") or f"dispatch-one:{os.getpid()}")
+    node_claim = (
+        (str(guard["node_claim_key"]), str(guard["node_claim_holder"]))
+        if guard.get("node_claim_key")
+        else None
+    )
 
-    # 3. Atomic lane cap (config.parallel.max_lanes) and then the spawn. Any
-    #    exit from here releases every hold taken so far, so the node stays
-    #    re-dispatchable - never a phantom lane holding the cap. On success
-    #    dispatch:<id> is left to TTL-expire (bridges the boot window until the
-    #    worker owns node:<id>).
+    # 3. The spawn gate, then the spawn. Any exit from here releases every
+    #    hold taken so far, so the node stays re-dispatchable - never a phantom
+    #    reservation holding the node. On success dispatch:<id> is left to
+    #    TTL-expire (bridges the boot window until the worker owns node:<id>).
     #
-    #    The guard opens at the RESERVATION, not at the lane slot and not at the
-    #    spawn call. `dispatch:<id>` is already held here, so a corrupt settings
-    #    file in `load_settings()` or an OSError inside `acquire_lane_slot`
-    #    leaks that reservation for its full TTL and blocks the node's own
-    #    re-dispatch. Releasing the lane slot before one is held is a documented
-    #    no-op, which is what lets one guard cover both.
+    #    The gate call below is the consolidation itself (x-3f84 W5, plan
+    #    change 2): dispatch's workers now count against agents.max_live, the
+    #    ONE fleet ceiling, instead of the private parallel-lane slot max_live
+    #    never saw. A full fleet queues inside run_gate (or refuses with its
+    #    own exit code on BaseException re-raise), so `lanes-full` left this
+    #    verb's vocabulary for good.
     #
-    #    Everything below - the cap, provenance, the cutover render, the refusal
-    #    carrier - runs with a hold taken, so an exception there leaks just as a
-    #    failed spawn does. And the guard catches BaseException, not just
-    #    Exception: GateRefused subclasses SystemExit, which is a BaseException,
-    #    so an `except Exception` lets a gate refusal walk out still holding the
-    #    slot it was refused for. Same shape as the run_gate call site in
-    #    fno/agents/cli.py. A BaseException is re-raised rather than folded into
-    #    a verdict, so a refusal keeps its own exit code and an interrupt still
-    #    interrupts.
+    #    Everything below - the gate, provenance, the cutover render, the
+    #    refusal carrier - runs with a hold taken, so an exception there leaks
+    #    just as a failed spawn does. And the guard catches BaseException, not
+    #    just Exception: GateRefused subclasses SystemExit, which is a
+    #    BaseException, so an `except Exception` lets a gate refusal walk out
+    #    still holding the claim it was refused for - the same release shape as
+    #    the run_gate call site in fno/agents/cli.py. A BaseException is
+    #    re-raised rather than folded into a verdict, so a refusal keeps its
+    #    own exit code and an interrupt still interrupts.
     #    Idempotent and best-effort per hold, for two reasons that both end in
     #    a leak. It is called from an early return INSIDE the try and from the
     #    handlers, so a release that raises on the early-return path re-enters
     #    through `except Exception` and releases a second time - and a second
-    #    release can free a slot another spawner has since taken. A raise on
+    #    release can free a claim another spawner has since taken. A raise on
     #    the way out of the handler escapes it entirely and leaks both holds,
     #    which is the failure this whole guard exists to prevent. So the flag
     #    makes the second call a no-op, and one broken hold never blocks the
     #    other's release. A release that genuinely fails is reported, never
     #    swallowed silently: the TTL is the backstop and a human needs the line.
+    from fno.agents.cli import _release_dispatch_claims
+
     released = False
 
     def _release_both() -> None:
@@ -611,85 +687,130 @@ def _dispatch_one(
         if released:
             return
         released = True
-        for label, release in (
-            ("lane slot", lambda: release_lane_slot(node_id)),
-            ("dispatch reservation",
-             lambda: release_claim(dispatch_key, dispatch_holder, root=dispatch_root)),
-        ):
-            try:
-                release()
-            except Exception as exc:  # noqa: BLE001 - one bad hold never strands the other
-                print(
-                    f"dispatch one: could not release the {label} for {node_id}: "
-                    f"{exc}. It will hold until its TTL expires",
-                    file=sys.stderr,
-                )
+        try:
+            _release_dispatch_claims((dispatch_key, dispatch_holder), node_claim)
+        except Exception as exc:  # noqa: BLE001 - a release fault must not mask the real error
+            # Reported, never silent: the TTL is the backstop and a human needs
+            # the line (the same contract the shared helper holds per claim).
+            print(
+                f"dispatch one: could not release the claims for {node_id}: "
+                f"{exc}. They hold until their TTLs expire",
+                file=sys.stderr,
+            )
 
     try:
-        # max_lanes 0 would forbid every manual grab, so a deliberate keystroke
-        # floors it to one slot. A full cap frees the reservation and returns
-        # before any lane slot exists, so the node stays re-dispatchable.
-        max_lanes = max(1, load_settings().parallel.max_lanes or 1)
-        if acquire_lane_slot(max_lanes, node_id) is None:
-            # Through the one funnel, not a direct release_claim. A direct call
-            # that raised would land in `except Exception` below, which re-enters
-            # _release_both and turns an exit-0 `lanes-full` into a `failed`
-            # verdict carrying a claims-store error. _release_both is idempotent
-            # and best-effort per hold, and releasing an unheld lane slot is a
-            # documented no-op, so routing through it preserves the verdict.
-            _release_both()
-            return {"outcome": "lanes-full", "node": node_id, "slug": slug or ""}
+        # The spawn gate (plan change 2): the SAME gate `fno agents spawn`
+        # runs. route_provider stays None here because dispatch resolves no
+        # model route today - the provider-budget dimension applies the day it
+        # does, through this same call.
+        from fno.agents.spawn_gate import run_gate
 
-        workdir = Path(cwd) if cwd else Path.cwd()
-        # (x-c914) Stamp the birth account into the pane provenance (FNO_ACCOUNT)
-        # when routed, so the mux server reads it back for the sideline account
-        # glyph - a managed account shares ~/.claude, so the roster can't
-        # distinguish it, but the pane's own env can (Locked Decision 5: pane env,
-        # not the registry schema).
-        provenance = resolve_provenance(node_id, slug)
-        if account:
-            provenance["FNO_ACCOUNT"] = account
-        # A cutover replaces all three parts of the launch together (harness,
-        # command, credential overlay); passing one without the others is the
-        # wrong-billing / wrong-binary launch the selector exists to prevent.
-        spawn_harness = "claude"
-        # Same posture render as the cutover destination: through the resolver, so
-        # the flag form (and any per-harness surface) comes from ONE template
-        # (harness_map._AUTONOMOUS_COMMAND), not a second hardcoded string that
-        # drifts when the token changes shape (x-9d11).
-        message = _cutover_command(spawn_harness, node_id)
-        if cutover is not None:
-            spawn_harness = cutover.harness or "claude"
-            message = cutover_command
-            account_env = cutover.account_env
-            provenance["FNO_ACCOUNT"] = cutover.record_id or ""
-        # x-9d11 mechanical refusal carrier: the flag in the message is the
-        # attributable carrier; the pane env is the backstop, so a worker that
-        # never passes the flag through still folds the refusal at init.
-        if not message:
-            # _cutover_command's contract: empty = stage nothing. An unresolvable
-            # target command must never spawn a billed pane with an empty prompt
-            # (review round 5) - release both holds so the node stays grabbable.
-            _release_both()
-            return {
-                "outcome": "failed",
-                "node": node_id,
-                "slug": slug or "",
-                "detail": "target command unresolvable (dispatch_command refused); nothing spawned",
-            }
-        from fno.agents.harness_map import message_carries_no_merge
-
-        if message_carries_no_merge(message):
-            provenance["TARGET_NO_MERGE"] = "1"
-        result = dispatch_spawn_pane(
-            name=_worker_agent_name(node_id, slug),
-            message=message,
-            provider=spawn_harness,
-            cwd=workdir,
-            session=session,
-            provenance=provenance,
-            account_env=account_env,
+        # no_wait: prefix+g is an interactive keystroke, and the operator
+        # wants an answer now - a silent detached task parked for the full
+        # 10-minute queue timeout (the old instant lanes-full replaced by a
+        # block) is the worse trade. A full fleet answers instantly with the
+        # gate's own refusal exit code and its stderr reason.
+        gate = run_gate(
+            _worker_agent_name(node_id, slug),
+            "pane",
+            no_wait=True,
         )
+        # Everything from here to the spawn runs with the gate HELD (pane
+        # substrate keeps the mutex until the registry row exists), so every
+        # exit path below - early return, spawn failure, refusal - releases
+        # it through this finally. run_gate refuses with its own exit code
+        # BEFORE this block, so a refusal never reaches it holding nothing.
+        try:
+            workdir = Path(cwd) if cwd else Path.cwd()
+            # (x-c914) Stamp the birth account into the pane provenance (FNO_ACCOUNT)
+            # when routed, so the mux server reads it back for the sideline account
+            # glyph - a managed account shares ~/.claude, so the roster can't
+            # distinguish it, but the pane's own env can (Locked Decision 5: pane env,
+            # not the registry schema).
+            provenance = resolve_provenance(node_id, slug)
+            if node_claim is not None:
+                # The worker proves it is the intended successor by naming this
+                # holder back - env, never argv, the same contract as the spawn
+                # path. Without it the pane clears the key and the worker cannot
+                # rebind node:<id> until the launch-window claim expires
+                # (review finding on the W5 cutover).
+                provenance["FNO_NODE_CLAIM_HOLDER"] = node_claim[1]
+            if account:
+                provenance["FNO_ACCOUNT"] = account
+            # A cutover replaces all three parts of the launch together (harness,
+            # command, credential overlay); passing one without the others is the
+            # wrong-billing / wrong-binary launch the selector exists to prevent.
+            spawn_harness = "claude"
+            # Same posture render as the cutover destination: through the resolver, so
+            # the flag form (and any per-harness surface) comes from ONE template
+            # (harness_map._AUTONOMOUS_COMMAND), not a second hardcoded string that
+            # drifts when the token changes shape (x-9d11).
+            message = _cutover_command(spawn_harness, node_id)
+            if cutover is not None:
+                spawn_harness = cutover.harness or "claude"
+                message = cutover_command
+                account_env = cutover.account_env
+                provenance["FNO_ACCOUNT"] = cutover.record_id or ""
+            # x-9d11 mechanical refusal carrier: the flag in the message is the
+            # attributable carrier; the pane env is the backstop, so a worker that
+            # never passes the flag through still folds the refusal at init.
+            if not message:
+                # _cutover_command's contract: empty = stage nothing. An unresolvable
+                # target command must never spawn a billed pane with an empty prompt
+                # (review round 5) - release both holds so the node stays grabbable.
+                _release_both()
+                return {
+                    "outcome": "failed",
+                    "node": node_id,
+                    "slug": slug or "",
+                    "detail": "target command unresolvable (dispatch_command refused); nothing spawned",
+                }
+            from fno.agents.harness_map import message_carries_no_merge
+
+            if message_carries_no_merge(message):
+                provenance["TARGET_NO_MERGE"] = "1"
+            # The launch cwd is NOT the node's recorded cwd: for every organically
+            # filed node that is the canonical checkout on the protected branch
+            # (plan change 5, x-3f84 W5). Route through the worktree resolver; an
+            # empty answer is a policy refusal or a misconfig, so HOLD - falling
+            # back to canonical main is the exact launch this replaces. A result
+            # equal to the repo root is the legal `worktree.policy = "never"` case
+            # and launches in place. setup-worktree.sh stays caller-side (the
+            # shellout-drift gate bars package code from repo-root scripts); the
+            # worker's own `fno do target start` heals .fno state in the worktree.
+            ensured = _worktree_ensure_for_launch(
+                workdir, _worker_agent_name(node_id, slug), spawn_harness
+            )
+            if ensured is None:
+                _release_both()
+                return {
+                    "outcome": "failed",
+                    "node": node_id,
+                    "slug": slug or "",
+                    "detail": (
+                        "worktree ensure refused or misconfigured; holding the node "
+                        "rather than launching on canonical main"
+                    ),
+                }
+            workdir = Path(ensured)
+            # The guard rides into the spawn as provider_gate, so the provider
+            # admission the pane consumes is one the caller actually obtained
+            # (AC2-EDGE) - not the ungated launch dispatch used to perform.
+            result = dispatch_spawn_pane(
+                name=_worker_agent_name(node_id, slug),
+                message=message,
+                provider=spawn_harness,
+                cwd=workdir,
+                session=session,
+                provenance=provenance,
+                account_env=account_env,
+                provider_gate=gate,
+            )
+        finally:
+            # The gate's claims go back once the registry row exists (or the
+            # spawn failed): the row carries the count from here, the same
+            # moment cmd_spawn releases its guard.
+            gate.release()
     except Exception as exc:  # noqa: BLE001 - DispatchAskError or any spawn error
         _release_both()
         return {"outcome": "failed", "node": node_id, "slug": slug or "", "detail": str(exc)[:200]}
@@ -711,7 +832,7 @@ def _dispatch_one(
     #
     # What this does and does NOT do. It reports the doubt, and `dispatch_notice`
     # renders it, so an operator watching the mux sees "seed unverified" instead
-    # of a clean "dispatched". It does NOT release the lane slot: the pane may
+    # of a clean "dispatched". It does NOT release the reservation: the pane may
     # well be running, and dropping the hold on a live worker is the failure this
     # whole branch exists to prevent. Whether an unverified seed should also
     # release is a behaviour question with a live pane on the other side of it,

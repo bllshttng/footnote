@@ -808,7 +808,9 @@ def _select_profile_lane(
         if getattr(row, "status", "live") not in TERMINAL_STATUSES
     ]
     start = len(live_rows) % len(lanes)
-    caps = dict(getattr(agents, "max_lanes", {}) or {})
+    from fno.config import provider_limits_table
+
+    caps = dict(provider_limits_table(agents))
     # FNO_SPAWN_GATE=0 is the documented operator/test bypass for live-slot
     # admission (spawn_gate.run_gate), and its contract is that it never BLOCKS
     # a spawn. This seam counts the same live rows, so it honors the same

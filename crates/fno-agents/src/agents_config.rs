@@ -258,6 +258,10 @@ pub fn dead_row_grace_secs(cwd: &Path, harness: &str) -> u64 {
 pub const DEFAULT_MAX_LIVE: u32 = 3;
 /// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
 pub const DEFAULT_MIN_FREE_GB: f64 = 4.0;
+/// Default CPU ceiling factor for spawn preflight (x-3f84 W3): refuse when the
+/// 1-min loadavg exceeds this times the CPU count. `<= 0` disables. Matches the
+/// Pydantic default.
+pub const DEFAULT_MAX_LOAD_PER_CPU: f64 = 8.0;
 
 /// Resolve `agents.max_live`. Values < 1 (or unparseable) coerce to
 /// [`DEFAULT_MAX_LIVE`] — never 0, which would block all spawns.
@@ -274,6 +278,15 @@ pub fn min_free_gb(cwd: &Path) -> f64 {
     resolve_agents_value(cwd, "min_free_gb")
         .and_then(|raw| raw.parse::<f64>().ok())
         .unwrap_or(DEFAULT_MIN_FREE_GB)
+}
+
+/// Resolve `agents.max_load_per_cpu` (x-3f84 W3). Same contract as
+/// [`min_free_gb`]: `<= 0` disables the guard, only unparseable input falls
+/// back to [`DEFAULT_MAX_LOAD_PER_CPU`].
+pub fn max_load_per_cpu(cwd: &Path) -> f64 {
+    resolve_agents_value(cwd, "max_load_per_cpu")
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .unwrap_or(DEFAULT_MAX_LOAD_PER_CPU)
 }
 
 /// Resolve `agents.worker_qos`: `true` = demote workers (the `utility` default),

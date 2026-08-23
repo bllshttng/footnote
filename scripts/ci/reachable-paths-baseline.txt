@@ -80,7 +80,8 @@ A	sandbox_mode=workspace-write	py=cli/src/fno/agents/harnesses/codex.py;rs=crate
 A	send_keys_enter_delay_ms	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol
 A	spawn-gate: corrupted slot claim {key} ignored	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: could not read available ram; skipping the floor check	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
-A	spawn-gate: forced past cap and ram floor (--force)	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
+A	spawn-gate: could not read load average; skipping the load check	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
+A	spawn-gate: forced past cap, ram floor, and load ceiling (--force)	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: qos demotion of pid {pid} failed (non-fatal)	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: worker slot claim {key} unavailable; proceeding uncounted	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon.rs	# protocol

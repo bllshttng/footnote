@@ -324,8 +324,8 @@ pub enum Event {
     /// Rerun the focused pane's selected block command (prefix+r, x-38c4).
     BlockRerun,
     /// Dispatch the next ready backlog node into a new pane (prefix+g, "grab
-    /// work", x-6f77). The server shells the Python porcelain; no-work /
-    /// lanes-full comes back as a one-line notice.
+    /// work", x-6f77). The server shells the Python porcelain; no-work and
+    /// refusal outcomes come back as a one-line notice.
     DispatchNext,
     /// Open in-scrollback search on the focused pane (prefix+/, x-e780). The
     /// client enters a local typing mode; the query and n/N/Esc are interpreted

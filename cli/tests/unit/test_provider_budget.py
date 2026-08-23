@@ -24,7 +24,7 @@ from fno.review_capability import (
 
 
 def _budget(**kwargs) -> tuple[int | None, int | None]:
-    b = AgentsBlock(**kwargs).max_lanes.get("zai")
+    b = AgentsBlock(**kwargs).provider_limits.get("zai")
     return (None, None) if b is None else (b.lanes, b.subagents)
 
 
@@ -48,7 +48,7 @@ def test_builtin_zai_budget_carries_both_dimensions():
 def test_legacy_scalar_reads_as_lanes_and_keeps_the_builtin_subagents():
     # AC3-HP. An install written before the record widened must still get the
     # protection, or shipping a built-in for a shared account buys nothing.
-    assert _budget(max_lanes={"zai": 5}) == (5, 1)
+    assert _budget(max_lanes={"zai": 5}) == (5, 1)  # legacy kwarg: exercises the alias
 
 
 def test_a_written_dimension_wins_over_the_builtin():
@@ -59,12 +59,12 @@ def test_a_written_dimension_wins_over_the_builtin():
 
 def test_an_unlisted_provider_is_unbounded_in_both_dimensions():
     # AC3-EDGE. Today's behavior for every dedicated account.
-    budgets = AgentsBlock(max_lanes={"openai": 7}).max_lanes
+    budgets = AgentsBlock(provider_limits={"openai": 7}).provider_limits
     assert (budgets["openai"].lanes, budgets["openai"].subagents) == (7, None)
 
 
 def test_an_explicit_empty_table_disables_every_budget():
-    assert AgentsBlock(max_lanes={}).max_lanes == {}
+    assert AgentsBlock(provider_limits={}).provider_limits == {}
 
 
 @pytest.mark.parametrize(
