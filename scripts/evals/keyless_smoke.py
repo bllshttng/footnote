@@ -77,13 +77,16 @@ def main() -> int:
         agents_home = root / "agents"
         claims_root = root / "claims"
         fake_argv = root / "provider-argv.txt"
+        session_id = "11111111-2222-3333-4444-" + "555555555555"
+        head_sha = "deadbeef" * 5
+        settings_text = "[review]\n" + "required_bots = []\n"
 
         _write_executable(
             provider_bin / "codex",
             """#!/bin/sh
 set -eu
 printf '%s\\n' "$@" > "$KEYLESS_ARGV_FILE"
-printf '%s\\n' '{"type":"thread.started","thread_id":"11111111-2222-3333-4444-555555555555"}'
+printf '{"type":"thread.started","thread_id":"%s"}\\n' "$KEYLESS_SESSION_ID"
 printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"provider output is ignored"}}'
 printf '%s\\n' '{"type":"turn.completed"}'
 """,
@@ -94,10 +97,10 @@ printf '%s\\n' '{"type":"turn.completed"}'
 set -eu
 case "$*" in
   *--version*) echo 'gh version 2.x' ;;
-  *headRefName*) echo '{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}' ;;
+  *headRefName*) printf '{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"%s"}\\n' "$KEYLESS_HEAD_SHA" ;;
   *checks*) echo '[{"name":"keyless-smoke","state":"SUCCESS","bucket":"pass"}]' ;;
   *reviews*) echo '{"reviews":[],"comments":[]}' ;;
-  *) echo 'deadbeefdeadbeefdeadbeefdeadbeef00000001' ;;
+  *) printf '%s\\n' "$KEYLESS_HEAD_SHA" ;;
 esac
 """,
         )
@@ -106,7 +109,7 @@ esac
             """#!/bin/sh
 case "$*" in
   *--raw*) exit 1 ;;
-  *) echo deadbeefdeadbeefdeadbeefdeadbeef00000001 ;;
+  *) printf '%s\\n' "$KEYLESS_HEAD_SHA" ;;
 esac
 """,
         )
@@ -122,6 +125,8 @@ esac
                 "FNO_EVENTS_PATH": str(project / ".fno" / "events.jsonl"),
                 "FNO_AGENTS_RUNTIME": "python",
                 "KEYLESS_ARGV_FILE": str(fake_argv),
+                "KEYLESS_SESSION_ID": session_id,
+                "KEYLESS_HEAD_SHA": head_sha,
                 "PATH": f"{provider_bin}{os.pathsep}{env.get('PATH', '')}",
             }
         )
@@ -171,7 +176,7 @@ esac
             '{"message":{"role":"assistant","content":"<promise>MISSION COMPLETE</promise>"}}\n',
             encoding="utf-8",
         )
-        (loop / "settings.toml").write_text("[review]\nrequired_bots = []\n", encoding="utf-8")
+        (loop / "settings.toml").write_text(settings_text, encoding="utf-8")
         loop_events = project / ".fno" / "events.jsonl"
         terminal = subprocess.run(
             [
