@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,40 +42,17 @@ def _event_type(row: dict) -> str:
 
 
 def _fno_agents_bin() -> str:
-    configured = os.environ.get("FNO_AGENTS_BIN")
-    if configured:
-        return configured
-    for relative in (
-        "crates/fno-agents/target/debug/fno-agents",
-        "crates/fno-agents/target/release/fno-agents",
-    ):
-        path = Path(relative)
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path.resolve())
-    found = shutil.which("fno-agents")
-    if found:
-        return found
     repo_root = Path(__file__).resolve().parents[2]
-    build = subprocess.run(
-        [
-            "cargo", "build", "--manifest-path", "crates/fno-agents/Cargo.toml",
-            "--bin", "fno-agents",
-        ],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        timeout=120,
+    for profile in ("debug", "release"):
+        path = repo_root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    raise RuntimeError(
+        "fno-agents binary not present; build it with "
+        "`cargo build -p fno-agents --bin fno-agents`. CI runs this smoke in "
+        "the post-build shard only; the pytest shard deletes the binary on "
+        "purpose so the @requires_rust wrapper skips there."
     )
-    if build.returncode != 0:
-        detail = (build.stderr or build.stdout).strip().splitlines()[-1:]
-        raise RuntimeError(
-            "fno-agents binary missing and build failed. "
-            f"Run `cargo build -p fno-agents --bin fno-agents`. {detail[0] if detail else ''}"
-        )
-    built = repo_root / "crates/fno-agents/target/debug/fno-agents"
-    if built.is_file() and os.access(built, os.X_OK):
-        return str(built)
-    raise RuntimeError("fno-agents build returned success without producing target/debug/fno-agents")
 
 
 def _fail(effect: str, detail: str) -> int:
@@ -132,9 +108,14 @@ esac
 """,
         )
 
-        env = dict(os.environ)
-        for key in KEYS:
-            env.pop(key, None)
+        # Strip both provider keys and FNO_* here so the hermetic claim holds
+        # for a direct `python3 scripts/evals/keyless_smoke.py` run, not only
+        # under the pytest wrapper.
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("FNO_") and key not in KEYS
+        }
         env.update(
             {
                 "HOME": str(root / "home"),

@@ -382,6 +382,13 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      'for p in codex gemini opencode; do printf "%s\\n%s\\n" "#!/bin/sh" "exit 0" > "$FAKE_BIN/$p"; chmod +x "$FAKE_BIN/$p"; done\n'
      'PATH="$FAKE_BIN:$PATH" uv run pytest --tb=short -q '
      "tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py"),
+    # Same shard contract as the parity suites above: the wrapper carries the
+    # @requires_rust marker, so in the pytest shard (binary deleted) it skips,
+    # and here, after the build step, it runs for real. Never inside the
+    # pytest shard: the smoke's terminal probe needs the binary, and building
+    # cargo from inside a pytest step is exactly what the shard seam forbids.
+    ("Keyless dispatch-to-terminal smoke (binary present)", "cli",
+     "uv run pytest --tb=short -q tests/unit/test_keyless_smoke.py"),
     ("registry-miss heal across the Rust/Python seam", ".", "bash tests/test-agents-heal-token.sh"),
     ("Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)", "cli",
      "FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest --tb=short -q tests/integration/test_claims_cross_impl.py"),
