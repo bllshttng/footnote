@@ -557,6 +557,17 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         cwd.to_str().unwrap_or(".").to_string(),
     ));
 
+    // The king walk's unit is keyed per invocation; hand that key to the
+    // dispatched session so its stop-hook terminal carries it and the walk
+    // can close the unit on the pass's own verdict. Target units need no
+    // counterpart: their manifest id is per-session already.
+    if let Some(kq) = king_queue.as_ref() {
+        env.push((
+            crate::loop_king::WALK_SESSION_KEY_ENV.to_string(),
+            kq.walk_key().to_string(),
+        ));
+    }
+
     // ── SIGINT handler ────────────────────────────────────────────────────────
     install_sigint_handler();
 

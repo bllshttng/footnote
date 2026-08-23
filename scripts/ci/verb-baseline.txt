@@ -90,6 +90,7 @@ inbox outstanding clear
 inbox outstanding mine do
 inbox outstanding reindex
 king board !--state
+king done
 king escalate
 king init
 king manifest-path

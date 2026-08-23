@@ -121,6 +121,21 @@ impl KingQueue {
         } else {
             manifest.scope
         };
+        // Registry authority, not file authority. The manifest deliberately
+        // outlives a crashed king (it is inert without a live crown), and the
+        // walk exists to RECOVER that orphaned scope - so an absent or terminal
+        // holder is the green light, not a refusal. But a LIVE row still
+        // holding the scope means a king is already reigning: respawning a
+        // second one is the double-rule the one-live-crown guard exists to
+        // stop, and a stale or copied manifest must not outvote it.
+        if let Some(live_holder) = live_crown_holder(&scope) {
+            return Err(LoopError::Queue(format!(
+                "a live king ({live_holder}) already reigns over {scope:?}: the walk \
+                 respawns an orphaned scope, it never doubles a live one. Wake or \
+                 reconcile the reigning king instead (`fno agents top`, \
+                 `fno agents watchdog`)"
+            )));
+        }
         Ok(Self {
             walk_key: mint_walk_key(&manifest.fno_id),
             fno_id: manifest.fno_id,
@@ -180,6 +195,45 @@ pub(crate) fn mint_walk_key(fno_id: &str) -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{fno_id}-w{nanos}")
+}
+
+/// The env var carrying [`KingQueue::walk_key`] into the dispatched session.
+/// A king session gated by the stop hook emits its termination under the
+/// manifest `fno_id`, which is stable across reigns; the walk keys its unit
+/// per invocation so the resume guard cannot close on a prior reign. The two
+/// only meet when the child inherits this var and `king_decide` tags the
+/// terminal with it, letting the walk close the unit on the pass's own
+/// verdict instead of parking it at the dispatch cap.
+pub(crate) const WALK_SESSION_KEY_ENV: &str = "FNO_KING_WALK_SESSION_KEY";
+
+/// The name of any live registry row holding a crown over `scope`, if the
+/// registry is readable and such a row exists. An unreadable registry answers
+/// `None` (fail-open to the recovery path): the walk's whole job is reviving
+/// scopes whose registry state is suspect, and refusing on a read error would
+/// strand exactly those, while the live-holder refusal above catches the
+/// double-rule case whenever the registry CAN be read.
+fn live_crown_holder(scope: &str) -> Option<String> {
+    let home = crate::paths::AgentsHome::from_env();
+    live_crown_holder_in(&home.registry_json(), scope)
+}
+
+fn live_crown_holder_in(registry_path: &Path, scope: &str) -> Option<String> {
+    let registry = crate::state::load_registry(registry_path).ok()?;
+    let is_terminal = |row: &crate::state::RegistryEntry| {
+        matches!(
+            row.status,
+            crate::AgentStatus::Orphaned
+                | crate::AgentStatus::Failed
+                | crate::AgentStatus::Exited
+                | crate::AgentStatus::PermanentDead
+        )
+    };
+    registry
+        .entries
+        .iter()
+        .filter(|row| !is_terminal(row))
+        .find(|row| row.crown_scope.as_deref() == Some(scope))
+        .map(|row| row.name.clone())
 }
 
 /// Tell the operator the king stopped with work still pending.
@@ -301,6 +355,23 @@ pub(crate) fn bump_respawn_count(path: &Path) -> Result<u64, String> {
     result
 }
 
+impl KingQueue {
+    /// Bill this walk's single respawn. `Ok(false)` means the LOCKED increment
+    /// landed past the ceiling - a concurrent walk won the last slot between
+    /// this walk's construction and its first dispatch - so the caller yields
+    /// no unit. The over-billed count stays on the manifest as the race's
+    /// scar; every later walk refuses at the preflight ceiling.
+    fn bill_one_respawn(&mut self) -> Result<bool, LoopError> {
+        if self.billed {
+            return Ok(true);
+        }
+        let billed = bump_respawn_count(&self.manifest_path).map_err(LoopError::Queue)?;
+        self.respawn_count = billed;
+        self.billed = true;
+        Ok(self.respawn_ceiling == 0 || billed <= self.respawn_ceiling)
+    }
+}
+
 impl Queue for KingQueue {
     fn next(&mut self) -> Result<Option<Unit>, LoopError> {
         if self.at_respawn_ceiling() {
@@ -309,10 +380,8 @@ impl Queue for KingQueue {
         if self.board_actionable()? == 0 {
             return Ok(None);
         }
-        if !self.billed {
-            self.respawn_count =
-                bump_respawn_count(&self.manifest_path).map_err(LoopError::Queue)?;
-            self.billed = true;
+        if !self.bill_one_respawn()? {
+            return Ok(None);
         }
         Ok(Some(Unit {
             id: self.fno_id.clone(),
@@ -418,5 +487,81 @@ mod tests {
             .err()
             .expect("escape scope must refuse");
         assert!(err.to_string().contains("unsafe king scope"));
+    }
+
+    fn write_registry(dir: &Path, status: &str, scope: Option<&str>) -> PathBuf {
+        let row = serde_json::json!({
+            "name": "reigning-king",
+            "cwd": "/tmp",
+            "status": status,
+            "created_at": "2026-08-23T00:00:00Z",
+            "crown_level": scope.map(|_| 2),
+            "crown_scope": scope,
+            "crown_grantor": scope.map(|_| "human"),
+        });
+        let path = dir.join("registry.json");
+        fs::write(
+            &path,
+            serde_json::json!({"schema_version": 11, "agents": [row]}).to_string(),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn a_live_crown_holder_read_from_the_registry_refuses_the_walk() {
+        let dir = std::env::temp_dir().join(format!("kinglive-{}", std::process::id()));
+        let kings = dir.join(".fno").join("kings");
+        fs::create_dir_all(&kings).unwrap();
+        fs::write(kings.join("k.md"), "---\nfno_id: k-1\nscope: epic-x\n---\n").unwrap();
+        let registry = write_registry(&dir, "busy", Some("epic-x"));
+
+        assert_eq!(
+            live_crown_holder_in(&registry, "epic-x"),
+            Some("reigning-king".to_string())
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_terminal_or_absent_holder_leaves_the_scope_recoverable() {
+        let dir = std::env::temp_dir().join(format!("kingdead-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let exited = write_registry(&dir, "exited", Some("epic-x"));
+        assert_eq!(live_crown_holder_in(&exited, "epic-x"), None);
+        let uncrowned = write_registry(&dir, "busy", None);
+        assert_eq!(live_crown_holder_in(&uncrowned, "epic-x"), None);
+        assert_eq!(
+            live_crown_holder_in(&dir.join("no-such-registry.json"), "epic-x"),
+            None,
+            "an unreadable registry fails open to the recovery path"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_concurrent_over_bill_refuses_instead_of_dispatching() {
+        // Two walks raced past the stale ceiling check; the loser sees the
+        // locked increment return a count PAST the ceiling and must yield no
+        // unit. Simulated by bumping the file between construction and next().
+        let dir = std::env::temp_dir().join(format!("kingrace-{}", std::process::id()));
+        let kings = dir.join(".fno").join("kings");
+        fs::create_dir_all(&kings).unwrap();
+        let path = kings.join("k.md");
+        fs::write(
+            &path,
+            "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\nrespawn_ceiling: 4\n---\n",
+        )
+        .unwrap();
+        let mut q = KingQueue::from_manifest(&dir, "k", "fno".to_string()).unwrap();
+        assert!(!q.at_respawn_ceiling(), "3 of 4 is under the ceiling");
+        // The concurrent winner bills the ceiling first...
+        assert_eq!(bump_respawn_count(&path).unwrap(), 4);
+        // ...so this walk's own bump returns 5, past the ceiling.
+        assert!(
+            !q.bill_one_respawn().unwrap(),
+            "the race loser must not dispatch"
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 }
