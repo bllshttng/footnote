@@ -9600,11 +9600,14 @@ pub(crate) struct KingManifest {
     pub(crate) scope: String,
     pub(crate) created_at: Option<String>,
     pub(crate) max_iterations: u64,
+    pub(crate) respawn_count: u64,
+    pub(crate) respawn_ceiling: u64,
 }
 
 pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
     let mut out = KingManifest {
         max_iterations: 40,
+        respawn_ceiling: 4,
         ..Default::default()
     };
     let mut saw_frontmatter = false;
@@ -9627,6 +9630,16 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
             "budget_max_iterations" => {
                 if let Ok(n) = value.parse::<u64>() {
                     out.max_iterations = n;
+                }
+            }
+            "respawn_count" => {
+                if let Ok(n) = value.parse::<u64>() {
+                    out.respawn_count = n;
+                }
+            }
+            "respawn_ceiling" => {
+                if let Ok(n) = value.parse::<u64>() {
+                    out.respawn_ceiling = n;
                 }
             }
             _ => {}

@@ -40,7 +40,6 @@ fn make_unit(id: &str, session_key: &str) -> Unit {
         title: format!("Test unit {id}"),
         session_key: session_key.to_string(),
         plan_path: None,
-        extra_env: vec![],
     }
 }
 
