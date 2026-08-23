@@ -2,7 +2,12 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-target_dir="${CARGO_TARGET_DIR:-${root_dir}/.cargo-target-repro-x-588a}"
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  target_dir="$CARGO_TARGET_DIR"
+else
+  target_dir="$(mktemp -d /tmp/fno-x588a-target.XXXXXX)"
+  trap 'rm -rf "$target_dir"' EXIT
+fi
 
 run_test() {
   local filter="$1"
