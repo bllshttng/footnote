@@ -577,10 +577,10 @@ pub fn run_finalize(args: &[String]) -> i32 {
         Some(true) if shadow_run_needs_finalize_done(&cwd, &session_id) => {
             if record_finalize_done(&cwd, &session_id, &project_events, &global_events) {
                 eprintln!("finalize: repaired shadow closure for previously finalized session {session_id}");
-                return 0;
+            } else {
+                eprintln!("finalize: shadow closure observer rejected previously finalized session {session_id}; legacy finalize remains complete");
             }
-            eprintln!("finalize: shadow closure still pending for previously finalized session {session_id}");
-            return 1;
+            return 0;
         }
         Some(true) => {
             eprintln!("finalize: session {session_id} already finalized (ship); early-return");
@@ -969,18 +969,10 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
     if failed.is_empty() {
-        if record_finalize_done(&cwd, &session_id, &project_events, &global_events) {
-            emit_to_both(&project_events, &global_events, "session_finalized", data);
-        } else {
-            failed.push("run_state_finalize_done".into());
-            data["failed_steps"] = json!(failed);
-            emit_to_both(
-                &project_events,
-                &global_events,
-                "session_finalize_failed",
-                data,
-            );
-        }
+        // Wave 3 is observer-only: telemetry rejection cannot change the
+        // legacy finalization result or turn a successful terminal into retry.
+        let _ = record_finalize_done(&cwd, &session_id, &project_events, &global_events);
+        emit_to_both(&project_events, &global_events, "session_finalized", data);
     } else {
         data["failed_steps"] = json!(failed);
         // session_finalized intentionally NOT emitted: a later fire retries the
@@ -992,8 +984,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
             data,
         );
     }
-    let should_retry = (delivery_ship && !failed.is_empty())
-        || failed.iter().any(|step| step == "run_state_finalize_done");
+    let should_retry = delivery_ship && !failed.is_empty();
     if should_retry {
         1
     } else {
