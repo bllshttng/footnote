@@ -1493,24 +1493,43 @@ def reap_open_session_record(
     phase: str,
     harness: str,
     session_id: str,
+    ended_at: "str | None" = None,
 ) -> dict:
-    """Remove one exact open observer-owned session row and report settlement.
+    """Close one exact open observer-owned session row and report settlement.
 
     Unlike rollback, this operation has positive death evidence from the
     observer and therefore does not require the row's ``started_at`` value.
     Closed provenance is immutable, and only an unfinished row with the exact
-    identity can be removed.
-    """
-    from fno.graph._intake import _find_node
-    from fno.graph.statuses import is_open_do_row
+    identity can be closed.
 
-    if phase != "do":
-        raise ValueError("observer session reap only supports phase 'do'")
+    Two close semantics by phase (x-4342). ``do`` REMOVES the row: an open do
+    window wedges node status in_progress, so after death the honest state is
+    "no do window", which removal restores. Every other phase FILLS
+    ``ended_at`` and keeps the row: a spawn-opened review row exists precisely
+    to record that a reviewer session ran, and the work it records did happen -
+    erasing it would undo the provenance the row was opened for. The fill value
+    defaults to the reap instant, an UPPER BOUND on the true end (the observer
+    proves "dead by now", not "died at"), and a caller with a sharper bound
+    passes it.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph._intake import _find_node
+    from fno.graph.statuses import is_open_do_row, is_open_phase_row
+    from fno.graph.types import SESSION_PHASES
+
+    if phase not in SESSION_PHASES:
+        raise ValueError(f"invalid phase {phase!r}; expected one of {sorted(SESSION_PHASES)}")
     harness, session_id = _validate_session_identity(phase, harness, session_id)
+    if ended_at is None:
+        ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        ended_at = _utc_session_stamp("ended_at", ended_at)
     result = {
         "found": False,
         "settled": False,
         "row_removed": False,
+        "row_closed": False,
         "status_before": None,
         "status_after": None,
         "remaining_open_do": 0,
@@ -1523,17 +1542,29 @@ def reap_open_session_record(
         result["found"] = True
         result["status_before"] = node.get("status")
         rows = node.get("sessions") or []
-        keep = [
-            row for row in rows
-            if not (
-                is_open_do_row(row)
-                and (row.get("harness"), row.get("session_id"))
-                == (harness, session_id)
-            )
-        ]
-        result["row_removed"] = len(keep) != len(rows)
-        if result["row_removed"]:
-            node["sessions"] = keep
+        if phase == "do":
+            keep = [
+                row for row in rows
+                if not (
+                    is_open_do_row(row)
+                    and (row.get("harness"), row.get("session_id"))
+                    == (harness, session_id)
+                )
+            ]
+            result["row_removed"] = len(keep) != len(rows)
+            if result["row_removed"]:
+                node["sessions"] = keep
+        else:
+            for row in rows:
+                if (
+                    is_open_phase_row(row, phase)
+                    and (row.get("harness"), row.get("session_id"))
+                    == (harness, session_id)
+                ):
+                    # Fill, never overwrite: a row that somehow already carries
+                    # an ended_at is not open and stays untouched.
+                    row.setdefault("ended_at", ended_at)
+                    result["row_closed"] = True
         return entries
 
     updated = locked_mutate_graph(path, mutator)

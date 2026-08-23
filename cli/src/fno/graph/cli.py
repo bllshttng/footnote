@@ -5016,7 +5016,7 @@ def _spawned_walk(
     return rows, cycle, truncated
 
 
-_LIFECYCLE_PHASES = ("think", "blueprint", "do", "ship")
+_LIFECYCLE_PHASES = ("think", "blueprint", "do", "review", "ship")
 
 
 def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
@@ -5471,7 +5471,9 @@ def cmd_session_add(
     node: Optional[str] = typer.Argument(
         None, help="Node id / slug / bare-hex to stamp (mutually exclusive with --pr-number)."
     ),
-    phase: str = typer.Option(..., "--phase", help="Lifecycle phase: think|blueprint|do|ship."),
+    phase: str = typer.Option(
+        ..., "--phase", help="Lifecycle phase: think|blueprint|do|review|ship."
+    ),
     pr: Optional[int] = typer.Option(
         None, "--pr-number", help="Resolve the UNIQUE node carrying this PR number instead "
                                   "of passing NODE (rejects 0 or multiple matches; never fans out)."
@@ -5710,11 +5712,20 @@ def cmd_session_reap_open(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
     harness: str = typer.Option(..., "--harness", help="Harness owning the dead session."),
     session_id: str = typer.Option(..., "--session-id", help="Dead harness session id."),
+    phase: str = typer.Option(
+        "do",
+        "--phase",
+        help=(
+            "Lifecycle phase of the open row. 'do' removes the row (it wedges "
+            "node status); any other phase (a spawn-opened review row) fills "
+            "ended_at and keeps the provenance."
+        ),
+    ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Reap one exact open do row after the observer proves session death."""
+    """Reap one exact open session row after the observer proves session death."""
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.statuses import is_open_do_row
+    from fno.graph.statuses import is_open_do_row, is_open_phase_row
     from fno.graph.store import reap_open_session_record, read_graph
 
     entries = read_graph(_graph_path())
@@ -5725,7 +5736,7 @@ def cmd_session_reap_open(
     node_id = match.candidates[0]["id"]
     try:
         receipt = reap_open_session_record(
-            _graph_path(), node_id, phase="do", harness=harness, session_id=session_id
+            _graph_path(), node_id, phase=phase, harness=harness, session_id=session_id
         )
     except (ValueError, OSError, RuntimeError) as exc:
         typer.echo(f"session reap-open: {exc}", err=True)
@@ -5738,7 +5749,7 @@ def cmd_session_reap_open(
         raise typer.Exit(code=1)
     rows = rebound.get("sessions") or []
     matching_open = any(
-        is_open_do_row(row)
+        is_open_phase_row(row, phase)
         and (row.get("harness"), row.get("session_id")) == (harness.strip(), session_id.strip())
         for row in rows
     )
@@ -5769,6 +5780,7 @@ def cmd_session_reap_open(
     else:
         typer.echo(
             f"settled {node_id}: row_removed={receipt['row_removed']} "
+            f"row_closed={receipt.get('row_closed')} "
             f"status={receipt['status_after']} remaining_open_do={remaining}"
         )
 

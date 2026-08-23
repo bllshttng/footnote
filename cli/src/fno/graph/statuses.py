@@ -172,12 +172,18 @@ def is_stale_lock(task: dict) -> bool:
         return True  # Unparseable timestamp = treat as stale
 
 
-def is_open_do_row(row: object) -> bool:
-    """Return whether a session row is a valid, unfinished ``do`` window."""
+def is_open_phase_row(row: object, phase: str) -> bool:
+    """Return whether a session row is a valid, unfinished ``phase`` window.
+
+    Same shape as :func:`is_open_do_row` for any lifecycle phase: identified
+    (harness + session_id), bounded (started_at), and not yet closed. The do
+    flavor additionally drives status derivation; other phases (a spawn-opened
+    review row, x-4342) open and close without wedging node status.
+    """
     if not isinstance(row, dict):
         return False
     return (
-        row.get("phase") == "do"
+        row.get("phase") == phase
         and isinstance(row.get("harness"), str)
         and bool(row["harness"].strip())
         and isinstance(row.get("session_id"), str)
@@ -186,6 +192,11 @@ def is_open_do_row(row: object) -> bool:
         and bool(row["started_at"].strip())
         and "ended_at" not in row
     )
+
+
+def is_open_do_row(row: object) -> bool:
+    """Return whether a session row is a valid, unfinished ``do`` window."""
+    return is_open_phase_row(row, "do")
 
 
 def recompute_statuses(entries: list[dict]) -> list[dict]:
