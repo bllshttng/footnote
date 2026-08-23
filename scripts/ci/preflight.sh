@@ -1171,6 +1171,9 @@ fi
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
 have_pinned_fmt() { rustup toolchain list 2>/dev/null | grep "^$PINNED_FMT" >/dev/null; }
 
+FNO_AGENTS_INTEGRATION_TARGETS="--test active_backlog_drain --test agy_ask_unit --test claude_ask_dispatch --test claude_ask_parity --test claude_bg_create --test codex_ask_dispatch --test codex_ask_parity --test codex_ask_sigint --test codex_ask_unit --test daemon_e2e --test finalize_e2e --test flock_interop --test gemini_ask_sigint --test gemini_ask_unit --test generic_completion --test kill_criteria_parity --test loop_check --test loop_runtime --test loop_target --test loopcheck_decisions --test loopcheck_hook_payload --test loopcheck_missing_manifest --test opencode_serve_journey --test provider_contract --test review_coverage_paths --test review_coverage_verb --test spawn_routing --test verify_evidence_parity"
+FNO_INTEGRATION_TARGETS="--test agent_edge_e2e --test client_e2e --test idle_reaper_e2e --test keymap_e2e --test layout_e2e --test mouse_e2e --test multiclient_e2e --test persistence --test proto_socket --test script_api_e2e --test search_e2e --test server_spine --test squad_prune --test squad_prune_live_pane --test workspace_persistence_e2e"
+
 run_rust_leg() { # scope  name  cwd  cmd...
     local scope="$1" name="$2" cwd="$3"; shift 3
     echo ""
@@ -1213,10 +1216,10 @@ else
     skip_rust_leg cargo-test:fno-agents-unit "cargo test --lib --bins (fno-agents)"
 fi
 if retry_run_leg cargo-test:fno-agents-e2e; then
-    run_rust_leg cargo-test:fno-agents-e2e "cargo test --tests --test-threads=1 (fno-agents)" "crates/fno-agents" "cargo test --tests -- --test-threads=1"
+    run_rust_leg cargo-test:fno-agents-e2e "cargo test explicit integration targets --test-threads=1 (fno-agents)" "crates/fno-agents" "cargo test $FNO_AGENTS_INTEGRATION_TARGETS -- --test-threads=1"
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
 else
-    skip_rust_leg cargo-test:fno-agents-e2e "cargo test --tests --test-threads=1 (fno-agents)"
+    skip_rust_leg cargo-test:fno-agents-e2e "cargo test explicit integration targets --test-threads=1 (fno-agents)"
 fi
 
 # squads.json leak guard (x-e447 US3): snapshot the REAL store mtime around the
@@ -1274,56 +1277,64 @@ else:
 }
 # The leak guard snapshots the real store around the crates/fno real-process
 # integration leg, so the pair runs together: selecting either scope runs both.
-RUN_FNO_CARGO=0
-retry_run_leg cargo-test:fno-unit && RUN_FNO_CARGO=1
-retry_run_leg cargo-test:fno-e2e && RUN_FNO_CARGO=1
-retry_run_leg squads-leak-guard:fno && RUN_FNO_CARGO=1
-if [[ $RUN_FNO_CARGO -eq 1 ]]; then
-    if retry_run_leg cargo-test:fno-unit; then
-        run_rust_leg cargo-test:fno-unit "cargo test --lib --bins (fno)" "crates/fno" "cargo test --lib --bins"
-        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-    else
-        skip_rust_leg cargo-test:fno-unit "cargo test --lib --bins (fno)"
-    fi
-    _squads_before="$(_real_squads_state || printf '%s' unavailable)"
-    case "$_squads_before" in
-        absent|unavailable|present:*) ;;
-        *) _squads_before=unavailable ;;
-    esac
-    run_rust_leg cargo-test:fno-e2e "cargo test --tests --test-threads=1 (fno)" "crates/fno" "cargo test --tests -- --test-threads=1"
+RUN_FNO_UNIT=0
+RUN_FNO_E2E=0
+RUN_FNO_SQUADS=0
+retry_run_leg cargo-test:fno-unit && RUN_FNO_UNIT=1
+retry_run_leg cargo-test:fno-e2e && RUN_FNO_E2E=1
+retry_run_leg squads-leak-guard:fno && RUN_FNO_SQUADS=1
+[[ $RUN_FNO_SQUADS -eq 1 ]] && RUN_FNO_E2E=1
+
+if [[ $RUN_FNO_UNIT -eq 1 ]]; then
+    run_rust_leg cargo-test:fno-unit "cargo test --lib --bins (fno)" "crates/fno" "cargo test --lib --bins"
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-    _squads_after="$(_real_squads_state || printf '%s' unavailable)"
-    case "$_squads_after" in
-        absent|unavailable|present:*) ;;
-        *) _squads_after=unavailable ;;
-    esac
-    SQUADS_INCLUDED=1
-    if [[ "$_squads_before" == "absent" && "$_squads_after" == "absent" ]]; then
-        SQUADS_INCLUDED=0
-        record_leg "" "squads.json leak guard (fno)" "not configured (no real store)" 0
-        SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
-        emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
-            || echo "preflight: WARN could not append squads not-configured receipt" >&2
-    elif [[ "$_squads_before" == "unavailable" || "$_squads_after" == "unavailable" ]]; then
-        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-        RECEIPT_UNAVAILABLE=1
-        FAIL=1
-        record_leg squads-leak-guard:fno "squads.json leak guard (fno)" unavailable 0
-    elif [[ "$_squads_after" != "$_squads_before" ]]; then
-        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-        echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno cargo test" \
-             "(mtime $_squads_before -> $_squads_after)" >&2
-        echo "  if a real mux session is running concurrently it is a valid writer;" >&2
-        echo "  otherwise a crates/fno doctor test bypassed the HOME redirect and leaked." >&2
-        FAIL=1
-        record_leg squads-leak-guard:fno "squads.json leak guard (fno)" fail 0
-    else
-        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-        record_leg squads-leak-guard:fno "squads.json leak guard (fno)" pass 0
-    fi
 else
     skip_rust_leg cargo-test:fno-unit "cargo test --lib --bins (fno)"
-    skip_rust_leg cargo-test:fno-e2e "cargo test --tests --test-threads=1 (fno)"
+fi
+
+if [[ $RUN_FNO_E2E -eq 1 ]]; then
+    if [[ $RUN_FNO_SQUADS -eq 1 ]]; then
+        _squads_before="$(_real_squads_state || printf '%s' unavailable)"
+        case "$_squads_before" in
+            absent|unavailable|present:*) ;;
+            *) _squads_before=unavailable ;;
+        esac
+    fi
+    run_rust_leg cargo-test:fno-e2e "cargo test explicit integration targets --test-threads=1 (fno)" "crates/fno" "cargo test $FNO_INTEGRATION_TARGETS -- --test-threads=1"
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    if [[ $RUN_FNO_SQUADS -eq 1 ]]; then
+        _squads_after="$(_real_squads_state || printf '%s' unavailable)"
+        case "$_squads_after" in
+            absent|unavailable|present:*) ;;
+            *) _squads_after=unavailable ;;
+        esac
+        SQUADS_INCLUDED=1
+        if [[ "$_squads_before" == "absent" && "$_squads_after" == "absent" ]]; then
+            SQUADS_INCLUDED=0
+            record_leg "" "squads.json leak guard (fno)" "not configured (no real store)" 0
+            SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
+            emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
+                || echo "preflight: WARN could not append squads not-configured receipt" >&2
+        elif [[ "$_squads_before" == "unavailable" || "$_squads_after" == "unavailable" ]]; then
+            REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+            RECEIPT_UNAVAILABLE=1
+            FAIL=1
+            record_leg squads-leak-guard:fno "squads.json leak guard (fno)" unavailable 0
+        elif [[ "$_squads_after" != "$_squads_before" ]]; then
+            REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+            echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno explicit integration tests" \
+                 "(mtime $_squads_before -> $_squads_after)" >&2
+            echo "  if a real mux session is running concurrently it is a valid writer;" >&2
+            echo "  otherwise a crates/fno doctor test bypassed the HOME redirect and leaked." >&2
+            FAIL=1
+            record_leg squads-leak-guard:fno "squads.json leak guard (fno)" fail 0
+        else
+            REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+            record_leg squads-leak-guard:fno "squads.json leak guard (fno)" pass 0
+        fi
+    fi
+else
+    skip_rust_leg cargo-test:fno-e2e "cargo test explicit integration targets --test-threads=1 (fno)"
 fi
 
 # advisory: never flips the exit code

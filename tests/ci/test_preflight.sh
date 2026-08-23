@@ -366,9 +366,9 @@ out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "leg-scoped retry passes" || fail "expected 0 got $rc: $out"
 grep <<<"$out" -q "smoke suite (skipped - not in the retry leg record)" \
     && ok "smoke leg skipped" || fail "smoke leg ran: $out"
-grep <<<"$out" -q "cargo test --tests --test-threads=1 (fno-agents) (skipped - not in the retry leg record)" \
+grep <<<"$out" -q "cargo test explicit integration targets --test-threads=1 (fno-agents) (skipped - not in the retry leg record)" \
     && ok "untouched cargo leg skipped" || fail "fno-agents leg ran: $out"
-grep <<<"$out" -q "=== cargo test --tests --test-threads=1 (fno) ===" \
+grep <<<"$out" -q "=== cargo test explicit integration targets --test-threads=1 (fno) ===" \
     && ok "the failed leg re-ran" || fail "failed leg did not run: $out"
 [[ ! -f "$(cur_att)" ]] && ok "leg-scoped subset mints no attestation" || fail "subset minted an attestation"
 jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \

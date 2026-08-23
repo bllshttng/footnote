@@ -153,7 +153,37 @@ jobs:
 
       - name: cargo test --tests --test-threads=1 (fno-agents real-process integration)
         working-directory: crates/fno-agents
-        run: cargo test --tests -- --test-threads=1
+        run: >-
+          cargo test
+          --test active_backlog_drain
+          --test agy_ask_unit
+          --test claude_ask_dispatch
+          --test claude_ask_parity
+          --test claude_bg_create
+          --test codex_ask_dispatch
+          --test codex_ask_parity
+          --test codex_ask_sigint
+          --test codex_ask_unit
+          --test daemon_e2e
+          --test finalize_e2e
+          --test flock_interop
+          --test gemini_ask_sigint
+          --test gemini_ask_unit
+          --test generic_completion
+          --test kill_criteria_parity
+          --test loop_check
+          --test loop_runtime
+          --test loop_target
+          --test loopcheck_decisions
+          --test loopcheck_hook_payload
+          --test loopcheck_missing_manifest
+          --test opencode_serve_journey
+          --test provider_contract
+          --test review_coverage_paths
+          --test review_coverage_verb
+          --test spawn_routing
+          --test verify_evidence_parity
+          -- --test-threads=1
 
       - name: cargo test --lib --bins (fno mux)
         working-directory: crates/fno
@@ -163,7 +193,24 @@ jobs:
         # The mux e2e tests spawn real PTYs and Unix sockets; both work on
         # the ubuntu-latest runner (the harness needs no TTY of its own).
         working-directory: crates/fno
-        run: cargo test --tests -- --test-threads=1
+        run: >-
+          cargo test
+          --test agent_edge_e2e
+          --test client_e2e
+          --test idle_reaper_e2e
+          --test keymap_e2e
+          --test layout_e2e
+          --test mouse_e2e
+          --test multiclient_e2e
+          --test persistence
+          --test proto_socket
+          --test script_api_e2e
+          --test search_e2e
+          --test server_spine
+          --test squad_prune
+          --test squad_prune_live_pane
+          --test workspace_persistence_e2e
+          -- --test-threads=1
 
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
