@@ -3325,9 +3325,11 @@ fn build_claude_stream_entry(
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     // Ambient parent edge (x-132c), captured for shape parity with the other
-    // mint sites. This fn runs IN THE DAEMON, whose env carries no session
-    // markers, so it stamps None honestly: the daemon itself started this PTY
-    // worker and no session parent is claimable from here.
+    // mint sites. This fn runs IN THE DAEMON, and lazy-start scrubs the
+    // harness session markers from the daemon's env (client.rs), so this
+    // stamps None by construction: the daemon itself started this PTY worker
+    // and no session parent is claimable from here. A daemon that somehow
+    // still carries a marker attributes nothing rather than laundering it.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
         name: name.into(),

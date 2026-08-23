@@ -519,3 +519,23 @@ def test_register_adopted_row_stamps_the_adopting_session(tmp_path, monkeypatch)
     assert entry.spawned_by_session == "adopter-session-1"
     assert entry.spawned_by_harness == "claude"
     assert entry.spawned_by_cwd
+
+
+def test_register_self_registration_never_stamps_its_own_id(tmp_path, monkeypatch):
+    """A caller that registers the session it runs in (a mail hold, any
+    self-join) passes no operator origin; the identity guard must refuse the
+    stamp anyway - a row naming itself as parent is a cycle the renderer has
+    to defend against, and the registry can simply never write it."""
+    from fno.agents.registry import register_existing_session
+
+    _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "own-session-id")
+    for origin in (None, "adopted"):
+        entry = register_existing_session(
+            provider="claude",
+            session_id="own-session-id",
+            cwd=str(tmp_path),
+            origin=origin,
+            registry_path=tmp_path / f"reg-{origin}.json",
+        )
+        assert entry.spawned_by_session is None, f"origin={origin}"
+        assert entry.spawned_by_cwd is None, f"origin={origin}"

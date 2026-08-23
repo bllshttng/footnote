@@ -6846,6 +6846,39 @@ impl View {
         }
     }
 
+    /// (x-132c) [`Self::display_rows`] plus the lineage depth of each rendered
+    /// row, aligned index-for-index. The depths come from the SAME pass that
+    /// builds the rows, so they are computed over exactly the set that paints:
+    /// an idle parent the fold removed, or an exited parent a LiveOnly section
+    /// hides, is ABSENT, and its child roots instead of indenting under a row
+    /// that never rendered. Non-agent rows (headers, sublines, spacers) carry
+    /// 0. Slim filters the pair exactly as it filters rows; Extended's flat
+    /// table indents nothing.
+    fn display_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
+        match self.density {
+            Density::Regular => self.tree_rows_with_depths(),
+            Density::Slim => {
+                let (rows, depths) = self.tree_rows_with_depths();
+                let mut kept_rows = Vec::with_capacity(rows.len());
+                let mut kept_depths = Vec::with_capacity(depths.len());
+                for (r, d) in rows.into_iter().zip(depths) {
+                    let keep = matches!(r, DisplayRow::Sel(s) if s.tab.is_none())
+                        || matches!(r, DisplayRow::Header { .. });
+                    if keep {
+                        kept_rows.push(r);
+                        kept_depths.push(d);
+                    }
+                }
+                (kept_rows, kept_depths)
+            }
+            Density::Extended => {
+                let rows = self.table_rows();
+                let depths = vec![0usize; rows.len()];
+                (rows, depths)
+            }
+        }
+    }
+
     /// (x-b186) The extended density's rows: an inert column header, then one
     /// row per agent in the chosen order.
     ///
@@ -6913,7 +6946,16 @@ impl View {
     // ever lands on rendered rows. Overflow is reached by the fold row's own
     // Enter/click toggle, which persists in `idle_expanded`.
     fn tree_rows(&self) -> Vec<DisplayRow<'_>> {
+        self.tree_rows_with_depths().0
+    }
+
+    /// [`Self::tree_rows`] with the per-row lineage depth beside it (see
+    /// [`Self::display_rows_with_depths`]). The depth is computed over the
+    /// EMITTED set after every display filter, never re-derived in the painter.
+    fn tree_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
         let mut out = Vec::new();
+        // Display index -> lineage depth for agent rows, filled at emit time.
+        let mut agent_depth_at: HashMap<usize, usize> = HashMap::new();
         // (x-cd67 US3) Section spacing only with more than one workspace: a
         // single squad has no groups to separate (US3 verify: absent with 1
         // squad).
@@ -6957,19 +6999,16 @@ impl View {
                     .filter(|a| view == SectionView::Expanded || !a.exited)
                     .collect();
                 // (x-132c) Order by lineage: children render beneath their
-                // parent, pre-order, over the SAME visible set that paints. A
-                // squad with no parent edges lays out in input order (the
-                // pane-tree, then name-sorted watch-only order crown-sort
-                // preserved), so it keeps its bytes. Siblings keep input order.
-                squad_agents = lineage_layout(
+                // parent, pre-order. Keyed by row identity (input index), never
+                // display name - two panes can share a label. A squad with no
+                // parent edges keeps its input order (pane-tree, then
+                // name-sorted watch-only), so it paints byte-identical.
+                let (order, _) = lineage_layout(
                     &squad_agents,
-                    |a| a.name.as_str(),
                     |a| a.harness_session_id.as_deref(),
                     |a| a.spawned_by_session.as_deref(),
-                )
-                .into_iter()
-                .filter_map(|(name, _)| squad_agents.iter().find(|a| a.name == name).copied())
-                .collect();
+                );
+                squad_agents = order.into_iter().map(|i| squad_agents[i]).collect();
                 // (x-c5ee) Top-K idle cap: attention rows (live, non-idle) always
                 // render; idle rows fill to SQUAD_ROW_CAP live rows total; the
                 // idle overflow folds into one `+N idle` row. Dead rows (present
@@ -6986,6 +7025,7 @@ impl View {
                 // its fold open (persisted for the session in `idle_expanded`).
                 let show_all_idle = self.idle_expanded.contains(&key);
                 let mut idle_shown = 0usize;
+                let mut emitted: Vec<&AgentRow> = Vec::with_capacity(squad_agents.len());
                 for &a in &squad_agents {
                     if is_idle_row(a) && !show_all_idle {
                         if idle_shown >= idle_budget {
@@ -6993,6 +7033,18 @@ impl View {
                         }
                         idle_shown += 1;
                     }
+                    emitted.push(a);
+                }
+                // (x-132c) Depth over exactly the emitted set: an idle parent
+                // the fold removed is ABSENT, so its visible child roots
+                // instead of indenting under a row that never painted.
+                let (_, emitted_depths) = lineage_layout(
+                    &emitted,
+                    |a| a.harness_session_id.as_deref(),
+                    |a| a.spawned_by_session.as_deref(),
+                );
+                for (a, depth) in emitted.iter().zip(emitted_depths) {
+                    agent_depth_at.insert(out.len(), depth);
                     out.push(DisplayRow::Agent(a));
                     // (x-6851 US3) Exception-based subline: a Sub row follows the
                     // agent ONLY when its cwd_base differs from the squad's
@@ -7093,18 +7145,15 @@ impl View {
                     .collect();
                 // (x-132c) Same lineage ordering as the squad sections, over
                 // this section's own visible set: an orphan spawned by another
-                // orphan nests beneath it.
-                let ordered = lineage_layout(
+                // orphan nests beneath it. Index-keyed, like the squads.
+                let (order, depths) = lineage_layout(
                     &visible,
-                    |a| a.name.as_str(),
                     |a| a.harness_session_id.as_deref(),
                     |a| a.spawned_by_session.as_deref(),
                 );
-                for a in ordered
-                    .into_iter()
-                    .filter_map(|(name, _)| visible.iter().find(|a| a.name == name).copied())
-                {
-                    out.push(DisplayRow::Agent(a));
+                for &i in &order {
+                    agent_depth_at.insert(out.len(), depths[i]);
+                    out.push(DisplayRow::Agent(visible[i]));
                 }
             }
         }
@@ -7160,53 +7209,13 @@ impl View {
                 }
             }
         }
-        out
-    }
-
-    /// (x-132c) Lineage indent for one row: its depth in the parent/child
-    /// forest over the rows that actually RENDER in its section (its squad,
-    /// or the `~ elsewhere` set for a squadless row - a squadless row now
-    /// nests under its own section's parent, where crown_indent flattened it).
-    /// Mirrors `tree_rows`' visibility filter exactly (an exited parent hidden
-    /// by a LiveOnly section is ABSENT, so its children root rather than
-    /// indenting under a row that never paints). Depth is bounded by the
-    /// layout's own cap, so it never runs off-screen.
-    fn lineage_indent(&self, a: &AgentRow) -> usize {
-        let expanded = self.squad_section_view(a.squad) == SectionView::Expanded;
-        let set: Vec<&AgentRow> = self
-            .layout
-            .agents
-            .iter()
-            .filter(|o| o.squad == a.squad)
-            .filter(|o| expanded || !o.exited)
+        // (x-132c) Materialize the aligned depth vec: agent rows carry the
+        // depth their emit site recorded (keyed by display index); every other
+        // row (headers, sublines, spacers, fold rows) indents nothing.
+        let out_depths = (0..out.len())
+            .map(|i| agent_depth_at.get(&i).copied().unwrap_or(0))
             .collect();
-        lineage_layout(
-            &set,
-            |r| r.name.as_str(),
-            |r| r.harness_session_id.as_deref(),
-            |r| r.spawned_by_session.as_deref(),
-        )
-        .into_iter()
-        .find(|(name, _)| name.as_str() == a.name.as_str())
-        .map(|(_, depth)| depth)
-        .unwrap_or(0)
-    }
-
-    /// The section-view state (Expanded / LiveOnly / Collapsed) of the section a
-    /// row lives in - a squad, or the Elsewhere catch-all for a squadless row.
-    /// Used to keep `crown_indent`'s row set in step with what `tree_rows`
-    /// actually paints. An unknown squad defaults to Expanded (count everything).
-    fn squad_section_view(&self, squad: Option<u64>) -> SectionView {
-        match squad {
-            Some(id) => self
-                .layout
-                .squads
-                .iter()
-                .find(|s| s.id == id)
-                .map(|s| self.section_view(&section_key(s)))
-                .unwrap_or(SectionView::Expanded),
-            None => self.section_view(&SectionKey::Elsewhere),
-        }
+        (out, out_depths)
     }
 
     fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
@@ -7224,7 +7233,11 @@ impl View {
         };
         // `i` stays the TRUE display index (so the selector/hover highlight and
         // hit-test still match); the painted row subtracts the scroll offset.
-        for (i, drow) in self.display_rows().into_iter().enumerate().skip(off) {
+        // (x-132c) The depths come from the SAME compose pass as the rows, so
+        // an agent row indents by the depth computed over exactly the set that
+        // paints - never a re-derivation over a different visibility set.
+        let (display, row_depths) = self.display_rows_with_depths();
+        for (i, drow) in display.into_iter().enumerate().skip(off) {
             // (x-cd67 US1) The sideline owns the full column height including
             // row 0; the tab strip moved right of the divider. Display row `i`
             // paints at outer row `i - off` (was `TAB_BAR_ROWS + (i - off)`).
@@ -7362,9 +7375,10 @@ impl View {
                         None => format!(" {mark}{glyph} {}", a.name),
                     };
                     // (x-132c) Indent the row under its lineage parent: one
-                    // step per depth. Zero steps -> no prefix -> a section
-                    // with no parent edges stays byte-identical.
-                    let steps = self.lineage_indent(a);
+                    // step per depth, read from the compose-pass depth vec.
+                    // Zero steps -> no prefix -> a section with no parent
+                    // edges stays byte-identical.
+                    let steps = row_depths.get(i).copied().unwrap_or(0);
                     if steps > 0 {
                         text = format!("{}{text}", "  ".repeat(steps));
                     }
@@ -7885,19 +7899,6 @@ fn section_project_base(canonical_cwd: &str) -> Option<&str> {
     Path::new(canonical_cwd)
         .file_name()
         .and_then(|b| b.to_str())
-}
-
-/// (US9 crown) The sort/indent rank of a crown altitude within a squad:
-/// coordinators rank by altitude (0 VP, 1 Director, 2 IC), an un-crowned leaf
-/// ranks last (3). A `crown_level` past the shipped 0..=2 ladder (a newer
-/// server, or corruption) clamps into the IC coordinator band rather than
-/// producing an unbounded indent - it degrades to "some coordinator", never a
-/// broken layout.
-fn crown_rank(level: Option<u32>) -> u8 {
-    match level {
-        Some(l) => l.min(2) as u8,
-        None => 3,
-    }
 }
 
 /// (x-6851 US3) Whether an agent's cwd is FOREIGN to its section: its `cwd_base`
@@ -27944,17 +27945,6 @@ mod tests {
     }
 
     #[test]
-    fn crown_rank_maps_altitudes_and_clamps_out_of_range() {
-        assert_eq!(crown_rank(None), 3, "un-crowned leaf ranks last");
-        assert_eq!(crown_rank(Some(0)), 0);
-        assert_eq!(crown_rank(Some(1)), 1);
-        assert_eq!(crown_rank(Some(2)), 2);
-        // A newer server's higher altitude degrades to "some coordinator",
-        // never an unbounded rank.
-        assert_eq!(crown_rank(Some(9)), 2);
-    }
-
-    #[test]
     fn lineage_child_sorts_beneath_its_parent_within_squad() {
         let v = view_with_agents(vec![
             lineage_row("worker-a", 2, Some("sid-king")),
@@ -28005,6 +27995,19 @@ mod tests {
         }
     }
 
+    /// (x-132c) The rendered lineage depth of the agent row named `name`,
+    /// read from the compose-pass depth vec (the painter's own source).
+    fn rendered_depth(v: &View, name: &str) -> usize {
+        let (rows, depths) = v.display_rows_with_depths();
+        rows.iter()
+            .position(|r| match r {
+                DisplayRow::Agent(a) => a.name == name,
+                _ => false,
+            })
+            .map(|i| depths[i])
+            .unwrap_or(0)
+    }
+
     #[test]
     fn lineage_indent_is_depth_within_squad() {
         let v = view_with_agents(vec![
@@ -28012,10 +28015,7 @@ mod tests {
             lineage_row("dir", 3, Some("sid-king")),
             lineage_row("ic", 4, Some("sid-dir")),
         ]);
-        let steps = |name: &str| {
-            let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
-            v.lineage_indent(a)
-        };
+        let steps = |name: &str| rendered_depth(&v, name);
         assert_eq!(steps("king"), 0);
         assert_eq!(steps("dir"), 1);
         assert_eq!(steps("ic"), 2);
@@ -28026,10 +28026,7 @@ mod tests {
             lineage_row("king", 2, None),
             lineage_row("stranger", 3, None),
         ]);
-        let steps2 = |name: &str| {
-            let a = v2.layout.agents.iter().find(|a| a.name == name).unwrap();
-            v2.lineage_indent(a)
-        };
+        let steps2 = |name: &str| rendered_depth(&v2, name);
         assert_eq!(steps2("king"), 0);
         assert_eq!(steps2("stranger"), 0);
     }
@@ -28043,10 +28040,7 @@ mod tests {
         parent.exited = true;
         let child = lineage_row("child", 3, Some("sid-parent"));
         let mut v = view_with_agents(vec![parent, child]);
-        let indent = |v: &View, name: &str| {
-            let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
-            v.lineage_indent(a)
-        };
+        let indent = |v: &View, name: &str| rendered_depth(v, name);
         // Expanded: the exited parent still renders, so the child indents.
         assert_eq!(indent(&v, "child"), 1);
         // LiveOnly hides the exited parent -> absent from the rendered set ->
@@ -28072,11 +28066,13 @@ mod tests {
         child.squad = None;
         let mut stranger = lineage_row("orphan-stranger", 4, None);
         stranger.squad = None;
-        let v = view_with_agents(vec![parent, child, stranger]);
-        let indent = |name: &str| {
-            let a = v.layout.agents.iter().find(|a| a.name == name).unwrap();
-            v.lineage_indent(a)
-        };
+        // `~ elsewhere` defaults to Collapsed; open it so the nesting this
+        // test asserts actually renders (the depth vec only covers rows that
+        // paint - that is the point of the compose-pass design).
+        let mut v = view_with_agents(vec![parent, child, stranger]);
+        v.section_view
+            .insert(SectionKey::Elsewhere, SectionView::Expanded);
+        let indent = |name: &str| rendered_depth(&v, name);
         assert_eq!(indent("orphan-parent"), 0);
         assert_eq!(indent("orphan-child"), 1, "a child nests under its parent");
         assert_eq!(

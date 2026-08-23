@@ -1106,7 +1106,7 @@ fn validate_inputs(key: &str, holder: &str, ttl_ms: Option<i64>) -> Result<(), S
 /// Ambient harness session markers, highest precedence first. Mirrors
 /// `cli/src/fno/harness_identity.py::HARNESS_SESSION_MARKERS` (x-efc7) so the
 /// Rust writer tags a claim with the same harness the Python resolver would.
-const HARNESS_SESSION_MARKERS: &[(&str, &str)] = &[
+pub(crate) const HARNESS_SESSION_MARKERS: &[(&str, &str)] = &[
     ("CODEX_THREAD_ID", "codex"),
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_SESSION_ID", "codex"),

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Selftest for check-spawn-lineage-parity.sh: the detector harness proves a
 # dropped stamp FAILS the check before the canonical sources are trusted.
+# Fixtures are written with printf only - no in-place sed, whose -i syntax
+# differs between BSD and GNU and broke this selftest on the Linux runner.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -14,28 +16,37 @@ fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/spawn-lineage-parity.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
-# Minimal fixtures shaped like the real mint sites. Every fixture carries the
-# full stamp: the helper call plus the field wiring the check demands.
+RUST_CALL='let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();'
+RUST_STAMP='spawned_by_session: parent_session,'
+
+# Every fixture carries the full stamp: the helper call plus the field wiring
+# the check demands. Variant files are written whole, never edited in place.
 write_fixtures() {
   printf '%s\n' \
     'fn create(' \
-    'let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();' \
-    'spawned_by_session: parent_session,' \
+    "$RUST_CALL" \
+    "$RUST_STAMP" \
     '#[cfg(test)]' > "$tmp/claude.rs"
-  cp "$tmp/claude.rs" "$tmp/adopt.rs"
-  sed -i '' '1s/fn create(/pub fn mint_adopted_entry/; 3s/$/\npub fn upsert_adopted_row/' "$tmp/adopt.rs"
-  cp "$tmp/claude.rs" "$tmp/codex.rs"
-  sed -i '' '1s/fn create(/fn dispatch_create(/; 3s/$/\nfn dispatch_resume(/' "$tmp/codex.rs"
+  printf '%s\n' \
+    'pub fn mint_adopted_entry' \
+    "$RUST_CALL" \
+    "$RUST_STAMP" \
+    'pub fn upsert_adopted_row' > "$tmp/adopt.rs"
+  printf '%s\n' \
+    'fn dispatch_create(' \
+    "$RUST_CALL" \
+    "$RUST_STAMP" \
+    'fn dispatch_resume(' > "$tmp/codex.rs"
   cp "$tmp/codex.rs" "$tmp/gemini.rs"
   printf '%s\n' \
     'fn build_claude_stream_entry' \
-    'let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();' \
-    'spawned_by_session: parent_session,' \
+    "$RUST_CALL" \
+    "$RUST_STAMP" \
     'fn acquire_session_claim' > "$tmp/stream.rs"
   printf '%s\n' \
     'fn mint_synthesized_entry' \
-    'let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();' \
-    'spawned_by_session: parent_session,' \
+    "$RUST_CALL" \
+    "$RUST_STAMP" \
     'fn upsert_synthesized_row' > "$tmp/synth.rs"
   printf '%s\n' \
     'pub spawned_by_session: Option<String>,' \
@@ -87,8 +98,11 @@ if [[ "$out" != *'parity OK'* ]]; then
   exit 1
 fi
 
-# Negative: drop the stamp from ONE Rust site; the failure must name it.
-sed -i '' '/spawned_by_session: parent_session,/d' "$tmp/codex.rs"
+# Negative: the codex site with NO stamp; the failure must name it.
+printf '%s\n' \
+  'fn dispatch_create(' \
+  "$RUST_CALL" \
+  'fn dispatch_resume(' > "$tmp/codex.rs"
 if out=$(run_check 2>&1); then
   echo "FAIL: check passed a codex mint site with no stamp: $out" >&2
   exit 1
@@ -100,7 +114,11 @@ fi
 
 # Negative: an operator register that stamps everything (the self-edge defect).
 write_fixtures
-sed -i '' 's/if origin == "operator":/if False:/' "$tmp/registry.py"
+printf '%s\n' \
+  'def register_existing_session(' \
+  'if False:' \
+  'spawned_by_session=_sb_session,' \
+  'def restamp_harness_session_id(' > "$tmp/registry.py"
 if out=$(run_check 2>&1); then
   echo "FAIL: check passed a register path with no operator refusal: $out" >&2
   exit 1

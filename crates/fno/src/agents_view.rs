@@ -1604,8 +1604,12 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
 /// rows off-screen (same bounded-steps posture `crown_indent` held).
 pub const MAX_LINEAGE_DEPTH: usize = 8;
 
-/// (x-132c) Join rows into a lineage forest and lay it out for rendering:
-/// `(name, depth)` pairs in stable pre-order, each row beneath its parent.
+/// (x-132c) Join rows into a lineage forest and lay it out for rendering.
+/// Returns `(order, depths)`: `order` is the render order as INPUT INDICES in
+/// stable pre-order (each row beneath its parent), and `depths[i]` is row
+/// `i`'s lineage depth. Keyed by ROW IDENTITY (the input index), never by a
+/// display name - two rows can legitimately share a name (two bare panes both
+/// labeled `shell`), and a name-keyed join maps both to one row's depth.
 ///
 /// The join: `parent_of` on one row is matched against `id_of` on the others.
 /// Three rules, all load-bearing on live registry data:
@@ -1618,15 +1622,13 @@ pub const MAX_LINEAGE_DEPTH: usize = 8;
 ///   carries its own path and breaks a revisit by rooting the cycle's entry.
 ///   A self-edge or an A->B->A pair terminates; it never hangs.
 ///
-/// Deterministic: roots and siblings keep input order, so a caller that
-/// name-sorts first gets name-stable siblings; a set with no parent edges lays
-/// out in input order at depth 0 (byte-identical to a flat list).
+/// Deterministic: roots and siblings keep input order, so a set with no parent
+/// edges lays out in input order at depth 0 (byte-identical to a flat list).
 pub fn lineage_layout<T>(
     rows: &[T],
-    name_of: impl Fn(&T) -> &str,
     id_of: impl Fn(&T) -> Option<&str>,
     parent_of: impl Fn(&T) -> Option<&str>,
-) -> Vec<(String, usize)> {
+) -> (Vec<usize>, Vec<usize>) {
     let n = rows.len();
     // id -> index; the first row wins a duplicated id (ids are only as
     // trustworthy as the env they were captured from).
@@ -1697,7 +1699,7 @@ pub fn lineage_layout<T>(
             has_parent[i] = true;
         }
     }
-    let mut out: Vec<(String, usize)> = Vec::with_capacity(n);
+    let mut order: Vec<usize> = Vec::with_capacity(n);
     let mut emitted = vec![false; n];
     let mut stack: Vec<usize> = Vec::new();
     for r in 0..n {
@@ -1710,7 +1712,7 @@ pub fn lineage_layout<T>(
                 continue;
             }
             emitted[x] = true;
-            out.push((name_of(&rows[x]).to_string(), depth[x].unwrap_or(0)));
+            order.push(x);
             for &c in children[x].iter().rev() {
                 if !emitted[c] {
                     stack.push(c);
@@ -1721,12 +1723,13 @@ pub fn lineage_layout<T>(
     // Defensive tail: nothing should reach here unemitted (every row is a root
     // or a descendant of one), but a forest the walk could not classify still
     // renders rather than vanishing.
-    for (i, r) in rows.iter().enumerate() {
+    for i in 0..n {
         if !emitted[i] {
-            out.push((name_of(r).to_string(), depth[i].unwrap_or(0)));
+            order.push(i);
         }
     }
-    out
+    let depths = (0..n).map(|i| depth[i].unwrap_or(0)).collect();
+    (order, depths)
 }
 
 /// One tracked external session's observed liveness from `claude agents --json
@@ -3652,8 +3655,13 @@ config_dir = "~/.claude-alt"
         parent: Option<&'static str>,
     }
 
-    fn layout(rows: &[LRow]) -> Vec<(String, usize)> {
-        lineage_layout(rows, |r| r.name, |r| r.id, |r| r.parent)
+    fn layout(rows: &[LRow]) -> (Vec<usize>, Vec<usize>) {
+        lineage_layout(rows, |r| r.id, |r| r.parent)
+    }
+
+    /// Display labels for the returned index order.
+    fn ordered_names(rows: &[LRow], order: &[usize]) -> Vec<&'static str> {
+        order.iter().map(|&i| rows[i].name).collect()
     }
 
     #[test]
@@ -3693,10 +3701,9 @@ config_dir = "~/.claude-alt"
                 parent: Some("sid-k"),
             },
         ];
-        assert_eq!(
-            layout(&rows),
-            vec![("king".to_string(), 0), ("worker".to_string(), 1),]
-        );
+        let (order, depths) = layout(&rows);
+        assert_eq!(ordered_names(&rows, &order), vec!["king", "worker"]);
+        assert_eq!(depths, vec![0, 1]);
     }
 
     #[test]
@@ -3725,15 +3732,12 @@ config_dir = "~/.claude-alt"
                 parent: Some("k"),
             },
         ];
+        let (order, depths) = layout(&rows);
         assert_eq!(
-            layout(&rows),
-            vec![
-                ("king".to_string(), 0),
-                ("a-child".to_string(), 1),
-                ("a-grand".to_string(), 2),
-                ("b-child".to_string(), 1),
-            ]
+            ordered_names(&rows, &order),
+            vec!["king", "a-child", "a-grand", "b-child"]
         );
+        assert_eq!(depths, vec![0, 1, 2, 1]);
     }
 
     #[test]
@@ -3750,10 +3754,9 @@ config_dir = "~/.claude-alt"
                 parent: None,
             },
         ];
-        assert_eq!(
-            layout(&rows),
-            vec![("orphan".to_string(), 0), ("plain".to_string(), 0),]
-        );
+        let (order, depths) = layout(&rows);
+        assert_eq!(ordered_names(&rows, &order), vec!["orphan", "plain"]);
+        assert_eq!(depths, vec![0, 0]);
     }
 
     #[test]
@@ -3772,10 +3775,17 @@ config_dir = "~/.claude-alt"
                 parent: Some("id-a"),
             },
         ];
-        let out = layout(&rows);
-        assert_eq!(out.len(), 2, "every cycle member renders exactly once");
-        assert_eq!(out[0], ("a".to_string(), 0), "the cycle entry roots");
-        assert_eq!(out[1], ("b".to_string(), 1));
+        let (order, depths) = layout(&rows);
+        assert_eq!(
+            ordered_names(&rows, &order),
+            vec!["a", "b"],
+            "every cycle member renders exactly once"
+        );
+        assert_eq!(
+            depths,
+            vec![0, 1],
+            "the cycle entry roots, the member nests"
+        );
     }
 
     #[test]
@@ -3785,7 +3795,9 @@ config_dir = "~/.claude-alt"
             id: Some("s"),
             parent: Some("s"),
         }];
-        assert_eq!(layout(&rows), vec![("self".to_string(), 0)]);
+        let (order, depths) = layout(&rows);
+        assert_eq!(ordered_names(&rows, &order), vec!["self"]);
+        assert_eq!(depths, vec![0]);
     }
 
     #[test]
@@ -3802,13 +3814,13 @@ config_dir = "~/.claude-alt"
                 parent: Some(Box::leak(format!("i{}", d - 1).into_boxed_str())),
             });
         }
-        let out = layout(&rows);
-        assert_eq!(out.len(), 15);
+        let (order, depths) = layout(&rows);
+        assert_eq!(order.len(), 15);
         assert!(
-            out.iter().all(|(_, depth)| *depth <= MAX_LINEAGE_DEPTH),
-            "no row indents past the cap: {out:?}"
+            depths.iter().all(|&d| d <= MAX_LINEAGE_DEPTH),
+            "no row indents past the cap: {depths:?}"
         );
-        assert_eq!(out.last().unwrap().1, MAX_LINEAGE_DEPTH);
+        assert_eq!(*depths.last().unwrap(), MAX_LINEAGE_DEPTH);
     }
 
     #[test]
@@ -3825,9 +3837,8 @@ config_dir = "~/.claude-alt"
                 parent: None,
             },
         ];
-        assert_eq!(
-            layout(&rows),
-            vec![("b".to_string(), 0), ("a".to_string(), 0)]
-        );
+        let (order, depths) = layout(&rows);
+        assert_eq!(ordered_names(&rows, &order), vec!["b", "a"]);
+        assert_eq!(depths, vec![0, 0]);
     }
 }
