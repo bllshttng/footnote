@@ -517,8 +517,10 @@ def _harness_can_self_review(repo: str) -> bool:
     stop gate reads the authoring session's harness, init stamps that same
     answer onto the manifest, and OR-ing a second input here is how the two
     gates come to disagree on one PR. A harness with a native self-review
-    verb floors; a KNOWN verbless harness (gemini/agy) does not, because the
-    floor would demand an attestation no native verb there produces.
+    verb floors; a KNOWN verbless harness (gemini/agy) does not - but only
+    when the ambient read agrees on that family, because the manifest alone
+    cannot vouch for the PR being merged and the floor would otherwise
+    demand an attestation no native verb there produces.
     Unattributable - no manifest, ambiguous or absent markers, or an
     unrecognized spelling - floors: ambiguity about who authored the change
     is not permission to skip its review. The pre-x-129b shape read ONLY
@@ -538,19 +540,21 @@ def _harness_can_self_review(repo: str) -> bool:
     elif harness_can_self_review(harness):
         applies = True
     else:
-        # A KNOWN verbless harness releases the floor - unless the manifest
-        # says verbless while a clean single-family ambient read says verbful.
-        # The manifest is an init-time snapshot that outlives its session and
-        # belongs to whichever root the merging process stands in, so a dead
-        # run's `harness: gemini` must not silently disengage the floor for a
-        # claude PR merged from that checkout. On that conflict, floor: the
-        # safe disagreement costs one review, the unsafe one costs the review.
+        # A KNOWN verbless harness releases the floor only when the ambient
+        # read AGREES on the same verbless family. The manifest is an
+        # init-time snapshot that outlives its session and belongs to
+        # whichever root the merging process stands in, so it cannot release
+        # alone: a dead run's `harness: gemini` must not disengage the floor
+        # for an unrelated PR merged from that checkout by a bare or poisoned
+        # shell. An absent, ambiguous, contradicting, or verbful ambient is
+        # not agreement - floor. The safe disagreement costs one review, the
+        # unsafe one costs the review.
         verbless = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
-        if harness in verbless and ambient is not None and harness_can_self_review(ambient):
+        if harness not in verbless:
+            # An unrecognized spelling is still an unattributed run: floors.
             applies = True
         else:
-            # An unrecognized spelling is still an unattributed run: floors.
-            applies = harness not in verbless
+            applies = ambient != harness
     return applies
 
 

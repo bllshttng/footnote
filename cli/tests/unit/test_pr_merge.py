@@ -964,7 +964,8 @@ def test_review_floor_is_caller_independent_across_env_shapes(
     two harness families, and the pre-fix predicate read that ambiguity as
     'no floor', silently disengaging the only review a stock install demands.
     Ambiguity is not permission - every unattributable shape floors - and a
-    KNOWN verbless run (manifest agy) is the only stock-install release."""
+    KNOWN verbless run whose manifest and ambient read agree is the only
+    stock-install release."""
     from fno.harness_identity import HARNESS_SESSION_MARKERS
 
     for marker, _harness in HARNESS_SESSION_MARKERS:
@@ -991,33 +992,40 @@ def test_review_floor_is_caller_independent_across_env_shapes(
     monkeypatch.delenv("GEMINI_SESSION_ID")
     assert requires_review() == (True, True)
 
-    # The run's own manifest attribution decides, not the asking process: a
-    # verbless-harness run keeps its designed no-floor state, and a verbful
-    # one floors even under the poisoned env above.
+    # A verbless manifest cannot release alone: it is an init-time snapshot
+    # that outlives its run, and nothing ties it to the PR being merged, so
+    # under the poisoned multi-family ambient above it is an unattributable
+    # shape and floors.
     state = tmp_path / ".fno"
     state.mkdir(exist_ok=True)
     (state / "target-state.md").write_text(
         "---\nharness: agy\n---\n", encoding="utf-8"
     )
-    assert requires_review() == (False, False)
+    assert requires_review() == (True, True)
     (state / "target-state.md").write_text(
         "---\nharness: claude\n---\n", encoding="utf-8"
     )
     assert requires_review() == (True, True)
-    # The manifest decides ALONE, so the gates cannot disagree: a gemini-run
-    # PR merged from a poisoned claude ambient (ambiguous, so no second
-    # attribution) still reads no-floor here, the same answer the gemini
-    # authoring session's stop gate gave.
+    # Same verdict for a verbless manifest under a poisoned claude ambient
+    # (ambiguous, so no agreeing second read).
     (state / "target-state.md").write_text(
         "---\nharness: gemini\n---\n", encoding="utf-8"
     )
+    assert requires_review() == (True, True)
+    # Release needs agreement: the manifest's verbless family must match a
+    # clean single-family ambient read, the shape of the authoring session
+    # merging its own PR.
+    monkeypatch.delenv("CODEX_THREAD_ID")
+    monkeypatch.delenv("CODEX_SESSION_ID")
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    monkeypatch.setenv("GEMINI_SESSION_ID", "g1")
     assert requires_review() == (False, False)
     # But a verbless manifest that CONTRADICTS a clean verbful ambient read
     # floors: the manifest is an init-time snapshot that outlives its run,
     # and a dead run's verbless stamp must not disengage the floor for a
     # verbful PR merged from that checkout.
-    monkeypatch.delenv("CODEX_THREAD_ID")
-    monkeypatch.delenv("CODEX_SESSION_ID")
+    monkeypatch.delenv("GEMINI_SESSION_ID")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "c1")
     assert requires_review() == (True, True)
     # The unknown sentinel is no attribution: ambient alone decides, and a
     # poisoned ambient therefore floors.
