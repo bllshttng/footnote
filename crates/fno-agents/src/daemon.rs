@@ -6107,6 +6107,31 @@ fn cleanup_king_manifest(entry: &state::RegistryEntry) {
         .join(".fno")
         .join("kings")
         .join(format!("{scope}.md"));
+    // Owner guard, the Rust half of Python remove_king_manifest's
+    // expected_harness_session_id: a successor crowned over this scope after
+    // the row went terminal can have re-armed the manifest with ITS session
+    // id, and deleting unconditionally would disarm that live king. Skip only
+    // on a PROVEN foreign owner (the manifest names a different session id);
+    // an id-less or matching manifest deletes on the registry's own authority,
+    // which is what rm acts on. The cwd join stays entry-relative: a
+    // subdirectory cwd may miss the repo-root manifest and leave a stale
+    // file, which is the same safe direction.
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        let current = content
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("harness_session_id:"))
+            .map(|v| v.trim().trim_matches('"').to_string());
+        let expected = entry
+            .harness_session_id
+            .as_deref()
+            .filter(|s| !s.is_empty());
+        if let (Some(exp), Some(cur)) = (expected, current) {
+            if cur != exp {
+                return;
+            }
+        }
+    }
     let _ = std::fs::remove_file(path);
 }
 
@@ -8059,6 +8084,54 @@ mod tests {
         assert!(
             !manifest.exists(),
             "successful rm left crown loop state behind"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_never_deletes_a_successors_re_armed_manifest() {
+        // The vacated row is removed with a manifest on disk naming a
+        // DIFFERENT session: a successor crowned over the scope after this
+        // row went terminal re-armed it. Deleting that file would disarm the
+        // live successor's stop gate.
+        let home = short_home("rmcrownsucc");
+        let project = home.root().join("project");
+        let manifest = project.join(".fno/kings/alpha.md");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            "---\nscope: alpha\nharness_session_id: bbbb9999-9999-4999-8999-999999999999\n---\n",
+        )
+        .unwrap();
+        let mut row = claude_rm_row(
+            "stopped-worker",
+            "aaaa3333",
+            "aaaa3333-1111-2222-3333-444444444444",
+        );
+        row.cwd = project.to_string_lossy().into_owned();
+        row.crown_level = Some(1);
+        row.crown_scope = Some("alpha".into());
+        row.crown_grantor = Some("human".into());
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
+        let snapshots = claude_row_then_absent("aaaa3333", "stopped");
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &snapshots,
+            &|_| Ok(()),
+            &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
+        )
+        .await;
+
+        assert!(response.error().is_none(), "{response:?}");
+        assert!(
+            manifest.exists(),
+            "rm deleted a manifest naming a different session: the live successor's gate"
         );
         std::fs::remove_dir_all(home.root()).ok();
     }
