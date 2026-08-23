@@ -9923,7 +9923,14 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         .global_events_path
         .clone()
         .unwrap_or_else(|| project_events.clone());
-    let session_id = manifest.fno_id.clone();
+    let session_id = std::env::var(crate::loop_king::WALK_SESSION_KEY_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| manifest.fno_id.clone());
+    // A walk-spawned pass tags its terminal with the per-invocation key so the
+    // walk's resume guard can never see a PRIOR reign's terminal, while every
+    // other reader (freshness probe, fire history) still filters on the
+    // driver tag rather than the id, so both spellings read the same.
     let emit = |event_type: &str, data: serde_json::Value| {
         emit_to_both(&project_events, &global_events, event_type, data);
     };

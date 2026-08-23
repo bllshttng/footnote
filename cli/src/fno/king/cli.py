@@ -120,6 +120,7 @@ def done_cmd(
         REGISTRY_UNREADABLE,
         calling_agent_row,
     )
+    from fno.agents.registry import TERMINAL_STATUSES as _TERMINAL_ROW_STATUSES
     from fno.agents.registry import update_registry
     from fno.king.state import remove_king_manifest
 
@@ -142,7 +143,13 @@ def done_cmd(
                 err=True,
             )
             raise typer.Exit(2)
-        holder_name = None
+        # A named scope may still have a LIVE king reigning over it; expiring
+        # only the manifest would disarm that king's stop-hook floor while its
+        # row still reads crowned. Resolve the holder inside the vacate
+        # closure below (under the registry lock) and vacate it too; a scope
+        # with no live holder is the orphan-cleanup case and clears the file
+        # alone.
+        holder_name = ""
     else:
         own = getattr(caller, "crown_scope", None)
         if not scope.strip():
@@ -172,11 +179,27 @@ def done_cmd(
     # then clean the vacated file).
     vacated = holder_name is None
     if holder_name is not None:
+        attended_named = holder_name == ""
 
         def _vacate(rows: list) -> list:
             nonlocal vacated
             for index, row in enumerate(rows):
-                if row.name == holder_name and row.crown_scope == scope:
+                if attended_named:
+                    # An attended shell naming a scope: vacate whatever live
+                    # row still holds it, or clear nothing when the scope is
+                    # already orphaned (the manifest-only cleanup below).
+                    if (
+                        row.crown_scope == scope
+                        and row.status not in _TERMINAL_ROW_STATUSES
+                    ):
+                        rows[index] = _replace(
+                            row,
+                            crown_level=None,
+                            crown_scope=None,
+                            crown_grantor=None,
+                        )
+                        vacated = True
+                elif row.name == holder_name and row.crown_scope == scope:
                     rows[index] = _replace(
                         row, crown_level=None, crown_scope=None, crown_grantor=None
                     )
@@ -189,7 +212,7 @@ def done_cmd(
         except Exception as exc:  # noqa: BLE001 - named, never swallowed
             typer.echo(f"king: crown expire failed: {exc}", err=True)
             raise typer.Exit(1) from exc
-        if not vacated:
+        if not vacated and not attended_named:
             typer.echo(
                 f"king: refusing to expire {scope!r}: this row no longer holds "
                 "it (the crown moved or was already vacated), so the manifest "
@@ -213,8 +236,8 @@ def done_cmd(
     typer.echo(f"king: crown expired: {scope}")
     typer.echo(
         "row crown: vacated; manifest: cleared"
-        if holder_name is not None
-        else "row crown: not this shell's to vacate; manifest: cleared"
+        if vacated
+        else "row crown: no live holder found; manifest: cleared"
     )
 
 

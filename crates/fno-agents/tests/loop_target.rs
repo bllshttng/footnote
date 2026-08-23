@@ -1241,7 +1241,13 @@ fn king_walk_proceeds_past_driver_validation_into_preflight() {
             "--max-iterations",
             "2",
         ],
-        &[("PATH", &path_with(&bin_dir))],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
     );
 
     assert_eq!(
@@ -1285,7 +1291,13 @@ fn king_walk_terminates_budget_at_the_respawn_ceiling() {
             "--max-iterations",
             "2",
         ],
-        &[("PATH", &path_with(&bin_dir))],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
     );
 
     assert_eq!(
@@ -1353,7 +1365,16 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
             "--max-iterations",
             "2",
         ],
-        &[("PATH", &path_with(&bin_dir))],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            // Hermetic registry: from_manifest refuses when a live row holds
+            // the scope, and the developer machine's real registry is none of
+            // this test's business.
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
     );
 
     assert!(
@@ -1364,6 +1385,10 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
     assert!(
         env_dump.contains("respawned king over epic-x"),
         "the continue prompt must name the reign: {env_dump}"
+    );
+    assert!(
+        env_dump.contains("FNO_KING_WALK_SESSION_KEY=k-9331-w"),
+        "the walk key must reach the child so its terminal correlates: {env_dump}"
     );
     assert!(
         !env_dump.contains("CONTINUE_PROMPT=/target --resume"),

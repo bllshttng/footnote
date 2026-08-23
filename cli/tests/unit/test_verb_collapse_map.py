@@ -144,8 +144,9 @@ def test_live_baseline_matches_the_projected_allocation():
     # carries. Bumped to the live count at rebase time, not a round number.
     # +1 for `project init`, the isolated-environment verb (x-20f1).
     # +1 for `king manifest-path`, the king-loop manifest lookup verb.
+    # +1 for `king done`, the crown expire verb.
     # Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 116
+    assert len(leaves) <= 117
     assert "fno-agents" in leaves
 
 
