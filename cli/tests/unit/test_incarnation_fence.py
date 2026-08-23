@@ -1,10 +1,14 @@
 """Incarnation fence (x-eea5 1.3): a losing incarnation refuses outward actions."""
-from typer.testing import CliRunner
+import os
+import socket
+import subprocess
+import sys
+from pathlib import Path
 
-from fno.claims.cli import cli as claims_cli
 from fno.claims.incarnation import incarnation_fence_blocks, resolve_fence_session_uuid
-
-runner = CliRunner()
+from fno.claims.io import claim_path, serialize_claim
+from fno.claims.staleness import now_ms
+from fno.claims.types import Claim
 
 
 def _wire(monkeypatch, status, *, own_pid=None):
@@ -139,3 +143,110 @@ def test_run_merge_blocked_by_fence(monkeypatch, tmp_path):
 
     rc = _merge.run_merge(["123"], cwd=str(tmp_path))
     assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# the 2026-08-21 specimen, replayed end to end against a real claim file
+# ---------------------------------------------------------------------------
+
+
+def _write_specimen_claim(root: Path, *, pid: int, provenance=None) -> None:
+    """The PR 1031 shape: a 120-second session-writer claim, long expired."""
+    started = now_ms() - 100
+    claim = Claim(
+        key="session:119e3c52-specimen",
+        holder="119e3c52-specimen-holder",
+        acquired_at=started,
+        expires_at=now_ms() - 50,  # the 120s TTL lapsed ~700 minutes ago
+        pid=pid,
+        host=socket.gethostname(),
+        pid_provenance=provenance,
+    )
+    path = claim_path(claim.key, root=root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(serialize_claim(claim))
+
+
+def test_specimen_expired_foreign_pid_no_longer_blocks(tmp_path):
+    """THE SPECIMEN, end to end: a session-writer claim whose TTL expired
+    ~700 minutes ago while a live foreign process (a chat app's app-server)
+    answered for the recorded pid. Before the corroborated hybrid arm the
+    claim read live forever and the fence blocked every merge on the
+    lineage; now the unproven pid cannot outrank the TTL, the claim reads
+    stale, and the fence clears - the merge path proceeds."""
+    foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        _write_specimen_claim(tmp_path, pid=foreign.pid, provenance="ambient")
+        blocked, reason = incarnation_fence_blocks(
+            "119e3c52-specimen", claims_root=tmp_path
+        )
+        assert blocked is False
+        assert reason == ""
+    finally:
+        foreign.terminate()
+        foreign.wait()
+
+
+def test_specimen_inverted_prover_pid_still_blocks(tmp_path, monkeypatch):
+    """The gate is not a blanket expiry-clears-all: the same expired claim
+    with a pid the prover could have answered for (a genuinely suspended
+    holder session) still reads live and still blocks."""
+    monkeypatch.setattr(
+        "fno.claims.incarnation._own_session_pid", lambda: None
+    )  # we are not the holder
+    _write_specimen_claim(
+        tmp_path, pid=os.getpid(), provenance="session-prover"
+    )
+    blocked, reason = incarnation_fence_blocks(
+        "119e3c52-specimen", claims_root=tmp_path
+    )
+    assert blocked is True
+    assert "session:119e3c52-specimen" in reason
+
+
+# ---------------------------------------------------------------------------
+# the refusal names the process it found
+# ---------------------------------------------------------------------------
+
+
+def test_blocked_refusal_names_cmdline_and_uptime(monkeypatch):
+    # Both specimen operators ran ps by hand to learn the blocker was a chat
+    # app. The refusal now says so itself: cmdline and uptime of the pid.
+    _wire(
+        monkeypatch,
+        {"state": "live", "holder": "target-session:other", "pid": os.getpid(),
+         "host": "h", "machine_id": "h"},
+        own_pid=123,
+    )
+    blocked, reason = incarnation_fence_blocks("uuid1")
+    assert blocked
+    assert "python" in reason  # our own cmdline: the interpreter running pytest
+    assert ", up " in reason
+
+
+def test_blocked_refusal_names_an_unreadable_pid(monkeypatch):
+    # A pid psutil cannot inspect renders <uninspectable>, not a crash and
+    # not a cleared fence: the state still says a contender exists.
+    _wire(
+        monkeypatch,
+        {"state": "live", "holder": "target-session:other", "pid": "garbage",
+         "host": "h", "machine_id": "h"},
+        own_pid=123,
+    )
+    blocked, reason = incarnation_fence_blocks("uuid1")
+    assert blocked
+    assert "<uninspectable>" in reason
+
+
+def test_blocked_refusal_names_a_dead_pid_honestly(monkeypatch):
+    # A live-or-suspect verdict over a pid that no longer exists (the suspect
+    # arm's normal shape) still blocks, and says there is no such process.
+    _wire(
+        monkeypatch,
+        {"state": "suspect", "holder": "target-session:other", "pid": 999_999_999,
+         "host": "h", "machine_id": "h"},
+        own_pid=123,
+    )
+    blocked, reason = incarnation_fence_blocks("uuid1")
+    assert blocked
+    assert "no such process" in reason

@@ -60,6 +60,34 @@ def _own_session_pid() -> Optional[int]:
         return None
 
 
+def _describe_process(pid: object) -> str:
+    """Name the process a blocking fence found: cmdline and uptime.
+
+    Both operators in the 2026-08-21 specimens ran ps by hand to learn the
+    blocker was a chat app; the gate that decides who may act must say so
+    itself. An unreadable or absent process renders honestly - the state said
+    live-or-suspect, and showing what the pid actually is (or that it cannot
+    be inspected) beats failing open or closed on a probe error.
+    """
+    try:
+        pid_int = int(pid)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "<uninspectable>"
+    import time
+
+    import psutil
+
+    try:
+        proc = psutil.Process(pid_int)
+        cmdline = " ".join(proc.cmdline()) or proc.name()
+        up_s = max(0, int(time.time() - proc.create_time()))
+        return f"{cmdline[:160]}, up {up_s // 3600}h{(up_s % 3600) // 60}m"
+    except psutil.NoSuchProcess:
+        return "no such process"
+    except Exception:  # noqa: BLE001 - AccessDenied and friends: name it, don't crash
+        return "<uninspectable>"
+
+
 def incarnation_fence_blocks(
     session_uuid: Optional[str], *, claims_root: Optional[Path] = None
 ) -> Tuple[bool, str]:
@@ -96,6 +124,7 @@ def incarnation_fence_blocks(
     holder = info.get("holder", "?")
     pid = info.get("pid", "?")
     return True, (
-        f"incarnation-fence: {key} held by {holder} (pid={pid}); "
+        f"incarnation-fence: {key} held by {holder} "
+        f"(pid={pid}, {_describe_process(pid)}); "
         f"refusing outward action - another incarnation owns this lineage"
     )
