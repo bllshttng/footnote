@@ -487,13 +487,11 @@ def _is_documentation_path(path: str) -> bool:
 
 # Short-lived memo for the PR files probe: the floored lane predicate runs on
 # every status/merge fire, and `gh pr view --json files` spends the per-USER
-# GraphQL quota this repo is documented to be sensitive to. A file list cannot
-# change within one PR head, and 120s bounds staleness across pushes. Every
-# CLI invocation is a fresh process, so the window only opens in a long-lived
-# in-process surface (MCP): such a caller that classifies a docs-only head and
-# then sees code pushed must evict or wait out the TTL before merging. Move to
-# a head-keyed cache if a long-lived surface ever needs cross-push exactness.
-_PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
+# GraphQL quota this repo is documented to be sensitive to. The current PR head
+# is part of the key so a long-lived in-process surface cannot reuse a file list
+# after a push. Every CLI invocation is a fresh process, so the TTL mainly
+# bounds repeated reads inside MCP-style callers.
+_PAYLOAD_CACHE: dict[tuple[str, int, str], tuple[float, list[str] | None]] = {}
 _PAYLOAD_CACHE_TTL = 120.0
 _CACHE_BOUND = 256
 
@@ -506,7 +504,10 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     surfaced) is not code: nothing to review, no gate."""
     if not shutil.which("gh"):
         return True
-    key = (repo, pr_number)
+    head = _pr_head_oid(pr_number, repo)
+    if not head:
+        return True
+    key = (repo, pr_number, head)
     now = time.monotonic()
     hit = _PAYLOAD_CACHE.get(key)
     if hit is not None and now - hit[0] < _PAYLOAD_CACHE_TTL:

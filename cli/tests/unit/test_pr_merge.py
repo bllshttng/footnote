@@ -1149,6 +1149,26 @@ def test_pr_payload_classifier_is_documentation_aware_and_fail_closed(monkeypatc
     assert _merge._pr_payload_is_code("/nope", 42) is True
 
 
+def test_pr_payload_cache_is_scoped_to_current_head(monkeypatch):
+    """A code-to-docs push must not reuse the old head's cached classification."""
+    monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
+    monkeypatch.setattr(_merge, "_PAYLOAD_CACHE", {})
+    heads = iter(("head-code", "head-docs"))
+    paths = iter((["cli/src/fno/pr/_merge.py"], ["README.md"]))
+    file_reads = []
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: next(heads))
+
+    def read_paths(pr, repo):
+        file_reads.append((pr, repo))
+        return next(paths)
+
+    monkeypatch.setattr(_merge, "_pr_file_paths", read_paths)
+
+    assert _merge._pr_payload_is_code("owner/repo", 42) is True
+    assert _merge._pr_payload_is_code("owner/repo", 42) is False
+    assert file_reads == [(42, "owner/repo"), (42, "owner/repo")]
+
+
 def test_up_to_date_head_with_live_lanes_merges(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
     fake = FakeRun(
