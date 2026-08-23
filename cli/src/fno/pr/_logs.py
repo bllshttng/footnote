@@ -27,9 +27,9 @@ The load-bearing invariant is that 0 is reachable ONLY from a rollup that
 parsed. A reader that says "all green" when it cannot see is the same false
 green it exists to replace.
 """
+
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
@@ -79,20 +79,29 @@ def _fail(reason: str, res: Optional[Result] = None) -> int:
 
 
 def _fetch_rollup(pr: Optional[str], cwd: Optional[str]) -> tuple[Optional[list], int]:
-    """Return (rollup, 0) or (None, exit_code). No PR argument reads the branch."""
-    cmd = ["gh", "pr", "view"]
-    if pr:
-        cmd.append(pr)
-    cmd += ["--json", "statusCheckRollup"]
-    res = run(cmd, cwd=cwd)
-    if not res.ok:
-        return None, _fail(_gh_failure_reason(res), res)
-    if not res.stdout.strip():
-        return None, _fail("gh returned no PR data")
-    try:
-        return (json.loads(res.stdout).get("statusCheckRollup") or []), 0
-    except json.JSONDecodeError:
-        return None, _fail("gh returned unparseable JSON")
+    """Return (rollup, 0) or (None, exit_code). No PR argument reads the branch.
+
+    REST, never `gh pr view`: the GraphQL quota is per-USER and shared by
+    every session on the machine, and this verb was one of the remaining
+    lanes spending it (x-4eac). `fetch_pr_rest` answers the same rollup
+    shape - check runs carrying a `detailsUrl` job ref, legacy statuses
+    beside them - out of the core REST budget.
+    """
+    from fno.pr._rest import fetch_pr_rest, resolve_current_pr_number_rest
+
+    number = pr
+    if number is None:
+        resolved, reason = resolve_current_pr_number_rest(cwd=cwd)
+        if resolved is None:
+            return None, _fail(reason)
+        number = str(resolved)
+    pr_json, reason = fetch_pr_rest(number, cwd)
+    if pr_json is None:
+        return None, _fail(reason)
+    rollup = pr_json.get("statusCheckRollup")
+    if not isinstance(rollup, list):
+        return None, _fail("REST reader carried no statusCheckRollup")
+    return rollup, 0
 
 
 def _job_ref(check: dict) -> Optional[tuple[str, str, str]]:

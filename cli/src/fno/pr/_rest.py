@@ -16,6 +16,7 @@ reason names a secondary limit so a caller backs off instead of retrying on
 an interval. A quiet REST port would be worse than the GraphQL exhaustion it
 replaces.
 """
+
 from __future__ import annotations
 
 import json
@@ -32,6 +33,21 @@ from fno.pr._ritual import _parse_origin_slug
 # rate limit exceeded" - the word "secondary" is the discriminator, so a 403
 # without it must fall through to the core-bucket branch.
 _SECONDARY = re.compile(r"secondary rate limit", re.IGNORECASE)
+# x-4eac: the 2026-08-19 incident died as `Post .../graphql: unexpected EOF`
+# and read downstream as three fresh merge blockers on the PR. A transport or
+# auth failure is a fact about the READ, not about the PR, and the reason must
+# say so before a worker polls harder or edits content that was never read.
+_AUTH = re.compile(
+    r"gh auth login|authentication required|bad credentials|http 401"
+    r"|must be logged in|not logged in",
+    re.IGNORECASE,
+)
+_TRANSPORT = re.compile(
+    r"unexpected eof|connection reset|reset by peer|dial tcp"
+    r"|no route to host|connection refused|i/o timeout|tls handshake"
+    r"|proxyconnect|network is unreachable",
+    re.IGNORECASE,
+)
 
 log = logging.getLogger(__name__)
 
@@ -55,17 +71,30 @@ def _rest_reason(res) -> str:
     if _SECONDARY.search(text):
         base = lines[0] if lines else "gh api failed with no message"
         return (
-            base
-            + " | this is the SECONDARY rate limit (request rate, not budget:"
+            base + " | this is the SECONDARY rate limit (request rate, not budget:"
             " the core bucket can read 5000 remaining here). Back off - retrying"
             " on a fixed interval sustains the refusal."
         )
     if "rate limit" in text.lower():
         base = lines[0] if lines else "gh api failed with no message"
         return (
-            base
-            + " | this is the CORE REST quota. Check"
+            base + " | this is the CORE REST quota. Check"
             " `gh api rate_limit --jq .resources.core` and wait for its reset."
+        )
+    if _AUTH.search(text):
+        base = lines[0] if lines else "gh api failed with no message"
+        return (
+            base + " | this is an AUTHENTICATION failure (gh is not logged in). Run"
+            " `gh auth login`. It is not a verdict about this PR, and any"
+            " blocker derived from this read is not content."
+        )
+    if _TRANSPORT.search(text):
+        base = lines[0] if lines else "gh api failed with no message"
+        return (
+            base + " | this is a TRANSPORT failure (the network between you and"
+            " GitHub), not a verdict about this PR, and any blocker derived"
+            " from this read is not content. Pause and retry - do not poll"
+            " harder, which deepens the condition."
         )
     return lines[0] if lines else "gh api failed with no message"
 
@@ -154,7 +183,8 @@ def resolve_current_pr_number_rest(
     owner = slug.split("/", 1)[0]
     rows = runner(
         [
-            "gh", "api",
+            "gh",
+            "api",
             f"repos/{slug}/pulls?state=all&head={owner}:{branch.stdout.strip()}&per_page=2",
         ],
         cwd=cwd,
@@ -202,8 +232,7 @@ def fetch_pr_rest(
     check_runs: list[dict[str, Any]] = []
     while True:
         checks = runner(
-            ["gh", "api",
-             f"repos/{slug}/commits/{sha}/check-runs?per_page=100&page={page}"],
+            ["gh", "api", f"repos/{slug}/commits/{sha}/check-runs?per_page=100&page={page}"],
             cwd=cwd,
         )
         if not checks.ok:
@@ -213,7 +242,9 @@ def fetch_pr_rest(
             if not isinstance(payload, dict):
                 return None, "gh api check-runs returned a JSON value that is not an object"
             page_runs = payload.get("check_runs")
-            if not isinstance(page_runs, list) or not all(isinstance(row, dict) for row in page_runs):
+            if not isinstance(page_runs, list) or not all(
+                isinstance(row, dict) for row in page_runs
+            ):
                 return None, "gh api check-runs carried malformed check_runs"
             check_runs.extend(page_runs)
             total = payload.get("total_count")
@@ -232,6 +263,10 @@ def fetch_pr_rest(
                 "status": cr.get("status") or "",
                 "conclusion": cr.get("conclusion") or "",
                 "startedAt": cr.get("started_at") or "",
+                # The Actions job URL (`.../actions/runs/<run>/job/<job>`),
+                # under the GraphQL-shape key `fno.pr._logs._job_ref` parses,
+                # so a failing row carries its own log ref through the rollup.
+                "detailsUrl": cr.get("details_url") or "",
             }
         )
 
@@ -257,6 +292,11 @@ def fetch_pr_rest(
                         "context": sc.get("context"),
                         "state": (sc.get("state") or "").upper(),
                         "createdAt": sc.get("created_at") or "",
+                        # The external CI's own link: the one affordance a
+                        # StatusContext carries, and `fno do pr logs` prints
+                        # it for a non-Actions red instead of pretending a
+                        # job log exists.
+                        "targetUrl": sc.get("target_url") or "",
                     }
                 )
         except json.JSONDecodeError:
@@ -380,7 +420,5 @@ def graphql_remaining(
         return None, None
     if not isinstance(remaining, int) or not isinstance(reset_epoch, (int, float)):
         return None, None
-    reset_iso = datetime.fromtimestamp(reset_epoch, tz=timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    reset_iso = datetime.fromtimestamp(reset_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return remaining, reset_iso

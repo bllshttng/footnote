@@ -2564,3 +2564,93 @@ def test_a_missing_head_branch_is_a_missing_input_not_a_failed_probe(monkeypatch
     activity = _REAL_REVIEW_ACTIVITY("", "abc123", None)
     assert activity.blocked is False
     assert activity.worktree["note"] == "no head branch on the PR read"
+
+
+# --- x-c124: a red verdict names its failures (ruling d-bdb035b6) -----------
+
+
+def test_red_status_names_its_failures(monkeypatch, capsys):
+    """A check NAME is not a failure: the payload names the failing check, the
+    failing step, its first error, and the steps fail-fast never reached."""
+    from fno.pr import _failures
+
+    monkeypatch.setattr(
+        _failures,
+        "collect_failures",
+        lambda rows, cwd=None, runner=None: [
+            {
+                "check": "smoke-pytest",
+                "step": "Pytest (unit + integration)",
+                "first_error": "FAILED t.py::test_a - assert 1 == 2",
+                "unreached_steps": ["ruff + mypy (both repo-wide)"],
+            }
+        ],
+    )
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "smoke-pytest", "status": "COMPLETED", "conclusion": "FAILURE"}],
+    )
+    assert code == 1
+    assert out["failures"][0]["step"] == "Pytest (unit + integration)"
+    # The one-line verdict names check[step]; the notes carry the error and
+    # the unreached steps, on every path (live read AND cache serve).
+    assert "failing: smoke-pytest[Pytest (unit + integration)]" in err
+    assert "FAILED t.py::test_a" in err
+    assert "fail-fast never ran: ruff + mypy (both repo-wide)" in err
+    assert "An unreached step is not a pass" in err
+
+
+def test_green_status_carries_no_failures_field(monkeypatch, capsys):
+    code, out, _ = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    )
+    assert code == 0
+    assert "failures" not in out  # green reads stay byte-identical, zero extra cost
+
+
+def test_detail_failure_never_breaks_the_verdict(monkeypatch, capsys):
+    """The failure detail is additive: an exception in the detail path must
+    degrade to counts, never to a wrong or crashed verdict."""
+
+    def boom(rows, cwd=None, runner=None):
+        raise RuntimeError("detail path exploded")
+
+    from fno.pr import _failures
+
+    monkeypatch.setattr(_failures, "collect_failures", boom)
+    code, out, _ = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}],
+    )
+    assert code == 1
+    assert out["verdict"] == "red"
+    assert "failures" not in out
+
+
+def test_failures_note_reads_the_payload_not_locals(capsys):
+    """The note is payload-keyed so `_cache._serve` prints the same failure
+    detail the live read produced - the fleet shares one enrichment."""
+    _status.failures_note(
+        {
+            "failures": [
+                {"check": "smoke", "detail": "log unavailable: HTTP 403"},
+                {"check": "guard", "step": "Lint", "first_error": "E402 boom"},
+            ]
+        }
+    )
+    err = capsys.readouterr().err
+    assert "smoke: log unavailable: HTTP 403" in err
+    assert "guard failed at step 'Lint': E402 boom" in err
+
+
+def test_main_prints_the_gh_call_counter(monkeypatch, capsys):
+    """x-4eac: the spender sees its spend - one stderr line per invocation."""
+    from fno.pr import _cache
+
+    monkeypatch.setattr(_cache, "cached_status", lambda pr, refresh=False: 0)
+    assert _status.main(["42"]) == 0
+    assert "gh call(s) this invocation" in capsys.readouterr().err

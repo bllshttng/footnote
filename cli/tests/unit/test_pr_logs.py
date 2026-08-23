@@ -8,43 +8,77 @@ import json
 
 import pytest
 
-from fno.pr import _logs
+from fno.pr import _logs, _rest
 from fno.pr._proc import Result
 
 
 def _check(name, conclusion="SUCCESS", status="COMPLETED", job="11", url=None):
+    # REST-native row shape (lowercase enums, details_url): the rollup source
+    # is `fetch_pr_rest`, never `gh pr view`.
     return {
-        "__typename": "CheckRun",
         "name": name,
-        "status": status,
-        "conclusion": conclusion,
-        "detailsUrl": url
+        "status": status.lower(),
+        "conclusion": conclusion.lower() if conclusion else "",
+        "started_at": "2026-07-24T00:00:00Z",
+        "details_url": url
         if url is not None
         else f"https://github.com/o/r/actions/runs/9/job/{job}",
-        "startedAt": "2026-07-24T00:00:00Z",
-        "completedAt": "2026-07-24T00:01:00Z",
     }
 
 
 class _Gh:
-    """Stand-in for `fno.pr._proc.run`, recording what was asked of gh."""
+    """Stand-in for `fno.pr._proc.run`, recording what was asked of gh/git."""
 
-    def __init__(self, *, rollup=None, view=None, log="", view_rc=0, log_rc=0, err=""):
-        self._view = view if view is not None else json.dumps(
-            {"statusCheckRollup": list(rollup or [])}
-        )
+    def __init__(self, *, rollup=None, statuses=None, log="", view_rc=0, log_rc=0, err=""):
+        self._rollup = list(rollup or [])
+        self._statuses = list(statuses or [])
         self._log, self._view_rc, self._log_rc, self._err = log, view_rc, log_rc, err
         self.calls = []
 
     def __call__(self, cmd, **kw):
         self.calls.append(list(cmd))
-        if cmd[:3] == ["gh", "pr", "view"]:
-            return Result(self._view_rc, self._view if self._view_rc == 0 else "", self._err)
-        return Result(self._log_rc, self._log if self._log_rc == 0 else "", self._err)
+        url = cmd[-1] if len(cmd) > 2 else ""
+        if cmd[0] == "git":
+            if "get-url" in cmd:
+                return Result(0, "https://github.com/o/r.git", "")
+            return Result(0, "feature/x\n", "")
+        if self._view_rc != 0:
+            # The status read itself fails (auth, rate limit, transport).
+            return Result(self._view_rc, "", self._err)
+        if "/actions/jobs/" in url:
+            return Result(self._log_rc, self._log if self._log_rc == 0 else "", self._err)
+        if "check-runs" in url:
+            return Result(
+                0,
+                json.dumps({"total_count": len(self._rollup), "check_runs": self._rollup}),
+                "",
+            )
+        if url.endswith("/status"):
+            return Result(0, json.dumps({"statuses": self._statuses}), "")
+        if "/pulls?" in url:
+            return Result(0, json.dumps([{"number": 42, "state": "open"}]), "")
+        if "/pulls/" in url:
+            return Result(
+                0,
+                json.dumps(
+                    {
+                        "html_url": "https://github.com/o/r/pull/1",
+                        "state": "open",
+                        "merged": False,
+                        "head": {"sha": "abc123", "ref": "feature/x"},
+                        "base": {"ref": "main"},
+                        "mergeable": True,
+                    }
+                ),
+                "",
+            )
+        return Result(1, "", f"unexpected: {' '.join(cmd)}")
 
     @property
     def fetched_a_log(self):
-        return any(c[:2] == ["gh", "api"] for c in self.calls)
+        return any(
+            c[:2] == ["gh", "api"] and "/actions/jobs/" in c[-1] for c in self.calls
+        )
 
 
 @pytest.fixture
@@ -52,6 +86,21 @@ def gh(monkeypatch):
     def _install(**kw):
         fake = _Gh(**kw)
         monkeypatch.setattr(_logs, "run", fake)
+        # The real REST reader runs against the fake runner: its `runner`
+        # default binds at import, so the injection has to happen through a
+        # wrapper, not by patching `_rest.run` (which the default never reads).
+        real_fetch = _rest.fetch_pr_rest
+        real_resolve = _rest.resolve_current_pr_number_rest
+        monkeypatch.setattr(
+            _rest,
+            "fetch_pr_rest",
+            lambda pr, cwd=None, runner=None: real_fetch(pr, cwd=cwd, runner=fake),
+        )
+        monkeypatch.setattr(
+            _rest,
+            "resolve_current_pr_number_rest",
+            lambda **kw: real_resolve(runner=fake, **kw),
+        )
         return fake
 
     return _install
@@ -101,7 +150,7 @@ def test_unauthenticated_never_prints_green(gh, tmp_path, capsys):
     cap = capsys.readouterr()
 
     assert rc == 4
-    assert "authentication" in cap.err
+    assert "authentication" in cap.err.lower()
     assert "green" not in cap.out
 
 
@@ -160,9 +209,9 @@ def test_unknown_job_filter_reports_the_real_names(gh, tmp_path, capsys):
 
 def test_non_actions_check_reports_its_url(gh, tmp_path, capsys):
     """A StatusContext has no job log; say so rather than spool an empty file."""
-    ctx = {"__typename": "StatusContext", "context": "ext/check", "state": "FAILURE",
-           "targetUrl": "https://ci.example.com/build/7", "createdAt": "2026-07-24T00:00:00Z"}
-    fake = gh(rollup=[ctx])
+    ctx = {"context": "ext/check", "state": "failure",
+           "target_url": "https://ci.example.com/build/7", "created_at": "2026-07-24T00:00:00Z"}
+    fake = gh(statuses=[ctx])
 
     rc = _logs.run_logs("1", root=tmp_path)
     out = capsys.readouterr().out
@@ -171,6 +220,16 @@ def test_non_actions_check_reports_its_url(gh, tmp_path, capsys):
     assert "https://ci.example.com/build/7" in out
     assert not fake.fetched_a_log
     assert not _spooled(tmp_path).exists()
+
+
+def test_rollup_read_is_rest_never_graphql(gh, tmp_path, capsys):
+    """x-4eac: the rollup read spends the core REST budget, never the shared
+    per-USER GraphQL quota `gh pr view` bills against."""
+    fake = gh(rollup=[_check("cli-ci", "FAILURE")], log="boom\n")
+    assert _logs.run_logs("1", root=tmp_path) == 1
+    capsys.readouterr()
+    assert not any(c[:3] == ["gh", "pr", "view"] for c in fake.calls)
+    assert any("check-runs" in c[-1] for c in fake.calls)
 
 
 def test_expired_log_says_retention(gh, tmp_path, capsys):
@@ -203,9 +262,9 @@ def test_spool_write_failure_is_reported(gh, tmp_path, capsys, monkeypatch):
 def test_superseded_cancelled_run_is_not_a_failure(gh, tmp_path, capsys):
     """Reuses _status's dedupe: a stale CANCELLED must not read as red."""
     stale = _check("cli-ci", "CANCELLED")
-    stale["startedAt"] = "2026-07-24T00:00:00Z"
+    stale["started_at"] = "2026-07-24T00:00:00Z"
     fresh = _check("cli-ci", "SUCCESS", job="12")
-    fresh["startedAt"] = "2026-07-24T05:00:00Z"
+    fresh["started_at"] = "2026-07-24T05:00:00Z"
     fake = gh(rollup=[stale, fresh])
 
     assert _logs.run_logs("1", root=tmp_path) == 0

@@ -21,6 +21,7 @@ Code defaults, deliberately not operator config: TTL 60s, backoff base 60s,
 cap 900s. Env overrides exist for tests and one-off
 tuning: FNO_PR_STATUS_TTL, FNO_PR_STATUS_BACKOFF_CAP, FNO_PR_STATUS_CACHE_DIR.
 """
+
 from __future__ import annotations
 
 import fcntl
@@ -199,9 +200,7 @@ def _serve(row: dict, *, stale: bool) -> int:
     # the conversion is guarded where it happens rather than by widening
     # `finite_or_zero` into a timestamp validator it is not.
     try:
-        out["cached_at"] = (
-            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
-        )
+        out["cached_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
     except (OSError, OverflowError, ValueError):
         out["cached_at"] = None
         ts = 0.0
@@ -213,11 +212,12 @@ def _serve(row: dict, *, stale: bool) -> int:
     # A degraded-coverage note must survive the coalescing this module
     # exists to do: without this, the note reaches only the one session
     # whose live read produced the row and none of the serves that follow.
-    from fno.pr._status import coverage_recompute_note, verdict_line
+    from fno.pr._status import coverage_recompute_note, failures_note, verdict_line
 
     sys.stderr.write(verdict_line(out) + "\n")
     sys.stdout.write(json.dumps(out) + "\n")
     coverage_recompute_note(out.get("review_coverage") or {})
+    failures_note(out)
     return code
 
 
@@ -351,15 +351,11 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 # clock: a read spanning the expiry then pushed the window
                 # PAST where it stood, extending the fleet's wait by the
                 # duration of the read.
-                backoff = (
-                    None if held else min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
-                )
+                backoff = None if held else min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
                 # Keep the last GOOD verdict for stale serving - its exit code
                 # too, so the served JSON and the process exit never disagree;
                 # with none, keep the error row itself (loud: verdict error).
-                had_prior = (
-                    (row or {}).get("exit") not in (4, None) and (row or {}).get("output")
-                )
+                had_prior = (row or {}).get("exit") not in (4, None) and (row or {}).get("output")
                 _write_row_locked(
                     p,
                     {
@@ -383,8 +379,13 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 # immediately instead of replaying an error from disk.
                 _write_row_locked(
                     p,
-                    {"ts": now, "exit": code, "output": output,
-                     "fail_count": 0, "backoff_until": 0},
+                    {
+                        "ts": now,
+                        "exit": code,
+                        "output": output,
+                        "fail_count": 0,
+                        "backoff_until": 0,
+                    },
                 )
                 # One row per PR: a served verdict must describe the current
                 # head, so superseded heads' rows (and locks) go now, not on

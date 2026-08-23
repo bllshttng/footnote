@@ -335,3 +335,65 @@ def test_status_context_entries_map_through_classify():
     verdict, code, counts = _status.verdict_for(pr_json["statusCheckRollup"])
     assert (verdict, code) == ("pending", 2)
     assert counts["total"] == 2
+
+
+def test_rollup_rows_carry_the_actions_job_ref():
+    """x-c124: a failing row must carry its own log ref - `detailsUrl` under
+    the GraphQL-shape key `fno.pr._logs._job_ref` parses, so the failure
+    detail needs no second lookup."""
+    cr = {
+        "name": "smoke",
+        "status": "completed",
+        "conclusion": "failure",
+        "started_at": "2026-08-14T10:00:00Z",
+        "details_url": "https://github.com/Owner/Repo/actions/runs/32579190880/job/97045903772",
+    }
+    pr_json, reason = _rest.fetch_pr_rest("42", runner=_runner(check_runs=[cr]))
+    assert reason == ""
+    row = pr_json["statusCheckRollup"][0]
+    assert row["detailsUrl"].endswith("/job/97045903772")
+
+
+def test_status_rows_carry_their_target_url():
+    """A StatusContext's one affordance is its external link; dropping it on
+    the REST port would make a non-Actions red unexplainable."""
+    pr_json, _ = _rest.fetch_pr_rest(
+        "42",
+        runner=_runner(
+            statuses=[
+                {
+                    "context": "ext/check",
+                    "state": "failure",
+                    "created_at": "2026-08-14T10:00:00Z",
+                    "target_url": "https://ci.example.com/build/7",
+                }
+            ]
+        ),
+    )
+    row = pr_json["statusCheckRollup"][0]
+    assert row["targetUrl"] == "https://ci.example.com/build/7"
+
+
+def test_transport_failure_names_its_class_and_disclaims_blockers():
+    """x-4eac (the 2026-08-19 EOF incident): a transport death is a fact about
+    the READ. The reason must say so before a worker polls harder or edits
+    content that was never read."""
+
+    class Res:
+        stderr = 'Post "https://api.github.com/graphql": unexpected EOF'
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    assert "TRANSPORT" in reason
+    assert "not a verdict about this PR" in reason
+    assert "not content" in reason
+
+
+def test_auth_failure_names_its_class():
+    class Res:
+        stderr = "gh: HTTP 401: Bad credentials"
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    assert "AUTHENTICATION" in reason
+    assert "gh auth login" in reason
