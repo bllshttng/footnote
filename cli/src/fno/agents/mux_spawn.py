@@ -68,8 +68,6 @@ from fno.agents.crown import (
     crown_validation_error,
     grant_error,
 )
-from fno.agents.whoami import is_caller_row
-
 #: Bound on the `pane run` / `pane ls` subprocesses. `pane run` includes a
 #: possible server self-spawn + squad git resolve (~2s worst case), so this is
 #: generous next to reality, tight next to a wedged mux.
@@ -3052,6 +3050,7 @@ def dispatch_spawn_pane(
     tab: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
+    succession: bool = False,
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
     route_env: Optional[dict[str, str]] = None,
@@ -3085,10 +3084,13 @@ def dispatch_spawn_pane(
     if crown_level is not None:
         # Same authorization rule as the bg seam: a grant must be a strict subset
         # of what the grantor holds. Both paths check, because either is a door.
+        succession_caller = calling_agent_row()
+        succession_caller_name = getattr(succession_caller, "name", None)
         grant_problem = grant_error(
             crown_scope or "",
-            calling_agent_row(),
+            succession_caller,
             allow_terminal_recovery=True,
+            allow_succession=succession,
         )
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
@@ -3981,9 +3983,9 @@ def dispatch_spawn_pane(
                     and r.status not in TERMINAL_STATUSES
                 ]
 
-                if holders and all(is_caller_row(h, spawned_by_session, spawned_by_harness) for h in holders):
+                if succession and succession_caller_name and holders and all(h.name == succession_caller_name for h in holders):
                     for idx, r in enumerate(rows):
-                        if r.crown_scope == crown_scope and is_caller_row(r, spawned_by_session, spawned_by_harness):
+                        if r.crown_scope == crown_scope and r.name == succession_caller_name:
                             rows[idx] = replace(
                                 r,
                                 crown_level=None,

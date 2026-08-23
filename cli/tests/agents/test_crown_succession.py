@@ -49,7 +49,14 @@ def court(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "busy"):
+def _seat(
+    name: str,
+    session: str,
+    *,
+    scope: str | None = SCOPE,
+    status: str = "busy",
+    grantor: str | None = None,
+):
     update_registry(
         lambda rows: rows
         + [
@@ -62,13 +69,13 @@ def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "
                 status=status,
                 crown_level=2 if scope else None,
                 crown_scope=scope,
-                crown_grantor="human" if scope else None,
+                crown_grantor=(grantor or "human") if scope else None,
             )
         ]
     )
 
 
-def _spawn_heir(name: str = "heir"):
+def _spawn_heir(name: str = "heir", *, succeed: bool = False):
     from fno.agents.dispatch import dispatch_spawn
 
     return dispatch_spawn(
@@ -78,6 +85,7 @@ def _spawn_heir(name: str = "heir"):
         cwd=Path("/tmp"),
         crown_level=2,
         crown_scope=SCOPE,
+        succession=succeed,
     )
 
 
@@ -90,7 +98,11 @@ def test_the_caller_s_crown_transfers_to_the_heir(court) -> None:
     successor and the crown moves in that one write."""
     _seat("sitting-king", CALLER_SESSION)
 
-    _spawn_heir()
+    _spawn_heir(succeed=True)
+
+    holders = [e for e in load_registry() if e.crown_scope == SCOPE]
+    assert len(holders) == 1
+    assert holders[0].name == "heir"
 
     king, heir = _row("sitting-king"), _row("heir")
     assert (king.crown_level, king.crown_scope, king.crown_grantor) == (None, None, None)
@@ -103,11 +115,21 @@ def test_the_scope_is_never_doubly_ruled_nor_unruled(court) -> None:
     holds the scope. Checked over the whole registry, not just the two rows."""
     _seat("sitting-king", CALLER_SESSION)
 
-    _spawn_heir()
+    _spawn_heir(succeed=True)
 
-    holders = [e for e in load_registry() if e.crown_scope == SCOPE]
-    assert len(holders) == 1
-    assert holders[0].name == "heir"
+
+def test_same_scope_spawn_refuses_without_explicit_succession(court) -> None:
+    """Naming the caller's territory is a transfer, never an implicit grant."""
+    from fno.agents.dispatch import DispatchAskError
+
+    _seat("sitting-king", CALLER_SESSION)
+
+    with pytest.raises(DispatchAskError, match="--succeed"):
+        _spawn_heir()
+
+    king = _row("sitting-king")
+    assert (king.crown_level, king.crown_scope) == (2, SCOPE)
+    assert _row("heir") is None
 
 
 def test_a_stranger_s_crown_is_declined_not_stolen(court, monkeypatch) -> None:
@@ -181,7 +203,7 @@ def test_succession_matches_cc_session_id_for_a_partially_backfilled_row(court) 
         ]
     )
 
-    _spawn_heir()
+    _spawn_heir(succeed=True)
 
     king, heir = _row("sitting-king"), _row("heir")
     assert (king.crown_level, king.crown_scope) == (None, None), "the king vacates"
@@ -199,6 +221,43 @@ def test_an_uncrowned_caller_grants_normally(court, monkeypatch) -> None:
 
     assert _row("heir").crown_scope == SCOPE
     assert _row("heir").crown_grantor == "human"
+
+
+def test_reclaim_returns_the_crown_to_its_grantor_without_spawning(court) -> None:
+    """The recorded grantor is a return address, not a reason to create a row."""
+    _seat("grantor", "grantor-session", scope=None)
+    _seat(
+        "heir",
+        CALLER_SESSION,
+        scope=SCOPE,
+        grantor="grantor-session",
+    )
+
+    from fno.agents.crown import reclaim_crown
+
+    receipt = reclaim_crown()
+
+    grantor, heir = _row("grantor"), _row("heir")
+    assert receipt["reclaimed"] == "grantor"
+    assert (grantor.crown_level, grantor.crown_scope) == (2, SCOPE)
+    assert (heir.crown_level, heir.crown_scope) == (None, None)
+    assert len(load_registry()) == 2
+
+
+def test_reclaim_command_uses_the_current_heir_without_a_new_session(court) -> None:
+    _seat("grantor", "grantor-session", scope=None)
+    _seat("heir", CALLER_SESSION, scope=SCOPE, grantor="grantor-session")
+
+    from typer.testing import CliRunner
+
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(agents_app, ["crown", "--reclaim"])
+
+    assert result.exit_code == 0, result.output
+    assert _row("grantor").crown_scope == SCOPE
+    assert _row("heir").crown_scope is None
+    assert len(load_registry()) == 2
 
 
 # --- you cannot hand down authority you do not hold --------------------------
