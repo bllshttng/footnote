@@ -86,6 +86,7 @@ pub mod protocol;
 pub mod provider;
 pub mod readiness;
 pub mod roster_progress;
+pub mod run_outcome;
 pub mod scrape;
 pub mod screen;
 pub mod spawn_gate;
