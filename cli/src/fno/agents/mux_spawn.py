@@ -563,6 +563,7 @@ _EFFORT_SUPERSET = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"
 _EFFORT_ALLOWED = {
     "claude": frozenset({"low", "medium", "high", "xhigh", "max"}),
     "codex": frozenset({"minimal", "low", "medium", "high", "xhigh"}),
+    "agy": frozenset({"low", "medium", "high"}),
     "opencode": _EFFORT_SUPERSET,
 }
 
@@ -592,6 +593,8 @@ def effort_tokens(provider: str, value: str) -> list[str]:
         return ["--effort", value]
     if provider == "codex":
         return ["-c", f"model_reasoning_effort={value}"]
+    if provider == "agy":
+        return ["--effort", value]
     return []
 
 
@@ -1292,8 +1295,7 @@ def build_pane_argv(
         argv += perm
         return argv
     if provider == "agy":
-        if effort:
-            effort_tokens("agy", effort)
+        effort_argv = effort_tokens("agy", effort) if effort else []
         # agy (Antigravity) interactive pane (x-8f7f US1). Mirrors AgyProvider in
         # provider.rs: `--dangerously-skip-permissions` is the never-prompt lane
         # so an unattended pane can't wedge on its first approval. agy is
@@ -1302,6 +1304,7 @@ def build_pane_argv(
         # NOT be used for a pane. The shared readiness gate submits the seed
         # after trust and the composer are ready.
         argv = ["agy", "--dangerously-skip-permissions"]
+        argv += effort_argv
         if permission_mode:
             # skip -> [] (argv already carries the flag); anything else raises.
             argv += permission_pane_tokens("agy", permission_mode)
