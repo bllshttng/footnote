@@ -610,6 +610,18 @@ pub struct RegistryEntry {
     /// which answers only human-or-not; this carries the cause.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_trigger: Option<String>,
+    /// The spawn-time parent edge (x-132c), mirroring Python's `AgentEntry`
+    /// (declared x-30f6, read 0-of-30 on the live fleet because no writer
+    /// stamped it). Ambient-captured from the SPAWNING session's environment
+    /// at every mint site; never required of a caller. Same X3 passthrough as
+    /// `origin`: a field this struct does not know is dropped on daemon
+    /// write-back, which is exactly how the fleet lost the Python stamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_cwd: Option<String>,
     /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
@@ -1577,6 +1589,9 @@ mod tests {
 
     fn sample_entry(name: &str) -> RegistryEntry {
         RegistryEntry {
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
             name: name.into(),
             short_id: format!("{name}-id"),
             legacy_provider: String::new(),
@@ -2238,6 +2253,35 @@ mod tests {
         assert_eq!(
             back["agents"][0]["spawn_trigger"], "think_spawn:work-start",
             "the daemon must re-emit a Python-stamped spawn trigger, not drop it"
+        );
+    }
+
+    #[test]
+    fn spawned_by_edge_survives_a_daemon_read_modify_write() {
+        // x-132c: the parent edge shipped as a Python-only declaration and read
+        // 0-of-30 on the live fleet. The struct mirror is what keeps a daemon
+        // write-back from erasing it again.
+        let mut reg = Registry::default();
+        reg.entries.push(sample_entry("child"));
+        let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
+
+        assert!(wire["agents"][0].get("spawned_by_session").is_none());
+
+        wire["agents"][0]["spawned_by_session"] =
+            serde_json::Value::from("7420e8f7-eeba-4309-8c37-9fc56674f112");
+        wire["agents"][0]["spawned_by_harness"] = serde_json::Value::from("claude");
+        wire["agents"][0]["spawned_by_cwd"] = serde_json::Value::from("/w");
+        let reg: Registry = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            reg.entries[0].spawned_by_session.as_deref(),
+            Some("7420e8f7-eeba-4309-8c37-9fc56674f112")
+        );
+        assert_eq!(reg.entries[0].spawned_by_harness.as_deref(), Some("claude"));
+        assert_eq!(reg.entries[0].spawned_by_cwd.as_deref(), Some("/w"));
+        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert_eq!(
+            back["agents"][0]["spawned_by_session"], "7420e8f7-eeba-4309-8c37-9fc56674f112",
+            "the daemon must re-emit a Python-stamped parent edge, not drop it"
         );
     }
 

@@ -1495,6 +1495,24 @@ def register_existing_session(
         while _address_is_taken(chosen):
             chosen = f"{base}-{suffix}"
             suffix += 1
+        # Parent edge (x-132c), captured for every NON-operator birth: a row
+        # an operator's SessionStart registered has no spawner, and stamping
+        # the operator's own session env would record a self-edge. Adopted and
+        # synthesized rows DO take the registering session as their parent -
+        # it is the session that vouched for them. The identity guard below
+        # covers every OTHER self-registration caller (e.g. a mail hold
+        # registering the session it runs in): a row whose captured parent IS
+        # its own session id never stamps itself as its own parent, whatever
+        # origin the caller passed. Lazy import: dispatch owns the capture
+        # helper and imports this module at load time.
+        if origin == "operator":
+            _sb_session = _sb_harness = _sb_cwd = None
+        else:
+            from fno.agents.dispatch import _capture_parent_edge
+
+            _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()
+            if _sb_session is not None and _sb_session == session_id:
+                _sb_session = _sb_harness = _sb_cwd = None
         fresh = AgentEntry(
             name=chosen,
             harness=harness,
@@ -1506,6 +1524,9 @@ def register_existing_session(
             log_path=log_path,
             status=_REGISTERED_STATUS,
             origin=origin,
+            spawned_by_session=_sb_session,
+            spawned_by_harness=_sb_harness,
+            spawned_by_cwd=_sb_cwd,
             delivery_policy=(
                 None if delivery_policy in (None, "off") else delivery_policy
             ),

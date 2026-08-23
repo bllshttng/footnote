@@ -84,6 +84,11 @@ pub struct RegistryAgent {
     pub crown_level: Option<u32>,
     /// The project/epic/node id the crown rules over, for the inline crown badge.
     pub crown_scope: Option<String>,
+    /// (x-132c) The session id this row was spawned by - the lineage join key,
+    /// matched against other rows' `harness_session_id`. `None` = no recorded
+    /// parent (a root, as far as the renderer can know). Distinct from
+    /// `crown_level`, a fixed authority rank: lineage is who spawned whom.
+    pub spawned_by_session: Option<String>,
     /// (x-9de7) Whether this row's terminal-looking status is a POSITIVE
     /// falsification or an absence of evidence. `Alive` for anything
     /// non-terminal (mirrors `exited == false`, unchanged). Only a terminal
@@ -1379,6 +1384,11 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let spawned_by_session = row
+            .get("spawned_by_session")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let (badge, reason, answerable) = match inside_leg {
             Some(leg) if !leg.is_null() => {
                 let live = report_is_live(
@@ -1490,6 +1500,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             updated_at,
             crown_level,
             crown_scope,
+            spawned_by_session,
             liveness,
         });
     }
@@ -1579,6 +1590,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             // A roster worker carries no crown (crown is an fno-registry fact).
             crown_level: None,
             crown_scope: None,
+            spawned_by_session: None,
             liveness: Liveness::Alive,
         });
     }
@@ -1586,6 +1598,138 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
     out.extend(foreign);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// (x-132c) Rendering cap on lineage depth: a pathological chain must not push
+/// rows off-screen (same bounded-steps posture `crown_indent` held).
+pub const MAX_LINEAGE_DEPTH: usize = 8;
+
+/// (x-132c) Join rows into a lineage forest and lay it out for rendering.
+/// Returns `(order, depths)`: `order` is the render order as INPUT INDICES in
+/// stable pre-order (each row beneath its parent), and `depths[i]` is row
+/// `i`'s lineage depth. Keyed by ROW IDENTITY (the input index), never by a
+/// display name - two rows can legitimately share a name (two bare panes both
+/// labeled `shell`), and a name-keyed join maps both to one row's depth.
+///
+/// The join: `parent_of` on one row is matched against `id_of` on the others.
+/// Three rules, all load-bearing on live registry data:
+/// - a row whose parent is ABSENT from the set renders as a root (depth 0),
+///   never an error - the parent may sit in another section, another project,
+///   or predate the field entirely;
+/// - depth is capped at [`MAX_LINEAGE_DEPTH`];
+/// - cycles are possible: the parent value is ambient-captured from an
+///   environment variable, never validated at write time, so the upward walk
+///   carries its own path and breaks a revisit by rooting the cycle's entry.
+///   A self-edge or an A->B->A pair terminates; it never hangs.
+///
+/// Deterministic: roots and siblings keep input order, so a set with no parent
+/// edges lays out in input order at depth 0 (byte-identical to a flat list).
+pub fn lineage_layout<T>(
+    rows: &[T],
+    id_of: impl Fn(&T) -> Option<&str>,
+    parent_of: impl Fn(&T) -> Option<&str>,
+) -> (Vec<usize>, Vec<usize>) {
+    let n = rows.len();
+    // id -> index; the first row wins a duplicated id (ids are only as
+    // trustworthy as the env they were captured from).
+    let mut by_id: HashMap<&str, usize> = HashMap::with_capacity(n);
+    for (i, r) in rows.iter().enumerate() {
+        if let Some(id) = id_of(r) {
+            by_id.entry(id).or_insert(i);
+        }
+    }
+    let parent_idx: Vec<Option<usize>> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            parent_of(r)
+                .and_then(|p| by_id.get(p).copied())
+                // A row naming its own id roots immediately.
+                .filter(|&p| p != i)
+        })
+        .collect();
+
+    // Depth by memoized upward walk. The walk stops at a resolved ancestor
+    // (its depth is known), a root (no in-set parent -> depth 0), or a
+    // revisit (cycle -> the revisited node roots at depth 0). Unwinding is
+    // uniform: every path node takes its (already-assigned) parent's depth+1.
+    let mut depth: Vec<Option<usize>> = vec![None; n];
+    for i in 0..n {
+        if depth[i].is_some() {
+            continue;
+        }
+        let mut path: Vec<usize> = Vec::new();
+        let mut cur = i;
+        loop {
+            if depth[cur].is_some() {
+                break;
+            }
+            if path.contains(&cur) {
+                depth[cur] = Some(0);
+                break;
+            }
+            path.push(cur);
+            match parent_idx[cur] {
+                Some(p) => cur = p,
+                None => {
+                    depth[cur] = Some(0);
+                    break;
+                }
+            }
+        }
+        for &node in path.iter().rev() {
+            // Root, anchor, and cycle-entry nodes already hold their depth;
+            // only the still-unassigned chain nodes take parent_depth + 1.
+            if depth[node].is_none() {
+                let parent_depth = parent_idx[node].and_then(|p| depth[p]).unwrap_or(0);
+                depth[node] = Some((parent_depth + 1).min(MAX_LINEAGE_DEPTH));
+            }
+        }
+    }
+
+    // Pre-order emission: roots (no in-set parent, or a cycle entry at depth
+    // 0) in input order, children in input order beneath them. The emitted
+    // guard covers a cycle's back-edge: a member already reached as a
+    // descendant is never duplicated.
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut has_parent = vec![false; n];
+    for (i, p) in parent_idx.iter().enumerate() {
+        if let Some(p) = p {
+            children[*p].push(i);
+            has_parent[i] = true;
+        }
+    }
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut emitted = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    for r in 0..n {
+        if has_parent[r] && depth[r] != Some(0) {
+            continue;
+        }
+        stack.push(r);
+        while let Some(x) = stack.pop() {
+            if emitted[x] {
+                continue;
+            }
+            emitted[x] = true;
+            order.push(x);
+            for &c in children[x].iter().rev() {
+                if !emitted[c] {
+                    stack.push(c);
+                }
+            }
+        }
+    }
+    // Defensive tail: nothing should reach here unemitted (every row is a root
+    // or a descendant of one), but a forest the walk could not classify still
+    // renders rather than vanishing.
+    for i in 0..n {
+        if !emitted[i] {
+            order.push(i);
+        }
+    }
+    let depths = (0..n).map(|i| depth[i].unwrap_or(0)).collect();
+    (order, depths)
 }
 
 /// One tracked external session's observed liveness from `claude agents --json
@@ -2970,6 +3114,7 @@ config_dir = "~/.claude-alt"
     // -------------------------------------------------------------------
     fn plain_row(name: &str, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
             name: name.into(),
@@ -3500,5 +3645,200 @@ config_dir = "~/.claude-alt"
         assert_eq!(resolve_branch(&dangling), None);
         std::fs::remove_dir_all(&cwd).unwrap();
         std::fs::remove_dir_all(&dangling).unwrap();
+    }
+
+    // -- x-132c: the lineage forest the sideline orders and indents by --------
+
+    struct LRow {
+        name: &'static str,
+        id: Option<&'static str>,
+        parent: Option<&'static str>,
+    }
+
+    fn layout(rows: &[LRow]) -> (Vec<usize>, Vec<usize>) {
+        lineage_layout(rows, |r| r.id, |r| r.parent)
+    }
+
+    /// Display labels for the returned index order.
+    fn ordered_names(rows: &[LRow], order: &[usize]) -> Vec<&'static str> {
+        order.iter().map(|&i| rows[i].name).collect()
+    }
+
+    #[test]
+    fn derive_rows_reads_the_spawned_by_edge_tolerantly() {
+        // The lineage join key parses like every other registry field: present
+        // and non-empty -> Some, absent/blank/null -> None, never a parse
+        // failure for the whole row.
+        let raw = reg(
+            r#"{"name":"child","cwd":"/w","status":"live","harness":"claude",
+                 "harness_session_id":"sid-c","spawned_by_session":"sid-p"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        assert_eq!(
+            rows[0].spawned_by_session.as_deref(),
+            Some("sid-p"),
+            "a stamped parent edge must reach the reader"
+        );
+        let blank = reg(
+            r#"{"name":"root","cwd":"/w","status":"live","harness":"claude",
+                 "harness_session_id":"sid-r","spawned_by_session":""}"#,
+        );
+        let rows = derive_rows(&blank, NOW).unwrap();
+        assert_eq!(rows[0].spawned_by_session, None);
+    }
+
+    #[test]
+    fn lineage_child_renders_beneath_its_parent() {
+        let rows = [
+            LRow {
+                name: "king",
+                id: Some("sid-k"),
+                parent: None,
+            },
+            LRow {
+                name: "worker",
+                id: Some("sid-w"),
+                parent: Some("sid-k"),
+            },
+        ];
+        let (order, depths) = layout(&rows);
+        assert_eq!(ordered_names(&rows, &order), vec!["king", "worker"]);
+        assert_eq!(depths, vec![0, 1]);
+    }
+
+    #[test]
+    fn lineage_grandchild_nests_before_later_siblings() {
+        // Pre-order: the grandchild renders beneath ITS parent, ahead of the
+        // parent's name-later sibling.
+        let rows = [
+            LRow {
+                name: "king",
+                id: Some("k"),
+                parent: None,
+            },
+            LRow {
+                name: "a-child",
+                id: Some("a"),
+                parent: Some("k"),
+            },
+            LRow {
+                name: "a-grand",
+                id: Some("g"),
+                parent: Some("a"),
+            },
+            LRow {
+                name: "b-child",
+                id: Some("b"),
+                parent: Some("k"),
+            },
+        ];
+        let (order, depths) = layout(&rows);
+        assert_eq!(
+            ordered_names(&rows, &order),
+            vec!["king", "a-child", "a-grand", "b-child"]
+        );
+        assert_eq!(depths, vec![0, 1, 2, 1]);
+    }
+
+    #[test]
+    fn lineage_missing_parent_is_a_root_never_an_error() {
+        let rows = [
+            LRow {
+                name: "orphan",
+                id: Some("o"),
+                parent: Some("gone"),
+            },
+            LRow {
+                name: "plain",
+                id: Some("p"),
+                parent: None,
+            },
+        ];
+        let (order, depths) = layout(&rows);
+        assert_eq!(ordered_names(&rows, &order), vec!["orphan", "plain"]);
+        assert_eq!(depths, vec![0, 0]);
+    }
+
+    #[test]
+    fn lineage_two_row_cycle_terminates() {
+        // Ambient-captured parent values are never validated, so a cycle must
+        // lay out (entry rooted, the other member beneath it), not hang.
+        let rows = [
+            LRow {
+                name: "a",
+                id: Some("id-a"),
+                parent: Some("id-b"),
+            },
+            LRow {
+                name: "b",
+                id: Some("id-b"),
+                parent: Some("id-a"),
+            },
+        ];
+        let (order, depths) = layout(&rows);
+        assert_eq!(
+            ordered_names(&rows, &order),
+            vec!["a", "b"],
+            "every cycle member renders exactly once"
+        );
+        assert_eq!(
+            depths,
+            vec![0, 1],
+            "the cycle entry roots, the member nests"
+        );
+    }
+
+    #[test]
+    fn lineage_self_edge_roots() {
+        let rows = [LRow {
+            name: "self",
+            id: Some("s"),
+            parent: Some("s"),
+        }];
+        let (order, depths) = layout(&rows);
+        assert_eq!(ordered_names(&rows, &order), vec!["self"]);
+        assert_eq!(depths, vec![0]);
+    }
+
+    #[test]
+    fn lineage_depth_is_capped_for_rendering() {
+        let mut rows = vec![LRow {
+            name: "r0",
+            id: Some("i0"),
+            parent: None,
+        }];
+        for d in 1..=14 {
+            rows.push(LRow {
+                name: Box::leak(format!("r{d}").into_boxed_str()),
+                id: Some(Box::leak(format!("i{d}").into_boxed_str())),
+                parent: Some(Box::leak(format!("i{}", d - 1).into_boxed_str())),
+            });
+        }
+        let (order, depths) = layout(&rows);
+        assert_eq!(order.len(), 15);
+        assert!(
+            depths.iter().all(|&d| d <= MAX_LINEAGE_DEPTH),
+            "no row indents past the cap: {depths:?}"
+        );
+        assert_eq!(*depths.last().unwrap(), MAX_LINEAGE_DEPTH);
+    }
+
+    #[test]
+    fn lineage_flat_set_is_byte_identical_to_input_order() {
+        let rows = [
+            LRow {
+                name: "b",
+                id: Some("b"),
+                parent: None,
+            },
+            LRow {
+                name: "a",
+                id: Some("a"),
+                parent: None,
+            },
+        ];
+        let (order, depths) = layout(&rows);
+        assert_eq!(ordered_names(&rows, &order), vec!["b", "a"]);
+        assert_eq!(depths, vec![0, 0]);
     }
 }

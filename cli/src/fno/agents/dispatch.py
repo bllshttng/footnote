@@ -1047,6 +1047,11 @@ def _codex_create_path(
     session_id = result.session_id
     assert session_id is not None  # codex.create raises NoSessionIdError otherwise
 
+    # The parent edge is captured BEFORE the row so the durable registry row
+    # and the lifecycle event name the same parent (x-132c: this path used to
+    # stamp the event only, leaving the row - the surface consumers read -
+    # without lineage).
+    _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
     new_entry = AgentEntry(
         name=name,
         cwd=str(cwd),
@@ -1056,6 +1061,9 @@ def _codex_create_path(
         model=model,
         effort=effort,
         harness_session_id=session_id,
+        spawned_by_session=_cx_session,
+        spawned_by_harness=_cx_harness,
+        spawned_by_cwd=_cx_cwd,
         # The THIRD Python path that mints a worker row, after the pane and bg
         # paths. Its Rust counterpart in codex_ask.rs stamps this, so leaving it
         # off here made one codex worker read "spawn" and another read absent
@@ -1088,8 +1096,8 @@ def _codex_create_path(
 
     # Spawn birth (x-8cd5 Wave 6): the codex create path is the third spawn
     # seam after _claude_create_path and mux_spawn, and was the one a death
-    # could dangle from. Emit to the daemon lifecycle log with the parent edge.
-    _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
+    # could dangle from. Emit to the daemon lifecycle log with the parent edge
+    # (captured above, alongside the row's own stamp).
     events.emit_spawned(
         name=name,
         short_id=session_id,
