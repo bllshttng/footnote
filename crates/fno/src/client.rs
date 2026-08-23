@@ -9507,7 +9507,7 @@ fn table_row_text(a: &AgentRow, layout: TableLayout, depth: usize, now_secs: u64
             tail.width as usize,
         ));
     }
-    let pr = a.pr.map(|n| format!("#{n}")).unwrap_or_default();
+    let pr = a.pr.map(|n| format!("#{n}")).unwrap_or_else(|| "—".into());
     out.push_str(&pad_cols(&pr, layout.pr.width as usize));
     let age = match (a.last_activity_age_s, a.updated_at) {
         (Some(s), _) => humanize_age(Some(s)),
@@ -19825,6 +19825,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keys_modal_esc_click_and_escape_both_close() {
+        use crate::mouse::MouseReport;
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        v.open_keys_modal();
+        let (row, col) = {
+            let rendered = v.keys_modal.as_ref().unwrap().popup.render(v.term);
+            let (line, hits) = rendered
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(_, line)| {
+                    line.hits
+                        .iter()
+                        .any(|(tag, _, _)| *tag == crate::chrome::ESC_CLOSE_HIT)
+                })
+                .expect("which-key modal exposes a clickable esc target");
+            let (offset, len) = hits
+                .hits
+                .iter()
+                .find(|(tag, _, _)| *tag == crate::chrome::ESC_CLOSE_HIT)
+                .map(|(_, offset, len)| (*offset, *len))
+                .unwrap();
+            (
+                rendered.origin.0 + line,
+                rendered.origin.1 + offset + len / 2,
+            )
+        };
+        let click = MouseReport {
+            row: row as u16,
+            col: col as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        let mut buf = Vec::new();
+        keys_modal_mouse(&mut v, &mut Scanner::default(), click, &mut buf)
+            .await
+            .unwrap();
+        assert!(v.keys_modal.is_none());
+        assert!(buf.is_empty());
+
+        v.open_keys_modal();
+        keys_modal_keys(&mut v, &mut Scanner::default(), b"\x1b", &mut buf)
+            .await
+            .unwrap();
+        keys_modal_keys(&mut v, &mut Scanner::default(), b"z", &mut buf)
+            .await
+            .unwrap();
+        assert!(v.keys_modal.is_none());
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
     async fn keys_modal_wheel_scrolls_and_click_off_dismisses() {
         use crate::mouse::MouseReport;
         let mut v = two_pane_view();
@@ -27575,6 +27628,16 @@ mod tests {
                 assert_eq!(descending.last().unwrap(), "age");
             }
         }
+    }
+
+    #[test]
+    fn extended_pr_cell_shows_number_or_neutral_value() {
+        let mut known = agent_row("known", 4, Some(AgentBadge::Working), false);
+        known.pr = Some(482);
+        let unknown = agent_row("unknown", 5, Some(AgentBadge::Working), false);
+        let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        assert!(table_row_text(&known, layout, 0, 0).contains("#482"));
+        assert!(table_row_text(&unknown, layout, 0, 0).contains('—'));
     }
 
     // The mux ranker's attention order, pinned to the shared fixture: the
