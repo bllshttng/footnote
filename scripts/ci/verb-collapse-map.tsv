@@ -300,6 +300,7 @@ doctor event fanout tick	T1	doctor event fanout tick	0
 doctor event gate-escape	T1	doctor event gate-escape	2
 doctor event gc	T1	doctor event gc	4
 doctor event push-parent	T1	doctor event push-parent	2
+doctor footprint	T1	doctor footprint	0
 doctor lint	T1	doctor lint	39
 doctor observer replay	T1	doctor observer replay	2
 doctor observer sweep	T1	doctor observer sweep	4
