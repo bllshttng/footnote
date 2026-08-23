@@ -15403,6 +15403,8 @@ mod tests {
         // still wins while a claude bg row is live and carries a jobId;
         // resumable takes the dead-and-nameless cases the notice used to eat.
         let row = AgentRow {
+            spawned_by_session: None,
+            harness_session_id: None,
             squad: Some(1),
             name: "t-codex-one".into(),
             pane_id: None,

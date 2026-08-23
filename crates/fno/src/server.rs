@@ -15069,6 +15069,7 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
@@ -15146,6 +15147,7 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
@@ -15227,6 +15229,7 @@ mod tests {
             },
         );
         let live_row = RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
@@ -15340,6 +15343,7 @@ mod tests {
         // the session id it resumes; a LIVE claude bg row with a jobId is
         // excluded (attach owns that gesture); agy has no form here.
         let base = || RegistryAgent {
+            spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad".into()),
             harness: Some("codex".into()),
