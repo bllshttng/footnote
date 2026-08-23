@@ -1759,7 +1759,7 @@ fn read_pr_view(
     gh_bin: &str,
     cwd: &Path,
     selector: Option<&str>,
-) -> Result<Option<Value>, (String, String)> {
+) -> Result<Option<Value>, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let metadata_read = if rest_adapter {
         "pr_info_rest"
@@ -1776,21 +1776,26 @@ fn read_pr_view(
         args.push(selector);
     }
     args.extend(["--json", PR_VIEW_FIELDS]);
-    let out = Command::new(gh_bin)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| (metadata_read.to_string(), e.to_string()))?;
+    let out = bounded_read(
+        gh_bin.as_ref(),
+        &args,
+        cwd,
+        metadata_read,
+        stopgate_read_timeout(),
+    )?;
     if !out.status.success() {
-        return if is_no_pr_stderr(&out.stderr) {
+        return if is_no_pr_stderr(&out.stderr_tail) {
             Ok(None)
         } else {
-            Err((metadata_read.to_string(), stderr_tail(&out.stderr)))
+            Err(GhReadError::failed(
+                metadata_read,
+                stderr_tail(&out.stderr_tail),
+            ))
         };
     }
     serde_json::from_slice(&out.stdout)
         .map(Some)
-        .map_err(|_| (metadata_parse.to_string(), String::new()))
+        .map_err(|_| GhReadError::parse_failed(metadata_parse))
 }
 
 /// Resolve a numeric PR selector without consulting the checkout branch.
@@ -1803,7 +1808,7 @@ fn read_pr_head_oid(
     gh_bin: &str,
     cwd: &Path,
     selector: &str,
-) -> Result<Option<(String, Value)>, (String, String)> {
+) -> Result<Option<(String, Value)>, GhReadError> {
     let Some(pr_json) = read_pr_view(gh_bin, cwd, Some(selector))? else {
         return Ok(None);
     };
@@ -1813,7 +1818,7 @@ fn read_pr_head_oid(
         } else {
             "pr_view_parse"
         };
-        (read.to_string(), "missing headRefOid".to_string())
+        GhReadError::failed(read, "missing headRefOid".to_string())
     })?;
     Ok(Some((head, pr_json)))
 }
@@ -1837,11 +1842,16 @@ struct GraphqlQuota {
 const GRAPHQL_FLOOR: i64 = 200;
 
 fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
-    let out = Command::new(gh_bin)
-        .args(["api", "rate_limit"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    // Advisory by contract: any failure (including a timeout kill) is None -
+    // a failed probe must never fabricate an exhaustion verdict.
+    let out = bounded_read(
+        gh_bin.as_ref(),
+        &["api", "rate_limit"],
+        cwd,
+        "graphql_quota",
+        stopgate_read_timeout(),
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2342,7 +2352,7 @@ fn read_pr_info(
     author_session: Option<&str>,
     pr_selector: Option<&str>,
     prefetched_pr_json: Option<Value>,
-) -> Result<PrInfo, (String, String)> {
+) -> Result<PrInfo, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
         "pr_status_rest"
@@ -2477,20 +2487,26 @@ fn read_pr_info(
     let (ci_conclusion, failing_checks, ci_has_pending) = if no_hosted_ci {
         (CiConclusion::Skipped, Vec::new(), false)
     } else {
-        let checks_out = Command::new(gh_bin)
-            .args(["pr", "checks"])
-            .args(&sel)
-            .args(["--json", "name,state,bucket,startedAt,workflow"])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| (checks_read.to_string(), e.to_string()))?;
+        let mut checks_args = vec!["pr", "checks"];
+        checks_args.extend(sel.iter().copied());
+        checks_args.extend(["--json", "name,state,bucket,startedAt,workflow"]);
+        let checks_out = bounded_read(
+            gh_bin.as_ref(),
+            &checks_args,
+            cwd,
+            checks_read,
+            stopgate_read_timeout(),
+        )?;
 
         if !checks_out.status.success() {
-            return Err((checks_read.to_string(), stderr_tail(&checks_out.stderr)));
+            return Err(GhReadError::failed(
+                checks_read,
+                stderr_tail(&checks_out.stderr_tail),
+            ));
         }
 
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
-            .map_err(|_| (checks_parse.to_string(), String::new()))?;
+            .map_err(|_| GhReadError::parse_failed(checks_parse))?;
         // One dedup feeds every reader of this payload, so the conclusion, the
         // failing-name set, and the pending flag can never answer off different
         // rollups (a superseded run read as the current one is the exact lie
@@ -2500,7 +2516,7 @@ fn read_pr_info(
         let failing = failing_check_names(&checks);
         let has_pending = ci_has_pending_checks(&checks);
         (
-            compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?,
+            compute_ci_conclusion(&checks).map_err(|e| GhReadError::parse_failed(&e))?,
             failing,
             has_pending,
         )
@@ -2574,20 +2590,26 @@ fn read_pr_info(
         )
     } else {
         // Read 3: top-level reviews + issue comments
-        let reviews_out = Command::new(gh_bin)
-            .args(["pr", "view"])
-            .args(&sel)
-            .args(["--json", "reviews,comments"])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| ("pr_reviews".to_string(), e.to_string()))?;
+        let mut reviews_args = vec!["pr", "view"];
+        reviews_args.extend(sel.iter().copied());
+        reviews_args.extend(["--json", "reviews,comments"]);
+        let reviews_out = bounded_read(
+            gh_bin.as_ref(),
+            &reviews_args,
+            cwd,
+            "pr_reviews",
+            stopgate_read_timeout(),
+        )?;
 
         if !reviews_out.status.success() {
-            return Err(("pr_reviews".to_string(), stderr_tail(&reviews_out.stderr)));
+            return Err(GhReadError::failed(
+                "pr_reviews",
+                stderr_tail(&reviews_out.stderr_tail),
+            ));
         }
 
         let reviews_json: Value = serde_json::from_slice(&reviews_out.stdout)
-            .map_err(|_| ("pr_reviews_parse".to_string(), String::new()))?;
+            .map_err(|_| GhReadError::parse_failed("pr_reviews_parse"))?;
 
         // PRESENCE is required-only: an optional login's absence must never
         // create a missing_bot (never wait for it). FINDINGS honor the union:
@@ -2644,30 +2666,29 @@ fn read_pr_info(
         // the /pulls/N/comments REST endpoint, which `gh pr view --json
         // comments` does NOT return (verified on PR #447). --paginate may
         // emit CONCATENATED JSON arrays (one per page), so parse as a stream.
-        let comments_out = Command::new(gh_bin)
-            .args([
-                "api",
-                &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
-                "--paginate",
-            ])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| ("pulls_comments".to_string(), e.to_string()))?;
+        let pulls_target = format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments");
+        let comments_out = bounded_read(
+            gh_bin.as_ref(),
+            &["api", &pulls_target, "--paginate"],
+            cwd,
+            "pulls_comments",
+            stopgate_read_timeout(),
+        )?;
 
         if !comments_out.status.success() {
-            return Err((
-                "pulls_comments".to_string(),
-                stderr_tail(&comments_out.stderr),
+            return Err(GhReadError::failed(
+                "pulls_comments",
+                stderr_tail(&comments_out.stderr_tail),
             ));
         }
 
         let mut inline_comments: Vec<Value> = Vec::new();
         for page in serde_json::Deserializer::from_slice(&comments_out.stdout).into_iter::<Value>()
         {
-            let page = page.map_err(|_| ("pulls_comments_parse".to_string(), String::new()))?;
+            let page = page.map_err(|_| GhReadError::parse_failed("pulls_comments_parse"))?;
             match page.as_array() {
                 Some(arr) => inline_comments.extend(arr.iter().cloned()),
-                None => return Err(("pulls_comments_parse".to_string(), String::new())),
+                None => return Err(GhReadError::parse_failed("pulls_comments_parse")),
             }
         }
 
@@ -2678,18 +2699,24 @@ fn read_pr_info(
                 && blocking_severity(c.get("body").and_then(|v| v.as_str()).unwrap_or("")).is_some()
         });
         let commit_dates: Vec<String> = if has_blocking_candidate {
-            let commits_out = Command::new(gh_bin)
-                .args(["pr", "view"])
-                .args(&sel)
-                .args(["--json", "commits"])
-                .current_dir(cwd)
-                .output()
-                .map_err(|e| ("pr_commits".to_string(), e.to_string()))?;
+            let mut commits_args = vec!["pr", "view"];
+            commits_args.extend(sel.iter().copied());
+            commits_args.extend(["--json", "commits"]);
+            let commits_out = bounded_read(
+                gh_bin.as_ref(),
+                &commits_args,
+                cwd,
+                "pr_commits",
+                stopgate_read_timeout(),
+            )?;
             if !commits_out.status.success() {
-                return Err(("pr_commits".to_string(), stderr_tail(&commits_out.stderr)));
+                return Err(GhReadError::failed(
+                    "pr_commits",
+                    stderr_tail(&commits_out.stderr_tail),
+                ));
             }
             let commits_json: Value = serde_json::from_slice(&commits_out.stdout)
-                .map_err(|_| ("pr_commits_parse".to_string(), String::new()))?;
+                .map_err(|_| GhReadError::parse_failed("pr_commits_parse"))?;
             commits_json
                 .get("commits")
                 .and_then(|v| v.as_array())
@@ -3060,8 +3087,10 @@ fn is_pre_existing_main_red(pr_failing: &[String], main_failing: &[String]) -> b
 /// with no failures on HEAD returns `Some(empty)` -> the subset rule then fails
 /// and the caller holds; only positive proof fires the terminal.
 fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<String>> {
-    let list_out = Command::new(gh_bin)
-        .args([
+    let limit = n.to_string();
+    let list_out = bounded_read(
+        gh_bin.as_ref(),
+        &[
             "run",
             "list",
             "--branch",
@@ -3069,13 +3098,15 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
             "--status",
             "completed",
             "--limit",
-            &n.to_string(),
+            &limit,
             "--json",
             "databaseId,conclusion,headSha",
-        ])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+        ],
+        cwd,
+        "main_run_list",
+        stopgate_read_timeout(),
+    )
+    .ok()?;
     if !list_out.status.success() {
         return None; // gh error -> unknown -> hold
     }
@@ -3093,11 +3124,15 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
 
     let mut names: Vec<String> = Vec::new();
     for id in failing_run_ids {
-        let view_out = Command::new(gh_bin)
-            .args(["run", "view", &id.to_string(), "--json", "jobs"])
-            .current_dir(cwd)
-            .output()
-            .ok()?;
+        let id_arg = id.to_string();
+        let view_out = bounded_read(
+            gh_bin.as_ref(),
+            &["run", "view", &id_arg, "--json", "jobs"],
+            cwd,
+            "main_run_view",
+            stopgate_read_timeout(),
+        )
+        .ok()?;
         if !view_out.status.success() {
             return None; // any per-run gh error -> unknown -> hold (fail closed)
         }
@@ -3159,18 +3194,17 @@ fn post_nudge_comment(gh_bin: &str, cwd: &Path, pr_number: i64, review_handle: &
     if std::env::var("FNO_LOOPCHECK_NO_COMMENT").as_deref() == Ok("1") {
         return false;
     }
-    Command::new(gh_bin)
-        .args([
-            "pr",
-            "comment",
-            &pr_number.to_string(),
-            "--body",
-            review_handle,
-        ])
-        .current_dir(cwd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let pr_arg = pr_number.to_string();
+    matches!(
+        bounded_read(
+            gh_bin.as_ref(),
+            &["pr", "comment", &pr_arg, "--body", review_handle],
+            cwd,
+            "nudge_comment",
+            stopgate_read_timeout(),
+        ),
+        Ok(out) if out.status.success()
+    )
 }
 
 /// The first missing bot that has been nudged to its ceiling and gone silent, if
@@ -3195,6 +3229,16 @@ fn is_code_review_reviewer(name: &str) -> bool {
 
 fn successful_output_text(out: std::io::Result<std::process::Output>) -> Option<String> {
     let out = out.ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `successful_output_text` for a bounded run: the completed payload's stdout
+/// when the child exited zero. A timeout or unrunnable child is not a success
+/// (None), which preserves each caller's degrade semantics.
+fn bounded_success_text(result: Result<BoundedOutput, GhReadError>) -> Option<String> {
+    let out = result.ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -3226,19 +3270,23 @@ fn successful_output_text(out: std::io::Result<std::process::Output>) -> Option<
 /// description before deciding whether an override green needs protection.
 fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> Option<bool> {
     for attempt in 1..=3 {
-        let out = Command::new(gh_bin)
-            .args([
+        let pr_arg = pr_number.to_string();
+        let out = bounded_read(
+            gh_bin.as_ref(),
+            &[
                 "pr",
                 "view",
-                &pr_number.to_string(),
+                &pr_arg,
                 "--json",
                 "labels",
                 "--jq",
                 "[.labels[].name] | index(\"coverage-override\") != null",
-            ])
-            .current_dir(cwd)
-            .output();
-        if let Some(text) = successful_output_text(out) {
+            ],
+            cwd,
+            "coverage_override_label",
+            stopgate_read_timeout(),
+        );
+        if let Some(text) = bounded_success_text(out) {
             match text.as_str() {
                 "true" => return Some(true),
                 "false" => return Some(false),
@@ -3257,17 +3305,18 @@ fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> Option<boo
 
 fn current_coverage_description(gh_bin: &str, cwd: &Path, head: &str) -> Option<String> {
     let target = format!("repos/:owner/:repo/commits/{head}/status");
-    successful_output_text(
-        Command::new(gh_bin)
-        .args([
+    bounded_success_text(bounded_read(
+        gh_bin.as_ref(),
+        &[
             "api",
             target.as_str(),
             "--jq",
             "[.statuses[] | select(.context == \"fno/review-coverage\")] | first | .description // \"\"",
-        ])
-        .current_dir(cwd)
-        .output(),
-    )
+        ],
+        cwd,
+        "coverage_status_read",
+        stopgate_read_timeout(),
+    ))
 }
 
 /// The one POST shape every coverage-marker writer uses.
@@ -3276,8 +3325,9 @@ fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, descr
     let state_arg = format!("state={state}");
     let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
     let description_arg = format!("description={description}");
-    let _ = Command::new(gh_bin)
-        .args([
+    let _ = bounded_read(
+        gh_bin.as_ref(),
+        &[
             "api",
             "--method",
             "POST",
@@ -3288,9 +3338,11 @@ fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, descr
             context_arg.as_str(),
             "-f",
             description_arg.as_str(),
-        ])
-        .current_dir(cwd)
-        .output();
+        ],
+        cwd,
+        "coverage_status_post",
+        stopgate_read_timeout(),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6034,6 +6086,10 @@ struct LoopCheckArgs {
     /// idiom as `gh_bin` / `git_bin`, and for the same reason: a test may not
     /// depend on what happens to be installed.
     fno_bin: String,
+    /// Override for the shared stop-gate read bound, in milliseconds. Tests
+    /// inject a small bound so a sleeping fake wedges for ~1s instead of 30;
+    /// any value <= 0 keeps the default. Production never passes it.
+    read_timeout_ms: Option<u64>,
 }
 
 fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
@@ -6053,6 +6109,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut hook_input_stdin = false;
     let mut driver = "target".to_string();
     let mut fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    let mut read_timeout_ms: Option<u64> = None;
 
     // Skip the "loop-check" verb itself if present
     let args = if args.first().map(|s| s.as_str()) == Some("loop-check") {
@@ -6086,6 +6143,12 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             now_override = Some(val);
         } else if let Some(val) = try_flag_value(arg, "--gh-bin", args, &mut i) {
             gh_bin = val;
+        } else if let Some(val) = try_flag_value(arg, "--read-timeout-ms", args, &mut i) {
+            // A parse failure falls back to the default rather than refusing:
+            // the bound is a safety ceiling, and a malformed override must
+            // never wedge or kill the fire over an argument nobody validates
+            // in production.
+            read_timeout_ms = val.parse::<u64>().ok();
         } else if let Some(val) = try_flag_value(arg, "--git-bin", args, &mut i) {
             git_bin = val;
         } else if let Some(val) = try_flag_value(arg, "--author-harness", args, &mut i) {
@@ -6132,6 +6195,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
         hook_input_stdin,
         driver,
         fno_bin,
+        read_timeout_ms,
     })
 }
 
@@ -6353,6 +6417,13 @@ pub fn decide(args: &[String]) -> (i32, String) {
             return (2, out.to_string());
         }
     };
+    // Publish the test override before any read can fire. Zero (and absent)
+    // both mean "the production default", so a fire without the flag always
+    // runs at the real bound no matter what an earlier test set.
+    READ_TIMEOUT_OVERRIDE_MS.store(
+        parsed.read_timeout_ms.unwrap_or(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     // The king asks a different question of a different manifest, so it routes
     // BEFORE the target-shaped manifest read below. Branching inside that read
@@ -6645,11 +6716,26 @@ pub fn decide(args: &[String]) -> (i32, String) {
     let gh_available = {
         // Use a harmless read-only probe: `gh auth status` exits non-zero when
         // not logged in, but the binary IS present. We only care about
-        // NotFound (binary missing from path entirely).
-        match Command::new(gh_bin).arg("--version").output() {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(_) => false,
-            Ok(_) => true, // any exit code: binary exists
+        // NotFound (binary missing from path entirely). Bounded like every
+        // other synchronous child, so even `--version` cannot wedge the fire.
+        match bounded_read(
+            gh_bin.as_ref(),
+            &["--version"],
+            &cwd,
+            "gh_version_probe",
+            std::time::Duration::from_secs(5),
+        ) {
+            // SpawnFailed (kind Failed) covers NotFound and every other spawn
+            // error: binary absent. Completion at any exit code proves it
+            // exists, and so does a timeout - a wedged --version must not read
+            // as "gh not found" and Interrupt an unattended session; the
+            // downstream reads are themselves bounded.
+            Err(GhReadError {
+                kind: ReadErrorKind::Failed,
+                ..
+            }) => false,
+            Err(_) => true,
+            Ok(_) => true,
         }
     };
 
@@ -6929,10 +7015,17 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // forward the most recent prior fingerprint so the consecutive-unchanged streak
     // continues instead of resetting to "none|none|none" which would mask NoProgress.
     // fp_read_failed is recorded in the event payload for observability.
-    let fp_read_result = Command::new(gh_bin)
-        .args(["pr", "view", "--json", "state,number,headRefName"])
-        .current_dir(&cwd)
-        .output();
+    let fp_read_result = bounded_read(
+        gh_bin.as_ref(),
+        &["pr", "view", "--json", "state,number,headRefName"],
+        &cwd,
+        "fingerprint_pr_view",
+        stopgate_read_timeout(),
+    );
+    let mut fp_timeout: Option<GhReadError> = fp_read_result
+        .as_ref()
+        .err()
+        .and_then(|e| (e.kind == ReadErrorKind::TimedOut).then(|| e.clone()));
     let (fp_pr_state, fp_ci, fp_review_ts, fp_read_failed) = match fp_read_result {
         Ok(o) if o.status.success() => {
             let pv: Value = serde_json::from_slice(&o.stdout).unwrap_or(Value::Null);
@@ -6940,16 +7033,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 PrState::from_gh_str(pv.get("state").and_then(|v| v.as_str()).unwrap_or("none"));
 
             // Get CI
-            let ci = match Command::new(gh_bin)
-                .args([
+            let ci = match bounded_read(
+                gh_bin.as_ref(),
+                &[
                     "pr",
                     "checks",
                     "--json",
                     "name,state,bucket,startedAt,workflow",
-                ])
-                .current_dir(&cwd)
-                .output()
-            {
+                ],
+                &cwd,
+                "fingerprint_pr_checks",
+                stopgate_read_timeout(),
+            ) {
                 Ok(co) if co.status.success() => {
                     let cv: Value = serde_json::from_slice(&co.stdout).unwrap_or(Value::Null);
                     // Same dedup as the main CI read: the fingerprint's CI arm
@@ -6957,20 +7052,30 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     // one a newer push already replaced.
                     compute_ci_conclusion(&latest_per_name(&cv)).unwrap_or(CiConclusion::None)
                 }
+                Err(e) if e.kind == ReadErrorKind::TimedOut => {
+                    fp_timeout = fp_timeout.or_else(|| Some(e.clone()));
+                    CiConclusion::None
+                }
                 _ => CiConclusion::None,
             };
 
             // Get review ts (skipped for no_external sessions and declared
             // no-review repos, matching the done() Read 3/4 skip)
             let rv_ts = if !manifest.no_external && !required_bots.is_empty() {
-                match Command::new(gh_bin)
-                    .args(["pr", "view", "--json", "reviews,comments"])
-                    .current_dir(&cwd)
-                    .output()
-                {
+                match bounded_read(
+                    gh_bin.as_ref(),
+                    &["pr", "view", "--json", "reviews,comments"],
+                    &cwd,
+                    "fingerprint_pr_reviews",
+                    stopgate_read_timeout(),
+                ) {
                     Ok(ro) if ro.status.success() => {
                         let rv: Value = serde_json::from_slice(&ro.stdout).unwrap_or(Value::Null);
                         review_activity_ts(&rv)
+                    }
+                    Err(e) if e.kind == ReadErrorKind::TimedOut => {
+                        fp_timeout = fp_timeout.or_else(|| Some(e.clone()));
+                        "none".to_string()
                     }
                     _ => "none".to_string(),
                 }
@@ -6983,13 +7088,49 @@ pub fn decide(args: &[String]) -> (i32, String) {
         // No PR yet: a healthy fire with a "none" fingerprint (world-state,
         // not an outage) - the backstop keeps ticking for a session that
         // never ships a PR.
-        Ok(o) if is_no_pr_stderr(&o.stderr) => {
+        Ok(o) if is_no_pr_stderr(&o.stderr_tail) => {
             (PrState::None, CiConclusion::None, "none".to_string(), false)
         }
-        // Hard gh failure (spawn error OR non-zero exit): mark as failed; we will
-        // carry forward the prior fingerprint after reading the events log.
+        // Hard gh failure (spawn error, non-zero exit, or any remaining
+        // non-success shape): mark as failed; we will carry forward the prior
+        // fingerprint after reading the events log. A TIMEOUT additionally
+        // surfaces below as a named, event-emitted block reason rather than a
+        // silent carry-forward.
         _ => (PrState::None, CiConclusion::None, "none".to_string(), true),
     };
+
+    // A killed fingerprint read blocks this fire with its own name and bound,
+    // exactly like a hard done() read error: the carry-forward streak logic
+    // below still runs (fp_read_failed), but the operator-facing decision
+    // must say what was killed, not report a generic continue.
+    if let Some(err) = &fp_timeout {
+        let quota = probe_graphql_quota(gh_bin, &cwd);
+        emit(
+            "loop_check_gh_error",
+            serde_json::json!({
+                "session_id": session_id,
+                "read": err.read,
+                "outcome": err.outcome(),
+                "stderr_tail": err.stderr_tail,
+                "elapsed_s": err.elapsed.map(|d| d.as_secs_f64()),
+                "graphql_remaining": quota.as_ref().map(|q| q.remaining),
+                "graphql_reset": quota.as_ref().map(|q| q.reset_epoch)
+            }),
+        );
+        emit(
+            "loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "fingerprint": Value::Null,
+                "decision": "block",
+                "pr_state": "unknown",
+                "ci": "unknown",
+                "reviewed": false,
+                "fp_read_failed": true
+            }),
+        );
+        return (0, allow_output("block", None, &err.render(), 0, None));
+    }
 
     // Build a tentative fingerprint from this fire's gh reads.
     let tentative_fp = generic.delivery_fingerprint(make_fingerprint(
@@ -8018,7 +8159,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     allow_output("block", None, &reason, this_fire, Some(fingerprint)),
                 );
             }
-            Err((failed_read, failed_stderr)) => {
+            Err(read_err) => {
+                let failed_read = read_err.read.clone();
+                let failed_stderr = read_err.stderr_tail.clone();
                 // US4 (locked decision 6, REVERSES the wedge's behavior): a
                 // gh-errored done() read NEVER terminates NoProgress, even
                 // with the backstop tripped - a healthy session must not be
@@ -8052,7 +8195,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     serde_json::json!({
                         "session_id": session_id,
                         "read": failed_read,
+                        "outcome": read_err.outcome(),
                         "stderr_tail": failed_stderr,
+                        "elapsed_s": read_err.elapsed.map(|d| d.as_secs_f64()),
                         "graphql_remaining": quota.as_ref().map(|q| q.remaining),
                         "graphql_reset": quota.as_ref().map(|q| q.reset_epoch)
                     }),
@@ -8090,7 +8235,13 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // 40 minutes away for a limit that actually clears in
                 // seconds - the exact "assert a positive marker, never an
                 // absence" trap this whole diagnosis exists to avoid.
-                let reason = if is_secondary_limit_stderr(&failed_stderr) {
+                // A killed timeout renders its own sentence and never falls
+                // through the ordinary failed-read wording: the two demand
+                // opposite operator responses, and the quota probe below must
+                // not label a killed child as a quota problem either.
+                let reason = if read_err.kind == ReadErrorKind::TimedOut {
+                    read_err.render()
+                } else if is_secondary_limit_stderr(&failed_stderr) {
                     format!(
                         "gh read '{failed_read}' hit GitHub's SECONDARY rate limit (burst/\
                          concurrency, not the hourly quota - `gh api rate_limit` can read \
@@ -8165,7 +8316,7 @@ fn run_done(
     global_events_path: &Path,
     repo_slug: &str,
     author_session: Option<&str>,
-) -> Result<PrInfo, (String, String)> {
+) -> Result<PrInfo, GhReadError> {
     let info = read_pr_info(
         gh_bin,
         git_bin,
@@ -8570,6 +8721,135 @@ fn run_bounded(
             })
         }
     }
+}
+
+/// Wall-clock ceiling for every synchronous `gh` and `fno` stop-gate read:
+/// PR metadata, checks, reviews, inline comments, commits, quota, coverage
+/// reads, fingerprint reads, nudges/coverage writes, and the king board. One
+/// named bound so a single wedged child can never outlive the stop fire; the
+/// fidelity ceiling (60s) and the advisory-hint ceiling (10s) stay separate
+/// because they gate different things and drift independently.
+const STOPGATE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Test-injected override for `STOPGATE_READ_TIMEOUT`, set from
+/// `--read-timeout-ms` at fire start. Process-global like every other env or
+/// arg pin this verb takes in-process: a test sets it, fires, and restores,
+/// and concurrent healthy fires answer in milliseconds either way, so the
+/// shortened bound never binds a fire that did not ask for it.
+static READ_TIMEOUT_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn stopgate_read_timeout() -> std::time::Duration {
+    let ms = READ_TIMEOUT_OVERRIDE_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if ms > 0 {
+        std::time::Duration::from_millis(ms)
+    } else {
+        STOPGATE_READ_TIMEOUT
+    }
+}
+
+/// How an external stop-gate read failed. `TimedOut` is its own kind so a
+/// killed child can never render through the ordinary failed-read wording -
+/// the two demand opposite operator responses (wait out a reset vs. debug a
+/// command), and conflating them is how a hang reads as a blip forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadErrorKind {
+    /// Non-zero exit, unparseable payload, or the process never ran. The
+    /// ordinary vocabulary ("gh read '<name>' failed; retrying next fire").
+    Failed,
+    /// The child outlived its bound and the process group was killed.
+    TimedOut,
+}
+
+/// One external read's typed failure: the logical read name, the kind, the
+/// capped stderr tail, and - for a timeout - the elapsed bound. Threads
+/// through every stop-gate reader so the render sites classify instead of
+/// guessing from a detail string.
+#[derive(Clone)]
+struct GhReadError {
+    read: String,
+    kind: ReadErrorKind,
+    stderr_tail: String,
+    elapsed: Option<std::time::Duration>,
+}
+
+impl GhReadError {
+    fn failed(read: &str, stderr_tail: String) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::Failed,
+            stderr_tail,
+            elapsed: None,
+        }
+    }
+
+    fn parse_failed(read: &str) -> Self {
+        Self::failed(read, String::new())
+    }
+
+    fn timed_out(read: &str, elapsed: std::time::Duration) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::TimedOut,
+            stderr_tail: String::new(),
+            elapsed: Some(elapsed),
+        }
+    }
+
+    fn unrunnable(read: &str, detail: &str) -> Self {
+        Self::failed(read, detail.to_string())
+    }
+
+    fn render(&self) -> String {
+        match self.kind {
+            ReadErrorKind::TimedOut => format!(
+                "external read '{}' timed out after {:.1}s and was killed; retrying next fire",
+                self.read,
+                self.elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0)
+            ),
+            ReadErrorKind::Failed => format!(
+                "gh read '{}' failed; retrying next fire. {}",
+                self.read, self.stderr_tail
+            ),
+        }
+    }
+
+    /// The positive outcome marker for `loop_check_gh_error` rows: every row
+    /// carries one, so a timeout is distinguishable in the events log without
+    /// parsing prose.
+    fn outcome(&self) -> &'static str {
+        match self.kind {
+            ReadErrorKind::TimedOut => "timeout",
+            ReadErrorKind::Failed => "failed",
+        }
+    }
+}
+
+/// One external read through the single bounded transport. Every synchronous
+/// `gh`/`fno` read reachable from the stop decision routes through here, so
+/// none can hang the fire and none can misreport a kill as an ordinary
+/// failure. The completed payload carries the exit status, stdout, and the
+/// pre-capped stderr tail; policy (fail-closed, fail-open, degrade) stays at
+/// the typed call site.
+fn bounded_read(
+    bin: &OsStr,
+    args: &[&str],
+    cwd: &Path,
+    read_name: &str,
+    timeout: std::time::Duration,
+) -> Result<BoundedOutput, GhReadError> {
+    match run_bounded(bin, args, cwd, timeout) {
+        BoundedRun::Completed(out) => Ok(out),
+        BoundedRun::TimedOut(elapsed) => Err(GhReadError::timed_out(read_name, elapsed)),
+        BoundedRun::SpawnFailed => Err(GhReadError::unrunnable(read_name, "spawn failed")),
+        BoundedRun::WaitFailed => Err(GhReadError::unrunnable(read_name, "wait failed")),
+    }
+}
+
+/// The `stderr_tail` byte helper applied to a bounded run's already-capped
+/// retention: lossy string for events and reason text.
+fn bounded_stderr(out: &BoundedOutput) -> String {
+    String::from_utf8_lossy(&out.stderr_tail).trim().to_string()
 }
 
 /// Run `fno do plan fidelity --json` for the bound plan and classify the decision.
@@ -9778,19 +10058,26 @@ pub(crate) fn read_king_board(
     // regardless of that exit code; only an absent or unparseable one is a read
     // failure, and that one blocks, because a king that cannot see its board
     // must not certify itself finished.
-    let output = Command::new(fno_bin)
-        .args(["inbox", "board", "--json", "--state"])
-        .arg(state_path)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run {fno_bin} inbox board: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let state_arg = state_path.to_string_lossy().into_owned();
+    let read = bounded_read(
+        fno_bin.as_ref(),
+        &["inbox", "board", "--json", "--state", &state_arg],
+        cwd,
+        "king_board",
+        stopgate_read_timeout(),
+    )
+    .map_err(|e| match e.kind {
+        ReadErrorKind::TimedOut => e.render(),
+        ReadErrorKind::Failed => {
+            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
+        }
+    })?;
+    let stdout = String::from_utf8_lossy(&read.stdout);
     parse_king_board(&stdout).ok_or_else(|| {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&read.stderr_tail);
         format!(
             "unparseable board output (exit {}): {}",
-            output.status.code().unwrap_or(-1),
+            read.status.code().unwrap_or(-1),
             stderr.trim().chars().take(300).collect::<String>()
         )
     })
@@ -10372,7 +10659,20 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 (resolved, true)
             }
             Ok(None) => return (3, no_pr_payload()),
-            Err((read, tail)) => {
+            Err(read_err) => {
+                // A killed timeout reports its own shape before the unknown-row
+                // machinery: no quota diagnosis for a child that never answered.
+                if read_err.kind == ReadErrorKind::TimedOut {
+                    let mut out = serde_json::json!({
+                        "error": read_err.render(),
+                        "outcome": read_err.outcome(),
+                        "emitted": false,
+                    });
+                    insert_quota_diagnostic(&mut out, &None);
+                    return (4, out.to_string());
+                }
+                let read = read_err.read.clone();
+                let tail = read_err.stderr_tail.clone();
                 let pr_num: i64 = pr.as_deref().and_then(|p| p.parse().ok()).unwrap_or(0);
                 let data = coverage_event_data(
                     pr_num,
@@ -10485,7 +10785,21 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 .to_string(),
             )
         }
-        Err((read, tail)) => {
+        Err(read_err) => {
+            // A killed timeout gets its own stdout shape: the caller must see
+            // what was killed and after how long, never a quota diagnosis for
+            // a child that never answered.
+            if read_err.kind == ReadErrorKind::TimedOut {
+                let mut out = serde_json::json!({
+                    "error": read_err.render(),
+                    "outcome": read_err.outcome(),
+                    "emitted": false,
+                });
+                insert_quota_diagnostic(&mut out, &None);
+                return (4, out.to_string());
+            }
+            let read = read_err.read.clone();
+            let tail = read_err.stderr_tail.clone();
             // The gh read failed. Emit an unknown row when the PR number is
             // known (--pr was passed - always true for the merge recompute) so
             // downstream readers see the failed read rather than nothing; with
