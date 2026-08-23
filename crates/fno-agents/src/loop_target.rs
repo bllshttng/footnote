@@ -36,6 +36,7 @@ use crate::loop_runtime::{
     ProjectJournalPath, Queue, Unit,
 };
 use crate::loopcheck::TerminationReason;
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -173,7 +174,6 @@ impl TargetQueue {
             } else {
                 Some(manifest.plan_path)
             },
-            extra_env: vec![],
         };
         Ok(Self { unit: Some(unit) })
     }
@@ -293,6 +293,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut prompt_file: Option<String> = None;
     let mut cli_alias: Option<String> = None;
     let mut driver_lib_dir: Option<PathBuf> = None;
+    let mut king_scope: Option<String> = None;
     let mut cwd: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Helper: advance i and return the next argument, or emit a "missing value"
@@ -363,6 +364,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "--cwd" => {
                 cwd = PathBuf::from(require_value!("--cwd", args, i));
             }
+            "--scope" => {
+                king_scope = Some(require_value!("--scope", args, i).to_string());
+            }
             _ => {
                 eprintln!("fno-agents loop run: unknown flag '{flag}'");
                 return Ok(2);
@@ -378,24 +382,11 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             eprintln!("Usage: fno-agents loop run --driver target [options]");
             return Ok(2);
         }
-        Some("target") => {}
-        Some("king") => {
-            // The cross-session king walk was cut before it shipped. It had no
-            // working path: the resume guard closed its unit undispatched, and
-            // the one dispatch path runs `/target --resume` for every driver.
-            // Under that, nothing crowns, returns or expires a crown at all.
-            // Refusing by NAME beats a silent fallthrough to the target walk,
-            // which would run a target session against a king's manifest.
-            eprintln!(
-                "fno-agents loop run: --driver king is not available. The \
-                 cross-session king walk needs a crown lifecycle (crown, \
-                 respawn, expire) that does not exist yet. The in-session arm \
-                 (`loop-check --driver king`, via the stop hook) is unaffected."
-            );
-            return Ok(2);
-        }
+        Some("target") | Some("king") => {}
         Some(other) => {
-            eprintln!("fno-agents loop run: unknown --driver '{other}'; supported: 'target'");
+            eprintln!(
+                "fno-agents loop run: unknown --driver '{other}'; supported: 'target', 'king'"
+            );
             return Ok(2);
         }
     }
@@ -427,13 +418,46 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // 1. Manifest exists (exit 1 on missing). Which manifest depends on the
     // driver: a king reads its per-scope file `.fno/kings/<scope>.md` (expired
     // by `fno agents king done` on abdication) and never touches the target one.
-    let mut target_queue = match TargetQueue::from_manifest(&cwd) {
-        Ok(q) => Some(q),
-        Err(e) => {
-            eprintln!("fno-agents loop run: {e}");
-            return Ok(1);
+    let driver_name = driver.clone().unwrap_or_else(|| "target".to_string());
+    let mut target_queue: Option<TargetQueue> = None;
+    let mut king_queue: Option<crate::loop_king::KingQueue> = None;
+    // (unit display id, input/scope display) for the header, captured at
+    // construction so the queue is never re-read for display (TOCTOU).
+    let mut unit_display = ("(none)".to_string(), "(none)".to_string());
+    if driver_name == "king" {
+        let Some(scope) = king_scope.as_deref() else {
+            eprintln!(
+                "fno-agents loop run: --driver king needs --scope <scope> (the crowned \
+                 territory to respawn a king over; the manifest is \
+                 .fno/kings/<scope>.md)"
+            );
+            return Ok(2);
+        };
+        let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+        match crate::loop_king::KingQueue::from_manifest(&cwd, scope, fno_bin) {
+            Ok(q) => {
+                unit_display = (q.walk_key().to_string(), q.scope().to_string());
+                king_queue = Some(q);
+            }
+            Err(e) => {
+                eprintln!("fno-agents loop run: {e}");
+                return Ok(1);
+            }
         }
-    };
+    } else {
+        match TargetQueue::from_manifest(&cwd) {
+            Ok(q) => {
+                if let Some(u) = q.unit.as_ref() {
+                    unit_display = (u.id.clone(), u.title.clone());
+                }
+                target_queue = Some(q);
+            }
+            Err(e) => {
+                eprintln!("fno-agents loop run: {e}");
+                return Ok(1);
+            }
+        }
+    }
 
     // 2. Driver whitelist + lib file + binary (exit 77 on missing binary).
     // F2: pass cli_alias so preflight checks the same binary the dispatcher will use.
@@ -472,6 +496,29 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let history_file = fno_dir.join("target-history.txt");
     let signal_file = fno_dir.join("target-promise.signal");
 
+    // Per-driver continue prompt. The driver libs use it as the session prompt
+    // for every (re)dispatch, so it IS the spawned session's instruction: a
+    // target resumes its own manifest, a king reads its board and reigns. One
+    // hardcoded "/target --resume" for every driver is how a respawned king
+    // once ran as a target resume that never knew it was crowned.
+    let continue_prompt = if driver_name == "king" {
+        let scope = king_queue
+            .as_ref()
+            .map(|q| q.scope().to_string())
+            .or_else(|| king_scope.clone())
+            .unwrap_or_default();
+        format!(
+            "You are the respawned king over {scope}. Read the board \
+             (fno agents king board --json --state <your kings manifest>), work \
+             every actionable row through the court duties in \
+             skills/king-for-a-day, and encode each ruling in the graph before \
+             your next read. This is a reign pass, not a /target resume: do not \
+             implement nodes yourself, dispatch and rule."
+        )
+    } else {
+        "/target --resume".to_string()
+    };
+
     let mut env: Vec<(String, String)> = vec![
         (
             "OUTPUT_FILE".to_string(),
@@ -487,10 +534,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         ),
         ("MAX_TURNS".to_string(), max_turns.to_string()),
         ("BUDGET_USD".to_string(), format!("{budget_usd}")),
-        (
-            "CONTINUE_PROMPT".to_string(),
-            "/target --resume".to_string(),
-        ),
+        ("CONTINUE_PROMPT".to_string(), continue_prompt),
     ];
 
     if let Some(m) = &model {
@@ -530,21 +574,44 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     );
 
     // ── peek at the first unit for the header (F6: no TOCTOU re-read) ────────
-    // Read session_id/input from the already-constructed queue instead of
-    // re-reading the manifest (which avoids the TOCTOU double-read and the
-    // .unwrap().unwrap() panic path).
-    // Peek without consuming: TargetQueue stores Option<Unit>, so we look at
-    // the inner unit via as_ref without taking it.
-    let (session_id_display, input_display) =
-        match target_queue.as_ref().and_then(|q| q.unit.as_ref()) {
-            Some(u) => (u.id.clone(), u.title.clone()),
-            None => ("(none)".to_string(), "(none)".to_string()),
-        };
+    // Captured at queue construction above (unit_display) instead of
+    // re-reading any manifest, which avoids the TOCTOU double-read.
+    let (session_id_display, input_display) = unit_display;
+
+    // ── king respawn ceiling (before any dispatch) ────────────────────────────
+    // The walk is one respawn of the crowned scope. Past the manifest ceiling
+    // it terminates on Budget without spawning: a scope that keeps needing a
+    // new king is a defect to look at, not a loop to fund. This is the
+    // ceiling's authority; KingQueue re-checks for mid-walk races.
+    if let Some(kq) = king_queue.as_ref() {
+        if kq.at_respawn_ceiling() {
+            journal.append(
+                "loop_terminated",
+                json!({
+                    "reason": "Budget",
+                    "driver": "king",
+                    "axis": "respawn",
+                    "respawn_count": kq.respawn_count(),
+                    "respawn_ceiling": kq.respawn_ceiling(),
+                    "scope": kq.scope(),
+                }),
+            )?;
+            eprintln!(
+                "fno-agents loop run: king scope {} is at its respawn ceiling \
+                 ({}/{}); terminating on Budget without another spawn. A scope \
+                 that keeps needing a new king needs an operator, not a respawn.",
+                kq.scope(),
+                kq.respawn_count(),
+                kq.respawn_ceiling()
+            );
+            return Ok(1);
+        }
+    }
 
     // Print header. resolve_driver_binary now reflects the cli_alias (F2).
     let binary_name = resolve_driver_binary(&dispatcher_name, cli_alias.as_deref());
     println!("fno-agents loop run");
-    println!("  driver:     target");
+    println!("  driver:     {driver_name}");
     println!("  dispatcher: {dispatcher_name} (binary: {binary_name})");
     println!("  session:    {session_id_display}");
     println!("  input:      {input_display}");
@@ -568,14 +635,23 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let cancel = move || SIGINT_RECEIVED.load(Ordering::SeqCst) || cancel_file.exists();
 
     // ── run the loop ──────────────────────────────────────────────────────────
-    // No cap: a target unit is one deliverable and re-dispatches until it
-    // terminates. The king walk that needed a per-unit cap was cut before it
-    // shipped, and `--driver king` refuses by name above, so there is no
-    // second caller to branch for here.
-    let queue: &mut dyn Queue = target_queue
-        .as_mut()
-        .expect("the target queue is always constructed above");
-    let outcome = match run_loop(queue, &dispatcher, &budget, &journal, &cancel, None) {
+    // Per-unit cap: None for a target (one deliverable re-dispatching until it
+    // terminates), Some(KING_MAX_DISPATCHES) for a king unit, which re-derives
+    // from the board each pass - an unbounded re-dispatch against a board that
+    // will not shrink is the shape that burns a night.
+    let outcome = match (&mut target_queue, &mut king_queue) {
+        (Some(tq), _) => run_loop(tq, &dispatcher, &budget, &journal, &cancel, None),
+        (_, Some(kq)) => run_loop(
+            kq,
+            &dispatcher,
+            &budget,
+            &journal,
+            &cancel,
+            Some(crate::loop_king::KING_MAX_DISPATCHES),
+        ),
+        (None, None) => unreachable!("exactly one queue is constructed above"),
+    };
+    let outcome = match outcome {
         Ok(o) => o,
         Err(e) => {
             eprintln!("fno-agents loop run: fatal loop error: {e}");
