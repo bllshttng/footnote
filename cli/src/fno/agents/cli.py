@@ -23,7 +23,7 @@ agents_app = typer.Typer(
     help=(
         "Cross-CLI agent lifecycle (claude / codex / gemini): "
         "spawn / watch / list / logs / stop. "
-        "To message a peer, use `fno agents mail send <name>` (or the `/mail` skill)."
+        "To message a peer, use `fno mail send <name>` (or the `/mail` skill)."
     ),
     no_args_is_help=True,
     # Default Rust runtime (Phase 6 W6 / cv-d28b266a): by default this group

@@ -91,9 +91,18 @@ def test_old_doctor_fold_spellings_forward_and_teach() -> None:
         ("observer", "doctor observer"),
         ("skill-diff", "doctor skill-diff"),
         ("status-fanout", "doctor event fanout"),
-        ("test", "doctor test"),
-        ("update", "doctor update"),
     ):
         result = runner.invoke(app, [old, "--help"])
         assert result.exit_code == 0, (old, result.output)
         assert f"fno {old} is now fno {destination}" in (result.stderr or "")
+
+
+def test_restored_test_and_update_resolve_at_doctor_as_silent_aliases() -> None:
+    """d-5073b562: `fno test` / `fno update` are canonical, so doctor keeps the
+    nested spellings as silent aliases - registered, quiet, no teaching line."""
+    from fno.cli import app
+
+    for argv in (["doctor", "test", "--help"], ["doctor", "update", "--help"]):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 0, (argv, result.output)
+        assert "is now" not in (result.stderr or ""), argv
