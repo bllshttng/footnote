@@ -444,8 +444,8 @@ def _is_documentation_path(path: str) -> bool:
 # change within one PR head, and 120s bounds staleness across pushes. Every
 # CLI invocation is a fresh process, so the window only opens in a long-lived
 # in-process surface (MCP): such a caller that classifies a docs-only head and
-# then sees code pushed must evict or wait out the TTL before merging. ponytail:
-# head-keyed cache if a long-lived surface ever needs cross-push exactness.
+# then sees code pushed must evict or wait out the TTL before merging. Move to
+# a head-keyed cache if a long-lived surface ever needs cross-push exactness.
 _PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
 _PAYLOAD_CACHE_TTL = 120.0
 
@@ -459,8 +459,6 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     surfaced) is not code: nothing to review, no gate."""
     if not shutil.which("gh"):
         return True
-    import time
-
     key = (repo, pr_number)
     now = time.monotonic()
     hit = _PAYLOAD_CACHE.get(key)

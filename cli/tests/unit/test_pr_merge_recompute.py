@@ -57,11 +57,8 @@ def _stub_recompute(
         return True, why
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake)
-    monkeypatch.setattr(
-        _reviews, "_reviewed_sha_is_ancestor", lambda *args: ancestor
-    )
-    # The content arm behind a dead ancestry must not reach real git/gh from a
-    # hermetic test: stub the whole describes-test at its seam.
+    # Hermetic: the describes-test is the one seam (no ancestry arm exists
+    # anymore); stub it so no real git/gh runs.
     monkeypatch.setattr(
         _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: ancestor
     )

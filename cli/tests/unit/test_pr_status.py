@@ -1398,7 +1398,7 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
     events.write_text(json.dumps(covered_row) + "\n", encoding="utf-8")
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
     monkeypatch.setattr(
-        _reviews, "_reviewed_sha_is_ancestor", lambda reviewed, head, cwd: True
+        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True
     )
     _status.run_status("42", cwd=str(tmp_path))
     out = json.loads(capsys.readouterr().out)
@@ -1831,7 +1831,12 @@ def test_read_review_coverage_rejects_verdict_without_freshness(tmp_path):
     assert got["stale_verdicts"][0]["reviewed_sha"] == head
 
 
-def test_read_review_coverage_preserves_ancestor_review(tmp_path):
+def test_read_review_coverage_expires_a_push_after_review(tmp_path):
+    """The Rust predicate has no ancestry arm: a commit pushed after the
+    review carries a strict superset of the reviewed delta, and ancestry alone
+    must not read it fresh. The old name of this test was 'preserves ancestor
+    review' - exactly the arm removed, because it let a merge accept an
+    increment the stop gate called stale."""
     from fno.pr._reviews import read_review_coverage
 
     reviewed_sha = _commit_reviewed_history(tmp_path)
@@ -1853,9 +1858,9 @@ def test_read_review_coverage_preserves_ancestor_review(tmp_path):
     )
 
     got = read_review_coverage(1005, cwd=str(tmp_path), head=head)
-    assert got["coverage"] == "covered"
-    assert got["verdicts"][0]["freshness"] == "fresh"
-    assert got["stale_verdicts"] == []
+    assert got["coverage"] == "uncovered"
+    assert got["verdicts"][0]["freshness"] == "stale"
+    assert got["stale_verdicts"][0]["reviewed_sha"] == reviewed_sha
 
 
 def test_error_verdict_carries_the_reason(monkeypatch, capsys):
@@ -2276,7 +2281,9 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
         return True, ""
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
-    monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: True)
+    monkeypatch.setattr(
+        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True
+    )
     # The status read resolves the project log from its cwd; point it at the
     # fixture. The lane is pinned on because recompute rides on it: a no-lane
     # repo must not fire the producer, and tmp_path resolves no real config.
