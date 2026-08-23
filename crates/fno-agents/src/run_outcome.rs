@@ -77,6 +77,7 @@ pub struct PredicateProjection {
     pub node_closable: bool,
     pub batch_member: bool,
     pub progress: bool,
+    pub cancelled: bool,
 }
 
 impl RunOutcome {
@@ -119,6 +120,7 @@ impl RunOutcome {
             batch_member: commit
                 .is_some_and(|value| matches!(value.deliverable, Deliverable::BatchMember)),
             progress: commit.is_some_and(|value| value.progress),
+            cancelled: matches!(self.outcome, Some(Outcome::Cancelled)),
         }
     }
 }
@@ -271,6 +273,7 @@ pub fn legacy_projection(reason: &TerminationReason) -> PredicateProjection {
                 | TerminationReason::DoneAwaitingReview
                 | TerminationReason::DonePlanned
         ),
+        cancelled: matches!(reason, TerminationReason::Interrupted),
     }
 }
 

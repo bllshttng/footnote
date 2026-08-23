@@ -5857,6 +5857,41 @@ pub(crate) fn emit_to_both(
     }
 }
 
+fn observe_shadow_transition(
+    run_log: &Path,
+    session_id: &str,
+    event: crate::run_state::RunEvent,
+    project_events: &Path,
+    global_events: &Path,
+) {
+    let result = if session_id == "unknown" || session_id.trim().is_empty() {
+        Err("manifest carries no full run id".to_string())
+    } else {
+        crate::run_state::append_transition(run_log, session_id, event)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    };
+    let Err(error) = result else {
+        return;
+    };
+
+    let event_name = serde_json::to_value(event)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    emit_to_both(
+        project_events,
+        global_events,
+        "transition_rejected",
+        serde_json::json!({
+            "session_id": session_id,
+            "event": event_name,
+            "error": error,
+            "run_log": run_log.display().to_string(),
+        }),
+    );
+}
+
 // ── cancel sentinel ───────────────────────────────────────────────────────────
 
 fn check_cancel_sentinel(cwd: &Path, created_at: &Option<String>) -> bool {
@@ -6343,7 +6378,7 @@ pub(crate) fn resolve_review_inputs(
 
 /// Core decision logic. Returns (exit_code, json_output).
 /// Exit 0 always for allow/block; non-zero only for internal/CLI errors.
-pub fn decide(args: &[String]) -> (i32, String) {
+fn decide_inner(args: &[String]) -> (i32, String) {
     // Missing required flags are CLI misuse: exit 2 with the same JSON error
     // shape the pre-refactor inline checks emitted (AC5-ERR).
     let parsed = match parse_args(args) {
@@ -10074,6 +10109,68 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 
 // ── public entry points ───────────────────────────────────────────────────────
 
+fn observe_decision(args: &[String], output: &str) {
+    let Ok(parsed) = parse_args(args) else {
+        return;
+    };
+    if parsed.driver != "target" {
+        return;
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(output) else {
+        return;
+    };
+    let transition = if let Some(reason) = payload
+        .get("termination_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        let Ok(record) = crate::run_outcome::classify_legacy(reason) else {
+            return;
+        };
+        let projection = record.projection();
+        if projection.cancelled {
+            crate::run_state::RunEvent::Cancel
+        } else if projection.stuck {
+            crate::run_state::RunEvent::Abort
+        } else {
+            crate::run_state::RunEvent::TerminalDecided
+        }
+    } else if payload.get("decision").and_then(serde_json::Value::as_str) == Some("block") {
+        crate::run_state::RunEvent::DispatchClassified
+    } else {
+        return;
+    };
+    let Ok(manifest) = std::fs::read_to_string(&parsed.state_path) else {
+        return;
+    };
+    let Some(session_id) = scan_manifest_field(&manifest, "session_id") else {
+        return;
+    };
+    let project_events = parsed
+        .events_path
+        .unwrap_or_else(|| parsed.cwd.join(".fno/events.jsonl"));
+    let global_events = parsed.global_events_path.unwrap_or_else(|| {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            .join(".fno/events.jsonl")
+    });
+    observe_shadow_transition(
+        &parsed.cwd.join(".fno/run-log.jsonl"),
+        &session_id,
+        transition,
+        &project_events,
+        &global_events,
+    );
+}
+
+pub fn decide(args: &[String]) -> (i32, String) {
+    let result = decide_inner(args);
+    if result.0 == 0 {
+        observe_decision(args, &result.1);
+    }
+    result
+}
+
 /// Entry point called from `bin/client.rs` direct dispatch.
 /// Prints JSON to stdout, returns exit code.
 pub fn run_loop_check(args: &[String]) -> i32 {
@@ -11642,6 +11739,113 @@ mod tests {
         assert!(std::fs::read_to_string(project)
             .unwrap()
             .contains("mutex_probe"));
+    }
+
+    #[test]
+    fn shadow_transition_accepts_without_emitting_a_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_log = dir.path().join("run-log.jsonl");
+        let events = dir.path().join("events.jsonl");
+        let run_id = "20260823T060900Z-cx73523-e04109";
+
+        observe_shadow_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::DispatchClassified,
+            &events,
+            &events,
+        );
+
+        assert_eq!(
+            crate::run_state::fold_run_state(&run_log, run_id).unwrap(),
+            crate::run_state::RunState::Working
+        );
+        assert!(!events.exists());
+    }
+
+    #[test]
+    fn shadow_transition_rejection_changes_no_legacy_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_log = dir.path().join("run-log.jsonl");
+        let events = dir.path().join("events.jsonl");
+        let run_id = "20260823T060900Z-cx73523-e04109";
+        crate::run_state::append_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::DispatchClassified,
+        )
+        .unwrap();
+        crate::run_state::append_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::PrepareHandoff,
+        )
+        .unwrap();
+        crate::run_state::append_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::SuccessorProven,
+        )
+        .unwrap();
+        let legacy = allow_output("block", None, "keep working", 2, None);
+
+        observe_shadow_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::DispatchClassified,
+            &events,
+            &events,
+        );
+
+        assert_eq!(legacy, allow_output("block", None, "keep working", 2, None));
+        let telemetry = std::fs::read_to_string(events).unwrap();
+        assert!(telemetry.contains("\"type\":\"transition_rejected\""));
+        assert!(telemetry.contains("invalid transition Closed + DispatchClassified"));
+    }
+
+    #[test]
+    fn decision_chokepoint_observes_block_then_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("target-state.md");
+        let events = dir.path().join("events.jsonl");
+        let run_id = "20260823T060900Z-cx73523-e04109";
+        std::fs::write(&state, format!("---\nsession_id: {run_id}\n---\n")).unwrap();
+        let args = vec![
+            "loop-check".to_string(),
+            "--state".to_string(),
+            state.display().to_string(),
+            "--transcript".to_string(),
+            dir.path().join("transcript.jsonl").display().to_string(),
+            "--cwd".to_string(),
+            dir.path().display().to_string(),
+            "--events".to_string(),
+            events.display().to_string(),
+            "--global-events".to_string(),
+            events.display().to_string(),
+        ];
+
+        let blocked = allow_output("block", None, "keep working", 1, None);
+        observe_decision(&args, &blocked);
+        assert_eq!(
+            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), run_id)
+                .unwrap(),
+            crate::run_state::RunState::Working
+        );
+
+        let terminal = allow_output(
+            "allow",
+            Some(TerminationReason::DonePRGreen),
+            "done",
+            2,
+            None,
+        );
+        observe_decision(&args, &terminal);
+        assert_eq!(
+            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), run_id)
+                .unwrap(),
+            crate::run_state::RunState::Sealing
+        );
+        assert!(!events.exists());
     }
 
     #[test]
