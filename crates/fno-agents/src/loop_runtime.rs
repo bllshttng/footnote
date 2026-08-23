@@ -100,14 +100,13 @@ pub struct Unit {
     /// Correlation key matched against termination events' `data.session_id`.
     /// For target sessions this is the session identifier written into the
     /// target-state.md manifest; for other drivers it is whatever key the
-    /// dispatcher embeds in its events.
+    /// dispatcher embeds in its events. A driver whose sessions terminate
+    /// under a stable id that ALSO terminates across runs (the king's
+    /// manifest `fno_id`) must mint this per invocation, or the resume guard
+    /// below closes every unit after the first on a prior run's terminal.
     pub session_key: String,
     /// Optional plan path for context (not used by the runtime itself).
     pub plan_path: Option<String>,
-    /// Driver-specific extra env vars to inject into the child process.
-    /// The runtime passes these through to the Dispatcher without inspecting
-    /// them; TargetQueue leaves this empty.
-    pub extra_env: Vec<(String, String)>,
 }
 
 /// Evidence of termination extracted from the project journal.

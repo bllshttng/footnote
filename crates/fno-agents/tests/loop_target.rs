@@ -785,7 +785,6 @@ fn signal_death_returns_128_plus_n() {
         title: "signal test".to_string(),
         session_key: "test-signal".to_string(),
         plan_path: None,
-        extra_env: vec![],
     };
     let ctx = DispatchCtx { iteration: 1 };
     let mut session = dispatcher.run(&unit, &ctx).expect("dispatch must succeed");
@@ -1175,4 +1174,235 @@ fn driver_persist_history_called_per_iteration() {
             "node_failed exit_code must be 7 (preserved from driver_invoke): {ev}"
         );
     }
+}
+
+// ── king walk arm ─────────────────────────────────────────────────────────────
+
+/// Write a per-scope king manifest under `<dir>/.fno/kings/<scope>.md`.
+fn write_king_manifest(dir: &Path, scope: &str, fno_id: &str, count: u64, ceiling: u64) {
+    let kings = dir.join(".fno").join("kings");
+    fs::create_dir_all(&kings).unwrap();
+    let content = format!(
+        "---\nfno_id: {fno_id}\nscope: {scope}\nharness: claude\nharness_session_id: k-sess\nbudget_max_iterations: 40\nrespawn_count: {count}\nrespawn_ceiling: {ceiling}\n---\n"
+    );
+    fs::write(kings.join(format!("{scope}.md")), content).unwrap();
+}
+
+/// A stub `fno` binary whose `inbox board` prints the given actionable count.
+fn write_stub_fno_board(dir: &Path, actionable: u64) {
+    write_stub_binary(
+        dir,
+        "fno",
+        &format!(
+            "if [ \"$1\" = \"inbox\" ]; then echo '{{\"actionable\": {actionable}, \"unreadable\": 0, \"queues\": []}}'; exit 0; fi\nexit 1"
+        ),
+    );
+}
+
+fn run_verb(args: &[&str], envs: &[(&str, &str)]) -> (String, String, Option<i32>) {
+    let mut cmd = std::process::Command::new(BINARY);
+    cmd.args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        out.status.code(),
+    )
+}
+
+/// Verify-4 shape, positive form: with a fixture king manifest the walk no
+/// longer refuses by name - it proceeds past driver validation into the
+/// preflight header and runs to a terminal (NoWork on a clean board).
+#[test]
+fn king_walk_proceeds_past_driver_validation_into_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("lib");
+    write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
+    let bin_dir = dir.path().join("bin");
+    write_stub_binary(&bin_dir, "claude", "exit 0");
+    write_stub_fno_board(&bin_dir, 0);
+    write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
+
+    let (stdout, stderr, code) = run_verb(
+        &[
+            "loop",
+            "run",
+            "--driver",
+            "king",
+            "--scope",
+            "epic-x",
+            "--driver-lib-dir",
+            lib_dir.to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+            "--max-iterations",
+            "2",
+        ],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        code,
+        Some(0),
+        "a clean board is NoWork (exit 0)\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("driver:     king"),
+        "the header must name the king driver: {stdout}"
+    );
+    assert!(
+        stdout.contains("session:    k-9331-w"),
+        "the header must show the per-invocation walk key: {stdout}"
+    );
+}
+
+/// AC5-ERR: at the respawn ceiling the walk terminates on Budget before
+/// dispatching, and says so in both the journal and stderr.
+#[test]
+fn king_walk_terminates_budget_at_the_respawn_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("lib");
+    write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
+    let bin_dir = dir.path().join("bin");
+    write_stub_binary(&bin_dir, "claude", "exit 0");
+    write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
+
+    let (stdout, stderr, code) = run_verb(
+        &[
+            "loop",
+            "run",
+            "--driver",
+            "king",
+            "--scope",
+            "epic-x",
+            "--driver-lib-dir",
+            lib_dir.to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+            "--max-iterations",
+            "2",
+        ],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        code,
+        Some(1),
+        "Budget exits 1\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("respawn ceiling"),
+        "names the ceiling: {stderr}"
+    );
+    let events = read_jsonl(&dir.path().join(".fno").join("events.jsonl"));
+    let budget = events
+        .iter()
+        .find(|v| v["type"].as_str() == Some("loop_terminated"))
+        .expect("a loop_terminated event must be journaled");
+    assert_eq!(budget["data"]["reason"].as_str(), Some("Budget"));
+    assert_eq!(budget["data"]["axis"].as_str(), Some("respawn"));
+    // Nothing dispatched at the ceiling: no driver output file was created.
+    assert!(!dir
+        .path()
+        .join(".fno")
+        .join("target-last-output.txt")
+        .exists());
+}
+
+/// AC5-HP: a prior reign's terminal under the bare fno_id must not close the
+/// walk unit (the original defect), the continue prompt must name the king's
+/// next move, and one walk invocation bills exactly one respawn.
+#[test]
+fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("lib");
+    let dump = dir.path().join("env-dump.txt");
+    let dump_str = dump.display().to_string();
+    write_stub_driver(
+        &lib_dir,
+        "claude-code",
+        3,
+        &format!("env > {dump_str}; exit 0"),
+    );
+    let bin_dir = dir.path().join("bin");
+    write_stub_binary(&bin_dir, "claude", "exit 0");
+    write_stub_fno_board(&bin_dir, 2);
+    write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
+    // A prior reign terminated under the bare manifest fno_id. Under the old
+    // unit keying the resume guard closed the unit on this event and the walk
+    // dispatched nothing.
+    let events = dir.path().join(".fno").join("events.jsonl");
+    fs::create_dir_all(events.parent().unwrap()).unwrap();
+    seed_termination_event(&events, "k-9331", "NoProgress");
+
+    let (stdout, stderr, code) = run_verb(
+        &[
+            "loop",
+            "run",
+            "--driver",
+            "king",
+            "--scope",
+            "epic-x",
+            "--driver-lib-dir",
+            lib_dir.to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+            "--max-iterations",
+            "2",
+        ],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            // Hermetic registry: from_manifest refuses when a live row holds
+            // the scope, and the developer machine's real registry is none of
+            // this test's business.
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
+    );
+
+    assert!(
+        dump.exists(),
+        "the walk must dispatch despite the prior reign terminal\nstdout={stdout}\nstderr={stderr}"
+    );
+    let env_dump = fs::read_to_string(&dump).unwrap();
+    assert!(
+        env_dump.contains("respawned king over epic-x"),
+        "the continue prompt must name the reign: {env_dump}"
+    );
+    assert!(
+        env_dump.contains("FNO_KING_WALK_SESSION_KEY=k-9331-w"),
+        "the walk key must reach the child so its terminal correlates: {env_dump}"
+    );
+    assert!(
+        !env_dump.contains("CONTINUE_PROMPT=/target --resume"),
+        "a king session must never be resumed as a target: {env_dump}"
+    );
+    assert_eq!(
+        code,
+        Some(1),
+        "board still actionable burns to Budget\nstdout={stdout}\nstderr={stderr}"
+    );
+    let manifest =
+        fs::read_to_string(dir.path().join(".fno").join("kings").join("epic-x.md")).unwrap();
+    assert!(
+        manifest.contains("respawn_count: 1"),
+        "one walk invocation bills exactly one respawn: {manifest}"
+    );
 }

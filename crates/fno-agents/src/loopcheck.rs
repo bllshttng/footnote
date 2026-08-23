@@ -9600,11 +9600,14 @@ pub(crate) struct KingManifest {
     pub(crate) scope: String,
     pub(crate) created_at: Option<String>,
     pub(crate) max_iterations: u64,
+    pub(crate) respawn_count: u64,
+    pub(crate) respawn_ceiling: u64,
 }
 
 pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
     let mut out = KingManifest {
         max_iterations: 40,
+        respawn_ceiling: 4,
         ..Default::default()
     };
     let mut saw_frontmatter = false;
@@ -9627,6 +9630,16 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
             "budget_max_iterations" => {
                 if let Ok(n) = value.parse::<u64>() {
                     out.max_iterations = n;
+                }
+            }
+            "respawn_count" => {
+                if let Ok(n) = value.parse::<u64>() {
+                    out.respawn_count = n;
+                }
+            }
+            "respawn_ceiling" => {
+                if let Ok(n) = value.parse::<u64>() {
+                    out.respawn_ceiling = n;
                 }
             }
             _ => {}
@@ -9910,7 +9923,14 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         .global_events_path
         .clone()
         .unwrap_or_else(|| project_events.clone());
-    let session_id = manifest.fno_id.clone();
+    let session_id = std::env::var(crate::loop_king::WALK_SESSION_KEY_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| manifest.fno_id.clone());
+    // A walk-spawned pass tags its terminal with the per-invocation key so the
+    // walk's resume guard can never see a PRIOR reign's terminal, while every
+    // other reader (freshness probe, fire history) still filters on the
+    // driver tag rather than the id, so both spellings read the same.
     let emit = |event_type: &str, data: serde_json::Value| {
         emit_to_both(&project_events, &global_events, event_type, data);
     };

@@ -120,7 +120,7 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
 
     result = _spawn(
         "spawn", "--name", "king-bg", "-H", "claude", "reign",
-        "--substrate", "bg", "--cwd", str(bg_home), "--crown", "epic-x",
+        "--substrate", "bg", "--cwd", str(bg_home), "--crown", "epic-x", "--succeed",
     )
     assert result.exit_code == 0, result.output
 

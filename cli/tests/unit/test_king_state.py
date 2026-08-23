@@ -196,6 +196,48 @@ def test_best_effort_cleanup_removes_only_the_named_scope(tmp_path):
     assert second.exists()
 
 
+def test_a_crashed_king_s_leftover_manifest_captures_nobody(tmp_path):
+    """Expiry must not depend on the verb being called, and it does not.
+
+    A king that crashes never runs the expire verb, so its scope manifest
+    stays on disk. The registry row is authority: the dead king's own read
+    resolves nothing (terminal row), and a successor session resolving over
+    the same file also gets nothing (its row holds no crown over that
+    scope). If either read ever returned the path, a leftover file would
+    capture a session that was never crowned by it.
+    """
+    import fno.king.state as state
+
+    resolve = state.resolve_king_manifest_path
+    root = tmp_path / ".fno"
+    path = state.king_manifest_path("x-f3d0", state_root=root)
+    write_manifest(path, scope="x-f3d0", harness_session_id="dead-session")
+    crashed_king = SimpleNamespace(
+        # A reconcile flipped the row terminal; the crown fields stay stamped
+        # because nothing ran to vacate them.
+        status="orphaned",
+        crown_scope="x-f3d0",
+        harness="claude",
+        harness_session_id="dead-session",
+        cc_session_id=None,
+        short_id=None,
+    )
+    successor = SimpleNamespace(
+        status="live",
+        crown_scope=None,
+        harness="claude",
+        harness_session_id="successor-session",
+        cc_session_id=None,
+        short_id=None,
+    )
+
+    assert resolve("dead-session", "claude", state_root=root, registry=[crashed_king]) is None
+    assert resolve("successor-session", "claude", state_root=root, registry=[successor]) is None
+    # The file is still there - inert, not deleted. Crash safety is row
+    # authority, not cleanup.
+    assert path.is_file()
+
+
 def test_init_writes_a_manifest_carrying_the_fields_the_loop_reads(tmp_path):
     path = tmp_path / "king-state.md"
     write_manifest(path, scope="board drain", harness_session_id="sess-1")

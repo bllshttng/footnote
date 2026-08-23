@@ -33,6 +33,11 @@ def init_cmd(
     max_iterations: int = typer.Option(
         40, "--max-iterations", help="Iteration ceiling before the loop stops on Budget."
     ),
+    respawn_ceiling: int = typer.Option(
+        4,
+        "--respawn-ceiling",
+        help="King sessions the walk may respawn before it terminates on Budget.",
+    ),
     force: bool = typer.Option(
         False, "--force", "-F", help="Replace an existing manifest."
     ),
@@ -40,9 +45,9 @@ def init_cmd(
     """Write this crown scope's manifest, which the king loop arms read.
 
     Write-once, like the target manifest. Without it the stop hook allows exit
-    silently, which is the correct posture for a session nobody crowned.
-    Re-crowning an ended king needs --force until a crown lifecycle exists to
-    expire the manifest on its own.
+    silently, which is the correct posture for a session nobody crowned. An
+    ended king's manifest is expired by `fno agents king done`, so a successor
+    init needs --force only when the predecessor died without abdicating.
     """
     from fno.king.state import (
         KingManifestExists,
@@ -84,6 +89,7 @@ def init_cmd(
             scope=scope,
             harness_session_id=harness_session_id,
             max_iterations=max_iterations,
+            respawn_ceiling=respawn_ceiling,
             force=force,
         )
     except KingManifestExists as exc:
@@ -92,6 +98,165 @@ def init_cmd(
     typer.echo(f"king: manifest written: {manifest_path}")
     typer.echo(f"fno_id: {fields['fno_id']}")
     typer.echo(f"scope:  {fields['scope']}")
+
+
+@king_app.command("done")
+def done_cmd(
+    scope: str = typer.Option(
+        "", "--scope", help="Crown scope to expire. Default: this session's own crown."
+    ),
+) -> None:
+    """Expire this crown: vacate the row and clear the scope manifest.
+
+    The abdication half of the crown lifecycle. A king ending its reign
+    calls it, so a successor's crown arms without --force. A king that dies
+    without calling it leaves an inert manifest: the registry row is
+    authority, so a leftover file captures nobody.
+    """
+    from dataclasses import replace as _replace
+
+    from fno.agents.crown import (
+        AGENT_UNREGISTERED,
+        REGISTRY_UNREADABLE,
+        calling_agent_row,
+    )
+    from fno.agents.registry import TERMINAL_STATUSES as _TERMINAL_ROW_STATUSES
+    from fno.agents.registry import update_registry
+    from fno.king.state import king_manifest_path, parse_manifest, remove_king_manifest
+
+    caller = calling_agent_row()
+    if caller is REGISTRY_UNREADABLE or caller is AGENT_UNREGISTERED:
+        typer.echo(
+            "king: cannot verify the caller's crown: this session carries an "
+            "agent identity the registry does not resolve to a row, and "
+            "expiring a crown requires a holder. Run /fno-me or retry, or "
+            "pass --scope from an attended shell.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    if caller is None:
+        if not scope.strip():
+            typer.echo(
+                "king: an attended shell holds no crown of its own; pass "
+                "--scope <territory> to expire that crown.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        # A named scope may still have a LIVE king reigning over it; expiring
+        # only the manifest would disarm that king's stop-hook floor while its
+        # row still reads crowned. Resolve the holder inside the vacate
+        # closure below (under the registry lock) and vacate it too; a scope
+        # with no live holder is the orphan-cleanup case and clears the file
+        # alone.
+        holder_name = ""
+    else:
+        own = getattr(caller, "crown_scope", None)
+        if not scope.strip():
+            if not own:
+                typer.echo(
+                    "king: this session holds no crown, so there is nothing "
+                    "to expire.",
+                    err=True,
+                )
+                raise typer.Exit(2)
+            scope = own
+        elif own != scope:
+            typer.echo(
+                f"king: refusing to expire {scope!r}: this session's crown is "
+                f"{own!r}, and an agent expires only its own crown. Call "
+                "`fno agents king done` with no --scope, or use an attended "
+                "shell for another territory.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        holder_name = caller.name
+
+    # Snapshot the manifest's OWN session id BEFORE vacating: the removal
+    # below compares against it under the manifest lock, so a successor
+    # crowned in the vacate window (which writes its own id into the same
+    # scope file) survives instead of having its manifest unlinked. The id is
+    # read from the file, never the caller's row, so a resumed king whose row
+    # id has moved on still expires the manifest it was armed with.
+    try:
+        expired_manifest_session = (
+            parse_manifest(king_manifest_path(scope)).get("harness_session_id") or None
+        )
+    except (OSError, ValueError):
+        expired_manifest_session = None
+
+    # Vacate the row BEFORE touching the file, under the registry lock: the
+    # vacate closure re-reads the row's crown, so a scope that moved to a
+    # successor mid-call is refused here instead of disarming the successor's
+    # manifest below. Same order the succession path uses (stamp the heir,
+    # then clean the vacated file).
+    vacated = holder_name is None
+    if holder_name is not None:
+        attended_named = holder_name == ""
+
+        def _vacate(rows: list) -> list:
+            nonlocal vacated
+            for index, row in enumerate(rows):
+                if attended_named:
+                    # An attended shell naming a scope: vacate whatever live
+                    # row still holds it, or clear nothing when the scope is
+                    # already orphaned (the manifest-only cleanup below).
+                    if (
+                        row.crown_scope == scope
+                        and row.status not in _TERMINAL_ROW_STATUSES
+                    ):
+                        rows[index] = _replace(
+                            row,
+                            crown_level=None,
+                            crown_scope=None,
+                            crown_grantor=None,
+                        )
+                        vacated = True
+                elif row.name == holder_name and row.crown_scope == scope:
+                    rows[index] = _replace(
+                        row, crown_level=None, crown_scope=None, crown_grantor=None
+                    )
+                    vacated = True
+                    break
+            return rows
+
+        try:
+            update_registry(_vacate)
+        except Exception as exc:  # noqa: BLE001 - named, never swallowed
+            typer.echo(f"king: crown expire failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        if not vacated and not attended_named:
+            typer.echo(
+                f"king: refusing to expire {scope!r}: this row no longer holds "
+                "it (the crown moved or was already vacated), so the manifest "
+                "on disk may belong to a successor. Re-read with "
+                "`fno agents court` before expiring anything.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+    # expected_harness_session_id is the snapshot taken above, compared under
+    # the manifest lock: it is the successor-race guard, not an ownership
+    # proof (the locked vacate above already proved that). A False return
+    # here means the file on disk is no longer the manifest this expiry
+    # targeted - most likely a successor's fresh one.
+    if not remove_king_manifest(
+        scope, expected_harness_session_id=expired_manifest_session
+    ):
+        typer.echo(
+            f"king: row vacated, but the manifest for {scope!r} could not be "
+            "removed: the file no longer names the session this expiry "
+            "snapshotted, so a successor crowned mid-expiry likely owns it "
+            "now. Re-read with `fno agents court` before touching anything.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    typer.echo(f"king: crown expired: {scope}")
+    typer.echo(
+        "row crown: vacated; manifest: cleared"
+        if vacated
+        else "row crown: no live holder found; manifest: cleared"
+    )
 
 
 @king_app.command("manifest-path", hidden=True)
@@ -249,6 +414,7 @@ agents_king_app = typer.Typer(
     no_args_is_help=True,
 )
 agents_king_app.command("init")(init_cmd)
+agents_king_app.command("done")(done_cmd)
 agents_king_app.command("escalate")(escalate_cmd)
 
 
