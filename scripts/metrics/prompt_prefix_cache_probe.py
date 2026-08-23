@@ -157,21 +157,47 @@ def _emit_measurement(
     return result
 
 
-def instrument_control(stable_prefix_tokens: int) -> None:
-    stable = [
-        UsageSample("stable-1", 0, stable_prefix_tokens, 8, "synthetic-control"),
+def _common_prefix_tokens(first: list[str], second: list[str]) -> int:
+    count = 0
+    for left, right in zip(first, second):
+        if left != right:
+            break
+        count += 1
+    return count
+
+
+def _synthetic_prefix_scenario(
+    first_early: str, second_early: str, stable_prefix_tokens: int
+) -> list[UsageSample]:
+    stable_tail = [f"stable-{index}" for index in range(stable_prefix_tokens - 1)]
+    first_prompt = [first_early, *stable_tail]
+    second_prompt = [second_early, *stable_tail]
+    second_cache_read = _common_prefix_tokens(first_prompt, second_prompt)
+    return [
         UsageSample(
-            "stable-2",
-            stable_prefix_tokens,
-            64,
-            9,
-            "synthetic-control",
+            f"early-block={first_early}",
+            0,
+            len(first_prompt),
+            len(first_prompt),
+            "exact-prefix-simulator",
+        ),
+        UsageSample(
+            f"early-block={second_early}",
+            second_cache_read,
+            len(second_prompt) - second_cache_read,
+            len(second_prompt),
+            "exact-prefix-simulator",
         ),
     ]
-    varying = [
-        UsageSample("varying-early-1", 0, stable_prefix_tokens, 8, "synthetic-control"),
-        UsageSample("varying-early-2", 0, stable_prefix_tokens, 9, "synthetic-control"),
-    ]
+
+
+def instrument_control(stable_prefix_tokens: int) -> None:
+    stable = _synthetic_prefix_scenario(
+        "request-id=constant", "request-id=constant", stable_prefix_tokens
+    )
+    varying = _synthetic_prefix_scenario(
+        "request-id=one", "request-id=two", stable_prefix_tokens
+    )
     stable_result = _emit_measurement(
         "instrument-stable-prefix", stable, stable_prefix_tokens
     )
@@ -190,6 +216,11 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def selftest() -> None:
+    stable_control = _synthetic_prefix_scenario("constant", "constant", 8)
+    varying_control = _synthetic_prefix_scenario("request-one", "request-two", 8)
+    assert stable_control[1].cache_read == 8
+    assert varying_control[1].cache_read == 0
+
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         claude = root / "claude.jsonl"
