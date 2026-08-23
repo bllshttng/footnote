@@ -467,19 +467,97 @@ def _reviewed_sha_is_ancestor(
     return result.returncode == 0
 
 
+def _pr_delta_patch_id(sha: str, base_ref: str, cwd: Optional[str]) -> Optional[str]:
+    """Stable patch-id of the PR's own delta at ``sha`` against ``base_ref``.
+
+    ``git diff base...sha`` names the branch's own changes (three-dot), not
+    changes that landed on the base since the branch point, so the id stays
+    comparable across a rebase that changed no content. ``None`` on any git
+    failure or an empty diff: an absence is never evidence (the
+    absence-matched-against-absence trap), matching the fail-closed contract
+    of the Rust twin's ``pr_code_diff_identity``."""
+    try:
+        diff = run(
+            ["git", "diff", f"{base_ref}...{sha}"],
+            cwd=cwd,
+            timeout=15,
+        )
+        if diff.returncode != 0 or not (diff.stdout or "").strip():
+            return None
+        pid = run(
+            ["git", "patch-id", "--stable"],
+            cwd=cwd,
+            timeout=15,
+            input_text=diff.stdout or "",
+        )
+    except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
+        return None
+    if pid.returncode != 0:
+        return None
+    first = (pid.stdout or "").strip().splitlines()
+    return first[0].split()[0] if first and first[0].split() else None
+
+
+def _resolve_base_ref(cwd: Optional[str]) -> Optional[str]:
+    """First resolvable default base ref, mirroring classify_payload in
+    loopcheck.rs (origin/main, then origin/master). ``None`` leaves the
+    content test unanswerable, which fails closed."""
+    for ref in ("origin/main", "origin/master"):
+        try:
+            result = run(
+                ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                cwd=cwd,
+                timeout=5,
+            )
+        except Exception:  # noqa: BLE001 - next ref may still resolve
+            continue
+        if result.returncode == 0:
+            return ref
+    return None
+
+
+def _reviewed_sha_still_describes_head(
+    reviewed_sha: str, head: str, cwd: Optional[str]
+) -> bool:
+    """Whether the change the reviewer read still ships at ``head``.
+
+    Ancestry is the cheap first test and covers every fast-forward. When it
+    fails - a rebase rewrote every commit by construction - the CONTENT test
+    takes over: the PR delta at ``reviewed_sha`` and at ``head`` must carry
+    the same stable patch-id, so a rebase that changed nothing (x-e8db's
+    treadmill) keeps the attestation while a conflict resolution that changed
+    the delta loses it. Any unreadable input is not fresh, matching the
+    existing ancestry contract."""
+    if _reviewed_sha_is_ancestor(reviewed_sha, head, cwd):
+        return True
+    base_ref = _resolve_base_ref(cwd)
+    if base_ref is None:
+        return False
+    reviewed_pid = _pr_delta_patch_id(reviewed_sha, base_ref, cwd)
+    head_pid = _pr_delta_patch_id(head, base_ref, cwd)
+    return (
+        reviewed_pid is not None
+        and head_pid is not None
+        and reviewed_pid == head_pid
+    )
+
+
 def _verdicts_with_current_freshness(
     data: dict, head: Optional[str], cwd: Optional[str]
 ) -> list[dict]:
     """Copy verdicts and recheck stored freshness against current history.
 
     A freshness stamp describes the branch only when it was written. When a
-    current head is available, the reviewed commit must still be its ancestor.
-    Missing metadata or an unreadable ancestry result cannot prove freshness.
+    current head is available, the reviewed change must still ship at that
+    head - by ancestry, or by an identical content delta when a rebase
+    rewrote the commits (x-e8db: every rebase used to invalidate every
+    attestation, even one that reviewed byte-identical content). Missing
+    metadata or an unreadable ancestry/content result cannot prove freshness.
     """
     verdicts = data.get("verdicts")
     if not isinstance(verdicts, list):
         return []
-    ancestry: dict[str, bool] = {}
+    describes: dict[str, bool] = {}
     shaped: list[dict] = []
     for verdict in verdicts:
         if not isinstance(verdict, dict):
@@ -495,11 +573,11 @@ def _verdicts_with_current_freshness(
         if verdict_kind == "reviewed" and head:
             if not isinstance(reviewed_sha, str) or not reviewed_sha:
                 stale = True
-            elif reviewed_sha not in ancestry:
-                ancestry[reviewed_sha] = _reviewed_sha_is_ancestor(
+            elif reviewed_sha not in describes:
+                describes[reviewed_sha] = _reviewed_sha_still_describes_head(
                     reviewed_sha, head, cwd
                 )
-            if isinstance(reviewed_sha, str) and not ancestry.get(reviewed_sha, False):
+            if isinstance(reviewed_sha, str) and not describes.get(reviewed_sha, False):
                 stale = True
         if stale:
             current["freshness"] = "stale"
@@ -610,7 +688,8 @@ def read_review_coverage(
     two gate surfaces - ``fno do pr merge`` and ``fno do pr status`` - opt in.
     Event-read failures degrade to the unknown sentinel. When ``head`` is
     supplied, verdict freshness fails closed unless Git proves the reviewed
-    commit remains in that head's history.
+    change still ships at that head (ancestry, or an identical content delta
+    across a rebase - x-e8db).
     Python still consumes the event rather than recomputing coverage itself
     (Ownership: Rust computes, Python reads) - the recompute shells out to the
     SAME Rust producer the stop hook runs.

@@ -10906,6 +10906,124 @@ mod tests {
         );
     }
 
+    // ── x-e8db: the resolver against a REAL rebase ──────────────────────────
+    //
+    // The pure tests above pin the predicate over synthetic facts; this pair
+    // drives the git plumbing (identity computation, base-ref qualification)
+    // through an actual rebase. The Python merge gate's twin pair lives in
+    // cli/tests/unit/test_review_freshness_rebase.py; the two gates must
+    // agree on the same PR shape.
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn write(repo: &Path, name: &str, body: &str) {
+        std::fs::write(repo.join(name), body).unwrap();
+    }
+
+    /// One repo whose feature branch rebases onto a moved `origin/main`.
+    /// Returns `(repo, reviewed_sha, head_sha)`. `conflict` selects whether
+    /// the rebase stops on a conflict that the resolution CHANGES.
+    fn rebased_repo(conflict: bool) -> (tempfile::TempDir, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        write(&repo, "f.txt", "base\n");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        if conflict {
+            write(&repo, "f.txt", "feature says B\n");
+        } else {
+            write(&repo, "code.txt", "pr change\n");
+        }
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "pr"]);
+        let reviewed = git(&repo, &["rev-parse", "HEAD"]);
+
+        git(&repo, &["checkout", "-q", "main"]);
+        if conflict {
+            write(&repo, "f.txt", "main says C\n");
+        } else {
+            write(&repo, "other.txt", "base moved\n");
+        }
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "base moved"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]);
+        // The machine's pre-push hook protects even scratch `main`s, so move
+        // the remote-tracking ref directly.
+        git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/main", &tip],
+        );
+
+        git(&repo, &["checkout", "-q", "feature"]);
+        let rebase = Command::new("git")
+            .args(["rebase", "origin/main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        if conflict {
+            assert!(!rebase.status.success(), "scenario requires a conflict");
+            write(&repo, "f.txt", "resolved differently\n");
+            git(&repo, &["add", "-A"]);
+            let cont = Command::new("git")
+                .args(["-c", "core.editor=true", "rebase", "--continue"])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(
+                cont.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cont.stderr)
+            );
+        } else {
+            assert!(
+                rebase.status.success(),
+                "{}",
+                String::from_utf8_lossy(&rebase.stderr)
+            );
+        }
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        (tmp, reviewed, head)
+    }
+
+    #[test]
+    fn resolver_carries_an_identical_rebase_and_expires_a_conflict() {
+        // The whole x-e8db contract on the resolver itself: a rebase that
+        // rewrote every commit but changed no content keeps the attestation
+        // (a Carried verdict counts), and a conflict resolution that changed
+        // the delta loses it. One test, both directions, so a regression in
+        // either can never leave the other green-looking.
+        let (tmp, reviewed, head) = rebased_repo(false);
+        let repo = tmp.path().join("r");
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let verdict = resolver.freshness(&reviewed);
+        assert!(verdict.counts(), "identical rebase must carry: {verdict:?}");
+
+        let (tmp, reviewed, head) = rebased_repo(true);
+        let repo = tmp.path().join("r");
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let verdict = resolver.freshness(&reviewed);
+        assert_eq!(verdict, Freshness::Stale, "conflict resolution must expire");
+    }
+
     #[test]
     fn freshness_base_sync_carries() {
         // PR 829's specimen: a 153-file rebase whose PR code diff is identical.
