@@ -2355,9 +2355,11 @@ def cmd_spawn(
             # the receipt holds the worker identity. Runs before the exit-22
             # check on purpose: an unverified seed still left a live pane, and
             # that pane's provenance is real whether its payload landed or not.
-            # node= is the ALREADY-resolved FNO_NODE from the provenance pass.
+            # node= is the ALREADY-resolved FNO_NODE from the provenance pass
+            # (`or {}`: resolve_provenance is Optional, like every prov_env
+            # consumer below treats it).
             _stamp_spawned_session_row(
-                node=prov_env.get("FNO_NODE"), message=message, phase=stamp_phase,
+                node=(prov_env or {}).get("FNO_NODE"), message=message, phase=stamp_phase,
                 worker_name=pane_result.name, worker_harness=pane_result.provider,
                 worker_session_uuid=pane_result.session_uuid,
             )
@@ -2483,9 +2485,12 @@ def cmd_spawn(
     # failure above exits). The registry row the dispatch minted carries the
     # worker's full harness session id; a one-shot whose row was torn down or
     # whose uuid never resolved skips with a named line, not a bad row.
+    # getattr like the receipt above: a minimal once-lane result carries only
+    # kind/reply, and the stamp must not add attribute requirements to it.
     _stamp_spawned_session_row(
-        node=prov_env.get("FNO_NODE"), message=message, phase=stamp_phase,
-        worker_name=result.name, worker_harness=result.provider,
+        node=(prov_env or {}).get("FNO_NODE"), message=message, phase=stamp_phase,
+        worker_name=getattr(result, "name", None),
+        worker_harness=getattr(result, "provider", None),
         worker_session_uuid=None,
     )
 
