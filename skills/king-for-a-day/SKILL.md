@@ -340,6 +340,8 @@ Cap it when the wave is wider than you meant to fund.
 
 Before you abdicate, record every ruling that changes what a worker does. One `fno backlog decide <node|pr-N|area> "<what>" --rationale "<why>"` call per ruling. Your context is the only place they live, and it is about to end.
 
+Expire your crown as the last act of the reign: `fno agents king done`. It vacates your row and clears the scope manifest, so the next king's crown arms without `--force`. A king that skips it relies on the crash path: the leftover manifest is inert (the registry row is authority), but the successor init pays a `--force`.
+
 No king outlives its day.
 Do not stay to watch, and do not re-plan mid-batch.
 Re-planning is a *new* pass with fresh context reading the map, which is the point: a monarch that persists accrues drift, and drift is what the graph exists to prevent.
