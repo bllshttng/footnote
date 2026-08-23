@@ -1370,13 +1370,16 @@ def _opencode_serve_spawn(
         "bg",
         "--cwd",
         str(cwd),
-        "--message",
-        message,
     ]
     if from_name:
-        argv += ["--from-name", from_name]
+        argv += [f"--from-name={from_name}"]
     if model:
-        argv += ["--model", model]
+        argv += [f"--model={model}"]
+    # The seed rides as the fenced positional tail, never a bare flag value:
+    # with --name set the whole tail is the message, and a hyphen-leading
+    # message as the value of `--message <msg>` would die as an unknown flag
+    # (the argv-fence gate's exact trap).
+    argv += ["--", message]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     except subprocess.TimeoutExpired as exc:
