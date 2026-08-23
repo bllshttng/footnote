@@ -425,7 +425,8 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 
     // ── preflight (all before any dispatch) ───────────────────────────────────
     // 1. Manifest exists (exit 1 on missing). Which manifest depends on the
-    // driver: a king reads .fno/king-state.md and never touches the target one.
+    // driver: a king reads its per-scope file `.fno/kings/<scope>.md` (expired
+    // by `fno agents king done` on abdication) and never touches the target one.
     let mut target_queue = match TargetQueue::from_manifest(&cwd) {
         Ok(q) => Some(q),
         Err(e) => {

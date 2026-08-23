@@ -143,7 +143,7 @@ Not state-root writers, listed here because they are the other family of session
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `.fno/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno do target init` | write-once per target session; archived on a terminal |
-| `.fno/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort |
+| `.fno/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
 
 Target state is write-once after init. King state is atomically refreshed at coronation and both gate a stop hook.
 
