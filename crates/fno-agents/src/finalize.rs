@@ -52,29 +52,11 @@
 //! its Rust-only dependency surface (Domain Pitfall).
 
 use crate::loopcheck::{emit_to_both, now_rfc3339_utc};
+use crate::run_outcome::classify_legacy;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Terminal reasons that ran an actual ship (PR landed or advisory-complete).
-/// Only these run the completion side-effects (stamp/graduate/handoff); every
-/// terminal reason runs the ledger record. `DoneBatched` and `DoneAwaitingMerge`
-/// are deliberately ABSENT: both are terminal-but-not-ship (the batch PR ships a
-/// batched member; a human merge past pre-existing main-red closes an
-/// awaiting-merge node via reconcile) - they get the always-branch ledger row
-/// but must never stamp/graduate the plan.
-const SHIP_REASONS: &[&str] = &["DonePRGreen", "DoneAdvisory"];
-
-/// Terminal reasons that signal a STUCK session: the loop-check verb saw no
-/// forward progress, or the budget cap tripped, and let the session exit
-/// without shipping. `write_postmortem` branches its body on this set - a
-/// stuck session gets the failure-triage prose, everything else gets a
-/// lighter completion-eval prose - but it no longer GATES whether an eval is
-/// written at all (see `eval_should_fire`). Interrupted/Aborted are in the
-/// set: a session that gave up mid-wedge or got cancelled is
-/// stuck-but-differently-terminated and belongs in the failure-shaped corpus.
-const STUCK_REASONS: &[&str] = &["NoProgress", "Budget", "Interrupted", "Aborted"];
 
 /// Whether a completion eval fires for this termination reason (x-8fc0).
 ///
@@ -91,7 +73,15 @@ const STUCK_REASONS: &[&str] = &["NoProgress", "Budget", "Interrupted", "Aborted
 /// ship reason, every stuck reason, `DoneBatched`/`DoneAwaitingMerge`/
 /// `DoneUnreviewed`/`DoneAwaitingReview`/`DonePlanned` alike - gets an eval.
 fn eval_should_fire(reason: &str) -> bool {
-    reason != "NoWork"
+    classify_legacy(reason)
+        .map(|record| record.projection().record_ledger)
+        .unwrap_or(false)
+}
+
+fn is_stuck_reason(reason: &str) -> bool {
+    classify_legacy(reason)
+        .map(|record| record.projection().stuck)
+        .unwrap_or(false)
 }
 
 // ── arg parsing ─────────────────────────────────────────────────────────────
@@ -510,7 +500,15 @@ pub fn run_finalize(args: &[String]) -> i32 {
         eprintln!("finalize: --state, --cwd and --reason are required\n{HELP}");
         return 2;
     };
-    let delivery_ship = reason == "DoneDelivery";
+    let classification = match classify_legacy(&reason) {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("finalize: {error}\n{HELP}");
+            return 2;
+        }
+    };
+    let predicates = classification.projection();
+    let delivery_ship = predicates.delivery_ship;
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let project_events = a.events.unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
@@ -543,7 +541,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         return i32::from(delivery_ship);
     };
 
-    let legacy_ship = SHIP_REASONS.contains(&reason.as_str());
+    let legacy_ship = predicates.ship_reason;
     let ship = legacy_ship || delivery_ship;
 
     // Idempotency, ship-aware (sigma-review HIGH): a prior COMPLETED ship means
@@ -563,7 +561,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // hits Budget and then resumes to DoneAwaitingMerge would silently lose
         // its do stamp - the same "correct wiring, missing coverage" failure this
         // backstop exists to fix. Everything downstream is idempotent.
-        Some(false) if !ship && !is_do_stamp_terminal(&reason) => {
+        Some(false) if !ship && !predicates.do_stamp_terminal => {
             eprintln!(
                 "finalize: session {session_id} ledger already recorded (non-ship); early-return"
             );
@@ -634,7 +632,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
             let expected = derive_expected_url_count(&cwd, &plan, m.cross_project);
             // Graduate only for the merge-less advisory terminal; a cross-project
             // advisory still waits for a derivable count (never graduate early).
-            let do_graduate = reason == "DoneAdvisory" && (!m.cross_project || expected.is_some());
+            let do_graduate = predicates.graduate && (!m.cross_project || expected.is_some());
             match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate, None) {
                 Ok(()) => stamped = true,
                 Err(step) => {
@@ -791,7 +789,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // that gets a postmortem, with an operator-directed question in its last
     // message and nothing already filed for this session, gets it filed here.
     let mut outstanding_filed = false;
-    if STUCK_REASONS.contains(&reason.as_str()) {
+    if predicates.stuck {
         let question = a
             .transcript
             .as_deref()
@@ -892,7 +890,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // The generic "not an arming terminal" hides WHY behind a vocabulary
         // term; an operator who armed auto-merge and sees it not fire needs to
         // learn the diff was unreviewed, not decode a terminal name.
-        let why = if reason == "DoneUnreviewed" {
+        let why = if predicates.awaiting_review_notify {
             "the PR is unreviewed (coverage 0); review the diff then re-run, or merge by hand"
         } else {
             "not an arming terminal"
@@ -1882,7 +1880,10 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
 /// human performs past pre-existing main-red - arming either would merge
 /// something no gate greened.
 fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
-    auto_merge_approved && reason == "DonePRGreen"
+    auto_merge_approved
+        && classify_legacy(reason)
+            .map(|record| record.projection().merge_armable)
+            .unwrap_or(false)
 }
 
 /// Return why configured optional-review evidence forbids native auto-merge,
@@ -2284,10 +2285,9 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
 /// ship authors no branch commits, so reusing that constant here would stamp
 /// every doc ship. The two sets disagree on purpose.
 fn is_do_stamp_terminal(reason: &str) -> bool {
-    matches!(
-        reason,
-        "DonePRGreen" | "DoneAwaitingMerge" | "DoneUnreviewed" | "DoneAwaitingReview"
-    )
+    classify_legacy(reason)
+        .map(|record| record.projection().do_stamp_terminal)
+        .unwrap_or(false)
 }
 
 /// Guarded `do` lifecycle stamp (x-0469). `/execute` Step 1.5 is the earlier truthful
@@ -2663,7 +2663,7 @@ fn write_postmortem(
     // heading word, the termination-line suffix, the trailing section name,
     // and its prose differ. Share the scaffold, branch only what differs
     // (was two ~20-line near-identical format! blocks).
-    let stuck = STUCK_REASONS.contains(&reason);
+    let stuck = is_stuck_reason(reason);
     let (heading, term_suffix, section, prose): (&str, &str, &str, String) = if stuck {
         (
             "Postmortem",
@@ -3474,10 +3474,20 @@ mod tests {
 
     #[test]
     fn ship_reasons_gate() {
-        assert!(SHIP_REASONS.contains(&"DonePRGreen"));
-        assert!(SHIP_REASONS.contains(&"DoneAdvisory"));
+        assert!(
+            classify_legacy("DonePRGreen")
+                .unwrap()
+                .projection()
+                .ship_reason
+        );
+        assert!(
+            classify_legacy("DoneAdvisory")
+                .unwrap()
+                .projection()
+                .ship_reason
+        );
         for non_ship in ["Budget", "NoProgress", "Interrupted", "Aborted", "NoWork"] {
-            assert!(!SHIP_REASONS.contains(&non_ship));
+            assert!(!classify_legacy(non_ship).unwrap().projection().ship_reason);
         }
     }
 
@@ -3485,8 +3495,9 @@ mod tests {
     fn done_planned_is_benign_terminal() {
         // A plan-only terminal graduates nothing, but (x-8fc0) it DOES still
         // get a completion eval - only NoWork is exempt from the eval.
-        assert!(!SHIP_REASONS.contains(&"DonePlanned"));
-        assert!(!STUCK_REASONS.contains(&"DonePlanned"));
+        let planned = classify_legacy("DonePlanned").unwrap().projection();
+        assert!(!planned.ship_reason);
+        assert!(!planned.stuck);
         assert!(eval_should_fire("DonePlanned"));
     }
 
@@ -3813,10 +3824,10 @@ mod tests {
     #[test]
     fn stuck_reasons_classify_the_eval_body_not_whether_it_fires() {
         for stuck in ["NoProgress", "Budget", "Interrupted", "Aborted"] {
-            assert!(STUCK_REASONS.contains(&stuck));
+            assert!(is_stuck_reason(stuck));
         }
         for not_stuck in ["DonePRGreen", "DoneAdvisory", "DoneDelivery", "NoWork"] {
-            assert!(!STUCK_REASONS.contains(&not_stuck));
+            assert!(!is_stuck_reason(not_stuck));
         }
     }
 

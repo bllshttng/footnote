@@ -2,7 +2,7 @@ use crate::loopcheck::TerminationReason;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutcome {
-    pub outcome: Option<Outcome>,
+    outcome: Option<Outcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,17 +14,17 @@ pub enum Outcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
-    pub deliverable: Deliverable,
-    pub shipped: bool,
-    pub node_closable: bool,
-    pub merge_armable: bool,
-    pub outstanding: Outstanding,
-    pub progress: bool,
+    deliverable: Deliverable,
+    shipped: bool,
+    node_closable: bool,
+    merge_armable: bool,
+    outstanding: Outstanding,
+    progress: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Abort {
-    pub cause: AbortCause,
+    cause: AbortCause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +74,9 @@ pub struct PredicateProjection {
     pub record_ledger: bool,
     pub circuit_breaker_success: bool,
     pub awaiting_review_notify: bool,
+    pub node_closable: bool,
+    pub batch_member: bool,
+    pub progress: bool,
 }
 
 impl RunOutcome {
@@ -112,6 +115,10 @@ impl RunOutcome {
                     cause: ReviewCause::NobodyReviewed
                 })
             ),
+            node_closable: commit.is_some_and(|value| value.node_closable),
+            batch_member: commit
+                .is_some_and(|value| matches!(value.deliverable, Deliverable::BatchMember)),
+            progress: commit.is_some_and(|value| value.progress),
         }
     }
 }
@@ -246,5 +253,79 @@ pub fn legacy_projection(reason: &TerminationReason) -> PredicateProjection {
             TerminationReason::DoneAwaitingMerge | TerminationReason::DoneAwaitingReview
         ),
         awaiting_review_notify: matches!(reason, TerminationReason::DoneUnreviewed),
+        node_closable: matches!(
+            reason,
+            TerminationReason::DonePRGreen
+                | TerminationReason::DoneAdvisory
+                | TerminationReason::DoneDelivery
+        ),
+        batch_member: matches!(reason, TerminationReason::DoneBatched),
+        progress: matches!(
+            reason,
+            TerminationReason::DonePRGreen
+                | TerminationReason::DoneAdvisory
+                | TerminationReason::DoneDelivery
+                | TerminationReason::DoneBatched
+                | TerminationReason::DoneAwaitingMerge
+                | TerminationReason::DoneUnreviewed
+                | TerminationReason::DoneAwaitingReview
+                | TerminationReason::DonePlanned
+        ),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("unknown termination reason: {0}")]
+pub struct UnknownTerminationReason(String);
+
+pub fn classify_legacy(reason: &str) -> Result<RunOutcome, UnknownTerminationReason> {
+    if reason == "delegated" {
+        return Ok(classify(TerminationReason::DonePlanned));
+    }
+    let wire =
+        serde_json::from_value::<TerminationReason>(serde_json::Value::String(reason.to_string()))
+            .map_err(|_| UnknownTerminationReason(reason.to_string()))?;
+    Ok(classify(wire))
+}
+
+impl From<RunOutcome> for TerminationReason {
+    fn from(record: RunOutcome) -> Self {
+        match record.outcome {
+            None => Self::NoWork,
+            Some(Outcome::Cancelled) => Self::Interrupted,
+            Some(Outcome::Aborted(abort)) => match abort.cause {
+                AbortCause::Budget => Self::Budget,
+                AbortCause::NoProgress => Self::NoProgress,
+                AbortCause::Interrupted => Self::Interrupted,
+                AbortCause::Failed => Self::Aborted,
+            },
+            Some(Outcome::Committed(commit)) => {
+                match (commit.deliverable, commit.shipped, commit.outstanding) {
+                    (Deliverable::Pr, true, Outstanding::Nothing) => Self::DonePRGreen,
+                    (Deliverable::Doc, true, Outstanding::Nothing) => Self::DoneAdvisory,
+                    (Deliverable::Delivery, false, Outstanding::Nothing) => Self::DoneDelivery,
+                    (Deliverable::BatchMember, false, Outstanding::BatchPr) => Self::DoneBatched,
+                    (Deliverable::Pr, false, Outstanding::HumanMerge { .. }) => {
+                        Self::DoneAwaitingMerge
+                    }
+                    (
+                        Deliverable::Pr,
+                        false,
+                        Outstanding::Review {
+                            cause: ReviewCause::NobodyReviewed,
+                        },
+                    ) => Self::DoneUnreviewed,
+                    (
+                        Deliverable::Pr,
+                        false,
+                        Outstanding::Review {
+                            cause: ReviewCause::BotRateLimited,
+                        },
+                    ) => Self::DoneAwaitingReview,
+                    (Deliverable::None, false, Outstanding::Nothing) => Self::DonePlanned,
+                    _ => unreachable!("RunOutcome constructors preserve the wire mapping"),
+                }
+            }
+        }
     }
 }
