@@ -36,6 +36,10 @@ def _isolated_world(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-root"))
     monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    # The gate reads the HOST load average live, so an "under cap" scenario
+    # fails on any machine whose real load crosses the ceiling (a busy fleet
+    # trips it daily). Pin it: the scenario roster is the variable under test.
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0.1, 0.1))
     yield
 
 
