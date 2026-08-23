@@ -56,9 +56,27 @@ def _fno_agents_bin() -> str:
     found = shutil.which("fno-agents")
     if found:
         return found
-    raise RuntimeError(
-        "fno-agents binary missing; run `cargo build -p fno-agents --bin fno-agents`"
+    repo_root = Path(__file__).resolve().parents[2]
+    build = subprocess.run(
+        [
+            "cargo", "build", "--manifest-path", "crates/fno-agents/Cargo.toml",
+            "--bin", "fno-agents",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
+    if build.returncode != 0:
+        detail = (build.stderr or build.stdout).strip().splitlines()[-1:]
+        raise RuntimeError(
+            "fno-agents binary missing and build failed. "
+            f"Run `cargo build -p fno-agents --bin fno-agents`. {detail[0] if detail else ''}"
+        )
+    built = repo_root / "crates/fno-agents/target/debug/fno-agents"
+    if built.is_file() and os.access(built, os.X_OK):
+        return str(built)
+    raise RuntimeError("fno-agents build returned success without producing target/debug/fno-agents")
 
 
 def _fail(effect: str, detail: str) -> int:
