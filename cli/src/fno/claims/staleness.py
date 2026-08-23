@@ -185,8 +185,8 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
     #
     # A claim that DOES name another machine keeps the gate. classify()'s
     # corroborated hybrid arm reads an expired claim as LIVE when its pid is
-    # live AND prover-proven, and that pid is
-    # only meaningful on the machine that wrote it. Reaping from here would let
+    # live AND prover-proven, and that pid is only meaningful on the machine
+    # that wrote it. Reaping from here would let
     # this host archive a claim its owner is still refreshing, and the next
     # reader would see the node free and staff a second worker onto it.
     unidentifiable = not claim.machine_id
