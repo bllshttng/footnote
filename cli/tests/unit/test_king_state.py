@@ -97,14 +97,35 @@ def test_coronation_refreshes_scope_manifest_for_a_successor(monkeypatch, tmp_pa
     monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
     state_root = tmp_path / ".fno"
 
-    first = arm("x-f3d0", "old-session", state_root=state_root)
+    first = arm(
+        "x-f3d0", "11111111-1111-4111-8111-111111111111", state_root=state_root
+    )
     first_id = parse_manifest(first)["fno_id"]
-    second = arm("x-f3d0", "new-session", state_root=state_root)
+    second = arm(
+        "x-f3d0", "22222222-2222-4222-8222-222222222222", state_root=state_root
+    )
 
     assert second == first
     fields = parse_manifest(second)
-    assert fields["harness_session_id"] == "new-session"
+    assert fields["harness_session_id"] == "22222222-2222-4222-8222-222222222222"
     assert fields["fno_id"] != first_id
+
+
+def test_arming_refuses_an_id_no_transcript_can_ever_match(monkeypatch, tmp_path):
+    """A short id or row name arms a manifest the owner guard always rejects.
+
+    The stop hook matches the manifest id against the transcript basename, and
+    every harness names transcripts with a full uuid, so an 8-hex short id or
+    a row name is a gate that arms dead. Arming must refuse it loudly.
+    """
+    import fno.king.state as state
+
+    arm = state.arm_king_manifest
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
+    for bogus in ("7c5dcf5d", "t-x1069-glm", ""):
+        with pytest.raises(ValueError, match="transcript basename|harness session id"):
+            arm("x-f3d0", bogus, state_root=tmp_path / ".fno")
+    assert not (tmp_path / ".fno" / "kings" / "x-f3d0.md").exists()
 
 
 def test_disabled_king_loop_arms_no_manifest(monkeypatch, tmp_path):
@@ -139,7 +160,9 @@ def test_coronation_defaults_to_the_owner_repositories_state_root(monkeypatch, t
     owner.mkdir()
     monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
 
-    path = state.arm_king_manifest("x-f3d0", "session", owner_cwd=str(owner))
+    path = state.arm_king_manifest(
+        "x-f3d0", "33333333-3333-4333-8333-333333333333", owner_cwd=str(owner)
+    )
 
     assert path == owner / ".fno" / "kings" / "x-f3d0.md"
 

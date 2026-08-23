@@ -1651,13 +1651,14 @@ def _claude_create_path(
     crown_declined = False
     crown_succeeded = False
     king_loop_armed: Optional[bool] = None
+    king_unarmed_reason = ""
 
     # x-9844 Fix 3: a revival REPLACES the existing exited same-name row in place
     # (never appends a duplicate name). The load-modify-write is atomic under
     # update_registry's own lock, so a concurrent reader sees the old exited row
     # or the new live row, never a torn/absent state.
     def _write(entries: list) -> list:
-        nonlocal crown_declined, crown_succeeded, king_loop_armed
+        nonlocal crown_declined, crown_succeeded, king_loop_armed, king_unarmed_reason
         entry = new_entry
         # One-live-crown guard (x-7685), inside the write lock so the check and
         # the stamp are atomic against a racing spawn. If a non-terminal row
@@ -1714,12 +1715,20 @@ def _claude_create_path(
         if entry.crown_level is not None and entry.crown_scope:
             from fno.king.state import arm_king_manifest
 
-            king_loop_armed = arm_king_manifest(
-                entry.crown_scope,
-                entry.harness_session_id or entry.short_id or "",
-                owner_pid=entry.pid,
-                owner_cwd=entry.cwd,
-            ) is not None
+            try:
+                king_loop_armed = arm_king_manifest(
+                    entry.crown_scope,
+                    entry.harness_session_id or "",
+                    owner_pid=entry.pid,
+                    owner_cwd=entry.cwd,
+                ) is not None
+            except ValueError as exc:
+                # Arming with a short_id/row-name fallback would write a
+                # manifest the stop hook's owner guard always rejects, so the
+                # gate arms dead. Record the crown, refuse the dead manifest,
+                # and tell the operator below.
+                king_loop_armed = False
+                king_unarmed_reason = str(exc)
         if revive:
             return [entry if e.name == name else e for e in entries]
         return entries + [entry]
@@ -1739,9 +1748,14 @@ def _claude_create_path(
                 file=sys.stderr,
             )
         if crown_scope and not crown_declined and king_loop_armed is False:
+            why = (
+                f": {king_unarmed_reason}"
+                if king_unarmed_reason
+                else "; king loop disabled, no scope manifest armed"
+            )
             print(
-                f"spawn: crown over {crown_scope!r} recorded, but king loop disabled; "
-                "no scope manifest armed",
+                f"spawn: crown over {crown_scope!r} recorded, but the king loop "
+                f"manifest was NOT armed{why}",
                 file=sys.stderr,
             )
     except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:

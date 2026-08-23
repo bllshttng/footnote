@@ -3892,9 +3892,10 @@ def dispatch_spawn_pane(
         crown_declined = False
         crown_succeeded = False
         king_loop_armed: Optional[bool] = None
+        king_unarmed_reason = ""
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
-            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded, king_loop_armed
+            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded, king_loop_armed, king_unarmed_reason
             # Reclaiming a dead row's name: drop the corpse in the SAME
             # transaction that appends its replacement, so the registry never
             # holds two rows under one name. Re-checked here, under the write
@@ -4066,12 +4067,19 @@ def dispatch_spawn_pane(
             if entry.crown_level is not None and entry.crown_scope:
                 from fno.king.state import arm_king_manifest
 
-                king_loop_armed = arm_king_manifest(
-                    entry.crown_scope,
-                    entry.harness_session_id or entry.short_id or entry.name,
-                    owner_pid=entry.pid,
-                    owner_cwd=entry.cwd,
-                ) is not None
+                try:
+                    king_loop_armed = arm_king_manifest(
+                        entry.crown_scope,
+                        entry.harness_session_id or "",
+                        owner_pid=entry.pid,
+                        owner_cwd=entry.cwd,
+                    ) is not None
+                except ValueError as exc:
+                    # Same contract as dispatch.py: a short_id/name fallback
+                    # arms a manifest the owner guard always rejects, so the
+                    # gate would arm dead. Refuse it and say so below.
+                    king_loop_armed = False
+                    king_unarmed_reason = str(exc)
             rows.append(entry)
             return rows
 
@@ -4094,16 +4102,21 @@ def dispatch_spawn_pane(
                     "by a live row); spawned uncrowned. The worker launched without a crown.",
                     file=sys.stderr,
                 )
-            elif _declined_scope and king_loop_armed is False:
-                print(
-                    f"spawn: crown over {_declined_scope!r} recorded, but king loop "
-                    "disabled; no scope manifest armed",
-                    file=sys.stderr,
-                )
-            elif crown_succeeded and _declined_scope:
+            if crown_succeeded and _declined_scope:
                 print(
                     f"spawn: crown over {_declined_scope!r} transferred from this "
                     f"session to {name} (succession). You no longer hold it.",
+                    file=sys.stderr,
+                )
+            if _declined_scope and king_loop_armed is False:
+                why = (
+                    f": {king_unarmed_reason}"
+                    if king_unarmed_reason
+                    else "; king loop disabled, no scope manifest armed"
+                )
+                print(
+                    f"spawn: crown over {_declined_scope!r} recorded, but the king "
+                    f"loop manifest was NOT armed{why}",
                     file=sys.stderr,
                 )
             # Birth (x-8cd5 Wave 6): the row is written, so the pane worker now

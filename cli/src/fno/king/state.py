@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 import subprocess
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -113,6 +114,24 @@ def resolve_king_manifest_path(
     return path if path.is_file() else None
 
 
+def _transcript_matchable_session_id(value: str) -> bool:
+    """Whether the stop hook's owner guard can ever match this id.
+
+    The guard compares the manifest id against the transcript basename
+    (equality, or a codex ``-<uuid>`` suffix), and every harness names
+    transcripts with a full canonical uuid. A registry short_id (8 hex) or a
+    row name parses fine as an identifier but matches NO transcript ever, so
+    arming with it writes a manifest the guard always rejects: the king's own
+    stop then exits 0 and the gate is silently off. uuid.UUID() alone would
+    accept the 8-hex short form, so the canonical 36-char round-trip is the
+    test.
+    """
+    try:
+        return len(value) == 36 and str(uuid.UUID(value)) == value.lower()
+    except (ValueError, AttributeError):
+        return False
+
+
 def arm_king_manifest(
     scope: str,
     harness_session_id: str,
@@ -129,6 +148,14 @@ def arm_king_manifest(
         return None
     if not harness_session_id.strip():
         raise ValueError("a crowned king manifest needs a harness session id")
+    if not _transcript_matchable_session_id(harness_session_id):
+        raise ValueError(
+            f"a crowned king manifest needs a full session uuid, got "
+            f"{harness_session_id!r}: the stop hook matches the manifest id "
+            "against the transcript basename, and a short id or row name "
+            "matches no transcript, so the gate would arm dead. Re-arm with "
+            "fno agents crown once the session has self-identified."
+        )
     path = king_manifest_path(scope, state_root=state_root)
     with _manifest_lock(path):
         write_manifest(
