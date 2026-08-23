@@ -103,6 +103,21 @@ fn path_with(bin_dir: &Path) -> String {
     format!("{}:/usr/bin:/bin", bin_dir.display())
 }
 
+fn install_warn_config(dir: &Path) -> Option<std::ffi::OsString> {
+    let config = dir.join("config.toml");
+    fs::write(&config, "[sandbox]\non_unavailable = \"warn\"\n").unwrap();
+    let old = std::env::var_os("FNO_CONFIG");
+    unsafe { std::env::set_var("FNO_CONFIG", &config) };
+    old
+}
+
+fn restore_config(old: Option<std::ffi::OsString>) {
+    match old {
+        Some(path) => unsafe { std::env::set_var("FNO_CONFIG", path) },
+        None => unsafe { std::env::remove_var("FNO_CONFIG") },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AC1-HP: ask with unknown name exits 16 (claude path)
 // ---------------------------------------------------------------------------
@@ -677,6 +692,7 @@ fn spawn_gemini_once_happy_path() {
     let cwd = tmpdir("once-gm-cwd");
     let bin = tmpdir("once-gm-bin");
     install_fake_gemini(&bin, "once gemini reply");
+    let old_config = install_warn_config(&cwd);
 
     let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let old_path = std::env::var_os("PATH");
@@ -697,6 +713,7 @@ fn spawn_gemini_once_happy_path() {
         Some(p) => unsafe { std::env::set_var("PATH", p) },
         None => unsafe { std::env::remove_var("PATH") },
     }
+    restore_config(old_config);
 
     assert_eq!(
         out.exit_code, 0,

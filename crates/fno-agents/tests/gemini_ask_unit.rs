@@ -7,9 +7,10 @@
 //! gemini adapter, which has since been deleted; these tests now pin the
 //! behavior that adapter defined rather than compare against it.
 
+use fno_agents::agents_config::SandboxUnavailablePolicy;
 use fno_agents::gemini_ask::{
     build_argv_create, build_argv_resume, inject_from_name, parse_response, sandbox_flag,
-    GeminiAskError,
+    sandbox_flag_with_policy, GeminiAskError,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,6 +58,22 @@ fn sandbox_flag_bounded_fallback_no_provider_never_prompts() {
 #[test]
 fn sandbox_flag_full_yolo_is_bare_yolo() {
     assert_eq!(sandbox_flag(true, None), vec!["--yolo"]);
+}
+
+#[test]
+fn unavailable_backend_refuses_with_positive_remediation_marker() {
+    let err = sandbox_flag_with_policy(false, Some(false), SandboxUnavailablePolicy::Refuse)
+        .expect_err("default policy must refuse an unconfined launch");
+    assert!(err.contains("gemini confinement unavailable"));
+    assert!(err.contains("sandbox-exec / docker"));
+    assert!(err.contains("install Docker Desktop"));
+}
+
+#[test]
+fn unavailable_backend_warn_policy_keeps_never_prompt_argv() {
+    let argv = sandbox_flag_with_policy(false, Some(false), SandboxUnavailablePolicy::Warn)
+        .expect("warn policy explicitly permits the fallback");
+    assert_eq!(argv, vec!["--approval-mode", "yolo"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -363,4 +380,14 @@ fn error_interrupted_exit_130() {
     let e = GeminiAskError::Interrupted;
     assert_eq!(e.exit_code(), 130);
     assert!(e.to_string().contains("SIGINT") || e.to_string().contains("Ctrl-C"));
+}
+
+#[test]
+fn error_sandbox_unavailable_is_nonzero_and_actionable() {
+    let e = GeminiAskError::SandboxUnavailable {
+        message: "gemini confinement unavailable: install Docker Desktop".into(),
+    };
+    assert_eq!(e.exit_code(), 2);
+    assert!(e.to_string().contains("confinement unavailable"));
+    assert!(e.to_string().contains("install Docker Desktop"));
 }

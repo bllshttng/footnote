@@ -136,6 +136,81 @@ fn table_headless_yolo(t: &toml::Table, provider: &str) -> Option<bool> {
         .as_bool()
 }
 
+/// Confinement fallback policy. This is intentionally a small Rust enum rather
+/// than a bool: the safe default is refusal, while `warn` is an explicit
+/// operator choice to continue unconfined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxUnavailablePolicy {
+    Refuse,
+    Warn,
+}
+
+impl SandboxUnavailablePolicy {
+    pub fn is_warn(self) -> bool {
+        matches!(self, Self::Warn)
+    }
+}
+
+/// Apply the shared headless confinement boundary for harnesses whose own argv
+/// has no usable sandbox backend. Explicit bypass remains an operator choice;
+/// otherwise the configured policy decides whether the child may spawn.
+pub fn enforce_headless_confinement(
+    cwd: &Path,
+    harness: &str,
+    backend_available: bool,
+    backend_name: &str,
+    explicit_bypass: bool,
+) -> Result<(), String> {
+    if backend_available || explicit_bypass {
+        return Ok(());
+    }
+    let policy = sandbox_on_unavailable(cwd);
+    let remediation = match harness {
+        "gemini" => {
+            "install Docker Desktop (or Podman) and select it with GEMINI_SANDBOX, or use macOS sandbox-exec"
+        }
+        _ => "install/configure a harness-owned sandbox backend",
+    };
+    let message = format!(
+        "fno-agents: {harness} confinement unavailable ({backend_name}); {remediation}. Set [sandbox] on_unavailable = \"warn\" to continue unconfined."
+    );
+    if policy.is_warn() {
+        eprintln!("warning: {message}");
+        Ok(())
+    } else {
+        Err(message)
+    }
+}
+
+/// Resolve the top-level `sandbox.on_unavailable` policy. A present malformed
+/// value is a safe refusal decision in that file; it must not fall through to a
+/// lower-precedence file and resurrect `warn`.
+pub fn sandbox_on_unavailable(cwd: &Path) -> SandboxUnavailablePolicy {
+    for path in config_candidates(cwd) {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(table) = parse_config(&content) else {
+            return SandboxUnavailablePolicy::Refuse;
+        };
+        let Some(sandbox) = table.get("sandbox") else {
+            continue;
+        };
+        let Some(sandbox) = sandbox.as_table() else {
+            return SandboxUnavailablePolicy::Refuse;
+        };
+        let Some(value) = sandbox.get("on_unavailable") else {
+            continue;
+        };
+        return match value.as_str().map(str::trim) {
+            Some("warn") => SandboxUnavailablePolicy::Warn,
+            Some("refuse") => SandboxUnavailablePolicy::Refuse,
+            _ => SandboxUnavailablePolicy::Refuse,
+        };
+    }
+    SandboxUnavailablePolicy::Refuse
+}
+
 /// A direct child scalar of `agents:` (e.g. `dead_row_grace`, `max_live`), NOT a
 /// provider-nested key: `agents.<provider>.<key>` never matches here.
 fn table_agents_scalar(t: &toml::Table, key: &str) -> Option<Value> {
@@ -440,6 +515,24 @@ pub(crate) fn read_headless_yolo(content: &str, provider: &str) -> Option<bool> 
     table_headless_yolo(&parse_config(content)?, provider)
 }
 
+#[cfg(test)]
+pub(crate) fn read_sandbox_on_unavailable(content: &str) -> SandboxUnavailablePolicy {
+    let Some(table) = parse_config(content) else {
+        return SandboxUnavailablePolicy::Refuse;
+    };
+    let Some(sandbox) = table.get("sandbox").and_then(Value::as_table) else {
+        return SandboxUnavailablePolicy::Refuse;
+    };
+    match sandbox
+        .get("on_unavailable")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some("warn") => SandboxUnavailablePolicy::Warn,
+        _ => SandboxUnavailablePolicy::Refuse,
+    }
+}
+
 /// `agents.dead_row_grace` (a direct child of `agents:`) from a config.toml body.
 #[cfg(test)]
 pub(crate) fn read_dead_row_grace(content: &str) -> Option<u64> {
@@ -494,6 +587,41 @@ mod tests {
         assert_eq!(read_headless_yolo(cfg, "gemini"), Some(false));
         // codex untouched -> absent -> falls through to default.
         assert_eq!(read_headless_yolo(cfg, "codex"), None);
+    }
+
+    #[test]
+    fn sandbox_unavailable_defaults_to_refuse_and_accepts_warn() {
+        assert_eq!(
+            read_sandbox_on_unavailable("schema_version = 1\n"),
+            SandboxUnavailablePolicy::Refuse
+        );
+        assert_eq!(
+            read_sandbox_on_unavailable("[sandbox]\non_unavailable = \"warn\"\n"),
+            SandboxUnavailablePolicy::Warn
+        );
+        assert_eq!(
+            read_sandbox_on_unavailable("[sandbox]\non_unavailable = \"oops\"\n"),
+            SandboxUnavailablePolicy::Refuse
+        );
+    }
+
+    #[test]
+    fn headless_confinement_guard_refuses_unavailable_backend_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let config = write_file("sandbox-refuse", "[sandbox]\non_unavailable = \"refuse\"\n");
+        std::env::set_var("FNO_CONFIG", &config);
+        let err = enforce_headless_confinement(
+            Path::new("/tmp"),
+            "opencode",
+            false,
+            "--dangerously-skip-permissions",
+            false,
+        )
+        .expect_err("default policy must stop an unconfined headless launch");
+        assert!(err.contains("opencode confinement unavailable"));
+        assert!(err.contains("install/configure"));
+        clear_config_env();
     }
 
     #[test]

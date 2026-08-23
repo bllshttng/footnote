@@ -256,7 +256,7 @@ pub fn dispatch_opencode_once(
     message: &str,
     from_name: &str,
     cwd: &Path,
-    _yolo: bool, // opencode uses --auto for permission bypass; yolo is a no-op (agy parity)
+    _yolo: bool, // opencode owns its permission/confinement behavior
     timeout: Option<Duration>,
     model: Option<&str>,
 ) -> AskOutcome {

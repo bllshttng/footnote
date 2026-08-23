@@ -69,6 +69,13 @@ FIELD_META: dict[str, Meta] = {
         "Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno agents mail status`).",
         default_source="default",
     ),
+    # --- config.sandbox.* ---
+    "sandbox.on_unavailable": Meta(
+        "advanced",
+        "When a headless harness has no confinement backend: refuse before spawn (default) or explicitly warn and continue unconfined.",
+        question="If a sandbox backend is unavailable, refuse or warn and continue?",
+        default_source="default",
+    ),
     # --- config.obsidian.* (a real decision) ---
     "obsidian.enabled": Meta(
         "always", "Whether this project uses an Obsidian vault for plans/docs.",
