@@ -130,10 +130,13 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
     # Provenance, not self-declaration: the grantor is the session that spawned it.
     assert row.crown_grantor == "parent-sess-abc"
     assert row.crown_label == "L2 epic-x"
+    # The bg receipt names the session as an 8-hex prefix, which no transcript
+    # basename ever matches, so arming at spawn would write a gate that arms
+    # dead. The crown is stamped, the manifest is refused, and the spawn says
+    # so; re-arming belongs to the later crown once the session self-identifies.
     manifest = Path(row.cwd) / ".fno" / "kings" / "epic-x.md"
-    assert king_state.parse_manifest(manifest)["harness_session_id"] == (
-        row.harness_session_id or row.short_id
-    )
+    assert not manifest.exists(), "armed a manifest no transcript can ever match"
+    assert "was NOT armed" in result.output
 
 
 def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:

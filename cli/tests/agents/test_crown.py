@@ -447,7 +447,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         [
             _entry(
                 "worker",
-                harness_session_id="session-worker",
+                harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 status="idle",
                 mux={"session": "main", "pane_id": 7},
             )
@@ -474,7 +474,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "human",
     )
     manifest = tmp_path / ".fno" / "kings" / "alpha.md"
-    assert king_state.parse_manifest(manifest)["harness_session_id"] == "session-worker"
+    assert king_state.parse_manifest(manifest)["harness_session_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def test_in_place_crown_receipt_names_a_disabled_king_loop(
@@ -483,7 +483,7 @@ def test_in_place_crown_receipt_names_a_disabled_king_loop(
     _prepare_crown_cli(
         monkeypatch,
         tmp_path,
-        [_entry("worker", harness_session_id="session-worker", status="idle")],
+        [_entry("worker", harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status="idle")],
     )
 
     result = _invoke_crown("worker", "--scope", "alpha")
@@ -502,7 +502,7 @@ def test_in_place_crown_aborts_before_registry_publish_when_manifest_write_fails
     _prepare_crown_cli(
         monkeypatch,
         tmp_path,
-        [_entry("worker", harness_session_id="session-worker", status="idle")],
+        [_entry("worker", harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status="idle")],
     )
     monkeypatch.setattr(
         king_state,
@@ -522,7 +522,7 @@ def test_in_place_crown_preserves_every_non_crown_field(tmp_path: Path, monkeypa
     target = _entry(
         "worker",
         harness="codex",
-        harness_session_id="session-worker",
+        harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         status="idle",
         mux={"session": "main", "pane_id": 7},
         delivery_policy="bus-only",
@@ -556,7 +556,7 @@ def test_uncrowned_agent_caller_is_refused_without_mutation(
     )
     target = _entry(
         "worker",
-        harness_session_id="worker-session",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         status="idle",
     )
     _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
@@ -589,7 +589,7 @@ def test_agent_caller_whose_crown_strictly_contains_scope_is_accepted(
     )
     target = _entry(
         "worker",
-        harness_session_id="worker-session",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         status="idle",
     )
     _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
@@ -622,7 +622,7 @@ def test_terminal_agent_grantor_is_refused_before_authority_check(
         crown_scope="alpha,beta",
         crown_grantor="human",
     )
-    target = _entry("worker", harness_session_id="worker-session", status="idle")
+    target = _entry("worker", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status="idle")
     _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
     monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
     before = [asdict(row) for row in load_registry()]
@@ -653,7 +653,7 @@ def test_agent_caller_whose_crown_does_not_contain_scope_is_refused_without_muta
     )
     target = _entry(
         "worker",
-        harness_session_id="worker-session",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         status="idle",
     )
     _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
@@ -676,7 +676,7 @@ def test_in_place_crown_refuses_a_terminal_target_without_mutation(
     _prepare_crown_cli(
         monkeypatch,
         tmp_path,
-        [_entry("worker", harness_session_id="worker-session", status=status)],
+        [_entry("worker", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status=status)],
     )
     before = [asdict(row) for row in load_registry()]
 
@@ -712,7 +712,7 @@ def test_grantor_whose_own_crown_moved_mid_grant_is_refused_under_the_lock(
         crown_scope="alpha,beta",
         crown_grantor="human",
     )
-    target = _entry("worker", harness_session_id="worker-session", status="idle")
+    target = _entry("worker", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status="idle")
     _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
     monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
 
@@ -763,7 +763,7 @@ def test_grantor_that_becomes_terminal_mid_grant_is_refused_under_the_lock(
         crown_scope="alpha,beta",
         crown_grantor="human",
     )
-    target = _entry("worker", harness_session_id="worker-session", status="idle")
+    target = _entry("worker", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status="idle")
     _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
     monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
 
@@ -800,7 +800,7 @@ def test_terminal_target_refusal_names_the_stale_snapshot_not_a_live_probe(
     _prepare_crown_cli(
         monkeypatch,
         tmp_path,
-        [_entry("worker", harness_session_id="worker-session", status="orphaned")],
+        [_entry("worker", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status="orphaned")],
     )
     before = [asdict(row) for row in load_registry()]
 
@@ -821,7 +821,7 @@ def test_in_place_crown_refuses_an_unknown_target_without_mutation(
     _prepare_crown_cli(
         monkeypatch,
         tmp_path,
-        [_entry("worker", harness_session_id="worker-session", status="idle")],
+        [_entry("worker", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status="idle")],
     )
     before = [asdict(row) for row in load_registry()]
 
@@ -844,7 +844,7 @@ def test_in_place_crown_rescopes_an_already_crowned_target(
         [
             _entry(
                 "worker",
-                harness_session_id="worker-session",
+                harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 status="idle",
                 crown_level=1,
                 crown_scope="beta",
@@ -855,7 +855,7 @@ def test_in_place_crown_rescopes_an_already_crowned_target(
     monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
     old_manifest = king_state.king_manifest_path("beta", state_root=tmp_path / ".fno")
     king_state.write_manifest(
-        old_manifest, scope="beta", harness_session_id="worker-session"
+        old_manifest, scope="beta", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     )
 
     result = _invoke_crown("worker", "--scope", "alpha")
@@ -885,7 +885,7 @@ def test_in_place_rescope_does_not_delete_a_successor_manifest(
         [
             _entry(
                 "worker",
-                harness_session_id="worker-session",
+                harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 status="idle",
                 crown_level=1,
                 crown_scope="beta",
@@ -896,7 +896,7 @@ def test_in_place_rescope_does_not_delete_a_successor_manifest(
     monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
     old_manifest = king_state.king_manifest_path("beta", state_root=tmp_path / ".fno")
     king_state.write_manifest(
-        old_manifest, scope="beta", harness_session_id="worker-session"
+        old_manifest, scope="beta", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     )
     real_update_registry = registry.update_registry
 
@@ -929,7 +929,7 @@ def test_in_place_crown_rescopes_a_live_row_from_project_to_epic(
         [
             _entry(
                 "worker",
-                harness_session_id="worker-session",
+                harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 status="busy",
                 crown_level=1,
                 crown_scope="alpha",
@@ -976,7 +976,7 @@ def test_rescope_into_a_scope_another_live_row_holds_is_still_refused(
     )
     target = _entry(
         "worker",
-        harness_session_id="worker-session",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         status="busy",
         crown_level=1,
         crown_scope="alpha",
@@ -1005,7 +1005,7 @@ def test_rescope_refusal_names_the_ways_out_and_never_force(
     )
     target = _entry(
         "worker",
-        harness_session_id="worker-session",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         status="busy",
         crown_level=1,
         crown_scope="alpha",
@@ -1035,7 +1035,7 @@ def test_rescope_onto_the_scope_already_held_is_an_idempotent_no_op(
         [
             _entry(
                 "worker",
-                harness_session_id="worker-session",
+                harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 status="busy",
                 crown_level=1,
                 crown_scope="alpha",
@@ -1066,7 +1066,7 @@ def test_rescope_emits_the_vacated_pair_on_the_event(
         [
             _entry(
                 "worker",
-                harness_session_id="worker-session",
+                harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 status="busy",
                 crown_level=1,
                 crown_scope="beta",
@@ -1215,7 +1215,7 @@ def test_in_place_crown_refuses_half_a_crown(
         [
             _entry(
                 "worker",
-                harness_session_id="worker-session",
+                harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 status="idle",
                 **half,
             )
@@ -1244,7 +1244,7 @@ def test_unreadable_graph_reads_null_on_the_strand_check(
         [
             _entry(
                 "worker",
-                harness_session_id="worker-session",
+                harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 status="busy",
                 crown_level=1,
                 crown_scope="beta",
@@ -1309,7 +1309,7 @@ def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
     )
     target = _entry(
         "worker",
-        harness_session_id="worker-session",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         status="idle",
     )
     _prepare_crown_cli(monkeypatch, tmp_path, [incumbent, target])
@@ -1380,7 +1380,7 @@ def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
     )
     target = _entry(
         "worker",
-        harness_session_id="worker-session",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         status="idle",
     )
     _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
@@ -1422,7 +1422,7 @@ def test_agent_caller_with_a_wrongly_typed_scope_sees_the_type_refusal_not_ident
     )
     target = _entry(
         "worker",
-        harness_session_id="worker-session",
+        harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         status="idle",
     )
     _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
@@ -1450,7 +1450,7 @@ def test_in_place_crown_canonicalizes_a_portfolio_and_derives_its_level(
     _prepare_crown_cli(
         monkeypatch,
         tmp_path,
-        [_entry("worker", harness_session_id="worker-session", status="idle")],
+        [_entry("worker", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status="idle")],
     )
 
     result = _invoke_crown(
@@ -1487,7 +1487,7 @@ def test_in_place_crown_emits_one_success_event_only_after_commit(
         monkeypatch,
         tmp_path,
         [
-            _entry("worker", harness_session_id="worker-session", status="idle"),
+            _entry("worker", harness_session_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", status="idle"),
             _entry(
                 "incumbent",
                 harness_session_id="incumbent-session",
