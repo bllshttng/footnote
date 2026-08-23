@@ -391,7 +391,7 @@ pub fn load() -> HashMap<SectionKey, SectionView> {
 /// Read the persisted density, sort, and sideline width (x-b186, x-2e86).
 ///
 /// Missing, corrupt, or written by a build with a state this one cannot parse
-/// all resolve to the defaults (`Regular` + by-squad + no width), independently
+/// all resolve to the defaults (`Regular` + status/attention-first + no width), independently
 /// per field: an unreadable `sort` never costs the operator their `density`.
 /// This is AC7-FR - the mux always starts, and the next gesture persists cleanly
 /// over whatever was there.

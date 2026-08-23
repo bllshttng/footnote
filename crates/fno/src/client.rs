@@ -181,7 +181,7 @@ fn canonical_width(d: Density) -> u16 {
 /// (x-2e86) The narrowest width at which a density still renders its structure.
 /// A drag below this demotes the density (Locked 5). Only `Extended` has a
 /// floor above [`MIN_SLIM_PANEL_W`]: the tree and the rail truncate gracefully
-/// down to the slim floor, but the table needs room for status + name + PR.
+/// down to the slim floor, but the table needs room for status + agent + PR + age.
 fn min_render_width(d: Density) -> u16 {
     match d {
         Density::Slim | Density::Regular => MIN_SLIM_PANEL_W,
@@ -6906,8 +6906,8 @@ impl View {
     ///
     /// Slim is a FILTER over the regular rows rather than a second builder, so
     /// it inherits section keys, rollup folding, and ordering for free and
-    /// cannot drift from the tree it is a summary of. Extended is its own
-    /// construction: a flat table has no tree to filter down to.
+    /// cannot drift from the tree it is a summary of. Extended keeps the same
+    /// structural rows and changes only agent-row composition and ordering.
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
         match self.density {
             Density::Regular => self.tree_rows(),
@@ -6932,8 +6932,8 @@ impl View {
     /// an idle parent the fold removed, or an exited parent a LiveOnly section
     /// hides, is ABSENT, and its child roots instead of indenting under a row
     /// that never rendered. Non-agent rows (headers, sublines, spacers) carry
-    /// 0. Slim filters the pair exactly as it filters rows; Extended's flat
-    /// table indents nothing.
+    /// 0. Slim filters the pair exactly as it filters rows; Extended retains
+    /// the same lineage depths inside its agent-name cells.
     fn display_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
         match self.density {
             Density::Regular => self.tree_rows_with_depths(),
@@ -9480,19 +9480,12 @@ fn humanize_age(secs: Option<u64>) -> String {
     format!("{body:>4}")
 }
 
-/// (x-b186) One extended-table row: status glyph, name, message tail, PR, and a
-/// relative last-update, each padded to its column so the table aligns.
+/// One extended-table row: status glyph, agent, last message, PR, and relative
+/// last-update age. Every cell is padded and truncated to its shared layout span
+/// so a long name or message stays on one display row.
 ///
-/// EMPTY CELLS ARE THE POINT (AC4-ERR). A row with no PR, no activity stamp, or
-/// no readable transcript renders blank in that cell - never a dash placeholder,
-/// an inferred PR, or a synthesized time. An external/roster row has none of the
-/// three by construction, so its right-hand cells are simply empty, which is the
-/// honest rendering of "fno does not know", not a rendering bug.
-///
-/// `cols` decides which columns survive a narrow panel; every cell is padded and
-/// truncated (via `pad_to`) so a long tail ellipsizes on one line rather than
-/// wrapping - a wrapped cell would paint two lines for one display row and break
-/// the x-260a single-enumeration invariant.
+/// Missing PR is rendered as an explicit neutral value; missing message and age
+/// remain empty because no honest value exists for those cells.
 fn table_row_text(a: &AgentRow, layout: TableLayout, depth: usize, now_secs: u64) -> String {
     let glyph = lattice_glyph(agent_lattice_state(a)).0;
     let name = if depth == 0 {
