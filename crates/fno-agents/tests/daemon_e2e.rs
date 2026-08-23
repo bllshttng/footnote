@@ -44,6 +44,15 @@ fn start_daemon(home: &AgentsHome) -> std::process::Child {
     start_daemon_env(home, &[])
 }
 
+fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> std::process::Child {
+    let mut cmd = Command::new(daemon_bin);
+    cmd.env("FNO_AGENTS_HOME", home.root())
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
+    let child = cmd.spawn().expect("daemon spawns");
+    wait_for(&home.supervisor_sock(), Duration::from_secs(10));
+    child
+}
+
 /// Like [`start_daemon`] but with extra env on the daemon process. Used by tests
 /// that seed a precise registry status the startup reconcile sweep (Architecture
 /// B) would otherwise settle -- e.g. `FNO_AGENTS_NO_STARTUP_RECONCILE=1` to keep
@@ -114,6 +123,20 @@ fn fake_daemon_bin(home: &AgentsHome) -> PathBuf {
     .expect("write fake daemon");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("chmod fake daemon");
+    path
+}
+
+fn env_probe_daemon_bin(home: &AgentsHome, label: &str, marker: &Path) -> PathBuf {
+    let path = home.root().join(format!("{label}-daemon.sh"));
+    let script = format!(
+        "#!/bin/sh\nprintf '%s delay=%s pid=%s\\n' '{label}' \"${{FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS:-unset}}\" \"$$\" >> '{}'\nexport FNO_AGENTS_WORKER_BIN='{}'\nexec '{}' \"$@\"\n",
+        marker.display(),
+        WORKER_BIN,
+        DAEMON_BIN,
+    );
+    std::fs::write(&path, script).expect("write environment probe daemon");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod environment probe daemon");
     path
 }
 
@@ -630,6 +653,53 @@ async fn restart_over_a_large_roster_leaves_exactly_one_daemon() {
     // 28 rows is the size at which the operator's fleet actually broke. Eight
     // rows the week before did not.
     restart_leaves_exactly_one_daemon(28).await;
+}
+
+#[tokio::test]
+async fn daemon_child_env_isolated_probe() {
+    let intended_home = short_home();
+    let sibling_home = short_home();
+    intended_home.ensure_root().unwrap();
+    sibling_home.ensure_root().unwrap();
+    let marker = intended_home.root().join("daemon-env-probe.log");
+    let intended_bin = env_probe_daemon_bin(&intended_home, "intended", &marker);
+    let sibling_bin = env_probe_daemon_bin(&sibling_home, "sibling", &marker);
+
+    let mut incumbent = start_daemon(&intended_home);
+    std::env::set_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000");
+    let restart = {
+        let home = intended_home.clone();
+        let bin = intended_bin.clone();
+        tokio::spawn(async move { fno_agents::client::restart_daemon(&home, &bin, false).await })
+    };
+    let mut sibling = start_daemon_with_bin(&sibling_home, &sibling_bin);
+    let outcome = restart.await.unwrap().expect("probe restart succeeds");
+    let _ = incumbent.wait();
+    unsafe {
+        libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
+        libc::kill(sibling.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let sibling_pid = sibling.id();
+    let _ = sibling.wait();
+    std::env::remove_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS");
+
+    let probe = std::fs::read_to_string(&marker).expect("daemon env probe marker");
+    assert!(
+        probe.contains("intended delay=3000"),
+        "intended successor did not receive its delay seam: {probe}"
+    );
+    assert!(
+        probe.contains("sibling delay=unset"),
+        "daemon_child_env_isolated expected sibling without delay; probe={probe}"
+    );
+    println!(
+        "daemon_child_env_isolated intended_pid={} sibling_pid={} marker={}",
+        outcome.new_pid,
+        sibling_pid,
+        marker.display()
+    );
+    std::fs::remove_dir_all(intended_home.root()).ok();
+    std::fs::remove_dir_all(sibling_home.root()).ok();
 }
 
 /// status (Wave 5, US6.10, AC10-ERR): with no daemon running, the `fno-agents

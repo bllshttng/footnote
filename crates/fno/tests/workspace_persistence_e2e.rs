@@ -52,6 +52,44 @@ fn restart(scratch: &Scratch) -> Restarted {
     }
 }
 
+fn process_stat(pid: u32) -> String {
+    String::from_utf8(
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("inspect server process")
+            .stdout,
+    )
+    .unwrap_or_default()
+    .trim()
+    .to_string()
+}
+
+#[test]
+fn old_server_reaped_before_rebind_probe() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("reap-probe");
+    let mut incumbent = spawn_server(&scratch.main_sock(), &[]);
+    let old_pid = incumbent.0.id();
+
+    kill_server(&scratch);
+    let stat = process_stat(old_pid);
+    assert!(
+        !stat.starts_with('Z'),
+        "old_server_reaped_before_rebind old_pid={old_pid} socket={} process_stat={stat:?}",
+        scratch.main_sock().display()
+    );
+
+    let replacement = spawn_server(&scratch.main_sock(), &[]);
+    println!(
+        "old_server_reaped_before_rebind old_pid={} new_pid={} socket={}",
+        old_pid,
+        replacement.0.id(),
+        scratch.main_sock().display()
+    );
+    let _ = incumbent.0.wait();
+}
+
 /// The squad id currently named `name`, from the last absorbed layout.
 fn squad_id(c: &FakeClient, name: &str) -> u64 {
     c.layout
