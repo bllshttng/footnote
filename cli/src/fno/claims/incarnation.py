@@ -69,8 +69,10 @@ def _describe_process(pid: object) -> str:
     live-or-suspect, and showing what the pid actually is (or that it cannot
     be inspected) beats failing open or closed on a probe error.
     """
+    if not isinstance(pid, (int, str)) or isinstance(pid, bool):
+        return "<uninspectable>"
     try:
-        pid_int = int(pid)  # type: ignore[arg-type]
+        pid_int = int(pid)
     except (TypeError, ValueError):
         return "<uninspectable>"
     import time
