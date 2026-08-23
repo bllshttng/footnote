@@ -61,22 +61,85 @@ pub(crate) fn session_handle_tier(token: &str, session_id: &str) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use proptest::prelude::*;
+
     use super::{canonical_handle, legacy_suffix_handle};
 
-    #[test]
-    fn canonical_is_first_eight_and_legacy_suffix_is_last_eight() {
-        // UUID family: lowercased. canonical = first-8, legacy_suffix = last-8.
-        assert_eq!(
-            canonical_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4"),
-            "019f48e1"
+    fn session_id_strategy() -> impl Strategy<Value = Vec<String>> {
+        let uuid_lower_pattern = [
+            r"[0-9a-f]{8}",
+            r"[0-9a-f]{4}",
+            r"[0-9a-f]{4}",
+            r"[0-9a-f]{4}",
+            r"[0-9a-f]{12}",
+        ]
+        .join("-");
+        let uuid_upper_pattern = [
+            r"[0-9A-F]{8}",
+            r"[0-9A-F]{4}",
+            r"[0-9A-F]{4}",
+            r"[0-9A-F]{4}",
+            r"[0-9A-F]{12}",
+        ]
+        .join("-");
+        let uuid_v7_pattern = [
+            r"[0-9a-f]{8}",
+            r"[0-9a-f]{4}",
+            r"7[0-9a-f]{3}",
+            r"[89ab][0-9a-f]{3}",
+            r"[0-9a-f]{12}",
+        ]
+        .join("-");
+        let uuid_lower = proptest::string::string_regex(&uuid_lower_pattern).unwrap();
+        let uuid_upper = proptest::string::string_regex(&uuid_upper_pattern).unwrap();
+        let uuid_v7 = proptest::string::string_regex(&uuid_v7_pattern).unwrap();
+        let opencode = proptest::string::string_regex(r"ses_[A-Za-z0-9]{8,32}").unwrap();
+        let short_hex = proptest::string::string_regex(r"[0-9a-f]{4,8}").unwrap();
+        (uuid_lower, uuid_upper, uuid_v7, opencode, short_hex)
+            .prop_map(|(lower, upper, v7, opencode, short)| vec![lower, upper, v7, opencode, short])
+    }
+
+    fn python_canonical_handles(session_ids: &[String]) -> Vec<String> {
+        let cli_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src");
+        let input = serde_json::to_string(session_ids).expect("session ids serialize");
+        let output = Command::new("python3")
+            .args([
+                "-c",
+                "import json, sys; from fno.harness_identity import canonical_handle; print(json.dumps([canonical_handle(value) for value in json.loads(sys.argv[1])]))",
+                &input,
+            ])
+            .env("PYTHONPATH", cli_src)
+            .output()
+            .expect("python3 is required for Rust/Python identity parity");
+        assert!(
+            output.status.success(),
+            "Python canonical_handle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
+        serde_json::from_slice(&output.stdout).expect("Python canonical_handle returned JSON")
+    }
+
+    #[test]
+    fn legacy_suffix_is_last_eight_and_preserves_opencode_case() {
+        // UUID family: lowercased. legacy_suffix = last-8.
         assert_eq!(
             legacy_suffix_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4"),
             "4bcf4ae4"
         );
-        // OpenCode ses_ family: case preserved (canonical includes the prefix;
-        // prefer the full id for ses_ short addressing).
-        assert_eq!(canonical_handle("ses_7f3a9b2cAbCd1234"), "ses_7f3a");
+        // OpenCode ses_ family: case preserved.
         assert_eq!(legacy_suffix_handle("ses_7f3a9b2cAbCd1234"), "AbCd1234");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn canonical_handle_matches_python_across_id_families(session_ids in session_id_strategy()) {
+            let expected = python_canonical_handles(&session_ids);
+            let actual: Vec<_> = session_ids.iter().map(|id| canonical_handle(id)).collect();
+            prop_assert_eq!(actual, expected);
+        }
     }
 }

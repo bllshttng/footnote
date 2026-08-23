@@ -858,7 +858,7 @@ fn effective_spawn_message(message: &str, substrate: &str) -> String {
 ///
 /// Returns `Some(exit_code)` when handled client-side, `None` to fall through.
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
-    use fno_agents::agy_ask::dispatch_agy_once;
+    use fno_agents::agy_ask::dispatch_agy_once_with_effort;
     use fno_agents::claude_ask::{
         dispatch_claude_headless, dispatch_claude_spawn, py_repr, ClaudeHome,
     };
@@ -1010,13 +1010,14 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         return Some(2);
     }
     // Pane spawns re-exec the Python CLI, whose effort_tokens mapper is the
-    // validator for claude/codex/opencode. Validate only client-owned lanes
+    // validator for claude/codex/agy/opencode. Validate only client-owned lanes
     // here; otherwise opencode pane effort would be rejected before re-exec.
     if substrate != "pane" {
         if let Some(value) = effort {
             let allowed = match provider {
                 "claude" => &["low", "medium", "high", "xhigh", "max"][..],
                 "codex" => &["minimal", "low", "medium", "high", "xhigh"][..],
+                "agy" => &["low", "medium", "high"][..],
                 _ => {
                     eprintln!(
                         "provider {} has no reasoning-effort surface; omit --effort",
@@ -1243,9 +1244,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         ("agy", "headless") => {
             // agy is stateless (plain text, no session id): a one-shot `agy -p`.
             // It ignores `yolo` (headless create always passes
-            // --dangerously-skip-permissions) and honors an optional --model.
-            emit!(dispatch_agy_once(
-                home, name, &message, from_name, &cwd, model, timeout, add_dir,
+            // --dangerously-skip-permissions) and honors optional effort/model.
+            emit!(dispatch_agy_once_with_effort(
+                home, name, &message, from_name, &cwd, model, effort, timeout, add_dir,
             ))
         }
 

@@ -67,7 +67,7 @@ fn agy_yolo_flags() -> Vec<String> {
 }
 
 /// Build the one-shot argv: `agy --print-timeout <dur> --add-dir <cwd>
-/// --dangerously-skip-permissions [--model <m>] -p <full_prompt>`.
+/// --dangerously-skip-permissions [--effort <level>] [--model <m>] -p <full_prompt>`.
 ///
 /// NOTE: in agy, `-p`/`--print` takes the prompt as its VALUE, so it must come
 /// LAST with the prompt attached (the wrapper's load-bearing ordering rule).
@@ -81,6 +81,17 @@ pub fn build_argv_once(
     full_prompt: &str,
     cwd: &Path,
     model: Option<&str>,
+    add_dir: Option<&str>,
+) -> Vec<String> {
+    build_argv_once_with_effort(full_prompt, cwd, model, None, add_dir)
+}
+
+/// Build the one-shot argv with an optional provider-native reasoning effort.
+pub fn build_argv_once_with_effort(
+    full_prompt: &str,
+    cwd: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
     add_dir: Option<&str>,
 ) -> Vec<String> {
     let mut argv = vec![
@@ -106,6 +117,10 @@ pub fn build_argv_once(
         argv.push(dir);
     }
     argv.extend(agy_yolo_flags());
+    if let Some(effort) = effort.filter(|effort| !effort.is_empty()) {
+        argv.push("--effort".to_string());
+        argv.push(effort.to_string());
+    }
     if let Some(m) = model {
         if !m.is_empty() {
             argv.push("--model".to_string());
@@ -553,8 +568,34 @@ pub fn agy_create(
     agent_self: Option<&str>,
     add_dir: Option<&str>,
 ) -> Result<AgyResult, AgyAskError> {
+    agy_create_with_effort(
+        cwd,
+        prompt,
+        from_name,
+        model,
+        None,
+        output_path,
+        timeout,
+        agent_self,
+        add_dir,
+    )
+}
+
+/// Spawn `agy -p ...` with an optional reasoning effort.
+#[allow(clippy::too_many_arguments)]
+pub fn agy_create_with_effort(
+    cwd: &Path,
+    prompt: &str,
+    from_name: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    output_path: &Path,
+    timeout: Option<Duration>,
+    agent_self: Option<&str>,
+    add_dir: Option<&str>,
+) -> Result<AgyResult, AgyAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
-    let argv = build_argv_once(&full_prompt, cwd, model, add_dir);
+    let argv = build_argv_once_with_effort(&full_prompt, cwd, model, effort, add_dir);
     run_agy(&argv, output_path, timeout, cwd, agent_self)
 }
 
@@ -612,6 +653,24 @@ pub fn dispatch_agy_once(
     timeout: Option<Duration>,
     add_dir: Option<&str>,
 ) -> AskOutcome {
+    dispatch_agy_once_with_effort(
+        home, name, message, from_name, cwd, model, None, timeout, add_dir,
+    )
+}
+
+/// Orchestrate one agy `spawn --once` with an optional reasoning effort.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_agy_once_with_effort(
+    home: &AgentsHome,
+    name: &str,
+    message: &str,
+    from_name: &str,
+    cwd: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
+    timeout: Option<Duration>,
+    add_dir: Option<&str>,
+) -> AskOutcome {
     use crate::claude_ask::py_repr;
     if let Err(msg) = crate::claude_ask::validate_spawn_inputs(name, from_name) {
         return AskOutcome::err(msg, 2);
@@ -660,11 +719,12 @@ pub fn dispatch_agy_once(
     }
 
     let eff_timeout = timeout.or(Some(DEFAULT_ASK_TIMEOUT));
-    match agy_create(
+    match agy_create_with_effort(
         cwd,
         effective_message,
         from_name,
         model,
+        effort,
         &log_path,
         eff_timeout,
         Some(name),
