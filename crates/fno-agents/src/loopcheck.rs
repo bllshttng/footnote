@@ -3073,7 +3073,7 @@ fn is_pre_existing_main_red(pr_failing: &[String], main_failing: &[String]) -> b
 /// and the caller holds; only positive proof fires the terminal.
 fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<String>> {
     let limit = n.to_string();
-    let list_out = bounded_read(
+    let list_out = match bounded_read(
         gh_bin.as_ref(),
         &[
             "run",
@@ -3090,12 +3090,26 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
         cwd,
         "main_run_list",
         stopgate_read_timeout(),
-    )
-    .ok()?;
+    ) {
+        Ok(out) => out,
+        Err(error) => {
+            log_bounded_read_error("main-head", &error);
+            return None;
+        }
+    };
     if !list_out.status.success() {
+        let error = GhReadError::failed("main_run_list", stderr_tail(&list_out.stderr_tail));
+        log_bounded_read_error("main-head", &error);
         return None; // gh error -> unknown -> hold
     }
-    let list: Value = serde_json::from_slice(&list_out.stdout).ok()?;
+    let list: Value = match serde_json::from_slice(&list_out.stdout) {
+        Ok(value) => value,
+        Err(_) => {
+            let error = GhReadError::parse_failed("main_run_list_parse");
+            log_bounded_read_error("main-head", &error);
+            return None;
+        }
+    };
     let arr = list.as_array()?;
     // Zero completed runs (new/quiet repo) is not proof -> unknown.
     // The newest run's headSha IS the current main HEAD; classify against only
@@ -3110,18 +3124,32 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
     let mut names: Vec<String> = Vec::new();
     for id in failing_run_ids {
         let id_arg = id.to_string();
-        let view_out = bounded_read(
+        let view_out = match bounded_read(
             gh_bin.as_ref(),
             &["run", "view", &id_arg, "--json", "jobs"],
             cwd,
             "main_run_view",
             stopgate_read_timeout(),
-        )
-        .ok()?;
+        ) {
+            Ok(out) => out,
+            Err(error) => {
+                log_bounded_read_error("main-head", &error);
+                return None;
+            }
+        };
         if !view_out.status.success() {
+            let error = GhReadError::failed("main_run_view", stderr_tail(&view_out.stderr_tail));
+            log_bounded_read_error("main-head", &error);
             return None; // any per-run gh error -> unknown -> hold (fail closed)
         }
-        let view: Value = serde_json::from_slice(&view_out.stdout).ok()?;
+        let view: Value = match serde_json::from_slice(&view_out.stdout) {
+            Ok(value) => value,
+            Err(_) => {
+                let error = GhReadError::parse_failed("main_run_view_parse");
+                log_bounded_read_error("main-head", &error);
+                return None;
+            }
+        };
         for name in parse_failing_job_names(&view) {
             if !names.contains(&name) {
                 names.push(name);
@@ -3303,7 +3331,7 @@ fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, descr
     let state_arg = format!("state={state}");
     let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
     let description_arg = format!("description={description}");
-    let _ = bounded_read(
+    let result = bounded_read(
         gh_bin.as_ref(),
         &[
             "api",
@@ -3321,6 +3349,14 @@ fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, descr
         "coverage_status_post",
         stopgate_read_timeout(),
     );
+    match result {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let error = GhReadError::failed("coverage_status_post", stderr_tail(&out.stderr_tail));
+            log_bounded_read_error("review-coverage publisher", &error);
+        }
+        Err(error) => log_bounded_read_error("review-coverage publisher", &error),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8868,6 +8904,24 @@ impl GhReadError {
     }
 }
 
+fn bounded_read_diagnostic(context: &str, error: &GhReadError) -> String {
+    let elapsed = error
+        .elapsed
+        .map(|duration| format!("{:.1}", duration.as_secs_f64()))
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "loop-check: {context}: external read '{}' outcome={} elapsed_s={} stderr_tail={:?}",
+        error.read,
+        error.outcome(),
+        elapsed,
+        error.stderr_tail
+    )
+}
+
+fn log_bounded_read_error(context: &str, error: &GhReadError) {
+    eprintln!("{}", bounded_read_diagnostic(context, error));
+}
+
 /// One external read through the single bounded transport. Every synchronous
 /// `gh`/`fno` read reachable from the stop decision routes through here, so
 /// none can hang the fire and none can misreport a kill as an ordinary
@@ -8899,17 +8953,24 @@ fn bounded_read(
 /// (unshipped, dirty, unknown branch), so the degrade direction is the same
 /// one each caller documented for a failing git.
 fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<BoundedOutput> {
+    let read_name = format!("git {}", args.first().unwrap_or(&"?"));
     match run_bounded(OsStr::new(git_bin), args, cwd, stopgate_read_timeout()) {
         BoundedRun::Completed(out) => Some(out),
         BoundedRun::TimedOut(elapsed) => {
-            eprintln!(
-                "loop-check: git read {:?} timed out after {:.1}s and was killed; reading as no-answer",
-                args.first().unwrap_or(&"?"),
-                elapsed.as_secs_f64()
-            );
+            let error = GhReadError::timed_out(&read_name, elapsed);
+            log_bounded_read_error("git", &error);
             None
         }
-        BoundedRun::SpawnFailed | BoundedRun::WaitFailed => None,
+        BoundedRun::SpawnFailed => {
+            let error = GhReadError::unrunnable(&read_name, "spawn failed");
+            log_bounded_read_error("git", &error);
+            None
+        }
+        BoundedRun::WaitFailed => {
+            let error = GhReadError::unrunnable(&read_name, "wait failed");
+            log_bounded_read_error("git", &error);
+            None
+        }
     }
 }
 
@@ -11278,6 +11339,22 @@ mod tests {
             }
             other => panic!("expected Completed, got {}", bounded_kind(&other)),
         }
+    }
+
+    #[test]
+    fn bounded_read_diagnostic_preserves_transport_classification() {
+        let timeout = GhReadError::timed_out("main_run_view", std::time::Duration::from_secs(1));
+        let rendered = bounded_read_diagnostic("main-head", &timeout);
+        assert!(rendered.contains("main-head"), "{rendered}");
+        assert!(rendered.contains("main_run_view"), "{rendered}");
+        assert!(rendered.contains("outcome=timeout"), "{rendered}");
+        assert!(rendered.contains("elapsed_s=1.0"), "{rendered}");
+
+        let spawn = GhReadError::unrunnable("git_status", "spawn failed");
+        let rendered = bounded_read_diagnostic("payload", &spawn);
+        assert!(rendered.contains("git_status"), "{rendered}");
+        assert!(rendered.contains("outcome=failed"), "{rendered}");
+        assert!(rendered.contains("spawn failed"), "{rendered}");
     }
 
     #[test]
