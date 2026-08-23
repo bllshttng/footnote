@@ -39,8 +39,8 @@
 //! budget deliberately (alongside loopcheck.rs).
 
 use crate::interrupt_classify::{
-    classify_interrupted, discover_transcript, read_transcript, resume_paragraph,
-    InterruptedCallOutcome, TranscriptDiscovery,
+    classify_interrupted, read_transcript, resume_paragraph, InterruptedCallOutcome,
+    TranscriptDiscovery,
 };
 use crate::loopcheck::TerminationReason;
 use chrono::Utc;
@@ -208,6 +208,12 @@ pub trait Dispatcher {
     /// Worktree whose Claude transcript should be inspected after a dead
     /// dispatch. Non-shellout test dispatchers have no transcript store.
     fn transcript_cwd(&self) -> Option<&Path> {
+        None
+    }
+
+    /// Effective Claude config's projects directory for the last dispatch.
+    /// Account rotation can change this per child launch.
+    fn transcript_projects_dir(&self) -> Option<PathBuf> {
         None
     }
 }
@@ -873,6 +879,7 @@ pub fn run_loop(
             // deliberately leaves retry/abort authority with the loop policy.
             let outcome = classify_dispatch(
                 dispatcher.transcript_cwd(),
+                dispatcher.transcript_projects_dir().as_deref(),
                 dispatch_started,
                 dispatch_finished,
             );
@@ -914,15 +921,27 @@ pub fn run_loop(
 
 fn classify_dispatch(
     cwd: Option<&Path>,
+    projects_dir: Option<&Path>,
     dispatch_started: SystemTime,
     dispatch_finished: SystemTime,
 ) -> InterruptedCallOutcome {
     let Some(cwd) = cwd else {
         return InterruptedCallOutcome::Unresolved;
     };
-    let TranscriptDiscovery::Found(path) =
-        discover_transcript(cwd, dispatch_started, dispatch_finished)
-    else {
+    let default_projects_dir;
+    let projects_dir = match projects_dir {
+        Some(projects_dir) => projects_dir,
+        None => {
+            default_projects_dir = crate::claude_drive::claude_projects_dir();
+            &default_projects_dir
+        }
+    };
+    let TranscriptDiscovery::Found(path) = crate::interrupt_classify::discover_transcript_in(
+        cwd,
+        projects_dir,
+        dispatch_started,
+        dispatch_finished,
+    ) else {
         return InterruptedCallOutcome::Unresolved;
     };
     match read_transcript(&path) {

@@ -34,8 +34,8 @@ driver_invoke() {
   fi
   local prompt="${CONTINUE_PROMPT:-/target --resume}"
   if [[ -n "${RESUME_CONTEXT:-}" ]]; then
-    prompt="${RESUME_CONTEXT}
-${prompt}"
+    prompt="${prompt}
+${RESUME_CONTEXT}"
   fi
   # shellcheck disable=SC2086
   "$cli" --print \
