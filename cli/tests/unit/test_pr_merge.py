@@ -450,6 +450,79 @@ def test_manifest_without_the_field_merges(enabled, monkeypatch, capsys, tmp_pat
     assert _last_json(capsys)["outcome"] == "merged"
 
 
+def test_env_grant_merges_despite_config_disabled(enabled, monkeypatch, capsys, tmp_path):
+    """x-01b9's positive marker: TARGET_AUTO_MERGE=1 is folded at init into
+    `auto_merge_approved: true` + `auto_merge_source: env-target-auto-merge`.
+    The docs (references/auto-merge.md, resolution order) promise that grant
+    allows merging on a config-disabled repo; the old config-first order
+    refused it before the manifest was ever read. A refusal alone could not
+    prove the fix (it refused for the wrong reason before), so this asserts
+    the merge HAPPENS."""
+    monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
+    _write_manifest(
+        tmp_path,
+        "session_id: s1\nauto_merge_approved: true\n"
+        "auto_merge_source: env-target-auto-merge\n",
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_config_withdrawal_refuses_a_config_sourced_manifest(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """x-2270 pin carried into the one-posture resolution: the manifest is a
+    snapshot; the live switch wins. A manifest whose `true` mirrored config
+    (source: config) must not outlive the operator flipping enabled off."""
+    monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
+    _write_manifest(
+        tmp_path,
+        "session_id: s1\nauto_merge_approved: true\nauto_merge_source: config\n",
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "skipped"
+    assert "auto_merge.enabled=false" in obj["reason"]
+
+
+def test_disabled_refusal_names_both_sanctioned_overrides(monkeypatch, capsys, tmp_path):
+    """x-3855: a refusal that names no sanctioned override is the one workers
+    improvised past (two inside sixty seconds). The config-disabled refusal
+    must name BOTH legitimate paths forward: arming the config key, and the
+    per-run spawn-time grant that touches no shared config."""
+    monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "skipped"
+    assert "sanctioned override" in obj["reason"]
+    assert "fno config set auto_merge.enabled true" in obj["reason"]
+    assert "TARGET_AUTO_MERGE=1" in obj["reason"]
+
+
+def test_per_run_refusal_names_the_override(enabled, monkeypatch, capsys, tmp_path):
+    """The per-run no-merge refusal names the source (x-9d11) AND the way
+    forward (x-3855): an out-of-band operator merge, or a re-dispatch without
+    the refusal flag."""
+    _write_manifest(
+        tmp_path,
+        "session_id: s1\nauto_merge_approved: false\n"
+        "auto_merge_source: flag-no-merge\n",
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "skipped"
+    assert "sanctioned override" in obj["reason"]
+    assert "out-of-band" in obj["reason"]
+    assert "without --no-merge" in obj["reason"]
+
+
 def test_merge_exit_0_with_queue_text_still_merged(enabled, monkeypatch, capsys, tmp_path):
     """x-9d11: the verb never queues, so gh output text cannot reclassify the
     outcome. A green exit is `merged` whatever the message says (the queued
