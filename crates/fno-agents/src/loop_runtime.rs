@@ -38,13 +38,17 @@
 //! `crates/fno-agents/src/loop*` counts this file's LOC toward the ratchet
 //! budget deliberately (alongside loopcheck.rs).
 
+use crate::interrupt_classify::{
+    classify_interrupted, discover_transcript, read_transcript, resume_paragraph,
+    InterruptedCallOutcome, TranscriptDiscovery,
+};
 use crate::loopcheck::TerminationReason;
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -187,6 +191,25 @@ pub trait Session {
 pub trait Dispatcher {
     /// Launch a session for the given unit in the given walk context.
     fn run(&self, unit: &Unit, ctx: &DispatchCtx) -> Result<Box<dyn Session>, LoopError>;
+
+    /// Launch a session with observational context from the preceding
+    /// interrupted dispatch. The default preserves every existing dispatcher
+    /// unchanged; shellout dispatchers opt in by exporting the context.
+    fn run_with_resume_context(
+        &self,
+        unit: &Unit,
+        ctx: &DispatchCtx,
+        resume_context: Option<&str>,
+    ) -> Result<Box<dyn Session>, LoopError> {
+        let _ = resume_context;
+        self.run(unit, ctx)
+    }
+
+    /// Worktree whose Claude transcript should be inspected after a dead
+    /// dispatch. Non-shellout test dispatchers have no transcript store.
+    fn transcript_cwd(&self) -> Option<&Path> {
+        None
+    }
 }
 
 // ── budget ────────────────────────────────────────────────────────────────────
@@ -718,6 +741,7 @@ pub fn run_loop(
         // Re-dispatch until a TerminationReason event appears, the per-unit
         // cap is hit, or the walk-level budget is exhausted.
         let mut unit_dispatches: u64 = 0;
+        let mut resume_context: Option<String> = None;
         loop {
             // Budget check (inner loop top, before dispatch).
             if iterations_used >= budget.max_iterations {
@@ -790,16 +814,21 @@ pub fn run_loop(
                 }),
             )?;
 
-            // Launch and wait for the session.
+            // Launch and wait for the session. The timestamp is taken
+            // immediately before the child starts so transcript discovery is
+            // scoped to this dispatch window.
+            let dispatch_started = SystemTime::now();
             let mut session = dispatcher
-                .run(
+                .run_with_resume_context(
                     &unit,
                     &DispatchCtx {
                         iteration: iterations_used,
                     },
+                    resume_context.take().as_deref(),
                 )
                 .map_err(|e| LoopError::Dispatch(e.to_string()))?;
             let exit_code = session.wait()?;
+            let dispatch_finished = SystemTime::now();
 
             // Check whether the session produced a termination event.
             if let Some(evidence) = journal.find_termination(&unit.session_key)? {
@@ -839,8 +868,37 @@ pub fn run_loop(
                 break; // Break inner loop -> continue outer loop (next unit).
             }
 
-            // No termination event: emit node_failed (watchdog synthesis) and
-            // re-dispatch in the next inner iteration.
+            // No termination event: observe the dead dispatch before emitting
+            // node_failed. This records what the resumed worker can know, but
+            // deliberately leaves retry/abort authority with the loop policy.
+            let outcome = classify_dispatch(
+                dispatcher.transcript_cwd(),
+                dispatch_started,
+                dispatch_finished,
+            );
+            let (resolution, calls_in_flight) = match &outcome {
+                InterruptedCallOutcome::Unknown { name } => {
+                    ("classified", Some(vec![json!({"name": name})]))
+                }
+                InterruptedCallOutcome::NothingInFlight => ("nothing_in_flight", None),
+                InterruptedCallOutcome::Unresolved => ("unresolved", None),
+            };
+            let mut interrupted_data = json!({
+                "unit_id": unit.id,
+                "session_id": unit.session_key,
+                "iteration": iterations_used,
+                "exit_code": exit_code,
+                "resolution": resolution,
+            });
+            if let Some(calls_in_flight) = calls_in_flight {
+                interrupted_data["calls_in_flight"] = json!(calls_in_flight);
+            }
+            journal.append("unit_interrupted", interrupted_data)?;
+            resume_context = resume_paragraph(&outcome);
+
+            // Emit node_failed (watchdog synthesis) and re-dispatch in the
+            // next inner iteration. The classifier above does not change this
+            // dispatch decision.
             journal.append(
                 "node_failed",
                 json!({
@@ -851,6 +909,25 @@ pub fn run_loop(
                 }),
             )?;
         }
+    }
+}
+
+fn classify_dispatch(
+    cwd: Option<&Path>,
+    dispatch_started: SystemTime,
+    dispatch_finished: SystemTime,
+) -> InterruptedCallOutcome {
+    let Some(cwd) = cwd else {
+        return InterruptedCallOutcome::Unresolved;
+    };
+    let TranscriptDiscovery::Found(path) =
+        discover_transcript(cwd, dispatch_started, dispatch_finished)
+    else {
+        return InterruptedCallOutcome::Unresolved;
+    };
+    match read_transcript(&path) {
+        Ok(entries) => classify_interrupted(&entries),
+        Err(_) => InterruptedCallOutcome::Unresolved,
     }
 }
 

@@ -6,6 +6,7 @@
 {"expect":"invalid","reason":"missing source","event":{"ts":"2026-05-07T09:30:42Z","type":"phase_transition","data":{"gate_bearing":true,"gate":"ledger_updated","phase":"p","nonce":"n","session_id":"s"}}}
 {"expect":"invalid","reason":"unknown source","event":{"ts":"2026-05-07T09:30:42Z","type":"phase_transition","source":"bogus","data":{"gate_bearing":true,"gate":"ledger_updated","phase":"p","nonce":"n","session_id":"s"}}}
 {"expect":"invalid","reason":"unknown event type","event":{"ts":"2026-05-07T09:30:42Z","type":"foo","source":"target","data":{}}}
+{"expect":"valid","reason":"unit_interrupted classified tool outcome","event":{"ts":"2026-05-07T09:30:42Z","type":"unit_interrupted","source":"loop","data":{"session_id":"s","unit_id":"u","iteration":2,"exit_code":137,"resolution":"classified","calls_in_flight":[{"name":"Bash"}]}}}
 {"expect":"invalid","reason":"phase_transition gate_bearing without gate","event":{"ts":"2026-05-07T09:30:42Z","type":"phase_transition","source":"target","data":{"gate_bearing":true,"phase":"p","nonce":"n","session_id":"s"}}}
 {"expect":"invalid","reason":"missing data.nonce","event":{"ts":"2026-05-07T09:30:42Z","type":"child_promise","source":"target","data":{"session_id":"s"}}}
 {"expect":"invalid","reason":"mission_complete bad status enum","event":{"ts":"2026-05-07T09:30:42Z","type":"mission_complete","source":"megatron","data":{"mission_id":"m","status":"sideways"}}}

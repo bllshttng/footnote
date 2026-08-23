@@ -33,22 +33,31 @@ pub enum InterruptedCallOutcome {
 /// Parse one Claude JSONL transcript line into the small vocabulary needed by
 /// the classifier. Malformed or unrelated records are intentionally `Other`.
 pub fn parse_transcript_entry(line: &str) -> TranscriptEntry {
+    parse_transcript_entries(line)
+        .into_iter()
+        .next()
+        .unwrap_or(TranscriptEntry::Other)
+}
+
+/// Parse every relevant block in one Claude JSONL transcript line. Claude can
+/// record more than one tool invocation in a single assistant message; dropping
+/// all but the last one would turn ambiguous evidence into a false claim.
+pub fn parse_transcript_entries(line: &str) -> Vec<TranscriptEntry> {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
-        Err(_) => return TranscriptEntry::Other,
+        Err(_) => return vec![TranscriptEntry::Other],
     };
 
     let message = match value.get("message") {
         Some(message) => message,
-        None => return TranscriptEntry::Other,
+        None => return vec![TranscriptEntry::Other],
     };
     let content = match message.get("content") {
         Some(Value::Array(content)) => content,
-        _ => return TranscriptEntry::Other,
+        _ => return vec![TranscriptEntry::Other],
     };
 
-    let mut tool_use = None;
-    let mut tool_result = None;
+    let mut entries = Vec::new();
     for block in content {
         let Some(block_type) = block.get("type").and_then(Value::as_str) else {
             continue;
@@ -59,29 +68,34 @@ pub fn parse_transcript_entry(line: &str) -> TranscriptEntry {
                     block.get("id").and_then(Value::as_str),
                     block.get("name").and_then(Value::as_str),
                 ) {
-                    tool_use = Some((id.to_string(), name.to_string()));
+                    entries.push(TranscriptEntry::AssistantToolUse {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                    });
                 }
             }
             "tool_result" => {
                 if let Some(tool_use_id) = block.get("tool_use_id").and_then(Value::as_str) {
-                    tool_result = Some(tool_use_id.to_string());
+                    entries.push(TranscriptEntry::ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                    });
                 }
             }
             _ => {}
         }
     }
 
-    match (tool_use, tool_result) {
-        (Some((id, name)), None) => TranscriptEntry::AssistantToolUse { id, name },
-        (None, Some(tool_use_id)) => TranscriptEntry::ToolResult { tool_use_id },
-        _ => TranscriptEntry::Other,
+    if entries.is_empty() {
+        vec![TranscriptEntry::Other]
+    } else {
+        entries
     }
 }
 
 /// Read and parse a JSONL transcript.
 pub fn read_transcript(path: &Path) -> Result<Vec<TranscriptEntry>, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
-    Ok(content.lines().map(parse_transcript_entry).collect())
+    Ok(content.lines().flat_map(parse_transcript_entries).collect())
 }
 
 /// Classify tool calls by pairing each recorded `tool_use` with a later result.
@@ -115,7 +129,7 @@ pub fn classify_interrupted(entries: &[TranscriptEntry]) -> InterruptedCallOutco
 pub fn resume_paragraph(outcome: &InterruptedCallOutcome) -> Option<String> {
     match outcome {
         InterruptedCallOutcome::Unknown { name } => Some(format!(
-            "The tool call `{name}` was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly."
+            "The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. The interrupted tool was `{name}`. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly."
         )),
         InterruptedCallOutcome::NothingInFlight => Some(
             "No tool call was left in flight; resuming this unit is retry-safe.".to_string(),
@@ -227,7 +241,8 @@ mod tests {
 
     #[test]
     fn multiple_unanswered_tools_are_unresolved_without_guidance() {
-        let outcome = classify_interrupted(&[tool_use("tool-1", "Bash"), tool_use("tool-2", "Edit")]);
+        let outcome =
+            classify_interrupted(&[tool_use("tool-1", "Bash"), tool_use("tool-2", "Edit")]);
         assert_eq!(outcome, InterruptedCallOutcome::Unresolved);
         assert_eq!(resume_paragraph(&outcome), None);
     }
@@ -242,5 +257,20 @@ mod tests {
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}"#,
         );
         assert_eq!(entry, result("tool-1"));
+    }
+
+    #[test]
+    fn preserves_multiple_tool_blocks_in_one_message() {
+        let entries = parse_transcript_entries(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{}},{"type":"tool_use","id":"tool-2","name":"Edit","input":{}}]}}"#,
+        );
+        assert_eq!(
+            entries,
+            vec![tool_use("tool-1", "Bash"), tool_use("tool-2", "Edit")]
+        );
+        assert_eq!(
+            classify_interrupted(&entries),
+            InterruptedCallOutcome::Unresolved
+        );
     }
 }

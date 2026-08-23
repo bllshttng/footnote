@@ -441,7 +441,16 @@ impl ShelloutDispatcher {
 }
 
 impl Dispatcher for ShelloutDispatcher {
-    fn run(&self, _unit: &Unit, ctx: &DispatchCtx) -> Result<Box<dyn Session>, LoopError> {
+    fn run(&self, unit: &Unit, ctx: &DispatchCtx) -> Result<Box<dyn Session>, LoopError> {
+        self.run_with_resume_context(unit, ctx, None)
+    }
+
+    fn run_with_resume_context(
+        &self,
+        _unit: &Unit,
+        ctx: &DispatchCtx,
+        resume_context: Option<&str>,
+    ) -> Result<Box<dyn Session>, LoopError> {
         let lib_str = self
             .driver_lib
             .to_str()
@@ -464,6 +473,11 @@ impl Dispatcher for ShelloutDispatcher {
         cmd.arg("-c").arg(script);
         cmd.env("FNO_DRIVER_LIB", lib_str);
         cmd.env("CURRENT_ITER", ctx.iteration.to_string());
+        if let Some(resume_context) = resume_context {
+            cmd.env("RESUME_CONTEXT", resume_context);
+        } else {
+            cmd.env_remove("RESUME_CONTEXT");
+        }
         cmd.current_dir(&self.cwd);
 
         // Passthrough static env vars.
@@ -544,6 +558,10 @@ impl Dispatcher for ShelloutDispatcher {
             .map(|(_, v)| PathBuf::from(v));
 
         Ok(Box::new(ShelloutSession { child, output_file }))
+    }
+
+    fn transcript_cwd(&self) -> Option<&std::path::Path> {
+        Some(&self.cwd)
     }
 }
 
