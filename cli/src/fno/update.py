@@ -916,6 +916,18 @@ def _sync_triad(cargo_bin_dir: Path, *, dry_run: bool = False) -> None:
         typer.echo(f"fno doctor update: synced fno-agents triad -> {dest}")
 
 
+def _report_daemon_drift() -> None:
+    """Relay the doctor-owned Rust drift signal after a triad refresh."""
+    try:
+        from fno.doctor import _daemon_drift_warning
+
+        warning = _daemon_drift_warning()
+    except Exception:
+        return
+    if warning:
+        typer.echo(f"fno doctor update: note: {warning}", err=True)
+
+
 def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = False) -> RefreshOutcome:
     """Refresh the cargo-installed fno-agents rust bins if stale.
 
@@ -995,6 +1007,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         # other install locations behind (AC2-FR). The gate's fresh verdict must
         # NOT short-circuit convergence.
         _sync_triad(installed_bin.parent, dry_run=dry_run)
+        _report_daemon_drift()
         return "fresh"
 
     if shutil.which("cargo") is None:
@@ -1077,6 +1090,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # client/daemon/worker stay a coherent set (the same-dir sibling contract).
     # After a successful cargo install the triad lives at <install_root>/bin.
     _sync_triad(install_root / "bin", dry_run=False)
+    _report_daemon_drift()
 
     outcome: RefreshOutcome
     if subtree is None:
@@ -1099,22 +1113,6 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
             err=True,
         )
         outcome = "refreshed"
-
-    # Best-effort daemon advisory: warn if the old binary is still running.
-    try:
-        pgrep_result = subprocess.run(
-            ["pgrep", "-x", "fno-agents-daemon"],
-            capture_output=True,
-            check=False,
-        )
-        if pgrep_result.returncode == 0:
-            typer.echo(
-                "fno doctor update: note: fno-agents-daemon is running the OLD binary;"
-                " restart it to pick up the refresh",
-                err=True,
-            )
-    except (OSError, subprocess.SubprocessError):
-        pass
 
     # Best-effort mux advisory: a long-running mux server keeps speaking the OLD
     # proto after this refresh (the mux deliberately survives a reinstall), which

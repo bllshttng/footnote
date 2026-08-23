@@ -61,6 +61,7 @@ def _stub_signals(
         "_rust_report",
         lambda: {"binary": rust_binary, "revision": rust_marker},
     )
+    monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: None)
     monkeypatch.setattr(doctor, "_read_rust_marker", lambda: rust_marker)
     monkeypatch.setattr(doctor, "_rust_source_rev", lambda source: rust_source_rev)
     monkeypatch.setattr(doctor, "_cargo_bin_present", lambda: cargo_bin_present)
@@ -390,6 +391,98 @@ def test_rust_binary_always_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     result = runner.invoke(app, ["doctor"])
     assert "/wheel/_bin/fno-agents" in result.stdout
+
+
+def test_daemon_drift_probe_uses_installed_status_and_relays_canonical_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fno import rust_binary
+
+    warning = (
+        "fno agents: the running daemon (pid 91627) is an older build than the installed "
+        "binary; run `fno agents restart` to pick up the new build."
+    )
+    calls: list[tuple[list[str], dict]] = []
+    monkeypatch.setattr(
+        rust_binary, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
+    )
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return type(
+            "Completed",
+            (),
+            {"returncode": 0, "stdout": '{"daemon": {"pid": 91627}}', "stderr": warning},
+        )()
+
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+    assert doctor._daemon_drift_warning() == warning
+    assert calls == [
+        (
+            ["/cargo/bin/fno-agents", "status"],
+            {"capture_output": True, "text": True, "check": False, "timeout": 5},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "returncode,stdout,stderr",
+    [
+        (0, '{"daemon": {"pid": 7}}', ""),
+        (13, "", "fno-agents: daemon not running"),
+        (
+            0,
+            "not json",
+            "fno agents: the running daemon (pid 7) is an older build than the installed "
+            "binary; run `fno agents restart` to pick up the new build.",
+        ),
+        (1, '{"daemon": {"pid": 7}}', "fno agents: transport failed"),
+    ],
+)
+def test_daemon_drift_probe_fails_silent_without_proven_status(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> None:
+    from fno import rust_binary
+
+    monkeypatch.setattr(
+        rust_binary, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
+    )
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "run",
+        lambda *args, **kwargs: type(
+            "Completed", (), {"returncode": returncode, "stdout": stdout, "stderr": stderr}
+        )(),
+    )
+    assert doctor._daemon_drift_warning() is None
+
+
+def test_doctor_reports_measured_daemon_drift_without_changing_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc",
+        marker="abc",
+        capture_present="present",
+    )
+    warning = (
+        "fno agents: the running daemon is an older build than the installed binary; "
+        "run `fno agents restart` to pick up the new build."
+    )
+    monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: warning)
+
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "fno doctor: note: " + warning in result.stdout
+
+    payload = json.loads(runner.invoke(app, ["doctor", "--json"]).stdout)
+    assert payload["status"] == "fresh"
+    assert payload["daemon_drift"] == warning
 
 
 # ---------------------------------------------------------------------------
