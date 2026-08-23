@@ -53,8 +53,12 @@ case "$DELIVERY_PENDING_PREFIX" in
     *) DELIVERY_PENDING_PREFIX="${REPO_ROOT}/${DELIVERY_PENDING_PREFIX}" ;;
 esac
 if [[ -f "$LIVE_STATE_FILE" ]]; then
-    LIVE_SESSION_ID=$(grep '^session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
-        | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
+    LIVE_SESSION_ID=$(sed -n 's/^fno_id:[[:space:]]*//p' "$LIVE_STATE_FILE" 2>/dev/null \
+        | head -1 | tr -d '[:space:]' || true)
+    if [[ -z "$LIVE_SESSION_ID" ]]; then
+        LIVE_SESSION_ID=$(sed -n 's/^session_id:[[:space:]]*//p' "$LIVE_STATE_FILE" 2>/dev/null \
+            | head -1 | tr -d '[:space:]' || true)
+    fi
     LIVE_HARNESS_ID=$(grep -E '^(harness_session_id|claude_session_id):' "$LIVE_STATE_FILE" 2>/dev/null \
         | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' \
         | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
@@ -170,8 +174,12 @@ fi
 # Active session confirmed from here down. A king manifest carries fno_id and
 # no session_id, so read both; SESSION_ID only keys the unavailable-retry
 # counter, and an empty one would collide every king with every other.
-SESSION_ID=$(grep -E '^(session_id|fno_id):' "$STATE_FILE" 2>/dev/null \
-    | head -1 | sed -E 's/^(session_id|fno_id):[[:space:]]*//' | tr -d '[:space:]' || true)
+SESSION_ID=$(sed -n 's/^fno_id:[[:space:]]*//p' "$STATE_FILE" 2>/dev/null \
+    | head -1 | tr -d '[:space:]' || true)
+if [[ -z "$SESSION_ID" ]]; then
+    SESSION_ID=$(sed -n 's/^session_id:[[:space:]]*//p' "$STATE_FILE" 2>/dev/null \
+        | head -1 | tr -d '[:space:]' || true)
+fi
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${GEMINI_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}}"
 EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"

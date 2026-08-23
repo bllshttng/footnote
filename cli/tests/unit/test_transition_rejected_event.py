@@ -20,7 +20,7 @@ def test_transition_rejected_event_validates() -> None:
     assert validate(event) is None
 
 
-@pytest.mark.parametrize("field", ["kind", "event"])
+@pytest.mark.parametrize("field", ["kind", "event", "from"])
 def test_transition_rejected_rejects_unknown_enum_values(field: str) -> None:
     event = {
         "ts": "2026-08-23T06:00:00Z",
@@ -30,6 +30,7 @@ def test_transition_rejected_rejects_unknown_enum_values(field: str) -> None:
             "session_id": "20260823T060900Z-cx73523-e04109",
             "kind": "invalid_transition",
             "event": "terminal_decided",
+            "from": "working",
             "error": "invalid",
         },
     }

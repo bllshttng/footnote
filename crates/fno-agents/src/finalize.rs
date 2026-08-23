@@ -303,6 +303,20 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
     m
 }
 
+fn canonical_session_id(m: &ManifestFields) -> Result<Option<String>, &'static str> {
+    let Some(session_id) = m
+        .session_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    if m.fno_id.is_some() && !crate::loopcheck::is_full_run_id(&session_id) {
+        return Err("invalid canonical fno_id; refusing to finalize");
+    }
+    Ok(Some(session_id))
+}
+
 // ── idempotency ─────────────────────────────────────────────────────────────
 
 /// Inspect prior `session_finalized` events for this session_id.
@@ -538,11 +552,13 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     };
     let m = parse_manifest_fields(&content);
-    let Some(session_id) = m
-        .session_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(session_id) = (match canonical_session_id(&m) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("finalize: {error}");
+            return 1;
+        }
+    }) else {
         eprintln!("finalize: manifest has no session_id; skipping (cannot dedup)");
         return i32::from(delivery_ship);
     };
@@ -992,7 +1008,7 @@ fn shadow_run_needs_finalize_done(cwd: &Path, run: &str) -> bool {
     }
     !matches!(
         crate::run_state::fold_run_state(&path, run),
-        Ok(crate::run_state::RunState::Closed)
+        Ok(crate::run_state::RunState::Closed | crate::run_state::RunState::Aborted)
     )
 }
 
@@ -1008,7 +1024,7 @@ fn record_finalize_done(
     }
     if matches!(
         crate::run_state::fold_run_state(&path, run),
-        Ok(crate::run_state::RunState::Closed)
+        Ok(crate::run_state::RunState::Closed | crate::run_state::RunState::Aborted)
     ) {
         return true;
     }
@@ -3598,6 +3614,39 @@ mod tests {
         assert_eq!(
             crate::run_state::fold_run_state(&log, run).unwrap(),
             crate::run_state::RunState::Closed
+        );
+    }
+
+    #[test]
+    fn finalize_done_is_already_complete_for_an_aborted_shadow_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = "20260823T060900Z-cx73523-e04109";
+        let log = dir.path().join(".fno/run-log.jsonl");
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        crate::run_state::append_transition(
+            &log,
+            run,
+            crate::run_state::RunEvent::DispatchClassified,
+        )
+        .unwrap();
+        crate::run_state::append_transition(&log, run, crate::run_state::RunEvent::Abort).unwrap();
+
+        let events = dir.path().join("events.jsonl");
+        assert!(record_finalize_done(dir.path(), run, &events, &events));
+        assert_eq!(
+            crate::run_state::fold_run_state(&log, run).unwrap(),
+            crate::run_state::RunState::Aborted
+        );
+        assert!(!events.exists(), "aborted runs need no finalize transition");
+    }
+
+    #[test]
+    fn finalize_rejects_an_invalid_canonical_fno_id() {
+        let manifest =
+            parse_manifest_fields("---\nfno_id: short-run\nsession_id: valid-fallback\n---\n");
+        assert_eq!(
+            canonical_session_id(&manifest),
+            Err("invalid canonical fno_id; refusing to finalize")
         );
     }
 

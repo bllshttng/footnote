@@ -5928,7 +5928,7 @@ fn emit_transition_rejection(
     emit_to_both(project_events, global_events, "transition_rejected", data);
 }
 
-fn is_full_run_id(value: &str) -> bool {
+pub(crate) fn is_full_run_id(value: &str) -> bool {
     static SESSION_ID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     SESSION_ID
         .get_or_init(|| {
@@ -10202,8 +10202,26 @@ fn observe_decision(args: &[String], output: &str) {
             .unwrap_or_else(|_| PathBuf::from("/tmp"))
             .join(".fno/events.jsonl")
     });
+    let run_log = parsed.cwd.join(".fno/run-log.jsonl");
+    if transition == crate::run_state::RunEvent::TerminalDecided
+        && matches!(
+            crate::run_state::fold_run_state(&run_log, &session_id),
+            Ok(crate::run_state::RunState::Open)
+        )
+    {
+        // A plan-only/advisory/batched run can terminate on its first fire.
+        // Seed the observer's dispatch arm so the legacy terminal remains
+        // unchanged while the shadow journal records a legal path.
+        observe_shadow_transition(
+            &run_log,
+            &session_id,
+            crate::run_state::RunEvent::DispatchClassified,
+            &project_events,
+            &global_events,
+        );
+    }
     observe_shadow_transition(
-        &parsed.cwd.join(".fno/run-log.jsonl"),
+        &run_log,
         &session_id,
         transition,
         &project_events,
@@ -11894,6 +11912,52 @@ mod tests {
             crate::run_state::RunState::Sealing
         );
         assert!(!events.exists());
+    }
+
+    #[test]
+    fn immediate_terminal_seeds_dispatch_before_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("target-state.md");
+        let events = dir.path().join("events.jsonl");
+        let run_id = "20260823T060900Z-cx73523-e04109";
+        std::fs::write(&state, format!("---\nfno_id: {run_id}\n---\n")).unwrap();
+        let args = vec![
+            "loop-check".to_string(),
+            "--state".to_string(),
+            state.display().to_string(),
+            "--transcript".to_string(),
+            dir.path().join("transcript.jsonl").display().to_string(),
+            "--cwd".to_string(),
+            dir.path().display().to_string(),
+            "--events".to_string(),
+            events.display().to_string(),
+            "--global-events".to_string(),
+            events.display().to_string(),
+        ];
+
+        observe_decision(
+            &args,
+            &allow_output(
+                "allow",
+                Some(TerminationReason::DonePRGreen),
+                "done",
+                1,
+                None,
+            ),
+        );
+
+        let run_log = dir.path().join(".fno/run-log.jsonl");
+        assert_eq!(
+            crate::run_state::fold_run_state(&run_log, run_id).unwrap(),
+            crate::run_state::RunState::Sealing
+        );
+        let log = std::fs::read_to_string(run_log).unwrap();
+        assert!(log.contains("dispatch_classified"));
+        assert!(log.contains("terminal_decided"));
+        assert!(
+            !events.exists(),
+            "accepted shadow transitions emit no rejection"
+        );
     }
 
     #[test]

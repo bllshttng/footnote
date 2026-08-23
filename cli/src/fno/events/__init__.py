@@ -482,11 +482,11 @@ def validate(event: dict[str, Any]) -> None:
 
     if type_name == "transition_rejected":
         type_props = type_spec["data"]["properties"]
-        for field in ("kind", "event"):
+        for field in ("kind", "event", "from"):
             allowed = type_props[field]["enum"]
-            if data.get(field) not in allowed:
+            if field in data and data[field] not in allowed:
                 raise ValidationError(
-                    f"unknown transition_rejected data.{field}: {data.get(field)!r} "
+                    f"unknown transition_rejected data.{field}: {data[field]!r} "
                     f"(allowed: {allowed})"
                 )
 
