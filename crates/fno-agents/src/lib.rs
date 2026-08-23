@@ -80,6 +80,7 @@ pub mod model_env_scrub;
 pub mod needs;
 pub mod nudge;
 pub mod opencode_ask;
+pub mod opencode_serve;
 pub mod osc;
 pub mod paths;
 pub mod protocol;

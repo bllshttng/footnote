@@ -106,7 +106,7 @@ How you spell that depends on your provider, so take the requirement and not thi
 There is a rot-proof abstraction for this, `--model-tier high`, which resolves to the cheapest model at or above a quality tier using a cached benchmark snapshot rather than a hardcoded name.
 It is not reachable from here yet: `fno backlog update` accepts it, `fno agents spawn` does not, and the snapshot is empty until someone runs `fno config accounts benchmarks refresh`.
 Until both are true, naming the model at spawn time is the only honest option.
-- **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `bg` is a detached claude-only thread and hard-errors elsewhere. `headless` is a one-shot and does **not** fit a multi-step reign, whatever the provider.
+- **Substrate** defaults to `pane`, which works on every provider and is the right answer here. `bg` is claude `--bg` or an opencode serve session, and hard-errors elsewhere. `headless` is a one-shot and does **not** fit a multi-step reign, whatever the provider.
 
 **Authority for the worker you crown.**
 `--yolo` means "full auto, no gates", and the *skill* surface translates it per provider: through `/fno:agent spawn` it maps to `--permission-mode bypassPermissions` on claude, while codex gets its literal bypass flag.

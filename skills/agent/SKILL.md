@@ -93,7 +93,7 @@ otherwise the whole argument is the spawn payload.
 | `gemini` | `fno agents spawn` (exec) / `fno agents host` (`-i`); `headless` -> `agy -p` | daemon-managed PTY worker | pretty JSON `.short_id` |
 
 All three create via `spawn`. The substrate axis (x-2c27) selects the host:
-`pane` (default, owned-PTY drivable), `bg` (claude-only detached `claude --bg`
+`pane` (default, owned-PTY drivable), `bg` (claude `--bg`; opencode serve session
 thread), `headless` (one-shot `claude -p` / `codex --exec` / `agy -p`). `bg` on a
 non-claude provider is a hard error pointing to `headless`. A one-shot Q&A is the
 `headless` substrate (x-cbb0: it subsumes the retired one-shot ask; today's `ask` verb is the sync lane to an existing worker). A codex/gemini

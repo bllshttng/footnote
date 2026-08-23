@@ -154,7 +154,7 @@ def test_malformed_trigger_fails_closed_on_capability_enabled_pane():
 
 
 def test_pane_capability_does_not_enable_codex_bg():
-    with pytest.raises(DispatchResolveError, match="bg is claude-only"):
+    with pytest.raises(DispatchResolveError, match="bg is claude \\+ opencode"):
         resolve_dispatch(
             harness="codex",
             substrate="bg",

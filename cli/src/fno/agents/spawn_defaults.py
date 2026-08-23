@@ -1433,7 +1433,7 @@ def inject_spawn_defaults(
             elif cfg_substrate not in _SUBSTRATES:
                 reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
             else:
-                reason = f"{prov} does not support substrate {cfg_substrate!r} (bg is claude-only)"
+                reason = f"{prov} does not support substrate {cfg_substrate!r} (bg is claude + opencode)"
             print(
                 f"fno agents spawn: substrate skipped ({reason}); "
                 f"{substrate_rung}.substrate = {cfg_substrate!r} ignored",
@@ -1775,9 +1775,9 @@ def link_to_spawn_flags(link) -> List[str]:
 
     No new axis vocabulary: harness is ``-H``, the vendor/model route is
     ``--route``, and model, effort, substrate, permission-mode and account keep
-    their own flags. ``--substrate bg`` is claude-only in the Rust client, so a
-    codex link that left substrate unset resolves to a pane rather than being
-    handed a substrate its harness rejects.
+    their own flags. ``--substrate bg`` is claude + opencode in the Rust client,
+    so a codex link that left substrate unset resolves to a pane rather than
+    being handed a substrate its harness rejects.
     """
     harness = (getattr(link, "provider", "") or "").strip()
     out: List[str] = []

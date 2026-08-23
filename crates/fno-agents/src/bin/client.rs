@@ -853,7 +853,9 @@ fn effective_spawn_message(message: &str, substrate: &str) -> String {
 /// - claude + `bg`: dispatch_claude_spawn (the detached `claude --bg` thread).
 /// - claude + `headless`: dispatch_claude_headless (the `claude -p` one-shot).
 /// - codex/gemini/agy/opencode + `headless`: dispatch_*_once (one-shot, client-side).
-/// - codex/gemini/agy/opencode + `bg`: hard error (bg is claude-only -> use headless).
+/// - opencode + `bg`: dispatch_opencode_serve (persistent session on a shared
+///   `opencode serve`, x-d9f9; detached `run --attach` writer streams events).
+/// - codex/gemini/agy + `bg`: hard error (bg is claude + opencode -> use headless).
 /// - no resolvable / unknown provider: stderr usage error + exit 2.
 ///
 /// Returns `Some(exit_code)` when handled client-side, `None` to fall through.
@@ -998,10 +1000,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         return Some(2);
     }
     // Fail-closed (Locked Decision 1/2): only claude's bg/headless lanes accept
-    // a mapped --permission-mode. codex/gemini/agy one-shot lanes hardcode their
-    // own bypass form and bg is claude-only, so a mode here can't be honored
-    // without a silent downgrade - reject it, pointing at the pane substrate
-    // (which DOES map every provider's vocabulary).
+    // a mapped --permission-mode. codex/gemini/agy one-shot lanes and the
+    // opencode bg serve lane hardcode their own bypass form, so a mode here
+    // can't be honored without a silent downgrade - reject it, pointing at the
+    // pane substrate (which DOES map every provider's vocabulary).
     if permission_mode.is_some() && provider != "claude" {
         eprintln!(
             "--permission-mode is not supported for provider {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); use --substrate pane",
@@ -1042,8 +1044,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // x-b6e2 fail-closed matrix for the client-owned bg/headless lanes (pane
     // re-execs Python, which guards there). A flag with no equivalent for the
     // resolved provider is a hard error BEFORE launch - never a silent drop.
-    // Message shape mirrors --permission-mode. (opencode is already refused by
-    // the substrate arm below, so it never reaches these checks.)
+    // Message shape mirrors --permission-mode. (opencode's bg lane DOES reach
+    // these checks now: `--add-dir`/`--agent`-shaped flags on an opencode bg
+    // spawn refuse HERE - the serve lane grants writable dirs itself, through
+    // the per-session permission rules.)
     if substrate != "pane" {
         // No "use --substrate pane" advice: unlike --permission-mode, pane does
         // NOT map these cells any wider than bg/headless does (gemini --add-dir,
@@ -1241,6 +1245,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             home, name, &message, from_name, &cwd, yolo, timeout, model,
         )),
 
+        // opencode bg: the serve-HTTP worker lane (x-d9f9). A shared
+        // `opencode serve` hosts a persistent session bound to the worker
+        // cwd; a detached `opencode run --attach` writer streams the turn's
+        // JSON events to the log. The spawn returns immediately - the session
+        // on the serve IS the worker (steering/mail over the API is a filed
+        // follow-up).
+        ("opencode", "bg") => emit!(fno_agents::opencode_serve::dispatch_opencode_serve(
+            home, name, &message, from_name, &cwd, model,
+        )),
+
         ("agy", "headless") => {
             // agy is stateless (plain text, no session id): a one-shot `agy -p`.
             // It ignores `yolo` (headless create always passes
@@ -1250,14 +1264,13 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             ))
         }
 
-        // bg is claude-only (Locked Decision 2): codex/gemini/agy/opencode have
-        // no detached-interactive substrate. Hard error pointing to headless;
-        // never a silent substrate swap. opencode falls through here now that its
-        // headless one-shot is wired (x-567d) - "use --substrate headless" is the
-        // right advice, no longer the dead end that warranted a special arm.
+        // bg is claude + opencode: claude's detached `--bg` thread, opencode's
+        // serve-hosted session (the arm above). codex/gemini/agy have no
+        // detached-interactive substrate. Hard error pointing to headless;
+        // never a silent substrate swap.
         (other, "bg") => {
             eprintln!(
-                "substrate 'bg' (detached interactive thread) is claude-only; provider {} has no detached-thread substrate - use --substrate headless for a one-shot",
+                "substrate 'bg' (detached interactive thread) is claude + opencode; provider {} has no detached-thread substrate - use --substrate headless for a one-shot",
                 py_repr(other)
             );
             Some(2)
@@ -1869,7 +1882,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--substrate" => {
                 // The session-substrate selector (x-2c27): pane (owned-PTY,
-                // default) | bg (claude --bg detached thread, claude-only) |
+                // default) | bg (claude --bg detached thread; opencode
+                // serve-hosted session, x-d9f9) |
                 // headless (claude -p / codex --exec / agy -p one-shot). The
                 // sole routing key the spawn arm reads (replaces --once).
                 let v = str_arg(&mut it, "--substrate")?;

@@ -11,6 +11,14 @@ The grant already has a channel: ``--add-dir`` is mapped natively for claude,
 codex and agy (:func:`fno.agents.mux_spawn.tier3_pane_tokens`). Nothing computed
 a value for it, so every spawn passed nothing. This module computes it.
 
+opencode has no additive CLI dir flag (``--dir`` SETS cwd, verified against
+v1.14.50), so its argv cell stays closed - but its serve-HTTP bg lane
+(x-d9f9) carries the computed set through a native cell of its own: the Rust
+driver turns ``FNO_WORKER_ADD_DIRS`` into per-session ``external_directory``
+allow rules on the opencode serve (``opencode_serve.rs``). The pane/headless
+opencode lanes keep the stderr note below; the bg lane is the one surface
+where an opencode worker's claim writes are granted.
+
 Operator ruling ``d-926a2b90`` on subject ``worker-writable-dirs``: fno computes
 the set per spawn and passes it through the existing cell. It does NOT write
 into any harness settings file. A per-spawn grant cannot reach a hand-started
@@ -130,7 +138,8 @@ def add_dir_tokens(
             print(
                 f"note: no state-root grant on {provider} (its --add-dir cell is "
                 "not additive); this worker's claim writes may fail, so the "
-                "graph can read its node free while it runs",
+                "graph can read its node free while it runs. For opencode the "
+                "bg serve lane carries the grant (per-session permission rules)",
                 file=sys.stderr,
             )
     return out

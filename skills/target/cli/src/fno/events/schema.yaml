@@ -2949,7 +2949,7 @@ event_types:
     consumers: [operator]
 
   - name: dispatch_substrate_fallback
-    description: "Emitted by an autonomous dispatcher (dispatch-node.sh / /target bg) when the resolved harness has no bg substrate, so dispatch falls BACK to headless (a one-shot that runs to completion, not a detached thread). Provider-aware dispatch (x-567d, epic AC1-EDGE): the downgrade is loud, never silent. bg is claude-only; every other harness resolves to headless via the harness-capability map."
+    description: "Emitted by an autonomous dispatcher (dispatch-node.sh / /target bg) when the resolved harness has no bg substrate, so dispatch falls BACK to headless (a one-shot that runs to completion, not a detached thread). Provider-aware dispatch (x-567d, epic AC1-EDGE): the downgrade is loud, never silent. bg runs on claude and opencode; every other harness resolves to headless via the harness-capability map."
     sources: [backlog]
     data:
       required: [harness, from, to]

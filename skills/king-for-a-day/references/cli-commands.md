@@ -55,7 +55,7 @@ Every axis is already config-sourced. `agents.defaults.*` fills a bare spawn (pr
 | Name the CLI binary | That is `-H/--harness`. `-P` is not it, and `-H` no longer means headless. |
 | Fire a one-shot | `-p` off spawn is a refusal, not a synonym. `--substrate headless` or `--once` is the one-shot. |
 | Escape an inherited tier remap | `ANTHROPIC_DEFAULT_SONNET_MODEL` and its siblings remap a tier for the whole inherited environment, so a `sonnet` spawn can land on another vendor's model. `env -u` escapes. Pinned by `cli/tests/unit/test_inherited_tier_remap.py` and `cli/tests/unit/test_model_routing.py`. |
-| Spawn through a crippled daemon | `--substrate bg` needs no mux pane, so it survives an EMFILE-crippled daemon. It is claude-only. |
+| Spawn through a crippled daemon | `--substrate bg` needs no mux pane, so it survives an EMFILE-crippled daemon. It is claude + opencode. |
 
 The prompt prefix is per harness: claude `/fno:target`, codex `$fno:target`, opencode prose only, with no slash surface. On codex the `$fno:` token does not reliably expand. An audit of one night's spawns (`scripts/diagnostics/codex-skill-load-audit.py`, 2026-08-18) found the harness `<skill>` injection in 4 of 15 wrapped prompts. The worker's own first-action read of the deployed SKILL.md carried most of the rest. Three of 15 never loaded it. Spawn the skill invocation as the prompt, never prose wrapping it.
 

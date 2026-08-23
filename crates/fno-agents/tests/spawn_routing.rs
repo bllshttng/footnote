@@ -930,8 +930,9 @@ fn client_spawn_headless_claude_honors_timeout() {
     );
 }
 
-/// x-2c27: `bg` is claude-only. `--substrate bg --harness codex` must hard-error
-/// (exit 2) pointing to headless, never silently fall to another substrate.
+/// x-2c27: `bg` is claude + opencode. `--substrate bg --harness codex` must
+/// hard-error (exit 2) pointing to headless, never silently fall to another
+/// substrate.
 #[test]
 fn client_spawn_substrate_bg_codex_hard_errors() {
     let home_dir = tmpdir("cli-spawn-bg-codex-home");
@@ -964,8 +965,8 @@ fn client_spawn_substrate_bg_codex_hard_errors() {
         "codex --substrate bg must exit 2; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("claude-only") && stderr.contains("headless"),
-        "codex --substrate bg error must name the claude-only constraint and headless: {stderr}"
+        stderr.contains("claude + opencode") && stderr.contains("headless"),
+        "codex --substrate bg error must name the claude + opencode constraint and headless: {stderr}"
     );
 }
 
@@ -1093,15 +1094,19 @@ fn client_spawn_substrate_headless_opencode_is_wired() {
 
 /// x-567d: `--substrate bg --harness opencode` still hard-errors (bg is
 /// claude-only) but now points at `--substrate headless` (the generic bg arm)
-/// - opencode's headless one-shot is wired, so that advice is no longer the
-/// dead end the x-51f6 special-case pane arm guarded against.
+/// x-d9f9: opencode's bg substrate is the serve-HTTP worker lane, so the
+/// old "bg is claude-only" refusal no longer fires for it. Deterministic on
+/// every machine: an empty PATH means ensure_serve cannot find the opencode
+/// binary, so the arm's OWN failure (exit 13, naming the serve boot) is the
+/// proof the spawn ROUTED to the serve lane - never a real serve boot inside
+/// a routing test, and never the exit-2 substrate refusal.
 #[test]
-fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_headless() {
+fn client_spawn_substrate_bg_opencode_routes_to_serve_lane() {
     let home_dir = tmpdir("cli-spawn-bg-opencode-home");
     let bin = find_client_bin();
     if !bin.exists() {
         eprintln!(
-            "skipping client_spawn_substrate_bg_opencode_hard_errors_pointing_to_headless: binary not found"
+            "skipping client_spawn_substrate_bg_opencode_routes_to_serve_lane: binary not found"
         );
         return;
     }
@@ -1119,6 +1124,48 @@ fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_headless() {
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
+        .env("PATH", "") // no opencode binary anywhere: serve boot fails, not the substrate guard
+        .output()
+        .expect("failed to run fno-agents");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(13),
+        "opencode --substrate bg must reach the serve lane (exit 13 = serve boot failure on an empty PATH, never the old exit-2 bg refusal); stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("opencode serve"),
+        "the failure must name the serve boot, proving the route: {stderr}"
+    );
+}
+
+/// The bg refusal still fires for a harness with no detached lane: agy joins
+/// codex/gemini on the claude + opencode only list.
+#[test]
+fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
+    let home_dir = tmpdir("cli-spawn-bg-agy-home");
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!(
+            "skipping client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless: binary not found"
+        );
+        return;
+    }
+
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "myagent",
+            "hello",
+            "--harness",
+            "agy",
+            "--substrate",
+            "bg",
+        ])
+        .env("FNO_SPAWN_GATE", "0")
+        .env("FNO_E2E", "1")
+        .env("FNO_AGENTS_HOME", &home_dir)
         .output()
         .expect("failed to run fno-agents");
 
@@ -1126,12 +1173,11 @@ fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_headless() {
     assert_eq!(
         out.status.code(),
         Some(2),
-        "opencode --substrate bg must exit 2 (bg is claude-only); stderr: {stderr}"
+        "agy --substrate bg must exit 2; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("headless"),
-        "opencode --substrate bg error must now point to --substrate headless \
-         (the wired one-shot, no longer a dead end): {stderr}"
+        stderr.contains("claude + opencode") && stderr.contains("headless"),
+        "agy --substrate bg error must name the claude + opencode constraint and headless: {stderr}"
     );
 }
 
@@ -1139,7 +1185,7 @@ fn client_spawn_substrate_bg_opencode_hard_errors_pointing_to_headless() {
 /// "provider is required" error - it INFERS the invoking harness, mirroring
 /// Python's resolve_dispatch_provider (and the pane arm). Proven deterministically
 /// here via a single CODEX_SESSION_ID marker: inference resolves codex, which then
-/// hits the bg-is-claude-only guard (exit 2, but for the claude-only reason, not a
+/// hits the bg guard (exit 2, but for the claude + opencode reason, not a
 /// missing-provider one). Other harness markers are removed so the ambient session
 /// running the test suite can't make the env ambiguous.
 #[test]
@@ -1166,10 +1212,10 @@ fn client_spawn_bg_no_provider_infers_harness() {
         .expect("failed to run fno-agents");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // Inference landed on codex -> the bg-claude-only guard, NOT the old
+    // Inference landed on codex -> the bg substrate guard, NOT the old
     // "provider is required" rejection.
     assert!(
-        stderr.contains("claude-only") && !stderr.contains("provider is required"),
+        stderr.contains("claude + opencode") && !stderr.contains("provider is required"),
         "missing --provider on bg must infer the harness (codex here), not reject: {stderr}"
     );
 }

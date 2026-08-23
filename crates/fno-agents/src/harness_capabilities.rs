@@ -408,7 +408,7 @@ mod tests {
             "Python and packaged Rust contract copies diverged",
         );
         let contract = HarnessContract::packaged().unwrap();
-        assert_eq!(contract.map_version, 7);
+        assert_eq!(contract.map_version, 8);
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
             ["agy", "claude", "codex", "gemini", "opencode"]

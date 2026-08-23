@@ -80,14 +80,14 @@ pub struct AskOutcome {
 }
 
 impl AskOutcome {
-    fn ok_reply(reply: String) -> Self {
+    pub(crate) fn ok_reply(reply: String) -> Self {
         Self {
             stdout: reply,
             stderr: String::new(),
             exit_code: 0,
         }
     }
-    fn err(msg: impl Into<String>, code: i32) -> Self {
+    pub(crate) fn err(msg: impl Into<String>, code: i32) -> Self {
         Self {
             stdout: String::new(),
             stderr: format!("{}\n", msg.into()),

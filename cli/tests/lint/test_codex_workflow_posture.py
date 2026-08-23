@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 POSTURES = {
-    "target": "codex posture: target uses the native Stop loop on the main thread; delegated work uses spawn_agent; bg dispatch is Claude-only.",
+    "target": "codex posture: target uses the native Stop loop on the main thread; delegated work uses spawn_agent; bg dispatch runs on claude and opencode.",
     "execute": "codex posture: execute uses spawn_agent for wave tasks when available, with main-thread sequential fallback.",
     "think": "codex posture: think researches inline by default. The bg token dispatches a background worker and subagent a subagent.",
     "blueprint": "codex posture: blueprint plans natively in this thread; auto-launch is Claude bg only, otherwise the node is visibly parked.",

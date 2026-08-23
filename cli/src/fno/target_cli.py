@@ -1968,9 +1968,10 @@ def resolve_model(
         "--harness",
         help="Only print the model if it is reachable by this harness. A tier "
         "can resolve to a model mapped to another harness (e.g. a codex gpt-*); "
-        "a single-provider spawn lane (bg is claude-only) passes its harness "
-        "here so a cross-harness pick degrades to the harness default instead "
-        "of an invalid `<harness> --model <foreign-model>` spawn.",
+        "a spawn lane whose harness is fixed (bg: claude or opencode) passes "
+        "its harness here so a cross-harness pick degrades to the harness "
+        "default instead of an invalid `<harness> --model <foreign-model>` "
+        "spawn.",
     ),
     _provider_tombstone: Optional[str] = typer.Option(
         None, "--provider", hidden=True,
