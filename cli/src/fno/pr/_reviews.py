@@ -519,20 +519,47 @@ def _pr_code_diff_identity(
 
 
 # Sha-keyed identity and tree-path memos. A commit's identity never changes,
-# so the entry is valid forever; the bound keeps a long-lived process from
-# growing without limit. A base branch CAN be retargeted, so that one carries
-# a TTL.
+# so the entry is valid forever - provided the BASE side of the key is also
+# immutable, so identities key on the base ref's resolved COMMIT, not the
+# moving ref name. The bound keeps a long-lived process from growing without
+# limit. A base branch CAN be retargeted, so the ref resolution carries a TTL.
 _IDENTITY_CACHE: dict[tuple[str, str, str], "Optional[tuple[str, frozenset[str]]]"] = {}
 _TREE_PATHS_CACHE: dict[tuple[str, str, str], bool] = {}
 _BASE_REF_CACHE: dict[tuple[str, int], tuple[float, Optional[str]]] = {}
+_BASE_COMMIT_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
 _BASE_REF_TTL = 300.0
 _CACHE_BOUND = 256
+
+
+def _base_commit_of(base_ref: str, cwd: Optional[str]) -> str:
+    """The commit ``base_ref`` resolves to, for use as an immutable cache key
+    (the ref name moves under a fetch; the commit does not). Empty on any
+    failure, which simply de-duplicates less. TTL-memoized: it runs per
+    identity lookup."""
+    key = (base_ref, cwd or "")
+    hit = _BASE_COMMIT_CACHE.get(key)
+    now = time.monotonic()
+    if hit is not None and now - hit[0] < _BASE_REF_TTL:
+        return hit[1]
+    try:
+        result = run(
+            ["git", "rev-parse", f"{base_ref}^{{commit}}"],
+            cwd=cwd,
+            timeout=5,
+        )
+        commit = result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:  # noqa: BLE001
+        commit = ""
+    if len(_BASE_COMMIT_CACHE) >= _CACHE_BOUND:
+        _BASE_COMMIT_CACHE.pop(next(iter(_BASE_COMMIT_CACHE)))
+    _BASE_COMMIT_CACHE[key] = (now, commit)
+    return commit
 
 
 def _identity_of(
     sha: str, base_ref: str, cwd: Optional[str]
 ) -> "Optional[tuple[str, frozenset[str]]]":
-    key = (sha, base_ref, cwd or "")
+    key = (sha, _base_commit_of(base_ref, cwd) or base_ref, cwd or "")
     if key not in _IDENTITY_CACHE:
         if len(_IDENTITY_CACHE) >= _CACHE_BOUND:
             _IDENTITY_CACHE.pop(next(iter(_IDENTITY_CACHE)))
@@ -566,13 +593,16 @@ def _tree_paths_readable(reviewed_sha: str, head: str, cwd: Optional[str]) -> bo
 def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
     """The ref the PR merges into, remote-qualified like the Rust resolver.
 
-    ``gh pr view`` supplies the real base branch first (a release-based PR
-    whose base moved must not diff against main, or both sides carry base-side
-    commits and every carry dies); the classify_payload defaults
-    (origin/main, then origin/master) are the fallback when there is no PR to
-    ask or the read fails. Memoized with a TTL: status polls fire this per
-    pass, the read spends the per-USER GraphQL quota, and a base retarget is
-    rare. ``None`` leaves the content test unanswerable, which fails closed."""
+    ``gh pr view`` supplies the real base branch first. When that read
+    SUCCEEDS, the qualified ref is the answer the Rust resolver would use:
+    if it does not resolve locally, the content test is unanswerable (None,
+    fail closed) - falling back to origin/main there would compute both
+    identities against the wrong base and CARRY a rebase the stop gate
+    expired, the disagreement this mirror exists to prevent. The
+    classify_payload defaults (origin/main, then origin/master) apply only
+    when there is no PR to ask or the read itself failed. Memoized with a
+    TTL: status polls fire this per pass, the read spends the per-USER
+    GraphQL quota, and a base retarget is rare."""
     key = (cwd or "", pr_number)
     hit = _BASE_REF_CACHE.get(key)
     now = time.monotonic()
@@ -580,6 +610,7 @@ def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
         return hit[1]
     resolved: Optional[str] = None
     candidates: list[str] = []
+    base_known = False
     if pr_number:
         try:
             view = run(
@@ -591,9 +622,11 @@ def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
                 base = (json.loads(view.stdout or "{}") or {}).get("baseRefName")
                 if isinstance(base, str) and base.strip():
                     candidates.append(f"origin/{base.strip()}")
+                    base_known = True
         except Exception:  # noqa: BLE001 - fall through to the defaults
             pass
-    candidates += ["origin/main", "origin/master"]
+    if not base_known:
+        candidates += ["origin/main", "origin/master"]
     for ref in candidates:
         try:
             result = run(

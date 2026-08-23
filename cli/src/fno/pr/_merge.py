@@ -448,6 +448,11 @@ def _is_documentation_path(path: str) -> bool:
 # a head-keyed cache if a long-lived surface ever needs cross-push exactness.
 _PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
 _PAYLOAD_CACHE_TTL = 120.0
+_CACHE_BOUND = 256
+
+# The floor predicate's memo: keyed by its own decision inputs (repo,
+# manifest mtime, ambient marker FAMILIES), bounded for long-lived surfaces.
+_FLOOR_CACHE: dict[tuple[str, int, tuple[str, ...]], bool] = {}
 
 
 def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
@@ -466,6 +471,8 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
         names = hit[1]
     else:
         names = _pr_file_paths(pr_number, repo)
+        if len(_PAYLOAD_CACHE) >= _CACHE_BOUND:
+            _PAYLOAD_CACHE.pop(next(iter(_PAYLOAD_CACHE)))
         _PAYLOAD_CACHE[key] = (now, names)
     if names is None:
         return True
@@ -527,26 +534,54 @@ def _harness_can_self_review(repo: str) -> bool:
     from fno.harness_names import KNOWN_HARNESSES
     from fno.review_capability import harness_can_self_review
 
+    # Memoized on the predicate's own inputs: the two gate predicates each
+    # consult this per fire, and each miss costs a git rev-parse plus a
+    # manifest parse on the status/merge polling path. The ambient FAMILIES
+    # (marker values are session noise) and the manifest's mtime ARE the
+    # decision inputs, so an input change is a key change and never a stale
+    # answer - a TTL would return a wrong floor across a manifest rewrite.
+    from pathlib import Path
+
+    from fno.harness_identity import present_harness_markers
+
+    manifest_path = Path(_repo_state_dir(repo)) / "target-state.md"
+    try:
+        mtime = manifest_path.stat().st_mtime_ns
+    except OSError:
+        mtime = 0
+    ambient_sig = tuple(
+        sorted({h for _m, h, _v in present_harness_markers()})
+    )
+    cache_key = (repo, mtime, ambient_sig)
+    hit = _FLOOR_CACHE.get(cache_key)
+    if hit is not None:
+        return hit
     harness = _manifest_harness(repo)
     ambient = _ambient_harness()
     if harness is None:
         harness = ambient
     if harness is None:
-        return True
-    if harness_can_self_review(harness):
-        return True
-    # A KNOWN verbless harness releases the floor - unless the manifest says
-    # verbless while a clean single-family ambient read says verbful. The
-    # manifest is an init-time snapshot that outlives its session and belongs
-    # to whichever root the merging process stands in, so a dead run's
-    # `harness: gemini` must not silently disengage the floor for a claude
-    # PR merged from that checkout. On that conflict, floor: the safe
-    # disagreement costs one review, the unsafe one costs the review.
-    verbless = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
-    if harness in verbless and ambient is not None and harness_can_self_review(ambient):
-        return True
-    # An unrecognized spelling is still an unattributed run and floors.
-    return harness not in verbless
+        applies = True
+    elif harness_can_self_review(harness):
+        applies = True
+    else:
+        # A KNOWN verbless harness releases the floor - unless the manifest
+        # says verbless while a clean single-family ambient read says verbful.
+        # The manifest is an init-time snapshot that outlives its session and
+        # belongs to whichever root the merging process stands in, so a dead
+        # run's `harness: gemini` must not silently disengage the floor for a
+        # claude PR merged from that checkout. On that conflict, floor: the
+        # safe disagreement costs one review, the unsafe one costs the review.
+        verbless = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
+        if harness in verbless and ambient is not None and harness_can_self_review(ambient):
+            applies = True
+        else:
+            # An unrecognized spelling is still an unattributed run: floors.
+            applies = harness not in verbless
+    if len(_FLOOR_CACHE) >= _CACHE_BOUND:
+        _FLOOR_CACHE.pop(next(iter(_FLOOR_CACHE)))
+    _FLOOR_CACHE[cache_key] = applies
+    return applies
 
 
 def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
