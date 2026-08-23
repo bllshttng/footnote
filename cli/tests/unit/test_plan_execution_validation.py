@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.plan._doc import load_plan
@@ -152,6 +153,206 @@ Make the change.
 
 {verification}
 """
+
+
+def _strategy_with_verify(verify: str) -> str:
+    return VALID_STRATEGY.replace(
+        "verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py",
+        f"verify: {json.dumps(verify)}",
+    )
+
+
+def _assert_verify_accepted_in_both_plan_shapes(
+    tmp_path: Path, command: str, *, full_command: str | None = None
+) -> None:
+    quick_dir = tmp_path / "quick"
+    full_dir = tmp_path / "full"
+    quick_dir.mkdir()
+    full_dir.mkdir()
+    quick = _write_plan(quick_dir, _quick_plan(verification=f"1. `{command}`"))
+    full = _write_plan(
+        full_dir,
+        _full_plan(_strategy_with_verify(full_command or command)),
+    )
+
+    assert validate_execution(load_plan(quick)).violations == [], command
+    assert validate_execution(load_plan(full)).violations == [], command
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "mix test",
+        "phpunit tests/",
+        "gleam test",
+        "zig build",
+        "nim c src/main.nim",
+        "sbt test",
+        "dune build",
+        "awk '... ' file",
+        "sed -n '1p' file",
+        "supabase db lint",
+    ),
+)
+def test_ecosystem_commands_are_runnable_in_quick_and_full_plans(
+    tmp_path: Path, command: str
+) -> None:
+    _assert_verify_accepted_in_both_plan_shapes(
+        tmp_path,
+        command,
+        full_command=f"env FNO_TEST=1 {command}",
+    )
+
+
+_LEGACY_COMMAND_INVOCATIONS = (
+    "[ -f out.txt ]",
+    "bash -n script.sh",
+    "bazel test //...",
+    "black --check .",
+    "bun test",
+    "bundle exec rake test",
+    "cargo check",
+    "cd /tmp",
+    "cmake --build build",
+    "composer install",
+    "ctest --test-dir build",
+    "curl -fsS https://example.com",
+    "deno test",
+    "diff -u expected actual",
+    "docker build .",
+    "dotnet test",
+    "eslint .",
+    "fno doctor test",
+    "fno-agents loop check",
+    "flutter test",
+    "git status",
+    "go test ./...",
+    "gradle test",
+    "grep -n pattern file",
+    "gh run list",
+    "helm lint chart/",
+    "java -version",
+    "javac Main.java",
+    "jest --runInBand",
+    "jq . file.json",
+    "just test",
+    "kubectl get pods",
+    "make test",
+    "mvn test",
+    "mypy src/",
+    "node --version",
+    "npm test",
+    "npx prettier --check .",
+    "php --version",
+    "pip install -r requirements.txt",
+    "pip3 --version",
+    "pipenv run pytest",
+    "pnpm test",
+    "podman run image",
+    "poetry run pytest",
+    "pre-commit run",
+    "prettier --check .",
+    "psql --command 'select 1'",
+    "pytest -q",
+    "python -m pytest",
+    "python3 --version",
+    "rake test",
+    "rg -n pattern src/",
+    "rspec spec",
+    "ruby -c script.rb",
+    "ruff check .",
+    "rustc main.rs",
+    "sh -n script.sh",
+    "shellcheck script.sh",
+    "swift test",
+    "terraform validate",
+    "test -f out.txt",
+    "tofu validate",
+    "tox -e py",
+    "tsc --noEmit",
+    "uv run pytest",
+    "vitest run",
+    "wget -q https://example.com/file",
+    "xcodebuild test",
+    "yarn test",
+    "yq '.foo' file.yaml",
+    "zsh -n script.zsh",
+)
+
+
+@pytest.mark.parametrize("command", _LEGACY_COMMAND_INVOCATIONS)
+def test_legacy_runnable_commands_remain_accepted(tmp_path: Path, command: str) -> None:
+    _assert_verify_accepted_in_both_plan_shapes(
+        tmp_path,
+        command,
+        full_command=f"env FNO_TEST=1 {command}",
+    )
+
+
+@pytest.mark.parametrize(
+    "verification",
+    (
+        "Manually inspect the result",
+        "make sure",
+        "test the login flow manually",
+        "go to settings",
+        "timeout 30",
+        "timeout 30 handwave",
+        "docs/verify.md describes the check",
+        "README.md",
+        "--dry-run",
+        "TODO",
+        "Verify the login flow",
+        "Check that the API works",
+        "Ensure tests pass",
+        "verify the login flow",
+        "check that the API works",
+        "ensure tests pass",
+        'pytest tests/ && echo "unclosed',
+    ),
+)
+def test_prose_and_non_commands_are_rejected_in_both_plan_shapes(
+    tmp_path: Path, verification: str
+) -> None:
+    quick_dir = tmp_path / "quick"
+    full_dir = tmp_path / "full"
+    quick_dir.mkdir()
+    full_dir.mkdir()
+    quick = _write_plan(quick_dir, _quick_plan(verification=f"1. {verification}"))
+    full = _write_plan(
+        full_dir,
+        _full_plan(_strategy_with_verify(verification)),
+    )
+
+    assert {v.field for v in validate_execution(load_plan(quick)).violations} == {
+        "Verification"
+    }, verification
+    assert {
+        v.field for v in validate_execution(load_plan(full)).violations
+    } == {"tasks.1.1.verify"}, verification
+
+
+def test_runnable_command_policy_has_no_positive_inventory() -> None:
+    from fno.plan import execution_validation
+
+    assert not hasattr(execution_validation, "_RUNNABLE_COMMANDS")
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        '"$VIRTUAL_ENV/bin/pytest" -q',
+        '"${REPO_ROOT}/scripts/check.sh"',
+    ),
+)
+def test_shell_expanded_executable_paths_remain_accepted(
+    tmp_path: Path, command: str
+) -> None:
+    _assert_verify_accepted_in_both_plan_shapes(
+        tmp_path,
+        command,
+        full_command=f"env FNO_TEST=1 {command}",
+    )
 
 
 def test_quick_plan_prose_verification_is_not_runnable(tmp_path: Path) -> None:
