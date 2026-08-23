@@ -3025,6 +3025,22 @@ impl Core {
             }
         };
         let tid = self.session.squads[si].tabs[ti].id;
+        // Same pane cap as the strict path: a numeric anchor or explicit
+        // --tab resolves here instead, and the cap the caller believes in
+        // must not silently stop at one spelling of --at. The New-tab branch
+        // above is born with a single pane and needs no check.
+        if let Some(cap) = placement.max_panes {
+            let pane_count = tree::leaves(&self.session.squads[si].tabs[ti].root).len();
+            if pane_count >= cap {
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!(
+                        "placement refused: target tab has {pane_count} panes and the cap is {cap}. Use --workspace <name> to place this worker elsewhere"
+                    ),
+                ));
+            }
+        }
         let vp = self.tab_rect(tid);
         let anchor = placement
             .at
@@ -3124,6 +3140,26 @@ impl Core {
                 return Err((
                     err_code::BAD_REQUEST,
                     format!("anchor pane {anchor} is not in the requested tab"),
+                ));
+            }
+        }
+        if let Some(cap) = placement.max_panes {
+            let pane_count = tree::leaves(
+                &self
+                    .session
+                    .squad(sid)
+                    .expect("find_pane returned a live squad")
+                    .tabs[ti]
+                    .root,
+            )
+            .len();
+            if pane_count >= cap {
+                self.reap_pane(pid);
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!(
+                        "exact placement refused: target tab has {pane_count} panes and the cap is {cap}. Use --workspace <name> to place this worker elsewhere"
+                    ),
                 ));
             }
         }
@@ -13445,6 +13481,7 @@ mod tests {
                     tab: Some(TabSel::Id(10)),
                     at: Some(2),
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
                 None,
             )
@@ -13477,6 +13514,7 @@ mod tests {
                     tab: Some(TabSel::Id(10)),
                     at: Some(999),
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
                 None,
             )
@@ -13512,6 +13550,7 @@ mod tests {
                     tab: Some(TabSel::Id(20)),
                     at: Some(1),
                     fallback: PlacementFallback::Refuse,
+                    max_panes: None,
                 },
                 None,
             )
@@ -13525,6 +13564,193 @@ mod tests {
         let s = core.session.squad(1).unwrap();
         assert_eq!(s.tabs.len(), 2, "no new tab minted");
         assert!(tree::leaves(&s.tabs.iter().find(|t| t.id == 10).unwrap().root).contains(&1));
+    }
+
+    #[test]
+    fn exact_current_refuses_when_the_anchor_tab_is_at_capacity() {
+        let mut core = two_tab_core();
+        core.shells = vec!["/bin/cat".into()];
+        let viewport = core.tab_rect(10);
+        {
+            let tab = core
+                .session
+                .squad_mut(1)
+                .unwrap()
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.id == 10)
+                .unwrap();
+            for (anchor, pane) in [(1, 101), (101, 102)] {
+                tree::split_at(tab, viewport, anchor, Dir::Right, pane).unwrap();
+            }
+        }
+        let before = tree::leaves(
+            &core
+                .session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 10)
+                .unwrap()
+                .root,
+        );
+        assert_eq!(before.len(), 4);
+        let placement: PanePlacement =
+            serde_json::from_str(r#"{"at":1,"split":"Right","fallback":"refuse","max_panes":4}"#)
+                .unwrap();
+
+        let err = core
+            .run_pane(
+                "/a".into(),
+                "/a".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                placement,
+                None,
+            )
+            .unwrap_err();
+
+        assert_eq!(err.0, err_code::BAD_REQUEST);
+        assert!(
+            err.1.contains("4 panes") && err.1.contains("cap is 4"),
+            "{}",
+            err.1
+        );
+        assert!(err.1.contains("--workspace <name>"), "{}", err.1);
+        let after = tree::leaves(
+            &core
+                .session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 10)
+                .unwrap()
+                .root,
+        );
+        assert_eq!(after, before, "capacity refusal changed the target tab");
+    }
+
+    #[test]
+    fn selector_tab_refuses_when_the_target_tab_is_at_capacity() {
+        // An explicit --tab (or a numeric anchor with a non-Refuse fallback)
+        // resolves through the selector path, not the strict one; the cap the
+        // caller set must bind there too, or the same flag that guards one
+        // spelling of placement grows a crowded tab under another.
+        let mut core = two_tab_core();
+        core.shells = vec!["/bin/cat".into()];
+        let viewport = core.tab_rect(10);
+        {
+            let tab = core
+                .session
+                .squad_mut(1)
+                .unwrap()
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.id == 10)
+                .unwrap();
+            for (anchor, pane) in [(1, 101), (101, 102)] {
+                tree::split_at(tab, viewport, anchor, Dir::Right, pane).unwrap();
+            }
+        }
+        let before = tree::leaves(
+            &core
+                .session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 10)
+                .unwrap()
+                .root,
+        );
+        assert_eq!(before.len(), 4);
+        let placement: PanePlacement = serde_json::from_str(
+            r#"{"tab":{"Id":10},"split":"Right","fallback":"new_tab","max_panes":4}"#,
+        )
+        .unwrap();
+
+        let err = core
+            .run_pane(
+                "/a".into(),
+                "/a".into(),
+                vec!["/bin/cat".into()],
+                24,
+                80,
+                false,
+                placement,
+                None,
+            )
+            .unwrap_err();
+
+        assert_eq!(err.0, err_code::BAD_REQUEST);
+        assert!(
+            err.1.contains("4 panes") && err.1.contains("cap is 4"),
+            "{}",
+            err.1
+        );
+        assert!(err.1.contains("--workspace <name>"), "{}", err.1);
+        let after = tree::leaves(
+            &core
+                .session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 10)
+                .unwrap()
+                .root,
+        );
+        assert_eq!(after, before, "capacity refusal changed the target tab");
+    }
+
+    #[test]
+    fn exact_current_accepts_the_last_slot_below_capacity() {
+        let mut core = two_tab_core();
+        core.shells = vec!["/bin/cat".into()];
+        let viewport = core.tab_rect(10);
+        {
+            let tab = core
+                .session
+                .squad_mut(1)
+                .unwrap()
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.id == 10)
+                .unwrap();
+            tree::split_at(tab, viewport, 1, Dir::Right, 101).unwrap();
+        }
+        let placement: PanePlacement =
+            serde_json::from_str(r#"{"at":1,"split":"Right","fallback":"refuse","max_panes":4}"#)
+                .unwrap();
+
+        core.run_pane(
+            "/a".into(),
+            "/a".into(),
+            vec!["/bin/cat".into()],
+            24,
+            80,
+            false,
+            placement,
+            None,
+        )
+        .unwrap();
+
+        let leaves = tree::leaves(
+            &core
+                .session
+                .squad(1)
+                .unwrap()
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 10)
+                .unwrap()
+                .root,
+        );
+        assert_eq!(leaves.len(), 4);
     }
 
     #[test]
@@ -14754,6 +14980,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
                 Some("probe-x5f7f".into()),
             )
@@ -14800,6 +15027,7 @@ mod tests {
                 split: None,
                 here: false,
                 fallback: PlacementFallback::NewTab,
+                max_panes: None,
             },
             None,
         )
@@ -14840,6 +15068,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
                 Some("a;rm -rf".into()),
             )
@@ -15851,6 +16080,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
             },
         );
@@ -16795,6 +17025,7 @@ mod tests {
                     split: Some(Dir::Right),
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
             },
         );
@@ -19188,6 +19419,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
                 None,
             )
@@ -19243,6 +19475,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
                 None,
             )
@@ -19301,6 +19534,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
                 None,
             )

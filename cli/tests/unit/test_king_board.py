@@ -68,6 +68,108 @@ def _queue(board, name):
     raise AssertionError(f"no queue named {name}: {[q['name'] for q in board['queues']]}")
 
 
+def test_scope_ids_filter_every_node_bearing_queue_and_report_rejections():
+    inputs = _empty_inputs(
+        ready=_ok([_node("in-ready"), _node("out-ready")]),
+        claims=_ok(
+            [
+                _claim("in-held", holder="target-session:in"),
+                _claim("out-held", holder="target-session:out"),
+                _claim("in-stale", state="stale"),
+                _claim("out-stale", state="stale"),
+            ]
+        ),
+        claimed_nodes=_ok([_node("in-held"), _node("out-held")]),
+        needs=_ok(
+            [
+                {"kind": "unreachable", "name": "inside", "node": "in-ready"},
+                {"kind": "unreachable", "name": "outside", "node": "out-ready"},
+            ]
+        ),
+    )
+
+    board = build_board(
+        inputs,
+        crown_scope="x-root",
+        scope_ids={"in-ready", "in-held", "in-stale"},
+    )
+
+    assert [r["id"] for r in _queue(board, "undispatched")["rows"]] == ["in-ready"]
+    assert [r["id"] for r in _queue(board, "stalled_holder")["rows"]] == ["in-held"]
+    assert [r["key"] for r in _queue(board, "stale_claim")["rows"]] == [
+        "node:in-stale"
+    ]
+    assert [r["name"] for r in _queue(board, "unreachable_worker")["rows"]] == [
+        "inside"
+    ]
+    outside = _queue(board, "out_of_scope")
+    assert outside["actionable"] is False
+    assert {r["id"] for r in outside["rows"]} == {
+        "out-ready",
+        "out-held",
+        "out-stale",
+    }
+    assert board["actionable"] == 3
+
+
+def test_a_scoped_board_demotes_the_operator_lane_to_report_only():
+    """Lane lines carry no node id, so a scoped king cannot attribute them.
+
+    Counting them would hold an epic king open on the operator's global
+    priorities, including lines belonging to other projects - the exact wedge
+    the scope subset rule exists to prevent. Unscoped, the lane stays the
+    actionable queue it always was.
+    """
+    inputs = _empty_inputs(
+        ready=_ok([_node("in-ready")]),
+        lane=_ok([_lane_item("ship the newsletter")]),
+    )
+
+    scoped = build_board(inputs, crown_scope="x-root", scope_ids={"in-ready"})
+    unscoped = build_board(inputs)
+
+    assert _queue(scoped, "operator_lane")["actionable"] is False
+    assert "report-only" in _queue(scoped, "operator_lane")["note"]
+    assert _queue(unscoped, "operator_lane")["actionable"] is True
+
+
+def test_epic_scope_compiles_to_the_root_and_transitive_descendants():
+    from fno.king import board as board_mod
+
+    compile_ids = getattr(board_mod, "compile_scope_ids", None)
+    assert compile_ids is not None, "scope compiler is missing"
+    entries = [
+        {"id": "x-root", "type": "epic", "project": "fno"},
+        {"id": "x-child", "parent": "x-root", "project": "fno"},
+        {"id": "x-grand", "parent": "x-child", "project": "fno"},
+        {"id": "x-other", "project": "fno"},
+    ]
+
+    assert compile_ids("x-root", entries, resolve=lambda _: (2, "x-root")) == {
+        "x-root",
+        "x-child",
+        "x-grand",
+    }
+
+
+def test_project_and_portfolio_scope_compile_to_their_project_union():
+    from fno.king import board as board_mod
+
+    compile_ids = getattr(board_mod, "compile_scope_ids", None)
+    assert compile_ids is not None, "scope compiler is missing"
+    entries = [
+        {"id": "f-1", "project": "fno"},
+        {"id": "e-1", "project": "etl"},
+        {"id": "w-1", "project": "web"},
+    ]
+
+    assert compile_ids("fno", entries, resolve=lambda _: (1, "fno")) == {"f-1"}
+    assert compile_ids("etl,fno", entries, resolve=lambda _: (0, "etl,fno")) == {
+        "e-1",
+        "f-1",
+    }
+
+
 # --- AC1-HP -----------------------------------------------------------------
 
 

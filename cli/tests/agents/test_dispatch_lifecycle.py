@@ -961,6 +961,36 @@ def test_rm_claude_happy_path(tmp_path: Path, monkeypatch, capsys) -> None:
     assert rm_events[0]["registry_changed"] is True
 
 
+def test_rm_crowned_agent_cleans_its_scope_manifest_best_effort(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-claude",
+            provider="claude",
+            short_id="7c5dcf5d",
+            harness_session_id="session-worker",
+            cwd=str(tmp_path),
+            crown_level=1,
+            crown_scope="alpha",
+            crown_grantor="human",
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+    from fno.agents import dispatch
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.king.state import king_manifest_path, write_manifest
+
+    manifest = king_manifest_path("alpha", state_root=tmp_path / ".fno")
+    write_manifest(manifest, scope="alpha", harness_session_id="session-worker")
+    monkeypatch.setattr(claude_mod, "claude_rm", lambda short_id, *, timeout=30.0: (0, ""))
+
+    dispatch.rm_agent("worker-claude")
+
+    assert not manifest.exists()
+
+
 def test_rm_claude_refusal_leaves_registry_unchanged(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

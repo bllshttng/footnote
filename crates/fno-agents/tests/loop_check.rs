@@ -7478,13 +7478,38 @@ fn king_manifest(dir: &Path, fno_id: &str) -> PathBuf {
     path
 }
 
-/// A mock `fno` whose `king board --json` prints `payload`.
+/// A mock `fno` whose `inbox board --json` prints `payload`.
 fn king_board_bin(dir: &Path, payload: &str, exit: i32) -> PathBuf {
     make_script(
         dir,
         "fno-king-mock",
         &format!("cat <<'JSON'\n{payload}\nJSON\nexit {exit}"),
     )
+}
+
+#[test]
+fn king_board_invocation_carries_the_selected_manifest_path() {
+    let tmp = TempDir::new().unwrap();
+    let state = king_manifest(tmp.path(), "king-state-path");
+    let record = tmp.path().join("board-args");
+    let script = make_script(
+        tmp.path(),
+        "fno-board-state-record",
+        &format!(
+            "printf '%s' \"$*\" > '{}'\ncat <<'JSON'\n{}\nJSON\n",
+            record.display(),
+            BOARD_CLEAN
+        ),
+    );
+
+    let events = tmp.path().join("events.jsonl");
+    let (code, decision) = king_fire(&state, tmp.path(), &events, &script);
+
+    assert_eq!(code, 0, "{decision}");
+    assert_eq!(decision["actionable"], 0);
+    let args = fs::read_to_string(record).unwrap();
+    assert!(args.contains("inbox board --json --state"), "{args}");
+    assert!(args.contains(state.to_str().unwrap()), "{args}");
 }
 
 fn king_fire(state: &Path, cwd: &Path, events: &Path, fno_bin: &Path) -> (i32, serde_json::Value) {

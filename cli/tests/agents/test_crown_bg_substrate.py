@@ -92,6 +92,9 @@ def _row(name: str) -> AgentEntry:
 
 
 def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
+    import fno.king.state as king_state
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-sess-abc")
     # Seat the grantor as a registered king over epic-x; the spawn is then a
     # succession (it hands its own scope to the heir). An agent identity with no
@@ -117,7 +120,7 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
 
     result = _spawn(
         "spawn", "--name", "king-bg", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "epic-x",
+        "--substrate", "bg", "--cwd", str(bg_home), "--crown", "epic-x",
     )
     assert result.exit_code == 0, result.output
 
@@ -127,6 +130,13 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
     # Provenance, not self-declaration: the grantor is the session that spawned it.
     assert row.crown_grantor == "parent-sess-abc"
     assert row.crown_label == "L2 epic-x"
+    # The bg receipt names the session as an 8-hex prefix, which no transcript
+    # basename ever matches, so arming at spawn would write a gate that arms
+    # dead. The crown is stamped, the manifest is refused, and the spawn says
+    # so; re-arming belongs to the later crown once the session self-identifies.
+    manifest = Path(row.cwd) / ".fno" / "kings" / "epic-x.md"
+    assert not manifest.exists(), "armed a manifest no transcript can ever match"
+    assert "was NOT armed" in result.output
 
 
 def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:
@@ -138,6 +148,7 @@ def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert _row("king-bg-human").crown_grantor == "human"
     assert _row("king-bg-human").crown_level == 1, "a project is a project king"
+    assert "king loop disabled" in result.output
 
 
 def test_bg_spawn_without_crown_leaves_the_fields_none(bg_home, monkeypatch) -> None:

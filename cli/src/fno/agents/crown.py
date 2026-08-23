@@ -571,8 +571,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         )
 
     receipt: dict[str, Any] = {}
+    vacated_manifest_owner = ""
+    vacated_owner_cwd = ""
 
     def _stamp(rows: list) -> list:
+        nonlocal vacated_manifest_owner, vacated_owner_cwd
         if caller is not None:
             live_caller = next((row for row in rows if row.name == grantor), None)
             if live_caller is not None and live_caller.status in TERMINAL_STATUSES:
@@ -625,6 +628,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         # so the receipt can name what changed hands.
         vacated_scope = target.crown_scope
         vacated_level = target.crown_level
+        vacated_manifest_owner = (
+            target.harness_session_id or target.cc_session_id or target.short_id or ""
+        )
+        vacated_owner_cwd = target.cwd
         if (vacated_level is None) != (vacated_scope is None):
             # Half a crown is unstampable by crown_validation_error, so no
             # legal writer produces it; overwrite would erase the corruption
@@ -660,6 +667,20 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 f"  end the holder        fno agents stop {holder.name}, then retry"
             )
 
+        try:
+            from fno.king.state import arm_king_manifest
+
+            manifest_path = arm_king_manifest(
+                scope,
+                target.harness_session_id or target.cc_session_id or target.short_id or "",
+                owner_pid=target.pid,
+                owner_cwd=target.cwd,
+            )
+        except (OSError, ValueError) as exc:
+            raise CrownPromotionError(
+                f"refusing to crown {target.name!r}: king manifest arming failed: {exc}"
+            ) from exc
+
         for index, row in enumerate(rows):
             if row.name == target.name:
                 rows[index] = replace(
@@ -676,6 +697,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             grantor=grantor,
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
+            king_loop_armed=manifest_path is not None,
         )
         return rows
 
@@ -683,6 +705,16 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # a post-release re-read could see a concurrent grant over the
     # just-freed scope and mislabel that heir as stranded.
     rows_after = update_registry(_stamp)
+    if receipt.get("vacated_scope") and not _same_territory(
+        receipt["vacated_scope"], scope
+    ):
+        from fno.king.state import remove_king_manifest
+
+        remove_king_manifest(
+            receipt["vacated_scope"],
+            owner_cwd=vacated_owner_cwd,
+            expected_harness_session_id=vacated_manifest_owner,
+        )
     try:
         receipt["stranded_subordinates"] = _stranded_subordinates(
             receipt["vacated_scope"], scope, target_name, rows_after

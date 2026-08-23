@@ -3398,6 +3398,7 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
+            placement_args += ["--max-panes", str(_pane_group_max())]
         # Same reasoning as the spawn-clock stamp below, snapshotted first: a
         # sibling pane starting during the lock-wait or argv-build above would
         # otherwise widen the daemon oracle's candidate set. Gated to codex
@@ -3893,9 +3894,11 @@ def dispatch_spawn_pane(
         row_status: AgentStatus = "live"
         crown_declined = False
         crown_succeeded = False
+        king_loop_armed: Optional[bool] = None
+        king_unarmed_reason = ""
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
-            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded
+            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded, king_loop_armed, king_unarmed_reason
             # Reclaiming a dead row's name: drop the corpse in the SAME
             # transaction that appends its replacement, so the registry never
             # holds two rows under one name. Re-checked here, under the write
@@ -4032,8 +4035,7 @@ def dispatch_spawn_pane(
             ):
                 touched_log_path = _touch_log_path(name)
                 final_log_path = str(touched_log_path) if touched_log_path is not None else ""
-            rows.append(
-                AgentEntry(
+            entry = AgentEntry(
                     name=name,
                     harness=provider,
                     provider=resolved_lane_provider,
@@ -4065,7 +4067,23 @@ def dispatch_spawn_pane(
                     route_settings_path=route_settings_path,
                     fno_id=stored_session_uuid or name,
                 )
-            )
+            if entry.crown_level is not None and entry.crown_scope:
+                from fno.king.state import arm_king_manifest
+
+                try:
+                    king_loop_armed = arm_king_manifest(
+                        entry.crown_scope,
+                        entry.harness_session_id or "",
+                        owner_pid=entry.pid,
+                        owner_cwd=entry.cwd,
+                    ) is not None
+                except ValueError as exc:
+                    # Same contract as dispatch.py: a short_id/name fallback
+                    # arms a manifest the owner guard always rejects, so the
+                    # gate would arm dead. Refuse it and say so below.
+                    king_loop_armed = False
+                    king_unarmed_reason = str(exc)
+            rows.append(entry)
             return rows
 
         try:
@@ -4087,10 +4105,21 @@ def dispatch_spawn_pane(
                     "by a live row); spawned uncrowned. The worker launched without a crown.",
                     file=sys.stderr,
                 )
-            elif crown_succeeded and _declined_scope:
+            if crown_succeeded and _declined_scope:
                 print(
                     f"spawn: crown over {_declined_scope!r} transferred from this "
                     f"session to {name} (succession). You no longer hold it.",
+                    file=sys.stderr,
+                )
+            if _declined_scope and king_loop_armed is False:
+                why = (
+                    f": {king_unarmed_reason}"
+                    if king_unarmed_reason
+                    else "; king loop disabled, no scope manifest armed"
+                )
+                print(
+                    f"spawn: crown over {_declined_scope!r} recorded, but the king "
+                    f"loop manifest was NOT armed{why}",
                     file=sys.stderr,
                 )
             # Birth (x-8cd5 Wave 6): the row is written, so the pane worker now

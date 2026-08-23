@@ -536,6 +536,10 @@ pub struct PanePlacement {
     /// substituting focus or minting a tab.
     #[serde(default)]
     pub fallback: PlacementFallback,
+    /// Maximum leaves accepted in the resolved target tab before an exact
+    /// split refuses. Absent on legacy and non-agent placement requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_panes: Option<usize>,
 }
 
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
@@ -3198,6 +3202,24 @@ mod tests {
     }
 
     #[test]
+    fn exact_placement_pane_cap_is_additive_and_roundtrips() {
+        let legacy: PanePlacement = serde_json::from_str(r#"{"target":"CurrentRoute"}"#).unwrap();
+        let legacy_wire = serde_json::to_string(&legacy).unwrap();
+        assert!(!legacy_wire.contains("max_panes"));
+
+        let capped: PanePlacement = serde_json::from_str(
+            r#"{"target":"CurrentRoute","at":4,"fallback":"refuse","max_panes":4}"#,
+        )
+        .unwrap();
+        let wire = serde_json::to_string(&capped).unwrap();
+        assert!(wire.contains(r#""max_panes":4"#), "{wire}");
+        assert_eq!(
+            serde_json::to_string(&serde_json::from_str::<PanePlacement>(&wire).unwrap()).unwrap(),
+            wire
+        );
+    }
+
+    #[test]
     fn agent_row_from_pre_seen_json_defaults_seen_false() {
         // AC1-ERR (x-4328): a pre-v23 AgentRow omits `seen` entirely. A v23
         // reader must decode it as `false` - the client then degrades to the
@@ -3505,6 +3527,7 @@ mod tests {
             split: Some(Dir::Up),
             here: false,
             fallback: PlacementFallback::NewTab,
+            max_panes: None,
         };
         for msg in [
             ClientMsg::Control {

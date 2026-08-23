@@ -89,7 +89,7 @@ trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 # and the target manifest wins when both are present: a session holding one is
 # a worker, whatever else is on disk beside it. Checked only after the target
 # search comes up empty, so nothing about a worker's path changes.
-KING_STATE_FILE=".fno/king-state.md"
+KING_STATE_FILE=""
 DRIVER="target"
 if [[ ! -f "$STATE_FILE" ]]; then
     # Presence is NOT ownership. Kings run in the canonical checkout, which is
@@ -103,16 +103,65 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # the session go: a stale manifest outliving its king must not capture a
     # stranger. `fno agents king init` refuses to write an unattributable manifest, so
     # a real king always has an id to match.
-    KING_HARNESS_ID=""
-    if [[ -f "$KING_STATE_FILE" ]]; then
-        KING_HARNESS_ID=$(grep -E '^harness_session_id:' "$KING_STATE_FILE" 2>/dev/null \
-            | sed -E 's/^harness_session_id:[[:space:]]*//' \
-            | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
+    HOOK_HARNESS="${FNO_HARNESS:-}"
+    if [[ -z "$HOOK_HARNESS" ]] && [[ "$HOOK_TRANSCRIPT_PATH" == "$HOME/.claude/projects/"* ]]; then
+        # The transcript's location is proof; env markers are claims. A claude
+        # session spawned from a codex parent inherits CODEX_THREAD_ID and
+        # carries no claude marker, so the lone foreign marker below wins, the
+        # crowned-row lookup narrows on the wrong harness, and the gate is
+        # bypassed. Only ~/.claude/projects claims claude here: every other
+        # transcript location keeps the marker logic unchanged.
+        HOOK_HARNESS="claude"
     fi
-    if [[ -n "$KING_HARNESS_ID" && -n "$HOOK_HARNESS_ID" \
-        && "$KING_HARNESS_ID" == "$HOOK_HARNESS_ID" ]]; then
+    if [[ -z "$HOOK_HARNESS" ]]; then
+        MARKER_COUNT=0
+        [[ -n "${CODEX_THREAD_ID:-}" ]] && { HOOK_HARNESS="codex"; MARKER_COUNT=$((MARKER_COUNT + 1)); }
+        [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] && { HOOK_HARNESS="claude"; MARKER_COUNT=$((MARKER_COUNT + 1)); }
+        [[ -n "${GEMINI_SESSION_ID:-}" ]] && { HOOK_HARNESS="gemini"; MARKER_COUNT=$((MARKER_COUNT + 1)); }
+        [[ $MARKER_COUNT -gt 1 ]] && HOOK_HARNESS=""
+    fi
+    # Cheap pre-check: no scope manifests on disk means nothing can name this
+    # session, and skipping the fno call keeps an ordinary session's stop at
+    # one directory glob instead of a full Python CLI startup.
+    KINGS_DIR="${REPO_ROOT}/.fno/kings"
+    KING_RESOLVE_BROKEN=0
+    if [[ -n "$HOOK_HARNESS_ID" ]] && compgen -G "${KINGS_DIR}/*.md" >/dev/null 2>&1; then
+        if command -v fno >/dev/null 2>&1; then
+            MANIFEST_ARGS=(king manifest-path --harness-session-id "$HOOK_HARNESS_ID" --state-root "$REPO_ROOT/.fno")
+            [[ -n "$HOOK_HARNESS" ]] && MANIFEST_ARGS+=(--harness "$HOOK_HARNESS")
+            KING_RC=0
+            KING_STATE_FILE=$(fno "${MANIFEST_ARGS[@]}" 2>/dev/null) || KING_RC=$?
+            # Exit 1 with no path is the verb's "no manifest names this
+            # session": a stranger goes free. Any OTHER nonzero exit is a
+            # resolver that cannot answer (a stale deployed fno without the
+            # verb exits 2), and allowing there would silently disarm a live
+            # king where the old file grep never needed fno at all.
+            if [[ "$KING_RC" -ne 0 && "$KING_RC" -ne 1 ]]; then
+                KING_RESOLVE_BROKEN=1
+            fi
+        else
+            KING_RESOLVE_BROKEN=1
+        fi
+    fi
+    if [[ -n "$KING_STATE_FILE" && -f "$KING_STATE_FILE" ]]; then
         STATE_FILE="$KING_STATE_FILE"
         DRIVER="king"
+    elif [[ "$KING_RESOLVE_BROKEN" == "1" ]]; then
+        # Bounded block, same contract as unavailable_block_or_allow, keyed by
+        # this transcript's id because SESSION_ID is not derived until a state
+        # file is chosen. Loud give-up, never a silent allow.
+        KCOUNT=".fno/.king-resolve-unavail-${HOOK_HARNESS_ID:-anon}"
+        KNUM=0
+        [[ -f "$KCOUNT" ]] && KNUM=$(tr -dc '0-9' < "$KCOUNT" 2>/dev/null)
+        [[ -z "$KNUM" ]] && KNUM=0
+        KNUM=$((10#$KNUM + 1))
+        echo "$KNUM" > "$KCOUNT" 2>/dev/null || true
+        if (( KNUM <= MAX_UNAVAIL_RETRIES )); then
+            echo "target stop-hook: king manifest resolver unavailable (${KNUM}/${MAX_UNAVAIL_RETRIES}) for an active kings dir, keeping session running" >&2
+            exit 2
+        fi
+        echo "target stop-hook: king manifest resolver unavailable ${KNUM} times (counter ${KCOUNT}); allowing stop (king gate off for this stop)" >&2
+        exit 0
     else
         exit 0
     fi

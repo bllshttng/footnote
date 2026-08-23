@@ -47,6 +47,11 @@
 #      exact progressive instructions Claude loads; it never writes there.
 #      guard-corpus-sweep.py joins ~/.claude/projects for the same reason: it
 #      READS Claude Code's own transcripts to replay every real Bash command
+#      hooks/target-stop-hook.sh compares the transcript path Claude Code
+#      hands it against the ~/.claude/projects prefix to prove the session's
+#      harness (an env marker alone is inheritable and can mislabel a claude
+#      session as codex). A string prefix match on the harness's own file;
+#      footnote state never lands there.
 #      through hooks/bg-process-guard.py. That corpus is the only source of
 #      the commands agents actually write, and it found three false refusals
 #      that eight rounds of hand-written cases missed. Read-only rglob over
@@ -247,6 +252,7 @@ hooks/attest-model.sh
 hooks/cache-keepalive-inject.sh
 hooks/corrections-git-postcommit.sh
 hooks/session-start.sh
+hooks/target-stop-hook.sh
 hooks/worktree-setup.sh
 hooks/helpers/check-impl-location.sh
 scripts/autocorrect-pack.sh

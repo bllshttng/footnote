@@ -1198,8 +1198,31 @@ mod tests {
         assert_eq!(workspace_projects("not json"), None);
     }
 
+    struct EnvVarGuard {
+        key: &'static str,
+        orig: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn remove(key: &'static str) -> Self {
+            let orig = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, orig }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.orig {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn resolve_board_scope_defaults_to_the_repo_project() {
+        let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         let (scope, why) = resolve_board_scope(|k| match k {
             "mux.board_scope" => Some("repo\n".into()),
             "project.id" => Some("fno\n".into()),
@@ -1214,6 +1237,7 @@ mod tests {
 
     #[test]
     fn resolve_board_scope_expands_a_workspace_and_refuses_an_empty_one() {
+        let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         let ws = r#"{"projects":[{"name":"web"},{"name":"etl"},{"name":"fno"}]}"#;
         let (scope, _) = resolve_board_scope(|k| match k {
             "mux.board_scope" => Some("workspace:main".into()),
@@ -1240,6 +1264,7 @@ mod tests {
 
     #[test]
     fn resolve_board_scope_refuses_rather_than_widening() {
+        let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         // No project.id resolves (a cwd outside any repo): resolve to the empty
         // set, and SAY which board that produces.
         let (scope, why) = resolve_board_scope(|_| None);
@@ -1254,6 +1279,7 @@ mod tests {
 
     #[test]
     fn every_refusal_reason_names_the_board_it_actually_produces() {
+        let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         // The reason is the ONLY place the fallback is visible: `mux doctor`
         // prints it verbatim and the server logs it. Each of these three paths
         // resolves to the empty set, which the client writes to the wire as ""
@@ -1297,6 +1323,7 @@ mod tests {
 
     #[test]
     fn resolve_board_scope_honors_all() {
+        let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         let (scope, _) =
             resolve_board_scope(|k| (k == "mux.board_scope").then(|| "all".to_string()));
         assert_eq!(scope, BoardScope::All);

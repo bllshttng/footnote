@@ -83,15 +83,16 @@ help
 inbox approvals decide !--db
 inbox approvals ls !--db
 inbox approvals show !--db
-inbox board
+inbox board !--state
 inbox notify
 inbox outstanding ask
 inbox outstanding clear
 inbox outstanding mine do
 inbox outstanding reindex
-king board
+king board !--state
 king escalate
 king init
+king manifest-path
 lint
 loops
 loops resume-all
