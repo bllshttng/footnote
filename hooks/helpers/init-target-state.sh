@@ -1245,6 +1245,15 @@ PYEOF
   # keeps its meaning for those two, and only what the claim block does with it
   # changes. Single-node resolution above is untouched.
   _EXTRA_CLAIMED=""
+  # The worktree in every node claim's metadata, so a reaper with no roster
+  # row can still find the session's transcript (death proven from evidence
+  # outside the claim). Quotes and backslashes are stripped from the value: a
+  # real worktree path carries neither, and an exotic one degrades to a
+  # transcript lookup that finds nothing (which keeps the claim) rather than
+  # a JSON parse failure that aborts the acquire. Defined before both claim
+  # blocks (multi-node below, single-node further down).
+  _wt_meta=$(printf '%s' "$PWD" | tr -d '"\\')
+  _CLAIM_METADATA=$(printf '{"worktree":"%s"}' "$_wt_meta")
   if [[ "$_GUARD_AMBIGUOUS" -eq 1 && -z "$_NODE_ID" && -n "$claim_owner_id" ]] \
      && command -v fno >/dev/null 2>&1; then
     _MULTI_HOLDER="target-session:${claim_owner_id}"
@@ -1293,6 +1302,7 @@ PYEOF
       if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "node:${_mnode}" \
             --holder "$_MULTI_HOLDER" --ttl "$_MULTI_TTL" $_MULTI_PID_FLAGS \
             $_MULTI_HANDOVER_FLAGS ${_CLAIM_HARNESS_FLAG:-} \
+            --metadata "$_CLAIM_METADATA" \
             --reason "target dispatch (multi-node payload)" >/dev/null 2>&1; then
         _EXTRA_CLAIMED="${_EXTRA_CLAIMED:+$_EXTRA_CLAIMED }$_mnode"
       else
@@ -1375,7 +1385,8 @@ PYEOF
       if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
             $_HANDOVER_FLAGS \
-            $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+            $_CLAIM_HARNESS_FLAG --metadata "$_CLAIM_METADATA" \
+            --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
         # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
         # below so a refusal leaves no claim fields behind. Every containment
         # gate above runs before this claim, so adoption committing in that
@@ -1515,7 +1526,8 @@ PYEOF
               _waited=$((_waited + (_WAIT_INTERVAL > 0 ? _WAIT_INTERVAL : 1)))
               if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "$_CLAIM_KEY" \
                     --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
-                    $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+                    $_CLAIM_HARNESS_FLAG --metadata "$_CLAIM_METADATA" \
+                    --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
                 _claim_acquired=1
                 break
               fi

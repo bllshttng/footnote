@@ -1145,6 +1145,86 @@ HANDOVER_HOLDER_PREFIX = _HANDOVER_HOLDER_PREFIX
 
 
 
+def _mux_pane_absent_for(worker: str, runner=None) -> Optional[bool]:
+    """True when the mux enumerated its panes and none hosts WORKER.
+
+    The evidence a handover claim's death leaves outside the claim: the
+    spawner launched the worker into a mux pane, so a pane carrying this
+    worker's fno_id or title SOMEWHERE is a live launch; a listing that ran
+    and names no such pane is the launch window over. Follows
+    ``_pane_absent_from_listing``'s empty-is-ambiguous rule: ``pane ls``
+    prints ``[]`` both for a session with no panes and for an unreachable
+    socket, so only a NON-EMPTY listing somewhere proves the instrument ran
+    and absence from it is a finding. True = positively absent, False =
+    present, None = cannot tell (and None keeps the claim).
+    """
+    import json as _json
+    import subprocess as _subprocess
+
+    if runner is None:
+        runner = _subprocess.run
+
+    def _mux(*args: str):
+        from fno.agents.mux_spawn import _fno_bin
+
+        try:
+            return runner(
+                [_fno_bin(), *args], capture_output=True, text=True, timeout=10
+            )
+        except Exception:  # noqa: BLE001 - a probe never fails a sweep
+            return None
+
+    ls = _mux("mux", "ls", "--json")
+    if ls is None or getattr(ls, "returncode", 1) != 0:
+        return None
+    try:
+        sessions = _json.loads(ls.stdout or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(sessions, list):
+        return None
+    saw_content = False
+    for row in sessions:
+        if not isinstance(row, dict) or row.get("state") != "live":
+            continue
+        if not int(row.get("panes") or 0):
+            # A zero-pane session would only contribute an ambiguous [].
+            continue
+        panes = _mux(
+            "mux", "pane", "ls", "--session", str(row.get("session")), "--json"
+        )
+        if panes is None or getattr(panes, "returncode", 1) != 0:
+            continue
+        try:
+            listing = _json.loads(panes.stdout or "")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(listing, list) or not listing:
+            continue
+        saw_content = True
+        for pane in listing:
+            if not isinstance(pane, dict):
+                continue
+            if pane.get("fno_id") == worker or pane.get("title") == worker:
+                return False
+    return True if saw_content else None
+
+
+def _claim_worktree_cwd(claim) -> Optional[str]:
+    """The worktree path a claim's writer stamped into metadata, if any.
+
+    The transcript fallback needs a cwd to find the session's tree; the
+    roster row (the usual source) is absent on exactly the paths that need
+    the fallback, so the claim itself carries it when its writer could.
+    """
+    meta = getattr(claim, "metadata", None) or {}
+    for key in ("worktree", "cwd"):
+        value = meta.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _abandonment_probe(reading: Optional[RosterReading] = None):
     """The roster-backed probe :func:`reap_dead_claims` calls on a SUSPECT node.
 
@@ -1172,34 +1252,76 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
     archived claim. That is the correct direction to fail: an unreaped claim
     expires on its own TTL, and a wrongly reaped one hands a live worker's node
     to a second worker.
+
+    THREE additions feed it evidence that lives outside the claim (the king's
+    2026-08-23 specimens, both of which needed a manual --force release):
+
+    1. A handover holder is no longer unconditionally unprovable. Its launch
+       window is observable: the mux pane the spawner created is ABSENT from
+       every live listing AND the recorded pid is dead. Both absences together
+       are the window over - a positive finding, never a failed lookup.
+    2. A roster reading that degraded (``roster not consulted``) is retried
+       ONCE before the sweep answers, so a transient ``claude not on PATH``
+       does not strand the whole pass.
+    3. A dead recorded pid with a parseable session id continues to the
+       transcript check even without a roster row, when the claim carries a
+       worktree path to find the tree with. A finished tree is a positive
+       finding.
     """
     cache: dict = {}
 
-    def _probe(claim) -> Optional[bool]:
-        if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
-            # A launch window, not an abandoned session. Between spawn and
-            # `target init` the worker has no worktree manifest and no ledger
-            # row, so the roster cannot resolve it to the node BY CONSTRUCTION.
-            # Nothing is stranded by declining: the handover claim is TTL-bound,
-            # and an expired claim is provably dead on its own.
-            return None
-        session_id = _holder_session_id(claim.holder)
-        if not session_id:
-            # A holder shape this lane cannot parse names no session to look up.
-            return None
+    def _reading() -> RosterReading:
+        """Take (and cache) the shared reading; retry once on a degraded read."""
         if "reading" not in cache:
-            cache["reading"] = (
+            first = (
                 reading
                 if reading is not None
                 else read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
             )
-        seen: RosterReading = cache["reading"]
+            if not first.consulted and reading is None:
+                # One retry, never a loop: a degraded read is usually a
+                # transient spawn failure, and a second degradation is a real
+                # one the sweep should report rather than paper over.
+                cache["reading"] = read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
+            else:
+                cache["reading"] = first
+        return cache["reading"]
+
+    def _probe(claim) -> Optional[bool]:
+        from .staleness import is_live
+
+        if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
+            # The launch window, not an abandoned session - but the window is
+            # observable from outside: the pane the spawner created and the
+            # spawner's own pid. BOTH absent is the window over (a positive
+            # finding); a pane that still hosts the worker, a live spawner
+            # pid, or a mux that cannot answer all keep the claim.
+            worker = claim.holder[len(HANDOVER_HOLDER_PREFIX):]
+            if _mux_pane_absent_for(worker) is not True:
+                return None
+            if is_live(claim):
+                return None
+            return True
+        session_id = _holder_session_id(claim.holder)
+        if not session_id:
+            # A holder shape this lane cannot parse names no session to look up.
+            return None
+        seen: RosterReading = _reading()
         if not seen.consulted:
             return None
         row = seen.row_for_session(session_id)
         if row is None:
-            # Not found is not gone. See the docstring.
-            return None
+            # Not found is not gone - but with the holder's own pid dead, one
+            # more positive instrument remains: the transcript. It needs only
+            # a cwd to find the tree, and the claim carries one when its
+            # writer stamped it. A finished tree is abandonment proven by
+            # FINDING the end, never by failing to find the worker.
+            if is_live(claim):
+                return None
+            cwd = _claim_worktree_cwd(claim)
+            if not cwd:
+                return None
+            return True if _transcript_says_finished(session_id, cwd) else None
         if row.get("state") not in _finished_row_states():
             return False
         # The row state alone does NOT authorize a reap. `_TERMINAL_STATES`

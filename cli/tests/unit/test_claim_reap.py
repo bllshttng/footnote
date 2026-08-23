@@ -1011,3 +1011,248 @@ class TestCliProbeWiring:
         )
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 0" in r.output
+
+
+class TestExternalDeathEvidence:
+    """The king's two 2026-08-23 specimens, replayed. Both held a claim whose
+    holder was dead to every outside instrument - process table, registry row,
+    mux pane - yet the reaper answered "I cannot tell" (suspect) and a manual
+    --force release was the only way through. The fix feeds the reaper those
+    instruments as positive findings; a claim that still cannot be proven
+    dead keeps, exactly as before."""
+
+    def _fake_roster(self, monkeypatch, rows, warnings=()):
+        def _fake(*_a, **_kw):
+            return list(rows), list(warnings)
+
+        monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _fake)
+
+    def _handover(self, tmp_path, *, pid=None, key="node:x-c272"):
+        acquire_claim(
+            key=key,
+            holder="spawn-handover:bp-xc272-daemondrift",
+            ttl_ms=900_000,  # inside the launch window: the old probe's blind spot
+            pid=pid if pid is not None else _dead_pid(),
+            root=tmp_path,
+        )
+
+    def _pane(self, monkeypatch, absent):
+        monkeypatch.setattr(
+            "fno.claims.cli._mux_pane_absent_for",
+            lambda worker, runner=None: absent,
+        )
+
+    def test_specimen_2_absent_pane_and_dead_pid_reaps(self, tmp_path, monkeypatch):
+        """x-c272: the king killed the holder's pane and removed its registry
+        row; the spawn-handover claim survived both and the next dispatch
+        refused. Pane positively absent from the mux listing AND the recorded
+        spawner pid dead is the launch window OVER - a positive finding."""
+        self._pane(monkeypatch, absent=True)
+        self._handover(tmp_path)
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 1" in r.output
+
+    def test_handover_whose_pane_is_still_live_stays(self, tmp_path, monkeypatch):
+        """The negative that keeps the fix honest: a pane still hosting the
+        worker is the launch window OPEN, and the claim keeps."""
+        self._pane(monkeypatch, absent=False)
+        self._handover(tmp_path)
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+
+    def test_handover_with_absent_pane_but_live_spawner_pid_stays(
+        self, tmp_path, monkeypatch
+    ):
+        """Pane gone but the spawner process itself still runs: it may be
+        mid-relaunch onto a new pane, so neither absence alone may reap."""
+        self._pane(monkeypatch, absent=True)
+        self._handover(tmp_path, pid=os.getpid())
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+
+    def test_handover_when_the_mux_cannot_answer_stays(self, tmp_path, monkeypatch):
+        """An unverifiable pane listing (None) is not absence: unknown keeps."""
+        monkeypatch.setattr(
+            "fno.claims.cli._mux_pane_absent_for", lambda worker, runner=None: None
+        )
+        self._handover(tmp_path)
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+
+    def test_specimen_1_degraded_then_recovered_roster_reaps(
+        self, tmp_path, monkeypatch
+    ):
+        """x-3f84: the king killed the holder's whole tree and verified five
+        pids gone; `claim reap` still reported `kept: 1 suspect (roster not
+        consulted)` because one degraded roster read answered None for the
+        whole pass. One retry on a degraded reading resolves it here."""
+        from fno.agents.watchdog import Row
+
+        calls = {"n": 0}
+
+        def _flaky(*_a, **_kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [], ["claude not on PATH"]
+            return (
+                [
+                    Row(
+                        row_id="sid-3f84", name="t-3f84", state="done",
+                        node="x-3f84", cwd="",
+                    )
+                ],
+                [],
+            )
+
+        monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _flaky)
+        monkeypatch.setattr(
+            "fno.claims.cli._transcript_says_finished", lambda *_a, **_kw: True
+        )
+        acquire_claim(
+            key="node:x-3f84", holder="target-session:sid-3f84",
+            ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path,
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 1" in r.output
+        assert calls["n"] == 2  # degraded once, retried once, settled
+
+    def test_a_still_degraded_roster_after_retry_keeps(self, tmp_path, monkeypatch):
+        """One retry, never a loop: a roster that fails twice is really
+        unavailable, and the sweep reports it rather than papering over it."""
+        calls = {"n": 0}
+
+        def _always_degraded(*_a, **_kw):
+            calls["n"] += 1
+            return [], ["claude not on PATH"]
+
+        monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _always_degraded)
+        acquire_claim(
+            key="node:x-dead-roster", holder="target-session:sid-1",
+            ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path,
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+        assert "roster not consulted" in r.output
+        assert calls["n"] == 2
+
+    def _claimed_no_row(self, tmp_path, *, metadata=None):
+        acquire_claim(
+            key="node:x-no-row", holder="target-session:sid-no-row",
+            ttl_ms=3_600_000, pid=_dead_pid(), metadata=metadata, root=tmp_path,
+        )
+
+    def _roster_without_holder(self, monkeypatch):
+        from fno.agents.watchdog import Row
+
+        self._fake_roster(
+            monkeypatch,
+            rows=[
+                Row(row_id=f"other-{i}", name=f"t-{i}", state="working",
+                    node=f"x-{i}", cwd="")
+                for i in range(3)
+            ],
+        )
+
+    def test_dead_pid_with_worktree_metadata_and_finished_transcript_reaps(
+        self, tmp_path, monkeypatch
+    ):
+        """The transcript fallback: the roster ran and has no row for the
+        holder (the codex/hand-started coverage gap), the recorded pid is
+        dead, and the claim itself carries the worktree the session's tree
+        lives under. A finished tree is abandonment PROVEN, never inferred
+        from the absent row."""
+        self._roster_without_holder(monkeypatch)
+        self._claimed_no_row(tmp_path, metadata={"worktree": "/tmp/wt-x"})
+        monkeypatch.setattr(
+            "fno.claims.cli._transcript_says_finished", lambda *_a, **_kw: True
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 1" in r.output
+
+    def test_dead_pid_without_worktree_metadata_stays(self, tmp_path, monkeypatch):
+        """No cwd to find the tree with: the probe still answers None. The
+        fallback is only as live as the worktree stamp init now writes."""
+        self._roster_without_holder(monkeypatch)
+        self._claimed_no_row(tmp_path)
+        monkeypatch.setattr(
+            "fno.claims.cli._transcript_says_finished",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                AssertionError("no transcript lookup without a worktree")
+            ),
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+
+    def test_dead_pid_with_live_transcript_stays(self, tmp_path, monkeypatch):
+        """An unfinished transcript overrules the fallback: still working."""
+        self._roster_without_holder(monkeypatch)
+        self._claimed_no_row(tmp_path, metadata={"worktree": "/tmp/wt-x"})
+        monkeypatch.setattr(
+            "fno.claims.cli._transcript_says_finished", lambda *_a, **_kw: False
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+
+
+class TestMuxPaneAbsenceHelper:
+    """_mux_pane_absent_for's own parsing rules, with a fake runner."""
+
+    class _Proc:
+        def __init__(self, rc, out):
+            self.returncode = rc
+            self.stdout = out
+
+    def _runner(self, replies):
+        calls = {"n": 0}
+
+        def _run(argv, **_kw):
+            idx = calls["n"]
+            calls["n"] += 1
+            return replies[idx]
+
+        return _run
+
+    def test_match_by_fno_id_or_title_means_present(self):
+        from fno.claims.cli import _mux_pane_absent_for
+
+        runner = self._runner(
+            [
+                self._Proc(0, '[{"session":"main","state":"live","panes":2}]'),
+                self._Proc(
+                    0,
+                    '[{"pane_id":2,"fno_id":"other"},'
+                    '{"pane_id":3,"fno_id":null,"title":"bp-x-worker"}]',
+                ),
+            ]
+        )
+        assert _mux_pane_absent_for("bp-x-worker", runner=runner) is False
+
+    def test_nonempty_listing_without_the_worker_is_positive_absence(self):
+        from fno.claims.cli import _mux_pane_absent_for
+
+        runner = self._runner(
+            [
+                self._Proc(0, '[{"session":"main","state":"live","panes":1}]'),
+                self._Proc(0, '[{"pane_id":2,"fno_id":"someone-else","title":null}]'),
+            ]
+        )
+        assert _mux_pane_absent_for("bp-x-worker", runner=runner) is True
+
+    def test_empty_listing_is_unknown_not_absent(self):
+        """`pane ls` prints [] both for no panes and for an unreachable
+        session socket, so an empty listing proves nothing about absence."""
+        from fno.claims.cli import _mux_pane_absent_for
+
+        runner = self._runner(
+            [
+                self._Proc(0, '[{"session":"main","state":"live","panes":2}]'),
+                self._Proc(0, "[]"),
+            ]
+        )
+        assert _mux_pane_absent_for("bp-x-worker", runner=runner) is None
+
+    def test_no_live_sessions_is_unknown(self):
+        from fno.claims.cli import _mux_pane_absent_for
+
+        runner = self._runner([self._Proc(0, '[{"session":"main","state":"stale"}]')])
+        assert _mux_pane_absent_for("bp-x-worker", runner=runner) is None
