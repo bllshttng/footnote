@@ -9,6 +9,7 @@ if selection ever answered from it, the sentinels give the test away.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,19 @@ from typer.testing import CliRunner
 from fno.cli import app
 
 runner = CliRunner()
+
+
+def _days_ago(n: int) -> str:
+    """A fixture created_at relative to now.
+
+    The literals these replaced (2026-08-01 / 08-02) aged past the
+    selection guard's 21-day stale-quarantine on 2026-08-23, silently
+    flipping every ranking assert: the fresh p3 started outranking the
+    p1. Relative dates keep every age gap without crossing the line.
+    """
+    return (datetime.now(timezone.utc) - timedelta(days=n)).strftime(
+        "%Y-%m-%dT00:00:00Z"
+    )
 
 
 class FakeTracker:
@@ -99,9 +113,9 @@ def _wire(monkeypatch, tmp_path, rows, sidecars, **tracker_kwargs):
 def _rows_basic():
     return [
         {"id": "EXT-hi", "title": "High prio leaf", "priority": "p1",
-         "created_at": "2026-08-01T00:00:00Z"},
+         "created_at": _days_ago(2)},
         {"id": "EXT-lo", "title": "Low prio leaf", "priority": "p3",
-         "created_at": "2026-08-02T00:00:00Z"},
+         "created_at": _days_ago(1)},
     ]
 
 
@@ -128,11 +142,11 @@ def test_next_excludes_pr_and_batch_and_contained_before_ranking(
     and containment facts are all sidecar-owned and all exclude."""
     rows = _rows_basic() + [
         {"id": "EXT-pr", "title": "In review", "priority": "p0",
-         "created_at": "2026-08-01T00:00:00Z"},
+         "created_at": _days_ago(2)},
         {"id": "EXT-bat", "title": "Batched", "priority": "p0",
-         "created_at": "2026-08-01T00:00:00Z"},
+         "created_at": _days_ago(2)},
         {"id": "EXT-con", "title": "Contained", "priority": "p0",
-         "created_at": "2026-08-01T00:00:00Z"},
+         "created_at": _days_ago(2)},
     ]
     _wire(monkeypatch, tmp_path, rows, {
         "EXT-hi": {"plan_path": "/plans/hi.md"},
@@ -188,12 +202,12 @@ def test_next_winner_parity_between_backends(tmp_path, monkeypatch):
     g.write_text(json.dumps({"entries": [
         {"id": "ab-aaa00001", "title": "Leaf under epic", "status": "ready",
          "priority": "p2", "parent": "ab-eee00001",
-         "created_at": "2026-08-01T00:00:00Z", "plan_path": "/p/1.md"},
+         "created_at": _days_ago(2), "plan_path": "/p/1.md"},
         {"id": "ab-loose001", "title": "Loose p1", "status": "ready",
-         "priority": "p1", "created_at": "2026-08-02T00:00:00Z",
+         "priority": "p1", "created_at": _days_ago(1),
          "plan_path": "/p/2.md"},
         {"id": "ab-eee00001", "title": "The epic", "status": "ready",
-         "priority": "p3", "created_at": "2026-07-01T00:00:00Z"},
+         "priority": "p3", "created_at": _days_ago(3)},
     ]}), encoding="utf-8")
     import fno.graph._constants as gc
     import fno.graph.store as gs
@@ -209,11 +223,11 @@ def test_next_winner_parity_between_backends(tmp_path, monkeypatch):
 
     rows = [
         {"id": "ab-aaa00001", "title": "Leaf under epic", "priority": "p2",
-         "parent": "ab-eee00001", "created_at": "2026-08-01T00:00:00Z"},
+         "parent": "ab-eee00001", "created_at": _days_ago(2)},
         {"id": "ab-loose001", "title": "Loose p1", "priority": "p1",
-         "created_at": "2026-08-02T00:00:00Z"},
+         "created_at": _days_ago(1)},
         {"id": "ab-eee00001", "title": "The epic", "priority": "p3",
-         "created_at": "2026-07-01T00:00:00Z"},
+         "created_at": _days_ago(3)},
     ]
     _wire(monkeypatch, tmp_path, rows, {
         "ab-aaa00001": {"plan_path": "/p/1.md"},
@@ -236,7 +250,7 @@ def test_next_starvation_receipts_explain_the_joined_denominator(
     plan = tmp_path / "design.md"
     plan.write_text("---\ntitle: Not blueprinted\nstatus: design\n---\n# D\n")
     rows = [{"id": "EXT-des", "title": "Only candidate", "priority": "p1",
-             "created_at": "2026-08-01T00:00:00Z"}]
+             "created_at": _days_ago(2)}]
     _wire(monkeypatch, tmp_path, rows, {
         "EXT-des": {"plan_path": str(plan)},
     })
