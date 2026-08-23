@@ -123,7 +123,13 @@ def _emit(out_text: str, err_text: str) -> None:
 
 
 def main(argv: "list[str]") -> int:
-    args = [a for a in argv if not str(a).startswith("-")]
+    # Positionals are collected INSIDE the parse loop, never by a leading
+    # comprehension: a comprehension cannot know that the token after
+    # `--until` is a VALUE, so every flag value read as a second PR number and
+    # the CLI shape (`wait 9 --until settled --timeout 30m`) refused on usage
+    # every time - the verb was unreachable from the CLI while its unit tests
+    # passed (they called wait_status directly).
+    args: "list[str]" = []
     until = "settled"
     timeout_s, interval_s = "30m", "60"
     unknown: "list[str]" = []
@@ -154,6 +160,8 @@ def main(argv: "list[str]") -> int:
             # same discipline `_status.main` enforces for its own flags).
             if a.startswith("-"):
                 unknown.append(a)
+            else:
+                args.append(a)
             i += 1
     usage = (
         "usage: fno do pr wait <pr-number> [--until settled|green] "

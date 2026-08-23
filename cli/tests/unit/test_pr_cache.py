@@ -746,3 +746,45 @@ def test_stale_serve_makes_no_failure_diagnosis(capsys, tmp_path, monkeypatch):
     assert "failing:" not in cap.err
     assert "smoke failed" not in cap.err
     assert '"failures"' not in cap.out
+
+
+def test_live_backoff_window_serves_degraded_with_zero_network(capsys, tmp_path, monkeypatch):
+    """x-4eac: inside a secondary-rate-limit window the HEAD read is itself
+    the refused call, so a waiter's tick must answer from the row without
+    touching GitHub. A fresh (< TTL) row does NOT short-circuit: a push keeps
+    being noticed on the next tick, exactly as before."""
+    import json as _json
+    import time as _time
+
+    monkeypatch.setenv("FNO_PR_STATUS_CACHE_DIR", str(tmp_path))
+    from fno.pr import _cache, _rest
+
+    (tmp_path / "Owner--Repo-9-abc123def000.json").write_text(
+        _json.dumps(
+            {
+                "ts": _time.time() - 120,
+                "exit": 0,
+                "output": {
+                    "pr": "9",
+                    "verdict": "green",
+                    "settled": True,
+                    "green": True,
+                    "head": "abc123def000",
+                    "checks": {"total": 1},
+                },
+                "fail_count": 1,
+                "backoff_until": _time.time() + 300,
+            }
+        )
+    )
+
+    def boom(*a, **k):
+        raise AssertionError("head read fired inside a live backoff window")
+
+    monkeypatch.setattr(_rest, "fetch_pr_info_rest", boom)
+    monkeypatch.setattr(_rest, "_repo_slug", lambda cwd, runner=None: "Owner/Repo")
+    rc = _cache.cached_status("9")
+    cap = capsys.readouterr()
+    assert rc == 3
+    assert "unknown" in cap.out
+    assert "secondary rate limit backoff" in cap.out

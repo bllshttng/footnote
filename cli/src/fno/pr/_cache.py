@@ -259,6 +259,24 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
         return run_status(pr, cwd)
 
     slug_key = slug.replace("/", "--")
+    # Backoff pre-check, zero network (x-4eac): inside a secondary-rate-limit
+    # window the HEAD read itself is the refused call, so every waiter's tick
+    # re-hit GitHub before reaching the serve it was going to make anyway -
+    # and a fixed-interval retry is exactly what sustains the window. Only a
+    # LIVE window short-circuits, and the row serves in the mode the normal
+    # path would have chosen: VERBATIM while fresh (a loud first-read error
+    # row keeps its exit 4 - degrading it would soften a refusal into an
+    # "unknown" nobody asked for), degraded once stale. Outside a window the
+    # head read fires on every call exactly as before, so a push is still
+    # noticed on the very next tick.
+    if not refresh:
+        for row in _rows_newest_first(slug_key, pr):
+            now = time.time()
+            if _num(row, "backoff_until") > now:
+                code = _serve(row, stale=now - _num(row, "ts") >= _ttl())
+                if code >= 0:
+                    return code
+            break  # newest row only: an expired window means read on
     info, _head_reason = fetch_pr_info_rest(pr, cwd=cwd)
     if info is None:
         if refresh:

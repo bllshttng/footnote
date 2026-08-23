@@ -126,3 +126,19 @@ def test_an_unknown_flag_is_refused_never_dropped(capsys) -> None:
     assert _wait.main(["9", "--timeou", "30m"]) == 2
     err = capsys.readouterr().err
     assert "unrecognized flag" in err and "--timeou" in err
+
+
+def test_cli_shape_flag_values_do_not_read_as_pr_numbers(monkeypatch, capsys) -> None:
+    """The parser once collected positionals with a leading comprehension,
+    which cannot know the token after `--until` is a VALUE - so every flag
+    value read as a second PR number and the CLI spelling refused on usage
+    every run. The verb was unreachable from the CLI while these tests
+    passed, because they called wait_status directly."""
+    _fake_cached_status(
+        monkeypatch,
+        {"pr": "9", "verdict": "green", "settled": True, "green": True},
+        0,
+    )
+    rc = _wait.main(["9", "--until", "settled", "--timeout", "1m", "--interval", "5"])
+    assert rc == 0
+    assert '"settled": true' in capsys.readouterr().out
