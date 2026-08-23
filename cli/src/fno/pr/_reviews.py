@@ -41,7 +41,11 @@ _OPTIONAL_BOTS = ("gemini-code-assist", "chatgpt-codex-connector")
 
 # Emitted on any review-read failure. A distinct sentinel from an empty list `[]`
 # so "read failed" never reads as "nothing posted" (US4).
-_UNKNOWN = {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+_UNKNOWN = {
+    "optional_reviews": "unknown",
+    "optional_reviews_unresolved": None,
+    "optional_reviews_resolved_unchanged": None,
+}
 
 # One GraphQL page of review threads: each thread's resolved state plus its first
 # comment's author (the thread author == the reviewer, used to classify optional).
@@ -51,7 +55,7 @@ _THREADS_QUERY = (
     "pullRequest(number:$number){"
     "reviewThreads(first:100,after:$cursor){"
     "pageInfo{hasNextPage endCursor}"
-    "nodes{isResolved comments(first:1){nodes{author{login}}}}"
+    "nodes{isResolved isOutdated comments(first:1){nodes{author{login}}}}"
     "}}}}"
 )
 
@@ -870,12 +874,12 @@ def _is_optional(login: str, names: list[str]) -> bool:
 
 def _fetch_threads(
     pr: str, slug: str, cwd: Optional[str], timeout: float, runner: Runner
-) -> "Optional[list[tuple[str, bool]]]":
-    """Return [(thread_author_login, is_resolved), ...] or None on any failure."""
+) -> "Optional[list[tuple[str, bool, bool]]]":
+    """Return [(author, is_resolved, is_outdated), ...] or None on failure."""
     owner, _, name = slug.partition("/")
     if not owner or not name:
         return None
-    threads: list[tuple[str, bool]] = []
+    threads: list[tuple[str, bool, bool]] = []
     cursor: Optional[str] = None
     for _ in range(50):  # bounded (50 * 100 = 5000 threads ceiling)
         args = [
@@ -908,10 +912,14 @@ def _fetch_threads(
             if not isinstance(node, dict):  # GraphQL can return null/odd nodes
                 continue
             cnodes = (node.get("comments") or {}).get("nodes") or []
+            resolved = node.get("isResolved")
+            outdated = node.get("isOutdated")
+            if not isinstance(resolved, bool) or not isinstance(outdated, bool):
+                return None
             author = ""
             if cnodes and isinstance(cnodes[0], dict):
                 author = (cnodes[0].get("author") or {}).get("login") or ""
-            threads.append((author, bool(node.get("isResolved"))))
+            threads.append((author, resolved, outdated))
         page = conn.get("pageInfo") or {}
         if page.get("hasNextPage") and page.get("endCursor"):
             cursor = page["endCursor"]
@@ -927,7 +935,7 @@ def read_optional_review_state(
     timeout: float = 8.0,
     runner: Runner = run,
 ) -> dict:
-    """Compute {optional_reviews, optional_reviews_unresolved} for PR ``pr``.
+    """Compute optional review presence and thread counts for PR ``pr``.
 
     `optional_reviews`: list of `{author, state, inline_count}` for optional
     reviewers who posted, OR `"unknown"` on a read failure. `state` is the
@@ -937,6 +945,10 @@ def read_optional_review_state(
     `optional_reviews_unresolved`: count of unresolved (`isResolved == false`)
     threads authored by an optional reviewer - the headline actionable field
     (`green && unresolved == 0` == ready) - OR `None` on a read failure.
+
+    `optional_reviews_resolved_unchanged`: count of resolved threads whose
+    flagged line is still current (`isResolved == true && isOutdated == false`)
+    for optional reviewers - OR `None` on a read failure.
 
     Both GraphQL reads route through the machine-wide quota broker. The broker
     holds one lock from the exempt quota probe through each command, so a fleet
@@ -989,14 +1001,18 @@ def read_optional_review_state(
             entry["state"] = state
 
     unresolved = 0
-    for author, resolved in threads:
+    resolved_unchanged = 0
+    for author, resolved, outdated in threads:
         if not _is_optional(author, names):
             continue
         _entry(author)["inline_count"] += 1
-        if not resolved:
+        if resolved is False:
             unresolved += 1
+        elif outdated is False:
+            resolved_unchanged += 1
 
     return {
         "optional_reviews": sorted(by_author.values(), key=lambda e: e["author"]),
         "optional_reviews_unresolved": unresolved,
+        "optional_reviews_resolved_unchanged": resolved_unchanged,
     }
