@@ -125,3 +125,62 @@ def test_conflict_resolving_rebase_expires_the_attestation(tmp_path):
     )
     assert shaped["coverage"] == "uncovered" and shaped["reviewed_count"] == 0
     assert shaped["stale_verdicts"][0]["reviewed_sha"] == reviewed
+
+
+def test_docs_only_conflict_rebase_keeps_the_attestation(tmp_path):
+    """The Rust twin drops documentation paths from its code-diff identity, so
+    a rebase whose conflict resolution touched only a .md carries there
+    (CarriedDocsOnly). The Python patch-id must exclude docs paths too, or the
+    merge gate demands a re-review the stop gate already waived - the two
+    gates expiring different rebases."""
+    import subprocess
+
+    tmp = tmp_path
+    repo = tmp / "r"
+    repo.mkdir()
+    _sh("git", "init", "-q", "-b", "main", str(repo), cwd=tmp)
+    _sh("git", "config", "user.email", "t@t", cwd=repo)
+    _sh("git", "config", "user.name", "t", cwd=repo)
+    (repo / "code.txt").write_text("code\n", encoding="utf-8")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("docs line A\n", encoding="utf-8")
+    _sh("git", "add", "-A", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "base", cwd=repo)
+
+    _sh("git", "checkout", "-q", "-b", "feature", cwd=repo)
+    (repo / "code.txt").write_text("code\npr change\n", encoding="utf-8")
+    (repo / "docs" / "guide.md").write_text("docs line B\n", encoding="utf-8")
+    _sh("git", "add", "-A", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "pr", cwd=repo)
+    reviewed = _sh("git", "rev-parse", "HEAD", cwd=repo)
+
+    _sh("git", "checkout", "-q", "main", cwd=repo)
+    (repo / "docs" / "guide.md").write_text("docs line C\n", encoding="utf-8")
+    _sh("git", "add", "-A", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "base moved the docs", cwd=repo)
+    tip = _sh("git", "rev-parse", "HEAD", cwd=repo)
+    _sh("git", "update-ref", "refs/remotes/origin/main", tip, cwd=repo)
+
+    _sh("git", "checkout", "-q", "feature", cwd=repo)
+    r = subprocess.run(
+        ["git", "rebase", "origin/main"], cwd=repo, capture_output=True, text=True
+    )
+    assert r.returncode != 0, "scenario requires a docs conflict"
+    # Resolution takes the BASE side of the docs conflict: docs content
+    # differs from what was reviewed, the code delta is untouched.
+    (repo / "docs" / "guide.md").write_text("docs line C\n", encoding="utf-8")
+    _sh("git", "add", "-A", cwd=repo)
+    r = subprocess.run(
+        ["git", "-c", "core.editor=true", "rebase", "--continue"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    head = _sh("git", "rev-parse", "HEAD", cwd=repo)
+
+    shaped = _shaped(repo, reviewed, head)
+    assert shaped["verdicts"][0]["freshness"] != "stale", (
+        "a docs-only resolution changed no code: the carry must match the "
+        "Rust twin's CarriedDocsOnly"
+    )

@@ -308,8 +308,9 @@ The Python merge gate's recheck (`_verdicts_with_current_freshness` in `cli/src/
 It used to answer with ancestry alone, so it killed every `carried_*` verdict the predicate had minted the moment a rebase rewrote the sha.
 That was the operator's daily rebase treadmill: one full re-review per merged sibling PR.
 Its freshness test is now ancestry OR content.
-The PR delta at the reviewed sha and at HEAD must carry the same `git patch-id --stable` over `base...sha` three-dot diffs.
-The base is the first resolvable of `origin/main`/`origin/master`.
+The PR's CODE delta at the reviewed sha and at HEAD must carry the same `git patch-id --stable` over `base...sha` three-dot diffs.
+Documentation paths are excluded and `--no-renames` is pinned, so the Python identity expires the same rebases the Rust identity does.
+The base is the PR's own `baseRefName`, remote-qualified, falling back to `origin/main`/`origin/master`.
 Unreadable on either side is stale, the same fail-closed contract as the predicate.
 
 Fix one and leave the others on a bare equality, and the gate stays exactly as tight as before.

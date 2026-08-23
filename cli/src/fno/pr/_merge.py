@@ -438,6 +438,15 @@ def _is_documentation_path(path: str) -> bool:
     return p.endswith(".md") or p.startswith("docs/")
 
 
+# Short-lived memo for the PR files probe: the floored lane predicate runs on
+# every status/merge fire, and `gh pr view --json files` spends the per-USER
+# GraphQL quota this repo is documented to be sensitive to. A file list cannot
+# change within one PR head, and 120s bounds staleness across pushes. ponytail:
+# head-keyed cache if a poll loop ever needs cross-push exactness.
+_PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
+_PAYLOAD_CACHE_TTL = 120.0
+
+
 def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     """Whether the PR's diff carries a code payload.
 
@@ -447,7 +456,16 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     surfaced) is not code: nothing to review, no gate."""
     if not shutil.which("gh"):
         return True
-    names = _pr_file_paths(pr_number, repo)
+    import time
+
+    key = (repo, pr_number)
+    now = time.monotonic()
+    hit = _PAYLOAD_CACHE.get(key)
+    if hit is not None and now - hit[0] < _PAYLOAD_CACHE_TTL:
+        names = hit[1]
+    else:
+        names = _pr_file_paths(pr_number, repo)
+        _PAYLOAD_CACHE[key] = (now, names)
     if names is None:
         return True
     if not names:
@@ -460,64 +478,63 @@ def _manifest_harness(repo: str) -> Optional[str]:
 
     `fno do target init` writes it from the process-tree identity resolver, so
     it names the run being judged even when the merging process carries
-    inherited foreign markers. A line scan, not the schema: the merge gate
-    needs one field and loopcheck's scan_manifest_field reads the same file
-    the same way for the same reason."""
+    inherited foreign markers. Reads through _read_state_field (one manifest
+    parser per file); the explicit `unknown` sentinel resolves to None, never
+    to a harness name."""
     from pathlib import Path
 
     try:
         manifest = Path(_repo_state_dir(repo)) / "target-state.md"
-        text = manifest.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except Exception:  # noqa: BLE001 - an unreadable manifest is no attribution
         return None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("harness:"):
-            value = stripped[len("harness:") :].strip().strip("\"'")
-            if value and value.lower() not in {"unknown", "none"}:
-                return value.lower()
-            return None
-    return None
+    value = _read_state_field(str(manifest), "harness").strip()
+    if not value or value.lower() in {"unknown", "none"}:
+        return None
+    return value.lower()
 
 
 def _ambient_harness() -> Optional[str]:
     """The single-family ambient harness, or None (absent or ambiguous).
 
     Ambient markers describe the process ASKING, never the run being judged,
-    so this is only one input to the floor - never the whole answer."""
+    so this is only a FALLBACK input to the floor - the manifest names the
+    run, and where it speaks the ambient answer is not consulted."""
     from fno.harness_identity import present_harness_markers
 
     families = {harness for _marker, harness, _value in present_harness_markers()}
     return next(iter(families)) if len(families) == 1 else None
 
 
-def _harness_can_self_review(repo: str = "") -> bool:
+def _harness_can_self_review(repo: str) -> bool:
     """Whether the self-review floor engages for this run (x-129b).
 
-    Inputs, in trust order: the manifest harness (property of the run), the
-    single-family ambient harness (the merging caller is usually the authoring
-    session). A harness with a native self-review verb floors; a KNOWN
-    verbless harness (gemini/agy) does not - the floor would demand an
-    attestation no native verb there produces. Unanimous known-verbless
-    releases; anything else - an unrecognized spelling, one unattributable
-    input, no input at all - floors, because ambiguity about who authored the
-    change is not permission to skip its review. The pre-x-129b shape read
-    ONLY ambient markers and treated multi-family ambiguity as 'no floor',
-    which silently disengaged review on any claude session started from a
-    codex shell. Mirrors self_review_floor_applies in loopcheck.rs so the
-    merge gate and the stop gate cannot disagree on the same PR."""
+    The run's harness decides, alone: the target manifest's `harness:` field
+    when it carries one, else the single-family ambient resolve (the merging
+    caller is usually the authoring session). One input, not a vote - the
+    stop gate reads the authoring session's harness, init stamps that same
+    answer onto the manifest, and OR-ing a second input here is how the two
+    gates come to disagree on one PR. A harness with a native self-review
+    verb floors; a KNOWN verbless harness (gemini/agy) does not, because the
+    floor would demand an attestation no native verb there produces.
+    Unattributable - no manifest, ambiguous or absent markers, or an
+    unrecognized spelling - floors: ambiguity about who authored the change
+    is not permission to skip its review. The pre-x-129b shape read ONLY
+    ambient markers and treated multi-family ambiguity as 'no floor', which
+    silently disengaged review on any claude session started from a codex
+    shell. Mirrors self_review_floor_applies in loopcheck.rs so the merge
+    gate and the stop gate cannot disagree on the same PR."""
     from fno.harness_names import KNOWN_HARNESSES
     from fno.review_capability import harness_can_self_review
 
-    inputs = [h for h in (_manifest_harness(repo), _ambient_harness()) if h is not None]
-    if not inputs:
+    harness = _manifest_harness(repo) or _ambient_harness()
+    if harness is None:
         return True
-    if any(harness_can_self_review(h) for h in inputs):
+    if harness_can_self_review(harness):
         return True
-    # Release only on unanimous KNOWN verbless harnesses; an unrecognized
-    # spelling is still an unattributed run and floors.
+    # Release only on a KNOWN verbless harness; an unrecognized spelling is
+    # still an unattributed run and floors.
     verbless = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
-    return not all(h in verbless for h in inputs)
+    return harness not in verbless
 
 
 def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:

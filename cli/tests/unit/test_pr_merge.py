@@ -1004,6 +1004,54 @@ def test_review_floor_is_caller_independent_across_env_shapes(
         "---\nharness: claude\n---\n", encoding="utf-8"
     )
     assert requires_review() == (True, True)
+    # The manifest decides ALONE, so the gates cannot disagree: a gemini-run
+    # PR merged from a clean claude session still reads no-floor here, the
+    # same answer the gemini authoring session's stop gate gave (its own
+    # ambient was gemini). OR-ing the ambient input in is how the two gates
+    # split on one PR.
+    (state / "target-state.md").write_text(
+        "---\nharness: gemini\n---\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("CODEX_THREAD_ID")
+    monkeypatch.delenv("CODEX_SESSION_ID")
+    assert requires_review() == (False, False)
+    # The unknown sentinel is no attribution: ambient alone decides, and a
+    # poisoned ambient therefore floors.
+    (state / "target-state.md").write_text(
+        "---\nharness: unknown\n---\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_THREAD_ID", "t1")
+    monkeypatch.setenv("CODEX_SESSION_ID", "s1")
+    assert requires_review() == (True, True)
+
+
+def test_floor_verbless_set_stays_locked_to_the_rust_twin():
+    """The Rust floor policy carries a hardcoded KNOWN_VERBLESS_HARNESSES
+    snapshot; Python derives the set. A harness added on one side only makes
+    the stop gate and the merge gate floor different runs, so this pins the
+    two to each other by reading the Rust source."""
+    import re
+    from pathlib import Path
+
+    from fno.harness_names import KNOWN_HARNESSES
+    from fno.review_capability import harness_can_self_review
+
+    rust = (
+        Path(__file__).resolve().parents[3]
+        / "crates"
+        / "fno-agents"
+        / "src"
+        / "loopcheck.rs"
+    ).read_text(encoding="utf-8")
+    m = re.search(r"KNOWN_VERBLESS_HARNESSES: &\[&str\] = &\[([^\]]*)\]", rust)
+    assert m, "KNOWN_VERBLESS_HARNESSES not found in loopcheck.rs"
+    rust_set = {v.strip().strip('"') for v in m.group(1).split(",") if v.strip()}
+    derived = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
+    assert rust_set == derived, (
+        f"Rust floor releases {sorted(rust_set)}, Python releases "
+        f"{sorted(derived)}: update both together (loopcheck.rs "
+        "KNOWN_VERBLESS_HARNESSES and review_capability's verb table)"
+    )
 
 
 def test_stock_code_floor_skips_a_harness_without_a_self_review_verb(

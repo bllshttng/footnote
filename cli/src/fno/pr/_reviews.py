@@ -422,7 +422,11 @@ def review_coverage_for_gate(
     """
     raw = latest_review_coverage(pr_number, cwd)
     note = ""
-    data = _shape_review_coverage(raw, head, cwd) if raw is not None else None
+    data = (
+        _shape_review_coverage(raw, head, cwd, pr_number)
+        if raw is not None
+        else None
+    )
     ev_head = (raw or {}).get("head_sha")
     mismatch = bool(head and raw and ev_head and head != ev_head)
     unusable = data is not None and data.get("coverage") == "unknown"
@@ -431,7 +435,7 @@ def review_coverage_for_gate(
         if ran:
             fresh = latest_review_coverage(pr_number, cwd)
             if fresh is not None:
-                data = _shape_review_coverage(fresh, head, cwd)
+                data = _shape_review_coverage(fresh, head, cwd, pr_number)
                 note = "recomputed"
                 if why and data.get("coverage") == "unknown":
                     note = f"recompute degraded to unknown: {why}"
@@ -468,17 +472,31 @@ def _reviewed_sha_is_ancestor(
 
 
 def _pr_delta_patch_id(sha: str, base_ref: str, cwd: Optional[str]) -> Optional[str]:
-    """Stable patch-id of the PR's own delta at ``sha`` against ``base_ref``.
+    """Stable patch-id of the PR's own CODE delta at ``sha`` against ``base_ref``.
 
     ``git diff base...sha`` names the branch's own changes (three-dot), not
     changes that landed on the base since the branch point, so the id stays
-    comparable across a rebase that changed no content. ``None`` on any git
-    failure or an empty diff: an absence is never evidence (the
-    absence-matched-against-absence trap), matching the fail-closed contract
-    of the Rust twin's ``pr_code_diff_identity``."""
+    comparable across a rebase that changed no content. ``--no-renames`` pins
+    it against a per-user ``diff.renames`` config, and documentation paths are
+    excluded so a rebase that resolved a docs-only conflict still carries -
+    both matching the Rust twin's ``pr_code_diff_identity``, or the two gates
+    expire different rebases. ``None`` on any git failure or an empty diff: an
+    absence is never evidence (the absence-matched-against-absence trap),
+    matching that twin's fail-closed contract; a docs-only delta is None too,
+    so it never carries."""
     try:
         diff = run(
-            ["git", "diff", f"{base_ref}...{sha}"],
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                f"{base_ref}...{sha}",
+                "--",
+                ".",
+                ":(exclude,glob)*.md",
+                ":(exclude,glob)**/*.md",
+                ":(exclude,glob)docs/**",
+            ],
             cwd=cwd,
             timeout=15,
         )
@@ -498,11 +516,31 @@ def _pr_delta_patch_id(sha: str, base_ref: str, cwd: Optional[str]) -> Optional[
     return first[0].split()[0] if first and first[0].split() else None
 
 
-def _resolve_base_ref(cwd: Optional[str]) -> Optional[str]:
-    """First resolvable default base ref, mirroring classify_payload in
-    loopcheck.rs (origin/main, then origin/master). ``None`` leaves the
-    content test unanswerable, which fails closed."""
-    for ref in ("origin/main", "origin/master"):
+def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
+    """The ref the PR merges into, remote-qualified like the Rust resolver.
+
+    ``gh pr view`` supplies the real base branch first (a release-based PR
+    whose base moved must not diff against main, or both sides carry base-side
+    commits and every carry dies); the classify_payload defaults
+    (origin/main, then origin/master) are the fallback when there is no PR to
+    ask or the read fails. ``None`` leaves the content test unanswerable,
+    which fails closed."""
+    candidates: list[str] = []
+    if pr_number:
+        try:
+            view = run(
+                ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"],
+                cwd=cwd,
+                timeout=10,
+            )
+            if view.returncode == 0:
+                base = (json.loads(view.stdout or "{}") or {}).get("baseRefName")
+                if isinstance(base, str) and base.strip():
+                    candidates.append(f"origin/{base.strip()}")
+        except Exception:  # noqa: BLE001 - fall through to the defaults
+            pass
+    candidates += ["origin/main", "origin/master"]
+    for ref in candidates:
         try:
             result = run(
                 ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
@@ -517,20 +555,20 @@ def _resolve_base_ref(cwd: Optional[str]) -> Optional[str]:
 
 
 def _reviewed_sha_still_describes_head(
-    reviewed_sha: str, head: str, cwd: Optional[str]
+    reviewed_sha: str, head: str, cwd: Optional[str], pr_number: int = 0
 ) -> bool:
     """Whether the change the reviewer read still ships at ``head``.
 
     Ancestry is the cheap first test and covers every fast-forward. When it
     fails - a rebase rewrote every commit by construction - the CONTENT test
-    takes over: the PR delta at ``reviewed_sha`` and at ``head`` must carry
-    the same stable patch-id, so a rebase that changed nothing (x-e8db's
+    takes over: the PR's code delta at ``reviewed_sha`` and at ``head`` must
+    carry the same stable patch-id, so a rebase that changed no code (x-e8db's
     treadmill) keeps the attestation while a conflict resolution that changed
     the delta loses it. Any unreadable input is not fresh, matching the
     existing ancestry contract."""
     if _reviewed_sha_is_ancestor(reviewed_sha, head, cwd):
         return True
-    base_ref = _resolve_base_ref(cwd)
+    base_ref = _resolve_base_ref(cwd, pr_number)
     if base_ref is None:
         return False
     reviewed_pid = _pr_delta_patch_id(reviewed_sha, base_ref, cwd)
@@ -543,7 +581,7 @@ def _reviewed_sha_still_describes_head(
 
 
 def _verdicts_with_current_freshness(
-    data: dict, head: Optional[str], cwd: Optional[str]
+    data: dict, head: Optional[str], cwd: Optional[str], pr_number: int = 0
 ) -> list[dict]:
     """Copy verdicts and recheck stored freshness against current history.
 
@@ -575,7 +613,7 @@ def _verdicts_with_current_freshness(
                 stale = True
             elif reviewed_sha not in describes:
                 describes[reviewed_sha] = _reviewed_sha_still_describes_head(
-                    reviewed_sha, head, cwd
+                    reviewed_sha, head, cwd, pr_number
                 )
             if isinstance(reviewed_sha, str) and not describes.get(reviewed_sha, False):
                 stale = True
@@ -631,10 +669,12 @@ def _derive_review_state(coverage: object, verdicts: object) -> str | None:
     return "unreviewed"
 
 
-def _shape_review_coverage(data: dict, head: Optional[str], cwd: Optional[str]) -> dict:
+def _shape_review_coverage(
+    data: dict, head: Optional[str], cwd: Optional[str], pr_number: int = 0
+) -> dict:
     """Shape one event and invalidate any unproven covered verdict."""
     shaped = dict(data)
-    verdicts = _verdicts_with_current_freshness(data, head, cwd)
+    verdicts = _verdicts_with_current_freshness(data, head, cwd, pr_number)
     shaped["verdicts"] = verdicts
     shaped["stale_verdicts"] = _stale_verdicts(verdicts)
     review_state = _derive_review_state(data.get("coverage"), verdicts)
@@ -672,7 +712,11 @@ def review_coverage_for_head(
 ) -> Optional[dict]:
     """Latest event shaped against the current head, without recomputing it."""
     data = latest_review_coverage(pr_number, cwd)
-    return _shape_review_coverage(data, head, cwd) if data is not None else None
+    return (
+        _shape_review_coverage(data, head, cwd, pr_number)
+        if data is not None
+        else None
+    )
 
 
 def read_review_coverage(

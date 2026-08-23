@@ -1202,8 +1202,10 @@ fn harness_can_self_review(harness: Option<&str>) -> bool {
 
 /// The KNOWN harnesses with no native self-review verb. A set, not
 /// `!harness_can_self_review()`, so an UNRECOGNIZED spelling floors instead of
-/// passing through as verbless; mirrors the verbless derivation in
-/// cli/src/fno/pr/_merge.py (`_harness_can_self_review`).
+/// passing through as verbless. Python derives this set from
+/// `KNOWN_HARNESSES` in `cli/src/fno/pr/_merge.py`; the two are pinned to each
+/// other by `test_floor_verbless_set_stays_locked_to_the_rust_twin`, so a
+/// harness lands on both sides or the suite goes red.
 const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy"];
 
 /// The self-review FLOOR policy on the author harness (x-129b). Distinct from
