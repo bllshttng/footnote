@@ -126,14 +126,35 @@ fn fake_daemon_bin(home: &AgentsHome) -> PathBuf {
     path
 }
 
-fn env_probe_daemon_bin(home: &AgentsHome, label: &str, marker: &Path) -> PathBuf {
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
+}
+
+fn daemon_env_bin(
+    home: &AgentsHome,
+    label: &str,
+    marker: Option<&Path>,
+    extra: &[(&str, &str)],
+) -> PathBuf {
     let path = home.root().join(format!("{label}-daemon.sh"));
-    let script = format!(
-        "#!/bin/sh\nprintf '%s delay=%s pid=%s\\n' '{label}' \"${{FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS:-unset}}\" \"$$\" >> '{}'\nexport FNO_AGENTS_WORKER_BIN='{}'\nexec '{}' \"$@\"\n",
-        marker.display(),
-        WORKER_BIN,
-        DAEMON_BIN,
+    let mut script = String::from(
+        "#!/bin/sh\nunset FNO_AGENTS_WORKER_BIN FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS\n",
     );
+    script.push_str(&format!(
+        "export FNO_AGENTS_WORKER_BIN={}\n",
+        shell_quote(WORKER_BIN),
+    ));
+    for (key, value) in extra {
+        script.push_str(&format!("export {key}={}\n", shell_quote(value)));
+    }
+    if let Some(marker) = marker {
+        script.push_str(&format!(
+            "printf '%s delay=%s pid=%s\\n' '{}' \"${{FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS:-unset}}\" \"$$\" >> {}\n",
+            label,
+            shell_quote(&marker.display().to_string()),
+        ));
+    }
+    script.push_str(&format!("exec {} \"$@\"\n", shell_quote(DAEMON_BIN)));
     std::fs::write(&path, script).expect("write environment probe daemon");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("chmod environment probe daemon");
@@ -472,8 +493,12 @@ async fn client_declines_to_spawn_while_the_singleton_lock_is_held() {
 async fn restart_leaves_exactly_one_daemon(rows: usize) {
     let home = short_home();
     home.ensure_root().unwrap();
-    let daemon_bin = PathBuf::from(DAEMON_BIN);
-    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let daemon_bin = daemon_env_bin(
+        &home,
+        "restart-storm",
+        None,
+        &[("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000")],
+    );
 
     for i in 0..rows {
         seed_codex_source(
@@ -487,9 +512,8 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     // Hold the successor's startup sweep open. Post-fix this does not delay
     // serving at all, which is the whole point -- pre-fix it is the window in
     // which the successor is silent and every client below reads that silence
-    // as "no daemon" and forks its own. Inherited by the daemon `restart`
-    // spawns, which is why it goes on the test process rather than on a child.
-    std::env::set_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000");
+    // as "no daemon" and forks its own. The seam belongs only to the wrapper
+    // used for the intended successor, never to this test process.
 
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
@@ -539,11 +563,6 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
             Err(e) => failures.push(format!("task join failed: {e}")),
         }
     }
-    // Clear the process-wide seam BEFORE the first assertion. Every panic
-    // between the set and the clear leaks a 3s startup delay into every daemon
-    // a later test in this binary spawns, so nothing that can panic may sit in
-    // between -- which is why the joins above collect rather than expect.
-    std::env::remove_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS");
     let outcome = restart_result
         .expect("restart task joins")
         .expect("restart over a large roster succeeds");
@@ -662,11 +681,15 @@ async fn daemon_child_env_isolated_probe() {
     intended_home.ensure_root().unwrap();
     sibling_home.ensure_root().unwrap();
     let marker = intended_home.root().join("daemon-env-probe.log");
-    let intended_bin = env_probe_daemon_bin(&intended_home, "intended", &marker);
-    let sibling_bin = env_probe_daemon_bin(&sibling_home, "sibling", &marker);
+    let intended_bin = daemon_env_bin(
+        &intended_home,
+        "intended",
+        Some(&marker),
+        &[("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000")],
+    );
+    let sibling_bin = daemon_env_bin(&sibling_home, "sibling", Some(&marker), &[]);
 
     let mut incumbent = start_daemon(&intended_home);
-    std::env::set_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000");
     let restart = {
         let home = intended_home.clone();
         let bin = intended_bin.clone();
@@ -681,7 +704,6 @@ async fn daemon_child_env_isolated_probe() {
     }
     let sibling_pid = sibling.id();
     let _ = sibling.wait();
-    std::env::remove_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS");
 
     let probe = std::fs::read_to_string(&marker).expect("daemon env probe marker");
     assert!(
@@ -1166,8 +1188,7 @@ async fn restart_when_down_starts_fresh() {
     // with no error and old_pid == None.
     let home = short_home();
     home.ensure_root().unwrap();
-    let daemon_bin = PathBuf::from(DAEMON_BIN);
-    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let daemon_bin = daemon_env_bin(&home, "restart-when-down", None, &[]);
 
     let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin, false)
         .await
@@ -1190,7 +1211,7 @@ async fn restart_force_recovers_a_wedged_holder() {
     // operator kill: SIGKILL the holder before any probe, fresh daemon serves.
     let home = short_home();
     home.ensure_root().unwrap();
-    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let daemon_bin = daemon_env_bin(&home, "restart-force", None, &[]);
     let mut daemon = start_daemon(&home);
     let wedged_pid = daemon.id();
 
@@ -1228,7 +1249,7 @@ async fn restart_force_recovers_a_wedged_holder() {
     );
 
     // The recovery: one verb, no operator kill.
-    let outcome = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
+    let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin, true)
         .await
         .expect("--force recovers the wedge");
     assert!(outcome.forced, "the transcript records a kill, not a drain");
@@ -1269,7 +1290,7 @@ async fn restart_force_refuses_to_signal_a_recycled_pid() {
     // SURVIVING the verb that had every reason to kill it.
     let home = short_home();
     home.ensure_root().unwrap();
-    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let daemon_bin = daemon_env_bin(&home, "restart-recycled", None, &[]);
 
     // A live, unrelated process the corrupt lockfile will name. Start time "1"
     // never matches a real process, so the pid-reuse guard must refuse it.
@@ -1279,7 +1300,7 @@ async fn restart_force_refuses_to_signal_a_recycled_pid() {
         .expect("spawn sleep");
     std::fs::write(home.supervisor_lock(), format!("{} 1\n", stranger.id())).unwrap();
 
-    let outcome = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
+    let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin, true)
         .await
         .expect("force-with-recycled-pid still restarts");
     assert!(!outcome.forced, "no kill was performed");
@@ -1307,7 +1328,7 @@ async fn restart_force_refuses_to_signal_a_recycled_pid() {
         libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
     }
     std::thread::sleep(Duration::from_millis(300));
-    let outcome2 = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
+    let outcome2 = fno_agents::client::restart_daemon(&home, &daemon_bin, true)
         .await
         .expect("force-with-pid-only still restarts");
     assert!(!outcome2.forced, "no kill on a startless lockfile record");
