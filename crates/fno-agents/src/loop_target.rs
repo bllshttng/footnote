@@ -509,7 +509,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             .unwrap_or_default();
         format!(
             "You are the respawned king over {scope}. Read the board \
-             (fno agents king board --json --state <your kings manifest>), work \
+             (fno inbox board --json --state <your kings manifest>), work \
              every actionable row through the court duties in \
              skills/king-for-a-day, and encode each ruling in the graph before \
              your next read. This is a reign pass, not a /target resume: do not \

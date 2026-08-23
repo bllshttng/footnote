@@ -511,13 +511,26 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
         update_registry,
     )
 
+    caller = calling_agent_row()
     if handle:
+        # The handle form is the attended operator's reach, and only that: a
+        # registered agent that learns a peer's handle must not strip that
+        # peer's crown by name. The no-handle form below is the one agent
+        # path, and it only ever expires the caller's own crown. The
+        # unreadable/unregistered sentinels refuse too - an identity the
+        # registry cannot resolve to "attended human" gets no handle reach.
+        if caller is not None:
+            raise CrownPromotionError(
+                "reclaim by handle is an attended-shell action: run it "
+                "without --handle inside the heir session, or from a shell "
+                "holding no agent identity"
+            )
         try:
             holder_snapshot = resolve_agent(handle).entry
         except AgentResolutionError as exc:
             raise CrownPromotionError(str(exc)) from exc
     else:
-        holder_snapshot = calling_agent_row()
+        holder_snapshot = caller
     if holder_snapshot in (None, REGISTRY_UNREADABLE, AGENT_UNREGISTERED):
         raise CrownPromotionError(
             "reclaim needs the current crowned holder: run it inside the heir "

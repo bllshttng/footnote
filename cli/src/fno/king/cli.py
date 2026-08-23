@@ -122,7 +122,7 @@ def done_cmd(
     )
     from fno.agents.registry import TERMINAL_STATUSES as _TERMINAL_ROW_STATUSES
     from fno.agents.registry import update_registry
-    from fno.king.state import remove_king_manifest
+    from fno.king.state import king_manifest_path, parse_manifest, remove_king_manifest
 
     caller = calling_agent_row()
     if caller is REGISTRY_UNREADABLE or caller is AGENT_UNREGISTERED:
@@ -171,6 +171,19 @@ def done_cmd(
             )
             raise typer.Exit(2)
         holder_name = caller.name
+
+    # Snapshot the manifest's OWN session id BEFORE vacating: the removal
+    # below compares against it under the manifest lock, so a successor
+    # crowned in the vacate window (which writes its own id into the same
+    # scope file) survives instead of having its manifest unlinked. The id is
+    # read from the file, never the caller's row, so a resumed king whose row
+    # id has moved on still expires the manifest it was armed with.
+    try:
+        expired_manifest_session = (
+            parse_manifest(king_manifest_path(scope)).get("harness_session_id") or None
+        )
+    except (OSError, ValueError):
+        expired_manifest_session = None
 
     # Vacate the row BEFORE touching the file, under the registry lock: the
     # vacate closure re-reads the row's crown, so a scope that moved to a
@@ -222,14 +235,19 @@ def done_cmd(
             )
             raise typer.Exit(1)
 
-    # expected session id deliberately omitted: the manifest names the id the
-    # row held at coronation, which a resumed session has already outlived;
-    # the locked vacate above is the ownership proof.
-    if not remove_king_manifest(scope):
+    # expected_harness_session_id is the snapshot taken above, compared under
+    # the manifest lock: it is the successor-race guard, not an ownership
+    # proof (the locked vacate above already proved that). A False return
+    # here means the file on disk is no longer the manifest this expiry
+    # targeted - most likely a successor's fresh one.
+    if not remove_king_manifest(
+        scope, expected_harness_session_id=expired_manifest_session
+    ):
         typer.echo(
             f"king: row vacated, but the manifest for {scope!r} could not be "
-            "removed. A successor init still needs --force until the file is "
-            "gone; retry, or remove `.fno/kings/` for that scope by hand.",
+            "removed: the file no longer names the session this expiry "
+            "snapshotted, so a successor crowned mid-expiry likely owns it "
+            "now. Re-read with `fno agents court` before touching anything.",
             err=True,
         )
         raise typer.Exit(1)

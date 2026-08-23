@@ -14,7 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.agents.registry import AgentEntry, load_registry, update_registry
-from fno.king.state import king_manifest_path, write_manifest
+from fno.king.state import king_manifest_path, parse_manifest, write_manifest
 from fno.paths_testing import use_tmpdir
 
 CALLER_SESSION = "0c1f2f9a-1111-4000-8000-000000000001"
@@ -157,6 +157,36 @@ def test_done_refuses_when_the_crown_moved_before_the_write(court, monkeypatch) 
     assert "no longer holds" in result.output
     assert manifest.exists(), "the heir's manifest must survive the refusal"
     assert _row("heir").crown_scope == SCOPE
+
+
+def test_done_leaves_a_successor_manifest_crowned_in_the_vacate_window(
+    court, monkeypatch
+) -> None:
+    """A successor init --force that lands between the row vacate and the
+    manifest unlink must survive it: the unlink compares against the session
+    id snapshotted before the vacate, so the file this expiry deletes can
+    only ever be the one it decided to expire."""
+    _seat("sitting-king", CALLER_SESSION)
+    manifest = _manifest(court)
+    from fno.agents import registry as registry_mod
+
+    real_update = registry_mod.update_registry
+
+    def _crown_successor_then_update(fn):
+        write_manifest(
+            manifest, scope=SCOPE, harness_session_id="successor-session", force=True
+        )
+        return real_update(fn)
+
+    monkeypatch.setattr(registry_mod, "update_registry", _crown_successor_then_update)
+
+    result = _done()
+
+    assert result.exit_code == 1, result.output
+    assert "no longer names the session" in result.output
+    assert manifest.exists(), "the successor's manifest must survive"
+    assert parse_manifest(manifest)["harness_session_id"] == "successor-session"
+    assert _row("sitting-king").crown_scope is None, "the row still vacated"
 
 
 def test_an_attended_human_expires_a_named_scope(court, monkeypatch) -> None:

@@ -260,6 +260,37 @@ def test_reclaim_command_uses_the_current_heir_without_a_new_session(court) -> N
     assert len(load_registry()) == 2
 
 
+def test_a_registered_agent_cannot_reclaim_by_naming_a_peers_handle(court) -> None:
+    """The handle form is attended-only: a worker that learns the heir's
+    handle must not strip that crown, or the guard that succession built
+    (no agent path off your own crown) has a side door."""
+    _seat("grantor", "grantor-session", scope=None)
+    _seat("heir", "heir-session", scope=SCOPE, grantor="grantor-session")
+
+    from fno.agents.crown import CrownPromotionError, reclaim_crown
+
+    with pytest.raises(CrownPromotionError, match="attended-shell"):
+        reclaim_crown(handle="heir")
+
+    assert _row("heir").crown_scope == SCOPE, "the crown never moved"
+    assert _row("grantor").crown_scope is None
+
+
+def test_an_attended_shell_reclaims_by_handle(court, monkeypatch) -> None:
+    """The operator path: no agent identity, the heir named by handle."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("grantor", "grantor-session", scope=None)
+    _seat("heir", "heir-session", scope=SCOPE, grantor="grantor-session")
+
+    from fno.agents.crown import reclaim_crown
+
+    receipt = reclaim_crown(handle="heir")
+
+    assert receipt["reclaimed"] == "grantor"
+    assert _row("grantor").crown_scope == SCOPE
+    assert _row("heir").crown_scope is None
+
+
 # --- you cannot hand down authority you do not hold --------------------------
 #
 # The strict-subset rule was documented from the start and enforced by the
