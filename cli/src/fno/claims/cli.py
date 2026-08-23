@@ -1202,25 +1202,30 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
     for row in sessions:
         if not isinstance(row, dict) or row.get("state") != "live":
             continue
+        session = row.get("session")
+        if session is None or session == "":
+            return None
+        if "panes" not in row:
+            return None
         try:
-            n_panes = int(row.get("panes") or 0)
+            n_panes = int(row["panes"])
         except (TypeError, ValueError):
-            n_panes = 0
+            return None
         if not n_panes:
             # A zero-pane (or unparseable) session would only contribute an
             # ambiguous []; the probe never raises on a malformed row.
             continue
         panes = _mux(
-            "mux", "pane", "ls", "--session", str(row.get("session")), "--json"
+            "mux", "pane", "ls", "--session", str(session), "--json"
         )
         if panes is None or getattr(panes, "returncode", 1) != 0:
-            continue
+            return None
         try:
             listing = _json.loads(panes.stdout or "")
         except (ValueError, TypeError):
-            continue
+            return None
         if not isinstance(listing, list) or not listing:
-            continue
+            return None
         saw_content = True
         for pane in listing:
             if not isinstance(pane, dict):
@@ -1248,6 +1253,24 @@ def _claim_worktree_cwd(claim) -> Optional[str]:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _handover_pane_probe_blocked(claim) -> bool:
+    """Return True when pane identity cannot prove an in-place worker dead.
+
+    ``worktree.policy = never`` launches the worker at the repository root, so
+    its pane cwd cannot carry the worker identity. An unreadable policy is the
+    same safety answer: keep the claim until its TTL rather than reap on pane
+    absence.
+    """
+    try:
+        from fno.worktree_paths import resolve_worktree_policy
+
+        cwd = _claim_worktree_cwd(claim)
+        repo_root = Path(cwd) if cwd else Path.cwd()
+        return resolve_worktree_policy(repo_root).policy == "never"
+    except Exception:  # noqa: BLE001 - an unreadable policy proves nothing
+        return True
 
 
 def _abandonment_probe(reading: Optional[RosterReading] = None):
@@ -1325,6 +1348,8 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
             # the pane answer is cached per worker for the sweep's lifetime,
             # like the shared roster reading.
             if is_live(claim):
+                return None
+            if _handover_pane_probe_blocked(claim):
                 return None
             worker = claim.holder[len(HANDOVER_HOLDER_PREFIX):]
             node_id = claim.key[len("node:"):] if claim.key.startswith("node:") else ""

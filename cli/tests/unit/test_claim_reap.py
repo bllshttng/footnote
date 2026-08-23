@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -1080,6 +1081,18 @@ class TestExternalDeathEvidence:
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 0" in r.output
 
+    def test_handover_in_place_policy_stays_unknown(self, tmp_path, monkeypatch):
+        """An in-place worker's pane has no worker/worktree identity, so a
+        missing match must not prove that its live pane is gone."""
+        self._pane(monkeypatch, absent=True)
+        monkeypatch.setattr(
+            "fno.worktree_paths.resolve_worktree_policy",
+            lambda *_a, **_kw: SimpleNamespace(policy="never"),
+        )
+        self._handover(tmp_path)
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+
     def test_specimen_1_degraded_then_recovered_roster_reaps(
         self, tmp_path, monkeypatch
     ):
@@ -1288,6 +1301,28 @@ class TestMuxPaneAbsenceHelper:
             [
                 self._Proc(0, '[{"session":"main","state":"live","panes":2}]'),
                 self._Proc(0, "[]"),
+            ]
+        )
+        assert _mux_pane_absent_for("bp-x-worker", runner=runner) is None
+
+    def test_uninspectable_live_session_keeps_mixed_listing_unknown(self):
+        """One unreadable live session invalidates absence from another
+        session's unrelated pane listing."""
+        from fno.claims.cli import _mux_pane_absent_for
+
+        runner = self._runner(
+            [
+                self._Proc(
+                    0,
+                    '[{"session":"main","state":"live","panes":1},'
+                    '{"session":"other","state":"live","panes":1}]',
+                ),
+                self._Proc(
+                    0,
+                    '[{"pane_id":2,"fno_id":"someone-else",'
+                    '"title":null,"cwd":"/Users/x/code/other"}]',
+                ),
+                self._Proc(1, "pane socket unavailable"),
             ]
         )
         assert _mux_pane_absent_for("bp-x-worker", runner=runner) is None
