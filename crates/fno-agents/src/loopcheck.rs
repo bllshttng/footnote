@@ -6109,7 +6109,12 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut hook_input_stdin = false;
     let mut driver = "target".to_string();
     let mut fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
-    let mut read_timeout_ms: Option<u64> = None;
+    // Env-as-default like the two bin overrides, so the real shell shim can be
+    // driven end to end against a wedged child at a test bound without the
+    // shim having to forward a flag it does not know about.
+    let mut read_timeout_ms: Option<u64> = std::env::var("FNO_LOOPCHECK_READ_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
 
     // Skip the "loop-check" verb itself if present
     let args = if args.first().map(|s| s.as_str()) == Some("loop-check") {
@@ -12897,6 +12902,86 @@ mod tests {
                 tail.chars().take(60).collect::<String>()
             );
         }
+    }
+
+    /// Names every direct synchronous wait on `gh`/`fno` outside the
+    /// centralized runner, given loopcheck source text. Pure over the source so
+    /// the ratchet test can drive it with a mutated fixture instead of trusting
+    /// a zero-hit scan that never ran.
+    ///
+    /// A bypass is `Command::new(gh_bin|fno_bin)` whose statement (the next
+    /// 300 chars, cut at the next `fn ` boundary so one chain cannot bleed into
+    /// the next function) calls `.output()`, `.wait()`, or `.status()` - the
+    /// three synchronous waits. The transport's own `.spawn()` chain and the
+    /// one deliberately detached notifier spawn are not waits and pass.
+    fn direct_wait_bypasses(source: &str) -> Vec<String> {
+        let mut hits = Vec::new();
+        for marker in ["Command::new(gh_bin", "Command::new(fno_bin"] {
+            for tail in source.split(marker).skip(1) {
+                let stmt: String = tail
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
+                    .split("fn ")
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let ctx = tail.chars().take(60).collect::<String>();
+                for wait in [".output()", ".wait()", ".status()"] {
+                    if stmt.contains(wait) {
+                        hits.push(format!("{marker} ... {ctx}"));
+                        break;
+                    }
+                }
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn no_direct_external_read_bypasses_bounded_runner() {
+        // Production region only: the file's own test module may legitimately
+        // spawn helper processes.
+        let source = include_str!("loopcheck.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("test module marker");
+        // Positive control first, so an empty scan can never read as green:
+        // the centralized runner must exist and carry real call sites.
+        assert!(production.contains("fn run_bounded("));
+        assert!(
+            production.matches("bounded_read(").count() >= 10,
+            "the bounded transport must carry its registered read sites"
+        );
+        let bypasses = direct_wait_bypasses(production);
+        assert!(
+            bypasses.is_empty(),
+            "direct synchronous gh/fno waits outside the bounded runner: {bypasses:?}"
+        );
+    }
+
+    #[test]
+    fn the_bypass_detector_catches_an_injected_bypass() {
+        // The detector itself is under test: a fixture with ONE new direct
+        // wait must be named, proving a green production scan is a scan that
+        // ran and matched the right symbol - not an empty haystack.
+        let fixture = "fn somewhere() {
+    let out = Command::new(gh_bin)
+        .args([\"pr\", \"view\"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| e.to_string())?;
+}
+fn run_bounded() {}
+bounded_read(); bounded_read();";
+        let hits = direct_wait_bypasses(fixture);
+        assert_eq!(hits.len(), 1, "exactly the injected bypass: {hits:?}");
+        assert!(hits[0].contains("Command::new(gh_bin"), "{hits:?}");
+        // And the wait call is what flagged it, not the spawn shape: the same
+        // fixture without the wait passes clean.
+        let clean = fixture.replace(".output()", ".spawn()");
+        assert!(direct_wait_bypasses(&clean).is_empty());
     }
 
     #[test]

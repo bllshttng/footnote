@@ -705,3 +705,107 @@ fn agy_foreign_conversation_cannot_judge_a_live_session() {
     assert!(!cwd.join(".fno/live-loopchecked").exists());
     assert!(!cwd.join(".fno/stale-finalized").exists());
 }
+
+/// The original user path, closed end to end: the REAL shim runs the REAL
+/// binary, one external read wedges past its bound, and what reaches the hook
+/// protocol is the bounded decision with the exact killed-read cause - never
+/// checker-unavailable handling and never the generic failed-GitHub-read line.
+#[test]
+fn shim_prints_the_exact_timeout_cause_when_a_read_wedges() {
+    let fx = fixture_with_manifest(
+        "---\nsession_id: sess-wedge-e2e\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\n---\n",
+    );
+    // The shim reads its state from .fno/target-state.md in $PWD.
+    fs::copy(&fx.manifest, fx.cwd.join(".fno/target-state.md")).unwrap();
+
+    // gh mock: --version fast; the fingerprint's exact argv wedges. The
+    // full-field view and every other read answer green.
+    let bins = TempDir::new().unwrap();
+    let gh = make_script(
+        bins.path(),
+        "gh",
+        r#"if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "state,number,headRefName" && ! echo "$*" | grep -q "headRefOid"; then
+  sleep 30
+  echo '{"state":"OPEN","number":1,"headRefName":"main"}'
+  exit 0
+fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{"name":"ci","state":"SUCCESS","bucket":"pass"}]'
+  exit 0
+fi
+if echo "$*" | grep -q "reviews"; then
+  echo '{"reviews":[],"comments":[]}'
+  exit 0
+fi
+exit 1"#,
+    );
+    let git = make_script(
+        bins.path(),
+        "git",
+        r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000001""#,
+    );
+
+    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/target-stop-hook.sh");
+    assert!(shim.exists(), "shim not found at {}", shim.display());
+
+    let payload = serde_json::json!({
+        "transcript_path": fx.transcript.to_str().unwrap(),
+        "last_assistant_message": "still working on it"
+    })
+    .to_string();
+
+    let started = std::time::Instant::now();
+    let mut child = Command::new("bash")
+        .arg(&shim)
+        .current_dir(&fx.cwd)
+        .env("FNO_AGENTS_BIN", env!("CARGO_BIN_EXE_fno-agents"))
+        .env("FNO_LOOPCHECK_GH_BIN", &gh)
+        .env("FNO_LOOPCHECK_GIT_BIN", &git)
+        .env("FNO_LOOPCHECK_READ_TIMEOUT_MS", "1000")
+        .env("FNO_NUDGE_DISABLED", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the bounded block must reach the hook protocol. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("external read 'fingerprint_pr_view' timed out after"),
+        "the shim must print the exact killed-read cause: {stderr}"
+    );
+    assert!(
+        stderr.contains("was killed"),
+        "the cause must say the child was killed: {stderr}"
+    );
+    assert!(
+        !stderr.contains("checker unavailable"),
+        "a bounded decision is the checker WORKING, not unavailable: {stderr}"
+    );
+    assert!(
+        !stderr.contains("gh read '"),
+        "the generic failed-read line must not appear for a kill: {stderr}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "the whole shim path must stay inside the bound plus slack, took {:?}",
+        started.elapsed()
+    );
+}
