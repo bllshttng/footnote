@@ -1008,6 +1008,9 @@ struct View {
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
     confirm: Option<ConfirmAction>,
+    /// A left-button release paired with a click on a modal's close chip must
+    /// stay swallowed after that click closes the modal.
+    modal_release_swallow: bool,
     /// (x-9e5e) The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to [`create_keys`]: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
@@ -2296,6 +2299,7 @@ impl View {
             row_drag: None,
             press_hold: None,
             confirm: None,
+            modal_release_swallow: false,
             create: None,
             create_esc: Vec::new(),
             rename: None,
@@ -6313,6 +6317,11 @@ impl View {
         name: &str,
         hint: Option<&str>,
     ) {
+        if rows > 0 {
+            for c in 0..cols {
+                cells[(rows - 1) * cols + c] = Cell::default();
+            }
+        }
         let layout = self.name_modal_layout(label, name, hint);
         draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
     }
@@ -10926,6 +10935,10 @@ enum StdinFlow {
 /// Only the shared Chrome esc hit cancels; outside clicks are swallowed so they
 /// cannot dismiss the modal or reach a pane underneath it.
 fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
+    if view.modal_release_swallow && matches!(rep.kind, MouseKind::Release(MouseButton::Left)) {
+        view.modal_release_swallow = false;
+        return true;
+    }
     let Some(layout) = view.active_overlay_layout() else {
         return false;
     };
@@ -10933,6 +10946,7 @@ fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
         && layout.hit_at(rep.row, rep.col) == Some(crate::chrome::ESC_CLOSE_HIT)
     {
         view.cancel_active_overlay();
+        view.modal_release_swallow = true;
     }
     true
 }
@@ -20895,6 +20909,76 @@ mod tests {
         assert!(
             view.confirm.is_none(),
             "confirm closes from the shared esc chip"
+        );
+    }
+
+    #[test]
+    fn esc_chip_close_swallows_its_matching_left_release() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let click = crate::mouse::MouseReport {
+            row: (layout.origin.0 + line) as u16,
+            col: (layout.origin.1 + offset + len / 2) as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        assert!(modal_mouse(&mut view, click));
+        assert!(view.create.is_none(), "the chip press closes the modal");
+        assert!(
+            modal_mouse(
+                &mut view,
+                crate::mouse::MouseReport {
+                    kind: MouseKind::Release(MouseButton::Left),
+                    ..click
+                },
+            ),
+            "the release paired with the closing click stays swallowed"
+        );
+        assert!(
+            !modal_mouse(
+                &mut view,
+                crate::mouse::MouseReport {
+                    kind: MouseKind::Release(MouseButton::Left),
+                    ..click
+                },
+            ),
+            "only the matching release is consumed"
+        );
+    }
+
+    #[test]
+    fn name_modal_clears_the_reserved_bottom_row() {
+        let mut view = two_pane_view();
+        view.rename = Some((RenameTarget::Tab(1), "typed".into()));
+        let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        for cell in &mut cells[(rows - 1) * cols..rows * cols] {
+            *cell = Cell {
+                c: 'x',
+                ..Cell::default()
+            };
+        }
+
+        view.draw_bottom_row(&mut cells, rows, cols);
+
+        assert!(
+            cells[(rows - 1) * cols..rows * cols]
+                .iter()
+                .all(|cell| *cell == Cell::default()),
+            "the reserved bottom row is blank beneath a name modal"
         );
     }
 
