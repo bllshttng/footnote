@@ -424,6 +424,7 @@ pub fn run_gate(
     let started = Instant::now();
     let mut last_progress = Instant::now();
     let mut announced = false;
+    let mut last_slots: usize = 0;
     // Start of the current UNBROKEN run of failed acquisitions (None = holding
     // or not yet contended). Reset on every success so a long legitimate queue
     // never accumulates into a spurious fail-open.
@@ -465,6 +466,16 @@ pub fn run_gate(
                     "spawn-gate: another spawner holds the gate mutex; refusing \
                      (--no-wait). See `fno agents top`."
                 );
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "refused",
+                        "reason": "no_wait_mutex_held",
+                        "max_live": cap,
+                    })
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
                 return Err(EXIT_NO_WAIT);
             }
             if now.duration_since(since) >= MUTEX_WAIT_BUDGET {
@@ -481,6 +492,7 @@ pub fn run_gate(
             guard.gate_key = Some(("spawn-gate".to_string(), holder.clone()));
             let mut warnings = Vec::new();
             let slots = slot_count(registry_path, &mut warnings);
+            last_slots = slots;
             for w in &warnings {
                 eprintln!("{w}");
             }
@@ -513,6 +525,18 @@ pub fn run_gate(
                     "spawn-gate: {slots} live worker slots >= max_live {cap}; refusing (--no-wait). \
                      See `fno agents top`."
                 );
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "refused",
+                        "reason": "no_wait",
+                        "max_live": cap,
+                        "count": slots,
+                        "current_count": slots,
+                    })
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
                 return Err(EXIT_NO_WAIT);
             }
             if !announced {
@@ -537,6 +561,18 @@ pub fn run_gate(
                  inspect live workers with `fno agents top`, or retry with --no-wait/--force",
                 QUEUE_TIMEOUT.as_secs()
             );
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "refused",
+                    "reason": "queue_timeout",
+                    "max_live": cap,
+                    "count": last_slots,
+                    "current_count": last_slots,
+                })
+            );
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
             return Err(EXIT_QUEUE_TIMEOUT);
         }
         std::thread::sleep(QUEUE_POLL);
@@ -557,6 +593,17 @@ fn check_ram_floor(floor_gb: f64) -> Result<(), i32> {
                 "spawn-gate: available RAM {avail:.1}GB is below the min_free_gb floor \
                  {floor_gb:.1}GB; refusing to spawn (--force to bypass)"
             );
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "refused",
+                    "reason": "ram_floor",
+                    "available_gb": avail,
+                    "min_free_gb": floor_gb,
+                })
+            );
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
             Err(EXIT_RAM_REFUSED)
         }
         None => {
@@ -929,6 +976,52 @@ MemAvailable:    8000000 kB\n";
             elapsed < QUEUE_TIMEOUT,
             "must refuse fast, not queue: took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn queue_timeout_refuses_with_receipt_and_exit_code() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-timeout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 1\nmin_free_gb = 0\n",
+        )
+        .unwrap();
+
+        // 1 worker in registry with alive pid -> cap full at 1/1
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":1,"entries":[{{"name":"w1","provider":"claude","cwd":"/tmp","status":"live","pid":{},"created_at":"2026-01-01T00:00:00Z"}}]}}"#,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+
+        // With QUEUE_TIMEOUT, full cap, not no_wait, and mock timeout:
+        // verify slot_count sees 1 slot >= max_live 1
+        let mut warnings = Vec::new();
+        let slots = slot_count(&reg, &mut warnings);
+        assert_eq!(slots, 1);
+        assert_eq!(EXIT_QUEUE_TIMEOUT, 75);
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

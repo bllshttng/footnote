@@ -669,7 +669,7 @@ set -o pipefail
 # liveness oracle (Locked Decision 1) - the receipt short_id is audit data, not
 # launch proof. Conflating the two used to park the parent while a receiptless
 # child kept running, splitting the branch across two workers (x-1adb).
-if [ "$_ASK_RC" -ne 0 ]; then
+if [ "$_ASK_RC" -ne 0 ] || printf '%s\n' "$_ASK_OUT" | grep -q '"status":[[:space:]]*"refused"'; then
   # Spawn failure: unwind in order
   #   (a) re-acquire node:<id> FIRST; capture the rc
   _REACQ_RC=0
