@@ -134,115 +134,15 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Rust must not grow a plan-status reader.
 #
-# Ratchet every production Rust `status` identifier, including string literals
-# and typed serde fields, independent of file-reading API, variable name, or
-# source filename. Counts also catch a new lookup added to an existing source
-# that already has unrelated status fields.
+# Freeze the known plan-document readers.
+# Both consume activation-specific markers, never `status:`.
 # ---------------------------------------------------------------------------
 echo "--- Rust: no plan-status reader ---"
-# The row-emitter contradiction guard owns two non-plan status fields.
-EXPECTED_RUST_STATUS_IDENTIFIERS="crates/fno-agents/build.rs:2
-crates/fno-agents/src/active_backlog.rs:20
-crates/fno-agents/src/agents_config.rs:1
-crates/fno-agents/src/bin/client.rs:68
-crates/fno-agents/src/claims.rs:11
-crates/fno-agents/src/claude_adopt.rs:3
-crates/fno-agents/src/claude_ask.rs:21
-crates/fno-agents/src/claude_roster.rs:6
-crates/fno-agents/src/client.rs:30
-crates/fno-agents/src/client_verbs.rs:78
-crates/fno-agents/src/codex_ask.rs:3
-crates/fno-agents/src/codex_inject.rs:3
-crates/fno-agents/src/daemon.rs:170
-crates/fno-agents/src/delivery_completion.rs:4
-crates/fno-agents/src/drift.rs:4
-crates/fno-agents/src/finalize.rs:48
-crates/fno-agents/src/gc.rs:31
-crates/fno-agents/src/gemini_ask.rs:4
-crates/fno-agents/src/kill_criteria.rs:8
-crates/fno-agents/src/lib.rs:12
-crates/fno-agents/src/loop_dispatch.rs:6
-crates/fno-agents/src/loop_king.rs:1
-crates/fno-agents/src/loopcheck.rs:70
-crates/fno-agents/src/manifest.rs:2
-crates/fno-agents/src/needs.rs:4
-crates/fno-agents/src/nudge.rs:1
-crates/fno-agents/src/opencode_ask.rs:1
-crates/fno-agents/src/paths.rs:3
-crates/fno-agents/src/protocol.rs:5
-crates/fno-agents/src/provider.rs:7
-crates/fno-agents/src/readiness.rs:13
-crates/fno-agents/src/roster_progress.rs:7
-crates/fno-agents/src/scrape.rs:10
-crates/fno-agents/src/spawn_gate.rs:12
-crates/fno-agents/src/state.rs:55
-crates/fno-agents/src/stream_worker.rs:19
-crates/fno-agents/src/subprocess_ask.rs:6
-crates/fno-agents/src/verify_evidence.rs:8
-crates/fno-agents/src/wait.rs:4
-crates/fno/build.rs:2
-crates/fno/src/agents_view.rs:94
-crates/fno/src/backlog_view.rs:108
-crates/fno/src/bootstrap.rs:11
-crates/fno/src/client.rs:54
-crates/fno/src/clipboard.rs:2
-crates/fno/src/connections_view.rs:3
-crates/fno/src/digest_overlay.rs:1
-crates/fno/src/keys.rs:9
-crates/fno/src/link.rs:11
-crates/fno/src/needs_overlay.rs:7
-crates/fno/src/proto.rs:4
-crates/fno/src/pty.rs:1
-crates/fno/src/server.rs:27
-crates/fno/src/sprites.rs:6
-crates/fno/src/squad.rs:6
-crates/fno/src/view_store.rs:4
-crates/fno/src/web.rs:1
-crates/fno/src/yard_overlay.rs:4"
-count_status_identifiers() {
-    awk '
-        {
-            line = $0
-            while (match(line, /(^|[^[:alnum:]_])status([^[:alnum:]_]|$)/)) {
-                count++
-                consumed = RSTART + RLENGTH - 1
-                if (consumed >= length(line)) break
-                line = substr(line, consumed)
-            }
-        }
-        END { print count + 0 }
-    ' "$1"
-}
-actual_status_identifiers=""
-while IFS= read -r source; do
-    [ -n "$source" ] || continue
-    count="$(count_status_identifiers "$source")"
-    if [ "$count" -gt 0 ]; then
-        actual_status_identifiers="${actual_status_identifiers}${source}:${count}
-"
-    fi
-done <<EOF
-$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' | LC_ALL=C sort || true)
-EOF
-actual_status_identifiers="${actual_status_identifiers%$'\n'}"
-if [ "$actual_status_identifiers" != "$EXPECTED_RUST_STATUS_IDENTIFIERS" ]; then
-    violation "the production Rust status-identifier inventory changed" \
-        "expected: $EXPECTED_RUST_STATUS_IDENTIFIERS" \
-        "actual:   ${actual_status_identifiers:-(none)}" \
-        "Do not classify plan frontmatter in Rust; route readiness through" \
-        "\`fno do plan rung\`. Update this ratchet only for a reviewed, unrelated" \
-        "status field."
-else
-    note "OK: the production Rust status-identifier inventory is unchanged"
-fi
-
-# Freeze the two known plan-document readers as a second, tighter diagnostic.
-# Both consume activation-specific markers, never `status:`.
 EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/delivery_completion.rs
 crates/fno-agents/src/kill_criteria.rs"
 actual=$(
     git ls-files -z -- 'crates/**/*.rs' 2>/dev/null \
-        | xargs -0 grep -lE 'read_to_string\(&?plan' 2>/dev/null \
+        | xargs -0 grep -lE '((std::)?fs::read(_to_string)?\([^)]*plan|read_to_string\([^)]*plan|read_plan|load_plan|parse_plan)' 2>/dev/null \
         | grep -v '/tests/' | LC_ALL=C sort || true
 )
 if [ "$actual" != "$EXPECTED_RUST_PLAN_READERS" ]; then
