@@ -69,18 +69,33 @@ mod tests {
     use super::{canonical_handle, legacy_suffix_handle};
 
     fn session_id_strategy() -> impl Strategy<Value = Vec<String>> {
-        let uuid_lower = proptest::string::string_regex(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-        )
-        .unwrap();
-        let uuid_upper = proptest::string::string_regex(
-            r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}",
-        )
-        .unwrap();
-        let uuid_v7 = proptest::string::string_regex(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
-        )
-        .unwrap();
+        let uuid_lower_pattern = [
+            r"[0-9a-f]{8}",
+            r"[0-9a-f]{4}",
+            r"[0-9a-f]{4}",
+            r"[0-9a-f]{4}",
+            r"[0-9a-f]{12}",
+        ]
+        .join("-");
+        let uuid_upper_pattern = [
+            r"[0-9A-F]{8}",
+            r"[0-9A-F]{4}",
+            r"[0-9A-F]{4}",
+            r"[0-9A-F]{4}",
+            r"[0-9A-F]{12}",
+        ]
+        .join("-");
+        let uuid_v7_pattern = [
+            r"[0-9a-f]{8}",
+            r"[0-9a-f]{4}",
+            r"7[0-9a-f]{3}",
+            r"[89ab][0-9a-f]{3}",
+            r"[0-9a-f]{12}",
+        ]
+        .join("-");
+        let uuid_lower = proptest::string::string_regex(&uuid_lower_pattern).unwrap();
+        let uuid_upper = proptest::string::string_regex(&uuid_upper_pattern).unwrap();
+        let uuid_v7 = proptest::string::string_regex(&uuid_v7_pattern).unwrap();
         let opencode = proptest::string::string_regex(r"ses_[A-Za-z0-9]{8,32}").unwrap();
         let short_hex = proptest::string::string_regex(r"[0-9a-f]{4,8}").unwrap();
         (uuid_lower, uuid_upper, uuid_v7, opencode, short_hex)
