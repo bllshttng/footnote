@@ -19,7 +19,7 @@
 A	(`fno agents spawn --provider <vendor> --model <m>`).	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# msg-twin
 A	(not yet implemented; planned for a future story)	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	--dangerously-bypass-approvals-and-sandbox	py=cli/src/fno/agents/harnesses/codex.py|cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/codex_ask.rs|crates/fno-agents/src/provider.rs	# protocol
-A	--dangerously-skip-permissions	py=cli/src/fno/agents/harnesses/claude.py|cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/agy_ask.rs|crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/opencode_ask.rs|crates/fno-agents/src/provider.rs	# protocol
+A	--dangerously-skip-permissions	py=cli/src/fno/agents/harnesses/claude.py|cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/agents_config.rs|crates/fno-agents/src/agy_ask.rs|crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/opencode_ask.rs|crates/fno-agents/src/provider.rs	# sandbox refusal remediation names the opt-in bypass alongside every harness carrier
 A	--permission-mode and --yolo are mutually exclusive; pass one	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/bin/client.rs	# msg-twin
 A	--provider was split at the axis rename: the cli binary is --harness/-h;	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# msg-twin
 A	--tail must be >= 0 (got {tail})	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
