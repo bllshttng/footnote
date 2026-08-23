@@ -32,6 +32,7 @@ that produced the defect - see ``_unclaimed_node_basis``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -51,7 +52,17 @@ from typing import Any, Callable, Optional
 # would drift from the one the classifier itself uses.
 from fno.agents.session_truth import STALLED_AFTER_S, _HELP_RE, classify_tail
 
-Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
+Verdict = namedtuple(
+    "Verdict", "row_id name state verdict basis action data",
+    defaults=(None, None),
+)
+#: The structured input the owed-work lane carries to its apply stage: the PR
+#: number and the ready_blockers list the gate reported. It rides the Verdict
+#: as ``data`` (defaulted None so every pre-existing construction site and
+#: positional test still builds) because the apply stage needs the blockers
+#: THEMSELVES - to build the obligation payload and to key the refire digest -
+#: and reparsing them out of the basis string would couple two spellings of
+#: one list that nothing keeps in step.
 #: ``origin`` and ``last_message_at`` are read off the joined registry entry in
 #: ``fleet_rows`` and consulted by ``reap_decision`` as PROTECTORS. They default
 #: to None so an older construction site (and every test that builds a Row
@@ -370,12 +381,17 @@ def verdicts(
     now_s: float,
     quiet_after_s: float = REAP_QUIET_AFTER_S,
     retire_grace_s_value: Optional[float] = None,
+    gate_for: Optional[Callable[[Row], Optional[dict]]] = None,
 ) -> list[Verdict]:
     """One verdict per row, in table precedence (ghost > reap > retire >
     reroute > wake > leave). Each basis string names the measurement that decided it, so
     a reader can falsify the call. ``claim_for(node)`` returns the
     ``node:<id>`` claim view (``{"state", "holder"}``); ``node_state_for``
-    returns the graph entry (``{"status", ...}``) or None."""
+    returns the graph entry (``{"status", ...}``) or None.
+    ``gate_for(row)`` returns the owed-work gate view
+    (``{"pr", "ready_blockers"}``) or None; the resolver, not the classifier,
+    does the reading, so tests inject a dict and the pure function stays
+    subprocess-free."""
     # Occupancy is read from the TRANSCRIPT, never from the roster state.
     # This module exists because both stores lie about liveness, and the
     # measured 2026-08-15 inversion had claude report `done` for a session
@@ -429,6 +445,7 @@ def verdicts(
             quiet_after_s=quiet_after_s,
             cotenants=_cotenants(row),
             retire_grace_s_value=grace,
+            gate=gate_for(row) if gate_for is not None else None,
         )
         # The unclaimed advisory upgrades a LEAVE, and it is applied HERE
         # rather than at a leave return because there are four of them. Putting
@@ -1026,6 +1043,7 @@ def _verdict_one(
     # that skipped `verdicts()`. A switch documented as off-capable must not
     # have an on-by-default back door.
     retire_grace_s_value: float,
+    gate: Optional[dict] = None,
 ) -> Verdict:
 
     # ghost: the row claims working/blocked but its recorded id resolves to no
@@ -1127,6 +1145,37 @@ def _verdict_one(
             f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
             f"{_mins(reset_epoch, now_s)}m out",
             "redispatch",
+        )
+
+    # owed work (x-fa8b): the PR gate reports blockers while this row, which
+    # holds its node's live claim, sits silent past the stalled threshold.
+    # The GATE outranks the tail's self-report: on x-c7fd the worker's own
+    # summary read "9 passes, 3 pending, no failures" while the gate said
+    # commit_status_red plus unresolved reviews, and a classifier that read
+    # the report would have left it parked - the exact failure this lane
+    # exists to catch. It sits ABOVE the plain stalled wake so a gate-red row
+    # always wakes with the obligation payload, whatever its tail reads.
+    # Every condition is positive evidence: a live gate dict with a
+    # non-empty ready_blockers list, a parseable last event, and an age over
+    # the same STALLED_AFTER_S the tail classifier uses. An unreadable gate
+    # resolves to None and never wakes anyone.
+    if (
+        gate is not None
+        and gate.get("ready_blockers")
+        and row.state in _WAKE_STATES
+        and facts is not None
+        and facts.last_event_epoch is not None
+        and facts_age_s is not None
+        and facts_age_s > STALLED_AFTER_S
+    ):
+        blockers = ", ".join(str(b) for b in gate["ready_blockers"])
+        return Verdict(
+            row.row_id, row.name, row.state, WAKE,
+            f"PR #{gate.get('pr')} gate red ({blockers}); "
+            f"{_mins(now_s, facts.last_event_epoch)}m silent with the claim "
+            f"live, gate outranks the self-report",
+            "obligation",
+            {"pr": gate.get("pr"), "ready_blockers": list(gate["ready_blockers"])},
         )
 
     # wake: blocked or stopped, a transcript exists, and no live 429 window.
@@ -1631,6 +1680,71 @@ def _claim_view(node: str) -> dict:
         return {}
 
 
+def _owed_gate_for(row: Row, *, claim_fn: Optional[Callable[[str], dict]] = None):
+    """The row's owed-work gate view, or None. Resolved OUTSIDE the pure
+    classifier (this is the seam's subprocess half): a row that holds its
+    node's LIVE claim, has an OPEN PR for its worktree's branch, and a gate
+    whose ``ready_blockers`` is non-empty owes work. The blockers are read by
+    the gate's own verb - ``fno do pr status`` - so the wake condition always
+    means what the merged predicate means, including its corrections (the
+    x-129b + x-e8db rework); a second implementation here would drift from
+    the one that decides merges.
+
+    Fail closed on every miss: an unreadable claim, an unresolvable branch,
+    a PR that is gone, a status read that errors - each returns None, and a
+    None gate never wakes anyone. The holder must MATCH this row (its session
+    id or its name): a live claim held by a sibling means the sibling owes
+    the work, and waking this row would inject a duplicate.
+    """
+    if not row.node or not row.cwd:
+        return None
+    claim = (claim_fn or _claim_view)(row.node)
+    if claim.get("state") != "live":
+        return None
+    if claim.get("holder") not in (row.row_id, row.name):
+        return None
+    try:
+        branch = subprocess.run(
+            ["git", "-C", row.cwd, "branch", "--show-current"],
+            capture_output=True, text=True, timeout=15, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not branch:
+        return None
+    try:
+        pr_json = json.loads(subprocess.run(
+            ["gh", "pr", "view", branch, "--json", "number,state"],
+            capture_output=True, text=True, timeout=30, check=True,
+            cwd=row.cwd,
+        ).stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    if (pr_json.get("state") or "").upper() != "OPEN":
+        return None
+    pr_number = pr_json.get("number")
+    if not isinstance(pr_number, int):
+        return None
+    try:
+        proc = subprocess.run(
+            [*_fno(), "do", "pr", "status", str(pr_number)],
+            capture_output=True, text=True, timeout=120, check=False,
+            cwd=row.cwd,
+        )
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, IndexError):
+        return None
+    if payload.get("ready"):
+        return None
+    blockers = [str(b) for b in (payload.get("ready_blockers") or []) if str(b)]
+    if not blockers:
+        # Not ready with an EMPTY blocker list is an instrument that cannot
+        # say why. An obligation needs a nameable debt, so refuse here
+        # rather than mail a wake that tells its recipient nothing.
+        return None
+    return {"pr": pr_number, "ready_blockers": blockers}
+
+
 def _graph_index() -> dict[str, dict]:
     from fno.graph.load import load_graph
 
@@ -1663,6 +1777,7 @@ def run_sweep(
     claim_fn: Optional[Callable[[str], dict]] = None,
     graph_fn: Optional[Callable[[], dict[str, dict]]] = None,
     roster_timeout: Optional[float] = None,
+    gate_fn: Optional[Callable[[Row], Optional[dict]]] = None,
 ) -> tuple[dict, list[Row]]:
     """Build the real seams and classify the whole fleet once. Returns
     ``(payload, rows)`` - the payload is the ``--json`` shape
@@ -1694,6 +1809,27 @@ def run_sweep(
         def transcript_fn(sid: str) -> Optional[TailFacts]:
             return tail_facts(sid, cwd_by_sid.get(sid, ""))
     claim_fn = claim_fn or _claim_view
+    if gate_fn is None:
+        # The gate resolver's subprocesses fire only for rows that already
+        # look owed: a wake-state row whose transcript is silent past the
+        # stalled threshold. Everything else - an active worker, a terminal
+        # row, a ghost - answers None before any process is spawned, so a
+        # healthy fleet pays zero subprocesses for this lane.
+        def gate_fn(row: Row) -> Optional[dict]:
+            try:
+                if row.state not in _WAKE_STATES:
+                    return None
+                facts = transcript_fn(row.row_id)
+                if (
+                    facts is None
+                    or facts.last_event_epoch is None
+                    or (now_s - facts.last_event_epoch) <= STALLED_AFTER_S
+                ):
+                    return None
+                return _owed_gate_for(row, claim_fn=claim_fn)
+            except Exception:  # noqa: BLE001 - a failed gate read is never a wake
+                return None
+
     if graph_fn is None:
         index = _graph_index()
 
@@ -1712,6 +1848,7 @@ def run_sweep(
         node_state_for=lambda node: graph_fn().get(node),
         now_s=now_s,
         quiet_after_s=quiet_after_s,
+        gate_for=gate_fn,
     )
     counts: dict[str, int] = {}
     for v in vs:
@@ -2181,6 +2318,96 @@ def _confirm_once(
     return False
 
 
+def owed_digest_path() -> Path:
+    """The per-row refire digests for the owed-work lane.
+
+    A top-level state-root file (owner + lifetime row in
+    docs/state-root-inventory.md): owned by the watchdog sweep, one key per
+    row id, each holding the digest of the blocker set the wake already
+    delivered. Entries live until the row's blockers CHANGE (the new digest
+    replaces the old and the wake fires again) or the row leaves the sweep.
+    """
+    from fno import paths
+
+    return paths.state_dir() / "watchdog-owed-digests.json"
+
+
+def _owed_digest(blockers: list) -> str:
+    joined = "|".join(sorted(str(b) for b in blockers))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _read_owed_digests() -> dict:
+    try:
+        return json.loads(owed_digest_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_owed_digests(store: dict) -> None:
+    try:
+        owed_digest_path().write_text(
+            json.dumps(store, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    except OSError:
+        # The digest store is a refire brake, not a ledger: a write failure
+        # costs one duplicate wake on the next sweep, never a lost one.
+        logging.getLogger(__name__).warning(
+            "watchdog: owed digest store unwritable; next sweep may refire"
+        )
+
+
+def _apply_obligation(
+    v: Verdict, *, cwd: str, runner: Callable
+) -> tuple[str, str]:
+    """Deliver the owed-work wake as user-shaped text at the prompt line.
+
+    ``fno agents mail send --raw`` is the plan's injection path: the payload
+    lands as user-shaped text, which is the only shape a stopped codex
+    worker's turn boundary picks up (the claude stop hook re-invokes; the
+    codex one only vetoes, so nothing restarts it from inside - x-c7fd).
+    Delivery truth is the mail receipt the verb prints, not a transcript
+    probe: unlike ``resume``'s state field, the receipt is issued by the
+    transport that performed the delivery.
+
+    Digest-gated (AC3): an unchanged blocker set never refires, so an
+    ignored obligation stays one mail, while a CHANGED set is a new debt
+    and fires once more.
+    """
+    gate = v.data or {}
+    pr = gate.get("pr")
+    blockers = [str(b) for b in (gate.get("ready_blockers") or [])]
+    if not blockers:
+        return "refused", "obligation verdict carries no blockers; not mailing"
+    digest = _owed_digest(blockers)
+    store = _read_owed_digests()
+    if store.get(v.row_id) == digest:
+        return SKIPPED, f"obligation unchanged ({digest}); already delivered"
+    message = (
+        f"PR #{pr} is not ready: {', '.join(blockers)}. "
+        f"Next: fno do pr status {pr}, clear every blocker, then /fno:pr check {pr}."
+    )
+    proc = runner(
+        [*_fno(), "agents", "mail", "send", v.row_id, "--raw", message],
+        capture_output=True, text=True, timeout=180, check=False,
+        cwd=cwd or None,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return (
+            "refused",
+            f"obligation mail exit {proc.returncode}: "
+            f"{tail[-1] if tail else ''}",
+        )
+    store[v.row_id] = digest
+    _write_owed_digests(store)
+    return (
+        "applied",
+        f"obligation mailed to {v.name}: PR #{pr} gate red "
+        f"({', '.join(blockers)})",
+    )
+
+
 #: Which verdicts each apply level may execute. ``wake`` is the one lane that
 #: cannot destroy work, so bare ``--apply`` stops there; reap and reroute both
 #: stop a session, so they need ``--apply-all``. ghost NEVER auto-acts: the
@@ -2268,6 +2495,8 @@ def apply_verdict(
                 "execute, or stop and rm this row by hand",
             )
     try:
+        if v.verdict == WAKE and v.action == "obligation":
+            return _apply_obligation(v, cwd=cwd, runner=runner)
         if v.verdict == WAKE:
             return _apply_wake(v, cwd=cwd, runner=runner)
         if v.verdict == REROUTE:

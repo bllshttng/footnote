@@ -38,6 +38,7 @@ One file per install. These belong at the root.
 | `convo-signals.jsonl` | `inbox/drain.py` | append-only |
 | `recovery-nudges.json` | `recovery.py` | permanent |
 | `watchdog-sweep.json` | `agents/watchdog.py` | permanent (rewritten per sweep) |
+| `watchdog-owed-digests.json` | `agents/watchdog.py` | permanent (one key per row id; replaced when that row's blocker set changes) |
 | `git-protection.json` | `hooks/git-protection.py` | permanent |
 | `squads.json`, `.lock` | `crates/fno/src/squad_store.rs` | permanent |
 | `session-names.json`, `.lock` | `agents/discover.py` | grows per session |

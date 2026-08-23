@@ -62,13 +62,16 @@ def _facts(
     return TailFacts([(epoch, text)], epoch, text, role, text, kind)
 
 
-def _run(rows, transcripts, *, claims=None, nodes=None, now_s=NOW_1840):
+def _run(rows, transcripts, *, claims=None, nodes=None, now_s=NOW_1840, gates=None):
     return verdicts(
         rows,
         transcript_for=lambda sid: transcripts.get(sid),
         claim_for=lambda node: (claims or {}).get(node, {}),
         node_state_for=lambda node: (nodes or {}).get(node),
         now_s=now_s,
+        gate_for=(
+            (lambda row: (gates or {}).get(row.row_id)) if gates is not None else None
+        ),
     )
 
 
@@ -2975,3 +2978,156 @@ def test_origin_is_on_the_shared_list_row_contract():
          / "schemas" / "agents-list-row.json").read_text()
     )
     assert "origin" in contract["required"]
+
+
+# ---------------------------------------------------------------------------
+# Owed work (x-fa8b): the PR gate outranks the worker's self-report
+# ---------------------------------------------------------------------------
+
+# The x-c7fd specimen, measured 2026-08-23 on PR 1108: a stopped codex worker
+# whose own summary read green while the gate held two blockers. The tail text
+# is the shape it left, and the gate is what the sweep read instead.
+C7FD_TAIL = "9 passes, 3 pending, no failures. PR is up."
+C7FD_GATE = {
+    "pr": 1108,
+    "ready_blockers": ["commit_status_red", "optional_reviews_unresolved"],
+}
+
+
+def test_a_green_self_report_with_a_red_gate_owes_work():
+    row = Row("dddd4444-0000", "w-c7fd", "stopped", "x-c7fd", "/tmp/w-c7fd")
+    facts = _facts(C7FD_TAIL, age_min=125)
+    [v] = _run([row], {"dddd4444-0000": facts},
+               gates={"dddd4444-0000": C7FD_GATE})
+    assert v.verdict == WAKE
+    assert v.action == "obligation"
+    assert "1108" in v.basis
+    assert "commit_status_red" in v.basis
+    assert "outranks" in v.basis
+    assert v.data["pr"] == 1108
+    assert v.data["ready_blockers"] == C7FD_GATE["ready_blockers"]
+
+
+def test_a_ready_gate_never_arms_the_obligation():
+    row = Row("dddd4444-0000", "w-c7fd", "stopped", "x-c7fd", "/tmp/w-c7fd")
+    facts = _facts(C7FD_TAIL, age_min=125)
+    [v] = _run([row], {"dddd4444-0000": facts},
+               gates={"dddd4444-0000": {"pr": 1108, "ready_blockers": []}})
+    assert v.action != "obligation"
+
+
+def test_silence_under_the_stalled_threshold_owes_nothing_yet():
+    row = Row("dddd4444-0000", "w-c7fd", "stopped", "x-c7fd", "/tmp/w-c7fd")
+    facts = _facts(C7FD_TAIL, age_min=5)
+    [v] = _run([row], {"dddd4444-0000": facts},
+               gates={"dddd4444-0000": C7FD_GATE})
+    assert v.action != "obligation"
+
+
+def test_no_gate_never_arms_the_obligation():
+    """The resolver answers None for a free claim, a foreign holder, an
+    unreadable PR - and a None gate must reach the classifier as no debt."""
+    row = Row("dddd4444-0000", "w-c7fd", "stopped", "x-c7fd", "/tmp/w-c7fd")
+    facts = _facts(C7FD_TAIL, age_min=125)
+    [v] = _run([row], {"dddd4444-0000": facts})
+    assert v.action != "obligation"
+
+
+def test_obligation_mail_fires_once_per_blocker_set(monkeypatch, tmp_path):
+    store_path = tmp_path / "owed-digests.json"
+    monkeypatch.setattr(watchdog, "owed_digest_path", lambda: store_path)
+    v = Verdict(
+        "dddd4444-0000", "w-c7fd", "stopped", WAKE,
+        "PR #1108 gate red", "obligation", dict(C7FD_GATE),
+    )
+    sent = []
+
+    def runner(argv, **kwargs):
+        sent.append(argv)
+        return _Proc(0)
+
+    outcome, detail = apply_verdict(
+        v, lanes="wake", cwd="/tmp/w-c7fd", runner=runner
+    )
+    assert outcome == "applied"
+    assert "1108" in detail
+    # The payload is user-shaped raw text at the prompt line: the mail verb
+    # with --raw, never the resume path the plain wake lane uses.
+    assert "mail" in sent[0] and "send" in sent[0]
+    assert "--raw" in sent[0]
+    assert any("1108" in part for part in sent[0])
+
+    outcome2, detail2 = apply_verdict(
+        v, lanes="wake", cwd="/tmp/w-c7fd", runner=runner
+    )
+    assert outcome2 == "skipped"
+    assert "unchanged" in detail2
+    assert len(sent) == 1
+
+
+def test_a_changed_blocker_set_fires_again(monkeypatch, tmp_path):
+    store_path = tmp_path / "owed-digests.json"
+    monkeypatch.setattr(watchdog, "owed_digest_path", lambda: store_path)
+    first = Verdict(
+        "dddd4444-0000", "w-c7fd", "stopped", WAKE,
+        "PR #1108 gate red", "obligation",
+        {"pr": 1108, "ready_blockers": ["commit_status_red"]},
+    )
+    second = Verdict(
+        "dddd4444-0000", "w-c7fd", "stopped", WAKE,
+        "PR #1108 gate red", "obligation",
+        {"pr": 1108, "ready_blockers": ["commit_status_red", "self_review"]},
+    )
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        return _Proc(0)
+
+    assert apply_verdict(
+        first, lanes="wake", cwd="/tmp/w", runner=runner
+    )[0] == "applied"
+    assert apply_verdict(
+        second, lanes="wake", cwd="/tmp/w", runner=runner
+    )[0] == "applied"
+    assert len(calls) == 2
+
+
+def test_resolver_reads_claim_holder_branch_and_gate(monkeypatch, tmp_path):
+    """The subprocess half: only a row holding its node's LIVE claim under
+    its own identity, with an OPEN PR whose gate reports blockers, gets a
+    gate dict. Every miss answers None."""
+    import subprocess as sp
+
+    row = Row("dddd4444-0000", "w-c7fd", "stopped", "x-c7fd", str(tmp_path))
+
+    def fake_run(argv, **kwargs):
+        if argv[:2] == ["git", "-C"]:
+            return _Proc(0, stdout="feature/w-c7fd\n")
+        if argv[:1] == ["gh"]:
+            return _Proc(0, stdout='{"number": 1108, "state": "OPEN"}\n')
+        if "status" in argv:
+            return _Proc(0, stdout=json.dumps({
+                "pr": 1108, "ready": False,
+                "ready_blockers": ["commit_status_red"],
+            }) + "\n")
+        raise AssertionError(f"unexpected argv {argv}")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    monkeypatch.setattr(
+        watchdog, "_claim_view",
+        lambda node: {"state": "live", "holder": "dddd4444-0000"},
+    )
+    gate = watchdog._owed_gate_for(row)
+    assert gate == {"pr": 1108, "ready_blockers": ["commit_status_red"]}
+
+    # A claim held by a sibling is not this row's debt.
+    monkeypatch.setattr(
+        watchdog, "_claim_view",
+        lambda node: {"state": "live", "holder": "eeee5555-0000"},
+    )
+    assert watchdog._owed_gate_for(row) is None
+
+    # A free claim owes nothing.
+    monkeypatch.setattr(watchdog, "_claim_view", lambda node: {"state": "free"})
+    assert watchdog._owed_gate_for(row) is None
