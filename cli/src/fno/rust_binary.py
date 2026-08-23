@@ -145,3 +145,27 @@ def resolve_installed_binary() -> Optional[Path]:
         if found is not None:
             return found
     return None
+
+
+def find_dev_binary() -> Optional[Path]:
+    """The ``@requires_rust`` marker's detector: a binary built in THIS checkout.
+
+    Debug or release under ``crates/fno-agents/target/``, and nothing else. No
+    installed, wheel-bundled, or ``$FNO_AGENTS_BIN`` copy may answer for it:
+    the tests behind the marker assert against this checkout's build, and the
+    smoke-pytest CI shard deletes exactly these two files so they skip there
+    instead of running against whatever else happens to be installed. The
+    single source for a fact three test files used to copy by hand.
+    """
+    here = Path(__file__).resolve()
+    try:
+        repo_root = here.parents[3]
+    except IndexError:
+        return None
+    if not (repo_root / "crates" / "fno-agents").is_dir():
+        return None
+    for profile in ("release", "debug"):
+        candidate = repo_root / "crates" / "fno-agents" / "target" / profile / BINARY_NAME
+        if candidate.is_file():
+            return candidate
+    return None
