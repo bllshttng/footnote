@@ -5857,13 +5857,13 @@ pub(crate) fn emit_to_both(
     }
 }
 
-fn observe_shadow_transition(
+pub(crate) fn observe_shadow_transition(
     run_log: &Path,
     session_id: &str,
     event: crate::run_state::RunEvent,
     project_events: &Path,
     global_events: &Path,
-) {
+) -> bool {
     if !is_full_run_id(session_id) {
         emit_transition_rejection(
             session_id,
@@ -5875,11 +5875,11 @@ fn observe_shadow_transition(
             project_events,
             global_events,
         );
-        return;
+        return false;
     }
 
     let Err(error) = crate::run_state::append_transition(run_log, session_id, event) else {
-        return;
+        return true;
     };
     let (kind, from) = match &error {
         crate::run_state::RunStateError::InvalidTransition(invalid) => (
@@ -5898,6 +5898,7 @@ fn observe_shadow_transition(
         project_events,
         global_events,
     );
+    false
 }
 
 fn emit_transition_rejection(

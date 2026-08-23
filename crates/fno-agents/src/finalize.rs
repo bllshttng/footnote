@@ -139,6 +139,9 @@ Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMer
 struct ManifestFields {
     /// Target-minted session id: idempotency key, handoff filename, event data.
     session_id: Option<String>,
+    /// Canonical target-minted id, retained separately so it wins regardless of
+    /// manifest key order over the one-release `session_id` fallback.
+    fno_id: Option<String>,
     /// Claude transcript UUID: positional arg to fno.cost._session_cost / _register.
     claude_transcript_id: Option<String>,
     /// Plan to stamp/graduate (ship branch only). Empty/absent -> skip.
@@ -262,10 +265,10 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             }
         };
         match k {
-            // fno_id is the canonical target-minted id; session_id is the
-            // pre-rename fallback. `set` keeps the first non-empty, so fno_id
-            // (written first in the manifest) wins.
-            "fno_id" | "session_id" => set(&mut m.session_id, v),
+            // fno_id is canonical regardless of key order; session_id is the
+            // pre-rename fallback.
+            "fno_id" => set(&mut m.fno_id, v),
+            "session_id" => set(&mut m.session_id, v),
             // Current key is claude_session_id; accept the pre-rename
             // claude_transcript_id as a fallback for one release. `set` keeps the
             // first non-empty value, so the current key (written first) wins.
@@ -293,6 +296,9 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             "auto_merge_source" if !line_untrusted => set(&mut m.auto_merge_source, v),
             _ => {}
         }
+    }
+    if m.fno_id.is_some() {
+        m.session_id = m.fno_id.clone();
     }
     m
 }
@@ -552,6 +558,14 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // the same session would otherwise never get stamped/graduated/handed off.
     let mut skip_ledger = false;
     match prior_finalize_ship(&project_events, &session_id) {
+        Some(true) if shadow_run_needs_finalize_done(&cwd, &session_id) => {
+            if record_finalize_done(&cwd, &session_id, &project_events, &global_events) {
+                eprintln!("finalize: repaired shadow closure for previously finalized session {session_id}");
+                return 0;
+            }
+            eprintln!("finalize: shadow closure still pending for previously finalized session {session_id}");
+            return 1;
+        }
         Some(true) => {
             eprintln!("finalize: session {session_id} already finalized (ship); early-return");
             return 0;
@@ -938,10 +952,19 @@ pub fn run_finalize(args: &[String]) -> i32 {
             failed.push("delivery_terminal".into());
         }
     }
-    let delivery_retry = delivery_ship && !failed.is_empty();
     if failed.is_empty() {
-        emit_to_both(&project_events, &global_events, "session_finalized", data);
-        record_finalize_done(&cwd, &session_id);
+        if record_finalize_done(&cwd, &session_id, &project_events, &global_events) {
+            emit_to_both(&project_events, &global_events, "session_finalized", data);
+        } else {
+            failed.push("run_state_finalize_done".into());
+            data["failed_steps"] = json!(failed);
+            emit_to_both(
+                &project_events,
+                &global_events,
+                "session_finalize_failed",
+                data,
+            );
+        }
     } else {
         data["failed_steps"] = json!(failed);
         // session_finalized intentionally NOT emitted: a later fire retries the
@@ -953,20 +976,49 @@ pub fn run_finalize(args: &[String]) -> i32 {
             data,
         );
     }
-    if delivery_retry {
+    let should_retry = (delivery_ship && !failed.is_empty())
+        || failed.iter().any(|step| step == "run_state_finalize_done");
+    if should_retry {
         1
     } else {
         0
     }
 }
 
-fn record_finalize_done(cwd: &Path, run: &str) {
+fn shadow_run_needs_finalize_done(cwd: &Path, run: &str) -> bool {
     let path = cwd.join(".fno/run-log.jsonl");
-    if let Err(error) =
-        crate::run_state::append_transition(&path, run, crate::run_state::RunEvent::FinalizeDone)
-    {
-        eprintln!("finalize: run-state finalize_done observer failed: {error}");
+    if !path.exists() {
+        return false;
     }
+    !matches!(
+        crate::run_state::fold_run_state(&path, run),
+        Ok(crate::run_state::RunState::Closed)
+    )
+}
+
+fn record_finalize_done(
+    cwd: &Path,
+    run: &str,
+    project_events: &Path,
+    global_events: &Path,
+) -> bool {
+    let path = cwd.join(".fno/run-log.jsonl");
+    if !path.exists() {
+        return true;
+    }
+    if matches!(
+        crate::run_state::fold_run_state(&path, run),
+        Ok(crate::run_state::RunState::Closed)
+    ) {
+        return true;
+    }
+    crate::loopcheck::observe_shadow_transition(
+        &path,
+        run,
+        crate::run_state::RunEvent::FinalizeDone,
+        project_events,
+        global_events,
+    )
 }
 
 // ── ledger (always) ─────────────────────────────────────────────────────────
@@ -2933,6 +2985,20 @@ mod tests {
     }
 
     #[test]
+    fn canonical_fno_id_wins_when_manifest_keys_are_reversed() {
+        let m = parse_manifest_fields(
+            "---\n\
+             session_id: legacy-run\n\
+             fno_id: 20260823T060900Z-cx73523-e04109\n\
+             ---\n",
+        );
+        assert_eq!(
+            m.session_id.as_deref(),
+            Some("20260823T060900Z-cx73523-e04109")
+        );
+    }
+
+    #[test]
     fn manifest_reads_do_stamp_guard_inputs() {
         // created_at carries colons, so the split_once(':') parse must keep the
         // whole remainder, not the first segment.
@@ -3526,7 +3592,8 @@ mod tests {
         crate::run_state::append_transition(&log, run, crate::run_state::RunEvent::TerminalDecided)
             .unwrap();
 
-        record_finalize_done(dir.path(), run);
+        let events = dir.path().join("events.jsonl");
+        assert!(record_finalize_done(dir.path(), run, &events, &events));
 
         assert_eq!(
             crate::run_state::fold_run_state(&log, run).unwrap(),

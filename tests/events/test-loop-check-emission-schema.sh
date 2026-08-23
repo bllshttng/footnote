@@ -377,6 +377,51 @@ RUNLOG
         fail "S5: observer rejection or legacy block missing; output: $OUTPUT events: $(cat "$EVENTS_FILE" 2>/dev/null)"
     fi
 
+rm -rf "$TMP_DIR"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S6: invalid run id -- typed telemetry preserves the legacy block
+# ─────────────────────────────────────────────────────────────────────────────
+log "S6: invalid run ID preserves legacy block"
+{
+    TMP_DIR="$(mktemp -d)"
+    HOME_DIR="${TMP_DIR}/home"
+    STUB_BIN="${TMP_DIR}/stubs"
+    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
+    printf '# isolated\n' > "${TMP_DIR}/.fno/config.toml"
+
+    MANIFEST="${TMP_DIR}/state.md"
+    cat > "$MANIFEST" <<'MANIFEST'
+---
+fno_id: short-run
+session_id: legacy-run
+created_at: 2026-06-05T00:00:00Z
+attended: true
+---
+MANIFEST
+    TRANSCRIPT="${TMP_DIR}/transcript.jsonl"
+    printf '{"message":{"role":"user","content":"go"}}\n' > "$TRANSCRIPT"
+    EVENTS_FILE="${TMP_DIR}/.fno/events.jsonl"
+    make_no_pr_gh "${STUB_BIN}/gh"
+    make_git_stub "${STUB_BIN}/git" "1111111111111111111111111111111100000001"
+
+    OUTPUT=$(HOME="${HOME_DIR}" FNO_LOOPCHECK_GH_BIN="${STUB_BIN}/gh" FNO_LOOPCHECK_GIT_BIN="${STUB_BIN}/git" \
+        "$REAL_BIN" loop-check \
+        --state "$MANIFEST" \
+        --transcript "$TRANSCRIPT" \
+        --cwd "$TMP_DIR" \
+        --now "2026-06-05T01:00:00Z" \
+        --events "$EVENTS_FILE" 2>/dev/null || true)
+
+    if [[ "$(jq -r '.decision // empty' <<< "$OUTPUT" 2>/dev/null)" == "block" ]] && \
+        validate_events_file "S6" "$EVENTS_FILE" && \
+        grep -q '"kind":"invalid_run_id"' "$EVENTS_FILE"; then
+        pass "S6: invalid run ID telemetry validates and legacy block remains"
+    else
+        fail "S6: invalid run ID telemetry or legacy block missing; output: $OUTPUT events: $(cat "$EVENTS_FILE" 2>/dev/null)"
+    fi
+
     rm -rf "$TMP_DIR"
 }
 
