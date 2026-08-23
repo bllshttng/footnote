@@ -3,6 +3,7 @@
   "required": [
     "name",
     "harness",
+    "provider",
     "harness_session_id",
     "short_id",
     "session_id",
@@ -33,9 +34,11 @@
     "liveness_origin",
     "liveness_origin_basis"
   ],
-  "projection_omissions": ["model", "provider"],
+  "projection_omissions": ["model"],
+  "stored": {
+    "provider": "The registry's spawn-stamped model vendor (v15+ axis), never inferred from `harness`. Restored to the projection by x-f273: the pre-v15 alias that carried the HARNESS value under this name was removed for lying, and that removal kept hiding the real vendor axis the rename had just created, so `fno agents list` answered null for a field the writer stored (30 of 31 live rows lost, 2026-08-22). `observed_model` remains the transcript-derived reading of what actually answered; this key answers which vendor's lane the row was minted for. Both serializers emit it or the parity asserts fail."
+  },
   "removed": {
-    "provider": "OMITTED FROM THE ROW PROJECTION. Registry storage records the intended model vendor, not an observation of what answered. Read `harness` for the CLI and `observed_model` for the actual transcript-derived model reading. Do not re-add it to one serializer: present-or-absent depending on which reader answered is worse still.",
     "model": "OMITTED FROM THE ROW PROJECTION. Registry storage records intended model configuration, while `observed_model` is the actual transcript-derived reading. Do not expose intended configuration as though it were observed runtime truth."
   },
   "derived": {

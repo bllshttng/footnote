@@ -24,12 +24,15 @@ from fno.agents.session_truth import STALE_ATTENTION_S
 # Distinct from registry SCHEMA_VERSION (storage substrate).
 # v2 (ab-098967b4): adds the additive ``discovered_sessions`` /
 # ``discovered_count`` keys for the P1 live-session lane.
-JSON_SCHEMA_VERSION = 2
+# v3 (x-f273): adds the additive ``provider`` key, the registry's
+# spawn-stamped model vendor (see the `stored` note in
+# schemas/agents-list-row.json).
+JSON_SCHEMA_VERSION = 3
 
 # Basis values that are falsifiers rather than evidence: a positive
 # measurement that the worker is gone, which no other reading outranks.
 _FALSIFIER_BASES = {"process-gone", "pane-gone"}
-_PROJECTION_OMISSIONS = ("model", "provider")
+_PROJECTION_OMISSIONS = ("model",)
 
 
 def attention_rank(row: dict) -> int:
@@ -164,13 +167,14 @@ def serialize_entry(
     """
     row = {
         "name": entry.name,
-        # `harness` is the sole identity axis. The `provider` alias that used to
-        # sit beside it carried the HARNESS value ("claude") for a worker routed
-        # to another vendor, and an operator read that as proof the route had
-        # fallen back to Anthropic. A key whose name says vendor and whose value
-        # is a harness is worse than no key, so it is gone; `observed_model`
-        # below is the honest answer to the question it looked like it answered.
+        # `harness` is the sole identity axis. `provider` beside it is the
+        # v15+ model-vendor axis, stamped at spawn and never inferred from
+        # harness. The pre-split alias that carried the HARNESS value under
+        # this name stayed gone until x-f273, which left the list answering
+        # null for a field the writer stored; `observed_model` below remains
+        # the transcript-derived answer to what actually answered.
         "harness": entry.harness,
+        "provider": entry.provider,
         # The worker's own session id in its harness's store. Distinct from
         # `session_id` (the resume-target id, which is the 8-hex jobId for
         # claude) and from `short_id` (the transport key).

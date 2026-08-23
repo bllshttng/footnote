@@ -2736,7 +2736,11 @@ def cmd_list(
 
     result = list_agents(
         cwd=cwd,
-        provider=harness,
+        # The CLI flag is the harness axis and now feeds the harness filter.
+        # It used to ride the `provider` param, which compared the harness
+        # pre-split and the vendor after, so `--harness claude` dropped every
+        # claude-hosted row the moment the axes separated.
+        harness=harness,
         status=status_value,
         progress=progress_value,
         json_out=json_out,

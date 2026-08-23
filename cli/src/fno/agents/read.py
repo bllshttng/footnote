@@ -55,6 +55,7 @@ class ListResult:
 
 def list_agents(
     cwd: Optional[str] = None,
+    harness: Optional[str] = None,
     provider: Optional[str] = None,
     status: Optional[str] = None,
     progress: Optional[str] = None,
@@ -83,6 +84,7 @@ def list_agents(
 
     filters_applied = {
         "cwd": resolved_cwd,
+        "harness": harness,
         "provider": provider,
         "status": status,
         "progress": progress,
@@ -96,7 +98,7 @@ def list_agents(
         # already names the file path).
         return ListResult(output="", warnings=[str(exc)], exit_code=1)
 
-    # Apply filters in order: cwd → provider → status. Empty registry
+    # Apply filters in order: cwd → harness → provider → status. Empty registry
     # short-circuits — no shellout needed when there's nothing to augment.
     filtered: list[AgentEntry] = []
     for entry in entries:
@@ -107,7 +109,15 @@ def list_agents(
                 entry_cwd = entry.cwd
             if entry_cwd != resolved_cwd:
                 continue
-        if provider is not None and entry.harness != provider:
+        # Two axes, two filters. `harness` compares the CLI identity axis and
+        # is what `fno agents list --harness` feeds; `provider` compares the
+        # v15+ model-vendor axis. Pre-split one param compared `entry.harness`
+        # for both callers, so the axis rename broke whichever it stopped
+        # matching: a vendor filter dropped claude-hosted workers, and a
+        # harness filter (once the param went vendor) drops everything.
+        if harness is not None and entry.harness != harness:
+            continue
+        if provider is not None and entry.provider != provider:
             continue
         filtered.append(entry)
 
@@ -272,9 +282,11 @@ def list_agents(
                     continue
                 # Filter by the row's own harness rather than gating the whole
                 # lane on it. The old gate ran discovery only for claude, so
-                # `--provider claude` listed every discovered codex/opencode
-                # session while `--provider codex` listed none of them.
-                if provider is not None and sess.agent != provider:
+                # a claude filter listed every discovered codex/opencode
+                # session while a codex filter listed none of them. A
+                # discovered session is un-adopted host state with no fno
+                # route, so it has no vendor axis to filter on: harness only.
+                if harness is not None and sess.agent != harness:
                     continue
                 if resolved_cwd is not None:
                     # An empty cwd must NOT resolve to the process cwd and then

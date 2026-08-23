@@ -98,11 +98,97 @@ def test_list_agents_empty_registry_json_shape(tmp_path, monkeypatch, _patch_cla
         "count": 0,
         "discovered_sessions": [],
         "discovered_count": 0,
-        "filters_applied": {"cwd": None, "provider": None, "status": None, "progress": None},
-        "fields_omitted": ["model", "provider"],
-        "schema_version": 2,
+        "filters_applied": {
+            "cwd": None,
+            "harness": None,
+            "provider": None,
+            "status": None,
+            "progress": None,
+        },
+        "fields_omitted": ["model"],
+        "schema_version": 3,
     }
     assert result.exit_code == 0
+
+
+def test_list_agents_provider_counts_match_registry(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """x-f273 — per-provider counts from list output equal the registry's.
+
+    The projection used to drop `provider` entirely, so a count read from
+    `fno agents list` answered 0 for every vendor while the disk file
+    carried real values (30 of 31 rows lost on the live roster).
+    """
+    from collections import Counter
+
+    use_tmpdir(monkeypatch, tmp_path)
+    entries = [
+        _claude(name="a1", provider="anthropic"),
+        _claude(name="a2", provider="anthropic"),
+        _codex(name="z1", provider="zai"),
+        _claude(name="o1", provider="openai"),
+        # A row minted without a stamp counts as None; absence is reported
+        # as absence, never zero-filled into a vendor bucket.
+        _codex(name="n1"),
+    ]
+    write_registry(entries)
+    _patch_claude_agents_json({})
+
+    result = list_agents(json_out=True, tty=True)
+
+    rows = json.loads(result.output)["agents"]
+    assert Counter(r.get("provider") for r in rows) == Counter(
+        e.provider for e in entries
+    )
+
+
+def test_list_agents_provider_filter_selects_provider_axis(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """x-f273 — the provider filter reads the provider axis, not harness.
+
+    Pre-split the filter compared `entry.harness`, so provider="zai"
+    dropped a claude-hosted zai worker and kept nothing.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            _claude(name="routed", provider="zai"),
+            _codex(name="unstamped"),
+        ]
+    )
+    _patch_claude_agents_json({})
+
+    result = list_agents(json_out=True, provider="zai")
+
+    rows = json.loads(result.output)["agents"]
+    assert [r["name"] for r in rows] == ["routed"]
+
+
+def test_list_agents_harness_filter_selects_harness_axis(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """`fno agents list --harness` must keep working after the axis split.
+
+    cmd_list feeds the --harness value to the harness param. Before the
+    two-axis split it rode the `provider` param, which compared the vendor
+    once this module went vendor-axis, and `--harness claude` dropped every
+    claude-hosted row (codex review P1 on this PR).
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            _claude(name="hosted", provider="zai"),
+            _codex(name="other"),
+        ]
+    )
+    _patch_claude_agents_json({})
+
+    result = list_agents(json_out=True, harness="claude")
+
+    rows = json.loads(result.output)["agents"]
+    assert [r["name"] for r in rows] == ["hosted"]
 
 
 def test_list_agents_json_flag_forces_json_in_tty(
@@ -155,15 +241,17 @@ def test_list_agents_filter_by_provider(
     tmp_path, monkeypatch, _patch_claude_agents_json
 ):
     use_tmpdir(monkeypatch, tmp_path)
-    write_registry([_claude(name="a"), _codex(name="b")])
+    write_registry(
+        [_claude(name="a", provider="zai"), _codex(name="b", provider="openai")]
+    )
     _patch_claude_agents_json({"abc12345": {"live_status": "Working"}})
 
-    result = list_agents(provider="codex", json_out=True, tty=True)
+    result = list_agents(provider="openai", json_out=True, tty=True)
     parsed = json.loads(result.output)
 
     assert parsed["count"] == 1
     assert parsed["agents"][0]["name"] == "b"
-    assert parsed["filters_applied"]["provider"] == "codex"
+    assert parsed["filters_applied"]["provider"] == "openai"
 
 
 def test_list_agents_filter_by_status(
@@ -502,7 +590,7 @@ def _discovered_agents(payload: str) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    "provider,expected",
+    "harness,expected",
     [
         (None, ["claude", "codex", "opencode"]),
         ("claude", ["claude"]),
@@ -510,14 +598,16 @@ def _discovered_agents(payload: str) -> list[str]:
         ("opencode", ["opencode"]),
     ],
 )
-def test_discovered_rows_honor_provider_filter(
-    tmp_path, monkeypatch, _patch_claude_agents_json, _patch_discovery, provider, expected
+def test_discovered_rows_honor_harness_filter(
+    tmp_path, monkeypatch, _patch_claude_agents_json, _patch_discovery, harness, expected
 ):
     """A discovered row must be filtered by its OWN harness.
 
     The lane used to be gated on `provider in (None, "claude")`, so
-    `--provider claude` listed every discovered codex/opencode session and
-    `--provider codex` listed none of them.
+    a claude filter listed every discovered codex/opencode session and
+    a codex filter listed none of them. The values here are harnesses;
+    the filter rides the harness axis since the v15 split, because an
+    un-adopted session carries no vendor axis at all.
     """
     use_tmpdir(monkeypatch, tmp_path)
     _patch_claude_agents_json([])
@@ -529,7 +619,7 @@ def test_discovered_rows_honor_provider_filter(
             _Discovered("opencode", "cccc3333"),
         ]
     )
-    result = list_agents(provider=provider, json_out=True)
+    result = list_agents(harness=harness, json_out=True)
     assert _discovered_agents(result.output) == expected
 
 

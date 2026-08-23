@@ -2431,11 +2431,11 @@ fn format_success(
 }
 
 /// Render agents list as Python-matching JSON (Task 3.1; discovered lane
-/// ab-098967b4).
+/// ab-098967b4; provider key restored x-f273).
 ///
-/// Shape (schema_version 2): `{"agents": [...], "count": N,
+/// Shape (schema_version 3): `{"agents": [...], "count": N,
 /// "discovered_sessions": [...], "discovered_count": M, "fields_omitted":
-/// [...], "filters_applied": {...}, "schema_version": 2}`. Stays
+/// [...], "filters_applied": {...}, "schema_version": 3}`. Stays
 /// byte-shape-aligned with Python's `format.render_json`.
 fn render_list_json(
     agents: &Value,
@@ -2451,7 +2451,7 @@ fn render_list_json(
         "discovered_count": discovered.len(),
         "fields_omitted": fields_omitted,
         "filters_applied": filters_applied,
-        "schema_version": 2,
+        "schema_version": 3,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_default()
 }
@@ -4679,7 +4679,7 @@ mod tests {
                 "last_reconciled_at": "2026-05-25T00:30:00Z",
                 "log_path": null,
             }],
-            "fields_omitted": ["model", "provider"],
+            "fields_omitted": ["model"],
             "filters_applied": {"cwd": null, "provider": null, "status": null},
         });
         let output = format_success("list", "", &result, true, false, false)
@@ -4703,7 +4703,7 @@ mod tests {
             "missing 'discovered_sessions' key"
         );
         assert_eq!(parsed["discovered_count"], 0);
-        assert_eq!(parsed["schema_version"], 2);
+        assert_eq!(parsed["schema_version"], 3);
         assert_eq!(parsed["count"], 1);
         assert_eq!(
             parsed["fields_omitted"], result["fields_omitted"],
@@ -4759,16 +4759,11 @@ mod tests {
             "status": "busy",
             "agent": "claude",
         })];
-        let out = render_list_json(
-            &agents,
-            &filters,
-            &json!(["model", "provider"]),
-            &discovered,
-        );
+        let out = render_list_json(&agents, &filters, &json!(["model"]), &discovered);
         let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["discovered_count"], 1);
         assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
-        assert_eq!(parsed["schema_version"], 2);
+        assert_eq!(parsed["schema_version"], 3);
 
         let table = render_list_table(&agents, &discovered);
         assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));

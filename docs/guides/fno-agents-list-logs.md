@@ -64,6 +64,7 @@ Returns a canonical object suitable for scripts:
     {
       "name": "worker-frontend",
       "harness": "claude",
+      "provider": "zai",
       "harness_session_id": "e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
       "short_id": "e6f78b98",
       "session_id": "e6f78b98",
@@ -91,17 +92,17 @@ Returns a canonical object suitable for scripts:
   "count": 1,
   "discovered_sessions": [],
   "discovered_count": 0,
-  "filters_applied": { "cwd": null, "provider": null, "status": null, "progress": null },
-  "fields_omitted": ["model", "provider"],
-  "schema_version": 2
+  "filters_applied": { "cwd": null, "harness": null, "provider": null, "status": null, "progress": null },
+  "fields_omitted": ["model"],
+  "schema_version": 3
 }
 ```
 
 The row's key set is pinned by [`schemas/agents-list-row.json`](../../schemas/agents-list-row.json), which both serializers are tested against; edit that file first when adding a key. Every entry carries the same keys regardless of harness, so a consumer never branches on harness to find a field. JSON is the default whenever stdout is a pipe, so `fno agents list | jq .` Just Works without an explicit `--json`.
 
-`harness` names the CLI, not the model vendor. An old `provider` alias duplicated the harness value. A z.ai-routed worker therefore reported `provider: claude`, which falsely looked like an Anthropic fallback. Row-level `provider` and `model` are omitted because those stored values describe intended routing, not observed runtime truth. The envelope reports that choice as `fields_omitted: ["model", "provider"]`. A consumer can now distinguish projection omission from a null registry value. `harness_session_id` is the worker's own session id in its harness's store.
+`harness` names the CLI, not the model vendor. `provider` beside it is the model vendor the row was spawned with, stamped at spawn and never inferred from `harness`. An old alias once duplicated the harness value here, so a z.ai-routed worker reported `provider: claude` and that falsely looked like an Anthropic fallback. The alias was removed for that lie, and the removal then hid the real vendor axis, which the split had just created. `provider` is back with its true meaning. `model` stays omitted because the stored value describes intended configuration, not observed runtime truth, and the envelope reports that as `fields_omitted: ["model"]`. `harness_session_id` is the worker's own session id in its harness's store.
 
-`observed_model` answers the question `provider` looked like it answered: which model the worker is ACTUALLY running.
+`observed_model` answers the question `provider` does not: which model the worker is ACTUALLY running.
 It is derived from the worker's own transcript at read time, never recorded at spawn, because a spawn records intent and would report the intended model in exactly the case you suspect a fallback.
 A worker that quietly fell back to Anthropic reports a `claude-*` id here and disagrees visibly with what you asked for.
 The value is a discriminated object, and the five kinds never collapse into one "unknown":
