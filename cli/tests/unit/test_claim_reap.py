@@ -97,8 +97,9 @@ class TestExpiredTTLIsHostIndependent:
     rows it needs no such proof.
 
     A row that names a real other machine keeps the gate, and the boundary is
-    load-bearing: ``classify``'s hybrid arm reads an expired claim as LIVE when
-    its pid is live, and that pid means something only on the machine that
+    load-bearing: ``classify``'s corroborated hybrid arm reads an expired
+    claim as LIVE when its pid is live and prover-proven, and that pid means
+    something only on the machine that
     wrote it. Reaping one from here would archive a claim its owner is still
     refreshing, and the next reader would staff a second worker onto the node.
     """
@@ -156,7 +157,8 @@ class TestExpiredTTLIsHostIndependent:
         assert (provably_dead, bucket) == (False, "offhost")
 
     def test_expired_ttl_on_this_machine_with_a_live_pid_is_still_live(self):
-        """The hybrid arm survives: a suspended local session keeps its slot.
+        """The corroborated hybrid arm survives: a suspended local session
+        keeps its slot when its pid was prover-proven at write time.
 
         ``acquired_at`` has to postdate this process's own create_time, or
         ``is_live`` reads the pid as reused and the claim is dead for an
@@ -166,10 +168,22 @@ class TestExpiredTTLIsHostIndependent:
         claim = Claim(
             key="k", holder="h", acquired_at=started + 1,
             expires_at=now_ms() - 1, pid=os.getpid(),
-            host=socket.gethostname(),
+            host=socket.gethostname(), pid_provenance="session-prover",
         )
         provably_dead, bucket = classify_for_sweep(claim)
         assert (provably_dead, bucket) == (False, "live")
+
+    def test_expired_ttl_on_this_machine_with_a_live_unproven_pid_reaps(self):
+        """The specimen flip side: the same live local pid WITHOUT provenance
+        is reapable at expiry. A claim that cannot prove its pid cannot
+        outrank its own TTL."""
+        started = int(psutil.Process(os.getpid()).create_time() * 1000)
+        claim = Claim(
+            key="k", holder="h", acquired_at=started + 1,
+            expires_at=now_ms() - 1, pid=os.getpid(),
+            host=socket.gethostname(),
+        )
+        assert is_provably_dead(claim) is True
 
     def test_hostname_drift_between_two_claims_does_not_change_the_verdict(self):
         """The two spellings one box wrote in one hour reap identically."""

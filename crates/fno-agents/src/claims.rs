@@ -26,8 +26,11 @@
 //!   brick a claim key forever;
 //! - stale claims are archived by rename to `.expired/<enc>.<now_ms>.lock`,
 //!   never unlinked;
-//! - hybrid liveness: an expired-TTL claim whose recorded pid is a live
-//!   process on this machine is still LIVE; PID-reuse is detected by comparing
+//! - hybrid liveness, corroborated: an expired-TTL claim whose recorded pid is
+//!   a live process on this machine is still LIVE only when the pid was
+//!   prover-proven at write time (`pid_provenance == "session-prover"`); a
+//!   live pid under any other provenance falls to STALE, so a foreign process
+//!   can never make a lease permanent. PID-reuse is detected by comparing
 //!   the process create time (epoch ms) against `acquired_at`;
 //! - liveness compares the additive `machine_id` field (`hostid.machine_id`),
 //!   NOT `host`/`gethostname(2)`; both implementations must write and compare
@@ -123,6 +126,16 @@ pub struct ClaimRecord {
     /// a foreign-harness owner from a native one without parsing the holder id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// How `pid` was resolved at write time (mirrors `types.Claim.pid_provenance`):
+    /// "session-prover" = provably the acquiring session's own process (the
+    /// process-tree prover's answer, or the claimant itself when the pid
+    /// defaults to this process); "ambient" = caller-supplied, unverifiable
+    /// here. The expired-TTL hybrid arm in `classify` reads it: only a
+    /// prover-proven pid keeps an expired claim Live, so a long-lived foreign
+    /// process can never make a lease permanent. Additive: absent on
+    /// pre-change records (reads as `None` == ambient).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_provenance: Option<String>,
     /// Stable machine identity (mirrors `fno.claims.hostid.machine_id`).
     /// Additive for the same reason `harness` is: absent on pre-change records
     /// (reads as `None`, never a parse error). Overwriting `host` instead would
@@ -489,9 +502,11 @@ fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
 }
 
 /// Compose liveness + expiry into a state (mirrors `staleness.classify`,
-/// INCLUDING the hybrid arm: an expired-TTL claim whose recorded pid is a
-/// live process on this host is still LIVE — a suspended-but-alive session
-/// must not have its claim reclaimed by a peer).
+/// INCLUDING the corroborated hybrid arm: an expired-TTL claim whose recorded
+/// pid is a live process on this host is still LIVE only when that pid was
+/// prover-proven at write time — a suspended-but-alive session must not have
+/// its claim reclaimed by a peer, while a live FOREIGN pid (a chat app's
+/// app-server answering for the holder) must not make the lease permanent).
 ///
 /// SUSPECT arm (x-ba4b): a TTL claim still inside its window whose recorded pid
 /// is NOT a live process reads `Suspect`, not `Live`. Dead-pid-but-unexpired is
@@ -502,7 +517,13 @@ fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
 pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
     let now = now.unwrap_or_else(now_ms);
     if is_expired(rec, now) {
-        return if is_live(rec) {
+        // Corroborated hybrid: the pid keeps the claim Live only when it was
+        // proven to be the holder session's own process. Any other provenance
+        // (or a legacy record with no field) is Stale, as a pre-hybrid claim
+        // was: the TTL is a lease.
+        let corroborated =
+            rec.pid_provenance.as_deref() == Some("session-prover") && is_live(rec);
+        return if corroborated {
             ClaimState::Live
         } else {
             ClaimState::Stale
@@ -1222,6 +1243,19 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
         expires_at: opts.ttl_ms.map(|ttl| acquired + ttl),
         reason: opts.reason.clone(),
         harness: resolve_harness(),
+        // A defaulted pid IS this process, so the claimant vouches for it
+        // directly (the native daemon is long-lived, per AcquireOpts). An
+        // explicitly passed pid is caller-supplied and unverifiable here, so
+        // it stamps ambient and the corroborated hybrid arm will not extend
+        // an expired lease on its say-so alone.
+        pid_provenance: Some(
+            if opts.pid.is_some() {
+                "ambient"
+            } else {
+                "session-prover"
+            }
+            .to_string(),
+        ),
         metadata: opts.metadata.clone().unwrap_or_default(),
     }
 }
@@ -2377,6 +2411,7 @@ mod tests {
             expires_at: None,
             reason: Some("why".into()),
             harness: Some("codex".into()),
+            pid_provenance: Some("session-prover".into()),
             machine_id: Some("mid".into()),
             metadata: meta,
         };
@@ -2500,6 +2535,7 @@ mod tests {
             expires_at,
             reason: None,
             harness: None,
+            pid_provenance: None,
             // None on purpose: these fixtures pass a HOST, so they exercise the
             // pre-change fallback arm. The machine-id arm has its own tests.
             machine_id: None,
@@ -2547,16 +2583,43 @@ mod tests {
             ),
             ClaimState::Suspect
         );
-        // HYBRID arm: expired TTL + live recorded pid -> LIVE.
+        // HYBRID arm, corroborated: expired TTL + live PROVER-PROVEN pid ->
+        // LIVE. The fixture's None provenance cannot reach LIVE on expiry, so
+        // prove it explicitly here.
+        let mut proven = record(me, now, Some(now - 1), &host);
+        proven.pid_provenance = Some("session-prover".into());
+        assert_eq!(classify(&proven, Some(now)), ClaimState::Live);
+        // Expired TTL + live pid WITHOUT provenance (legacy / ambient, the
+        // foreign-pid specimen shape) -> STALE: the TTL is a lease.
         assert_eq!(
             classify(&record(me, now, Some(now - 1), &host), Some(now)),
-            ClaimState::Live
+            ClaimState::Stale
         );
         // Expired TTL + dead pid -> STALE.
         assert_eq!(
             classify(&record(-1, now, Some(now - 1), &host), Some(now)),
             ClaimState::Stale
         );
+    }
+
+    #[test]
+    fn make_claim_stamps_pid_provenance_by_pid_origin() {
+        let td = TempDir::new().unwrap();
+        // A defaulted pid is the claimant itself: the strongest provenance.
+        let own = match acquire("session:prov", "pty:me", opts_in(&td)) {
+            AcquireOutcome::Acquired(r) => r,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(own.pid_provenance.as_deref(), Some("session-prover"));
+        // An explicitly passed pid is caller-supplied and unverifiable here:
+        // ambient, so the hybrid arm will not extend an expired lease for it.
+        let mut o = opts_in(&td);
+        o.pid = Some(4242);
+        let foreign = match acquire("session:prov2", "pty:me", o) {
+            AcquireOutcome::Acquired(r) => r,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(foreign.pid_provenance.as_deref(), Some("ambient"));
     }
 
     #[test]

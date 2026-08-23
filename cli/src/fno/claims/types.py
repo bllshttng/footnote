@@ -73,6 +73,16 @@ class Claim(BaseModel):
             which fall back to the host compare. Cross-machine claims are
             intentionally treated as opaque (see staleness.is_live).
         reason: optional human-readable context string.
+        pid_provenance: how ``pid`` was resolved at write time. "session-prover"
+            = the process-tree prover resolved it from the acquiring session's
+            own anchor; "ambient" = everything else (caller-supplied, resolved
+            through an ambient harness marker, or the default transient
+            subprocess pid). The expired-TTL hybrid arm in staleness.classify
+            reads it: a live pid keeps an expired claim LIVE only when it was
+            proven to be the holder session's own process, so a long-lived
+            foreign process can never make a lease permanent. Additive: absent
+            on pre-change records (reads as None), which classify treats as
+            ambient - a legacy claim cannot prove its pid, and the TTL wins.
         metadata: optional dict; treated opaquely.
 
     Bool-vs-string traps are not in play here because no field is a Literal.
@@ -93,6 +103,7 @@ class Claim(BaseModel):
     machine_id: Optional[str] = None
     reason: Optional[str] = None
     harness: Optional[str] = None
+    pid_provenance: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("key")
@@ -147,6 +158,8 @@ class Claim(BaseModel):
             out["reason"] = self.reason
         if self.harness is not None:
             out["harness"] = self.harness
+        if self.pid_provenance is not None:
+            out["pid_provenance"] = self.pid_provenance
         if self.metadata:
             out["metadata"] = self.metadata
         return out
