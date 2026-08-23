@@ -412,8 +412,15 @@ def build_board(
             f"cat {paths.operator_lane()}",
             inputs.lane,
             lane_rows,
-            actionable=True,
-            note=lane_note,
+            actionable=scope_ids is None,
+            note=lane_note
+            + (
+                ""
+                if scope_ids is None
+                else " report-only under a crown: lane lines are the operator's "
+                "global priorities and carry no node id, so a scoped king cannot "
+                "attribute them to its subtree"
+            ),
         ),
         _queue(
             "undispatched",

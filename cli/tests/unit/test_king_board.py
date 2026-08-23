@@ -112,6 +112,27 @@ def test_scope_ids_filter_every_node_bearing_queue_and_report_rejections():
     assert board["actionable"] == 3
 
 
+def test_a_scoped_board_demotes_the_operator_lane_to_report_only():
+    """Lane lines carry no node id, so a scoped king cannot attribute them.
+
+    Counting them would hold an epic king open on the operator's global
+    priorities, including lines belonging to other projects - the exact wedge
+    the scope subset rule exists to prevent. Unscoped, the lane stays the
+    actionable queue it always was.
+    """
+    inputs = _empty_inputs(
+        ready=_ok([_node("in-ready")]),
+        lane=_ok([_lane_item("ship the newsletter")]),
+    )
+
+    scoped = build_board(inputs, crown_scope="x-root", scope_ids={"in-ready"})
+    unscoped = build_board(inputs)
+
+    assert _queue(scoped, "operator_lane")["actionable"] is False
+    assert "report-only" in _queue(scoped, "operator_lane")["note"]
+    assert _queue(unscoped, "operator_lane")["actionable"] is True
+
+
 def test_epic_scope_compiles_to_the_root_and_transitive_descendants():
     from fno.king import board as board_mod
 
