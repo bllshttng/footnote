@@ -6580,6 +6580,11 @@ impl View {
         cols: usize,
         action: &ConfirmAction,
     ) {
+        if rows > 0 {
+            for c in 0..cols {
+                cells[(rows - 1) * cols + c] = Cell::default();
+            }
+        }
         let layout = self.confirm_overlay_layout(rows, action);
         draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
     }
@@ -10991,12 +10996,15 @@ async fn handle_stdin(
         // entirely. On a terminal that marks releases with Shift, every plain
         // click on a workspace, section or card row would become a no-op, and
         // the reaper would later open a menu nobody asked for.
+        // A close-chip release is also release-owned state. Let it reach
+        // `modal_mouse` even when the terminal marks it as Shift-modified.
         let ends_a_drag = matches!(rep.kind, MouseKind::Release(MouseButton::Left))
             && (view.pane_drag.is_some()
                 || view.seam_drag.is_some()
                 || view.tab_drag.is_some()
                 || view.row_drag.is_some()
-                || view.press_hold.is_some());
+                || view.press_hold.is_some()
+                || view.modal_release_swallow);
         if rep.shift && !ends_a_drag {
             continue;
         }
@@ -20979,6 +20987,82 @@ mod tests {
                 .iter()
                 .all(|cell| *cell == Cell::default()),
             "the reserved bottom row is blank beneath a name modal"
+        );
+    }
+
+    #[tokio::test]
+    async fn shifted_release_after_esc_chip_close_is_consumed_before_prefilter() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let row = (layout.origin.0 + line) as u16;
+        let col = (layout.origin.1 + offset + len / 2) as u16;
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                row,
+                col,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            },
+        ));
+
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf = Vec::new();
+        let shifted_release = format!("\x1b[<4;{};{}m", col + 1, row + 1);
+        handle_stdin(
+            &mut view,
+            &mut scanner,
+            &mut carry,
+            shifted_release.as_bytes(),
+            &mut buf,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !view.modal_release_swallow,
+            "the shifted release clears the latch"
+        );
+        assert!(buf.is_empty(), "the shifted release never reaches the pane");
+    }
+
+    #[test]
+    fn confirm_clears_the_reserved_bottom_row_on_fallback() {
+        let mut view = two_pane_view();
+        view.confirm = Some(ConfirmAction {
+            action: ConfirmKind::ReapAgents,
+            label: "all agents".into(),
+        });
+        let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        for cell in &mut cells[(rows - 1) * cols..rows * cols] {
+            *cell = Cell {
+                c: 'x',
+                ..Cell::default()
+            };
+        }
+
+        view.draw_bottom_row(&mut cells, rows, cols);
+
+        assert!(
+            cells[(rows - 1) * cols..rows * cols]
+                .iter()
+                .all(|cell| *cell == Cell::default()),
+            "the reserved bottom row is blank beneath a fallback confirm"
         );
     }
 
