@@ -56,7 +56,6 @@ from fno.agents.registry import (
     update_registry,
 )
 from fno.agents.crown import calling_agent_row, crown_validation_error, grant_error
-from fno.agents.whoami import is_caller_row
 from fno.harness_identity import (
     canonical_handle,
     session_identity_key,
@@ -1430,6 +1429,7 @@ def _claude_create_path(
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     succession: bool = False,
+    succession_caller_name: Optional[str] = None,
     route_provider: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
@@ -2627,6 +2627,10 @@ def dispatch_spawn(
     crown_problem = crown_validation_error(crown_level, crown_scope)
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
+    # Bound for every path, not just the crowned one: the create call below
+    # reads it unconditionally, and an uncrowned spawn must not crash on a
+    # name only the crown block ever assigns.
+    succession_caller_name: Optional[str] = None
     if crown_level is not None:
         # Authorization, at the seam every caller reaches: you cannot hand down
         # authority you do not hold. Refuses BEFORE the launch rather than
@@ -2943,6 +2947,7 @@ def dispatch_spawn(
                         crown_level=crown_level,
                         crown_scope=crown_scope,
                         succession=succession,
+                        succession_caller_name=succession_caller_name,
                         route_provider=route_provider,
                     )
                     return SpawnResult(

@@ -367,6 +367,7 @@ def grant_error(
     caller_row,
     *,
     allow_terminal_recovery: bool = False,
+    allow_succession: bool = False,
 ) -> Optional[str]:
     """Why this caller may not bestow a crown over ``requested_scope``, or None.
 
@@ -382,9 +383,9 @@ def grant_error(
       identity in its environment) may grant any scope; there is nobody above a
       human to check against.
     - **an agent** must hold a live crown that STRICTLY contains the request.
-      Uncrowned means it holds nothing to hand down, and an equal scope would be
-      a peer crown rather than a subordinate one - already refused by the
-      one-live-crown rule, and refused here with a message that explains it.
+      Uncrowned means it holds nothing to hand down. An equal scope is a
+      transfer, not a grant, and is refused unless the caller carries explicit
+      succession intent.
     - **an unreadable registry** (``caller_row`` is
       :data:`REGISTRY_UNREADABLE`) is refused outright. The check cannot verify
       the caller holds anything, so it must not fall back to the most privileged
@@ -398,11 +399,11 @@ def grant_error(
       permanent_dead) cannot bestow a crown: authority it can no longer exercise
       is not authority to hand down.
 
-    ``allow_terminal_recovery`` is the one exemption, and the spawn seams pass
-    it because spawn is how an abandoned scope is recovered. It admits ONLY a
-    request for the SAME territory the terminal row already holds - handing the
-    whole thing to an heir. A strict subset is still refused there, because
-    narrowing from a dead grantor leaves the remainder ruled by nobody live.
+    ``allow_terminal_recovery`` admits ONLY a request for the SAME territory the
+    terminal row already holds - handing the whole thing to an heir. A strict
+    subset is still refused there, because narrowing from a dead grantor leaves
+    the remainder ruled by nobody live. ``allow_succession`` is the separate
+    live-holder exemption for an intentional same-scope transfer.
     """
     if caller_row is None:
         return None
@@ -444,13 +445,18 @@ def grant_error(
             "agent cannot bestow one. Ask a king whose scope contains "
             f"{requested_scope!r}, or spawn from an attended shell."
         )
-    # SUCCESSION, not a grant. Handing your own scope to an heir is the one case
-    # where an equal scope is legal, because the caller does not keep it: the
-    # one-live-crown guard vacates the caller in the same write that stamps the
-    # heir. Checking strict containment alone would refuse exactly the abdication
-    # this design requires - a king cannot hand off after exiting.
+    # SUCCESSION, not a grant. An equal scope is legal only when the spawn caller
+    # explicitly names the transfer; otherwise the caller could strip itself by
+    # accident while believing --crown was additive.
     if _same_territory(holder, requested_scope):
-        return None
+        if allow_succession:
+            return None
+        return (
+            f"this session already holds its own crown over {requested_scope!r}; "
+            "a same-scope spawn is a transfer, not a grant. Re-run with "
+            "`--succeed` to name the succession explicitly, or choose a "
+            "different scope so this session keeps its crown."
+        )
     if not scope_contains(holder, requested_scope):
         return (
             f"this session's crown over {holder!r} neither contains nor equals "
@@ -488,6 +494,175 @@ class CrownPromotionError(RuntimeError):
     """An attended in-place grant that refused without changing the registry."""
 
 
+def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
+    """Return a transferred crown to its recorded grantor.
+
+    Reclaim is a registry transfer, not a spawn: the current holder is cleared
+    and the live row named by ``crown_grantor`` receives the same territory and
+    level in one locked write. A caller may identify the current holder by
+    ``handle`` from an attended shell; without one, the current session must be
+    the holder. The grantor is treated as an opaque registry identity and is
+    resolved against every session-id field the registry accepts.
+    """
+    from fno.agents.registry import (
+        AgentResolutionError,
+        TERMINAL_STATUSES,
+        resolve_agent,
+        update_registry,
+    )
+
+    if handle:
+        try:
+            holder_snapshot = resolve_agent(handle).entry
+        except AgentResolutionError as exc:
+            raise CrownPromotionError(str(exc)) from exc
+    else:
+        holder_snapshot = calling_agent_row()
+    if holder_snapshot in (None, REGISTRY_UNREADABLE, AGENT_UNREGISTERED):
+        raise CrownPromotionError(
+            "reclaim needs the current crowned holder: run it inside the heir "
+            "session or pass that registered handle from an attended shell"
+        )
+    scope = getattr(holder_snapshot, "crown_scope", None)
+    level = getattr(holder_snapshot, "crown_level", None)
+    grantor_key = getattr(holder_snapshot, "crown_grantor", None)
+    if level is None or not isinstance(scope, str) or not scope.strip():
+        raise CrownPromotionError("this session holds no crown to reclaim")
+    if not grantor_key or grantor_key == "human":
+        raise CrownPromotionError(
+            f"crown over {scope!r} has no registry grantor to reclaim; "
+            "a human grant cannot be returned automatically"
+        )
+
+    holder_name = holder_snapshot.name
+    holder_session = (
+        getattr(holder_snapshot, "harness_session_id", None)
+        or getattr(holder_snapshot, "cc_session_id", None)
+        or getattr(holder_snapshot, "short_id", None)
+        or holder_name
+    )
+    receipt: dict[str, Any] = {}
+
+    def _reclaim(rows: list) -> list:
+        holder = next((row for row in rows if row.name == holder_name), None)
+        if holder is None or holder.status in TERMINAL_STATUSES:
+            raise CrownPromotionError(
+                f"cannot reclaim {scope!r}: current holder {holder_name!r} "
+                "is no longer live"
+            )
+        if holder.crown_scope != scope or holder.crown_level != level:
+            raise CrownPromotionError(
+                f"cannot reclaim {scope!r}: holder {holder_name!r} changed "
+                "its crown while reclaim was in flight"
+            )
+        target = next(
+            (
+                row
+                for row in rows
+                if row.name != holder_name
+                and grantor_key
+                in {
+                    row.name,
+                    getattr(row, "harness_session_id", None),
+                    getattr(row, "cc_session_id", None),
+                    getattr(row, "short_id", None),
+                }
+            ),
+            None,
+        )
+        if target is None:
+            raise CrownPromotionError(
+                f"cannot reclaim {scope!r}: recorded grantor {grantor_key!r} "
+                "has no registry row; leave the crown in place and re-register "
+                "the grantor before retrying"
+            )
+        if target.status in TERMINAL_STATUSES:
+            raise CrownPromotionError(
+                f"cannot reclaim {scope!r}: recorded grantor {target.name!r} "
+                f"is terminal ({target.status}); a crown cannot return to a dead row"
+            )
+        if target.crown_scope is not None or target.crown_level is not None:
+            raise CrownPromotionError(
+                f"cannot reclaim {scope!r}: grantor {target.name!r} already "
+                "holds a crown; refusing to replace unrelated authority"
+            )
+        other = next(
+            (
+                row
+                for row in rows
+                if row.name not in {holder_name, target.name}
+                and row.status not in TERMINAL_STATUSES
+                and _same_territory(row.crown_scope, scope)
+            ),
+            None,
+        )
+        if other is not None:
+            raise CrownPromotionError(
+                f"cannot reclaim {scope!r}: live row {other.name!r} also "
+                "holds the scope"
+            )
+
+        armed = False
+        unarmed_reason = ""
+        try:
+            from fno.king.state import arm_king_manifest
+
+            armed = (
+                arm_king_manifest(
+                    scope,
+                    getattr(target, "harness_session_id", None) or "",
+                    owner_pid=getattr(target, "pid", None),
+                    owner_cwd=getattr(target, "cwd", None),
+                )
+                is not None
+            )
+        except (OSError, ValueError) as exc:
+            unarmed_reason = str(exc)
+
+        returned_by = (
+            getattr(holder, "harness_session_id", None)
+            or getattr(holder, "cc_session_id", None)
+            or getattr(holder, "short_id", None)
+            or holder.name
+        )
+        for index, row in enumerate(rows):
+            if row.name == holder_name:
+                rows[index] = replace(
+                    row,
+                    crown_level=None,
+                    crown_scope=None,
+                    crown_grantor=None,
+                )
+            elif row.name == target.name:
+                rows[index] = replace(
+                    row,
+                    crown_level=level,
+                    crown_scope=scope,
+                    crown_grantor=returned_by,
+                )
+        receipt.update(
+            reclaimed=target.name,
+            from_holder=holder_name,
+            level=level,
+            scope=scope,
+            grantor=returned_by,
+            king_loop_armed=armed,
+        )
+        if unarmed_reason:
+            receipt["king_loop_unarmed_reason"] = unarmed_reason
+        return rows
+
+    update_registry(_reclaim)
+    from fno.king.state import remove_king_manifest
+
+    remove_king_manifest(
+        scope,
+        owner_cwd=getattr(holder_snapshot, "cwd", None),
+        expected_harness_session_id=holder_session,
+    )
+    return receipt
+
+
 def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     """Grant a crown to one existing row from an attended human shell, or from
     an agent whose own crown strictly contains the requested scope.
@@ -509,7 +684,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # Resolved before update_registry, never inside _stamp: this reads the
     # registry itself, and the closure runs under its lock.
     caller = calling_agent_row()
-    denial = grant_error(scope, caller)
+    denial = grant_error(scope, caller, allow_succession=True)
     if denial is not None:
         raise CrownPromotionError(denial)
     grantor = "human" if caller is None else caller.name
@@ -526,9 +701,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         raise CrownPromotionError(
             f"refusing to crown {handle!r}: {scope!r} is your OWN scope, and "
             "this verb only stamps the target, so it cannot hand a crown over. "
-            "Succession runs through `fno agents spawn --crown` instead, which "
-            "vacates you and stamps the heir in a single registry write, so the "
-            "scope is never doubly ruled and never briefly unruled."
+            "Succession runs through `fno agents spawn --crown --succeed` "
+            "instead, which vacates you and stamps the heir in a single "
+            "registry write, so the scope is never doubly ruled and never "
+            "briefly unruled."
         )
     # The authority check above ran OUTSIDE the lock, so the grantor's own
     # crown can move between it and the stamp - a window that did not exist

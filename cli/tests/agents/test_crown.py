@@ -190,7 +190,7 @@ def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypat
     _spawn_crowned(
         monkeypatch, tmp_path,
         grantor_env="parent-sess-abc",
-        crown_level=1, crown_scope="epic-x",
+        crown_level=1, crown_scope="epic-x", succession=True,
     )
     heir = next(e for e in load_registry() if e.name == "king-epic")
     assert heir.crown_level == 1

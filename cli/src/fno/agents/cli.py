@@ -895,15 +895,26 @@ def cmd_watch(
 @agents_app.command("crown", hidden=True)
 def cmd_crown(
     handle: str = typer.Argument(
-        ...,
-        help="Existing registered session handle to crown in place.",
+        "",
+        help=(
+            "Existing registered session handle to crown in place, or the "
+            "current heir when --reclaim is run from an attended shell."
+        ),
     ),
     scopes: list[str] = typer.Option(
-        ...,
+        [],
         "--scope",
         help=(
             "Territory to grant. Repeat for a multi-project portfolio; the "
             "crown level is derived and cannot be supplied."
+        ),
+    ),
+    reclaim: bool = typer.Option(
+        False,
+        "--reclaim",
+        help=(
+            "Return the current holder's crown to its recorded grantor without "
+            "creating a session."
         ),
     ),
 ) -> None:
@@ -911,14 +922,37 @@ def cmd_crown(
     own crown strictly contains the requested scope.
 
     Run `fno agents register` inside the target session, then run this command
-    with its printed handle. Same-scope succession stays on `spawn --crown`. A
-    row already holding a crown is re-scoped rather than refused: the new
-    territory replaces the old in one atomic write, the level is derived from
-    the new scope, the registry records the actual grantor, and the receipt
-    reports what was vacated.
+    with its printed handle. Same-scope succession stays on the spawn-time
+    transfer path. A row already holding a crown is re-scoped rather
+    than refused: the new territory replaces the old in one atomic write, the
+    level is derived from the new scope, the registry records the actual
+    grantor, and the receipt reports what was vacated. `--reclaim` returns a
+    transferred crown to its recorded grantor and never creates a session.
     """
     from fno.agents import events
     from fno.agents.crown import CrownPromotionError, promote_existing_session
+
+    if reclaim:
+        from fno.agents.crown import reclaim_crown
+
+        try:
+            receipt = reclaim_crown(handle or None)
+        except CrownPromotionError as exc:
+            print(f"crown reclaim: {exc}", file=sys.stderr)
+            raise typer.Exit(code=2) from exc
+        events.emit(
+            "agent_crown_reclaimed",
+            reclaimed=receipt["reclaimed"],
+            from_holder=receipt["from_holder"],
+            scope=receipt["scope"],
+            grantor=receipt["grantor"],
+        )
+        print(json.dumps(receipt))
+        return
+
+    if not handle or not scopes:
+        print("crown: HANDLE and at least one --scope are required", file=sys.stderr)
+        raise typer.Exit(code=2)
 
     try:
         receipt = promote_existing_session(handle, scopes)
@@ -1278,7 +1312,7 @@ def cmd_spawn(
         "--crown",
         "-k",
         help=(
-            "Bestow an orchestrator crown on the spawned worker, over the "
+            "Grant an orchestrator crown on the spawned worker, over the "
             "territory named here. Repeatable: pass ONE epic id (a Director), "
             "ONE project name (a project king), or SEVERAL project names for a "
             "portfolio (`-k etl -k web`). The ladder altitude is derived from "
@@ -1287,7 +1321,18 @@ def cmd_spawn(
             "grantor derived from THIS session, never self-declared. Works on "
             "--substrate pane and bg (crown on bg is claude-only until the "
             "court plumbing learns the opencode serve lane); refused on "
-            "headless, whose one-shot exits before it can reign."
+            "headless, whose one-shot exits before it can reign. If the caller "
+            "already holds the named territory, add --succeed: that explicit "
+            "flag transfers the crown and strips the caller atomically."
+        ),
+    ),
+    succeed: bool = typer.Option(
+        False,
+        "--succeed",
+        help=(
+            "Explicitly transfer a caller-held --crown territory to the spawned "
+            "heir. Without this flag, a same-scope crown is refused and the "
+            "caller keeps its crown."
         ),
     ),
     node: str | None = typer.Option(
@@ -2072,6 +2117,7 @@ def cmd_spawn(
                     tab=tab,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
+                    succession=succeed,
                     provenance=prov_env,
                     account_env=account_env,
                     route_env=route_env,
@@ -2276,6 +2322,7 @@ def cmd_spawn(
                 account_env=account_env,
                 crown_level=crown_level,
                 crown_scope=crown_scope,
+                succession=succeed,
                 route_provider=route_provider,
                 provider_gate=gate,
             )
