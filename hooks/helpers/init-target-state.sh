@@ -1247,12 +1247,13 @@ PYEOF
   _EXTRA_CLAIMED=""
   # The worktree in every node claim's metadata, so a reaper with no roster
   # row can still find the session's transcript (death proven from evidence
-  # outside the claim). Quotes and backslashes are stripped from the value: a
-  # real worktree path carries neither, and an exotic one degrades to a
-  # transcript lookup that finds nothing (which keeps the claim) rather than
-  # a JSON parse failure that aborts the acquire. Defined before both claim
-  # blocks (multi-node below, single-node further down).
-  _wt_meta=$(printf '%s' "$PWD" | tr -d '"\\')
+  # outside the claim). Quotes, backslashes, and control characters are
+  # stripped from the value: a real worktree path carries none of them, and
+  # an exotic one degrades to a transcript lookup that finds nothing (which
+  # keeps the claim) rather than a JSON parse failure that aborts the
+  # acquire. Defined before both claim blocks (multi-node below, single-node
+  # further down).
+  _wt_meta=$(printf '%s' "$PWD" | tr -d '"\\\000-\037\177')
   _CLAIM_METADATA=$(printf '{"worktree":"%s"}' "$_wt_meta")
   if [[ "$_GUARD_AMBIGUOUS" -eq 1 && -z "$_NODE_ID" && -n "$claim_owner_id" ]] \
      && command -v fno >/dev/null 2>&1; then

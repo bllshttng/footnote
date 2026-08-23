@@ -1039,7 +1039,7 @@ class TestExternalDeathEvidence:
     def _pane(self, monkeypatch, absent):
         monkeypatch.setattr(
             "fno.claims.cli._mux_pane_absent_for",
-            lambda worker, runner=None: absent,
+            lambda worker, node_id="", runner=None: absent,
         )
 
     def test_specimen_2_absent_pane_and_dead_pid_reaps(self, tmp_path, monkeypatch):
@@ -1073,7 +1073,8 @@ class TestExternalDeathEvidence:
     def test_handover_when_the_mux_cannot_answer_stays(self, tmp_path, monkeypatch):
         """An unverifiable pane listing (None) is not absence: unknown keeps."""
         monkeypatch.setattr(
-            "fno.claims.cli._mux_pane_absent_for", lambda worker, runner=None: None
+            "fno.claims.cli._mux_pane_absent_for",
+            lambda worker, node_id="", runner=None: None,
         )
         self._handover(tmp_path)
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
@@ -1227,13 +1228,53 @@ class TestMuxPaneAbsenceHelper:
         )
         assert _mux_pane_absent_for("bp-x-worker", runner=runner) is False
 
+    def test_match_by_worktree_cwd_basename_means_present(self):
+        """The NORMAL live-launch marker: the pane's fno_id is the session
+        UUID (not the worker name) and the title is whatever the shell set,
+        but dispatch names the worker's worktree after the worker, so the
+        pane's cwd basename is the reliable join. A miss here is the
+        reaped-a-live-worker disaster."""
+        from fno.claims.cli import _mux_pane_absent_for
+
+        runner = self._runner(
+            [
+                self._Proc(0, '[{"session":"main","state":"live","panes":1}]'),
+                self._Proc(
+                    0,
+                    '[{"pane_id":4,"fno_id":"01a0-fresh-uuid","title":null,'
+                    '"cwd":"/Users/x/.fno/worktrees/footnote/bp-x-worker"}]',
+                ),
+            ]
+        )
+        assert _mux_pane_absent_for("bp-x-worker", runner=runner) is False
+
+    def test_match_by_node_id_worktree_name_means_present(self):
+        """The `target start` naming: a worktree named after the node id."""
+        from fno.claims.cli import _mux_pane_absent_for
+
+        runner = self._runner(
+            [
+                self._Proc(0, '[{"session":"main","state":"live","panes":1}]'),
+                self._Proc(
+                    0,
+                    '[{"pane_id":5,"fno_id":null,"title":null,'
+                    '"cwd":"/Users/x/.fno/worktrees/footnote/x-c272"}]',
+                ),
+            ]
+        )
+        assert _mux_pane_absent_for("bp-x-worker", node_id="x-c272", runner=runner) is False
+
     def test_nonempty_listing_without_the_worker_is_positive_absence(self):
         from fno.claims.cli import _mux_pane_absent_for
 
         runner = self._runner(
             [
                 self._Proc(0, '[{"session":"main","state":"live","panes":1}]'),
-                self._Proc(0, '[{"pane_id":2,"fno_id":"someone-else","title":null}]'),
+                self._Proc(
+                    0,
+                    '[{"pane_id":2,"fno_id":"someone-else","title":null,'
+                    '"cwd":"/Users/x/code/other"}]',
+                ),
             ]
         )
         assert _mux_pane_absent_for("bp-x-worker", runner=runner) is True

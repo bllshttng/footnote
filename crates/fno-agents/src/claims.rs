@@ -504,7 +504,7 @@ fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
 /// Compose liveness + expiry into a state (mirrors `staleness.classify`,
 /// INCLUDING the corroborated hybrid arm: an expired-TTL claim whose recorded
 /// pid is a live process on this host is still LIVE only when that pid was
-/// prover-proven at write time — a suspended-but-alive session must not have
+/// prover-proven at write time - a suspended-but-alive session must not have
 /// its claim reclaimed by a peer, while a live FOREIGN pid (a chat app's
 /// app-server answering for the holder) must not make the lease permanent).
 ///

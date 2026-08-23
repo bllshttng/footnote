@@ -1145,18 +1145,32 @@ HANDOVER_HOLDER_PREFIX = _HANDOVER_HOLDER_PREFIX
 
 
 
-def _mux_pane_absent_for(worker: str, runner=None) -> Optional[bool]:
-    """True when the mux enumerated its panes and none hosts WORKER.
+def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optional[bool]:
+    """True when the mux enumerated its panes and none plausibly hosts WORKER.
 
     The evidence a handover claim's death leaves outside the claim: the
-    spawner launched the worker into a mux pane, so a pane carrying this
-    worker's fno_id or title SOMEWHERE is a live launch; a listing that ran
-    and names no such pane is the launch window over. Follows
+    spawner launched the worker into a mux pane. Presence is matched against
+    EVERY identity a spawned worker's pane can carry, because a miss on any
+    one of them reaps a LIVE worker's claim (the ``reaped_a_live_worker``
+    disaster): the pane's ``fno_id`` is the SESSION uuid, not the worker
+    name (mux_spawn stamps ``fno_id=stored_session_uuid or name``), the OSC
+    ``title`` is whatever the pane's shell set, and the load-bearing join is
+    the worktree: dispatch names the worker's worktree after the worker
+    (``workspace worktree ensure --name <agent_name>``), so
+    ``basename(pane.cwd) == worker`` is the normal live-launch marker, with
+    the node id covering the ``target start`` naming. Follows
     ``_pane_absent_from_listing``'s empty-is-ambiguous rule: ``pane ls``
     prints ``[]`` both for a session with no panes and for an unreachable
     socket, so only a NON-EMPTY listing somewhere proves the instrument ran
     and absence from it is a finding. True = positively absent, False =
     present, None = cannot tell (and None keeps the claim).
+
+    Residual, named: a ``worktree.policy = never`` project launches the
+    worker at its repo root, where no pane identity names the worker - there
+    this helper can read absence while a live worker runs, so the handover
+    early-reap arm must not be the only thing standing between that worker
+    and a steal (its TTL expiry still governs, and the pid check still
+    refuses while the spawner lives).
     """
     import json as _json
     import subprocess as _subprocess
@@ -1183,12 +1197,18 @@ def _mux_pane_absent_for(worker: str, runner=None) -> Optional[bool]:
         return None
     if not isinstance(sessions, list):
         return None
+    names = {worker, node_id} - {""}
     saw_content = False
     for row in sessions:
         if not isinstance(row, dict) or row.get("state") != "live":
             continue
-        if not int(row.get("panes") or 0):
-            # A zero-pane session would only contribute an ambiguous [].
+        try:
+            n_panes = int(row.get("panes") or 0)
+        except (TypeError, ValueError):
+            n_panes = 0
+        if not n_panes:
+            # A zero-pane (or unparseable) session would only contribute an
+            # ambiguous []; the probe never raises on a malformed row.
             continue
         panes = _mux(
             "mux", "pane", "ls", "--session", str(row.get("session")), "--json"
@@ -1205,7 +1225,12 @@ def _mux_pane_absent_for(worker: str, runner=None) -> Optional[bool]:
         for pane in listing:
             if not isinstance(pane, dict):
                 continue
-            if pane.get("fno_id") == worker or pane.get("title") == worker:
+            cwd_name = str(pane.get("cwd") or "").rstrip("/").rsplit("/", 1)[-1]
+            if (
+                pane.get("fno_id") in names
+                or pane.get("title") in names
+                or cwd_name in names
+            ):
                 return False
     return True if saw_content else None
 
@@ -1295,11 +1320,18 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
             # observable from outside: the pane the spawner created and the
             # spawner's own pid. BOTH absent is the window over (a positive
             # finding); a pane that still hosts the worker, a live spawner
-            # pid, or a mux that cannot answer all keep the claim.
-            worker = claim.holder[len(HANDOVER_HOLDER_PREFIX):]
-            if _mux_pane_absent_for(worker) is not True:
-                return None
+            # pid, or a mux that cannot answer all keep the claim. The pid
+            # check is local and cheap, so it runs before the pane subprocess;
+            # the pane answer is cached per worker for the sweep's lifetime,
+            # like the shared roster reading.
             if is_live(claim):
+                return None
+            worker = claim.holder[len(HANDOVER_HOLDER_PREFIX):]
+            node_id = claim.key[len("node:"):] if claim.key.startswith("node:") else ""
+            pane_key = f"pane_absent:{worker}"
+            if pane_key not in cache:
+                cache[pane_key] = _mux_pane_absent_for(worker, node_id)
+            if cache[pane_key] is not True:
                 return None
             return True
         session_id = _holder_session_id(claim.holder)
