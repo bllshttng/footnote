@@ -32,6 +32,8 @@ on:
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - scripts/ci/check-review-app-parity.sh
+      - scripts/ci/preflight.sh
+      - scripts/tests/stress-rust-e2e-concurrency.sh
       - cli/src/fno/config/__init__.py
       - cli/src/fno/pr/_reviews.py
       - cli/src/fno/review_capability.py
@@ -145,15 +147,23 @@ jobs:
         # the same parser its frozen goldens were captured with.
         run: python3 -m pip install "pyyaml>=6"
 
-      - name: cargo test --all-targets
+      - name: cargo test --lib --bins (fno-agents)
         working-directory: crates/fno-agents
-        run: cargo test --all-targets
+        run: cargo test --lib --bins
 
-      - name: cargo test --all-targets (fno mux)
+      - name: cargo test --tests --test-threads=1 (fno-agents real-process integration)
+        working-directory: crates/fno-agents
+        run: cargo test --tests -- --test-threads=1
+
+      - name: cargo test --lib --bins (fno mux)
+        working-directory: crates/fno
+        run: cargo test --lib --bins
+
+      - name: cargo test --tests --test-threads=1 (fno mux real-process integration)
         # The mux e2e tests spawn real PTYs and Unix sockets; both work on
         # the ubuntu-latest runner (the harness needs no TTY of its own).
         working-directory: crates/fno
-        run: cargo test --all-targets
+        run: cargo test --tests -- --test-threads=1
 
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
