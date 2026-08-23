@@ -457,21 +457,6 @@ def _is_covered(data: Optional[dict]) -> bool:
         return False
 
 
-def _reviewed_sha_is_ancestor(
-    reviewed_sha: str, head: str, cwd: Optional[str]
-) -> bool:
-    """Whether Git proves that ``reviewed_sha`` remains in ``head`` history."""
-    try:
-        result = run(
-            ["git", "merge-base", "--is-ancestor", reviewed_sha, head],
-            cwd=cwd,
-            timeout=5,
-        )
-    except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
-        return False
-    return result.returncode == 0
-
-
 def _pr_code_diff_identity(
     sha: str, base_ref: str, cwd: Optional[str]
 ) -> Optional[tuple[str, frozenset[str]]]:
@@ -550,9 +535,13 @@ def _base_commit_of(base_ref: str, cwd: Optional[str]) -> str:
         commit = result.stdout.strip() if result.returncode == 0 else ""
     except Exception:  # noqa: BLE001
         commit = ""
-    if len(_BASE_COMMIT_CACHE) >= _CACHE_BOUND:
-        _BASE_COMMIT_CACHE.pop(next(iter(_BASE_COMMIT_CACHE)))
-    _BASE_COMMIT_CACHE[key] = (now, commit)
+    if commit:
+        # Only successes memoize: a failed resolve cached as "" would key
+        # later identities on the moving ref NAME, the exact aliasing the
+        # resolved-commit key exists to prevent.
+        if len(_BASE_COMMIT_CACHE) >= _CACHE_BOUND:
+            _BASE_COMMIT_CACHE.pop(next(iter(_BASE_COMMIT_CACHE)))
+        _BASE_COMMIT_CACHE[key] = (now, commit)
     return commit
 
 
@@ -561,9 +550,16 @@ def _identity_of(
 ) -> "Optional[tuple[str, frozenset[str]]]":
     key = (sha, _base_commit_of(base_ref, cwd) or base_ref, cwd or "")
     if key not in _IDENTITY_CACHE:
-        if len(_IDENTITY_CACHE) >= _CACHE_BOUND:
-            _IDENTITY_CACHE.pop(next(iter(_IDENTITY_CACHE)))
-        _IDENTITY_CACHE[key] = _pr_code_diff_identity(sha, base_ref, cwd)
+        value = _pr_code_diff_identity(sha, base_ref, cwd)
+        if value is not None:
+            # Only successes memoize: None means the git read failed (or the
+            # code diff is empty), and either recomputes cheaply. Pinning a
+            # transient failure would keep verdicts stale for the process
+            # life.
+            if len(_IDENTITY_CACHE) >= _CACHE_BOUND:
+                _IDENTITY_CACHE.pop(next(iter(_IDENTITY_CACHE)))
+            _IDENTITY_CACHE[key] = value
+        return value
     return _IDENTITY_CACHE[key]
 
 
@@ -584,9 +580,13 @@ def _tree_paths_readable(reviewed_sha: str, head: str, cwd: Optional[str]) -> bo
             readable = result.returncode == 0
         except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
             readable = False
-        if len(_TREE_PATHS_CACHE) >= _CACHE_BOUND:
-            _TREE_PATHS_CACHE.pop(next(iter(_TREE_PATHS_CACHE)))
-        _TREE_PATHS_CACHE[key] = readable
+        if readable:
+            # Only successes memoize: a False from a transient git failure
+            # is not a property of the sha pair.
+            if len(_TREE_PATHS_CACHE) >= _CACHE_BOUND:
+                _TREE_PATHS_CACHE.pop(next(iter(_TREE_PATHS_CACHE)))
+            _TREE_PATHS_CACHE[key] = readable
+        return readable
     return _TREE_PATHS_CACHE[key]
 
 
@@ -598,11 +598,12 @@ def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
     if it does not resolve locally, the content test is unanswerable (None,
     fail closed) - falling back to origin/main there would compute both
     identities against the wrong base and CARRY a rebase the stop gate
-    expired, the disagreement this mirror exists to prevent. The
-    classify_payload defaults (origin/main, then origin/master) apply only
-    when there is no PR to ask or the read itself failed. Memoized with a
-    TTL: status polls fire this per pass, the read spends the per-USER
-    GraphQL quota, and a base retarget is rare."""
+    expired, the disagreement this mirror exists to prevent. A FAILED read
+    with a PR number is the same unanswerable state: the Rust resolver
+    expires everything when its read fails, so the defaults (origin/main,
+    then origin/master) apply only when there is no PR to ask at all.
+    Memoized with a TTL: status polls fire this per pass, the read spends
+    the per-USER GraphQL quota, and a base retarget is rare."""
     key = (cwd or "", pr_number)
     hit = _BASE_REF_CACHE.get(key)
     now = time.monotonic()
@@ -623,9 +624,16 @@ def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
                 if isinstance(base, str) and base.strip():
                     candidates.append(f"origin/{base.strip()}")
                     base_known = True
-        except Exception:  # noqa: BLE001 - fall through to the defaults
+        except Exception:  # noqa: BLE001 - a failed read is fail-closed below
             pass
-    if not base_known:
+        if not base_known:
+            # Unanswerable, not defaultable: cache None so the poll loop
+            # cannot hammer a failing gh, and let the TTL bound the blip.
+            if len(_BASE_REF_CACHE) >= _CACHE_BOUND:
+                _BASE_REF_CACHE.pop(next(iter(_BASE_REF_CACHE)))
+            _BASE_REF_CACHE[key] = (now, None)
+            return None
+    else:
         candidates += ["origin/main", "origin/master"]
     for ref in candidates:
         try:
@@ -649,8 +657,6 @@ def _reviewed_sha_still_describes_head(
     reviewed_sha: str,
     head: str,
     cwd: Optional[str],
-    base_ref: Optional[str] = None,
-    head_identity: "Optional[tuple[str, frozenset[str]]]" = None,
     pr_number: int = 0,
 ) -> bool:
     """Whether the change the reviewer read still ships at ``head``.
@@ -666,22 +672,18 @@ def _reviewed_sha_still_describes_head(
     resolution, an unreadable identity on either side - is a new review.
     There is deliberately NO ancestry arm: ancestry alone proved a push-after-
     review head fresh here while the Rust rule expired it, and a merge must
-    not accept an increment the stop gate calls stale. ``base_ref`` and
-    ``head_identity`` are optional precomputed inputs (the module caches make
-    them cheap); left unset they resolve here, fail closed, and are the one
-    seam hermetic tests stub."""
+    not accept an increment the stop gate calls stale. Resolves its own base
+    (fail closed) through the module caches, and is the one seam hermetic
+    tests stub."""
     if reviewed_sha == head:
         return True
-    if base_ref is None:
-        base_ref = _resolve_base_ref(cwd, pr_number)
+    base_ref = _resolve_base_ref(cwd, pr_number)
     if base_ref is None:
         return False
     reviewed = _identity_of(reviewed_sha, base_ref, cwd)
     if reviewed is None:
         return False
-    current_head = head_identity
-    if current_head is None:
-        current_head = _identity_of(head, base_ref, cwd)
+    current_head = _identity_of(head, base_ref, cwd)
     if current_head is None:
         return False
     if reviewed[0] == current_head[0]:

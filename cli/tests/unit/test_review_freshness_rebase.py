@@ -105,7 +105,10 @@ def test_identical_rebase_keeps_the_attestation(tmp_path):
         tmp_path, conflicting_base=False
     )
     assert head != reviewed, "a rebase must rewrite the commit"
-    assert not _reviews._reviewed_sha_is_ancestor(reviewed, head, repo), (
+    ancestry = _reviews.run(
+        ["git", "merge-base", "--is-ancestor", reviewed, head], cwd=str(repo)
+    )
+    assert ancestry.returncode != 0, (
         "precondition: the ancestry test alone kills the attestation here"
     )
     shaped = _shaped(repo, reviewed, head)
