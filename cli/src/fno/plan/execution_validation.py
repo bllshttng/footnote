@@ -40,11 +40,13 @@ _QUICK_PLACEHOLDERS = (
 # with one, plus the determiners that follow them in a sentence but never in an
 # invocation. Matching the PAIR is what keeps `cargo check` and `make test`
 # runnable while `make sure the button works` is not.
-_AMBIGUOUS_COMMANDS = frozenset("cd go java just make manually node test".split())
+_AMBIGUOUS_COMMANDS = frozenset(
+    "cd check ensure go java just make manually node test verify".split()
+)
 # No `all`: `make all` is a real default target, and it outranks `make all the
 # tests pass` as a thing an author writes.
 _PROSE_FOLLOWERS = frozenset(
-    "a an each every inspect it its my that the this to into your sure".split()
+    "a an each every inspect it its my that the tests this to into your sure".split()
 )
 _PROSE_ONLY_COMMANDS = frozenset("handwave manually".split())
 _COMMAND_WRAPPERS = frozenset({"command", "env", "gtimeout", "sudo", "timeout"})
@@ -62,6 +64,9 @@ _NON_EXECUTABLE_SUFFIXES = (
     ".md", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml", ".lock", ".csv",
 )
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_PARAMETER_RE = re.compile(
+    r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)"
+)
 _SHELL_SEGMENT_RE = re.compile(r"(?:&&|\|\||[;|])")
 
 
@@ -94,6 +99,8 @@ def _runs_a_command(tokens: list[str]) -> bool:
         return False
     command = tokens[0]
     command_lower = command.lower()
+    if command[:1].isupper():
+        return False
     if (
         command_lower in _AMBIGUOUS_COMMANDS
         and len(tokens) > 1
@@ -102,7 +109,14 @@ def _runs_a_command(tokens: list[str]) -> bool:
         return False
     if command_lower in _PROSE_ONLY_COMMANDS or command.startswith("-"):
         return False
-    if _FILE_REJECT_RE.search(command):
+    command_for_reject = command
+    if "$" in command:
+        if "/" not in command:
+            return False
+        command_for_reject = _SHELL_PARAMETER_RE.sub("", command)
+        if "$" in command_for_reject:
+            return False
+    if _FILE_REJECT_RE.search(command_for_reject):
         return False
     # A document-shaped first token is prose that happens to lead with a path;
     # other bare tokens remain valid without an ecosystem-specific inventory.

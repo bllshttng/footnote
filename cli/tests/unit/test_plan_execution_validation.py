@@ -302,6 +302,12 @@ def test_legacy_runnable_commands_remain_accepted(tmp_path: Path, command: str) 
         "README.md",
         "--dry-run",
         "TODO",
+        "Verify the login flow",
+        "Check that the API works",
+        "Ensure tests pass",
+        "verify the login flow",
+        "check that the API works",
+        "ensure tests pass",
         'pytest tests/ && echo "unclosed',
     ),
 )
@@ -330,6 +336,23 @@ def test_runnable_command_policy_has_no_positive_inventory() -> None:
     from fno.plan import execution_validation
 
     assert not hasattr(execution_validation, "_RUNNABLE_COMMANDS")
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        '"$VIRTUAL_ENV/bin/pytest" -q',
+        '"${REPO_ROOT}/scripts/check.sh"',
+    ),
+)
+def test_shell_expanded_executable_paths_remain_accepted(
+    tmp_path: Path, command: str
+) -> None:
+    _assert_verify_accepted_in_both_plan_shapes(
+        tmp_path,
+        command,
+        full_command=f"env FNO_TEST=1 {command}",
+    )
 
 
 def test_quick_plan_prose_verification_is_not_runnable(tmp_path: Path) -> None:
