@@ -352,7 +352,7 @@ def test_agents_fold_move_table_matches_the_approved_work_order():
 
 
 def test_restored_root_spellings_are_canonical_not_moves():
-    """mail, test, update are root-canonical again (operator ruling d-5073b562).
+    """mail, test, update are root-canonical again (2026-08-22 operator ruling).
 
     The root lazy registrations serve the call directly: no argv rewrite, no
     "is now" line. A move entry here would re-shadow the canonical spelling,

@@ -39,10 +39,11 @@ class Move(NamedTuple):
 
 
 VERB_MOVES: dict[str, Move] = {
-    # mail, test, and update are NOT here by design (operator ruling
-    # d-5073b562): the root spellings are canonical, and the nested
-    # registrations (agents mail / doctor test / doctor update) are the
-    # kept silent aliases - both resolve the same command objects.
+    # mail, test, and update are NOT here by design (2026-08-22 operator
+    # ruling, recovered via `fno backlog decisions` on the reorg node): the
+    # root spellings are canonical, and the nested registrations (agents
+    # mail / doctor test / doctor update) are the kept silent aliases -
+    # both resolve the same command objects.
     "annotate": Move(kind="deprecated", to="backlog annotate"),
     "approvals": Move(kind="deprecated", to="inbox approvals"),
     "autonomy": Move(kind="deprecated", to="agents autonomy"),
