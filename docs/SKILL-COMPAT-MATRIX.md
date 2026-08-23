@@ -40,7 +40,7 @@ Skills with none of these run stateless and work OOTB on every driver that loads
 | codemap | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Pure Python + tree-sitter. |
 | create-pr | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Mechanical `gh` invocation. |
 | debug | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Hypothesis loop completes within one turn unless chained. |
-| agent | orchestrator | OOTB | - | - | - | OOTB | Natural-language control over the provider-native worker mesh. Codex/Gemini build dispatch and prose handoff use provider-neutral briefs; discussions use provider-native interactive panes. All return real receipts and never send Claude slash commands. Explicit `bg` remains Claude-only. |
+| agent | orchestrator | OOTB | - | - | - | OOTB | Natural-language control over the provider-native worker mesh. Codex/Gemini build dispatch and prose handoff use provider-neutral briefs; discussions use provider-native interactive panes. All return real receipts and never send Claude slash commands. Explicit `bg` runs on claude and opencode. |
 | distill | stateless | OOTB | partial | partial | partial | partial | Reads Claude Code observations; other drivers need skill-checkpoint parity. |
 | execute | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Lightweight single-session executor. Does not emit `<promise>`. |
 | fix | hybrid | OOTB | wrapper | wrapper | wrapper | wrapper | Bounded iteration loop (N iterations). Wrapper restarts between iterations on non-CC. |
@@ -51,7 +51,7 @@ Skills with none of these run stateless and work OOTB on every driver that loads
 | operator | orchestrator | OOTB | OOTB | OOTB | OOTB | OOTB | Dispatches waves through the driver's subagent primitive. Codex uses project custom agents/`spawn_agent` when available and announces a sequential fallback otherwise. |
 | target | loop | OOTB | wrapper | wrapper | wrapper | OOTB | Emits `<promise>MISSION COMPLETE</promise>`. Claude and Codex continue through native `Stop` hooks; wrapper drivers require external re-invocation. |
 | target (plan-mode front door) | CC-only | OOTB | - | - | - | - | Native Plan Mode -> `/target` Mode 1. The capture hook fires on Claude Code's `ExitPlanMode` PostToolUse; Gemini/Codex have no such tool, so no sidecar is ever written and `/target` behaves exactly as today (no-op degradation). |
-| target (bg-dispatch `bg`) | CC-only | OOTB | - | - | - | - | `/target bg` dispatches fresh `claude --bg` workers and remains Claude-only. Codex build dispatch is a separate prose-brief path through an owned-PTY `pane` or one-shot `headless` spawn; it never masquerades as `claude --bg`. |
+| target (bg-dispatch `bg`) | CC-only | OOTB | - | - | - | - | `/target bg` dispatches fresh `claude --bg` workers (claude-only lane). Codex build dispatch is a separate prose-brief path through an owned-PTY `pane` or one-shot `headless` spawn; it never masquerades as `claude --bg`. |
 | setup | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Interactive wizard; single conversation. |
 | ship-docs | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Generates architecture + how-to docs. |
 | sigma-review | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Spawns reviewer agents through the driver-native primitive. Codex uses project custom agents/`spawn_agent` when available and otherwise announces sequential execution. |

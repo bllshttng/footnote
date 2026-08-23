@@ -89,7 +89,9 @@ def cmd_resolve(
         None, "--harness", help="Target harness (claude|codex|gemini|agy|opencode). Default: config.dispatch.harness > claude."
     ),
     substrate: Optional[str] = typer.Option(
-        None, "--substrate", help="bg|headless|pane. Default: per-harness (claude=bg, else headless)."
+        None,
+        "--substrate",
+        help="bg|headless|pane. Default: per-harness (claude + opencode=bg, else headless).",
     ),
     node: Optional[str] = typer.Option(
         None, "--node", "--id", help="Node id substituted into the command's {id}. Absent = template returned literally."

@@ -36,12 +36,16 @@ fn journey_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// The last assistant text part in the message readback, if any.
+/// The last assistant text part in the message readback, if any. Entries
+/// without an `info` object are SKIPPED, not propagated: one odd row must not
+/// make the poll read the whole turn as incomplete.
 fn last_assistant_text(messages: &serde_json::Value) -> Option<String> {
     let arr = messages.as_array()?;
     let mut out = None;
     for msg in arr {
-        let info = msg.get("info")?;
+        let Some(info) = msg.get("info") else {
+            continue;
+        };
         if info.get("role").and_then(|r| r.as_str()) != Some("assistant") {
             continue;
         }
@@ -119,7 +123,7 @@ fn opencode_bg_worker_completes_unattended_over_serve() {
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut reply = None;
     while Instant::now() < deadline {
-        if let Ok(messages) = fetch_messages(&serve.base_url, &session_id) {
+        if let Ok(messages) = fetch_messages(&serve.base_url, &serve.token, &session_id) {
             if let Some(text) = last_assistant_text(&messages) {
                 reply = Some(text);
                 break;
@@ -135,7 +139,8 @@ fn opencode_bg_worker_completes_unattended_over_serve() {
 
     // The writable-dirs grant is ON the session (scoped external_directory
     // allow rule for the granted root).
-    let session = fetch_session(&serve.base_url, &session_id).expect("session readback");
+    let session =
+        fetch_session(&serve.base_url, &serve.token, &session_id).expect("session readback");
     let rules = session
         .get("permission")
         .and_then(|p| p.as_array())
@@ -165,7 +170,8 @@ fn opencode_bg_worker_completes_unattended_over_serve() {
     // above already proved role/text; pin the structured fields a pane scrape
     // could never give: model identity and message ids.
     {
-        let messages = fetch_messages(&serve.base_url, &session_id).expect("readback for capture");
+        let messages = fetch_messages(&serve.base_url, &serve.token, &session_id)
+            .expect("readback for capture");
         let arr = messages.as_array().expect("messages array");
         let assistant = arr
             .iter()
@@ -204,7 +210,7 @@ fn opencode_bg_worker_completes_unattended_over_serve() {
     );
 
     // Cleanup: session deleted; the reaper drops the serve pid on exit.
-    delete_session(&serve.base_url, &session_id).expect("session teardown");
+    delete_session(&serve.base_url, &serve.token, &session_id).expect("session teardown");
 }
 
 // tempfile + libc are dev-dependencies of the crate; serde_json is a main dep.

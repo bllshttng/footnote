@@ -59,13 +59,15 @@ use crate::paths::AgentsHome;
 use crate::state::{load_registry, update_registry, RegistryEntry};
 use crate::AgentStatus;
 
-/// Everything the spawn needs from a live serve: the loopback base URL. The
-/// port IS the identity (state file records it); the pid is bookkeeping for
-/// anyone sweeping stale serves.
+/// Everything the spawn needs from a live serve: the loopback base URL, the
+/// auth token the serve was booted with, and the pid (with its start time, so
+/// a displaced-serve reap can never SIGTERM a recycled pid).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeHandle {
     pub base_url: String,
+    pub token: String,
     pub pid: u32,
+    pub pid_start: Option<u64>,
 }
 
 /// The unattended permission posture, written to the generated OPENCODE_CONFIG
@@ -89,12 +91,16 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 /// One request/response exchange against the serve. Blocking, std-only: the
 /// serve is always 127.0.0.1, every call here is short (create / merge /
 /// health), and the fno-agents spawn path is synchronous - a full HTTP stack
-/// would be a dependency bought for nothing.
+/// would be a dependency bought for nothing. `auth_token` rides every request
+/// as Basic auth: the serve is booted with `OPENCODE_SERVER_PASSWORD`, so a
+/// loopback listener with an allow-all permission posture is not reachable by
+/// arbitrary local processes.
 fn http_json(
     base_url: &str,
     method: &str,
     path_and_query: &str,
     body: Option<&serde_json::Value>,
+    auth_token: Option<&str>,
     timeout: Duration,
 ) -> Result<(u16, String), String> {
     let after_scheme = base_url
@@ -110,8 +116,15 @@ fn http_json(
         .set_write_timeout(Some(timeout))
         .map_err(|e| format!("write timeout: {e}"))?;
     let body_bytes = body.map(|v| v.to_string()).unwrap_or_default();
+    let auth_header = auth_token
+        .map(|t| {
+            use base64::Engine as _;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(format!("opencode:{t}"));
+            format!("Authorization: Basic {encoded}\r\n")
+        })
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path_and_query} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path_and_query} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nContent-Type: application/json\r\n{auth_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body_bytes.len(),
     );
     stream
@@ -137,13 +150,31 @@ fn http_json(
     Ok((status, body_out))
 }
 
-/// GET /global/health -> true iff `{healthy: true}`. The reuse gate for a
-/// recorded serve and the post-boot confirmation for a fresh one.
-fn serve_healthy(base_url: &str) -> bool {
-    matches!(
-        http_json(base_url, "GET", "/global/health", None, HEALTH_TIMEOUT),
-        Ok((200, body)) if body.contains("\"healthy\":true")
-    )
+/// GET /global/health -> true iff `{healthy: true}`. Reused as the gate for a
+/// recorded serve, so a single answer never decides a live serve is dead: a
+/// busy node event loop can miss one 3s probe while workers run turns, and
+/// the unhealthy branch SIGTERMs the serve (killing every worker session on
+/// it). Three attempts, 1s apart - slow answers survive, dead ones do not.
+fn serve_healthy(base_url: &str, token: &str) -> bool {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        if matches!(
+            http_json(
+                base_url,
+                "GET",
+                "/global/health",
+                None,
+                Some(token),
+                HEALTH_TIMEOUT
+            ),
+            Ok((200, body)) if body.contains("\"healthy\":true")
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 // ===========================================================================
@@ -163,6 +194,18 @@ fn serve_log_path(home: &AgentsHome) -> std::path::PathBuf {
         .join("agents")
         .join("logs")
         .join("opencode-serve.log")
+}
+
+/// 32 hex chars from /dev/urandom - the per-serve Basic-auth password. No
+/// rand crate; the OS CSPRNG is one read_exact away and the token never needs
+/// reproduction.
+fn new_serve_token() -> Result<String, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open("/dev/urandom").map_err(|e| format!("open urandom: {e}"))?;
+    let mut buf = [0u8; 16];
+    f.read_exact(&mut buf)
+        .map_err(|e| format!("read urandom: {e}"))?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Extract the port from a serve log line (`opencode server listening on
@@ -219,30 +262,49 @@ fn acquire_serve_lock(home: &AgentsHome) -> Option<std::fs::File> {
 }
 
 fn ensure_serve_locked(home: &AgentsHome) -> Result<ServeHandle, String> {
-    let mut displaced_pid: Option<u32> = None;
+    let mut displaced: Option<(u32, Option<u64>)> = None;
     if let Ok(raw) = std::fs::read_to_string(serve_state_path(home)) {
         if let Ok(recorded) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(base_url) = recorded.get("base_url").and_then(|v| v.as_str()) {
-                if serve_healthy(base_url) {
-                    return Ok(ServeHandle {
-                        base_url: base_url.to_string(),
-                        pid: recorded.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    });
-                }
-            }
-            displaced_pid = recorded
+            let token = recorded
+                .get("token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let pid = recorded
                 .get("pid")
                 .and_then(|v| v.as_u64())
                 .filter(|p| *p > 0)
                 .map(|p| p as u32);
+            let pid_start = recorded.get("pid_start").and_then(|v| v.as_u64());
+            if let Some(base_url) = recorded.get("base_url").and_then(|v| v.as_str()) {
+                if !token.is_empty() && serve_healthy(base_url, &token) {
+                    return Ok(ServeHandle {
+                        base_url: base_url.to_string(),
+                        token,
+                        pid: pid.unwrap_or(0),
+                        pid_start,
+                    });
+                }
+            }
+            displaced = pid.map(|p| (p, pid_start));
         }
-        // Unhealthy or unreadable: fall through and boot a replacement. A
-        // stale state file must never wedge every future spawn to a dead port.
+        // Unhealthy, token-less, or unreadable: fall through and boot a
+        // replacement. A stale state file must never wedge every future spawn
+        // to a dead port - and a token-less legacy record can never be
+        // authenticated against, so it is replaced too.
     }
-    if let Some(pid) = displaced_pid {
-        // Best-effort reap of the displaced serve so it cannot linger as an
-        // orphan holding a port nobody records.
-        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if let Some((pid, pid_start)) = displaced {
+        // Reap the displaced serve so it cannot linger as an orphan holding a
+        // port nobody records. The start-time guard means a RECYCLED pid (the
+        // recorded serve died weeks ago and the OS reused its id) is left
+        // alone instead of SIGTERMed - that pid now belongs to someone else.
+        let is_ours = match pid_start {
+            Some(start) => crate::daemon::pid_is_ours(pid, Some(start)),
+            None => false, // no recorded start time: do not trust the bare pid
+        };
+        if is_ours {
+            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        }
     }
     let config = serve_config_path(home);
     if let Some(parent) = config.parent() {
@@ -250,13 +312,21 @@ fn ensure_serve_locked(home: &AgentsHome) -> Result<ServeHandle, String> {
     }
     std::fs::write(&config, SERVE_CONFIG_JSON)
         .map_err(|e| format!("write serve config {:?}: {e}", config))?;
+    // Fresh token per serve: Basic-auth material for every request (the serve
+    // is booted with OPENCODE_SERVER_PASSWORD), generated from /dev/urandom.
+    let token = new_serve_token()?;
     let log_path = serve_log_path(home);
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // TRUNCATE, not append: the boot loop below scans this file for the
+    // serving port, and a previous boot's `listening on` line would win
+    // rfind while the new serve is still starting - recording the OLD url
+    // with the NEW pid. Truncating also bounds the file per boot.
     let log = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&log_path)
         .map_err(|e| format!("open serve log {:?}: {e}", log_path))?;
     let log_err = log
@@ -267,6 +337,7 @@ fn ensure_serve_locked(home: &AgentsHome) -> Result<ServeHandle, String> {
     let mut cmd = Command::new("opencode");
     cmd.args(["serve", "--port", "0", "--print-logs"])
         .env("OPENCODE_CONFIG", &config)
+        .env("OPENCODE_SERVER_PASSWORD", &token)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
@@ -284,6 +355,7 @@ fn ensure_serve_locked(home: &AgentsHome) -> Result<ServeHandle, String> {
     // detach is real (setsid + no wait); dropping the Rust handle only stops
     // reaping, which is the point.
     std::mem::forget(child);
+    let pid_start = crate::daemon::process_start_time(pid);
 
     let deadline = std::time::Instant::now() + SERVE_BOOT_BUDGET;
     loop {
@@ -291,17 +363,24 @@ fn ensure_serve_locked(home: &AgentsHome) -> Result<ServeHandle, String> {
         if let Ok(log_text) = std::fs::read_to_string(&log_path) {
             if let Some(port) = serve_port_from_log(&log_text) {
                 let base_url = format!("http://127.0.0.1:{port}");
-                if serve_healthy(&base_url) {
+                if serve_healthy(&base_url, &token) {
                     let record = serde_json::json!({
                         "base_url": base_url,
                         "port": port,
                         "pid": pid,
+                        "pid_start": pid_start,
+                        "token": token,
                     });
                     let _ = std::fs::write(
                         serve_state_path(home),
                         serde_json::to_string(&record).unwrap_or_default(),
                     );
-                    return Ok(ServeHandle { base_url, pid });
+                    return Ok(ServeHandle {
+                        base_url,
+                        token,
+                        pid,
+                        pid_start,
+                    });
                 }
             }
         }
@@ -494,6 +573,7 @@ fn dispatch_opencode_serve_inner(
         "POST",
         &create_path,
         Some(&serde_json::json!({"title": name})),
+        Some(&serve.token),
         HTTP_CALL_TIMEOUT,
     ) {
         Ok(r) => r,
@@ -544,6 +624,7 @@ fn dispatch_opencode_serve_inner(
             "PATCH",
             &format!("/session/{session_id}"),
             Some(&serde_json::json!({"permission": permission_rules_for(&state_dirs)})),
+            Some(&serve.token),
             HTTP_CALL_TIMEOUT,
         ) {
             Ok((204, _)) | Ok((200, _)) => {}
@@ -608,6 +689,9 @@ fn dispatch_opencode_serve_inner(
         cmd.current_dir(cwd);
         cmd.env("FNO_AGENT_SELF", name);
         cmd.env("FNO_AGENT_HARNESS", "opencode");
+        // The writer attaches to an authenticated serve; the run client reads
+        // its password from this env (`-p` is the flag spelling).
+        cmd.env("OPENCODE_SERVER_PASSWORD", &serve.token);
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
@@ -623,7 +707,7 @@ fn dispatch_opencode_serve_inner(
             Err(e) => {
                 // No row exists yet; the minted session is the only leftover,
                 // so remove it rather than leaving an unreachable session.
-                let _ = delete_session(&serve.base_url, &session_id);
+                let _ = delete_session(&serve.base_url, &serve.token, &session_id);
                 let code = if e.kind() == std::io::ErrorKind::NotFound {
                     13
                 } else {
@@ -712,7 +796,7 @@ fn dispatch_opencode_serve_inner(
         Ok(false) => {
             // Roll the launch back: kill the writer and drop the session so a
             // retry with the same name is not wedged by orphaned state.
-            let _ = delete_session(&serve.base_url, &session_id);
+            let _ = delete_session(&serve.base_url, &serve.token, &session_id);
             unsafe { libc::kill(writer_pid as i32, libc::SIGTERM) };
             emit_event(
                 &events,
@@ -732,7 +816,7 @@ fn dispatch_opencode_serve_inner(
             );
         }
         Err(e) => {
-            let _ = delete_session(&serve.base_url, &session_id);
+            let _ = delete_session(&serve.base_url, &serve.token, &session_id);
             unsafe { libc::kill(writer_pid as i32, libc::SIGTERM) };
             emit_event(
                 &events,
@@ -790,12 +874,17 @@ fn tail_reason(body: &str, code: u16) -> String {
 
 /// `GET /session/:id` as parsed JSON. The session object carries the merged
 /// `permission` rules, so a caller can assert the writable-dirs grant landed.
-pub fn fetch_session(base_url: &str, session_id: &str) -> Result<serde_json::Value, String> {
+pub fn fetch_session(
+    base_url: &str,
+    token: &str,
+    session_id: &str,
+) -> Result<serde_json::Value, String> {
     let (status, body) = http_json(
         base_url,
         "GET",
         &format!("/session/{session_id}"),
         None,
+        Some(token),
         HTTP_CALL_TIMEOUT,
     )?;
     if status != 200 {
@@ -808,12 +897,17 @@ pub fn fetch_session(base_url: &str, session_id: &str) -> Result<serde_json::Val
 }
 
 /// `GET /session/:id/message` as parsed JSON (structured capture readback).
-pub fn fetch_messages(base_url: &str, session_id: &str) -> Result<serde_json::Value, String> {
+pub fn fetch_messages(
+    base_url: &str,
+    token: &str,
+    session_id: &str,
+) -> Result<serde_json::Value, String> {
     let (status, body) = http_json(
         base_url,
         "GET",
         &format!("/session/{session_id}/message"),
         None,
+        Some(token),
         HTTP_CALL_TIMEOUT,
     )?;
     if status != 200 {
@@ -827,12 +921,13 @@ pub fn fetch_messages(base_url: &str, session_id: &str) -> Result<serde_json::Va
 
 /// `DELETE /session/:id` - best-effort teardown; an error is returned, not
 /// panicked on, so a caller can still finish its other cleanup.
-pub fn delete_session(base_url: &str, session_id: &str) -> Result<(), String> {
+pub fn delete_session(base_url: &str, token: &str, session_id: &str) -> Result<(), String> {
     let (status, body) = http_json(
         base_url,
         "DELETE",
         &format!("/session/{session_id}"),
         None,
+        Some(token),
         HTTP_CALL_TIMEOUT,
     )?;
     if status == 200 || status == 204 {
@@ -887,7 +982,9 @@ mod tests {
     fn writer_argv_is_attach_session_bypass_then_tail() {
         let serve = ServeHandle {
             base_url: "http://127.0.0.1:59971".to_string(),
+            token: "test-token".to_string(),
             pid: 1,
+            pid_start: None,
         };
         // Slash command rides --command (x-de43). No --format json: the attach
         // writer prints nothing on stdout (verified live), so the flag is dead.
@@ -941,6 +1038,7 @@ mod tests {
     struct FakeServe {
         addr: std::net::SocketAddr,
         requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        auth_seen: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
     }
 
     impl FakeServe {
@@ -948,7 +1046,9 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = listener.local_addr().unwrap();
             let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let auth_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let seen = requests.clone();
+            let auth_tx = auth_seen.clone();
             let sid = session_id.to_string();
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
@@ -970,6 +1070,10 @@ mod tests {
                     }
                     let line = req.lines().next().unwrap_or("").to_string();
                     seen.lock().unwrap().push(line.clone());
+                    auth_tx
+                        .lock()
+                        .unwrap()
+                        .push(req.contains("Authorization: Basic "));
                     let body_start = req.split_once("\r\n\r\n").map(|(_, b)| b.to_string());
                     let (status, body) = if line.starts_with("GET /global/health") {
                         ("200 OK", "{\"healthy\":true}".to_string())
@@ -1002,7 +1106,11 @@ mod tests {
                     let _ = stream.shutdown(std::net::Shutdown::Write);
                 }
             });
-            FakeServe { addr, requests }
+            FakeServe {
+                addr,
+                requests,
+                auth_seen,
+            }
         }
         fn base_url(&self) -> String {
             format!("http://{}", self.addr)
@@ -1017,6 +1125,7 @@ mod tests {
             "GET",
             "/global/health",
             None,
+            Some("tok"),
             Duration::from_secs(2),
         )
         .unwrap();
@@ -1027,6 +1136,7 @@ mod tests {
             "POST",
             "/session?directory=/w",
             Some(&serde_json::json!({"title": "wk"})),
+            Some("tok"),
             Duration::from_secs(2),
         )
         .unwrap();
@@ -1037,6 +1147,8 @@ mod tests {
             "GET /global/health HTTP/1.1"
         );
         assert!(fake.requests.lock().unwrap()[1].starts_with("POST /session?directory=/w"));
+        // Every authenticated request carried the Basic header.
+        assert!(fake.auth_seen.lock().unwrap().iter().all(|s| *s));
     }
 
     #[test]
@@ -1051,6 +1163,7 @@ mod tests {
             "base_url": fake.base_url(),
             "port": fake.addr.port(),
             "pid": 4242,
+            "token": "test-token",
         });
         std::fs::write(serve_state_path(&h), record.to_string()).unwrap();
 
@@ -1135,7 +1248,8 @@ mod tests {
 
         // A serve answering with a non-ses id refuses rather than rowing junk.
         let fake = FakeServe::start("not-an-opencode-id");
-        let record = serde_json::json!({"base_url": fake.base_url(), "pid": 1});
+        let record =
+            serde_json::json!({"base_url": fake.base_url(), "pid": 1, "token": "test-token"});
         std::fs::write(serve_state_path(&h), record.to_string()).unwrap();
         let out = dispatch_opencode_serve_inner(
             &h,
