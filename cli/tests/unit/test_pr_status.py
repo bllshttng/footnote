@@ -2162,6 +2162,7 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
 
 def test_status_surfaces_resolved_unchanged_as_advisory(monkeypatch, capsys):
     """AC2-HP: the count is visible without changing readiness or exit code."""
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
