@@ -1044,8 +1044,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // x-b6e2 fail-closed matrix for the client-owned bg/headless lanes (pane
     // re-execs Python, which guards there). A flag with no equivalent for the
     // resolved provider is a hard error BEFORE launch - never a silent drop.
-    // Message shape mirrors --permission-mode. (opencode is already refused by
-    // the substrate arm below, so it never reaches these checks.)
+    // Message shape mirrors --permission-mode. (opencode's bg lane DOES reach
+    // these checks now: `--add-dir`/`--agent`-shaped flags on an opencode bg
+    // spawn refuse HERE - the serve lane grants writable dirs itself, through
+    // the per-session permission rules.)
     if substrate != "pane" {
         // No "use --substrate pane" advice: unlike --permission-mode, pane does
         // NOT map these cells any wider than bg/headless does (gemini --add-dir,

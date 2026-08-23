@@ -160,17 +160,47 @@ fn opencode_bg_worker_completes_unattended_over_serve() {
     assert_eq!(row.harness.as_deref(), Some("opencode"));
     assert_eq!(row.harness_session_id.as_deref(), Some(session_id.as_str()));
 
-    // Structured capture: the detached writer streamed JSON events to the log.
-    let log = std::fs::read_to_string(
+    // Structured capture is the SERVE's message readback, not the writer's
+    // stdout (the attach writer prints nothing - verified live). The readback
+    // above already proved role/text; pin the structured fields a pane scrape
+    // could never give: model identity and message ids.
+    {
+        let messages = fetch_messages(&serve.base_url, &session_id).expect("readback for capture");
+        let arr = messages.as_array().expect("messages array");
+        let assistant = arr
+            .iter()
+            .find(|m| {
+                m.get("info")
+                    .and_then(|i| i.get("role"))
+                    .and_then(|r| r.as_str())
+                    == Some("assistant")
+            })
+            .expect("assistant message in readback");
+        let info = assistant.get("info").unwrap();
+        assert!(
+            info.get("modelID")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| !m.is_empty()),
+            "structured model identity on the readback: {info}"
+        );
+        assert!(
+            info.get("id")
+                .and_then(|i| i.as_str())
+                .is_some_and(|i| i.starts_with("msg_")),
+            "structured message id on the readback: {info}"
+        );
+    }
+
+    // The writer's log is the diagnostics trail (its stderr; stdout is empty
+    // on the attach path). Existence is the claim - non-emptiness is not,
+    // because a quiet run writes nothing.
+    assert!(
         home.root()
             .join("agents")
             .join("logs")
-            .join("wk-journey.jsonl"),
-    )
-    .unwrap_or_default();
-    assert!(
-        !log.trim().is_empty(),
-        "writer log is empty - no structured capture"
+            .join("wk-journey.jsonl")
+            .exists(),
+        "writer log file missing"
     );
 
     // Cleanup: session deleted; the reaper drops the serve pid on exit.

@@ -118,7 +118,8 @@ def _refused_reason(harness: str) -> str:
 # capability -> per-harness value, keyed by the READABLE_PROVIDERS set. Each
 # harness carries a `command_surface` (x-a5e4): the invocation form its native
 # footnote skill takes, or `refused` where the harness is deprecated. A slash
-# harness also carries `slash_prefix` (the plugin namespace). `bg` is claude-only.
+# harness also carries `slash_prefix` (the plugin namespace). `bg` is claude
+# and opencode (the serve-HTTP worker lane).
 #
 # Two pane capabilities, both EVIDENCE-GATED and read fail-closed (a missing key
 # reads false), because each one used to be a blanket rule that was true of at

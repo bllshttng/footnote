@@ -1285,7 +1285,8 @@ def cmd_spawn(
             "what you name - there is no --level, and a node that is not an epic "
             "is refused, since implementers get no crowns. Stamped with the "
             "grantor derived from THIS session, never self-declared. Works on "
-            "--substrate pane and bg (bg is claude + opencode); refused on "
+            "--substrate pane and bg (crown on bg is claude-only until the "
+            "court plumbing learns the opencode serve lane); refused on "
             "headless, whose one-shot exits before it can reign."
         ),
     ),
