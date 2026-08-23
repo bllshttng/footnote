@@ -13593,6 +13593,7 @@ mod tests {
                 80,
                 false,
                 placement,
+                None,
             )
             .unwrap_err();
 
@@ -13645,6 +13646,7 @@ mod tests {
             80,
             false,
             placement,
+            None,
         )
         .unwrap();
 
@@ -14889,6 +14891,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
                 Some("probe-x5f7f".into()),
             )
@@ -14935,6 +14938,7 @@ mod tests {
                 split: None,
                 here: false,
                 fallback: PlacementFallback::NewTab,
+                max_panes: None,
             },
             None,
         )
@@ -14975,6 +14979,7 @@ mod tests {
                     split: None,
                     here: false,
                     fallback: PlacementFallback::NewTab,
+                    max_panes: None,
                 },
                 Some("a;rm -rf".into()),
             )
