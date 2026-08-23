@@ -689,6 +689,13 @@ fn dispatch_opencode_serve_inner(
         cmd.current_dir(cwd);
         cmd.env("FNO_AGENT_SELF", name);
         cmd.env("FNO_AGENT_HARNESS", "opencode");
+        // A shell exporting both color knobs (NO_COLOR + FORCE_COLOR, common
+        // in prompt frameworks) crashes the opencode writer at module load
+        // (assertion trace in its color init, seen live 2026-08-23). The
+        // writer streams to a log file, where color is noise anyway. Strip
+        // both so the child starts from the CLI's own default.
+        cmd.env_remove("NO_COLOR");
+        cmd.env_remove("FORCE_COLOR");
         // The writer attaches to an authenticated serve; the run client reads
         // its password from this env (`-p` is the flag spelling).
         cmd.env("OPENCODE_SERVER_PASSWORD", &serve.token);

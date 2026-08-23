@@ -1332,6 +1332,77 @@ _NO_CHILD_POSSIBLE_EXIT = 127
 _UNKNOWN_ORPHAN_TTL_MS = 5 * 60 * 1000
 
 
+def _opencode_serve_spawn(
+    *,
+    name: str,
+    message: str,
+    cwd: Path,
+    from_name: str,
+    model: Optional[str],
+) -> str:
+    """Delegate an opencode bg spawn to the Rust serve lane; return short_id.
+
+    The lane (shared serve, session mint, writable-dirs grant, registry row,
+    detached writer) is implemented once, in the fno-agents runtime; forking it
+    here would fork the registry contract too. The subprocess runs while this
+    process holds the per-agent flock, which is safe: the serve dispatch takes
+    no per-agent lock, only its serve-boot sidecar.
+    """
+    import json
+
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_binary()
+    if binary is None:
+        raise DispatchAskError(
+            "opencode bg spawn needs the fno-agents runtime; install it "
+            "(cargo build --release -p fno-agents) or use --substrate pane",
+            exit_code=13,
+        )
+    argv = [
+        str(binary),
+        "spawn",
+        "--name",
+        name,
+        "--harness",
+        "opencode",
+        "--substrate",
+        "bg",
+        "--cwd",
+        str(cwd),
+        "--message",
+        message,
+    ]
+    if from_name:
+        argv += ["--from-name", from_name]
+    if model:
+        argv += ["--model", model]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired as exc:
+        raise DispatchAskError(
+            "opencode serve spawn timed out after 180s", exit_code=2
+        ) from exc
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise DispatchAskError(
+            f"opencode serve spawn failed: {detail}", exit_code=2
+        )
+    try:
+        receipt = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError) as exc:
+        raise DispatchAskError(
+            f"opencode serve spawn printed no receipt: {proc.stdout[:200]!r}",
+            exit_code=2,
+        ) from exc
+    short_id = receipt.get("short_id") or receipt.get("session_id")
+    if not short_id:
+        raise DispatchAskError(
+            f"opencode serve receipt carries no session id: {receipt!r}", exit_code=2
+        )
+    return str(short_id)
+
+
 def _claude_create_path(
     *,
     name: str,
@@ -2424,6 +2495,7 @@ def dispatch_spawn(
        b. Dispatch by (provider, once):
           - claude + once=True           -> exit 2 (refused)
           - claude + once=False          -> ``_claude_create_path``; return compact JSON
+          - opencode + bg                -> ``_opencode_serve_spawn`` (Rust serve lane)
           - codex + once=False           -> exit 13 (PTY daemon required)
           - codex + once=True            -> ``_codex_create_path``; teardown after
           - gemini                       -> refused as a retired provider
@@ -2581,10 +2653,15 @@ def dispatch_spawn(
     # 2. Provider validation. _check_known_provider raises ValueError, which
     # cmd_spawn does not catch (it only catches DispatchAskError) -- wrap it
     # so an unknown --provider exits 2 cleanly instead of tracebacking.
+    # opencode is admitted HERE only: it is not in the Python ask vocabulary
+    # (KNOWN_PROVIDERS), but its bg spawn is dispatchable -- 4b2 delegates to
+    # the Rust serve lane and refuses every other substrate itself, so this
+    # admission covers exactly the spawn surface, never ask.
     try:
         _check_known_provider(provider)
     except ValueError as exc:
-        raise DispatchAskError(str(exc), exit_code=2) from exc
+        if provider != "opencode":
+            raise DispatchAskError(str(exc), exit_code=2) from exc
 
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
@@ -2864,6 +2941,55 @@ def dispatch_spawn(
                         name=name,
                         provider="claude",
                         short_id=created.short_id,
+                        effective_message=effective_message,
+                    )
+
+                # 4b2. opencode bg: delegate to the Rust serve lane. This arm
+                # exists because node dispatch (x-84a8) forces spawn onto the
+                # Python parser (--node is Python-only), and without the arm an
+                # opencode bg spawn died on the retired-gemini fallthrough.
+                # Provenance flags are inert on bg (they ride the pane wrapper
+                # only), so delegation drops nothing; role, resume, and crown
+                # have no carrier on the serve row yet, so they are refused
+                # here rather than silently lost.
+                if provider == "opencode":
+                    if once or headless:
+                        raise DispatchAskError(
+                            "opencode one-shot spawns run through the Rust "
+                            "runtime's headless lane; the Python path carries "
+                            "--substrate bg only",
+                            exit_code=2,
+                        )
+                    if resume_session_id:
+                        raise DispatchAskError(
+                            "--resume is not carried on the opencode serve lane "
+                            "yet; resume on --substrate pane or spawn fresh",
+                            exit_code=2,
+                        )
+                    if launch_role is not None:
+                        raise DispatchAskError(
+                            "--role is not carried on the opencode serve lane; "
+                            f"spawn {name!r} without --role or on --substrate pane",
+                            exit_code=2,
+                        )
+                    short_id = _opencode_serve_spawn(
+                        name=name,
+                        message=message,
+                        cwd=cwd,
+                        from_name=from_name,
+                        model=model,
+                    )
+                    _emit_ev(
+                        "agent_ask_done",
+                        stage="dispatch",
+                        name=name,
+                        provider="opencode",
+                    )
+                    return SpawnResult(
+                        kind="created",
+                        name=name,
+                        provider="opencode",
+                        short_id=short_id,
                         effective_message=effective_message,
                     )
 

@@ -519,3 +519,167 @@ def test_spawn_not_in_rust_only_verb_help() -> None:
     assert "spawn" not in rr.RUST_ONLY_VERB_HELP, (
         "spawn has a Python implementation; it must not be in RUST_ONLY_VERB_HELP"
     )
+
+
+# ---------------------------------------------------------------------------
+# opencode bg: delegation to the Rust serve lane
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_opencode_bg_delegates_to_serve_lane(workdir, monkeypatch) -> None:
+    """A node-bearing opencode bg spawn reaches the serve lane.
+
+    --node forces spawn onto the Python parser (x-84a8: the Rust client cannot
+    parse provenance flags), and before this arm the provider fell through to
+    the retired-gemini refusal. The helper is stubbed; the real lane is proven
+    live by the Rust journey test."""
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.cli import agents_app
+
+    calls: list[dict] = []
+
+    def _fake_serve(**kwargs):
+        calls.append(kwargs)
+        return "ses_deleg1"
+
+    monkeypatch.setattr(dispatch_mod, "_opencode_serve_spawn", _fake_serve)
+
+    runner = _make_runner()
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn",
+            "--name",
+            "wkoc",
+            "-H",
+            "opencode",
+            "--substrate",
+            "bg",
+            "--node",
+            "x-abcd",
+            "--cwd",
+            str(workdir),
+            "run the node",
+        ],
+    )
+
+    assert result.exit_code == 0, (
+        f"expected exit 0, got {result.exit_code}\noutput: {result.output}"
+    )
+    assert "retired" not in result.output
+    assert calls, "serve delegation never ran"
+    assert calls[0]["name"] == "wkoc"
+    assert "run the node" in calls[0]["message"]
+    receipt = json.loads(_receipt_line(result.output))
+    assert receipt["short_id"] == "ses_deleg1"
+    assert receipt["harness"] == "opencode"
+
+
+def test_spawn_opencode_bg_once_refused(workdir) -> None:
+    """The serve lane is the bg substrate; a one-shot is refused, not fallen
+    through to the retired-gemini text."""
+    from fno.agents.cli import agents_app
+
+    runner = _make_runner()
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn",
+            "--name",
+            "wkoc",
+            "-H",
+            "opencode",
+            "--substrate",
+            "bg",
+            "--once",
+            "--cwd",
+            str(workdir),
+            "hello",
+        ],
+    )
+
+    assert result.exit_code == 2, (
+        f"expected exit 2, got {result.exit_code}\noutput: {result.output}"
+    )
+    assert "headless" in result.output
+
+
+def test_spawn_opencode_bg_role_refused(workdir) -> None:
+    """--role has no carrier on the serve row, so it is refused loudly rather
+    than silently dropped."""
+    from fno.agents.cli import agents_app
+
+    runner = _make_runner()
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn",
+            "--name",
+            "wkoc",
+            "-H",
+            "opencode",
+            "--substrate",
+            "bg",
+            "--role",
+            "archer",
+            "--cwd",
+            str(workdir),
+            "hello",
+        ],
+    )
+
+    assert result.exit_code == 2, (
+        f"expected exit 2, got {result.exit_code}\noutput: {result.output}"
+    )
+    assert "--role" in result.output
+
+
+def test_spawn_opencode_bg_resume_refused(workdir) -> None:
+    """Resume over the serve API is a filed follow-up; the spawn refuses
+    instead of pretending to resume."""
+    from fno.agents.cli import agents_app
+
+    runner = _make_runner()
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn",
+            "--name",
+            "wkoc",
+            "-H",
+            "opencode",
+            "--substrate",
+            "bg",
+            "--resume",
+            "ses_old123",
+            "--cwd",
+            str(workdir),
+            "hello",
+        ],
+    )
+
+    assert result.exit_code == 2, (
+        f"expected exit 2, got {result.exit_code}\noutput: {result.output}"
+    )
+    assert "--resume" in result.output
+
+
+def test_opencode_serve_spawn_without_binary_exits_13(workdir, monkeypatch) -> None:
+    """No fno-agents runtime on the box -> the same exit-13 shape as codex
+    plain spawn, naming the pane escape."""
+    from fno import rust_binary
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import DispatchAskError, _opencode_serve_spawn
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    with pytest.raises(DispatchAskError) as exc_info:
+        _opencode_serve_spawn(
+            name="wkoc",
+            message="hello",
+            cwd=workdir,
+            from_name="",
+            model=None,
+        )
+    assert exc_info.value.exit_code == 13
+    assert "--substrate pane" in str(exc_info.value)
+    assert dispatch_mod._opencode_serve_spawn is _opencode_serve_spawn

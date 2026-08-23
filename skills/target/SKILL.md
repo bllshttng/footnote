@@ -19,7 +19,7 @@ requires:
 **Get it done.** From idea to a green, reviewed PR.
 
 When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
-`codex posture: target uses the native Stop loop on the main thread; delegated work uses spawn_agent; bg dispatch is Claude-only.`
+`codex posture: target uses the native Stop loop on the main thread; delegated work uses spawn_agent; bg dispatch runs on claude and opencode.`
 
 ## The spine (happy path - read this first)
 
