@@ -5835,6 +5835,15 @@ _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S = 40.0
 # stalled demotion to the durable floor, never a hosted receipt (US4, LD4).
 _MUX_EXIT_TARGET_NOT_IDLE = 15
 
+# The server's PaneClaim refusal for a HELD claim names the holder pid
+# (crates/fno/src/server.rs "writer claim held by pid"); every other refusal
+# (not claim-eligible, dead pane) is a pane with no writer interlock, which
+# keeps the fail-open path. How long a held claim is waited out before the
+# send demotes to durable: a concurrent writer's burst is paste + settle
+# delay + CR, low single-digit seconds at the 800 ms table value.
+_MUX_CLAIM_HELD_MARKER = "held by pid"
+_MUX_PANE_CLAIM_WAIT_S = 4.0
+
 # Wake spawns key on the target session uuid, not on a fresh agent name: spawn
 # dedup scopes NAME, so two senders waking one session must derive the same name
 # to collide on its flock. Prefixed because a bare 8-hex name is refused.
@@ -6240,7 +6249,53 @@ def _mux_pane_send(
         except OSError:
             confirm_transcript = None
 
-    claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
+    def _claim_writer() -> tuple[bool, str]:
+        """Acquire the pane writer claim; return (ok, stderr detail).
+
+        The detail carries the server's refusal REASON: "held by pid" is
+        another live writer mid-burst; anything else (not claim-eligible,
+        dead pane) is a pane with no writer interlock at all."""
+        try:
+            proc = subprocess.run(
+                [fno_bin, "mux", "pane", "claim", pane, "--pid", str(os.getpid()),
+                 "--session", str(session)],
+                capture_output=True,
+                text=True,
+                timeout=_MAIL_INJECT_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"fno mux pane claim failed: {exc}", file=sys.stderr)
+            return False, ""
+        detail = (proc.stderr or "").strip()
+        if proc.returncode != 0 and detail:
+            print(f"fno mux pane claim exited {proc.returncode}: {detail}", file=sys.stderr)
+        return proc.returncode == 0, detail
+
+    claimed, claim_detail = _claim_writer()
+    if not claimed and _MUX_CLAIM_HELD_MARKER in claim_detail:
+        # x-4b0b review finding: the settle window between paste and CR is a
+        # single-writer window. A HELD claim means another writer is mid-burst
+        # on this pane; pasting now interleaves two envelopes under one CR,
+        # which submits both concatenated. Wait out the concurrent burst, then
+        # demote to durable rather than interleave. A refusal that is NOT a
+        # held claim falls through to the fail-open send below: a pane
+        # without the writer interlock never had serialization to lose.
+        deadline = time.monotonic() + _MUX_PANE_CLAIM_WAIT_S
+        while (
+            not claimed
+            and _MUX_CLAIM_HELD_MARKER in claim_detail
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.25)
+            claimed, claim_detail = _claim_writer()
+        if not claimed and _MUX_CLAIM_HELD_MARKER in claim_detail:
+            print(
+                f"mux pane {pane} send demoted to durable: writer claim held "
+                f"by another writer past {_MUX_PANE_CLAIM_WAIT_S}s; refusing "
+                f"to interleave envelopes",
+                file=sys.stderr,
+            )
+            return False
     try:
         sent = _paste_then_submit()
         if sent and confirm:

@@ -158,6 +158,15 @@ fn wrong_capability_entry_is_a_named_failure() {
         "submit_keys = [\"unsupported\"]",
         1,
     );
+    // x-4b0b: agy now carries a real (nonzero) settle delay, and the contract
+    // parser refuses an unsupported submit contract with a nonzero delay.
+    // Zero it so the mutated contract still parses and this test keeps
+    // exercising validate_submit_claims, not the parser's own rejection.
+    let section = section.replacen(
+        "send_keys_enter_delay_ms = 800",
+        "send_keys_enter_delay_ms = 0",
+        1,
+    );
     let bad_toml = format!("{prefix}{section}");
     let contract = HarnessContract::parse(&bad_toml).unwrap();
     let mut observations = BTreeMap::new();

@@ -64,17 +64,32 @@ def _mux_entry(name: str = "muxed", provider: str = "claude"):
 
 
 class FakeMux:
-    """Record `fno mux pane <verb> ...` calls; script per-verb exit codes."""
+    """Record `fno mux pane <verb> ...` calls; script per-verb exit codes.
 
-    def __init__(self, fail_verbs: set[str] | None = None) -> None:
+    ``fail_stderr`` overrides the refusal text for a verb (the pane-claim gate
+    reads it); ``fail_times`` fails a verb for the first N calls (a held claim
+    that clears after a retry)."""
+
+    def __init__(
+        self,
+        fail_verbs: set[str] | None = None,
+        fail_stderr: dict[str, str] | None = None,
+        fail_times: dict[str, int] | None = None,
+    ) -> None:
         self.calls: list[tuple[list[str], str | None]] = []
         self.fail_verbs = fail_verbs or set()
+        self.fail_stderr = fail_stderr or {}
+        self.fail_times = fail_times or {}
 
     def __call__(self, argv, input=None, **kwargs):
         verb = argv[3]
         self.calls.append((list(argv), input))
-        rc = 1 if verb in self.fail_verbs else 0
-        return subprocess.CompletedProcess(argv, rc, "", "boom" if rc else "")
+        times = self.fail_times.get(verb)
+        if times is not None and times > 0:
+            self.fail_times[verb] = times - 1
+        rc = 1 if verb in self.fail_verbs or (times is not None and times > 0) else 0
+        stderr = (self.fail_stderr.get(verb) or "boom") if rc else ""
+        return subprocess.CompletedProcess(argv, rc, "", stderr)
 
 
 @pytest.fixture(autouse=True)
@@ -147,6 +162,40 @@ def test_unguarded_claim_refusal_is_fail_open(monkeypatch) -> None:
     assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is True
     verbs = [c[0][3] for c in fake.calls]
     assert verbs == ["claim", "send", "send"]
+
+
+def test_held_writer_claim_is_waited_out_then_proceeds(monkeypatch) -> None:
+    # x-4b0b review: a HELD claim means another writer is mid-burst on this
+    # pane. The send waits for the burst to clear instead of pasting a second
+    # envelope under the holder's (the settle window between paste and CR is
+    # a single-writer window).
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux(
+        fail_times={"claim": 2},
+        fail_stderr={"claim": "pane 7 writer claim held by pid 999"},
+    )
+    _patch_mux(monkeypatch, fake)
+    assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is True
+    verbs = [c[0][3] for c in fake.calls]
+    assert verbs == ["claim", "claim", "claim", "send", "send", "release"]
+
+
+def test_held_writer_claim_past_the_wait_demotes_without_pasting(monkeypatch) -> None:
+    # A claim still held past the wait demotes to durable: no paste, no CR,
+    # no interleaved envelopes.
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux(
+        fail_verbs={"claim"},
+        fail_stderr={"claim": "pane 7 writer claim held by pid 999"},
+    )
+    _patch_mux(monkeypatch, fake)
+    monkeypatch.setattr(dispatch_mod, "_MUX_PANE_CLAIM_WAIT_S", 0.0)
+    assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is False
+    verbs = [c[0][3] for c in fake.calls]
+    assert verbs == ["claim"]
 
 
 def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None:
