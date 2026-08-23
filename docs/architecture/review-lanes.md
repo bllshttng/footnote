@@ -17,6 +17,16 @@ The obligation to use one of these lanes on a code payload is enforced at the st
 This doc is the lane menu; the gate is the authority.
 Opt out with `config.review.self_review_required = false`.
 
+Who the floor applies to: a harness with a native review verb floors.
+A KNOWN verbless harness (gemini/agy) does not, because no native verb there can satisfy it.
+A run that cannot be attributed also floors: absent markers, ambiguous markers, or no target manifest.
+Ambiguity about who authored the change is not permission to skip its review.
+The Python merge gate attributes the run from the target manifest's `harness:` field first, then a single-family ambient resolve.
+The stop gate attributes from its ambient markers, and `--author-harness none` is the explicit hermetic opt-out.
+Before this rule the Python half read only ambient markers.
+Two families meant "no floor", so a claude session started from a codex shell merged code PRs with zero review.
+That is the default state of any session under a multi-CLI shell.
+
 ## Lane 0: the provider budget decides the route before any lane runs
 
 A lane is how a review is triggered. This is about how WIDE it is allowed to be, and it is decided before any of the lanes below.
@@ -293,6 +303,14 @@ That is what makes a rebase carry and a one-line code fix die.
 Four separate places ask "has this reviewer reviewed this code".
 
 All four go through the predicate: the coverage count, the attestation scan, the presence check behind `missing_bots`, and `finalize`'s arming check.
+
+The Python merge gate's recheck (`_verdicts_with_current_freshness` in `cli/src/fno/pr/_reviews.py`) is the fifth.
+It used to answer with ancestry alone, so it killed every `carried_*` verdict the predicate had minted the moment a rebase rewrote the sha.
+That was the operator's daily rebase treadmill: one full re-review per merged sibling PR.
+Its freshness test is now ancestry OR content.
+The PR delta at the reviewed sha and at HEAD must carry the same `git patch-id --stable` over `base...sha` three-dot diffs.
+The base is the first resolvable of `origin/main`/`origin/master`.
+Unreadable on either side is stale, the same fail-closed contract as the predicate.
 
 Fix one and leave the others on a bare equality, and the gate stays exactly as tight as before.
 The softening is then purely decorative.
