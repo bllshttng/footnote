@@ -187,6 +187,10 @@ def _serve(row: dict, *, stale: bool) -> int:
         out["green"] = False
         out["settled"] = False
         out["ready"] = False
+        # The failure diagnosis goes with it: a payload that declares the
+        # check set unreadable must not also print `failing:` slots and
+        # per-check notes asserting a diagnosis it just called unverifiable.
+        out.pop("failures", None)
         out["stale_reason"] = (
             "secondary rate limit backoff - the check set is unreadable, so "
             "this is the last cached row degraded to unknown, not a verdict"

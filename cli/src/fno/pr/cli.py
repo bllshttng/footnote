@@ -141,23 +141,20 @@ def wait(
     interval: str = typer.Option("60", "--interval", help="Poll interval in seconds (minimum 5)."),
 ) -> None:
     from fno.pr import _wait
-    from fno.pr._proc import ToolMissing
 
-    try:
-        rc = _wait.main(
-            [
-                str(pr_number),
-                "--until",
-                until,
-                "--timeout",
-                timeout,
-                "--interval",
-                interval,
-            ]
-        )
-    except ToolMissing as exc:
-        typer.echo(f"fno do pr wait: {exc.tool} not found on PATH", err=True)
-        rc = 127
+    # No ToolMissing handler here: `_wait.main` maps it to 127 itself, and a
+    # second handler for the same exception is a copy that drifts.
+    rc = _wait.main(
+        [
+            str(pr_number),
+            "--until",
+            until,
+            "--timeout",
+            timeout,
+            "--interval",
+            interval,
+        ]
+    )
     raise typer.Exit(code=rc)
 
 

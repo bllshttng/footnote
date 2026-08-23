@@ -28,7 +28,7 @@ import json
 import re
 from typing import Callable, Optional, Sequence
 
-from fno.pr._logs import _job_ref
+from fno.pr._logs import _check_name, _job_ref
 from fno.pr._proc import run
 
 # `smoke: step failed, stopping (fail-fast): <name>` (test_cmd.py), plus the
@@ -161,8 +161,18 @@ def unreached_job_steps(steps: Sequence[dict]) -> list[str]:
     return out
 
 
-def _check_name(check: dict) -> str:
-    return str(check.get("name") or check.get("context") or "(unnamed check)")
+def _fetch_job_steps(
+    owner: str, repo: str, job_id: str, cwd: Optional[str], runner: Callable
+) -> Sequence[dict]:
+    """The job object's `steps[]`, or [] on any failure (detail is additive)."""
+    job = runner(["gh", "api", f"repos/{owner}/{repo}/actions/jobs/{job_id}"], cwd=cwd)
+    if not job.ok:
+        return []
+    try:
+        steps = json.loads(job.stdout).get("steps")
+    except json.JSONDecodeError:
+        return []
+    return steps if isinstance(steps, list) else []
 
 
 def collect_failures(
@@ -172,8 +182,11 @@ def collect_failures(
 ) -> list[dict]:
     """Detail entries for the failing rollup rows, loudest facts first.
 
-    Per check: two REST reads (the job object for `steps[]`, its log text).
-    A row that is not an Actions job (a commit StatusContext, e.g.
+    Per check: the log text first, and the job object (`steps[]`) ONLY when
+    the log cannot answer on its own - the canonical smoke-red path (a runner
+    step-failed line plus the planned-step prologue) needs nothing else, so
+    the second read stays off the hot polling path this module serves. A row
+    that is not an Actions job (a commit StatusContext, e.g.
     `stacked-base-guard`) is named with no log claim; a fetch failure names
     its class rather than vanishing - an omitted check reads as passed, which
     is the exact lie this module exists to stop. Capped at
@@ -189,17 +202,11 @@ def collect_failures(
             continue
         owner, repo, job_id = ref
         entry["job_id"] = job_id
-        steps: Sequence[dict] = []
-        job = runner(["gh", "api", f"repos/{owner}/{repo}/actions/jobs/{job_id}"], cwd=cwd)
-        if job.ok:
-            try:
-                steps = json.loads(job.stdout).get("steps") or []
-            except json.JSONDecodeError:
-                steps = []
         log_res = runner(["gh", "api", f"repos/{owner}/{repo}/actions/jobs/{job_id}/logs"], cwd=cwd)
         log_text = log_res.stdout if log_res.ok else ""
         if not log_res.ok:
             entry["detail"] = f"log unavailable: {(log_res.stderr or 'gh error').strip()[:160]}"
+        steps: Sequence[dict] = []
         if log_text:
             step = failing_step(log_text)
             if step:
@@ -210,26 +217,36 @@ def collect_failures(
             runner_unreached = unreached_runner_steps(log_text)
             if runner_unreached:
                 entry["unreached_steps"] = runner_unreached
-            elif not step and steps:
+            elif not step:
                 # No runner lines in this log: it is a plain multi-step job,
                 # so the GitHub steps after the failed one are the unreached
                 # work. (A smoke shard's wrapper step names no runner step,
                 # and its job-level later steps are only cleanup - which
                 # unreached_job_steps already excludes.)
-                job_unreached = unreached_job_steps(steps)
-                if job_unreached:
-                    entry["unreached_steps"] = job_unreached
-                failed_job_step = next(
-                    (
-                        str(s.get("name"))
-                        for s in steps
-                        if str(s.get("conclusion") or "").lower() == "failure"
-                    ),
-                    None,
-                )
-                if failed_job_step:
-                    entry.setdefault("step", failed_job_step)
-        elif steps:
+                steps = _fetch_job_steps(owner, repo, job_id, cwd, runner)
+                if steps:
+                    job_unreached = unreached_job_steps(steps)
+                    if job_unreached:
+                        entry["unreached_steps"] = job_unreached
+                    failed_job_step = next(
+                        (
+                            str(s.get("name"))
+                            for s in steps
+                            if str(s.get("conclusion") or "").lower() == "failure"
+                        ),
+                        None,
+                    )
+                    if failed_job_step:
+                        entry.setdefault("step", failed_job_step)
+                        if "first_error" not in entry:
+                            # Same block scan as the runner path, against the
+                            # failed JOB step's group: a plain Actions job's
+                            # error also lives before the failure, in-output.
+                            err = first_error(log_text, failed_job_step)
+                            if err:
+                                entry["first_error"] = err
+        else:
+            steps = _fetch_job_steps(owner, repo, job_id, cwd, runner)
             job_unreached = unreached_job_steps(steps)
             if job_unreached:
                 entry["unreached_steps"] = job_unreached

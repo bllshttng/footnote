@@ -96,13 +96,11 @@ def wait_status(
         rc, payload, out_text, err_text = _poll(pr, cwd)
         done = payload.get("green") if until == "green" else payload.get("settled")
         if done:
-            sys.stdout.write(out_text)
-            sys.stderr.write(err_text)
+            _emit(out_text, err_text)
             return rc
         now = clock()
         if now + interval > deadline:
-            sys.stdout.write(out_text)
-            sys.stderr.write(err_text)
+            _emit(out_text, err_text)
             sys.stderr.write(
                 f"wait: still not {until} after {int(timeout)}s; last verdict "
                 f"{payload.get('verdict')}. Re-arm the wait or read the PR.\n"
@@ -111,10 +109,24 @@ def wait_status(
         sleeper(interval)
 
 
+def _emit(out_text: str, err_text: str) -> None:
+    """Re-emit the final tick's captured output plus the spend counter.
+
+    The gh-call line is the one promise that separates this verb from the
+    hand-rolled loops it replaces: the spender sees its spend at exit.
+    """
+    from fno.pr import _proc
+
+    sys.stdout.write(out_text)
+    sys.stderr.write(err_text)
+    sys.stderr.write(f"note: {_proc.GH_CALLS} gh call(s) this invocation\n")
+
+
 def main(argv: "list[str]") -> int:
     args = [a for a in argv if not str(a).startswith("-")]
     until = "settled"
     timeout_s, interval_s = "30m", "60"
+    unknown: "list[str]" = []
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -137,12 +149,21 @@ def main(argv: "list[str]") -> int:
             interval_s = a.split("=", 1)[1]
             i += 1
         else:
+            # An unrecognized flag is REFUSED, never dropped: a silent drop
+            # hands the caller a bound or condition they did not choose (the
+            # same discipline `_status.main` enforces for its own flags).
+            if a.startswith("-"):
+                unknown.append(a)
             i += 1
+    usage = (
+        "usage: fno do pr wait <pr-number> [--until settled|green] "
+        "[--timeout 30m] [--interval 60]\n"
+    )
+    if unknown:
+        sys.stderr.write(f"fno do pr wait: unrecognized flag(s): {', '.join(unknown)}\n{usage}")
+        return 2
     if len(args) != 1 or not str(args[0]).strip().isdigit():
-        sys.stderr.write(
-            "usage: fno do pr wait <pr-number> [--until settled|green] "
-            "[--timeout 30m] [--interval 60]\n"
-        )
+        sys.stderr.write(usage)
         return 2
     timeout = parse_duration(timeout_s)
     interval = parse_duration(interval_s)

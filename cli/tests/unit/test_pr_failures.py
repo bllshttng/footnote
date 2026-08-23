@@ -248,3 +248,39 @@ def test_planned_step_lines_round_trip_through_the_parser() -> None:
         "Pytest (unit + integration)",
         commad,
     ]
+
+
+def test_canonical_smoke_red_path_fetches_no_job_object() -> None:
+    """The runner log answers alone (step-failed line + planned prologue), so
+    the per-check cost is ONE read: the job object is the fallback, and the
+    hot polling path never pays for it."""
+    calls: list[str] = []
+    entries = _failures.collect_failures(
+        [_actions_check()], runner=_fake_runner(_RED_LOG, [], calls=calls)
+    )
+    assert entries[0]["step"] == "Pytest (unit + integration)"
+    assert calls and all(c.endswith("/logs") for c in calls), calls
+
+
+def test_plain_multi_step_job_reads_step_and_unreached_from_steps() -> None:
+    """A log with no runner markers (a plain Actions job) falls back to the
+    job object: the failed step's name and the steps after it."""
+    plain_log = (
+        "::group::cargo test --all-targets\n"
+        "collected\n"
+        "Traceback (most recent call last)\n"
+        "::endgroup::\n"
+    )
+    steps = [
+        {"name": "Set up job", "conclusion": "success"},
+        {"name": "cargo test --all-targets", "conclusion": "failure"},
+        {"name": "Schema parity check", "conclusion": "skipped"},
+        {"name": "Complete job", "conclusion": "success"},
+    ]
+    entries = _failures.collect_failures(
+        [_actions_check("cargo")], runner=_fake_runner(plain_log, steps)
+    )
+    e = entries[0]
+    assert e["step"] == "cargo test --all-targets"
+    assert e["first_error"] and "Traceback" in e["first_error"]
+    assert e["unreached_steps"] == ["Schema parity check"]

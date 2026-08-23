@@ -397,3 +397,13 @@ def test_auth_failure_names_its_class():
     reason = _rest._rest_reason(Res())
     assert "AUTHENTICATION" in reason
     assert "gh auth login" in reason
+
+
+def test_not_found_names_the_pr_number_as_the_thing_to_check() -> None:
+    class Res:
+        stderr = "gh: Not Found (https://api.github.com/repos/o/r/pulls/999)"
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    assert "not found" in reason.lower()
+    assert "Check the PR number" in reason

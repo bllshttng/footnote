@@ -97,6 +97,12 @@ def _rest_reason(res) -> str:
             " from this read is not content. Pause and retry - do not poll"
             " harder, which deepens the condition."
         )
+    if "not found" in text.lower() or "404" in text:
+        base = lines[0] if lines else "gh api failed with no message"
+        return (
+            base + " | not found. Check the PR number (and that this branch"
+            " still has an open PR); this is not a verdict about any PR."
+        )
     return lines[0] if lines else "gh api failed with no message"
 
 

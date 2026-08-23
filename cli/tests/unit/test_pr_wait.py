@@ -59,6 +59,9 @@ def test_settled_green_exits_the_status_code(monkeypatch, capsys) -> None:
     assert rc == 0
     out = capsys.readouterr()
     assert '"settled": true' in out.out  # the final payload is re-emitted
+    # The spend line is the promise that separates the verb from the loops it
+    # replaces: the spender sees its spend at exit.
+    assert "gh call(s) this invocation" in out.err
 
 
 def test_settled_red_exits_one_not_two(monkeypatch, capsys) -> None:
@@ -114,3 +117,12 @@ def test_unknown_condition_and_bad_args_refuse(monkeypatch, capsys) -> None:
     assert _wait.main(["9", "--until", "settled", "--timeout", "nope"]) == 2
     capsys.readouterr()
     assert _wait.main(["not-a-pr"]) == 2
+    capsys.readouterr()
+
+
+def test_an_unknown_flag_is_refused_never_dropped(capsys) -> None:
+    """A typo'd flag must not fall back to a bound the caller never chose -
+    the same refuse-don't-drop discipline `fno do pr status` enforces."""
+    assert _wait.main(["9", "--timeou", "30m"]) == 2
+    err = capsys.readouterr().err
+    assert "unrecognized flag" in err and "--timeou" in err
