@@ -20862,13 +20862,18 @@ mod tests {
         };
         let click = |view: &mut View| {
             let (row, col) = close_cell(view);
+            let press = crate::mouse::MouseReport {
+                row,
+                col,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            };
+            assert!(modal_mouse(view, press));
             assert!(modal_mouse(
                 view,
                 crate::mouse::MouseReport {
-                    row,
-                    col,
-                    kind: MouseKind::Press(MouseButton::Left),
-                    shift: false,
+                    kind: MouseKind::Release(MouseButton::Left),
+                    ..press
                 },
             ));
         };
