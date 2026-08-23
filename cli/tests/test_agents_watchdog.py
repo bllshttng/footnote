@@ -1675,30 +1675,20 @@ def test_mail_digest_project_recipient(monkeypatch, tmp_path):
     assert "--to-project" in seen["argv"] and "fno" in seen["argv"]
 
 
-def test_machine_report_uses_internal_transport_for_long_digest(monkeypatch, tmp_path):
+def test_machine_report_queues_from_unregistered_cwd(monkeypatch, tmp_path):
     import json as _json
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_INBOX_ROOT", str(tmp_path / "agents"))
 
     (tmp_path / "watchdog-sweep.json").write_text(
         _json.dumps({"source": "tick", "at": "x", "counts": {}, "signature": ""})
     )
     monkeypatch.setattr(watchdog, "sweep_path", lambda: tmp_path / "watchdog-sweep.json")
-    sent = {}
-
-    from fno.agents import dispatch
-
-    def internal_send(name, message, **kwargs):
-        sent.update(name=name, message=message, kwargs=kwargs)
-        from fno.agents.dispatch import DispatchSendResult
-
-        return DispatchSendResult(msg_id="msg-4", delivery="durable", reason="offline")
-
-    monkeypatch.setattr(dispatch, "dispatch_send", internal_send)
-    from fno.inbox import store
-
-    def no_project(**_kwargs):
-        raise store.ProjectIdentificationError("unregistered watchdog cwd")
-
-    monkeypatch.setattr(store, "resolve_project", no_project)
+    unregistered = tmp_path / "runner"
+    unregistered.mkdir()
+    monkeypatch.chdir(unregistered)
     payload = {
         "verdicts": [
             {
@@ -1714,14 +1704,15 @@ def test_machine_report_uses_internal_transport_for_long_digest(monkeypatch, tmp
         "counts": {WAKE: 7},
     }
 
-    ok, receipt = watchdog.mail_digest(payload, "king")
+    ok, receipt = watchdog.mail_digest(payload, "project:fno")
 
     assert ok
-    assert receipt == "msg-4 queued (durable) [offline]"
-    assert sent["name"] == "king"
-    assert sent["kwargs"]["budget_enforce"] is False
-    assert "from_name" not in sent["kwargs"]
-    assert len(sent["message"].split()) > 80
+    assert "queued (durable)" in receipt
+    from fno.bus.log import iter_messages
+
+    [message] = [row for row in iter_messages() if row.to == "fno"]
+    assert message.to_kind == "project"
+    assert len(message.body.split()) > 80
 
 
 def test_terminal_harness_residue_mails_even_when_every_verdict_is_leave(

@@ -1987,26 +1987,41 @@ def _send_machine_report(
         # existing neutral sender instead of dropping the alert at resolution.
         sender = None
 
-    dispatch_kwargs: dict[str, object] = {"budget_enforce": False}
-    if sender is not None:
-        dispatch_kwargs["from_name"] = sender
-
     try:
         if to.startswith("project:"):
-            result = dispatch_send_to_project(
-                to[len("project:"):],
-                body,
-                cwd=Path.cwd(),
-                **dispatch_kwargs,
-            )
+            if sender is None:
+                result = dispatch_send_to_project(
+                    to[len("project:"):],
+                    body,
+                    cwd=Path.cwd(),
+                    budget_enforce=False,
+                )
+            else:
+                result = dispatch_send_to_project(
+                    to[len("project:"):],
+                    body,
+                    cwd=Path.cwd(),
+                    from_name=sender,
+                    budget_enforce=False,
+                )
         else:
-            result = dispatch_send(
-                name=to,
-                message=body,
-                provider=None,
-                cwd=Path.cwd(),
-                **dispatch_kwargs,
-            )
+            if sender is None:
+                result = dispatch_send(
+                    name=to,
+                    message=body,
+                    provider=None,
+                    cwd=Path.cwd(),
+                    budget_enforce=False,
+                )
+            else:
+                result = dispatch_send(
+                    name=to,
+                    message=body,
+                    provider=None,
+                    cwd=Path.cwd(),
+                    from_name=sender,
+                    budget_enforce=False,
+                )
     except DispatchAskError as exc:
         return False, str(exc)
 
