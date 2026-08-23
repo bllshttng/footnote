@@ -91,6 +91,41 @@ fn wait_for_event(home: &AgentsHome, needle: &str, budget: Duration) {
     panic!("event never appeared within {budget:?}: {needle}");
 }
 
+fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, budget: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < budget {
+        let events: Vec<serde_json::Value> = std::fs::read_to_string(home.events_jsonl())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let started = events.iter().position(|event| {
+            event["type"] == "daemon_started"
+                && event["data"]["pid"].as_u64() == Some(successor_pid as u64)
+        });
+        let sweeps: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                (event["type"] == "startup_reconcile_done").then_some(index)
+            })
+            .collect();
+        if let Some(started) = started {
+            if let Some(successor_sweep) = sweeps.get(1) {
+                assert!(
+                    started < *successor_sweep,
+                    "daemon successor {successor_pid} started after its startup sweep; event_order={events:?}"
+                );
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "successor {successor_pid} did not produce a positive daemon_started-before-startup_reconcile_done order within {budget:?}"
+    );
+}
+
 /// Every pid that ever reached the accept loop under this home.
 ///
 /// A daemon emits `daemon_started` with its own pid once it is serving, so the
@@ -517,12 +552,12 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
 
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
+    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
 
     // The storm: a restart and a burst of ordinary client verbs at the same
     // moment. Every verb routes through `ensure_daemon`, which is the site that
     // used to treat a failed connect as licence to fork.
     const CONCURRENT_VERBS: u64 = 8;
-    let storm_started = Instant::now();
     let restart = {
         let h = home.clone();
         let b = daemon_bin.clone();
@@ -584,7 +619,11 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
         "the restarted daemon rejected the positive probe: {:?}",
         post_restart.error()
     );
-    let storm_took = storm_started.elapsed();
+    wait_for_successor_reconcile_order(&home, outcome.new_pid, Duration::from_secs(10));
+    println!(
+        "daemon_restart_served_during_sweep successor_pid={} rows={} answered={} teardown_casualties={}",
+        outcome.new_pid, rows, answered, teardown_casualties
+    );
     // The teardown shapes, named exhaustively so that anything else still
     // fails this test. All three describe one event: the incumbent's socket
     // went away with a request in flight. Which one surfaces depends on where
@@ -601,22 +640,6 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
              racing the teardown: {f}"
         );
     }
-    // The discriminating assertion, and the reason it is a LATENCY bound rather
-    // than a success count or a process count. Neither of those can fail on the
-    // old code: the flock already forced one supervisor, and the client's 10s
-    // budget still connected eventually, so both stayed green over a successor
-    // nobody could talk to for seconds. Only the time to answer moves. Measured
-    // on this test: 6.2s with the sweep awaited before accept, 176ms with it
-    // concurrent. Pre-fix the successor cannot answer before its own 3s seam
-    // elapses, so any bound under 3s separates the two. 2.5s takes the widest
-    // margin available on a slow runner while still failing the old ordering.
-    assert!(
-        storm_took < Duration::from_millis(2500),
-        "a restart storm over {rows} rows must clear in under 2.5s; took \
-         {storm_took:?} ({answered} raced verbs answered, {teardown_casualties} \
-         raced teardown, failures: {failures:?})"
-    );
-
     assert_eq!(
         outcome.old_pid,
         Some(incumbent_pid),
