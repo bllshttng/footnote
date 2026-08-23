@@ -55,7 +55,7 @@ def _read_ps() -> tuple[str | None, str | None]:
 
 def _roster_count() -> tuple[int | None, str | None]:
     result = subprocess.run(
-        [_fno_binary(), "agents", "list", "--json"],
+        [_fno_binary(), "agents", "list", "--status", "live", "--json"],
         capture_output=True,
         text=True,
         check=False,

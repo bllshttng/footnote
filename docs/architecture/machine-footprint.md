@@ -8,9 +8,9 @@ The CPU number is `sustained_cpu_cores`. It comes from `ps -Ao pid,etime,%cpu,rs
 
 A process with `etime` below `SUSTAINED_FLOOR_SECONDS` (default 30 seconds) contributes to `transient_call_count` and `process_count`, but not sustained CPU. This prevents one-shot Python CLI startup cost from appearing as daemon load.
 
-Only rows whose command starts with the `fno`, `fno-py`, `fno-agents` or `fno-agents-daemon` executable are attributable to fleet overhead. `claude` worker processes are the work the fleet runs, not the fleet's own control-plane cost, so they are excluded.
+Rows whose command starts with the `fno`, `fno-py`, `fno-agents`, `fno-agents-daemon` or `fno-agents-worker` executable are attributable to fleet overhead. Python-launched `fno-py` rows are also attributable. `claude` worker processes are the work the fleet runs, not the fleet's own control-plane cost, so they are excluded.
 
-The verb runs `ps` once with stdout redirected to a temporary file, then reads that file. It reads the process threshold from `fno agents list --json` and adds one daemon allowance. It never uses load average and never counts through a `ps | wc` or `ps | grep` pipeline. `--json` emits the same thresholds and measurements for automation.
+The verb runs `ps` once with stdout redirected to a temporary file, then reads that file. It reads live roster rows from `fno agents list --status live --json` and adds one daemon allowance. It never uses load average and never counts through a `ps | wc` or `ps | grep` pipeline. `--json` emits the same thresholds and measurements for automation.
 
 Exit codes are intentionally separate. `0` means both closure numbers are within threshold. `3` means at least one number is over budget. `4` means the instrument failed to read required data, including an unavailable roster or unparsed `ps` rows. A transient CLI burst does not produce exit 3 by itself.
 

@@ -2,8 +2,9 @@
 
 The parser receives one file-backed ``ps`` snapshot and never runs ``ps``
 itself. A row is fleet-attributable only when its command's executable is
-``fno``, ``fno-py``, ``fno-agents`` or ``fno-agents-daemon``. Worker sessions
-such as ``claude`` are deliberately outside this overhead measurement.
+``fno``, ``fno-py``, ``fno-agents``, ``fno-agents-daemon`` or
+``fno-agents-worker``. Python-launched ``fno-py`` is also attributable. Worker
+sessions such as ``claude`` are deliberately outside this overhead measurement.
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ from typing import NamedTuple
 
 
 SUSTAINED_FLOOR_SECONDS = 30
-_FNO_BINARIES = frozenset({"fno", "fno-py", "fno-agents", "fno-agents-daemon"})
+_FNO_BINARIES = frozenset(
+    {"fno", "fno-py", "fno-agents", "fno-agents-daemon", "fno-agents-worker"}
+)
 
 
 class Footprint(NamedTuple):
@@ -51,12 +54,17 @@ def _elapsed_seconds(value: str) -> int:
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
-def _binary_name(command: str) -> str | None:
+def _attributed_command(command: str) -> bool:
     try:
-        first = shlex.split(command)[0]
+        tokens = shlex.split(command)
     except (IndexError, ValueError):
-        return None
-    return Path(first).name
+        return False
+    if not tokens:
+        return False
+    names = [Path(token).name for token in tokens]
+    if names[0] in _FNO_BINARIES:
+        return True
+    return names[0].startswith("python") and "fno-py" in names[1:]
 
 
 def parse_footprint(
@@ -92,7 +100,7 @@ def parse_footprint(
             unparsed_lines += 1
             continue
 
-        if _binary_name(command) not in _FNO_BINARIES:
+        if not _attributed_command(command):
             continue
 
         process_count += 1

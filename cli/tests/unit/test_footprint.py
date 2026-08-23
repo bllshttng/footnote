@@ -69,3 +69,20 @@ def test_ac9_edge_high_cpu_burst_is_transient_not_sustained() -> None:
     assert reading.transient_call_count == 3
     assert reading.process_count == 3
     assert reading.top == []
+
+
+def test_review_p2_python_launched_fno_and_agents_worker_are_attributed() -> None:
+    reading = parse_footprint(
+        """\
+        PID ELAPSED %CPU RSS COMMAND
+        401 01:00:00 12.0 1024 /opt/python/bin/python /opt/fno-py agents list --json
+        402 01:00:00 18.0 2048 fno-agents-worker --stream
+        """,
+    )
+
+    assert reading.process_count == 2
+    assert reading.sustained_cpu_cores == 0.3
+    assert reading.top == [
+        (18.0, "fno-agents-worker --stream"),
+        (12.0, "/opt/python/bin/python /opt/fno-py agents list --json"),
+    ]

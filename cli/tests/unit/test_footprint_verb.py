@@ -51,7 +51,7 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(monkeypatch) -> None:
     assert "transient calls: 1" in result.stdout
     assert [call for call in calls if call[0] in {"ps", "/usr/local/bin/fno"}] == [
         ["ps", "-Ao", "pid,etime,%cpu,rss,command"],
-        ["/usr/local/bin/fno", "agents", "list", "--json"],
+        ["/usr/local/bin/fno", "agents", "list", "--status", "live", "--json"],
     ]
 
 
@@ -128,7 +128,14 @@ def test_ac5_edge_roster_failure_exits_four_without_a_default_threshold(monkeypa
     assert result.exit_code == 4
     assert "roster unavailable" in result.stdout
     assert "processes:" not in result.stdout
-    assert calls[-1] == ["/usr/local/bin/fno", "agents", "list", "--json"]
+    assert calls[-1] == [
+        "/usr/local/bin/fno",
+        "agents",
+        "list",
+        "--status",
+        "live",
+        "--json",
+    ]
 
 
 def test_ac7_edge_json_contains_thresholds_and_exit_meaning(monkeypatch) -> None:
