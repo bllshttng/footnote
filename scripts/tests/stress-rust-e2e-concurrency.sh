@@ -86,7 +86,7 @@ build_test_binary daemon_e2e crates/fno-agents/Cargo.toml daemon_e2e
 build_test_binary persistence crates/fno/Cargo.toml persistence
 build_test_binary workspace_persistence_e2e crates/fno/Cargo.toml workspace_persistence_e2e
 
-echo "stress_setup=ready sha=$head_sha parallel_binaries=3 trials=$trials logs=$log_root"
+echo "stress_setup=ready sha=$head_sha parallel_binaries=3 per_binary_threads=1 trials=$trials logs=$log_root"
 failures=0
 for ((trial = 1; trial <= trials; trial++)); do
     if [[ "$(git rev-parse HEAD)" != "$head_sha" ]]; then
@@ -104,7 +104,7 @@ for ((trial = 1; trial <= trials; trial++)); do
             persistence) bin="$persistence_bin" ;;
             workspace_persistence_e2e) bin="$workspace_bin" ;;
         esac
-        "$bin" --nocapture --test-threads=16 >"$trial_dir/$key.log" 2>&1
+        "$bin" --nocapture --test-threads=1 >"$trial_dir/$key.log" 2>&1
         printf '%s\n' "$?" >"$trial_dir/$key.rc"
     }
 
