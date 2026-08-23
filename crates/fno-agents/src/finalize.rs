@@ -303,18 +303,10 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
     m
 }
 
-fn canonical_session_id(m: &ManifestFields) -> Result<Option<String>, &'static str> {
-    let Some(session_id) = m
-        .session_id
+fn canonical_session_id(m: &ManifestFields) -> Option<String> {
+    m.session_id
         .clone()
         .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(None);
-    };
-    if m.fno_id.is_some() && !crate::loopcheck::is_full_run_id(&session_id) {
-        return Err("invalid canonical fno_id; refusing to finalize");
-    }
-    Ok(Some(session_id))
 }
 
 // ── idempotency ─────────────────────────────────────────────────────────────
@@ -552,13 +544,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     };
     let m = parse_manifest_fields(&content);
-    let Some(session_id) = (match canonical_session_id(&m) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("finalize: {error}");
-            return 1;
-        }
-    }) else {
+    let Some(session_id) = canonical_session_id(&m) else {
         eprintln!("finalize: manifest has no session_id; skipping (cannot dedup)");
         return i32::from(delivery_ship);
     };
@@ -3632,12 +3618,12 @@ mod tests {
     }
 
     #[test]
-    fn finalize_rejects_an_invalid_canonical_fno_id() {
+    fn finalize_preserves_canonical_fno_id_for_legacy_writes() {
         let manifest =
             parse_manifest_fields("---\nfno_id: short-run\nsession_id: valid-fallback\n---\n");
         assert_eq!(
             canonical_session_id(&manifest),
-            Err("invalid canonical fno_id; refusing to finalize")
+            Some("short-run".to_string())
         );
     }
 
