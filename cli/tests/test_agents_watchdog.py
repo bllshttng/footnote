@@ -1675,6 +1675,46 @@ def test_mail_digest_project_recipient(monkeypatch, tmp_path):
     assert "--to-project" in seen["argv"] and "fno" in seen["argv"]
 
 
+def test_machine_report_queues_from_unregistered_cwd(monkeypatch, tmp_path):
+    import json as _json
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_INBOX_ROOT", str(tmp_path / "agents"))
+
+    (tmp_path / "watchdog-sweep.json").write_text(
+        _json.dumps({"source": "tick", "at": "x", "counts": {}, "signature": ""})
+    )
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: tmp_path / "watchdog-sweep.json")
+    unregistered = tmp_path / "runner"
+    unregistered.mkdir()
+    monkeypatch.chdir(unregistered)
+    payload = {
+        "verdicts": [
+            {
+                "row_id": f"row-{i}",
+                "name": f"worker-{i}",
+                "state": "blocked",
+                "verdict": WAKE,
+                "basis": "a measured watchdog basis with enough detail to exceed the authored word cap",
+                "action": "resume",
+            }
+            for i in range(7)
+        ],
+        "counts": {WAKE: 7},
+    }
+
+    ok, receipt = watchdog.mail_digest(payload, "project:fno")
+
+    assert ok
+    assert "queued (durable)" in receipt
+    from fno.bus.log import iter_messages
+
+    [message] = [row for row in iter_messages() if row.to == "fno"]
+    assert message.to_kind == "project"
+    assert len(message.body.split()) > 80
+
+
 def test_terminal_harness_residue_mails_even_when_every_verdict_is_leave(
     monkeypatch, tmp_path
 ):
