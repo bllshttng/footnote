@@ -18,8 +18,9 @@ Verified facts (2026-07-13):
 - permission_bypass tokens mirror the provider adapters (claude.py,
   codex.py, gemini.py) - the flag a headless/bg worker needs so it never wedges
   on an approval prompt (the concrete cause of the manual-approve pain).
-- bg is claude-only (``claude --bg``); every other harness falls back to
-  ``headless`` (Locked Decision 3, HARNESSES.md).
+- bg is claude (``claude --bg``) + opencode (a persistent session on a shared
+  ``opencode serve``, x-d9f9); every other harness falls back to ``headless``
+  (Locked Decision 3, HARNESSES.md).
 - stop_hook is native for all THREE dispatchable harnesses: the autonomous
   target loop's stop-equivalent hook fires under ``claude -p`` (verified),
   ``codex exec`` (CODEX_THREAD_ID), and ``gemini -p`` natively - so NO dispatch
@@ -402,8 +403,8 @@ def permission_response_keys(harness: str, action: str, rule_id: str) -> list[st
 
 
 def substrate_default(harness: str) -> str:
-    """Per-harness default substrate: ``bg`` where supported (claude), else
-    ``headless``. Pane permission is independent from substrate preference."""
+    """Per-harness default substrate: ``bg`` where supported (claude, opencode),
+    else ``headless``. Pane permission is independent from substrate preference."""
     return "bg" if capabilities(harness)["bg"] else "headless"
 
 
@@ -526,7 +527,7 @@ def resolve_dispatch(
     if chosen_substrate == "bg" and not caps["bg"]:
         raise DispatchResolveError(
             f"substrate 'bg' is unsupported on harness {chosen_harness!r} "
-            f"(bg is claude-only); use 'headless'"
+            f"(bg is claude + opencode); use 'headless'"
         )
     # Only an explicit attended trigger bypasses the autonomy capability check.
     # A missing key is false so newly added or partially specified harnesses stay

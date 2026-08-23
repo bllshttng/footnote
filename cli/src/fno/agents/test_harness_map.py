@@ -36,7 +36,7 @@ def test_packaged_contract_is_complete_for_every_known_harness():
     ).read_text(encoding="utf-8") == (
         root / "cli/src/fno/agents/harness_capabilities.toml"
     ).read_text(encoding="utf-8")
-    assert MAP_VERSION == 7
+    assert MAP_VERSION == 8
     assert set(known_harnesses()) == {"claude", "codex", "gemini", "agy", "opencode"}
     for harness in known_harnesses():
         caps = capabilities(harness)
@@ -208,8 +208,8 @@ def test_unknown_harness_fails_loud_naming_the_map():
     assert "fno.agents.harness_map" in msg
 
 
-def test_explicit_bg_on_non_claude_is_rejected():
-    """bg is claude-only; an explicit bg on codex is a hard error -> headless."""
+def test_explicit_bg_on_non_bg_harness_is_rejected():
+    """bg is claude + opencode; an explicit bg on codex is a hard error -> headless."""
     with pytest.raises(DispatchResolveError, match="headless"):
         _resolve(harness="codex", substrate="bg")
 
@@ -321,10 +321,11 @@ def test_codex_normalization_accepts_plugin_qualified_slash_and_native_skill():
 
 def test_opencode_default_dispatch_renders_fno_slash():
     """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
-    invocation `/fno:target ...` on the headless substrate - no prose brief."""
+    invocation `/fno:target ...` on the bg substrate (the serve-HTTP worker
+    lane, x-d9f9) - no prose brief."""
     out = _resolve(harness="opencode", node_id="x-4d85")
     assert out["command"] == "/fno:target --no-merge x-4d85"
-    assert out["substrate"] == "headless"
+    assert out["substrate"] == "bg"
     assert out["command_surface"] == "slash"
 
 
@@ -442,7 +443,8 @@ def test_config_already_native_template_not_double_prefixed():
 
 def test_substrate_default_table():
     assert substrate_default("claude") == "bg"
-    for h in ("codex", "gemini", "agy", "opencode"):
+    assert substrate_default("opencode") == "bg"
+    for h in ("codex", "gemini", "agy"):
         assert substrate_default(h) == "headless"
 
 

@@ -1,4 +1,4 @@
-map_version = 7
+map_version = 8
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -204,7 +204,7 @@ tokens = ["agy", "--conversation", "{session_id}"]
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-bg = false
+bg = true
 autonomous_pane = false
 route_on_pane = false
 stop_hook = "native"
