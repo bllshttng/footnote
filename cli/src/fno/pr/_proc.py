@@ -7,11 +7,19 @@ distinguish "tool not installed" from "tool ran and failed". Centralising it
 keeps the ``gh``-version-drift fixes in one place (Domain Pitfall: pin gh
 fields, parse JSON in one spot).
 """
+
 from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence
+
+# gh subprocess invocations this process has issued (x-4eac: no agent could
+# see its own quota spend). Per-process, not per-fleet: it answers "what did
+# THIS call cost", which is the number a poller can act on. Read it from the
+# verbs that shell gh through this helper; reset is never needed because a
+# process is one invocation's lifetime.
+GH_CALLS = 0
 
 
 class ToolMissing(Exception):
@@ -54,6 +62,9 @@ def run(
     ``command -v`` guard), so callers can preserve the script's missing-tool
     exit code rather than surfacing a Python traceback.
     """
+    global GH_CALLS
+    if cmd and cmd[0] == "gh":
+        GH_CALLS += 1
     try:
         proc = subprocess.run(
             list(cmd),

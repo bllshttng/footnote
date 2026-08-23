@@ -258,6 +258,7 @@ do pr status	T1	do pr status	19
 do pr stub-manifest reconcile-finalize	T1	do pr stub-manifest reconcile-finalize	1
 do pr stub-manifest reconcile-validate	T1	do pr stub-manifest reconcile-validate	2
 do pr stub-manifest write	T1	do pr stub-manifest write	2
+do pr wait	T1	do pr wait	0
 do pr sync-canonical	T1	do pr sync-canonical	2
 do pr verify	T1	do pr verify	13
 do pr watch heal	T1	do pr watch heal	3
@@ -420,6 +421,7 @@ pr ritual	T1	pr ritual	24
 pr status	T1	pr status	19
 pr sync-canonical	T1	pr sync-canonical	2
 pr verify	T1	pr verify	13
+pr wait	T1	pr wait	0
 pr-watch heal	T1	pr-watch heal	3
 pr-watch install	T1	pr-watch install	3
 pr-watch refresh	T1	pr-watch refresh	1

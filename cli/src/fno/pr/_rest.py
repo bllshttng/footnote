@@ -45,7 +45,8 @@ _AUTH = re.compile(
 _TRANSPORT = re.compile(
     r"unexpected eof|connection reset|reset by peer|dial tcp"
     r"|no route to host|connection refused|i/o timeout|tls handshake"
-    r"|proxyconnect|network is unreachable",
+    r"|proxyconnect|network is unreachable"
+    r"|context deadline exceeded|client\.timeout",
     re.IGNORECASE,
 )
 

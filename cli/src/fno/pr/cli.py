@@ -5,11 +5,13 @@ Verbs:
     verify - audit an external PR gate, merged|reviews (-> _verify.py)
     rebase - two-phase rebase with conflict delegation (-> _rebase.py)
     logs   - tail the failing CI job, spool the rest (-> _logs.py)
+    wait   - poll status through the coalescing cache until settled/green (-> _wait.py)
 
 The four ``scripts/lib/pr-*.sh`` were ported to in-package Python shelling to
 gh/git, so these verbs run from a bare ``pip install fno`` with no repo-root
 dependency. Each module preserves the bash exit-code / output contract.
 """
+
 from __future__ import annotations
 
 import enum
@@ -116,6 +118,50 @@ def status(
 
 
 @pr_app.command(
+    "wait",
+    hidden=True,
+    help=(
+        "The sanctioned watcher: poll `fno do pr status` through the "
+        "coalescing cache until the PR settles (or turns green with "
+        "--until green), then exit the status verb's own code. N waiters on "
+        "one PR cost one network read per cache TTL, a rate-limit backoff is "
+        "ridden out rather than hammered, and the gh-call count prints at "
+        "exit. --timeout (30m default) exits with the last observed code and "
+        "a still-unsettled note. Use this instead of a hand-rolled "
+        "`while/sleep/grep` loop - every such loop is an uncoordinated poll "
+        "against a quota the whole machine shares."
+    ),
+)
+def wait(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+    until: str = typer.Option(
+        "settled", "--until", help="Exit when: settled (any terminal verdict) or green."
+    ),
+    timeout: str = typer.Option("30m", "--timeout", help="Max wait, e.g. 30m / 90s / 1h."),
+    interval: str = typer.Option("60", "--interval", help="Poll interval in seconds (minimum 5)."),
+) -> None:
+    from fno.pr import _wait
+    from fno.pr._proc import ToolMissing
+
+    try:
+        rc = _wait.main(
+            [
+                str(pr_number),
+                "--until",
+                until,
+                "--timeout",
+                timeout,
+                "--interval",
+                interval,
+            ]
+        )
+    except ToolMissing as exc:
+        typer.echo(f"fno do pr wait: {exc.tool} not found on PATH", err=True)
+        rc = 127
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
     "coverage-publish",
     hidden=True,
     help=(
@@ -136,9 +182,7 @@ def coverage_publish(
 ) -> None:
     from fno.pr import _reviews
 
-    posted, note = _reviews.publish_coverage_status(
-        pr_number, head, cwd=repo, repo=repo
-    )
+    posted, note = _reviews.publish_coverage_status(pr_number, head, cwd=repo, repo=repo)
     typer.echo(
         json.dumps(
             {"pr": pr_number, "posted": posted, "note": note},
@@ -156,8 +200,12 @@ def coverage_publish(
     ),
 )
 def info(
-    pr_number: Optional[int] = typer.Argument(None, help="GitHub PR number; defaults to current branch"),
-    repo: Optional[str] = typer.Option(None, "--repo", help="GitHub owner/repo; defaults to origin"),
+    pr_number: Optional[int] = typer.Argument(
+        None, help="GitHub PR number; defaults to current branch"
+    ),
+    repo: Optional[str] = typer.Option(
+        None, "--repo", help="GitHub owner/repo; defaults to origin"
+    ),
 ) -> None:
     from fno.pr import _rest
 
@@ -179,7 +227,9 @@ def info(
 )
 def list_cmd(
     state: str = typer.Option("open", "--state", help="open, closed, or all"),
-    repo: Optional[str] = typer.Option(None, "--repo", help="GitHub owner/repo; defaults to origin"),
+    repo: Optional[str] = typer.Option(
+        None, "--repo", help="GitHub owner/repo; defaults to origin"
+    ),
 ) -> None:
     from fno.pr import _rest
 
@@ -381,9 +431,7 @@ def review_hold(
         # Say which happened. "released" printed over an absent hold is the
         # absence-as-success shape, on the one recovery path there is.
         typer.echo(
-            f"review-hold: released {branch}"
-            if released
-            else f"review-hold: no hold on {branch}"
+            f"review-hold: released {branch}" if released else f"review-hold: no hold on {branch}"
         )
         raise typer.Exit(code=0)
     if not holder:
@@ -395,9 +443,7 @@ def review_hold(
             head=head,
             holder=holder,
             verb=verb,
-            ttl_ms=(
-                _review_hold.resolve_ttl_ms(ttl_minutes) if ttl_minutes is not None else None
-            ),
+            ttl_ms=(_review_hold.resolve_ttl_ms(ttl_minutes) if ttl_minutes is not None else None),
         )
         if claim is None:
             # Registration never blocks a review from starting: an unheld review
@@ -446,9 +492,7 @@ def evidence_check(
 ) -> None:
     from fno.pr import _preflight
 
-    raise typer.Exit(
-        code=_preflight.run_evidence_check(allow_equivalent=allow_rebase_equivalent)
-    )
+    raise typer.Exit(code=_preflight.run_evidence_check(allow_equivalent=allow_rebase_equivalent))
 
 
 @pr_app.command("evidence-required", hidden=True)
@@ -458,9 +502,7 @@ def evidence_required(
     """Expose the one local-verification policy to shell-based ship paths."""
     from fno.pr import _preflight
 
-    required, reason = _preflight.local_verification_required(
-        cwd=os.getcwd(), base_ref=base
-    )
+    required, reason = _preflight.local_verification_required(cwd=os.getcwd(), base_ref=base)
     typer.echo(json.dumps({"required": required, "reason": reason}, separators=(",", ":")))
 
 
@@ -542,9 +584,10 @@ def ritual(
         None, help="Merged PR number; omitted -> most recently merged PR for this repo."
     ),
     autonomous: bool = typer.Option(
-        False, "--autonomous",
+        False,
+        "--autonomous",
         help="No operator present: spawn the judgment leg as one headless one-shot "
-             "when its inputs are non-empty. Mirrors the POST_MERGE_NONINTERACTIVE=1 env.",
+        "when its inputs are non-empty. Mirrors the POST_MERGE_NONINTERACTIVE=1 env.",
     ),
 ) -> None:
     from fno.pr import _ritual
@@ -569,9 +612,10 @@ def ritual(
 def closure_trailer(
     node: str = typer.Argument(..., help="Node id to render the trailer for."),
     extra: List[str] = typer.Option(
-        [], "--extra",
+        [],
+        "--extra",
         help="Additional genuinely-shipped node ids beyond NODE and its "
-             "contained_in descendants (repeatable).",
+        "contained_in descendants (repeatable).",
     ),
 ) -> None:
     from fno.graph.store import read_graph
@@ -612,16 +656,15 @@ def bind_created(
     owner: Optional[str] = typer.Option(None, "--owner", help="Best-known live owner."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Repository worktree."),
     node: Optional[str] = typer.Option(
-        None, "--node",
+        None,
+        "--node",
         help="Authoritative node id (the manifest's). Leads; branch is the fallback.",
     ),
 ) -> None:
     """Bind a raw ``gh pr create`` result to its one real node."""
     from fno.pr.closure import bind_created_pr_from_branch
 
-    result = bind_created_pr_from_branch(
-        url, owner=owner, cwd=repo or os.getcwd(), node_id=node
-    )
+    result = bind_created_pr_from_branch(url, owner=owner, cwd=repo or os.getcwd(), node_id=node)
     if result.outcome == "bound":
         # The ship row follows the binding, not one particular verb. This used
         # to ride on `backlog update --pr-number`; when ship switched to this
