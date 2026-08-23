@@ -123,7 +123,7 @@ for ((trial = 1; trial <= trials; trial++)); do
     workspace_verdict=pass
     [[ "$daemon_rc" == 0 ]] && rg -q '^daemon_child_env_isolated ' "$trial_dir/daemon_e2e.log" || daemon_verdict=fail
     [[ "$persistence_rc" == 0 ]] || persistence_verdict=fail
-    [[ "$workspace_rc" == 0 ]] && rg -q '^old_server_reaped_before_rebind ' "$trial_dir/workspace_persistence_e2e.log" || workspace_verdict=fail
+    [[ "$workspace_rc" == 0 ]] && rg -q 'old_server_reaped_before_rebind old_pid=' "$trial_dir/workspace_persistence_e2e.log" || workspace_verdict=fail
 
     if [[ "$daemon_verdict" != pass || "$persistence_verdict" != pass || "$workspace_verdict" != pass ]]; then
         failures=$((failures + 1))
