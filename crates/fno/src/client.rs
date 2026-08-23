@@ -72,7 +72,7 @@ const MIN_CONTENT_COLS: u16 = 40;
 /// Extended-table column widths in display columns, render order: status glyph,
 /// agent, last message, PR, and relative last-update age. The first and last
 /// three cells are fixed; the agent and message cells share the remainder.
-const COL_STATUS: u16 = 2;
+const COL_STATUS: u16 = 4;
 const COL_PR: u16 = 7;
 const COL_TIME: u16 = 6;
 const COL_MIN_NAME: u16 = 12;
@@ -7975,7 +7975,20 @@ fn append_sorted_agent_group<'a>(
     needs: &HashMap<String, NeedKind>,
     now_secs: u64,
 ) {
-    group.sort_by(|(_, a), (_, b)| {
+    let mut subtrees: Vec<(
+        Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
+        &'a AgentRow,
+    )> = Vec::new();
+    for item in group.drain(..) {
+        let depth = item.0.first().map(|(_, depth)| *depth).unwrap_or_default();
+        if depth == 0 || subtrees.is_empty() {
+            let root = item.1;
+            subtrees.push((vec![item], root));
+        } else {
+            subtrees.last_mut().unwrap().0.push(item);
+        }
+    }
+    subtrees.sort_by(|(_, a), (_, b)| {
         compare_agent_rows(
             a,
             b,
@@ -7985,8 +7998,10 @@ fn append_sorted_agent_group<'a>(
             now_secs,
         )
     });
-    for (rows, _) in group.drain(..) {
-        out.extend(rows);
+    for (items, _) in subtrees {
+        for (rows, _) in items {
+            out.extend(rows);
+        }
     }
 }
 
@@ -9551,7 +9566,17 @@ fn table_head_text(layout: TableLayout, sort: AgentSort) -> String {
         layout.pr.width as usize,
     ));
     out.push_str(&pad_cols(
-        &format!("age{}", marker(AgentSortColumn::Age)),
+        &format!(
+            "age{}",
+            if sort.column == AgentSortColumn::Age {
+                match sort.direction {
+                    SortDirection::Ascending => "↑",
+                    SortDirection::Descending => "↓",
+                }
+            } else {
+                ""
+            }
+        ),
         layout.age.width as usize,
     ));
     debug_assert_eq!(
@@ -27634,6 +27659,52 @@ mod tests {
                 assert_eq!(descending.last().unwrap(), "age");
             }
         }
+    }
+
+    #[test]
+    fn extended_sort_keeps_lineage_subtrees_together() {
+        let mut v = wide_view(vec![
+            lineage_row("zeta", 4, None),
+            lineage_row("alpha", 5, Some("sid-zeta")),
+            lineage_row("aardvark", 6, None),
+        ]);
+        set_density(&mut v, Density::Extended);
+        v.agent_sort = AgentSort::Squad;
+        let names = agent_order(&v);
+        assert_eq!(names, ["aardvark", "zeta", "alpha"]);
+        assert_eq!(rendered_depth(&v, "zeta"), 0);
+        assert_eq!(rendered_depth(&v, "alpha"), 1);
+    }
+
+    #[test]
+    fn status_sort_arrow_fits_inside_the_status_header_span() {
+        let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        let header = table_head_text(layout, AgentSort::Attention);
+        let status: String = header.chars().take(layout.status.width as usize).collect();
+        assert!(
+            status.contains('↑'),
+            "status header must show direction: {status:?}"
+        );
+    }
+
+    #[test]
+    fn age_sort_arrow_survives_the_density_button_on_header_row() {
+        let mut v = wide_view(vec![agent_row(
+            "agent",
+            4,
+            Some(AgentBadge::Working),
+            false,
+        )]);
+        set_density(&mut v, Density::Extended);
+        v.agent_sort = AgentSort {
+            column: AgentSortColumn::Age,
+            direction: SortDirection::Ascending,
+        };
+        let first_line = frame_text(&v.compose()).lines().next().unwrap().to_string();
+        assert!(
+            first_line.contains("age↑"),
+            "age header must remain visible: {first_line:?}"
+        );
     }
 
     #[test]
