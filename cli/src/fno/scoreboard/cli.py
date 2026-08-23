@@ -198,7 +198,11 @@ def scoreboard_command(
             read_graph_nodes(graph_path),
             [asdict(row) for row in load_registry(path=_paths.agents_registry_path())],
             read_jsonl_events(events_paths, {"provider_rate_limited"}),
-            dict(getattr(settings.agents, "max_lanes", {})),
+            dict(
+                getattr(settings.agents, "provider_limits", None)
+                or getattr(settings.agents, "max_lanes", {})
+                or {}
+            ),
             since_days=since,
             now=datetime.now(),
         )

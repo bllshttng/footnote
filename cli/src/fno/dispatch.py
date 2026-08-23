@@ -728,6 +728,13 @@ def _dispatch_one(
             # distinguish it, but the pane's own env can (Locked Decision 5: pane env,
             # not the registry schema).
             provenance = resolve_provenance(node_id, slug)
+            if node_claim is not None:
+                # The worker proves it is the intended successor by naming this
+                # holder back - env, never argv, the same contract as the spawn
+                # path. Without it the pane clears the key and the worker cannot
+                # rebind node:<id> until the launch-window claim expires
+                # (review finding on the W5 cutover).
+                provenance["FNO_NODE_CLAIM_HOLDER"] = node_claim[1]
             if account:
                 provenance["FNO_ACCOUNT"] = account
             # A cutover replaces all three parts of the launch together (harness,

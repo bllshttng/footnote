@@ -299,6 +299,17 @@ def test_no_account_is_byte_identical(monkeypatch, tmp_path):
     assert calls[0]["account_env"] is None
 
 
+def test_handover_claim_holder_rides_the_provenance(monkeypatch, tmp_path):
+    # The pane env clears omitted keys, and target init only supplies
+    # --handover-from when FNO_NODE_CLAIM_HOLDER exists, so without this the
+    # worker cannot rebind node:<id> until the launch-window claim expires
+    # (the spawn path's env-never-argv contract, extended to dispatch).
+    calls, _gate = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
+    v = dispatch._dispatch_one(session="s", node=None, project=None)
+    assert v["outcome"] == "launched"
+    assert calls[0]["provenance"]["FNO_NODE_CLAIM_HOLDER"] == "spawn-handover:target-x-1"
+
+
 def test_bad_account_fails_before_spawn(monkeypatch, tmp_path):
     # A stale/missing account fails the verdict (the x-d012 resolver's refusal)
     # rather than silently spawning under the default account (AC2-ERR). No
