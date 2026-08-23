@@ -1270,9 +1270,11 @@ def _auto_merge_review_gap(
     about a hypothetical code payload - a doctor-side recount of its lane
     logic would be the same bug one level up, the reason the predicate already
     mirrors loopcheck.rs. The pairing reads the two layers the merge path
-    reads: global ``auto_merge.enabled`` (``_load_auto_merge``) and
-    repo-resolved review config. A config the predicate cannot read
-    fail-closes to True inside it, so a broken config never warns here.
+    reads: global ``auto_merge.enabled`` (``_load_auto_merge``) and the
+    INVOKING project's repo-resolved review config (the same cwd-to-toplevel
+    resolution ``fno do pr status`` uses), never the fno source checkout. A
+    config the predicate cannot read fail-closes to True inside it, so a
+    broken config never warns here.
 
     ``unknown`` in the armed breakdown is its own answer (x-9d11), never
     folded into a default origin. Zero armed manifests still reports: the
@@ -1286,18 +1288,19 @@ def _auto_merge_review_gap(
         )
         if enabled is not True:
             return None
-        root = _resolve_source(None)
-        if root is None:
-            return None
-        from fno.pr._merge import _review_lane_configured
+        # The project doctor runs IN, resolved the same way the predicate
+        # resolves it (rev-parse from cwd). Never the fno source checkout:
+        # the lanes that matter are the invoking repo's, and an install with
+        # no source checkout at all (plugin, PyPI) is exactly the install
+        # this check protects - a source-rooted read no-ops there.
+        from fno.pr._merge import _repo_state_dir, _review_lane_configured
 
+        root = Path(_repo_state_dir(os.getcwd())).parent
         if _review_lane_configured(str(root), code_payload=True):
             return None
-        from pathlib import Path
-
         from fno.config import load_settings_for_repo
 
-        review = load_settings_for_repo(Path(root)).review
+        review = load_settings_for_repo(root).review
     except Exception:  # noqa: BLE001 - advisory; never crash doctor
         return None
     keys = [

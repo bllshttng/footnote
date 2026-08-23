@@ -7,6 +7,7 @@ irreversible action owes one too. Advisory only, never changes the exit code.
 from __future__ import annotations
 
 import types
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -265,22 +266,32 @@ def _patch_gap(
     monkeypatch: pytest.MonkeyPatch,
     *,
     settings: types.SimpleNamespace,
-    source,
+    repo: Path,
     lane: bool,
     review: types.SimpleNamespace | None = None,
     armed: dict[str, int] | int = 0,
+    source_points_elsewhere: Path | None = None,
 ) -> list[dict]:
     """Stub the gap check's collaborators; return the lane-predicate calls so
     tests can pin the reuse contract (doctor asks the gate, never recounts)."""
     armed_value = armed if isinstance(armed, dict) else {"config": armed}
     calls: list[dict] = []
 
-    def fake_lane(repo, pr_number=0, code_payload=False):
-        calls.append({"repo": repo, "pr_number": pr_number, "code_payload": code_payload})
+    def fake_lane(repo_arg, pr_number=0, code_payload=False):
+        calls.append({"repo": repo_arg, "pr_number": pr_number, "code_payload": code_payload})
         return lane
 
     monkeypatch.setattr("fno.config.load_settings", lambda: settings)
-    monkeypatch.setattr(doctor, "_resolve_source", lambda _source: source)
+    # The gap resolves the INVOKING repo (cwd -> toplevel), never the fno
+    # source checkout: point _resolve_source somewhere wrong and require the
+    # predicate still receive the cwd-derived repo (x-0888 review finding 1).
+    if source_points_elsewhere is not None:
+        monkeypatch.setattr(
+            doctor, "_resolve_source", lambda _source: source_points_elsewhere
+        )
+    monkeypatch.setattr(
+        "fno.pr._merge._repo_state_dir", lambda _cwd: str(repo / ".fno")
+    )
     monkeypatch.setattr("fno.pr._merge._review_lane_configured", fake_lane)
     if review is not None:
         monkeypatch.setattr(
@@ -294,17 +305,20 @@ def _patch_gap(
 def test_gap_fires_on_armed_with_zero_lanes(
     monkeypatch: pytest.MonkeyPatch, tmp_path,
 ) -> None:
+    elsewhere = tmp_path / "fno-source-checkout"
     calls = _patch_gap(
         monkeypatch,
         settings=_fake_settings(auto_merge=True),
-        source=tmp_path,
+        repo=tmp_path,
         lane=False,
         review=_fake_review(self_review_required=False),
         armed={"config": 16, "unknown": 3},
+        source_points_elsewhere=elsewhere,
     )
     gap = doctor._auto_merge_review_gap()
     # Reuse contract: the verdict is the merge gate's own predicate, asked
     # about a hypothetical code payload - never a doctor-side lane recount.
+    # And the repo is the INVOKING project, never the fno source checkout.
     assert calls == [{"repo": str(tmp_path), "pr_number": 0, "code_payload": True}]
     assert gap is not None
     assert gap["keys"] == [
@@ -326,7 +340,7 @@ def test_gap_names_peer_identity_when_it_released_the_floor(
     _patch_gap(
         monkeypatch,
         settings=_fake_settings(auto_merge=True),
-        source=tmp_path,
+        repo=tmp_path,
         lane=False,
         review=_fake_review(self_review_required=True, peer_identity="fno-peer-bot"),
         armed=0,
@@ -345,7 +359,7 @@ def test_gap_silent_when_a_lane_covers_or_the_switch_is_off(
     _patch_gap(
         monkeypatch,
         settings=_fake_settings(auto_merge=True),
-        source=tmp_path,
+        repo=tmp_path,
         lane=True,
         review=_fake_review(self_review_required=True),
     )
@@ -354,16 +368,7 @@ def test_gap_silent_when_a_lane_covers_or_the_switch_is_off(
     _patch_gap(
         monkeypatch,
         settings=_fake_settings(auto_merge=False),
-        source=tmp_path,
-        lane=False,
-        review=_fake_review(self_review_required=False),
-    )
-    assert doctor._auto_merge_review_gap() is None
-    # No source checkout: no merge path to warn about.
-    _patch_gap(
-        monkeypatch,
-        settings=_fake_settings(auto_merge=True),
-        source=None,
+        repo=tmp_path,
         lane=False,
         review=_fake_review(self_review_required=False),
     )

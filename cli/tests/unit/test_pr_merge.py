@@ -981,6 +981,15 @@ def test_review_lane_configured_answers_a_hypothetical_code_payload(
     assert _merge._review_lane_configured(str(tmp_path)) is False
 
 
+def test_review_lane_configured_refuses_pr_number_with_code_payload(tmp_path):
+    """code_payload=True answers a HYPOTHETICAL payload; combined with a real
+    pr_number it would silently skip the payload probe and floor a docs-only
+    PR. The ValueError sits outside the fail-closed try so misuse surfaces
+    instead of reading as 'review required'."""
+    with pytest.raises(ValueError):
+        _merge._review_lane_configured(str(tmp_path), 42, code_payload=True)
+
+
 def test_manifest_reader_ignores_keys_inside_a_multiline_input_scalar(
     tmp_path,
 ):

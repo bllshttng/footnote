@@ -640,6 +640,13 @@ def _review_lane_configured(
     drift from this one. The lane logic is untouched, so the loopcheck.rs
     mirror still holds; the stop gate always has a real PR and never passes it.
     """
+    # Outside the try on purpose: this is caller misuse, not a degraded read,
+    # and the try's fail-closed True would misread it as "review required".
+    if code_payload and pr_number:
+        raise ValueError(
+            "code_payload=True answers a hypothetical payload; pass it with "
+            "no pr_number, or probe a real PR with code_payload=False"
+        )
     try:
         from pathlib import Path
 
