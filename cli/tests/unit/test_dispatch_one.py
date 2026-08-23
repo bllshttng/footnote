@@ -1,9 +1,11 @@
 """Unit tests for `fno agents dispatch one` (x-6f77): the mux leader+g porcelain.
 
-The lane slot is held for real against an isolated `FNO_CLAIMS_ROOT`, so the cap
-and the release-on-failure path are genuinely exercised. Selection (`_next_node`)
+The shared guard's claims are held for real against an isolated
+`FNO_CLAIMS_ROOT`, so the reservation and the release-on-failure path are
+genuinely exercised. Selection (`_next_node`), the family-2 guard
+(`_spawn_guard_decision`), the spawn gate (`run_gate`), the worktree resolver
 and the pane spawn (`dispatch_spawn_pane`) are monkeypatched - no real
-`fno backlog next` subprocess, no real pane.
+`fno backlog next` subprocess, no real gate, no real pane.
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ from types import SimpleNamespace
 import pytest
 
 from fno import dispatch
-from fno.claims.lanes import active_lane_count
 
 
 def test_registered_and_addressable():
@@ -34,15 +35,43 @@ class _FakeSpawnOK:
     bound = True
 
 
-def _wire(monkeypatch, tmp_path, *, next_node=None, spawn=None, max_lanes=1):
+class _FakeGate:
+    """Stands in for run_gate's GateGuard: records its release."""
+
+    def __init__(self):
+        self.releases = 0
+
+    def release(self):
+        self.releases += 1
+
+
+def _wire(monkeypatch, tmp_path, *, next_node=None, spawn=None):
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
-    monkeypatch.setattr(
-        dispatch, "load_settings",
-        lambda: SimpleNamespace(parallel=SimpleNamespace(max_lanes=max_lanes)),
-    )
     monkeypatch.setattr(dispatch, "_next_node", lambda project: next_node)
     monkeypatch.setattr(dispatch, "_worker_agent_name", lambda nid, slug: f"target-{nid}")
     monkeypatch.setattr(dispatch, "resolve_provenance", lambda nid, slug: {})
+
+    # The family-2 guard is faked at its import source (dispatch imports it
+    # inside _dispatch_one from fno.agents.cli): dispatchable verdict with the
+    # reservation + handover node claim a real guard takes.
+    def fake_guard(node_id, holder, *, cwd=None, handover_holder=None):
+        return {
+            "verdict": "dispatchable",
+            "reservation_key": f"dispatch:{node_id}",
+            "reservation_holder": holder,
+            "node_claim_key": f"node:{node_id}",
+            "node_claim_holder": handover_holder or "spawn-handover:t",
+        }, 0
+
+    monkeypatch.setattr("fno.agents.cli._spawn_guard_decision", fake_guard)
+
+    gate = _FakeGate()
+    monkeypatch.setattr("fno.agents.spawn_gate.run_gate", lambda *a, **kw: gate)
+
+    # The launch cwd resolver: the repo-root (never-policy) answer.
+    monkeypatch.setattr(
+        dispatch, "_worktree_ensure_for_launch", lambda cwd, name, harness: str(cwd)
+    )
 
     calls: list = []
 
@@ -53,25 +82,29 @@ def _wire(monkeypatch, tmp_path, *, next_node=None, spawn=None, max_lanes=1):
         return _FakeSpawnOK()
 
     monkeypatch.setattr(dispatch, "dispatch_spawn_pane", fake_spawn)
-    return calls
+    return calls, gate
 
 
 def test_no_ready_work(monkeypatch, tmp_path):
     _wire(monkeypatch, tmp_path, next_node=None)
     v = dispatch._dispatch_one(session="main", node=None, project=None)
     assert v["outcome"] == "no-work"
-    assert active_lane_count() == 0  # never touched a slot
 
 
-def test_launched_holds_a_lane(monkeypatch, tmp_path):
-    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "feat", "cwd": str(tmp_path)})
+def test_launched_passes_the_guard_and_spawns(monkeypatch, tmp_path):
+    calls, gate = _wire(
+        monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "feat", "cwd": str(tmp_path)}
+    )
     v = dispatch._dispatch_one(session="work", node=None, project=None)
     assert v["outcome"] == "launched"
     assert v["node"] == "x-1"
     assert v["pane_id"] == 7
     assert calls[0]["session"] == "work"
     assert calls[0]["message"] == "/target --no-merge x-1"
-    assert active_lane_count() == 1  # slot held for the live lane
+    # The gate's guard rode into the spawn (AC2-EDGE) and was released once the
+    # registry row existed.
+    assert calls[0]["provider_gate"] is gate
+    assert gate.releases == 1
 
 
 def _real_result(**fields):
@@ -142,50 +175,95 @@ def test_seed_verified_survives_an_observed_pane(monkeypatch, tmp_path, observat
     assert v["seed_verified"] is True
 
 
-def test_lanes_full_when_cap_reached(monkeypatch, tmp_path):
-    # max_lanes=1: the first dispatch takes the only slot, the second is refused
-    # with no spawn and no new claim (AC-edge).
-    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)}, max_lanes=1)
-    assert dispatch._dispatch_one(session="s", node=None, project=None)["outcome"] == "launched"
-    monkeypatch.setattr(dispatch, "_next_node", lambda project: {"id": "x-2", "slug": "b", "cwd": str(tmp_path)})
-    v = dispatch._dispatch_one(session="s", node=None, project=None)
-    assert v["outcome"] == "lanes-full"
-    assert v["node"] == "x-2"
-    assert len(calls) == 1  # the second never spawned
-    assert active_lane_count() == 1
+def test_full_fleet_refuses_in_the_gate_not_a_verdict(monkeypatch, tmp_path):
+    """The positive marker x-68fd asked for, as a test: `agents.max_live` at 1
+    with one live registry row held must refuse, and the census must still
+    report 1. `lanes-full` is gone from the vocabulary; a full fleet blocks in
+    run_gate and surfaces the gate's own exit code."""
+    from fno.agents import spawn_gate
+    from fno.agents.registry import AgentEntry
+
+    real_run_gate = spawn_gate.run_gate  # _wire stubs it; this test needs the real one
+    _wire(monkeypatch, tmp_path, next_node={"id": "x-2", "slug": "b", "cwd": str(tmp_path)})
+    monkeypatch.setattr("fno.agents.spawn_gate.run_gate", real_run_gate)
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)  # conftest disables it
+
+    def fake_settings():
+        class _A:
+            max_live = 1
+            min_free_gb = 0.0
+            max_load_per_cpu = 0.0
+            provider_limits = {"zai": 5}
+
+        class _S:
+            agents = _A()
+
+        return _S()
+
+    monkeypatch.setattr("fno.config.load_settings", fake_settings)
+    import os
+
+    live_row = AgentEntry(
+        name="held-worker", harness="claude", cwd="/tmp", log_path="/tmp/l",
+        status="live", pid=os.getpid(),  # a live pid or the row reads dead
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [live_row])
+    monkeypatch.setattr("fno.agents.session_procs.bg_socket_pid_map", lambda root=None: {})
+    census = spawn_gate.census()
+    monkeypatch.setattr(spawn_gate, "census", lambda: census)
+    monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+    monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
+
+    with pytest.raises(SystemExit) as exc:
+        dispatch._dispatch_one(session="s", node=None, project=None)
+
+    assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
+    assert census.slot_count == 1  # the held row is still the only live slot
 
 
 def test_same_node_second_dispatch_is_deduped(monkeypatch, tmp_path):
     # Two fast leader+g resolve _next_node to the SAME node before the first
-    # worker claims it. The create-only dispatch:<id> reservation must make the
+    # worker claims it. The guard's dispatch:<id> reservation must make the
     # second a no-op (already-dispatching) - never a second spawn, and never a
-    # release of the first worker's live lane slot (the P1 race).
-    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)}, max_lanes=2)
+    # release of the first worker's live reservation (the P1 race).
+    calls, _gate = _wire(
+        monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)}
+    )
     assert dispatch._dispatch_one(session="s", node=None, project=None)["outcome"] == "launched"
+
+    def guard_refuses(node_id, holder, *, cwd=None, handover_holder=None):
+        return {
+            "verdict": "already-running",
+            "reason": "reservation-held",
+        }, 0
+
+    monkeypatch.setattr("fno.agents.cli._spawn_guard_decision", guard_refuses)
     v = dispatch._dispatch_one(session="s", node=None, project=None)
     assert v["outcome"] == "already-dispatching"
     assert v["node"] == "x-1"
     assert len(calls) == 1  # the second never spawned
-    assert active_lane_count() == 1  # first worker's slot intact
 
 
 @pytest.mark.parametrize("reason", ["auto-deferred", "defer-failed"])
 def test_manual_dispatch_preserves_family2_refusal_reason(monkeypatch, tmp_path, reason):
-    calls = _wire(
+    calls, _gate = _wire(
         monkeypatch,
         tmp_path,
         next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)},
     )
-    monkeypatch.setattr("fno.backlog.advance._node_dispatch_block_reason", lambda *_a: reason)
+
+    def guard_refuses(node_id, holder, *, cwd=None, handover_holder=None):
+        return {"verdict": "refused", "reason": reason}, 0
+
+    monkeypatch.setattr("fno.agents.cli._spawn_guard_decision", guard_refuses)
 
     verdict = dispatch._dispatch_one(session="s", node=None, project=None)
 
     assert verdict["outcome"] == reason
     assert calls == []
-    assert active_lane_count() == 0
 
 
-def test_spawn_failure_releases_the_slot(monkeypatch, tmp_path):
+def test_spawn_failure_releases_the_reservation(monkeypatch, tmp_path):
     def boom():
         raise RuntimeError("mux pane spawn failed")
 
@@ -193,7 +271,7 @@ def test_spawn_failure_releases_the_slot(monkeypatch, tmp_path):
     v = dispatch._dispatch_one(session="s", node=None, project=None)
     assert v["outcome"] == "failed"
     assert "spawn failed" in v["detail"]
-    assert active_lane_count() == 0  # slot released -> node re-dispatchable
+    assert _dispatch_claim_state("x-9") == "free"  # node re-dispatchable
 
 
 # --- `--account` overlay threading (x-c914 piece 1) ------------------------
@@ -202,7 +280,7 @@ def test_spawn_failure_releases_the_slot(monkeypatch, tmp_path):
 def test_account_threads_overlay_env(monkeypatch, tmp_path):
     # An --account resolves CLI-side to an env overlay (x-d012) and rides into
     # the spawn as account_env, so the worker bills the chosen account (AC1-HP).
-    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
+    calls, _gate = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
     monkeypatch.setattr(
         "fno.agents.account_env.resolve_account_overlay",
         lambda acc: SimpleNamespace(env={"CLAUDE_CONFIG_DIR": "/home/u/.claude-alt"}),
@@ -217,7 +295,7 @@ def test_account_threads_overlay_env(monkeypatch, tmp_path):
 
 def test_no_account_is_byte_identical(monkeypatch, tmp_path):
     # account=None spawns exactly as pre-feature: account_env is None (AC2-HP).
-    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
+    calls, _gate = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
     v = dispatch._dispatch_one(session="s", node=None, project=None)
     assert v["outcome"] == "launched"
     assert calls[0]["account_env"] is None
@@ -229,7 +307,7 @@ def test_bad_account_fails_before_spawn(monkeypatch, tmp_path):
     # spawn, no lane slot held -> the node stays re-dispatchable.
     from fno.agents.account_env import AccountResolutionError
 
-    calls = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
+    calls, _gate = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
 
     def boom(acc):
         raise AccountResolutionError("no such account 'rr'")
@@ -239,7 +317,6 @@ def test_bad_account_fails_before_spawn(monkeypatch, tmp_path):
     assert v["outcome"] == "failed"
     assert "rr" in v["detail"]
     assert len(calls) == 0  # never spawned
-    assert active_lane_count() == 0  # never took a slot
 
 
 # --- `fno agents dispatch resolve` --verb/--brief (US3) ---------------------------
@@ -344,19 +421,28 @@ def test_resolve_no_node_no_brief_is_none(monkeypatch):
 
 # --- Hold release on every exit --------------------------------------------
 #
-# `_dispatch_one` holds two things at once: a `dispatch:<id>` claim and a lane
-# slot. Only two hand-written spots used to release them, and neither caught a
+# `_dispatch_one` holds three things at once: the gate guard, the `dispatch:<id>`
+# reservation, and the handover `node:<id>` claim. The release funnel catches
 # `BaseException`, so a `GateRefused` (which subclasses `SystemExit`) or an
-# error in the provenance/cutover block between the acquisition and the spawn
-# leaked both. A leaked lane slot is a phantom worker against the cap; a leaked
-# `dispatch:<id>` refuses the node's own relaunch as `already-running`.
+# error in the provenance/cutover block between the guard and the spawn
+# releases everything. A leaked reservation refuses the node's own relaunch as
+# `already-running`; a leaked node claim wedges the node for the handover TTL.
 
 
 def _dispatch_claim_state(node_id: str) -> str:
     from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
 
     key = f"dispatch:{node_id}"
-    return claim_status(key, root=dispatch._claims_root_for(key))["state"]
+    return claim_status(key, root=claims_root_for(key))["state"]
+
+
+def _node_claim_state(node_id: str) -> str:
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
+
+    key = f"node:{node_id}"
+    return claim_status(key, root=claims_root_for(key))["state"]
 
 
 def test_gate_refusal_releases_both_holds_and_keeps_its_exit_code(monkeypatch, tmp_path):
@@ -365,22 +451,24 @@ def test_gate_refusal_releases_both_holds_and_keeps_its_exit_code(monkeypatch, t
     exit code rather than being flattened into a verdict."""
     from fno.agents.spawn_gate import EXIT_NO_WAIT, GateRefused
 
-    def refuse():
+    def refuse(*a, **kw):
         raise GateRefused(EXIT_NO_WAIT)
 
-    _wire(monkeypatch, tmp_path, next_node={"id": "x-7", "slug": "g", "cwd": str(tmp_path)}, spawn=refuse)
+    # The refusal comes from the GATE now, not the spawn.
+    _wire(monkeypatch, tmp_path, next_node={"id": "x-7", "slug": "g", "cwd": str(tmp_path)})
+    monkeypatch.setattr("fno.agents.spawn_gate.run_gate", refuse)
 
     with pytest.raises(SystemExit) as exc:
         dispatch._dispatch_one(session="s", node=None, project=None)
 
     assert exc.value.code == EXIT_NO_WAIT
-    assert active_lane_count() == 0
     assert _dispatch_claim_state("x-7") == "free"
+    assert _node_claim_state("x-7") == "free"
 
 
 def test_provenance_error_before_the_spawn_releases_both_holds(monkeypatch, tmp_path):
-    """The lane slot is taken before the provenance/cutover block runs, and that
-    block used to sit outside every handler."""
+    """The guard takes its claims before the provenance/cutover block runs, and
+    that block must sit inside every handler."""
     _wire(monkeypatch, tmp_path, next_node={"id": "x-8", "slug": "p", "cwd": str(tmp_path)})
 
     def boom(nid, slug):
@@ -392,39 +480,24 @@ def test_provenance_error_before_the_spawn_releases_both_holds(monkeypatch, tmp_
 
     assert v["outcome"] == "failed"
     assert "provenance resolver exploded" in v["detail"]
-    assert active_lane_count() == 0
     assert _dispatch_claim_state("x-8") == "free"
-
-
-def test_real_lanes_full_still_releases_only_the_reservation(monkeypatch, tmp_path):
-    """A genuine full cap is not a refusal: `acquire_lane_slot` returned None, so
-    no lane slot was ever taken and the verdict stays the exit-0 `lanes-full`.
-    Only the reservation needs releasing."""
-    _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)}, max_lanes=1)
-    assert dispatch._dispatch_one(session="s", node=None, project=None)["outcome"] == "launched"
-    monkeypatch.setattr(dispatch, "_next_node", lambda project: {"id": "x-2", "slug": "b", "cwd": str(tmp_path)})
-
-    v = dispatch._dispatch_one(session="s", node=None, project=None)
-
-    assert v["outcome"] == "lanes-full"
-    assert active_lane_count() == 1  # the first worker's slot, untouched
-    assert _dispatch_claim_state("x-2") == "free"
+    assert _node_claim_state("x-8") == "free"
 
 
 def test_a_release_that_raises_never_strands_the_other_hold(monkeypatch, tmp_path):
-    """The guard must not leak on a release fault. A raising lane release used
-    to re-enter through `except Exception` and release a second time, which can
-    free a slot another spawner has since taken - and a second raise escapes the
+    """The funnel must not leak on a release fault. A raising release used to
+    re-enter through `except Exception` and release a second time, which can
+    free a claim another spawner has since taken - and a second raise escapes the
     handler entirely, leaking both holds. One bad hold never blocks the other."""
     _wire(monkeypatch, tmp_path, next_node={"id": "x-5", "slug": "r", "cwd": str(tmp_path)})
 
     calls: list[str] = []
 
-    def bad_lane(node_id):
-        calls.append("lane")
+    def bad_release(*claims):
+        calls.append("release")
         raise RuntimeError("claims store briefly unreadable")
 
-    monkeypatch.setattr(dispatch, "release_lane_slot", bad_lane)
+    monkeypatch.setattr("fno.agents.cli._release_dispatch_claims", bad_release)
 
     def boom(nid, slug):
         raise RuntimeError("provenance resolver exploded")
@@ -434,7 +507,7 @@ def test_a_release_that_raises_never_strands_the_other_hold(monkeypatch, tmp_pat
     v = dispatch._dispatch_one(session="s", node=None, project=None)
 
     assert v["outcome"] == "failed"
-    assert calls == ["lane"], "released once, not twice"
+    assert calls == ["release"], "released once, not twice"
     # The reservation is the hold that CAN still be freed, and it must be.
     assert _dispatch_claim_state("x-5") == "free"
 
@@ -451,5 +524,37 @@ def test_keyboard_interrupt_releases_both_holds_and_propagates(monkeypatch, tmp_
     with pytest.raises(KeyboardInterrupt):
         dispatch._dispatch_one(session="s", node=None, project=None)
 
-    assert active_lane_count() == 0
     assert _dispatch_claim_state("x-6") == "free"
+    assert _node_claim_state("x-6") == "free"
+
+
+# --- worktree-ensure launch cwd (x-3f84 W5, plan change 5) ------------------
+
+
+def test_launch_cwd_comes_from_worktree_ensure(monkeypatch, tmp_path):
+    """AC5-HP: a node whose recorded cwd is the canonical checkout launches in
+    the path ensure resolved, never the canonical root."""
+    calls, _gate = _wire(
+        monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)}
+    )
+    resolved = tmp_path / "wt" / "target-x-1"
+    monkeypatch.setattr(
+        dispatch, "_worktree_ensure_for_launch", lambda cwd, name, harness: str(resolved)
+    )
+    v = dispatch._dispatch_one(session="s", node=None, project=None)
+    assert v["outcome"] == "launched"
+    assert calls[0]["cwd"] == resolved
+
+
+def test_ensure_refusal_holds_the_node_and_spawns_nothing(monkeypatch, tmp_path):
+    """AC5-ERR: an empty ensure answer (policy refusal / misconfig) is a failed
+    verdict naming the hold, with both claims released and no pane spawned."""
+    calls, _gate = _wire(
+        monkeypatch, tmp_path, next_node={"id": "x-2", "slug": "b", "cwd": str(tmp_path)}
+    )
+    monkeypatch.setattr(dispatch, "_worktree_ensure_for_launch", lambda cwd, name, harness: None)
+    v = dispatch._dispatch_one(session="s", node=None, project=None)
+    assert v["outcome"] == "failed"
+    assert "canonical main" in v["detail"]
+    assert calls == []
+    assert _dispatch_claim_state("x-2") == "free"

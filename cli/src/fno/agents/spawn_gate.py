@@ -770,7 +770,7 @@ def _acquire_gate_mutex(holder: str, *, fail_closed: bool = False) -> bool:
 def provider_lanes_cap(budget: object) -> Optional[int]:
     """The `lanes` dimension of one provider budget, whichever spelling arrived.
 
-    `config.agents.max_lanes.<provider>` is a :class:`~fno.config.ProviderBudget`
+    `config.agents.provider_limits.<provider>` is a :class:`~fno.config.ProviderBudget`
     record since x-c703, and was a bare integer before it. Both reach this seam:
     the configured table carries the record, and the fail-safe fallback below
     carries the integer. Reading them through one function is what keeps the two
@@ -957,16 +957,22 @@ def run_gate(
         cap = int(agents_cfg.max_live)
         floor_gb = float(agents_cfg.min_free_gb)
         max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
-        max_lanes = dict(getattr(agents_cfg, "max_lanes", {"zai": 5}))
+        # A real attribute read, not a getattr fallback: a missing field must
+        # fail loudly here rather than silently uncapping every provider.
+        limits = dict(agents_cfg.provider_limits)
     except Exception:
         cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
-        # The same lanes number the built-in ProviderBudget carries.
-        # `provider_lanes_cap` reads either spelling, so this fail-safe path
-        # cannot disagree with the configured one about zai's lane cap.
-        max_lanes = {"zai": 5}
+        # The same budget the built-in table carries, coerced through the same
+        # model so this fail-safe path cannot disagree with the configured one
+        # about zai's caps.
+        from fno.config import ProviderBudget, _BUILTIN_PROVIDER_BUDGETS
+
+        limits = {
+            k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
+        }
 
     provider_cap = (
-        provider_lanes_cap(max_lanes.get(route_provider))
+        provider_lanes_cap(limits.get(route_provider))
         if route_provider is not None
         else None
     )

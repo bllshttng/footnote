@@ -98,7 +98,7 @@ def test_king_at_share_refuses_under_cap(monkeypatch, capsys):
             max_live = 30
             min_free_gb = 0.0
             max_load_per_cpu = 0.0
-            max_lanes = {"zai": 5}
+            provider_limits = {"zai": 5}
 
         class _S:
             agents = _A()
@@ -146,7 +146,7 @@ def test_cap_refusal_wins_over_share_verdict(monkeypatch):
             max_live = 3
             min_free_gb = 0.0
             max_load_per_cpu = 0.0
-            max_lanes = {"zai": 5}
+            provider_limits = {"zai": 5}
 
         class _S:
             agents = _A()

@@ -1499,7 +1499,10 @@ class TestLoadAgents:
             for f in AgentsBlock.model_fields.values()
         ), "AgentsBlock gained a field alias; compare alias-aware keys, not names"
 
-        assert set(_AGENTS_RESERVED_KEYS) == set(AgentsBlock.model_fields)
+        # `max_lanes` is the ONE tolerated legacy spelling (renamed to
+        # provider_limits in x-3f84 W5; still parsed by the block's
+        # before-validator, so it must stay reserved against provider pins).
+        assert set(_AGENTS_RESERVED_KEYS) == set(AgentsBlock.model_fields) | {"max_lanes"}
 
     def test_reserved_key_carrying_a_pin_warns(self, tmp_path: Path, caplog):
         """A reserved key that is ALSO binding-shaped is skipped, but not

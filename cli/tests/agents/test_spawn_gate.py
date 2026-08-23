@@ -269,7 +269,7 @@ def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None, max_l
     a.max_live = max_live
     a.min_free_gb = min_free_gb
     a.max_load_per_cpu = max_load_per_cpu  # 0 = the CPU guard stays off in tests
-    a.max_lanes = {"zai": 5} if max_lanes is None else max_lanes
+    a.provider_limits = {"zai": 5} if max_lanes is None else max_lanes
 
     class _S:
         pass

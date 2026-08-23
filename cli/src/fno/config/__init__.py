@@ -675,7 +675,7 @@ def provider_subagent_budget(
         return None
     try:
         resolved = load_settings() if settings is None else settings
-        budget = resolved.agents.max_lanes.get(provider)
+        budget = resolved.agents.provider_limits.get(provider)
     except Exception:  # noqa: BLE001 - fail open; see the docstring
         return None
     subagents = getattr(budget, "subagents", None)
@@ -1623,7 +1623,7 @@ _BUILTIN_PROVIDER_BUDGETS: dict[str, dict[str, int]] = {
 class ProviderBudget(BaseModel):
     """What ONE account at a model provider tolerates, in every dimension.
 
-    The fleet already had a per-provider record: `agents.max_lanes.<provider>`,
+    The fleet already had a per-provider record: `agents.provider_limits.<provider>` (then `max_lanes`),
     a bare integer capping concurrent spawned workers. It carried one dimension
     while the account is spent on two - a worker also fans out subagents inside
     its own session, and a shared-quota account was spent eight subagents deep
@@ -1746,16 +1746,20 @@ class AgentsBlock(BaseModel):
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     # Spawn-gate knobs (x-c5cc). Scalar guards retain their fail-open defaults;
-    # max_lanes keeps its safe default on invalid input because dropping zai's
-    # cap would fail open exactly when the fleet is busiest.
+    # provider_limits keeps its safe default on invalid input because dropping
+    # zai's cap would fail open exactly when the fleet is busiest.
     #   max_live    — cap on concurrent live worker processes (union of the fno
     #                 registry and claude's daemon roster). Spawn queues at cap.
-    #   max_lanes   — the per-provider budget record (:class:`ProviderBudget`):
-    #                 `lanes` is the immediate-refusal spawn cap, `subagents`
-    #                 is the in-session fan-out width route resolution reads.
+    #   provider_limits — the per-provider budget record
+    #                 (:class:`ProviderBudget`): `lanes` is the
+    #                 immediate-refusal spawn cap, `subagents` is the
+    #                 in-session fan-out width route resolution reads.
     #                 Unlisted providers are uncapped in both dimensions; the
     #                 built-in zai budget is lanes 5, subagents 1. A bare
-    #                 integer is still legal and coerces to `lanes`.
+    #                 integer is still legal and coerces to `lanes`. Renamed
+    #                 from `max_lanes` (x-3f84 W5) so no two config leaves
+    #                 share that name with `parallel.max_lanes`; the legacy
+    #                 spelling still parses, with one deprecation line.
     #   min_free_gb — available-RAM floor for spawn preflight; <= 0 disables.
     #   max_load_per_cpu — CPU ceiling for spawn preflight: refuse when the
     #                 1-min loadavg exceeds this factor times the CPU count
@@ -1767,7 +1771,7 @@ class AgentsBlock(BaseModel):
     #                 <= 0 disables.
     #   worker_qos  — utility (demote workers to background QoS) | off.
     max_live: int = 3
-    max_lanes: dict[str, ProviderBudget] = Field(
+    provider_limits: dict[str, ProviderBudget] = Field(
         default_factory=lambda: {
             k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
         }
@@ -1857,18 +1861,55 @@ class AgentsBlock(BaseModel):
             return v
         return 4
 
-    @field_validator("max_lanes", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _coerce_max_lanes(cls, v: object) -> object:
+    def _accept_legacy_max_lanes(cls, data: object) -> object:
+        """Rename a legacy `[agents] max_lanes` table onto `provider_limits`.
+
+        The rename (x-3f84 W5) kills the leaf-name collision with
+        `parallel.max_lanes`, but a hard break would silently uncap a live
+        provider budget - a billing failure, not a config failure - so the old
+        spelling parses forever and prints ONE deprecation line naming the new
+        key. When both spellings are present the new one wins and the legacy
+        table is ignored (stated in the same line, never silent).
+        """
+        if not isinstance(data, dict):
+            return data
+        legacy = "max_lanes" in data
+        modern = "provider_limits" in data
+        if not legacy:
+            return data
+        import sys as _sys
+
+        if modern:
+            print(
+                "fno config: [agents] carries both provider_limits and the "
+                "legacy max_lanes; using provider_limits and ignoring max_lanes",
+                file=_sys.stderr,
+            )
+            data = {k: v for k, v in data.items() if k != "max_lanes"}
+        else:
+            print(
+                "fno config: [agents] max_lanes is renamed provider_limits; "
+                "the legacy spelling still parses (x-3f84)",
+                file=_sys.stderr,
+            )
+            data = {**data, "provider_limits": data["max_lanes"]}
+            data.pop("max_lanes")
+        return data
+
+    @field_validator("provider_limits", mode="before")
+    @classmethod
+    def _coerce_provider_limits(cls, v: object) -> object:
         """Accept a per-provider budget table, or the bare integer that used to be one.
 
         Two spellings are legal and mean the same thing, so no live config
         breaks when the record widens::
 
-            [agents.max_lanes]
+            [agents.provider_limits]
             zai = 5                 # legacy scalar -> lanes = 5
 
-            [agents.max_lanes.zai]
+            [agents.provider_limits.zai]
             lanes = 5
             subagents = 1
 

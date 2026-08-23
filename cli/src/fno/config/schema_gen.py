@@ -124,7 +124,7 @@ def _jsonable(value: Any) -> Any:
     """Reduce a default to something `json.dumps` accepts.
 
     A default can be a Pydantic model now that a config value is a RECORD and
-    not only a scalar (`agents.max_lanes` carries a `ProviderBudget`). Without
+    not only a scalar (`agents.provider_limits` carries a `ProviderBudget`). Without
     this the generator raised on the model instance, so the docs gate failed
     with a TypeError instead of reporting drift.
     """
@@ -201,7 +201,7 @@ def _toml_value(value: Any) -> str:
     these config defaults); lists/dicts use JSON flow, which is valid TOML for
     scalar-element arrays and the empty inline table ``{}``.
 
-    A dict VALUE may itself be a record now (`agents.max_lanes` maps a provider
+    A dict VALUE may itself be a record now (`agents.provider_limits` maps a provider
     to a `ProviderBudget`), so an inline table nests one more level. A `None`
     field inside such a record is DROPPED rather than rendered: TOML has no
     null, and an absent key already means "unset" for every optional field

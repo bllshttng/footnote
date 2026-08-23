@@ -241,8 +241,8 @@ happy_routed_panes = false
 dead_row_grace = 3600
 # Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).
 max_live = 3
-# Per-provider budget record keyed by model provider: `lanes` is the immediate-refusal cap on concurrent live workers, `subagents` is the in-session fan-out width review route resolution reads (1 means a panel is never dispatched there). A bare integer is still legal and reads as `lanes`. Unlisted providers are uncapped in both dimensions; the built-in zai budget is lanes 5, subagents 1, because that account is shared.
-max_lanes = { zai = { lanes = 5, subagents = 1 } }
+# Per-provider budget record keyed by model provider: `lanes` is the immediate-refusal cap on concurrent live workers, `subagents` is the in-session fan-out width review route resolution reads (1 means a panel is never dispatched there). A bare integer is still legal and reads as `lanes`. Unlisted providers are uncapped in both dimensions; the built-in zai budget is lanes 5, subagents 1, because that account is shared. Renamed from `agents.max_lanes` (x-3f84 W5) so no two leaves share that name with `parallel.max_lanes`; the legacy spelling still parses with one deprecation line.
+provider_limits = { zai = { lanes = 5, subagents = 1 } }
 # Maximum panes placed in one named pane_group tab before a spawn creates the next numbered sibling tab (default 4).
 pane_group_max = 4
 # Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).
