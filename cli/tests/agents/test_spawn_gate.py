@@ -262,8 +262,14 @@ class TestRamFloor:
 def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None, max_load_per_cpu=0.0):
     """Point run_gate at fixed knobs without touching real settings."""
 
+    class _D:
+        model = None
+        account = None
+
     class _A:
-        pass
+        defaults = _D()
+        profiles = {}
+        worker_qos = "off"
 
     a = _A()
     a.max_live = max_live
@@ -338,7 +344,7 @@ class TestRunGate:
         guard.release()
 
     def test_queue_timeout_is_distinct_and_loud(self, monkeypatch, capsys):
-        """AC1-ERR: timeout exit code is the gate's own, message names top."""
+        """AC1-ERR: reusable gate returns refusal data without writing stdout."""
         _settings(monkeypatch, max_live=1)
         w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
         monkeypatch.setattr(
@@ -349,9 +355,47 @@ class TestRunGate:
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg")
         assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
-        err = capsys.readouterr().err
-        assert "fno agents top" in err
+        captured = capsys.readouterr()
+        assert "fno agents top" in captured.err
         assert exc.value.code not in (2, 13, 14, 15, 18, 127)
+        assert captured.out == ""
+        receipt = exc.value.receipt
+        assert receipt["status"] == "refused"
+        assert receipt["reason"] == "queue_timeout"
+        assert receipt["max_live"] == 1
+        assert receipt["count"] == 1
+        assert receipt["current_count"] == 1
+
+    def test_queue_timeout_spawn_command_emits_receipt_and_exits_75(self, monkeypatch):
+        """fno agents spawn exits non-zero (75) on queue timeout and emits machine-readable receipt."""
+        from typer.testing import CliRunner
+        from fno.agents.cli import agents_app
+
+        _settings(monkeypatch, max_live=2)
+        w1 = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
+        w2 = spawn_gate.LiveWorker("fno", "w2", "claude", "bg", ALIVE, "busy")
+        monkeypatch.setattr(
+            spawn_gate,
+            "census",
+            lambda: spawn_gate.LiveCensus(workers=[w1, w2], fno_slot_workers=2),
+        )
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.05)
+
+        runner = CliRunner()
+        res = runner.invoke(
+            agents_app,
+            ["spawn", "do something", "--name", "w3", "-H", "claude", "-m", "claude-sonnet-4-6"],
+        )
+        assert res.exit_code == spawn_gate.EXIT_QUEUE_TIMEOUT
+        assert "spawn-gate: queue timeout after 0s at max_live 2" in res.output
+        receipt_line = [line for line in res.output.splitlines() if line.startswith("{")][-1]
+        receipt = json.loads(receipt_line)
+        assert receipt["status"] == "refused"
+        assert receipt["reason"] == "queue_timeout"
+        assert receipt["max_live"] == 2
+        assert receipt["count"] == 2
+        assert receipt["current_count"] == 2
 
     def test_force_bypasses_and_prints_forced_line(self, monkeypatch, capsys):
         _settings(monkeypatch, max_live=1)

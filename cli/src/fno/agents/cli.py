@@ -1983,7 +1983,7 @@ def cmd_spawn(
     # so those normally gate in Rust; the Rust pane arm re-execs back here) —
     # exactly one gate evaluation per spawn (LD1). `--once` is the
     # pre-substrate spelling of a headless one-shot, so it gates as headless.
-    from fno.agents.spawn_gate import run_gate
+    from fno.agents.spawn_gate import GateRefused, run_gate
 
     try:
         gate = run_gate(
@@ -1993,6 +1993,11 @@ def cmd_spawn(
             no_wait=no_wait,
             route_provider=route_provider,
         )
+    except GateRefused as exc:
+        _release_dispatch_claims(node_reservation, node_claim)
+        if exc.receipt is not None:
+            print(json.dumps(exc.receipt))
+        raise
     except BaseException:
         _release_dispatch_claims(node_reservation, node_claim)
         raise

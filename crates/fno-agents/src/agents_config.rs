@@ -839,7 +839,8 @@ mod tests {
     // cannot observe a half-set env (the same discipline as provider.rs's
     // HOME_LOCK). The pure content-based readers above touch no env and need no
     // lock.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: std::sync::LazyLock<&'static std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(crate::claims::test_env_lock);
 
     fn clear_config_env() {
         std::env::remove_var("FNO_CONFIG");

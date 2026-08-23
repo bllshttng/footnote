@@ -755,6 +755,10 @@ def _release_claim_bounded(key: str, holder: str) -> bool:
 class GateRefused(SystemExit):
     """Raised (as SystemExit subclass) when the gate refuses the spawn."""
 
+    def __init__(self, code: int, receipt: Optional[dict[str, object]] = None) -> None:
+        super().__init__(code)
+        self.receipt = receipt
+
 
 def _acquire_gate_mutex(holder: str, *, fail_closed: bool = False) -> bool:
     """One attempt at the spawn-gate mutex. True = held. Errors fail open."""
@@ -814,7 +818,15 @@ def _refuse_provider_cap(
         f"spawn-gate: provider {provider}, cap {cap}, current count "
         f"{current_text}{detail}; refusing immediately; no worker launched"
     )
-    raise GateRefused(EXIT_PROVIDER_CAP)
+    receipt = {
+        "status": "refused",
+        "reason": "provider_cap",
+        "provider": provider,
+        "cap": cap,
+        "count": current,
+        "current_count": current,
+    }
+    raise GateRefused(EXIT_PROVIDER_CAP, receipt)
 
 
 def _check_ram_floor(floor_gb: float) -> None:
@@ -830,7 +842,13 @@ def _check_ram_floor(floor_gb: float) -> None:
             f"spawn-gate: available RAM {avail:.1f}GB is below the min_free_gb "
             f"floor {floor_gb:.1f}GB; refusing to spawn (--force to bypass)"
         )
-        raise GateRefused(EXIT_RAM_REFUSED)
+        receipt = {
+            "status": "refused",
+            "reason": "ram_floor",
+            "available_gb": avail,
+            "min_free_gb": floor_gb,
+        }
+        raise GateRefused(EXIT_RAM_REFUSED, receipt)
 
 
 def _check_load_ceiling(max_load_per_cpu: float) -> None:
@@ -1027,6 +1045,7 @@ def run_gate(
     started = time.monotonic()
     last_progress = started
     announced = False
+    slots: int = 0
     #: start of the current UNBROKEN run of failed acquisitions (None = holding
     #: or not yet contended). Reset on every success so a long legitimate queue
     #: never accumulates into a spurious fail-open.
@@ -1065,7 +1084,12 @@ def run_gate(
                     "spawn-gate: another spawner holds the gate mutex; refusing "
                     "(--no-wait). See `fno agents top`."
                 )
-                raise GateRefused(EXIT_NO_WAIT)
+                receipt = {
+                    "status": "refused",
+                    "reason": "no_wait_mutex_held",
+                    "max_live": cap,
+                }
+                raise GateRefused(EXIT_NO_WAIT, receipt)
             if now - mutex_blocked_since >= MUTEX_WAIT_BUDGET_S:
                 _warn(
                     f"spawn-gate: gate mutex still held after "
@@ -1148,7 +1172,14 @@ def run_gate(
                     f"spawn-gate: {slots} live worker slots >= max_live {cap}; "
                     f"refusing (--no-wait). See `fno agents top`."
                 )
-                raise GateRefused(EXIT_NO_WAIT)
+                receipt = {
+                    "status": "refused",
+                    "reason": "no_wait",
+                    "max_live": cap,
+                    "count": slots,
+                    "current_count": slots,
+                }
+                raise GateRefused(EXIT_NO_WAIT, receipt)
             now = time.monotonic()
             if not announced:
                 _warn(
@@ -1171,7 +1202,14 @@ def run_gate(
                 f"max_live {cap}; inspect live workers with `fno agents top`, "
                 f"or retry with --no-wait/--force"
             )
-            raise GateRefused(EXIT_QUEUE_TIMEOUT)
+            receipt = {
+                "status": "refused",
+                "reason": "queue_timeout",
+                "max_live": cap,
+                "count": slots,
+                "current_count": slots,
+            }
+            raise GateRefused(EXIT_QUEUE_TIMEOUT, receipt)
         time.sleep(QUEUE_POLL_S)
 
 
