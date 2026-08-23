@@ -111,10 +111,32 @@ def _load_auto_merge():
     return load_settings().auto_merge
 
 
+# A checkout's toplevel never moves within a process, so the rev-parse
+# answer memoizes forever. This is what keeps the floor predicate off the
+# per-fire subprocess path without ever keying a VERDICT on file metadata
+# (the deleted mtime-keyed floor cache; see git history).
+_REPO_ROOT_CACHE: dict[str, str] = {}
+
+
 def _repo_state_dir(cwd: str) -> str:
-    res = _git(["rev-parse", "--show-toplevel"], cwd)
-    root = res.stdout.strip() if res.ok and res.stdout.strip() else cwd
+    root = _REPO_ROOT_CACHE.get(cwd)
+    if root is None:
+        res = _git(["rev-parse", "--show-toplevel"], cwd)
+        root = res.stdout.strip() if res.ok and res.stdout.strip() else cwd
+        _REPO_ROOT_CACHE[cwd] = root
     return os.path.join(root, ".fno")
+
+
+def _closes_quoted_scalar(raw: str) -> bool:
+    """Whether the text after ``key:`` ends its quoted scalar on this line.
+
+    Mirrors ``line_closes_quoted_scalar`` in client_verbs.rs: a trailing
+    quote with no preceding backslash closes, because init prepends exactly
+    one backslash to every user quote.
+    """
+    if not raw.endswith('"'):
+        return False
+    return not raw[:-1].endswith("\\")
 
 
 def _read_state_field(state_file: str, field: str) -> str:
@@ -122,19 +144,41 @@ def _read_state_field(state_file: str, field: str) -> str:
 
     Strips only a MATCHED surrounding quote pair (not a naive unbalanced
     strip that could mangle a value starting/ending with a quote; gemini on
-    PR #524).
+    PR #524). Lines inside a multi-line quoted scalar are VALUE, not fields:
+    a target description containing a `harness:` line must not read as the
+    run's harness - the forgery parse_manifest_identity in client_verbs.rs
+    already guards on the Rust side.
     """
     try:
         with open(state_file, "r", encoding="utf-8") as fh:
+            in_scalar = False
             for ln in fh:
-                if ln.startswith(field + ":"):
-                    val = ln[len(field) + 1:].strip()
-                    if len(val) >= 2 and (
-                        (val[0] == '"' and val[-1] == '"')
-                        or (val[0] == "'" and val[-1] == "'")
+                untrusted = in_scalar
+                if in_scalar and _closes_quoted_scalar(ln.strip()):
+                    in_scalar = False
+                if untrusted:
+                    continue
+                if not ln.startswith(field + ":"):
+                    # Any key opening an unclosed quote starts a multi-line
+                    # scalar; its body lines are not fields. Like the Rust
+                    # scan, blank, comment, and marker lines never open one.
+                    _k, sep, raw = ln.partition(":")
+                    if (
+                        sep
+                        and not ln.startswith("#")
+                        and ln.strip() != "---"
+                        and raw.strip().startswith('"')
+                        and not _closes_quoted_scalar(raw.strip())
                     ):
-                        return val[1:-1]
-                    return val
+                        in_scalar = True
+                    continue
+                val = ln[len(field) + 1:].strip()
+                if len(val) >= 2 and (
+                    (val[0] == '"' and val[-1] == '"')
+                    or (val[0] == "'" and val[-1] == "'")
+                ):
+                    return val[1:-1]
+                return val
     except OSError:
         pass
     return ""

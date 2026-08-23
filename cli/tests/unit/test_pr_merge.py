@@ -955,6 +955,36 @@ def test_review_lane_configured_floors_a_code_payload(monkeypatch, tmp_path):
     assert _merge._review_lane_configured(str(tmp_path), 42) is False
 
 
+def test_manifest_reader_ignores_keys_inside_a_multiline_input_scalar(
+    tmp_path,
+):
+    """A `harness:` line inside the target's free-text argument is not the
+    run's harness. The Rust manifest parser already skips input-scalar lines
+    for exactly this forgery (parse_manifest_identity); the Python reader
+    agrees, so the two gates cannot disagree on one manifest."""
+    state = tmp_path / ".fno"
+    state.mkdir(exist_ok=True)
+    # The scalar body carries a forged harness line before the real one.
+    (state / "target-state.md").write_text(
+        "---\n"
+        'input: "/target fix the floor\nharness: gemini\nsee docs"\n'
+        "harness: agy\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    assert _merge._manifest_harness(str(tmp_path)) == "agy"
+    # With no real harness line, the forged one is still not attribution:
+    # unattributable, so the floor engages.
+    (state / "target-state.md").write_text(
+        "---\n"
+        'input: "/target fix the floor\nharness: gemini\nsee docs"\n'
+        "cross_project: false\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    assert _merge._manifest_harness(str(tmp_path)) is None
+
+
 def test_review_floor_is_caller_independent_across_env_shapes(
     monkeypatch, tmp_path
 ):
