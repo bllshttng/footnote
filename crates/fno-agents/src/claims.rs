@@ -521,8 +521,7 @@ pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
         // proven to be the holder session's own process. Any other provenance
         // (or a legacy record with no field) is Stale, as a pre-hybrid claim
         // was: the TTL is a lease.
-        let corroborated =
-            rec.pid_provenance.as_deref() == Some("session-prover") && is_live(rec);
+        let corroborated = rec.pid_provenance.as_deref() == Some("session-prover") && is_live(rec);
         return if corroborated {
             ClaimState::Live
         } else {
