@@ -184,3 +184,92 @@ def test_docs_only_conflict_rebase_keeps_the_attestation(tmp_path):
         "a docs-only resolution changed no code: the carry must match the "
         "Rust twin's CarriedDocsOnly"
     )
+
+
+def _rebased_repo_variant(tmp, variant):
+    """Rebase scenarios pinning the identity's exact tightness. All three were
+    verified against the construction both gates now share: the raw line
+    carries the PRE-IMAGE blob sha too, so a sibling edit to the same file
+    (different region, clean rebase) still expires - the reviewer never saw
+    the sibling's bytes - while a delta the base absorbed (subset) carries."""
+    repo = tmp / "r"
+    repo.mkdir()
+    _sh("git", "init", "-q", "-b", "main", str(repo), cwd=tmp)
+    _sh("git", "config", "user.email", "t@t", cwd=repo)
+    _sh("git", "config", "user.name", "t", cwd=repo)
+    (repo / "code.txt").write_text("a\nb\nc\n", encoding="utf-8")
+    _sh("git", "add", "-A", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "base", cwd=repo)
+    tip = _sh("git", "rev-parse", "HEAD", cwd=repo)
+    _sh("git", "update-ref", "refs/remotes/origin/main", tip, cwd=repo)
+
+    _sh("git", "checkout", "-q", "-b", "feature", cwd=repo)
+    if variant == "sibling":
+        (repo / "code.txt").write_text("a\nb\nc\npr\n", encoding="utf-8")
+        _sh("git", "add", "-A", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "pr", cwd=repo)
+    elif variant == "reindent":
+        (repo / "code.txt").write_text("a\nb\nc\n    pr\n", encoding="utf-8")
+        _sh("git", "add", "-A", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "pr", cwd=repo)
+    else:  # subset: two files, base later absorbs one
+        (repo / "x.txt").write_text("x\n", encoding="utf-8")
+        _sh("git", "add", "-A", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "add x", cwd=repo)
+        (repo / "y.txt").write_text("y\n", encoding="utf-8")
+        _sh("git", "add", "-A", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "add y", cwd=repo)
+    reviewed = _sh("git", "rev-parse", "HEAD", cwd=repo)
+
+    _sh("git", "checkout", "-q", "main", cwd=repo)
+    if variant == "sibling":
+        (repo / "code.txt").write_text("A\nb\nc\n", encoding="utf-8")
+    elif variant == "reindent":
+        (repo / "code.txt").write_text("a\nb\nc\nbase tail\n", encoding="utf-8")
+    else:
+        (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    _sh("git", "add", "-A", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "base moved", cwd=repo)
+    tip = _sh("git", "rev-parse", "HEAD", cwd=repo)
+    _sh("git", "update-ref", "refs/remotes/origin/main", tip, cwd=repo)
+
+    _sh("git", "checkout", "-q", "feature", cwd=repo)
+    r = subprocess.run(
+        ["git", "rebase", "origin/main"], cwd=repo, capture_output=True, text=True
+    )
+    if variant == "reindent":
+        assert r.returncode != 0, "scenario requires a conflict"
+        (repo / "code.txt").write_text("a\nb\nc\n        pr reindented\n", encoding="utf-8")
+        _sh("git", "add", "-A", cwd=repo)
+        r = subprocess.run(
+            ["git", "-c", "core.editor=true", "rebase", "--continue"],
+            cwd=repo, capture_output=True, text=True,
+        )
+    assert r.returncode == 0, r.stderr
+    head = _sh("git", "rev-parse", "HEAD", cwd=repo)
+    return repo, reviewed, head
+
+
+def test_sibling_edit_to_the_same_file_expires_the_attestation(tmp_path):
+    """A patch-id approximation called this carried (it strips line numbers
+    and whitespace); the raw-diff identity both gates now share does not: the
+    pre-image blob sha changed, so the reviewer never saw the shipping
+    bytes of that file."""
+    repo, reviewed, head = _rebased_repo_variant(tmp_path, "sibling")
+    shaped = _shaped(repo, reviewed, head)
+    assert shaped["verdicts"][0]["freshness"] == "stale"
+
+
+def test_reindented_conflict_resolution_expires_the_attestation(tmp_path):
+    repo, reviewed, head = _rebased_repo_variant(tmp_path, "reindent")
+    shaped = _shaped(repo, reviewed, head)
+    assert shaped["verdicts"][0]["freshness"] == "stale"
+
+
+def test_base_absorbed_subset_rebase_keeps_the_attestation(tmp_path):
+    """The Rust twin's CarriedSubset: the delta only SHRANK (every raw line
+    still shipping was read). The patch-id approximation re-staled this shape,
+    re-creating the treadmill for subset rebases."""
+    repo, reviewed, head = _rebased_repo_variant(tmp_path, "subset")
+    shaped = _shaped(repo, reviewed, head)
+    assert shaped["verdicts"][0]["freshness"] != "stale"

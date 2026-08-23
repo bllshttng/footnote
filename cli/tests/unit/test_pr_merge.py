@@ -1005,16 +1005,20 @@ def test_review_floor_is_caller_independent_across_env_shapes(
     )
     assert requires_review() == (True, True)
     # The manifest decides ALONE, so the gates cannot disagree: a gemini-run
-    # PR merged from a clean claude session still reads no-floor here, the
-    # same answer the gemini authoring session's stop gate gave (its own
-    # ambient was gemini). OR-ing the ambient input in is how the two gates
-    # split on one PR.
+    # PR merged from a poisoned claude ambient (ambiguous, so no second
+    # attribution) still reads no-floor here, the same answer the gemini
+    # authoring session's stop gate gave.
     (state / "target-state.md").write_text(
         "---\nharness: gemini\n---\n", encoding="utf-8"
     )
+    assert requires_review() == (False, False)
+    # But a verbless manifest that CONTRADICTS a clean verbful ambient read
+    # floors: the manifest is an init-time snapshot that outlives its run,
+    # and a dead run's verbless stamp must not disengage the floor for a
+    # verbful PR merged from that checkout.
     monkeypatch.delenv("CODEX_THREAD_ID")
     monkeypatch.delenv("CODEX_SESSION_ID")
-    assert requires_review() == (False, False)
+    assert requires_review() == (True, True)
     # The unknown sentinel is no attribution: ambient alone decides, and a
     # poisoned ambient therefore floors.
     (state / "target-state.md").write_text(

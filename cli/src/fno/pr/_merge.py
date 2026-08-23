@@ -441,8 +441,11 @@ def _is_documentation_path(path: str) -> bool:
 # Short-lived memo for the PR files probe: the floored lane predicate runs on
 # every status/merge fire, and `gh pr view --json files` spends the per-USER
 # GraphQL quota this repo is documented to be sensitive to. A file list cannot
-# change within one PR head, and 120s bounds staleness across pushes. ponytail:
-# head-keyed cache if a poll loop ever needs cross-push exactness.
+# change within one PR head, and 120s bounds staleness across pushes. Every
+# CLI invocation is a fresh process, so the window only opens in a long-lived
+# in-process surface (MCP): such a caller that classifies a docs-only head and
+# then sees code pushed must evict or wait out the TTL before merging. ponytail:
+# head-keyed cache if a long-lived surface ever needs cross-push exactness.
 _PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
 _PAYLOAD_CACHE_TTL = 120.0
 
@@ -526,14 +529,25 @@ def _harness_can_self_review(repo: str) -> bool:
     from fno.harness_names import KNOWN_HARNESSES
     from fno.review_capability import harness_can_self_review
 
-    harness = _manifest_harness(repo) or _ambient_harness()
+    harness = _manifest_harness(repo)
+    ambient = _ambient_harness()
+    if harness is None:
+        harness = ambient
     if harness is None:
         return True
     if harness_can_self_review(harness):
         return True
-    # Release only on a KNOWN verbless harness; an unrecognized spelling is
-    # still an unattributed run and floors.
+    # A KNOWN verbless harness releases the floor - unless the manifest says
+    # verbless while a clean single-family ambient read says verbful. The
+    # manifest is an init-time snapshot that outlives its session and belongs
+    # to whichever root the merging process stands in, so a dead run's
+    # `harness: gemini` must not silently disengage the floor for a claude
+    # PR merged from that checkout. On that conflict, floor: the safe
+    # disagreement costs one review, the unsafe one costs the review.
     verbless = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
+    if harness in verbless and ambient is not None and harness_can_self_review(ambient):
+        return True
+    # An unrecognized spelling is still an unattributed run and floors.
     return harness not in verbless
 
 

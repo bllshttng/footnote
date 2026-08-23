@@ -17,15 +17,7 @@ The obligation to use one of these lanes on a code payload is enforced at the st
 This doc is the lane menu; the gate is the authority.
 Opt out with `config.review.self_review_required = false`.
 
-Who the floor applies to: a harness with a native review verb floors.
-A KNOWN verbless harness (gemini/agy) does not, because no native verb there can satisfy it.
-A run that cannot be attributed also floors: absent markers, ambiguous markers, or no target manifest.
-Ambiguity about who authored the change is not permission to skip its review.
-The Python merge gate attributes the run from the target manifest's `harness:` field first, then a single-family ambient resolve.
-The stop gate attributes from its ambient markers, and `--author-harness none` is the explicit hermetic opt-out.
-Before this rule the Python half read only ambient markers.
-Two families meant "no floor", so a claude session started from a codex shell merged code PRs with zero review.
-That is the default state of any session under a multi-CLI shell.
+Who the floor applies to: a harness with a native review verb floors. A run that cannot be attributed also floors. That covers absent markers, ambiguous markers, no target manifest, and an unrecognized spelling. Ambiguity about who authored the change is not permission to skip its review. A KNOWN verbless harness (gemini/agy) does not floor, because no native verb there can satisfy it. The Python merge gate attributes the run from the target manifest's `harness:` field first. When no manifest carries a harness, a single-family ambient resolve is the fallback. The stop gate attributes from its ambient markers, and `--author-harness none` is the explicit hermetic opt-out. A verbless manifest that contradicts a verbful ambient read still floors. The manifest is an init-time snapshot that outlives its session. A dead run's verbless stamp must not disengage the floor for a verbful PR merged from that checkout. Before this rule the Python half read only ambient markers. Two families meant "no floor", so a claude session started from a codex shell merged code PRs with zero review. That is the default state of any session under a multi-CLI shell.
 
 ## Lane 0: the provider budget decides the route before any lane runs
 
@@ -304,14 +296,7 @@ Four separate places ask "has this reviewer reviewed this code".
 
 All four go through the predicate: the coverage count, the attestation scan, the presence check behind `missing_bots`, and `finalize`'s arming check.
 
-The Python merge gate's recheck (`_verdicts_with_current_freshness` in `cli/src/fno/pr/_reviews.py`) is the fifth.
-It used to answer with ancestry alone, so it killed every `carried_*` verdict the predicate had minted the moment a rebase rewrote the sha.
-That was the operator's daily rebase treadmill: one full re-review per merged sibling PR.
-Its freshness test is now ancestry OR content.
-The PR's CODE delta at the reviewed sha and at HEAD must carry the same `git patch-id --stable` over `base...sha` three-dot diffs.
-Documentation paths are excluded and `--no-renames` is pinned, so the Python identity expires the same rebases the Rust identity does.
-The base is the PR's own `baseRefName`, remote-qualified, falling back to `origin/main`/`origin/master`.
-Unreadable on either side is stale, the same fail-closed contract as the predicate.
+The Python merge gate's recheck (`_verdicts_with_current_freshness` in `cli/src/fno/pr/_reviews.py`) is the fifth. It used to answer with ancestry alone, so it killed every `carried_*` verdict the predicate had minted the moment a rebase rewrote the sha. That was the operator's daily rebase treadmill: one full re-review per merged sibling PR. Its freshness test is now ancestry OR a faithful mirror of the predicate's own identity. The mirror builds the same `git diff --raw --no-abbrev --no-renames base...sha` code-diff identity `pr_code_diff_identity` builds, with documentation paths dropped. Identities compare for equality. When the base absorbed paths on the rebase, a strict subset also carries. The base is the PR's own `baseRefName`, remote-qualified, falling back to `origin/main`/`origin/master`. It resolves once per shaping pass. Unreadable on either side is stale, the same fail-closed contract as the predicate. Because the identity is the same construction rather than an approximation, the two gates expire the same rebases.
 
 Fix one and leave the others on a bare equality, and the gate stays exactly as tight as before.
 The softening is then purely decorative.

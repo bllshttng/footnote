@@ -149,6 +149,10 @@ def test_rebased_out_verdict_refuses_both_surfaces(
 ):
     monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
     monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: False)
+    # Hermetic: a dead ancestry must not fall into the real content arm.
+    monkeypatch.setattr(
+        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: False
+    )
     _seed_row(
         tmp_path,
         coverage="covered",

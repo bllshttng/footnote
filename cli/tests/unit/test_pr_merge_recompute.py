@@ -60,6 +60,11 @@ def _stub_recompute(
     monkeypatch.setattr(
         _reviews, "_reviewed_sha_is_ancestor", lambda *args: ancestor
     )
+    # The content arm behind a dead ancestry must not reach real git/gh from a
+    # hermetic test: stub the whole describes-test at its seam.
+    monkeypatch.setattr(
+        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: ancestor
+    )
     # Route the gate through the REAL read (the `enabled` fixture's covered
     # stub would bypass the recompute entirely): the only seam is the verb.
     monkeypatch.setattr(

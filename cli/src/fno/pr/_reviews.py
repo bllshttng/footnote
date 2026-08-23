@@ -148,6 +148,7 @@ def _repo_root(cwd: Optional[str] = None) -> Path:
 # `finalize.rs` instead of one. Re-exported under the old private names so every
 # call site and test here reads unchanged.
 from fno.paths import repo_identity as _repo_identity  # noqa: E402
+from fno.pr._merge import _is_documentation_path  # noqa: E402
 
 
 def _scan_coverage(
@@ -471,49 +472,50 @@ def _reviewed_sha_is_ancestor(
     return result.returncode == 0
 
 
-def _pr_delta_patch_id(sha: str, base_ref: str, cwd: Optional[str]) -> Optional[str]:
-    """Stable patch-id of the PR's own CODE delta at ``sha`` against ``base_ref``.
+def _pr_code_diff_identity(
+    sha: str, base_ref: str, cwd: Optional[str]
+) -> Optional[tuple[str, frozenset[str]]]:
+    """Content identity of the PR's own CODE changes at ``sha``.
 
-    ``git diff base...sha`` names the branch's own changes (three-dot), not
-    changes that landed on the base since the branch point, so the id stays
-    comparable across a rebase that changed no content. ``--no-renames`` pins
-    it against a per-user ``diff.renames`` config, and documentation paths are
-    excluded so a rebase that resolved a docs-only conflict still carries -
-    both matching the Rust twin's ``pr_code_diff_identity``, or the two gates
-    expire different rebases. ``None`` on any git failure or an empty diff: an
-    absence is never evidence (the absence-matched-against-absence trap),
-    matching that twin's fail-closed contract; a docs-only delta is None too,
-    so it never carries."""
+    A faithful mirror of ``pr_code_diff_identity`` in loopcheck.rs, decision
+    for decision: the same ``git diff --raw --no-abbrev --no-renames
+    base...sha`` (one line per changed path carrying both blob SHAs, so a
+    sibling edit to the same file or a reindent changes the identity where a
+    patch-id would not), documentation paths dropped, sorted, hashed. The
+    hash algorithm differs (sha256 vs blake3) but only the EQUALITY decision
+    crosses the language line, and the line sets make the subset test
+    possible. ``None`` on any git failure AND when nothing outside
+    documentation changed - an empty code diff is not evidence, the
+    absence-matched-against-absence trap."""
     try:
         diff = run(
-            [
-                "git",
-                "diff",
-                "--no-renames",
-                f"{base_ref}...{sha}",
-                "--",
-                ".",
-                ":(exclude,glob)*.md",
-                ":(exclude,glob)**/*.md",
-                ":(exclude,glob)docs/**",
-            ],
+            ["git", "diff", "--raw", "--no-abbrev", "--no-renames", f"{base_ref}...{sha}"],
             cwd=cwd,
             timeout=15,
-        )
-        if diff.returncode != 0 or not (diff.stdout or "").strip():
-            return None
-        pid = run(
-            ["git", "patch-id", "--stable"],
-            cwd=cwd,
-            timeout=15,
-            input_text=diff.stdout or "",
         )
     except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
         return None
-    if pid.returncode != 0:
+    if diff.returncode != 0:
         return None
-    first = (pid.stdout or "").strip().splitlines()
-    return first[0].split()[0] if first and first[0].split() else None
+    lines = []
+    for line in (diff.stdout or "").splitlines():
+        line = line.rstrip()
+        if not line:
+            continue
+        path = line.split("\t")[1].strip() if "\t" in line else ""
+        if _is_documentation_path(path):
+            continue
+        lines.append(line)
+    if not lines:
+        return None
+    lines.sort()
+    import hashlib
+
+    digest = hashlib.sha256()
+    for line in lines:
+        digest.update(line.encode("utf-8", "replace"))
+        digest.update(b"\n")
+    return digest.hexdigest(), frozenset(lines)
 
 
 def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
@@ -555,29 +557,39 @@ def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
 
 
 def _reviewed_sha_still_describes_head(
-    reviewed_sha: str, head: str, cwd: Optional[str], pr_number: int = 0
+    reviewed_sha: str,
+    head: str,
+    cwd: Optional[str],
+    base_ref: Optional[str] = None,
+    head_identity: "Optional[tuple[str, frozenset[str]]]" = None,
 ) -> bool:
     """Whether the change the reviewer read still ships at ``head``.
 
     Ancestry is the cheap first test and covers every fast-forward. When it
     fails - a rebase rewrote every commit by construction - the CONTENT test
-    takes over: the PR's code delta at ``reviewed_sha`` and at ``head`` must
-    carry the same stable patch-id, so a rebase that changed no code (x-e8db's
-    treadmill) keeps the attestation while a conflict resolution that changed
-    the delta loses it. Any unreadable input is not fresh, matching the
-    existing ancestry contract."""
+    takes over, mirroring ``review_freshness`` decision for decision: the
+    code-diff identities at ``reviewed_sha`` and at ``head`` carry equal, or
+    the head delta strictly SHRANK (every raw line still shipping was read;
+    the vanished lines are paths the base absorbed on the rebase). Anything
+    else - a sibling edit to the same file, a reindented resolution, an
+    unreadable identity on either side - is a new review. ``base_ref`` and
+    ``head_identity`` let one shaping pass resolve the base once and compute
+    the head identity once for N verdicts."""
     if _reviewed_sha_is_ancestor(reviewed_sha, head, cwd):
         return True
-    base_ref = _resolve_base_ref(cwd, pr_number)
     if base_ref is None:
         return False
-    reviewed_pid = _pr_delta_patch_id(reviewed_sha, base_ref, cwd)
-    head_pid = _pr_delta_patch_id(head, base_ref, cwd)
-    return (
-        reviewed_pid is not None
-        and head_pid is not None
-        and reviewed_pid == head_pid
-    )
+    reviewed = _pr_code_diff_identity(reviewed_sha, base_ref, cwd)
+    if reviewed is None:
+        return False
+    current_head = head_identity
+    if current_head is None:
+        current_head = _pr_code_diff_identity(head, base_ref, cwd)
+    if current_head is None:
+        return False
+    if reviewed[0] == current_head[0]:
+        return True
+    return current_head[1] < reviewed[1]
 
 
 def _verdicts_with_current_freshness(
@@ -587,14 +599,37 @@ def _verdicts_with_current_freshness(
 
     A freshness stamp describes the branch only when it was written. When a
     current head is available, the reviewed change must still ship at that
-    head - by ancestry, or by an identical content delta when a rebase
-    rewrote the commits (x-e8db: every rebase used to invalidate every
-    attestation, even one that reviewed byte-identical content). Missing
-    metadata or an unreadable ancestry/content result cannot prove freshness.
+    head - by ancestry, or by the content-identity test when a rebase rewrote
+    the commits (x-e8db: every rebase used to invalidate every attestation,
+    even one that reviewed byte-identical content). Missing metadata or an
+    unreadable ancestry/content result cannot prove freshness. The base ref
+    and the head identity resolve lazily and once per pass: N stale verdicts
+    at N shas cost one base read and one head diff, not N of each.
     """
     verdicts = data.get("verdicts")
     if not isinstance(verdicts, list):
         return []
+    base_ref: Optional[Optional[str]] = None
+    head_identity: "Optional[tuple[str, frozenset[str]]]" = None
+    head_identity_resolved = False
+
+    def _describes(reviewed_sha: str) -> bool:
+        nonlocal base_ref, head_identity, head_identity_resolved
+        if _reviewed_sha_is_ancestor(reviewed_sha, head, cwd):
+            return True
+        if base_ref is None:
+            base_ref = _resolve_base_ref(cwd, pr_number)
+            if base_ref is None:
+                base_ref = ""  # unanswerable; remembered so N shas pay once
+        if not base_ref:
+            return False
+        if not head_identity_resolved:
+            head_identity = _pr_code_diff_identity(head, base_ref, cwd)
+            head_identity_resolved = True
+        return _reviewed_sha_still_describes_head(
+            reviewed_sha, head, cwd, base_ref or None, head_identity
+        )
+
     describes: dict[str, bool] = {}
     shaped: list[dict] = []
     for verdict in verdicts:
@@ -612,9 +647,7 @@ def _verdicts_with_current_freshness(
             if not isinstance(reviewed_sha, str) or not reviewed_sha:
                 stale = True
             elif reviewed_sha not in describes:
-                describes[reviewed_sha] = _reviewed_sha_still_describes_head(
-                    reviewed_sha, head, cwd, pr_number
-                )
+                describes[reviewed_sha] = _describes(reviewed_sha)
             if isinstance(reviewed_sha, str) and not describes.get(reviewed_sha, False):
                 stale = True
         if stale:
