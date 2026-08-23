@@ -77,7 +77,7 @@ FOLDED_AGENT_SUBCOMMANDS = {
     ),
     "mail": (
         "fno.mail.cli:mail_app",
-        "Durable polled mailbox: send/unread/ack/reply/drain/status.",
+        "Alias of `fno mail` (the canonical root spelling): send/unread/ack/reply/drain/status.",
         {"hidden": True},
     ),
     "mcp": (

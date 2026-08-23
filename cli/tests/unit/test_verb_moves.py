@@ -333,8 +333,6 @@ def test_doctor_fold_move_table_matches_the_approved_work_order():
         "observer": "doctor observer",
         "skill-diff": "doctor skill-diff",
         "status-fanout": "doctor event fanout",
-        "test": "doctor test",
-        "update": "doctor update",
     }
     assert {name: VERB_MOVES[name].to for name in expected} == expected
 
@@ -345,13 +343,43 @@ def test_agents_fold_move_table_matches_the_approved_work_order():
         "claim": "agents claim",
         "dispatch": "agents dispatch",
         "king": "agents king",
-        "mail": "agents mail",
         "mcp": "agents mcp",
         "restart": "agents restart",
         "roles": "agents roles",
         "worker": "agents worker",
     }
     assert {name: VERB_MOVES[name].to for name in expected} == expected
+
+
+def test_restored_root_spellings_are_canonical_not_moves():
+    """mail, test, update are root-canonical again (operator ruling d-5073b562).
+
+    The root lazy registrations serve the call directly: no argv rewrite, no
+    "is now" line. A move entry here would re-shadow the canonical spelling,
+    so its absence is the pinned contract, not an omission to backfill.
+    """
+    from fno.cli import app
+
+    for verb in ("mail", "test", "update"):
+        assert verb not in VERB_MOVES, f"{verb} is root-canonical, not a move"
+        result = runner.invoke(app, [verb, "--help"])
+        assert result.exit_code == 0, (verb, result.output)
+        assert "is now" not in (result.stderr or ""), verb
+
+
+def test_restored_root_spellings_stay_hidden_so_menu_caps_hold():
+    import typer.main
+
+    from fno.cli import app
+
+    root = typer.main.get_command(app)
+    ctx = click.Context(root)
+    for verb in ("mail", "test", "update"):
+        cmd = root.get_command(ctx, verb)
+        assert cmd is not None, f"restored spelling {verb!r} must stay registered"
+        assert getattr(cmd, "hidden", False), (
+            f"restored spelling {verb!r} must be hidden or menu-caps counts it as a root"
+        )
 
 
 def test_rest_fold_move_table_matches_the_approved_work_order():

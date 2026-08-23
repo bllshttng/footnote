@@ -39,6 +39,10 @@ class Move(NamedTuple):
 
 
 VERB_MOVES: dict[str, Move] = {
+    # mail, test, and update are NOT here by design (operator ruling
+    # d-5073b562): the root spellings are canonical, and the nested
+    # registrations (agents mail / doctor test / doctor update) are the
+    # kept silent aliases - both resolve the same command objects.
     "annotate": Move(kind="deprecated", to="backlog annotate"),
     "approvals": Move(kind="deprecated", to="inbox approvals"),
     "autonomy": Move(kind="deprecated", to="agents autonomy"),
@@ -59,7 +63,6 @@ VERB_MOVES: dict[str, Move] = {
     ),
     "lint": Move(kind="deprecated", to="doctor lint"),
     "loops": Move(kind="deprecated", to="do loops"),
-    "mail": Move(kind="deprecated", to="agents mail"),
     "mcp": Move(kind="deprecated", to="agents mcp"),
     "notify": Move(kind="deprecated", to="inbox notify"),
     "observer": Move(kind="deprecated", to="doctor observer"),
@@ -89,9 +92,7 @@ VERB_MOVES: dict[str, Move] = {
     "stub-manifest": Move(kind="deprecated", to="do pr stub-manifest"),
     "skill-diff": Move(kind="deprecated", to="doctor skill-diff"),
     "target": Move(kind="deprecated", to="do target"),
-    "test": Move(kind="deprecated", to="doctor test"),
     "think": Move(kind="deprecated", to="do think"),
-    "update": Move(kind="deprecated", to="doctor update"),
     "worker": Move(kind="deprecated", to="agents worker"),
     "worktree": Move(kind="deprecated", to="workspace worktree"),
 }

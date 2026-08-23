@@ -58,4 +58,7 @@ doctor_app.add_typer(doctor_event_app, name="event")
 doctor_app.command("lint")(lint)
 doctor_app.add_typer(observer_app, name="observer")
 doctor_app.add_typer(skill_diff_app, name="skill-diff")
+# test and update resolve the SAME command objects as the root spellings
+# `fno test` / `fno update`, which are canonical (operator ruling d-5073b562);
+# these registrations are the kept silent aliases.
 doctor_app.command("update")(update_command)

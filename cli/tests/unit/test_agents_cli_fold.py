@@ -52,7 +52,6 @@ def test_old_agents_fold_spellings_forward_and_teach() -> None:
         ("claim", "agents claim"),
         ("dispatch", "agents dispatch"),
         ("king", "agents king"),
-        ("mail", "agents mail"),
         ("mcp", "agents mcp"),
         ("restart", "agents restart"),
         ("roles", "agents roles"),
@@ -61,6 +60,16 @@ def test_old_agents_fold_spellings_forward_and_teach() -> None:
         result = runner.invoke(app, [old, "--help"])
         assert result.exit_code == 0, (old, result.output)
         assert f"fno {old} is now fno {destination}" in (result.stderr or "")
+
+
+def test_restored_mail_stays_folded_at_agents_as_a_silent_alias() -> None:
+    """d-5073b562: `fno mail` is the canonical root spelling; the folded
+    `agents mail` registration keeps serving as a silent alias."""
+    from fno.cli import app
+
+    result = runner.invoke(app, ["agents", "mail", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "is now" not in (result.stderr or "")
 
 
 def test_old_king_board_forwards_to_inbox_not_agents() -> None:
