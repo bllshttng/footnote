@@ -842,7 +842,7 @@ def test_session_add_pr_no_node_names_repair(tmp_path, monkeypatch):
     assert "session add <node-id>" in r.output
 
 
-@pytest.mark.parametrize("phase", ["review", "plan", "", "DO"])
+@pytest.mark.parametrize("phase", ["verif", "plan", "", "DO"])
 def test_append_session_record_rejects_bad_phase(tmp_path, monkeypatch, phase):
     g = _make_graph(tmp_path, [{"id": "ab-add00006", "title": "t"}])
     _patch_graph(monkeypatch, g)
@@ -1464,7 +1464,7 @@ def test_cli_session_add_bad_phase_exits_nonzero(tmp_path, monkeypatch):
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "S")
 
-    r = CliRunner().invoke(C.cli, ["session", "add", "ab-cli00004", "--phase", "review"])
+    r = CliRunner().invoke(C.cli, ["session", "add", "ab-cli00004", "--phase", "verif"])
     assert r.exit_code != 0
 
 

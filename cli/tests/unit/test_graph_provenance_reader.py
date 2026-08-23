@@ -40,10 +40,18 @@ def graph(tmp_path, monkeypatch):
         return g
 
     import fno.graph._constants as gc
+    import fno.graph.cli as gcli
     import fno.graph.store as gs
 
-    monkeypatch.setattr(gc, "GRAPH_JSON", g)
-    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+    # Pin the CLI boundary directly: _graph_path is a concrete function, so
+    # monkeypatch restores it exactly. The lazy GRAPH_JSON attr is unusable
+    # here - ten sibling fixtures setattr it at teardown, which pins a
+    # concrete value into the module dict and silences __getattr__ for the
+    # rest of the process, so a resolver-function patch never fires when this
+    # file runs after any of them.
+    monkeypatch.setattr(gcli, "_graph_path", lambda: g)
+    monkeypatch.setattr(gc, "_graph_json", lambda: g)
+    monkeypatch.setattr(gc, "_graph_md", lambda: tmp_path / "graph.md")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
     for var in ("FNO_NODE", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
                 "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
@@ -229,8 +237,9 @@ def _row(phase, harness="claude", session_id="sess-A", **times):
 
 
 def test_roster_all_four_phases_with_honest_windows_summing(graph):
-    """Canonical started_at+ended_at on all four phases: each shows its window,
-    the total is the sum, and 4 of 4 phases recorded."""
+    """Canonical started_at+ended_at on the four build phases (no review row):
+    each shows its window, the total is the sum, 4 of 5 phases recorded and
+    review alone renders not recorded."""
     graph([_node("x-aaaa", sessions=[
         _row("think", started_at="2026-08-07T00:00:00Z", ended_at="2026-08-07T01:00:00Z"),
         _row("blueprint", started_at="2026-08-07T01:30:00Z", ended_at="2026-08-07T02:00:00Z"),
@@ -238,20 +247,21 @@ def test_roster_all_four_phases_with_honest_windows_summing(graph):
         _row("ship", started_at="2026-08-07T05:30:00Z", ended_at="2026-08-07T06:00:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
-    assert "4 of 4 phases recorded" in out
-    assert out.count("not recorded") == 0
+    assert "4 of 5 phases recorded" in out
+    assert out.count("not recorded") == 1
+    assert "review" in out
     assert "4h30m" in out  # 1h + 30m + 2h30m + 30m
 
 
 def test_roster_do_only_honest_window_marks_three_not_recorded(graph):
-    """One honest do window: three phases render 'not recorded', the total names
+    """One honest do window: four phases render 'not recorded', the total names
     '1 of 4' rather than summing silently over the gaps."""
     graph([_node("x-aaaa", sessions=[
         _row("do", started_at="2026-08-07T02:30:00Z", ended_at="2026-08-07T05:00:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
-    assert out.count("not recorded") == 3
-    assert "1 of 4 phases recorded" in out
+    assert out.count("not recorded") == 4
+    assert "1 of 5 phases recorded" in out
     assert "2h30m" in out
 
 
@@ -264,7 +274,7 @@ def test_roster_end_only_row_renders_no_duration(graph):
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert "end only" in out
     assert "0m" not in out
-    assert "0 of 4 phases recorded" in out
+    assert "0 of 5 phases recorded" in out
 
 
 def test_roster_in_progress_row_renders_no_duration(graph):
@@ -276,7 +286,7 @@ def test_roster_in_progress_row_renders_no_duration(graph):
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert "in progress" in out
     assert "0m" not in out
-    assert "0 of 4 phases recorded" in out
+    assert "0 of 5 phases recorded" in out
 
 
 def test_roster_legacy_rows_are_not_summed_as_durations(graph):
@@ -289,7 +299,7 @@ def test_roster_legacy_rows_are_not_summed_as_durations(graph):
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert "end only" in out
     assert "5h" not in out  # the defective session-span duration must not appear
-    assert "0 of 4 phases recorded" in out
+    assert "0 of 5 phases recorded" in out
     payload = json.loads(
         runner.invoke(app, ["backlog", "provenance", "x-aaaa", "--json"]).stdout
     )
@@ -312,6 +322,6 @@ def test_roster_json_absent_values_are_null_not_zero(graph):
     assert do["duration_seconds"] is None
     assert lc["phases_recorded"] == 0
     assert lc["total_duration_seconds"] is None
-    assert lc["phases_total"] == 4
+    assert lc["phases_total"] == 5
     # a missing phase is recorded=False, not a fabricated zero-duration row
     assert next(p for p in lc["phases"] if p["phase"] == "think")["recorded"] is False

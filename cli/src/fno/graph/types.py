@@ -53,10 +53,11 @@ class Priority(str, Enum):
 
 
 # Lifecycle phases stamped into a node's append-only `sessions` list (x-b6e4).
-# Exactly these four; review/plan-validation are deliberately excluded (Locked
-# Decision 2). The single source of truth for phase validation in
-# store.append_session_record and the `session add` CLI.
-SESSION_PHASES: frozenset[str] = frozenset({"think", "blueprint", "do", "ship"})
+# `review` joined at x-4342 (operator ruling 2026-08-23): a spawned reviewer
+# session that never holds the claim crossed no stamping chokepoint, so its
+# provenance row had no honest label. The single source of truth for phase
+# validation in store.append_session_record and the `session add` CLI.
+SESSION_PHASES: frozenset[str] = frozenset({"think", "blueprint", "do", "review", "ship"})
 
 
 # Re-export the canonical PRIORITY_ORDER from _constants so this module

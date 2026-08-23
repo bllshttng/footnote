@@ -965,6 +965,126 @@ def cmd_court(
     print(render_court(json_output))
 
 
+# The prompt lane opens a row only for a message that leads with a review
+# verb: the x-4342 complaint shape is a review worker spawned with the node id
+# in its prompt. A do worker whose prompt mentions a SIBLING id must not get a
+# reviewer row stamped on that sibling, so prose and other verbs arm nothing.
+_REVIEW_VERB_PREFIXES = ("/code-review", "/review", "/fno:review")
+
+
+def _stamp_spawned_session_row(
+    *,
+    node: "str | None",
+    message: str,
+    phase: str,
+    worker_name: "str | None",
+    worker_harness: "str | None",
+    worker_session_uuid: "str | None",
+) -> None:
+    """Open the node's sessions row for a spawned contributor (x-4342).
+
+    A spawned reviewer never holds the claim, so it crosses none of the
+    mechanical stamping chokepoints (claim acquire/release, plan-bind, PR-link)
+    and its work lands in no sessions array. This stamp runs spawn-side, where
+    the receipt already knows the node and the worker's identity, and is
+    best-effort with a named stderr skip - matching the claim-path stamps, a
+    provenance miss must never fail the spawn.
+
+    ``node`` is the ALREADY-RESOLVED node id from the ``--node`` lane
+    (cmd_spawn's own ``resolve_provenance`` pass, reused rather than repeated).
+    Without it, the prompt lane fires only for a message leading with a review
+    verb that names exactly ONE node id - conservative by design, because a
+    bare id in prose names a sibling more often than a target.
+
+    The row's identity is the WORKER's harness-native session id (the registry
+    row's harness_session_id; the receipt's session uuid as fallback), never
+    the spawning session's id and never a prefix-shaped short id: the
+    observed_model reader refuses those, so the row would be born unreadable.
+    The row closes via `fno backlog session reap-open --phase all` when the
+    daemon observer proves the worker dead (fill, not remove - the provenance
+    stands).
+    """
+    from datetime import datetime, timezone
+
+    from fno.agents.mux_spawn import resolve_provenance
+    from fno.graph._constants import extract_node_ids
+    from fno.graph.store import append_session_record
+    from fno.paths import graph_json
+
+    node_id = node
+    who = node
+    if node_id is None:
+        msg = (message or "").lstrip()
+        ids = extract_node_ids(message or "")
+        if not msg.startswith(_REVIEW_VERB_PREFIXES) or len(ids) != 1:
+            return  # not a single-node review prompt: no row, nothing to say
+        who = ids[0]
+        try:
+            node_id = resolve_provenance(who, None, None).get("FNO_NODE")
+        except Exception as exc:  # noqa: BLE001 - provenance never fails the spawn
+            print(f"spawn: session row open skipped for {who}: {exc}", file=sys.stderr)
+            return
+    if not node_id:
+        print(
+            f"spawn: session row open skipped for {who} "
+            f"(node not in graph); the row was not written. Skipped.",
+            file=sys.stderr,
+        )
+        return
+    if not phase:
+        # A verb cmd_spawn could not label (a /think worker is neither do nor
+        # review). A guessed label would lie on an append-only record.
+        print(
+            f"spawn: session row open skipped for {node_id} "
+            f"(phase unknown for the message verb; pass --session-phase); "
+            f"the row was not written. Skipped.",
+            file=sys.stderr,
+        )
+        return
+
+    harness = None
+    session_id = None
+    if worker_name:
+        try:
+            from fno.agents.registry import load_registry
+
+            row = next((r for r in load_registry() if r.name == worker_name), None)
+        except Exception:  # noqa: BLE001 - fall through to the receipt fallback
+            row = None
+        if row is not None:
+            harness = row.harness
+            session_id = row.harness_session_id
+    if not session_id:
+        # A pane binds its session uuid after the registry row exists, and a
+        # one-shot tears its row down before returning; the receipt's own uuid
+        # is the remaining honest source.
+        harness = worker_harness
+        session_id = worker_session_uuid
+    if not harness or not session_id:
+        print(
+            f"spawn: session row open skipped for {node_id} "
+            f"(no harness session id at spawn); the row was not written. Skipped.",
+            file=sys.stderr,
+        )
+        return
+
+    started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        found, _added = append_session_record(
+            graph_json(), node_id, phase=phase,
+            harness=harness, session_id=session_id, started_at=started,
+        )
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
+        print(f"spawn: session row open skipped for {node_id}: {exc}", file=sys.stderr)
+        return
+    if not found:
+        print(
+            f"spawn: session row open skipped for {node_id} "
+            f"(node not in graph); the row was not written. Skipped.",
+            file=sys.stderr,
+        )
+
+
 @agents_app.command("spawn")
 def cmd_spawn(
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
@@ -1305,6 +1425,19 @@ def cmd_spawn(
     ),
     plan: str | None = typer.Option(
         None, "--plan", help="Provenance FNO_PLAN override (skips the graph read)."
+    ),
+    session_phase: str = typer.Option(
+        "",
+        "--session-phase",
+        help=(
+            "Lifecycle phase for the sessions row a node-bearing spawn opens on "
+            "the node (x-4342): a spawned contributor that never holds the claim "
+            "crosses no stamping chokepoint, so spawn opens the row itself. "
+            "Empty (the default) infers from the message: /target-family work "
+            "stamps do (its claim-acquire stamp fills the same row), everything "
+            "else stamps review. No node resolved (--node or a review-verb "
+            "prompt naming one node id) means no row."
+        ),
     ),
     force: bool = typer.Option(
         False,
@@ -1841,6 +1974,35 @@ def cmd_spawn(
     message = normalize_legacy_no_merge(message)
     if prov_env is not None and message_carries_no_merge(message):
         prov_env["TARGET_NO_MERGE"] = "1"
+
+    # x-4342: the sessions row a node-bearing spawn opens. An explicit
+    # --session-phase is the operator's label and wins; empty infers from the
+    # work's own shape - a /target-family message names a do worker (whose
+    # claim-acquire stamp duplicate-fills the same row), a review verb names
+    # the contributor shape that motivated the stamp, prose defaults to review.
+    # Any OTHER leading verb is a label this code cannot guess (a /think worker
+    # stamped review would lie on an append-only record), so it stamps nothing
+    # and says so. Fail-closed on an unknown explicit value, like the guards
+    # above, before anything spawns.
+    from fno.graph.types import SESSION_PHASES
+
+    if session_phase:
+        if session_phase not in SESSION_PHASES:
+            print(
+                f"--session-phase must be one of {sorted(SESSION_PHASES)} "
+                f"(got {session_phase!r})",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        stamp_phase = session_phase
+    else:
+        _verb = (message or "").lstrip().split(maxsplit=1)[0] if message else ""
+        if is_target_family(message):
+            stamp_phase = "do"
+        elif _verb.startswith(_REVIEW_VERB_PREFIXES) or not _verb.startswith("/"):
+            stamp_phase = "review"
+        else:
+            stamp_phase = ""  # unlabelable verb: the helper skips, named
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
     # destination the revived worker will actually use.
@@ -2189,6 +2351,18 @@ def cmd_spawn(
             receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
+            # x-4342: the node this pane works gets its sessions row now, while
+            # the receipt holds the worker identity. Runs before the exit-22
+            # check on purpose: an unverified seed still left a live pane, and
+            # that pane's provenance is real whether its payload landed or not.
+            # node= is the ALREADY-resolved FNO_NODE from the provenance pass
+            # (`or {}`: resolve_provenance is Optional, like every prov_env
+            # consumer below treats it).
+            _stamp_spawned_session_row(
+                node=(prov_env or {}).get("FNO_NODE"), message=message, phase=stamp_phase,
+                worker_name=pane_result.name, worker_harness=pane_result.provider,
+                worker_session_uuid=pane_result.session_uuid,
+            )
             # Exit 22 means one thing: a receipt WAS written and something on it
             # is unverified - the seed, or the pane the seed was handed to. Both
             # leave a caller holding a row it cannot trust, which is what exit 22
@@ -2306,6 +2480,19 @@ def cmd_spawn(
                 os.environ.pop(_k, None)
             else:
                 os.environ[_k] = _v
+
+    # x-4342: bg/headless lane - reached only on a successful dispatch (every
+    # failure above exits). The registry row the dispatch minted carries the
+    # worker's full harness session id; a one-shot whose row was torn down or
+    # whose uuid never resolved skips with a named line, not a bad row.
+    # getattr like the receipt above: a minimal once-lane result carries only
+    # kind/reply, and the stamp must not add attribute requirements to it.
+    _stamp_spawned_session_row(
+        node=(prov_env or {}).get("FNO_NODE"), message=message, phase=stamp_phase,
+        worker_name=getattr(result, "name", None),
+        worker_harness=getattr(result, "provider", None),
+        worker_session_uuid=None,
+    )
 
     if result.kind == "created":
         # claude plain spawn: compact hand-rolled JSON receipt on stdout.

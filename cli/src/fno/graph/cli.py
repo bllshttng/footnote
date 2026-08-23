@@ -5016,7 +5016,7 @@ def _spawned_walk(
     return rows, cycle, truncated
 
 
-_LIFECYCLE_PHASES = ("think", "blueprint", "do", "ship")
+_LIFECYCLE_PHASES = ("think", "blueprint", "do", "review", "ship")
 
 
 def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
@@ -5025,9 +5025,10 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
 
     Honesty is the acceptance criterion (node x-015c): a phase with no row
     renders 'not recorded'; a row with an end but no start renders 'end only';
-    neither renders as a duration, and the total states how many of the four
-    phases contributed a duration rather than summing silently over gaps. Start
-    reads ``started_at`` (canonical) with ``claimed_at`` as the legacy fallback.
+    neither renders as a duration, and the total states how many of the
+    lifecycle phases contributed a duration rather than summing silently over
+    gaps. Start reads ``started_at`` (canonical) with ``claimed_at`` as the
+    legacy fallback.
     """
     from datetime import datetime
 
@@ -5114,16 +5115,19 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
     # real recorded window.
     if phases_with_window > 0:
         lines.append(
-            f"    total     {_fmt(total)} ({phases_with_window} of 4 phases recorded)"
+            f"    total     {_fmt(total)} "
+            f"({phases_with_window} of {len(_LIFECYCLE_PHASES)} phases recorded)"
         )
     else:
-        lines.append(f"    total     {phases_with_window} of 4 phases recorded")
+        lines.append(
+            f"    total     {phases_with_window} of {len(_LIFECYCLE_PHASES)} phases recorded"
+        )
 
     summary = {
         "phases": phases,
         "total_duration_seconds": total if phases_with_window > 0 else None,
         "phases_recorded": phases_with_window,
-        "phases_total": 4,
+        "phases_total": len(_LIFECYCLE_PHASES),
     }
     return lines, summary
 
@@ -5430,8 +5434,8 @@ def cmd_provenance(
     # Lifecycle roster (x-b6e4, x-015c): per-phase start/end/duration + an
     # honest total. Distinct from the birth/spawn edges above -- those are
     # single parent pointers; this is the per-phase who-did-what across sessions
-    # and harnesses. All four phases always render (not recorded / end only for
-    # gaps) so a roster never reads "nobody touched this" by omission.
+    # and harnesses. Every lifecycle phase always renders (not recorded / end
+    # only for gaps) so a roster never reads "nobody touched this" by omission.
     lines.append("  lifecycle:")
     lines.extend(roster_lines)
 
@@ -5471,7 +5475,9 @@ def cmd_session_add(
     node: Optional[str] = typer.Argument(
         None, help="Node id / slug / bare-hex to stamp (mutually exclusive with --pr-number)."
     ),
-    phase: str = typer.Option(..., "--phase", help="Lifecycle phase: think|blueprint|do|ship."),
+    phase: str = typer.Option(
+        ..., "--phase", help="Lifecycle phase: think|blueprint|do|review|ship."
+    ),
     pr: Optional[int] = typer.Option(
         None, "--pr-number", help="Resolve the UNIQUE node carrying this PR number instead "
                                   "of passing NODE (rejects 0 or multiple matches; never fans out)."
@@ -5710,12 +5716,23 @@ def cmd_session_reap_open(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
     harness: str = typer.Option(..., "--harness", help="Harness owning the dead session."),
     session_id: str = typer.Option(..., "--session-id", help="Dead harness session id."),
+    phase: str = typer.Option(
+        "do",
+        "--phase",
+        help=(
+            "Lifecycle phase of the open row. 'do' removes the row (it wedges "
+            "node status); any other phase (a spawn-opened review row) fills "
+            "ended_at and keeps the provenance; 'all' settles every open row "
+            "carrying the identity (the death-cascade spelling)."
+        ),
+    ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
-    """Reap one exact open do row after the observer proves session death."""
+    """Reap one exact open session row after the observer proves session death."""
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.statuses import is_open_do_row
+    from fno.graph.statuses import is_open_do_row, is_open_phase_row
     from fno.graph.store import reap_open_session_record, read_graph
+    from fno.graph.types import SESSION_PHASES
 
     entries = read_graph(_graph_path())
     match = resolve_node(node, entries)
@@ -5725,7 +5742,7 @@ def cmd_session_reap_open(
     node_id = match.candidates[0]["id"]
     try:
         receipt = reap_open_session_record(
-            _graph_path(), node_id, phase="do", harness=harness, session_id=session_id
+            _graph_path(), node_id, phase=phase, harness=harness, session_id=session_id
         )
     except (ValueError, OSError, RuntimeError) as exc:
         typer.echo(f"session reap-open: {exc}", err=True)
@@ -5737,8 +5754,9 @@ def cmd_session_reap_open(
         typer.echo(f"session reap-open: node {node_id} disappeared on read-back.", err=True)
         raise typer.Exit(code=1)
     rows = rebound.get("sessions") or []
+    want_phases = sorted(SESSION_PHASES) if phase == "all" else [phase]
     matching_open = any(
-        is_open_do_row(row)
+        any(is_open_phase_row(row, ph) for ph in want_phases)
         and (row.get("harness"), row.get("session_id")) == (harness.strip(), session_id.strip())
         for row in rows
     )
@@ -5769,6 +5787,7 @@ def cmd_session_reap_open(
     else:
         typer.echo(
             f"settled {node_id}: row_removed={receipt['row_removed']} "
+            f"row_closed={receipt.get('row_closed')} "
             f"status={receipt['status_after']} remaining_open_do={remaining}"
         )
 

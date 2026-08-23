@@ -532,6 +532,8 @@ def test_reap_open_session_record_removes_exact_open_row_with_readback(tmp_path)
         "found": True,
         "settled": True,
         "row_removed": True,
+        # x-4342: the do path removes; only non-do phases close by filling.
+        "row_closed": False,
         "status_before": "in_progress",
         "status_after": "in_progress",
         "remaining_open_do": 1,
