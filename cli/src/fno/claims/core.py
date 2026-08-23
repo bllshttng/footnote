@@ -193,6 +193,36 @@ def _validate_inputs(
         )
 
 
+def _resolve_pid_provenance(pid: Optional[int], ttl_ms: Optional[int]) -> str:
+    """Classify how a claim's pid was resolved: "session-prover" or "ambient".
+
+    The corroborated hybrid arm in ``staleness.classify`` reads this field to
+    decide whether a live pid may keep an expired TTL claim LIVE, so the stamp
+    must be EARNED, never asserted. The one earning path is the process-tree
+    prover: the pid must be exactly ``resolve_session_pid``'s answer for THIS
+    process's own session. Everything else - a caller-supplied pid, a pid
+    resolved through an ambient harness marker (the specimen: a reattach that
+    landed on a chat app's app-server), or a defaulted transient subprocess
+    pid - stamps "ambient", and the TTL stays the lease it claims to be.
+
+    ``ttl_ms`` gates the walk: provenance is only ever consulted on a TTL
+    claim (PID-liveness claims never expire into the hybrid arm), so a
+    PID-liveness acquire skips the process walk entirely. Like the harness
+    resolution, callers invoke this OUTSIDE the recovery mutex - the walk has
+    no business on a critical section every other acquirer polls on.
+    """
+    if pid is None or ttl_ms is None:
+        return "ambient"
+    try:
+        from .session_pid import resolve_session_pid
+
+        return (
+            "session-prover" if resolve_session_pid(from_pid=os.getpid()) == pid else "ambient"
+        )
+    except Exception:  # noqa: BLE001 - an unprovable pid is ambient, never an error
+        return "ambient"
+
+
 def _make_claim(
     key: str,
     holder: str,
@@ -202,6 +232,7 @@ def _make_claim(
     pid: Optional[int],
     host: Optional[str],
     harness: Optional[str] = None,
+    pid_provenance: Optional[str] = None,
 ) -> Claim:
     acquired = now_ms()
     return Claim(
@@ -211,6 +242,7 @@ def _make_claim(
         expires_at=(acquired + ttl_ms) if ttl_ms is not None else None,
         pid=pid if pid is not None else os.getpid(),
         host=host if host is not None else socket.gethostname(),
+        pid_provenance=pid_provenance,
         # Liveness compares THIS, not host: a name that flips mid-session made a
         # live holder read cross-host, then stale, then stealable. Additive, so a
         # pre-change reader still reads host and behaves exactly as today. `or
@@ -243,6 +275,7 @@ def acquire_claim(
     pid: Optional[int] = None,
     host: Optional[str] = None,
     harness: Optional[str] = None,
+    pid_provenance: Optional[str] = None,
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Claim:
@@ -294,6 +327,7 @@ def acquire_claim(
             pid=pid,
             host=host,
             harness=harness,
+            pid_provenance=pid_provenance,
             root=root,
             _attempt=_attempt + 1,
         )
@@ -323,7 +357,18 @@ def acquire_claim(
     if harness is None:
         harness = resolve_self_identity().harness
 
-    new_claim = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
+    # Provenance resolves ONCE, here, beside the harness and outside every
+    # mutex below, for the same reason (x-20f1): the earning path walks the
+    # process tree. An explicit stamp from a caller that already did its own
+    # proving is accepted verbatim; everything else earns the field against
+    # the prover or stays ambient - a writer that cannot reach the prover
+    # records the pid it has with "ambient" rather than lying.
+    if pid_provenance is None:
+        pid_provenance = _resolve_pid_provenance(pid, ttl_ms)
+
+    new_claim = _make_claim(
+        key, holder, ttl_ms, reason, metadata, pid, host, harness, pid_provenance
+    )
     payload = serialize_claim(new_claim)
 
     try:
@@ -387,7 +432,9 @@ def acquire_claim(
             if fresh_existing.holder != holder:
                 return _release_and_retry()
 
-            refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
+            refreshed = _make_claim(
+                key, holder, ttl_ms, reason, metadata, pid, host, harness, pid_provenance
+            )
             _atomic_replace(path, serialize_claim(refreshed))
             emit_claim_idempotent_reacquired(refreshed, previous=fresh_existing)
             return refreshed
@@ -438,7 +485,9 @@ def acquire_claim(
 
             if existing.holder == holder:
                 # Raced into the idempotent path while we were grabbing the lock.
-                refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
+                refreshed = _make_claim(
+                    key, holder, ttl_ms, reason, metadata, pid, host, harness, pid_provenance
+                )
                 _atomic_replace(path, serialize_claim(refreshed))
                 emit_claim_idempotent_reacquired(refreshed, previous=existing)
                 return refreshed
@@ -488,6 +537,7 @@ def _rebound_claim(
     new_reason: Optional[str] = None,
     new_harness: Optional[str] = None,
     new_metadata: Optional[dict] = None,
+    new_pid_provenance: Optional[str] = None,
     keep_acquired_at: bool = False,
 ) -> Claim:
     """A rebound claim: identity fields preserved, process anchor + lease fresh.
@@ -543,6 +593,11 @@ def _rebound_claim(
         machine_id=machine_id() or None,
         reason=new_reason if new_reason is not None else existing.reason,
         harness=new_harness if new_harness is not None else existing.harness,
+        # The pid is being REWRITTEN here, so the prior record's provenance
+        # describes a process this claim no longer names. A rebound pid either
+        # earns its own stamp from the caller (the reanchor path's pid IS the
+        # prover's answer) or resets to ambient - never silently inherits.
+        pid_provenance=new_pid_provenance,
         metadata=new_metadata if new_metadata else existing.metadata,
     )
 
@@ -617,6 +672,9 @@ def compare_and_rebind(
     resolved_harness = (
         new_harness if new_harness is not None else resolve_self_identity().harness
     )
+    # Same placement, same reason: the rebind rewrites the pid, so its
+    # provenance is earned here against the prover or it resets to ambient.
+    resolved_provenance = _resolve_pid_provenance(new_pid, ttl_ms)
     recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
@@ -727,6 +785,7 @@ def compare_and_rebind(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=effective_new_reason, new_harness=effective_new_harness,
                 new_metadata=effective_new_metadata,
+                new_pid_provenance=resolved_provenance,
             )
             _atomic_replace(path, serialize_claim(rebound))
             if emit:
@@ -747,6 +806,7 @@ def compare_and_rebind(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=effective_new_reason, new_harness=effective_new_harness,
                 new_metadata=effective_new_metadata,
+                new_pid_provenance=resolved_provenance,
             )
                 _atomic_replace(path, serialize_claim(rebound))
                 if emit:
@@ -785,6 +845,7 @@ def compare_and_rebind(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=effective_new_reason, new_harness=effective_new_harness,
                 new_metadata=effective_new_metadata,
+                new_pid_provenance=resolved_provenance,
             )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
@@ -1084,9 +1145,17 @@ def refresh_claim(
         anchor_pid = _reanchor_pid_for(existing)
         if anchor_pid is not None:
             refreshed = _rebound_claim(
-                existing, anchor_pid, window, keep_acquired_at=True
+                existing,
+                anchor_pid,
+                window,
+                # The anchor IS resolve_session_pid's answer for this process
+                # (see _reanchor_pid_for), so it carries the strongest
+                # provenance by construction - the one rebind that always can.
+                new_pid_provenance="session-prover",
+                keep_acquired_at=True,
             )
         else:
+            # The pid is untouched, so its provenance stays truthful as written.
             refreshed = existing.model_copy(update={"expires_at": now_ms() + window})
 
         try:
