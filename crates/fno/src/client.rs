@@ -27443,8 +27443,8 @@ mod tests {
         );
     }
 
-    // AC2-HP: an fno-owned row shows every column. AC4-ERR: a row with no PR,
-    // stamp, or transcript shows EMPTY cells - never a placeholder.
+    // An fno-owned row shows every column. Unknown PR is explicit neutral
+    // state; missing message and age remain empty rather than fabricated.
     #[test]
     fn extended_table_renders_columns_and_leaves_unknown_cells_empty() {
         let mut owned = agent_row("owned", 4, Some(AgentBadge::Working), false);
@@ -27472,21 +27472,23 @@ mod tests {
 
         let ext_line = line("stranger");
         assert!(!ext_line.contains('#'), "no fabricated PR: {ext_line:?}");
-        // Nothing that reads as a value: no dash placeholder, no zero age.
-        for fake in ["-", "n/a", "0s", "?"] {
+        assert!(
+            ext_line.contains('—'),
+            "unknown PR is explicit: {ext_line:?}"
+        );
+        // No fabricated message or age.
+        for fake in ["n/a", "0s", "?"] {
             assert!(
                 !ext_line.contains(fake),
-                "external row must render EMPTY, not {fake:?}: {ext_line:?}"
+                "external row must not fabricate {fake:?}: {ext_line:?}"
             );
         }
     }
 
-    // (codex P1) The extended table must show EVERY agent, not just the ones the
-    // tree happens to be showing. Deriving it from tree_rows() inherited the
-    // section view state, so a collapsed squad or a LiveOnly section silently
-    // dropped its rows from a view whose whole purpose is to list them all.
+    // Expanded density retains the regular section visibility policy while
+    // changing only the composition of agent rows.
     #[test]
-    fn extended_table_lists_agents_from_collapsed_and_live_only_sections() {
+    fn extended_table_preserves_collapsed_and_live_only_section_state() {
         let mut exited = agent_row("dead", 6, None, false);
         exited.exited = true;
         let mut v = wide_view(vec![
@@ -27514,11 +27516,21 @@ mod tests {
             })
             .collect();
         assert!(
-            names.contains(&"alive".to_string()) && names.contains(&"dead".to_string()),
-            "the table lists every agent regardless of section state: {names:?}"
+            names.is_empty(),
+            "collapsed section stays hidden: {names:?}"
         );
 
-        // LiveOnly hides exited rows in the tree; the table still lists them.
+        v.set_section_view(key.clone(), SectionView::Expanded);
+        let names: Vec<String> = v
+            .display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["alive", "dead"]);
+
         v.set_section_view(key, SectionView::LiveOnly);
         let names: Vec<String> = v
             .display_rows()
@@ -27528,7 +27540,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(names.contains(&"dead".to_string()), "{names:?}");
+        assert_eq!(names, ["alive"]);
     }
 
     // AC3-UI: the sort toggle re-orders rows AND relabels the header, so the
