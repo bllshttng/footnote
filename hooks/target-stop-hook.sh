@@ -104,6 +104,15 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # stranger. `fno agents king init` refuses to write an unattributable manifest, so
     # a real king always has an id to match.
     HOOK_HARNESS="${FNO_HARNESS:-}"
+    if [[ -z "$HOOK_HARNESS" ]] && [[ "$HOOK_TRANSCRIPT_PATH" == "$HOME/.claude/projects/"* ]]; then
+        # The transcript's location is proof; env markers are claims. A claude
+        # session spawned from a codex parent inherits CODEX_THREAD_ID and
+        # carries no claude marker, so the lone foreign marker below wins, the
+        # crowned-row lookup narrows on the wrong harness, and the gate is
+        # bypassed. Only ~/.claude/projects claims claude here: every other
+        # transcript location keeps the marker logic unchanged.
+        HOOK_HARNESS="claude"
+    fi
     if [[ -z "$HOOK_HARNESS" ]]; then
         MARKER_COUNT=0
         [[ -n "${CODEX_THREAD_ID:-}" ]] && { HOOK_HARNESS="codex"; MARKER_COUNT=$((MARKER_COUNT + 1)); }

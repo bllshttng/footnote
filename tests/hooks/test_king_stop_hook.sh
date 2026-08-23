@@ -19,6 +19,7 @@
 #   K8  agy adapter, repeated king refusals         -> bounded, then allows
 #   K6  agy adapter, no manifest              -> allow (the refusal is scoped)
 #   K9  conflicting ambient markers omit harness narrowing
+#   K10 a claude transcript beats a lone foreign codex marker
 
 set -uo pipefail
 
@@ -137,6 +138,32 @@ cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
         pass "K9: conflicting markers omit harness narrowing"
     else
         fail "K9: rc=$CLAUDE_RC fno_args=$FNO_ARGS"
+    fi
+    cleanup
+}
+
+# ── K10: a claude-located transcript beats a lone foreign codex marker ────────
+{
+    setup_king
+    stub_binary '{"decision":"block","message":"scoped board has work"}'
+    mkdir -p "${HOME_DIR}/.claude/projects/proj"
+    CLAUDE_TRANSCRIPT="${HOME_DIR}/.claude/projects/proj/transcript.jsonl"
+    printf '{"message":{"role":"assistant","content":"working"}}\n' > "$CLAUDE_TRANSCRIPT"
+    CLAUDE_RC=0
+    (
+        cd "$TMP_DIR" || exit 1
+        env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_HARNESS="" \
+            CODEX_THREAD_ID="foreign-codex" \
+            FNO_AGENTS_BIN="$BIN" bash "$CLAUDE_HOOK" \
+            <<< "{\"transcript_path\":\"${CLAUDE_TRANSCRIPT}\"}" >/dev/null 2>/dev/null
+    ) || CLAUDE_RC=$?
+    FNO_ARGS="$(cat "${TMP_DIR}/.fno/fno.args" 2>/dev/null)"
+    if [[ "$CLAUDE_RC" -eq 2 ]] \
+        && tr ' ' '\n' <<< "$FNO_ARGS" | grep -qx -- "--harness" \
+        && tr ' ' '\n' <<< "$FNO_ARGS" | grep -qx -- "claude"; then
+        pass "K10: claude transcript wins over a lone foreign codex marker"
+    else
+        fail "K10: rc=$CLAUDE_RC fno_args=$FNO_ARGS"
     fi
     cleanup
 }
