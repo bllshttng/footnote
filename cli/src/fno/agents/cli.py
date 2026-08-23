@@ -992,14 +992,15 @@ def _stamp_spawned_session_row(
     """
     from datetime import datetime, timezone
 
+    from fno.agents.mux_spawn import resolve_provenance
     from fno.graph._constants import extract_node_ids
-    from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import append_session_record, read_graph
+    from fno.graph.store import append_session_record
     from fno.paths import graph_json
 
     # --node wins; else the first node-id-shaped token in the prompt (the
     # operator's review spawn names the node in the message). extract_node_ids
-    # is liberal by design; resolve_node does the graph filtering.
+    # is liberal by design; resolve_provenance (the same seam cmd_spawn uses
+    # for --node) does the graph filtering and the slug->id normalization.
     candidate = node
     if candidate is None:
         ids = extract_node_ids(message or "")
@@ -1007,19 +1008,17 @@ def _stamp_spawned_session_row(
             return  # ad-hoc spawn: no node named anywhere, nothing to say
         candidate = ids[0]
     try:
-        entries = read_graph(graph_json())
-        match = resolve_node(candidate, entries)
+        node_id = resolve_provenance(candidate, None, None).get("FNO_NODE")
     except Exception as exc:  # noqa: BLE001 - provenance never fails the spawn
         print(f"spawn: session row open skipped for {candidate}: {exc}", file=sys.stderr)
         return
-    if match.kind != "exact":
+    if not node_id:
         print(
             f"spawn: session row open skipped for {candidate} "
             f"(node not in graph); the row was not written. Skipped.",
             file=sys.stderr,
         )
         return
-    node_id = match.candidates[0]["id"]
 
     harness = None
     session_id = None
