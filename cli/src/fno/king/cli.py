@@ -33,6 +33,11 @@ def init_cmd(
     max_iterations: int = typer.Option(
         40, "--max-iterations", help="Iteration ceiling before the loop stops on Budget."
     ),
+    respawn_ceiling: int = typer.Option(
+        4,
+        "--respawn-ceiling",
+        help="King sessions the walk may respawn before it terminates on Budget.",
+    ),
     force: bool = typer.Option(
         False, "--force", "-F", help="Replace an existing manifest."
     ),
@@ -84,6 +89,7 @@ def init_cmd(
             scope=scope,
             harness_session_id=harness_session_id,
             max_iterations=max_iterations,
+            respawn_ceiling=respawn_ceiling,
             force=force,
         )
     except KingManifestExists as exc:

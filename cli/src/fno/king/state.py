@@ -34,6 +34,12 @@ from typing import Optional
 #: A non-converging king should cost a ceiling, not a night.
 DEFAULT_MAX_ITERATIONS = 40
 
+#: Respawn ceiling a crown scope allows before the walk refuses to respawn
+#: another king session and terminates on Budget. Mirrors the target
+#: self-handoff generation cap (default 4): a scope that keeps needing a new
+#: king is a defect to look at, not a loop to fund.
+DEFAULT_RESPAWN_CEILING = 4
+
 #: Both king arms end a walk, so both satisfy the freshness probe. The walk arm
 #: emits the runtime's ``loop_terminated``; the in-session stop arm emits
 #: ``termination``. Reading only one would report "no king walk in 24h" right
@@ -241,11 +247,17 @@ def write_manifest(
     scope: str,
     harness_session_id: str = "",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    respawn_ceiling: int = DEFAULT_RESPAWN_CEILING,
     force: bool = False,
     owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
 ) -> dict[str, str]:
-    """Write the manifest once. Raises :class:`KingManifestExists` if it is there."""
+    """Write the manifest once. Raises :class:`KingManifestExists` if it is there.
+
+    ``respawn_count`` starts at 0 on every write, including a force re-arm:
+    a successor coronation is a new reign generation, so it must not inherit
+    the predecessor's respawn bill. The count is bumped by the walk arm only.
+    """
     path = Path(path)
     if path.exists() and not force:
         raise KingManifestExists(
@@ -261,6 +273,8 @@ def write_manifest(
         "owner_pid": str(owner_pid or os.getpid()),
         "owner_cwd": owner_cwd or str(Path.cwd()),
         "budget_max_iterations": str(max_iterations),
+        "respawn_count": "0",
+        "respawn_ceiling": str(respawn_ceiling),
     }
     body = "---\n" + "".join(f"{k}: {_dump(v)}\n" for k, v in fields.items()) + "---\n"
     path.parent.mkdir(parents=True, exist_ok=True)
