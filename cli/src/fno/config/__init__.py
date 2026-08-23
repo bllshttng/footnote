@@ -1435,6 +1435,14 @@ class InboxBlock(BaseModel):
         return v
 
 
+class SandboxBlock(BaseModel):
+    """Confinement fallback policy (nested under ``config.sandbox``)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    on_unavailable: Literal["refuse", "warn"] = "refuse"
+
+
 class A2aBlock(BaseModel):
     """Agent-to-agent switchboard settings (nested under 'config.agents.a2a').
 
@@ -3602,6 +3610,7 @@ class ConfigBlock(BaseModel):
     obsidian: ObsidianBlock = Field(default_factory=ObsidianBlock)
     project: ProjectBlock = Field(default_factory=ProjectBlock)
     inbox: InboxBlock = Field(default_factory=InboxBlock)
+    sandbox: SandboxBlock = Field(default_factory=SandboxBlock)
     blueprint: BlueprintBlock = Field(default_factory=BlueprintBlock)
     backlog: BacklogBlock = Field(default_factory=BacklogBlock)
     batch: BatchBlock = Field(default_factory=BatchBlock)

@@ -766,6 +766,21 @@ pub fn codex_create(
         yolo,
         crate::agents_config::headless_yolo_enabled("codex", cwd),
     );
+    // Codex's bounded argv owns its confinement (`--sandbox workspace-write`);
+    // keep it on the same shared policy seam as the other headless harnesses so
+    // a future Codex fallback cannot silently fail open.
+    if let Err(message) = crate::agents_config::enforce_headless_confinement(
+        cwd,
+        "codex",
+        !eff,
+        "--sandbox workspace-write",
+        eff,
+    ) {
+        return Err(CodexAskError::Invocation {
+            exit_code: 2,
+            message,
+        });
+    }
     let argv = build_argv_create(cwd, &full_prompt, eff, model, reasoning_effort, add_dir);
     run_codex(&argv, output_path, timeout, true, None, agent_self)
 }
@@ -788,6 +803,18 @@ pub fn codex_resume(
         yolo,
         crate::agents_config::headless_yolo_enabled("codex", cwd),
     );
+    if let Err(message) = crate::agents_config::enforce_headless_confinement(
+        cwd,
+        "codex",
+        !eff,
+        "--sandbox workspace-write",
+        eff,
+    ) {
+        return Err(CodexAskError::Invocation {
+            exit_code: 2,
+            message,
+        });
+    }
     let argv = build_argv_resume(cwd, session_id, &full_prompt, eff);
     run_codex(&argv, output_path, timeout, false, Some(cwd), None)
 }

@@ -115,8 +115,8 @@ fn gemini_sandbox_available() -> bool {
 
 /// Argv tokens for gemini's create-path posture (bounded-posture amendment).
 /// - bounded (default): `["--approval-mode", "yolo", "--sandbox"]` when a
-///   sandbox provider exists; else fall back to `["--approval-mode", "yolo"]`
-///   (never-prompt, unsandboxed) with a warning. NEVER `default`/`auto_edit`.
+///   sandbox provider exists; else return the legacy unconfined tokens. The
+///   policy-aware caller owns refusal/warning. NEVER `default`/`auto_edit`.
 /// - full yolo (explicit): `["--yolo"]` (unsandboxed full-auto).
 /// `sandbox_available` is injectable for tests; `None` runs the detection
 /// ladder. Mirror of `gemini.py::sandbox_flag`. gemini uses the SAME selector
@@ -133,10 +133,34 @@ pub fn sandbox_flag(yolo: bool, sandbox_available: Option<bool>) -> Vec<String> 
             "--sandbox".to_string(),
         ]
     } else {
-        eprintln!(
-            "warning: no gemini sandbox provider (sandbox-exec / docker); launching --approval-mode yolo UNSANDBOXED (still never-prompt, no hang)"
-        );
         vec!["--approval-mode".to_string(), "yolo".to_string()]
+    }
+}
+
+/// Policy-aware bounded posture. The refusal is returned before a child is
+/// spawned; `warn` is the explicit opt-in for the old unconfined fallback.
+pub fn sandbox_flag_with_policy(
+    yolo: bool,
+    sandbox_available: Option<bool>,
+    policy: crate::agents_config::SandboxUnavailablePolicy,
+) -> Result<Vec<String>, String> {
+    if yolo {
+        return Ok(vec!["--yolo".to_string()]);
+    }
+    let available = sandbox_available.unwrap_or_else(gemini_sandbox_available);
+    if available {
+        return Ok(vec![
+            "--approval-mode".to_string(),
+            "yolo".to_string(),
+            "--sandbox".to_string(),
+        ]);
+    }
+    let message = "fno-agents: gemini confinement unavailable (sandbox-exec / docker); install Docker Desktop (or Podman) and select it with GEMINI_SANDBOX, or use macOS sandbox-exec. Set [sandbox] on_unavailable = \"warn\" to continue unconfined.".to_string();
+    if policy.is_warn() {
+        eprintln!("warning: {message}");
+        Ok(vec!["--approval-mode".to_string(), "yolo".to_string()])
+    } else {
+        Err(message)
     }
 }
 
@@ -281,6 +305,9 @@ pub enum GeminiAskError {
     /// Mirrors Python re-raising KeyboardInterrupt -> CPython exit 130
     /// (cv-cfdb7a56), symmetric with codex's `Interrupted`.
     Interrupted,
+    /// No confinement backend was available and the configured policy refused
+    /// an unconfined headless launch — exit 2.
+    SandboxUnavailable { message: String },
 }
 
 impl GeminiAskError {
@@ -301,6 +328,7 @@ impl GeminiAskError {
             }
             GeminiAskError::OsError { .. } => 1,
             GeminiAskError::Interrupted => 130,
+            GeminiAskError::SandboxUnavailable { .. } => 2,
         }
     }
 }
@@ -330,6 +358,7 @@ impl std::fmt::Display for GeminiAskError {
             GeminiAskError::Interrupted => {
                 write!(f, "gemini interrupted by SIGINT (Ctrl-C)")
             }
+            GeminiAskError::SandboxUnavailable { message } => write!(f, "{message}"),
         }
     }
 }
@@ -632,6 +661,10 @@ pub fn gemini_create(
         yolo,
         crate::agents_config::headless_yolo_enabled("gemini", cwd),
     );
+    let policy = crate::agents_config::sandbox_on_unavailable(cwd);
+    if let Err(message) = sandbox_flag_with_policy(eff, None, policy) {
+        return Err(GeminiAskError::SandboxUnavailable { message });
+    }
     let argv = build_argv_create(&full_prompt, eff, None, model);
     // gemini pins sessions to cwd via Popen(cwd=...), so create passes popen_cwd.
     run_gemini(&argv, output_path, timeout, true, Some(cwd), agent_self)
@@ -654,6 +687,10 @@ pub fn gemini_resume(
         yolo,
         crate::agents_config::headless_yolo_enabled("gemini", cwd),
     );
+    let policy = crate::agents_config::sandbox_on_unavailable(cwd);
+    if let Err(message) = sandbox_flag_with_policy(eff, None, policy) {
+        return Err(GeminiAskError::SandboxUnavailable { message });
+    }
     let argv = build_argv_resume(session_id, &full_prompt, eff);
     run_gemini(&argv, output_path, timeout, false, Some(cwd), None)
 }

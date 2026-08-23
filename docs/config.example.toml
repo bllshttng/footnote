@@ -86,6 +86,10 @@ enabled = false
 # Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno agents mail status`).
 unclaimed_ttl = 1800
 
+[sandbox]
+# When a headless harness has no confinement backend: refuse before spawn (default) or explicitly warn and continue unconfined.
+on_unavailable = "refuse"
+
 [blueprint]
 # Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it.
 max_prs_per_epic = 4
