@@ -15,7 +15,7 @@ from pathlib import Path
 class UsageSample:
     entry: str
     cache_read: int
-    cache_creation: int
+    cache_creation: int | None
     input_tokens: int
     route: str
 
@@ -83,11 +83,7 @@ def extract_usage(path: Path) -> list[UsageSample]:
                 raise ValueError(
                     f"{path}:{line_number}: entry {entry_name} missing usage"
                 )
-            required = (
-                "cached_input_tokens",
-                "cache_write_input_tokens",
-                "input_tokens",
-            )
+            required = ("cached_input_tokens", "input_tokens")
             missing = [field for field in required if field not in usage]
             if missing:
                 raise ValueError(
@@ -98,7 +94,11 @@ def extract_usage(path: Path) -> list[UsageSample]:
                 UsageSample(
                     entry=entry_name,
                     cache_read=int(usage["cached_input_tokens"]),
-                    cache_creation=int(usage["cache_write_input_tokens"]),
+                    cache_creation=(
+                        int(usage["cache_write_input_tokens"])
+                        if "cache_write_input_tokens" in usage
+                        else None
+                    ),
                     input_tokens=int(usage["input_tokens"]),
                     route=codex_model,
                 )
@@ -259,6 +259,32 @@ def selftest() -> None:
         assert len(samples) == 2
         assert classify_pair(samples, 8192) == "HIT"
         print("PASS AC1-HP: shared stable prefix reports HIT")
+
+        codex = root / "codex.jsonl"
+        _write_jsonl(
+            codex,
+            [
+                {
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-test"},
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "cached_input_tokens": 4096,
+                                "input_tokens": 8192,
+                            }
+                        },
+                    },
+                },
+            ],
+        )
+        codex_samples = extract_usage(codex)
+        assert codex_samples[0].cache_creation is None
+        print("PASS AC1-HP: Codex cache creation may be unavailable")
 
         varying = [
             UsageSample("varying-1", 0, 8192, 7, "synthetic-control"),
