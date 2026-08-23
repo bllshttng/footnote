@@ -176,6 +176,15 @@ pub fn build_argv_create(
     session_id: Option<&str>,
     model: Option<&str>,
 ) -> Vec<String> {
+    build_argv_create_with_sandbox(full_prompt, session_id, model, sandbox_flag(yolo, None))
+}
+
+fn build_argv_create_with_sandbox(
+    full_prompt: &str,
+    session_id: Option<&str>,
+    model: Option<&str>,
+    sandbox_tokens: Vec<String>,
+) -> Vec<String> {
     let mut argv = vec![
         "gemini".to_string(),
         "--skip-trust".to_string(),
@@ -192,7 +201,7 @@ pub fn build_argv_create(
         argv.push("--model".to_string());
         argv.push(m.to_string());
     }
-    argv.extend(sandbox_flag(yolo, None));
+    argv.extend(sandbox_tokens);
     if let Some(sid) = session_id {
         if !sid.is_empty() {
             argv.push("--session-id".to_string());
@@ -207,6 +216,14 @@ pub fn build_argv_create(
 /// `Command::current_dir` to the registry-recorded cwd (gemini sessions are
 /// cwd-pinned; resume from elsewhere fails with "Invalid session identifier").
 pub fn build_argv_resume(session_id: &str, full_prompt: &str, yolo: bool) -> Vec<String> {
+    build_argv_resume_with_sandbox(session_id, full_prompt, sandbox_flag(yolo, None))
+}
+
+fn build_argv_resume_with_sandbox(
+    session_id: &str,
+    full_prompt: &str,
+    sandbox_tokens: Vec<String>,
+) -> Vec<String> {
     let mut argv = vec![
         "gemini".to_string(),
         "--skip-trust".to_string(),
@@ -219,7 +236,7 @@ pub fn build_argv_resume(session_id: &str, full_prompt: &str, yolo: bool) -> Vec
         "--resume".to_string(),
         session_id.to_string(),
     ];
-    argv.extend(sandbox_flag(yolo, None));
+    argv.extend(sandbox_tokens);
     argv
 }
 
@@ -662,10 +679,9 @@ pub fn gemini_create(
         crate::agents_config::headless_yolo_enabled("gemini", cwd),
     );
     let policy = crate::agents_config::sandbox_on_unavailable(cwd);
-    if let Err(message) = sandbox_flag_with_policy(eff, None, policy) {
-        return Err(GeminiAskError::SandboxUnavailable { message });
-    }
-    let argv = build_argv_create(&full_prompt, eff, None, model);
+    let sandbox_tokens = sandbox_flag_with_policy(eff, None, policy)
+        .map_err(|message| GeminiAskError::SandboxUnavailable { message })?;
+    let argv = build_argv_create_with_sandbox(&full_prompt, None, model, sandbox_tokens);
     // gemini pins sessions to cwd via Popen(cwd=...), so create passes popen_cwd.
     run_gemini(&argv, output_path, timeout, true, Some(cwd), agent_self)
 }
@@ -688,10 +704,9 @@ pub fn gemini_resume(
         crate::agents_config::headless_yolo_enabled("gemini", cwd),
     );
     let policy = crate::agents_config::sandbox_on_unavailable(cwd);
-    if let Err(message) = sandbox_flag_with_policy(eff, None, policy) {
-        return Err(GeminiAskError::SandboxUnavailable { message });
-    }
-    let argv = build_argv_resume(session_id, &full_prompt, eff);
+    let sandbox_tokens = sandbox_flag_with_policy(eff, None, policy)
+        .map_err(|message| GeminiAskError::SandboxUnavailable { message })?;
+    let argv = build_argv_resume_with_sandbox(session_id, &full_prompt, sandbox_tokens);
     run_gemini(&argv, output_path, timeout, false, Some(cwd), None)
 }
 
