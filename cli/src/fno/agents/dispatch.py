@@ -6220,6 +6220,8 @@ def _mux_pane_send(
         expected_fno_id = getattr(entry, "harness_session_id", None) or getattr(
             entry, "session_id", None
         )
+        if not expected_fno_id:
+            return True
         try:
             proc = subprocess.run(
                 [

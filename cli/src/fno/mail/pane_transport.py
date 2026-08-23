@@ -111,12 +111,11 @@ def _identity_receipt_refusal(
     expected_fno_id = getattr(entry, "harness_session_id", None) or getattr(
         entry, "session_id", None
     )
+    # Legacy pane rows can carry the durable worker name before a canonical
+    # fno_id is recorded. Keep their existing frame gate; the identity receipt
+    # requires the full address and is enforced for that addressable shape.
     if not expected_name or not expected_fno_id:
-        return (
-            f"pane {pane_id} identity is incomplete; refusing to type into an "
-            "unverified target",
-            None,
-        )
+        return None, None
     try:
         receipt = _run_mux(
             [
