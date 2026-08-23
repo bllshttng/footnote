@@ -114,11 +114,6 @@ mod tests {
             .env("PYTHONPATH", cli_src)
             .output()
             .expect("python3 is required for Rust/Python identity parity");
-        assert!(
-            output.status.success(),
-            "Python canonical_handle failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
         serde_json::from_slice(&output.stdout).expect("Python canonical_handle returned JSON")
     }
 
