@@ -70,6 +70,11 @@ ProbeResult = Literal["present", "missing", "unknown"]
 # The verdict's discriminator. Only these three values are ever reachable.
 DoctorStatus = Literal["fresh", "stale", "unknown"]
 
+_DAEMON_DRIFT_WARNING = re.compile(
+    r"^fno agents: .* is an older build than the installed binary; "
+    r"run `fno agents restart` to pick up the new build\.$"
+)
+
 
 # ---------------------------------------------------------------------------
 # Signal collectors (module-level so tests monkeypatch them individually)
@@ -391,6 +396,50 @@ def _binary_crates_rev(binary: Optional[str]) -> Optional[str]:
     subtree rev, not HEAD), so the verdict compares apples-to-apples.
     """
     return _clean_rev(_binary_version_json(binary).get("crates_rev"))
+
+
+def _daemon_drift_warning() -> Optional[str]:
+    """Return Rust's measured daemon-drift warning, or None on unknown state.
+
+    ``fno-agents status`` owns the executable fingerprint comparison. This
+    adapter only validates its JSON response and relays the canonical stderr
+    warning; it never infers freshness from process presence or Python-side
+    version data.
+    """
+    try:
+        from fno import rust_binary
+
+        if os.environ.get("FNO_AGENTS_RUNTIME", "auto").strip().lower() == "rust":
+            binary = rust_binary.resolve_binary()
+        else:
+            binary = rust_binary.resolve_installed_binary()
+    except Exception:
+        return None
+    if binary is None:
+        return None
+    try:
+        result = subprocess.run(
+            [str(binary), "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout or "")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("daemon"), dict):
+        return None
+    for line in (result.stderr or "").splitlines():
+        line = line.strip()
+        if _DAEMON_DRIFT_WARNING.fullmatch(line):
+            return line
+    return None
 
 
 def _rust_report() -> dict[str, Optional[str]]:
@@ -1604,6 +1653,10 @@ def _emit_human(
             f"fno doctor: rust fno-agents binary built at HEAD {binary_rev[:12]} "
             "(build provenance)."
         )
+
+    daemon_drift = result.get("daemon_drift")
+    if daemon_drift:
+        out(f"fno doctor: note: {daemon_drift}")
 
     # Mux front-door health (x-c267): does bare `fno` launch the mux? Advisory.
     fd_state = result.get("mux_front_door")
@@ -3223,6 +3276,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     )
     # Advisory front-door fields (x-c267); never change status/exit.
     result.update(_mux_front_door_report())
+    result["daemon_drift"] = _daemon_drift_warning()
     # Advisory process-freshness (x-e6dd): a long-running mux server still on the
     # OLD proto after an upgrade. Binary staleness is above; this is the running
     # PROCESS. Never changes status/exit.

@@ -1046,6 +1046,74 @@ def test_ac1_err_stale_daemon_forces_rebuild(
     assert len(cargo_calls) >= 1, "stale daemon must force a cargo rebuild, not the fresh path"
 
 
+def test_refresh_rust_bins_probes_measured_daemon_drift_after_triad_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    fake_bin = tmp_path / "cargo" / "bin" / "fno-agents"
+    fake_bin.parent.mkdir(parents=True)
+    fake_bin.write_text("x")
+    for name in update._triad_names():
+        (fake_bin.parent / name).write_text("x")
+
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda _source: "a" * 40)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda _binary, **_kwargs: "a" * 40)
+    monkeypatch.setattr(update, "_triad_same_build", lambda _bindir, _subtree: True)
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_bin.parent / "fno")
+    monkeypatch.setattr(update, "_install_mux_front_door", lambda *args, **kwargs: None)
+
+    events: list[str] = []
+    monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: events.append("sync"))
+    from fno import doctor
+
+    warning = (
+        "fno agents: the running daemon is an older build than the installed binary; "
+        "run `fno agents restart` to pick up the new build."
+    )
+
+    def measured_warning() -> str:
+        events.append("probe")
+        return warning
+
+    monkeypatch.setattr(doctor, "_daemon_drift_warning", measured_warning)
+
+    assert update._refresh_rust_bins(source) == "fresh"
+    assert events == ["sync", "probe"]
+    assert "fno doctor update: note: " + warning in capsys.readouterr().err
+
+
+def test_refresh_rust_bins_fresh_daemon_probe_stays_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    source = tmp_path / "cli"
+    source.mkdir()
+    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
+    fake_bin = tmp_path / "cargo" / "bin" / "fno-agents"
+    fake_bin.parent.mkdir(parents=True)
+    fake_bin.write_text("x")
+    for name in update._triad_names():
+        (fake_bin.parent / name).write_text("x")
+
+    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
+    monkeypatch.setattr(update, "_rust_subtree_rev", lambda _source: "a" * 40)
+    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda _binary, **_kwargs: "a" * 40)
+    monkeypatch.setattr(update, "_triad_same_build", lambda _bindir, _subtree: True)
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_bin.parent / "fno")
+    monkeypatch.setattr(update, "_install_mux_front_door", lambda *args, **kwargs: None)
+    monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: None)
+    from fno import doctor
+
+    calls: list[str] = []
+    monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: calls.append("probe") or None)
+
+    assert update._refresh_rust_bins(source) == "fresh"
+    assert calls == ["probe"]
+    assert "OLD binary" not in capsys.readouterr().err
+
+
 def test_refresh_rust_bins_also_installs_mux_front_door(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
@@ -1326,7 +1394,7 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
             recorded_cargo.append(list(cmd))
             state["built"] = True
         elif cmd and cmd[0] == "pgrep":
-            pass  # daemon advisory
+            raise AssertionError("update must not infer daemon freshness from pgrep")
         # stdout/stderr: the update:fno claim guard's hostid probe reads them.
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -2473,7 +2541,7 @@ def test_update_readiness_never_empty_guidance_on_full_failure(monkeypatch, tmp_
 
 def test_update_check_flag_prints_readiness_json(monkeypatch, tmp_path) -> None:
     """`fno doctor update --check` prints the readiness payload and installs nothing."""
-    src = _readiness_env(monkeypatch, tmp_path)
+    _readiness_env(monkeypatch, tmp_path)
     monkeypatch.setattr(
         update,
         "update_readiness",
