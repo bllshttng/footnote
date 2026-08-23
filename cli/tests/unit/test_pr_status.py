@@ -191,12 +191,26 @@ def test_genuine_latest_cancel_stays_red():
 # (a result that was taken away) can never read as decided.
 
 
+def _no_floor(monkeypatch):
+    """Isolate from the x-129b fail-closed self-review floor.
+
+    A hermetic (markerless, manifestless) env is an UNATTRIBUTABLE caller and
+    now floors, so status tests that are not about the floor pin the
+    required-conjunct off; tests about it override this with their own patch."""
+    from fno.pr import _merge
+
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+
+
 def _run_status_on(monkeypatch, capsys, rollup):
     """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr)."""
 
     def _patch(name, value):
         monkeypatch.setattr(_status, name, value)
 
+    _no_floor(monkeypatch)
     _patch("_fetch", lambda pr, cwd: ({"state": "OPEN", "statusCheckRollup": rollup}, ""))
     _patch(
         "read_optional_review_state",
@@ -518,6 +532,7 @@ def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, caps
 
 def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
     """The hint is advice, not decoration: silent when there is nothing to do."""
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status, "_fetch",
         lambda pr, cwd: ({
@@ -651,6 +666,7 @@ def test_run_status_keeps_stdout_a_pure_json_contract(monkeypatch, capsys):
     """AC2-HP: stdout carries exactly one JSON object with the pre-change
     keys, and the human line lands on stderr - the fleet's watcher greps
     stdout with stderr discarded, so the two streams must never trade."""
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status, "_fetch",
         lambda pr, cwd: ({
@@ -694,6 +710,7 @@ def test_run_status_keeps_stdout_a_pure_json_contract(monkeypatch, capsys):
 
 
 def test_run_status_emits_json_and_code(monkeypatch, capsys):
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
@@ -767,6 +784,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
 
 
 def test_dispatch_hold_removes_green_pr_from_ready_set(monkeypatch, capsys):
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
@@ -1380,7 +1398,7 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
     events.write_text(json.dumps(covered_row) + "\n", encoding="utf-8")
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
     monkeypatch.setattr(
-        _reviews, "_reviewed_sha_is_ancestor", lambda reviewed, head, cwd: True
+        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True
     )
     _status.run_status("42", cwd=str(tmp_path))
     out = json.loads(capsys.readouterr().out)
@@ -1813,7 +1831,12 @@ def test_read_review_coverage_rejects_verdict_without_freshness(tmp_path):
     assert got["stale_verdicts"][0]["reviewed_sha"] == head
 
 
-def test_read_review_coverage_preserves_ancestor_review(tmp_path):
+def test_read_review_coverage_expires_a_push_after_review(tmp_path):
+    """The Rust predicate has no ancestry arm: a commit pushed after the
+    review carries a strict superset of the reviewed delta, and ancestry alone
+    must not read it fresh. The old name of this test was 'preserves ancestor
+    review' - exactly the arm removed, because it let a merge accept an
+    increment the stop gate called stale."""
     from fno.pr._reviews import read_review_coverage
 
     reviewed_sha = _commit_reviewed_history(tmp_path)
@@ -1835,9 +1858,9 @@ def test_read_review_coverage_preserves_ancestor_review(tmp_path):
     )
 
     got = read_review_coverage(1005, cwd=str(tmp_path), head=head)
-    assert got["coverage"] == "covered"
-    assert got["verdicts"][0]["freshness"] == "fresh"
-    assert got["stale_verdicts"] == []
+    assert got["coverage"] == "uncovered"
+    assert got["verdicts"][0]["freshness"] == "stale"
+    assert got["stale_verdicts"][0]["reviewed_sha"] == reviewed_sha
 
 
 def test_error_verdict_carries_the_reason(monkeypatch, capsys):
@@ -2144,6 +2167,7 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
 
 def test_status_surfaces_resolved_unchanged_as_advisory(monkeypatch, capsys):
     """AC2-HP: the count is visible without changing readiness or exit code."""
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
@@ -2257,7 +2281,9 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
         return True, ""
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
-    monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: True)
+    monkeypatch.setattr(
+        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True
+    )
     # The status read resolves the project log from its cwd; point it at the
     # fixture. The lane is pinned on because recompute rides on it: a no-lane
     # repo must not fire the producer, and tmp_path resolves no real config.
@@ -2360,6 +2386,7 @@ def test_no_lane_repo_never_fires_the_recompute(monkeypatch, capsys, tmp_path):
     rows nobody acts on; status must not fire it either, now that ready
     ignores the conjunct there. A read that surfaces an EXISTING row is fine -
     only the producer spawn is the cost being gated."""
+    _no_floor(monkeypatch)
     import json
 
     from fno.pr import _reviews
@@ -2469,6 +2496,7 @@ def test_a_running_review_blocks_ready_even_with_no_lane_configured(monkeypatch,
 
 def test_the_verdict_and_exit_code_are_untouched_by_the_conjunct(monkeypatch, capsys):
     """`ready` tightens; the CI verdict is authoritative and stays green."""
+    _no_floor(monkeypatch)
     from fno.pr._review_hold import ReviewActivity
 
     code, out, _err, _seen = _run_status_with_activity(
@@ -2485,6 +2513,7 @@ def test_the_verdict_and_exit_code_are_untouched_by_the_conjunct(monkeypatch, ca
 def test_a_clear_reading_is_still_reported(monkeypatch, capsys):
     """An empty `ready_blockers` was the whole complaint: a reader must be able
     to see that both probes RAN, not just that nothing came back."""
+    _no_floor(monkeypatch)
     from fno.pr._review_hold import ReviewActivity
 
     _code, out, _err, _seen = _run_status_with_activity(

@@ -111,10 +111,32 @@ def _load_auto_merge():
     return load_settings().auto_merge
 
 
+# A checkout's toplevel never moves within a process, so the rev-parse
+# answer memoizes forever. This is what keeps the floor predicate off the
+# per-fire subprocess path without ever keying a VERDICT on file metadata
+# (the deleted mtime-keyed floor cache; see git history).
+_REPO_ROOT_CACHE: dict[str, str] = {}
+
+
 def _repo_state_dir(cwd: str) -> str:
-    res = _git(["rev-parse", "--show-toplevel"], cwd)
-    root = res.stdout.strip() if res.ok and res.stdout.strip() else cwd
+    root = _REPO_ROOT_CACHE.get(cwd)
+    if root is None:
+        res = _git(["rev-parse", "--show-toplevel"], cwd)
+        root = res.stdout.strip() if res.ok and res.stdout.strip() else cwd
+        _REPO_ROOT_CACHE[cwd] = root
     return os.path.join(root, ".fno")
+
+
+def _closes_quoted_scalar(raw: str) -> bool:
+    """Whether the text after ``key:`` ends its quoted scalar on this line.
+
+    Mirrors ``line_closes_quoted_scalar`` in client_verbs.rs: a trailing
+    quote with no preceding backslash closes, because init prepends exactly
+    one backslash to every user quote.
+    """
+    if not raw.endswith('"'):
+        return False
+    return not raw[:-1].endswith("\\")
 
 
 def _read_state_field(state_file: str, field: str) -> str:
@@ -122,19 +144,44 @@ def _read_state_field(state_file: str, field: str) -> str:
 
     Strips only a MATCHED surrounding quote pair (not a naive unbalanced
     strip that could mangle a value starting/ending with a quote; gemini on
-    PR #524).
+    PR #524). Lines inside a multi-line quoted scalar are VALUE, not fields:
+    a target description containing a `harness:` line must not read as the
+    run's harness - the forgery parse_manifest_identity in client_verbs.rs
+    already guards on the Rust side.
     """
     try:
         with open(state_file, "r", encoding="utf-8") as fh:
+            in_scalar = False
             for ln in fh:
-                if ln.startswith(field + ":"):
-                    val = ln[len(field) + 1:].strip()
-                    if len(val) >= 2 and (
-                        (val[0] == '"' and val[-1] == '"')
-                        or (val[0] == "'" and val[-1] == "'")
+                untrusted = in_scalar
+                if in_scalar and _closes_quoted_scalar(ln.strip()):
+                    in_scalar = False
+                if untrusted:
+                    continue
+                if not ln.startswith(field + ":"):
+                    # Any key opening an unclosed quote starts a multi-line
+                    # scalar; its body lines are not fields. Like the Rust
+                    # scan, blank, comment, and marker lines never open one,
+                    # and a lone opening quote is not its own terminator
+                    # (the len >= 2 guard, so `input: "` opens the scalar).
+                    _k, sep, raw = ln.partition(":")
+                    raw = raw.strip()
+                    if (
+                        sep
+                        and not ln.startswith("#")
+                        and ln.strip() != "---"
+                        and raw.startswith('"')
+                        and not (len(raw) >= 2 and _closes_quoted_scalar(raw))
                     ):
-                        return val[1:-1]
-                    return val
+                        in_scalar = True
+                    continue
+                val = ln[len(field) + 1:].strip()
+                if len(val) >= 2 and (
+                    (val[0] == '"' and val[-1] == '"')
+                    or (val[0] == "'" and val[-1] == "'")
+                ):
+                    return val[1:-1]
+                return val
     except OSError:
         pass
     return ""
@@ -438,6 +485,18 @@ def _is_documentation_path(path: str) -> bool:
     return p.endswith(".md") or p.startswith("docs/")
 
 
+# Short-lived memo for the PR files probe: the floored lane predicate runs on
+# every status/merge fire, and `gh pr view --json files` spends the per-USER
+# GraphQL quota this repo is documented to be sensitive to. A file list cannot
+# change within one PR head, and 120s bounds staleness across pushes. Every
+# CLI invocation is a fresh process, so the window only opens in a long-lived
+# in-process surface (MCP): such a caller that classifies a docs-only head and
+# then sees code pushed must evict or wait out the TTL before merging. Move to
+# a head-keyed cache if a long-lived surface ever needs cross-push exactness.
+_PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
+_PAYLOAD_CACHE_TTL = 120.0
+_CACHE_BOUND = 256
+
 def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     """Whether the PR's diff carries a code payload.
 
@@ -447,7 +506,22 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     surfaced) is not code: nothing to review, no gate."""
     if not shutil.which("gh"):
         return True
-    names = _pr_file_paths(pr_number, repo)
+    key = (repo, pr_number)
+    now = time.monotonic()
+    hit = _PAYLOAD_CACHE.get(key)
+    if hit is not None and now - hit[0] < _PAYLOAD_CACHE_TTL:
+        names = hit[1]
+    else:
+        names = _pr_file_paths(pr_number, repo)
+        if names is None or any(not _is_documentation_path(p) for p in names):
+            # Only a CODE answer (or a failed read, which fails closed to
+            # code) memoizes: the cached key is (repo, pr), not the head, so
+            # a cached docs-only answer could suppress the floor for up to
+            # the TTL after new code lands on the PR. A stale code answer
+            # only demands a review that a fresh read would also demand.
+            if len(_PAYLOAD_CACHE) >= _CACHE_BOUND:
+                _PAYLOAD_CACHE.pop(next(iter(_PAYLOAD_CACHE)))
+            _PAYLOAD_CACHE[key] = (now, names)
     if names is None:
         return True
     if not names:
@@ -455,13 +529,90 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     return any(not _is_documentation_path(p) for p in names)
 
 
-def _harness_can_self_review() -> bool:
-    """Mirror loop-check's floor boundary for the ambient harness."""
+def _manifest_harness(repo: str) -> Optional[str]:
+    """The harness stamped on this run's target manifest, or None.
+
+    `fno do target init` writes it from the process-tree identity resolver, so
+    it names the run being judged even when the merging process carries
+    inherited foreign markers. Reads through _read_state_field (one manifest
+    parser per file); the explicit `unknown` sentinel resolves to None, never
+    to a harness name."""
+    from pathlib import Path
+
+    try:
+        manifest = Path(_repo_state_dir(repo)) / "target-state.md"
+    except Exception:  # noqa: BLE001 - an unreadable manifest is no attribution
+        return None
+    value = _read_state_field(str(manifest), "harness").strip()
+    if not value or value.lower() in {"unknown", "none"}:
+        return None
+    return value.lower()
+
+
+def _ambient_harness() -> Optional[str]:
+    """The single-family ambient harness, or None (absent or ambiguous).
+
+    Ambient markers describe the process ASKING, never the run being judged,
+    so this is only a FALLBACK input to the floor - the manifest names the
+    run, and where it speaks the ambient answer is not consulted."""
     from fno.harness_identity import present_harness_markers
-    from fno.review_capability import harness_can_self_review
 
     families = {harness for _marker, harness, _value in present_harness_markers()}
-    return len(families) == 1 and harness_can_self_review(next(iter(families)))
+    return next(iter(families)) if len(families) == 1 else None
+
+
+def _harness_can_self_review(repo: str) -> bool:
+    """Whether the self-review floor engages for this run (x-129b).
+
+    The run's harness decides, alone: the target manifest's `harness:` field
+    when it carries one, else the single-family ambient resolve (the merging
+    caller is usually the authoring session). One input, not a vote - the
+    stop gate reads the authoring session's harness, init stamps that same
+    answer onto the manifest, and OR-ing a second input here is how the two
+    gates come to disagree on one PR. A harness with a native self-review
+    verb floors; a KNOWN verbless harness (gemini/agy) does not - but only
+    when the ambient read agrees on that family, because the manifest alone
+    cannot vouch for the PR being merged and the floor would otherwise
+    demand an attestation no native verb there produces.
+    Unattributable - no manifest, ambiguous or absent markers, or an
+    unrecognized spelling - floors: ambiguity about who authored the change
+    is not permission to skip its review. The pre-x-129b shape read ONLY
+    ambient markers and treated multi-family ambiguity as 'no floor', which
+    silently disengaged review on any claude session started from a codex
+    shell. Mirrors self_review_floor_applies in loopcheck.rs: the two gates
+    agree wherever both read the same run. One residual divergence is
+    deliberate and safe - a stale VERBFUL manifest floors a merge performed
+    by a verbless session whose own stop gate would not floor, because the
+    manifest names the run the PR belongs to; that direction only demands a
+    review, never drops one."""
+    from fno.harness_names import KNOWN_HARNESSES
+    from fno.review_capability import harness_can_self_review
+
+    harness = _manifest_harness(repo)
+    ambient = _ambient_harness()
+    if harness is None:
+        harness = ambient
+    if harness is None:
+        applies = True
+    elif harness_can_self_review(harness):
+        applies = True
+    else:
+        # A KNOWN verbless harness releases the floor only when the ambient
+        # read AGREES on the same verbless family. The manifest is an
+        # init-time snapshot that outlives its session and belongs to
+        # whichever root the merging process stands in, so it cannot release
+        # alone: a dead run's `harness: gemini` must not disengage the floor
+        # for an unrelated PR merged from that checkout by a bare or poisoned
+        # shell. An absent, ambiguous, contradicting, or verbful ambient is
+        # not agreement - floor. The safe disagreement costs one review, the
+        # unsafe one costs the review.
+        verbless = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
+        if harness not in verbless:
+            # An unrecognized spelling is still an unattributed run: floors.
+            applies = True
+        else:
+            applies = ambient != harness
+    return applies
 
 
 def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
@@ -504,11 +655,12 @@ def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
         # No configured lane: a code payload still requires review (the
         # self-review floor), unless the install opted out with
         # config.review.self_review_required = false. Mirrors the loop-check
-        # floor so the merge gate and the stop gate cannot disagree.
+        # floor so a stock install cannot merge a code PR the stop gate
+        # would have demanded review for.
         if (
             getattr(r, "self_review_required", True)
             and pr_number
-            and _harness_can_self_review()
+            and _harness_can_self_review(repo)
             and _pr_payload_is_code(repo, pr_number)
         ):
             return True
@@ -547,7 +699,7 @@ def _code_review_attestation_required(repo: str, pr_number: int = 0) -> bool:
             not lane_configured
             and getattr(review, "self_review_required", True)
             and pr_number
-            and _harness_can_self_review()
+            and _harness_can_self_review(repo)
             and _pr_payload_is_code(repo, pr_number)
         )
     except Exception:

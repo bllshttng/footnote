@@ -148,6 +148,7 @@ def _repo_root(cwd: Optional[str] = None) -> Path:
 # `finalize.rs` instead of one. Re-exported under the old private names so every
 # call site and test here reads unchanged.
 from fno.paths import repo_identity as _repo_identity  # noqa: E402
+from fno.pr._merge import _is_documentation_path  # noqa: E402
 
 
 def _scan_coverage(
@@ -422,7 +423,11 @@ def review_coverage_for_gate(
     """
     raw = latest_review_coverage(pr_number, cwd)
     note = ""
-    data = _shape_review_coverage(raw, head, cwd) if raw is not None else None
+    data = (
+        _shape_review_coverage(raw, head, cwd, pr_number)
+        if raw is not None
+        else None
+    )
     ev_head = (raw or {}).get("head_sha")
     mismatch = bool(head and raw and ev_head and head != ev_head)
     unusable = data is not None and data.get("coverage") == "unknown"
@@ -431,7 +436,7 @@ def review_coverage_for_gate(
         if ran:
             fresh = latest_review_coverage(pr_number, cwd)
             if fresh is not None:
-                data = _shape_review_coverage(fresh, head, cwd)
+                data = _shape_review_coverage(fresh, head, cwd, pr_number)
                 note = "recomputed"
                 if why and data.get("coverage") == "unknown":
                     note = f"recompute degraded to unknown: {why}"
@@ -452,34 +457,282 @@ def _is_covered(data: Optional[dict]) -> bool:
         return False
 
 
-def _reviewed_sha_is_ancestor(
-    reviewed_sha: str, head: str, cwd: Optional[str]
-) -> bool:
-    """Whether Git proves that ``reviewed_sha`` remains in ``head`` history."""
+def _pr_code_diff_identity(
+    sha: str, base_ref: str, cwd: Optional[str]
+) -> Optional[tuple[str, frozenset[str]]]:
+    """Content identity of the PR's own CODE changes at ``sha``.
+
+    A faithful mirror of ``pr_code_diff_identity`` in loopcheck.rs, decision
+    for decision: the same ``git diff --raw --no-abbrev --no-renames
+    base...sha`` (one line per changed path carrying both blob SHAs, so a
+    sibling edit to the same file or a reindent changes the identity where a
+    patch-id would not), documentation paths dropped, sorted, hashed. The
+    hash algorithm differs (sha256 vs blake3) but only the EQUALITY decision
+    crosses the language line, and the line sets make the subset test
+    possible. ``None`` on any git failure AND when nothing outside
+    documentation changed - an empty code diff is not evidence, the
+    absence-matched-against-absence trap."""
+    try:
+        diff = run(
+            ["git", "diff", "--raw", "--no-abbrev", "--no-renames", f"{base_ref}...{sha}"],
+            cwd=cwd,
+            timeout=15,
+        )
+    except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
+        return None
+    if diff.returncode != 0:
+        return None
+    lines = []
+    for line in (diff.stdout or "").splitlines():
+        line = line.rstrip()
+        if not line:
+            continue
+        path = line.split("\t")[1].strip() if "\t" in line else ""
+        if _is_documentation_path(path):
+            continue
+        lines.append(line)
+    if not lines:
+        return None
+    lines.sort()
+    import hashlib
+
+    digest = hashlib.sha256()
+    for line in lines:
+        digest.update(line.encode("utf-8", "replace"))
+        digest.update(b"\n")
+    return digest.hexdigest(), frozenset(lines)
+
+
+# Sha-keyed identity and tree-path memos. A commit's identity never changes,
+# so the entry is valid forever - provided the BASE side of the key is also
+# immutable, so identities key on the base ref's resolved COMMIT, not the
+# moving ref name. The bound keeps a long-lived process from growing without
+# limit. A base branch CAN be retargeted, so the ref resolution carries a TTL.
+_IDENTITY_CACHE: dict[tuple[str, str, str], "Optional[tuple[str, frozenset[str]]]"] = {}
+_TREE_PATHS_CACHE: dict[tuple[str, str, str], bool] = {}
+_BASE_REF_CACHE: dict[tuple[str, int], tuple[float, Optional[str]]] = {}
+_BASE_COMMIT_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
+_BASE_REF_TTL = 300.0
+_CACHE_BOUND = 256
+
+
+def _base_commit_of(base_ref: str, cwd: Optional[str]) -> str:
+    """The commit ``base_ref`` resolves to, for use as an immutable cache key
+    (the ref name moves under a fetch; the commit does not). Empty on any
+    failure, which simply de-duplicates less. TTL-memoized: it runs per
+    identity lookup."""
+    key = (base_ref, cwd or "")
+    hit = _BASE_COMMIT_CACHE.get(key)
+    now = time.monotonic()
+    if hit is not None and now - hit[0] < _BASE_REF_TTL:
+        return hit[1]
     try:
         result = run(
-            ["git", "merge-base", "--is-ancestor", reviewed_sha, head],
+            ["git", "rev-parse", f"{base_ref}^{{commit}}"],
             cwd=cwd,
             timeout=5,
         )
-    except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
+        commit = result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:  # noqa: BLE001
+        commit = ""
+    if commit:
+        # Only successes memoize: a failed resolve cached as "" would key
+        # later identities on the moving ref NAME, the exact aliasing the
+        # resolved-commit key exists to prevent.
+        if len(_BASE_COMMIT_CACHE) >= _CACHE_BOUND:
+            _BASE_COMMIT_CACHE.pop(next(iter(_BASE_COMMIT_CACHE)))
+        _BASE_COMMIT_CACHE[key] = (now, commit)
+    return commit
+
+
+def _identity_of(
+    sha: str, base_ref: str, cwd: Optional[str]
+) -> "Optional[tuple[str, frozenset[str]]]":
+    base_commit = _base_commit_of(base_ref, cwd)
+    key = (sha, base_commit or base_ref, cwd or "")
+    # The diff runs against the RESOLVED COMMIT, the same object the key
+    # names. Diffing the live ref would let a base rewrite inside the
+    # base-commit TTL compare two identities built against different bases
+    # under one key; pinning both sides to one commit keeps the comparison
+    # coherent even when the TTL serves the pre-rewrite resolution.
+    effective_base = base_commit or base_ref
+    if key not in _IDENTITY_CACHE:
+        value = _pr_code_diff_identity(sha, effective_base, cwd)
+        if value is not None:
+            # Only successes memoize: None means the git read failed (or the
+            # code diff is empty), and either recomputes cheaply. Pinning a
+            # transient failure would keep verdicts stale for the process
+            # life.
+            if len(_IDENTITY_CACHE) >= _CACHE_BOUND:
+                _IDENTITY_CACHE.pop(next(iter(_IDENTITY_CACHE)))
+            _IDENTITY_CACHE[key] = value
+        return value
+    return _IDENTITY_CACHE[key]
+
+
+def _tree_paths_readable(reviewed_sha: str, head: str, cwd: Optional[str]) -> bool:
+    """Whether the two-dot name-only diff between the shas is READABLE.
+
+    The Rust rule requires the tree-paths read on an identity match: a carry
+    that cannot name why it carries is Stale. Python does not split the carry
+    reasons, so only the readability conjunct crosses the language line."""
+    key = (reviewed_sha, head, cwd or "")
+    if key not in _TREE_PATHS_CACHE:
+        try:
+            result = run(
+                ["git", "diff", "--name-only", "--no-renames", reviewed_sha, head],
+                cwd=cwd,
+                timeout=10,
+            )
+            readable = result.returncode == 0
+        except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
+            readable = False
+        if readable:
+            # Only successes memoize: a False from a transient git failure
+            # is not a property of the sha pair.
+            if len(_TREE_PATHS_CACHE) >= _CACHE_BOUND:
+                _TREE_PATHS_CACHE.pop(next(iter(_TREE_PATHS_CACHE)))
+            _TREE_PATHS_CACHE[key] = readable
+        return readable
+    return _TREE_PATHS_CACHE[key]
+
+
+def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
+    """The ref the PR merges into, remote-qualified like the Rust resolver.
+
+    ``gh pr view`` supplies the real base branch first. When that read
+    SUCCEEDS, the qualified ref is the answer the Rust resolver would use:
+    if it does not resolve locally, the content test is unanswerable (None,
+    fail closed) - falling back to origin/main there would compute both
+    identities against the wrong base and CARRY a rebase the stop gate
+    expired, the disagreement this mirror exists to prevent. A FAILED read
+    with a PR number is the same unanswerable state: the Rust resolver
+    expires everything when its read fails, so the defaults (origin/main,
+    then origin/master) apply only when there is no PR to ask at all.
+    Memoized with a TTL: status polls fire this per pass, the read spends
+    the per-USER GraphQL quota, and a base retarget is rare."""
+    key = (cwd or "", pr_number)
+    hit = _BASE_REF_CACHE.get(key)
+    now = time.monotonic()
+    if hit is not None and now - hit[0] < _BASE_REF_TTL:
+        return hit[1]
+    resolved: Optional[str] = None
+    candidates: list[str] = []
+    base_known = False
+    if pr_number:
+        try:
+            view = run(
+                ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"],
+                cwd=cwd,
+                timeout=10,
+            )
+            if view.returncode == 0:
+                base = (json.loads(view.stdout or "{}") or {}).get("baseRefName")
+                if isinstance(base, str) and base.strip():
+                    candidates.append(f"origin/{base.strip()}")
+                    base_known = True
+        except Exception:  # noqa: BLE001 - a failed read is fail-closed below
+            pass
+        if not base_known:
+            # Unanswerable, not defaultable: cache None so the poll loop
+            # cannot hammer a failing gh, and let the TTL bound the blip.
+            if len(_BASE_REF_CACHE) >= _CACHE_BOUND:
+                _BASE_REF_CACHE.pop(next(iter(_BASE_REF_CACHE)))
+            _BASE_REF_CACHE[key] = (now, None)
+            return None
+    else:
+        candidates += ["origin/main", "origin/master"]
+    for ref in candidates:
+        try:
+            result = run(
+                ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                cwd=cwd,
+                timeout=5,
+            )
+        except Exception:  # noqa: BLE001 - next ref may still resolve
+            continue
+        if result.returncode == 0:
+            resolved = ref
+            break
+    if len(_BASE_REF_CACHE) >= _CACHE_BOUND:
+        _BASE_REF_CACHE.pop(next(iter(_BASE_REF_CACHE)))
+    _BASE_REF_CACHE[key] = (now, resolved)
+    return resolved
+
+
+def _reviewed_sha_still_describes_head(
+    reviewed_sha: str,
+    head: str,
+    cwd: Optional[str],
+    pr_number: int = 0,
+) -> bool:
+    """Whether the change the reviewer read still ships at ``head``.
+
+    The SAME rule ``review_freshness`` applies, decision for decision, with
+    no extra arms: the reviewer read this exact commit; or the code-diff
+    identities at ``reviewed_sha`` and at ``head`` carry equal (and the
+    tree-paths read between them is readable, like the Rust carry's own
+    auditability requirement); or the head delta strictly SHRANK (every raw
+    line still shipping was read; the vanished lines are paths the base
+    absorbed on the rebase). Anything else - a push of new unreviewed code
+    after the review, a sibling edit to the same file, a reindented
+    resolution, an unreadable identity on either side - is a new review.
+    There is deliberately NO ancestry arm: ancestry alone proved a push-after-
+    review head fresh here while the Rust rule expired it, and a merge must
+    not accept an increment the stop gate calls stale. Resolves its own base
+    (fail closed) through the module caches, and is the one seam hermetic
+    tests stub."""
+    if reviewed_sha == head:
+        return True
+    base_ref = _resolve_base_ref(cwd, pr_number)
+    if base_ref is None:
         return False
-    return result.returncode == 0
+    reviewed = _identity_of(reviewed_sha, base_ref, cwd)
+    if reviewed is None:
+        return False
+    current_head = _identity_of(head, base_ref, cwd)
+    if current_head is None:
+        return False
+    if reviewed[0] == current_head[0]:
+        # The Rust carry is auditable: it requires the tree-paths read, and a
+        # carry that cannot name why it carries is Stale. Readability is the
+        # only part of that read the equal-identity decision depends on.
+        return _tree_paths_readable(reviewed_sha, head, cwd)
+    return current_head[1] < reviewed[1]
 
 
 def _verdicts_with_current_freshness(
-    data: dict, head: Optional[str], cwd: Optional[str]
+    data: dict, head: Optional[str], cwd: Optional[str], pr_number: int = 0
 ) -> list[dict]:
     """Copy verdicts and recheck stored freshness against current history.
 
     A freshness stamp describes the branch only when it was written. When a
-    current head is available, the reviewed commit must still be its ancestor.
-    Missing metadata or an unreadable ancestry result cannot prove freshness.
+    current head is available, the reviewed change must still ship at that
+    head under the SAME rule the Rust predicate applies (x-e8db: every rebase
+    used to invalidate every attestation, even one that reviewed
+    byte-identical content). Missing metadata or an unreadable identity
+    cannot prove freshness. The base ref and the head identity resolve lazily
+    and once per pass: N stale verdicts at N shas cost one base read and one
+    head diff, not N of each.
     """
     verdicts = data.get("verdicts")
     if not isinstance(verdicts, list):
         return []
-    ancestry: dict[str, bool] = {}
+    # Narrowed once for the closure below (mypy cannot carry the loop's
+    # truthiness guard into it): the closure is only invoked under `head`.
+    current_head = head or ""
+
+    def _describes(reviewed_sha: str) -> bool:
+        # The one seam: hermetic tests stub the describes-test, so the closure
+        # delegates straight to it and every memo (base ref, identities, tree
+        # paths) lives in the module caches the callee reads.
+        if not current_head:
+            return False
+        return _reviewed_sha_still_describes_head(
+            reviewed_sha, current_head, cwd, pr_number=pr_number
+        )
+
+    describes: dict[str, bool] = {}
     shaped: list[dict] = []
     for verdict in verdicts:
         if not isinstance(verdict, dict):
@@ -495,11 +748,9 @@ def _verdicts_with_current_freshness(
         if verdict_kind == "reviewed" and head:
             if not isinstance(reviewed_sha, str) or not reviewed_sha:
                 stale = True
-            elif reviewed_sha not in ancestry:
-                ancestry[reviewed_sha] = _reviewed_sha_is_ancestor(
-                    reviewed_sha, head, cwd
-                )
-            if isinstance(reviewed_sha, str) and not ancestry.get(reviewed_sha, False):
+            elif reviewed_sha not in describes:
+                describes[reviewed_sha] = _describes(reviewed_sha)
+            if isinstance(reviewed_sha, str) and not describes.get(reviewed_sha, False):
                 stale = True
         if stale:
             current["freshness"] = "stale"
@@ -553,10 +804,12 @@ def _derive_review_state(coverage: object, verdicts: object) -> str | None:
     return "unreviewed"
 
 
-def _shape_review_coverage(data: dict, head: Optional[str], cwd: Optional[str]) -> dict:
+def _shape_review_coverage(
+    data: dict, head: Optional[str], cwd: Optional[str], pr_number: int = 0
+) -> dict:
     """Shape one event and invalidate any unproven covered verdict."""
     shaped = dict(data)
-    verdicts = _verdicts_with_current_freshness(data, head, cwd)
+    verdicts = _verdicts_with_current_freshness(data, head, cwd, pr_number)
     shaped["verdicts"] = verdicts
     shaped["stale_verdicts"] = _stale_verdicts(verdicts)
     review_state = _derive_review_state(data.get("coverage"), verdicts)
@@ -594,7 +847,11 @@ def review_coverage_for_head(
 ) -> Optional[dict]:
     """Latest event shaped against the current head, without recomputing it."""
     data = latest_review_coverage(pr_number, cwd)
-    return _shape_review_coverage(data, head, cwd) if data is not None else None
+    return (
+        _shape_review_coverage(data, head, cwd, pr_number)
+        if data is not None
+        else None
+    )
 
 
 def read_review_coverage(
@@ -610,7 +867,8 @@ def read_review_coverage(
     two gate surfaces - ``fno do pr merge`` and ``fno do pr status`` - opt in.
     Event-read failures degrade to the unknown sentinel. When ``head`` is
     supplied, verdict freshness fails closed unless Git proves the reviewed
-    commit remains in that head's history.
+    change still ships at that head (ancestry, or an identical content delta
+    across a rebase - x-e8db).
     Python still consumes the event rather than recomputing coverage itself
     (Ownership: Rust computes, Python reads) - the recompute shells out to the
     SAME Rust producer the stop hook runs.

@@ -1200,6 +1200,33 @@ fn harness_can_self_review(harness: Option<&str>) -> bool {
     matches!(harness, Some("claude") | Some("codex") | Some("opencode"))
 }
 
+/// The KNOWN harnesses with no native self-review verb. A set, not
+/// `!harness_can_self_review()`, so an UNRECOGNIZED spelling floors instead of
+/// passing through as verbless. Python derives this set from `KNOWN_HARNESSES`
+/// in `cli/src/fno/harness_names.py` minus the verb table in
+/// `cli/src/fno/review_capability.py`; the two are pinned to each other by
+/// `test_floor_verbless_set_stays_locked_to_the_rust_twin`, so a harness lands
+/// on both sides or the suite goes red.
+const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy"];
+
+/// The self-review FLOOR policy on the author harness (x-129b). Distinct from
+/// the capability question above: `None` answers "unattributable", not
+/// "verbless". A KNOWN harness with a native verb floors; a KNOWN verbless
+/// harness (gemini/agy) does not, because the floor would demand an
+/// attestation no native verb there produces. An UNRESOLVED harness (absent
+/// or ambiguous ambient markers - a claude session started from a codex
+/// shell) floors, because ambiguity about who authored the run is not
+/// permission to skip its review. The explicit `--author-harness none` pin is
+/// the hermetic opt-out and stays unfloored. Mirrors `_harness_can_self_review`
+/// in cli/src/fno/pr/_merge.py so the stop gate and the merge gate cannot
+/// disagree on the same PR.
+fn self_review_floor_applies(author_harness: Option<&str>, pinned_none: bool) -> bool {
+    match author_harness {
+        Some(h) => harness_can_self_review(Some(h)) || !KNOWN_VERBLESS_HARNESSES.contains(&h),
+        None => !pinned_none,
+    }
+}
+
 /// Pure payload classifier: CODE iff any changed path is not documentation.
 /// An empty diff is NOT a code payload (no ship, so no gate). Pure over a path
 /// slice so unit tests need no git; the git-caller wrapper is `classify_payload`.
@@ -6159,6 +6186,9 @@ pub(crate) struct ReviewInputs {
     pub(crate) settings: Settings,
     /// The ambient author harness (env markers, or the explicit override).
     pub(crate) author_harness: Option<String>,
+    /// Whether the caller explicitly pinned `--author-harness none` (the
+    /// hermetic opt-out). Distinct from an UNRESOLVED harness, which floors.
+    pub(crate) author_harness_pinned_none: bool,
     pub(crate) required_bots: Vec<String>,
     pub(crate) required_reviewers: Vec<String>,
     pub(crate) optional_bots: Vec<String>,
@@ -6313,6 +6343,10 @@ pub(crate) fn resolve_review_inputs(
     // the same-model peer guard (x-c2e7); None leaves the set unchanged.
     // `--author-harness none` pins the no-harness case, which an absent flag
     // cannot express, and an absent flag keeps reading the ambient markers.
+    // The pin is recorded separately: a PINNED none is the hermetic opt-out,
+    // while an UNRESOLVED None (absent or ambiguous markers) floors the
+    // self-review reviewer instead of dropping it (x-129b).
+    let author_harness_pinned_none = matches!(author_harness_override, Some("none") | Some(""));
     let author_harness = match author_harness_override {
         Some("none") | Some("") => None,
         Some(h) => Some(h.to_string()),
@@ -6334,6 +6368,7 @@ pub(crate) fn resolve_review_inputs(
         repo_slug,
         settings,
         author_harness,
+        author_harness_pinned_none,
         required_bots,
         required_reviewers,
         optional_bots,
@@ -6482,15 +6517,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
     let lane_configured =
         !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
-    // The floor only applies where a session can satisfy it: a harness with a
+    // The floor applies where a session can satisfy it: a harness with a
     // self-review verb (claude /code-review, codex /review, opencode
-    // /review-changes). Flooring gemini/agy would demand an attestation no
+    // /review-changes), or a harness that could not be attributed at all -
+    // ambiguity is not permission (x-129b). A KNOWN verbless harness
+    // (gemini/agy) stays unfloored: the floor would demand an attestation no
     // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
     // those harnesses' path and is deferred. classify_payload forks git, so it
     // runs only when the floor could apply - a configured lane makes it moot,
     // and most fires have one.
-    let harness_can_self_review = harness_can_self_review(author_harness.as_deref());
-    let self_review_floor = if !lane_configured && self_review_required && harness_can_self_review {
+    let floor_applies =
+        self_review_floor_applies(author_harness.as_deref(), inputs.author_harness_pinned_none);
+    let self_review_floor = if !lane_configured && self_review_required && floor_applies {
         let payload = classify_payload(&parsed.git_bin, &cwd);
         floor_self_review(&required_reviewers, false, payload.0, true)
     } else {
@@ -10380,7 +10418,10 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         && required_reviewers.is_empty());
     if !lane_configured
         && inputs.settings.self_review_required.unwrap_or(true)
-        && harness_can_self_review(inputs.author_harness.as_deref())
+        && self_review_floor_applies(
+            inputs.author_harness.as_deref(),
+            inputs.author_harness_pinned_none,
+        )
     {
         let payload = classify_payload(&git_bin, &cwd);
         if let Some(floored) = floor_self_review(&required_reviewers, false, payload.0, true) {
@@ -10884,6 +10925,121 @@ mod tests {
             review_freshness("r", "h", &facts(Some("i"), None, None)),
             Freshness::Stale
         );
+    }
+
+    // ── x-e8db: the resolver against a REAL rebase ──────────────────────────
+    //
+    // The pure tests above pin the predicate over synthetic facts; this pair
+    // drives the git plumbing (identity computation, base-ref qualification)
+    // through an actual rebase. The Python merge gate's twin pair lives in
+    // cli/tests/unit/test_review_freshness_rebase.py; the two gates must
+    // agree on the same PR shape.
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn write(repo: &Path, name: &str, body: &str) {
+        std::fs::write(repo.join(name), body).unwrap();
+    }
+
+    /// One repo whose feature branch rebases onto a moved `origin/main`.
+    /// Returns `(repo, reviewed_sha, head_sha)`. `conflict` selects whether
+    /// the rebase stops on a conflict that the resolution CHANGES.
+    fn rebased_repo(conflict: bool) -> (tempfile::TempDir, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        write(&repo, "f.txt", "base\n");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        if conflict {
+            write(&repo, "f.txt", "feature says B\n");
+        } else {
+            write(&repo, "code.txt", "pr change\n");
+        }
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "pr"]);
+        let reviewed = git(&repo, &["rev-parse", "HEAD"]);
+
+        git(&repo, &["checkout", "-q", "main"]);
+        if conflict {
+            write(&repo, "f.txt", "main says C\n");
+        } else {
+            write(&repo, "other.txt", "base moved\n");
+        }
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "base moved"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]);
+        // The machine's pre-push hook protects even scratch `main`s, so move
+        // the remote-tracking ref directly.
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &tip]);
+
+        git(&repo, &["checkout", "-q", "feature"]);
+        let rebase = Command::new("git")
+            .args(["rebase", "origin/main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        if conflict {
+            assert!(!rebase.status.success(), "scenario requires a conflict");
+            write(&repo, "f.txt", "resolved differently\n");
+            git(&repo, &["add", "-A"]);
+            let cont = Command::new("git")
+                .args(["-c", "core.editor=true", "rebase", "--continue"])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(
+                cont.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cont.stderr)
+            );
+        } else {
+            assert!(
+                rebase.status.success(),
+                "{}",
+                String::from_utf8_lossy(&rebase.stderr)
+            );
+        }
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        (tmp, reviewed, head)
+    }
+
+    #[test]
+    fn resolver_carries_an_identical_rebase_and_expires_a_conflict() {
+        // The whole x-e8db contract on the resolver itself: a rebase that
+        // rewrote every commit but changed no content keeps the attestation
+        // (a Carried verdict counts), and a conflict resolution that changed
+        // the delta loses it. One test, both directions, so a regression in
+        // either can never leave the other green-looking.
+        let (tmp, reviewed, head) = rebased_repo(false);
+        let repo = tmp.path().join("r");
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let verdict = resolver.freshness(&reviewed);
+        assert!(verdict.counts(), "identical rebase must carry: {verdict:?}");
+
+        let (tmp, reviewed, head) = rebased_repo(true);
+        let repo = tmp.path().join("r");
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let verdict = resolver.freshness(&reviewed);
+        assert_eq!(verdict, Freshness::Stale, "conflict resolution must expire");
     }
 
     #[test]
@@ -13892,6 +14048,24 @@ mod tests {
         assert!(!harness_can_self_review(Some("gemini")));
         assert!(!harness_can_self_review(Some("agy")));
         assert!(!harness_can_self_review(None));
+    }
+
+    #[test]
+    fn unresolved_harness_floors_the_self_review_gate() {
+        // x-129b: `None` means UNATTRIBUTABLE, not verbless. A claude session
+        // started from a codex shell resolves no single family, and reading
+        // that ambiguity as "no floor" silently disengaged the only review a
+        // stock install demands. Ambiguity is not permission; the explicit
+        // `--author-harness none` pin stays the hermetic opt-out.
+        assert!(self_review_floor_applies(None, false));
+        assert!(!self_review_floor_applies(None, true));
+        assert!(self_review_floor_applies(Some("claude"), false));
+        assert!(self_review_floor_applies(Some("codex"), true));
+        assert!(!self_review_floor_applies(Some("gemini"), false));
+        assert!(!self_review_floor_applies(Some("agy"), false));
+        // An unrecognized spelling is an unattributed run: it floors rather
+        // than passing an unknown name through the verb table.
+        assert!(self_review_floor_applies(Some("hermes"), false));
     }
 
     #[test]
