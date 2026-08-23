@@ -10936,14 +10936,21 @@ enum StdinFlow {
     Detach,
 }
 
+fn consume_modal_close_gesture(view: &mut View, kind: MouseKind) -> bool {
+    if view.modal_release_swallow {
+        if matches!(kind, MouseKind::Release(MouseButton::Left)) {
+            view.modal_release_swallow = false;
+        }
+        return true;
+    }
+    false
+}
+
 /// Family-B name and confirmation overlays own every pointer event while open.
 /// Only the shared Chrome esc hit cancels; outside clicks are swallowed so they
 /// cannot dismiss the modal or reach a pane underneath it.
 fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
-    if view.modal_release_swallow {
-        if matches!(rep.kind, MouseKind::Release(MouseButton::Left)) {
-            view.modal_release_swallow = false;
-        }
+    if consume_modal_close_gesture(view, rep.kind) {
         return true;
     }
     let Some(layout) = view.active_overlay_layout() else {
@@ -11007,6 +11014,9 @@ async fn handle_stdin(
         // A close-chip gesture is also release-owned state. Let every event in
         // it reach `modal_mouse`, even when the terminal marks it as Shift.
         if rep.shift && !ends_a_drag && !view.modal_release_swallow {
+            continue;
+        }
+        if consume_modal_close_gesture(view, rep.kind) {
             continue;
         }
         // A pointer action - click/press/wheel/drag, anything but passive hover
@@ -21092,6 +21102,65 @@ mod tests {
             !view.modal_release_swallow,
             "left release ends the closing gesture"
         );
+    }
+
+    #[tokio::test]
+    async fn close_latch_consumes_release_before_an_intervening_modal_router() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let row = (layout.origin.0 + line) as u16;
+        let col = (layout.origin.1 + offset + len / 2) as u16;
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                row,
+                col,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            },
+        ));
+        view.open_keys_modal();
+        assert!(
+            view.modal_release_swallow,
+            "the close gesture remains armed"
+        );
+
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf = Vec::new();
+        let release = format!("\x1b[<0;{};{}m", col + 1, row + 1);
+        handle_stdin(
+            &mut view,
+            &mut scanner,
+            &mut carry,
+            release.as_bytes(),
+            &mut buf,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !view.modal_release_swallow,
+            "the release clears the latch first"
+        );
+        assert!(
+            view.keys_modal.is_some(),
+            "the release does not dismiss the new modal"
+        );
+        assert!(buf.is_empty(), "the release never reaches the pane");
     }
 
     #[test]
