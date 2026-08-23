@@ -63,8 +63,9 @@ def test_old_agents_fold_spellings_forward_and_teach() -> None:
 
 
 def test_restored_mail_stays_folded_at_agents_as_a_silent_alias() -> None:
-    """d-5073b562: `fno mail` is the canonical root spelling; the folded
-    `agents mail` registration keeps serving as a silent alias."""
+    """`fno mail` is the canonical root spelling (2026-08-22 operator
+    ruling); the folded `agents mail` registration keeps serving as a
+    silent alias."""
     from fno.cli import app
 
     result = runner.invoke(app, ["agents", "mail", "--help"])

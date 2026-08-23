@@ -61,6 +61,6 @@ doctor_app.command("footprint", hidden=True)(footprint_command)
 doctor_app.add_typer(observer_app, name="observer")
 doctor_app.add_typer(skill_diff_app, name="skill-diff")
 # test and update resolve the SAME command objects as the root spellings
-# `fno test` / `fno update`, which are canonical (operator ruling d-5073b562);
-# these registrations are the kept silent aliases.
+# `fno test` / `fno update`, which are canonical by the 2026-08-22 operator
+# ruling on the reorg node; these registrations are the kept silent aliases.
 doctor_app.command("update")(update_command)

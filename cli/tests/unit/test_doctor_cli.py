@@ -99,8 +99,9 @@ def test_old_doctor_fold_spellings_forward_and_teach() -> None:
 
 
 def test_restored_test_and_update_resolve_at_doctor_as_silent_aliases() -> None:
-    """d-5073b562: `fno test` / `fno update` are canonical, so doctor keeps the
-    nested spellings as silent aliases - registered, quiet, no teaching line."""
+    """`fno test` / `fno update` are canonical (2026-08-22 operator ruling),
+    so doctor keeps the nested spellings as silent aliases - registered,
+    quiet, no teaching line."""
     from fno.cli import app
 
     for argv in (["doctor", "test", "--help"], ["doctor", "update", "--help"]):

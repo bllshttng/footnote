@@ -117,5 +117,5 @@ def test_known_parallel_racers_are_marked_and_grouped(pytestconfig):
 
 
 def test_help_describes_parallel_default():
-    assert "Bare `fno doctor test` runs the Python suite in parallel" in test_cmd.test_command.help
-    assert "Bare `fno doctor test` is serial" not in test_cmd.test_command.help
+    assert "Bare `fno test` runs the Python suite in parallel" in test_cmd.test_command.help
+    assert "Bare `fno test` is serial" not in test_cmd.test_command.help
