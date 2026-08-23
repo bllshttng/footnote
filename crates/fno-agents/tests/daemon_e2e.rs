@@ -50,6 +50,7 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> std::process::
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
     let child = cmd.spawn().expect("daemon spawns");
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
+    wait_for_event(home, "daemon_started", Duration::from_secs(10));
     child
 }
 
@@ -68,6 +69,7 @@ fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> std::process::
     }
     let child = cmd.spawn().expect("daemon spawns");
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
+    wait_for_event(home, "daemon_started", Duration::from_secs(10));
     child
 }
 
