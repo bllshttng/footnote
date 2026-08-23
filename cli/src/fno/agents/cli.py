@@ -965,6 +965,13 @@ def cmd_court(
     print(render_court(json_output))
 
 
+# The prompt lane opens a row only for a message that leads with a review
+# verb: the x-4342 complaint shape is a review worker spawned with the node id
+# in its prompt. A do worker whose prompt mentions a SIBLING id must not get a
+# reviewer row stamped on that sibling, so prose and other verbs arm nothing.
+_REVIEW_VERB_PREFIXES = ("/code-review", "/review", "/fno:review")
+
+
 def _stamp_spawned_session_row(
     *,
     node: "str | None",
@@ -983,12 +990,19 @@ def _stamp_spawned_session_row(
     best-effort with a named stderr skip - matching the claim-path stamps, a
     provenance miss must never fail the spawn.
 
+    ``node`` is the ALREADY-RESOLVED node id from the ``--node`` lane
+    (cmd_spawn's own ``resolve_provenance`` pass, reused rather than repeated).
+    Without it, the prompt lane fires only for a message leading with a review
+    verb that names exactly ONE node id - conservative by design, because a
+    bare id in prose names a sibling more often than a target.
+
     The row's identity is the WORKER's harness-native session id (the registry
     row's harness_session_id; the receipt's session uuid as fallback), never
     the spawning session's id and never a prefix-shaped short id: the
     observed_model reader refuses those, so the row would be born unreadable.
-    The row closes via `fno backlog session reap-open --phase <phase>` when the
-    observer proves the worker dead (fill, not remove - the provenance stands).
+    The row closes via `fno backlog session reap-open --phase all` when the
+    daemon observer proves the worker dead (fill, not remove - the provenance
+    stands).
     """
     from datetime import datetime, timezone
 
@@ -997,24 +1011,22 @@ def _stamp_spawned_session_row(
     from fno.graph.store import append_session_record
     from fno.paths import graph_json
 
-    # --node wins; else the first node-id-shaped token in the prompt (the
-    # operator's review spawn names the node in the message). extract_node_ids
-    # is liberal by design; resolve_provenance (the same seam cmd_spawn uses
-    # for --node) does the graph filtering and the slug->id normalization.
-    candidate = node
-    if candidate is None:
+    node_id = node
+    who = node
+    if node_id is None:
+        msg = (message or "").lstrip()
         ids = extract_node_ids(message or "")
-        if not ids:
-            return  # ad-hoc spawn: no node named anywhere, nothing to say
-        candidate = ids[0]
-    try:
-        node_id = resolve_provenance(candidate, None, None).get("FNO_NODE")
-    except Exception as exc:  # noqa: BLE001 - provenance never fails the spawn
-        print(f"spawn: session row open skipped for {candidate}: {exc}", file=sys.stderr)
-        return
+        if not msg.startswith(_REVIEW_VERB_PREFIXES) or len(ids) != 1:
+            return  # not a single-node review prompt: no row, nothing to say
+        who = ids[0]
+        try:
+            node_id = resolve_provenance(who, None, None).get("FNO_NODE")
+        except Exception as exc:  # noqa: BLE001 - provenance never fails the spawn
+            print(f"spawn: session row open skipped for {who}: {exc}", file=sys.stderr)
+            return
     if not node_id:
         print(
-            f"spawn: session row open skipped for {candidate} "
+            f"spawn: session row open skipped for {who} "
             f"(node not in graph); the row was not written. Skipped.",
             file=sys.stderr,
         )
@@ -1405,14 +1417,16 @@ def cmd_spawn(
         None, "--plan", help="Provenance FNO_PLAN override (skips the graph read)."
     ),
     session_phase: str = typer.Option(
-        "review",
+        "",
         "--session-phase",
         help=(
             "Lifecycle phase for the sessions row a node-bearing spawn opens on "
             "the node (x-4342): a spawned contributor that never holds the claim "
             "crosses no stamping chokepoint, so spawn opens the row itself. "
-            "Validated against the graph phase enum; default review. No node "
-            "resolved (--node or a node id in the prompt) means no row."
+            "Empty (the default) infers from the message: /target-family work "
+            "stamps do (its claim-acquire stamp fills the same row), everything "
+            "else stamps review. No node resolved (--node or a review-verb "
+            "prompt naming one node id) means no row."
         ),
     ),
     force: bool = typer.Option(
@@ -1933,19 +1947,6 @@ def cmd_spawn(
     # Resolve node provenance once for every substrate. A node-bearing spawn is
     # itself a dispatcher route, so it must cross the same family-2 decision and
     # dispatch reservation as advance, reconcile, and the shell entry points.
-    # x-4342: the same node-bearing spawn opens a sessions row on the node.
-    # Validate the phase before anything spawns (fail-closed, like the guards
-    # above); the stamp itself is best-effort after the launch succeeds.
-    from fno.graph.types import SESSION_PHASES
-
-    if session_phase not in SESSION_PHASES:
-        print(
-            f"--session-phase must be one of {sorted(SESSION_PHASES)} "
-            f"(got {session_phase!r})",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-
     from fno.agents.mux_spawn import resolve_provenance
 
     prov_env = resolve_provenance(node, slug, plan)
@@ -1963,6 +1964,26 @@ def cmd_spawn(
     message = normalize_legacy_no_merge(message)
     if prov_env is not None and message_carries_no_merge(message):
         prov_env["TARGET_NO_MERGE"] = "1"
+
+    # x-4342: the sessions row a node-bearing spawn opens. An explicit
+    # --session-phase is the operator's label and wins; empty infers from the
+    # work's own shape - a /target-family message names a do worker (whose
+    # claim-acquire stamp duplicate-fills the same row), anything else defaults
+    # to review, the contributor shape that motivated the stamp. Fail-closed on
+    # an unknown explicit value, like the guards above, before anything spawns.
+    from fno.graph.types import SESSION_PHASES
+
+    if session_phase:
+        if session_phase not in SESSION_PHASES:
+            print(
+                f"--session-phase must be one of {sorted(SESSION_PHASES)} "
+                f"(got {session_phase!r})",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        stamp_phase = session_phase
+    else:
+        stamp_phase = "do" if is_target_family(message) else "review"
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
     # destination the revived worker will actually use.
@@ -2315,8 +2336,9 @@ def cmd_spawn(
             # the receipt holds the worker identity. Runs before the exit-22
             # check on purpose: an unverified seed still left a live pane, and
             # that pane's provenance is real whether its payload landed or not.
+            # node= is the ALREADY-resolved FNO_NODE from the provenance pass.
             _stamp_spawned_session_row(
-                node=node, message=message, phase=session_phase,
+                node=prov_env.get("FNO_NODE"), message=message, phase=stamp_phase,
                 worker_name=pane_result.name, worker_harness=pane_result.provider,
                 worker_session_uuid=pane_result.session_uuid,
             )
@@ -2443,7 +2465,7 @@ def cmd_spawn(
     # worker's full harness session id; a one-shot whose row was torn down or
     # whose uuid never resolved skips with a named line, not a bad row.
     _stamp_spawned_session_row(
-        node=node, message=message, phase=session_phase,
+        node=prov_env.get("FNO_NODE"), message=message, phase=stamp_phase,
         worker_name=result.name, worker_harness=result.provider,
         worker_session_uuid=None,
     )

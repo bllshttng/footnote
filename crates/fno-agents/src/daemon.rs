@@ -1240,6 +1240,11 @@ fn reap_node_session(
             harness,
             "--session-id",
             session_id,
+            // Close every open row the dead session held, not just its do
+            // window: a spawned reviewer opens a review row the do-only reap
+            // would leave reading "in progress" forever.
+            "--phase",
+            "all",
             "--json",
         ])
         .stdout(std::process::Stdio::piped())

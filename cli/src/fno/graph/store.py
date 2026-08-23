@@ -1507,10 +1507,12 @@ def reap_open_session_record(
     "no do window", which removal restores. Every other phase FILLS
     ``ended_at`` and keeps the row: a spawn-opened review row exists precisely
     to record that a reviewer session ran, and the work it records did happen -
-    erasing it would undo the provenance the row was opened for. The fill value
-    defaults to the reap instant, an UPPER BOUND on the true end (the observer
-    proves "dead by now", not "died at"), and a caller with a sharper bound
-    passes it.
+    erasing it would undo the provenance the row was opened for. ``all`` is the
+    death-cascade spelling the daemon observer uses: apply BOTH semantics to
+    every open row carrying the identity, so a session holding a do window and
+    a review window at death settles both in one call. The fill value defaults
+    to the reap instant, an UPPER BOUND on the true end (the observer proves
+    "dead by now", not "died at"), and a caller with a sharper bound passes it.
     """
     from datetime import datetime, timezone
 
@@ -1518,9 +1520,17 @@ def reap_open_session_record(
     from fno.graph.statuses import is_open_do_row, is_open_phase_row
     from fno.graph.types import SESSION_PHASES
 
-    if phase not in SESSION_PHASES:
-        raise ValueError(f"invalid phase {phase!r}; expected one of {sorted(SESSION_PHASES)}")
-    harness, session_id = _validate_session_identity(phase, harness, session_id)
+    if phase != "all" and phase not in SESSION_PHASES:
+        raise ValueError(
+            f"invalid phase {phase!r}; expected 'all' or one of {sorted(SESSION_PHASES)}"
+        )
+    close_phases = sorted(SESSION_PHASES - {"do"}) if phase == "all" else (
+        [] if phase == "do" else [phase]
+    )
+    remove_do = phase in ("do", "all")
+    harness, session_id = _validate_session_identity(
+        "do" if phase == "all" else phase, harness, session_id
+    )
     if ended_at is None:
         ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     else:
@@ -1542,7 +1552,7 @@ def reap_open_session_record(
         result["found"] = True
         result["status_before"] = node.get("status")
         rows = node.get("sessions") or []
-        if phase == "do":
+        if remove_do:
             keep = [
                 row for row in rows
                 if not (
@@ -1552,12 +1562,13 @@ def reap_open_session_record(
                 )
             ]
             result["row_removed"] = len(keep) != len(rows)
+            rows = keep
             if result["row_removed"]:
                 node["sessions"] = keep
-        else:
+        for close_phase in close_phases:
             for row in rows:
                 if (
-                    is_open_phase_row(row, phase)
+                    is_open_phase_row(row, close_phase)
                     and (row.get("harness"), row.get("session_id"))
                     == (harness, session_id)
                 ):

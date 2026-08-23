@@ -5,17 +5,19 @@ chokepoint (claim acquire/release, plan-bind, PR-link), so its review work
 landed in no sessions array. Coverage:
 
   - AC1: `spawn --node X --substrate bg` with a resolvable worker uuid opens a
-    review row carrying the WORKER's harness session id (never the spawner's,
-    never the 8-hex short id).
-  - AC1-fallback: a node id parsed from the prompt (no --node) opens the same
-    row.
-  - AC1-ERR: a prompt naming an unresolvable id exits 0 with a named skip on
-    stderr and writes no row.
-  - AC1-ERR2: a bad --session-phase refuses before anything spawns (exit 2).
+    row carrying the WORKER's harness session id (never the spawner's, never
+    the 8-hex short id). Phase: /target-family message stamps do (the worker's
+    claim-acquire stamp fills the same row), anything else stamps review.
+  - AC1-fallback: a review-verb prompt naming exactly ONE node id (no --node)
+    opens the same row; prose or a two-id prompt arms nothing.
+  - AC1-ERR: a review prompt naming an unresolvable id exits 0 with a named
+    skip on stderr and writes no row; a bad --session-phase refuses before
+    anything spawns (exit 2).
   - AC2: `session add --phase review` stamps (exit 2 before the enum gained
     review), and the roster renders the review slot between do and ship.
   - Closing: `session reap-open --phase review` fills ended_at and KEEPS the
-    row (a do row is removed to unwedge status; review provenance stands).
+    row; `--phase all` settles a dead session's do AND review windows in one
+    call (the daemon observer's spelling).
 """
 from __future__ import annotations
 
@@ -33,14 +35,17 @@ FULL_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
 @pytest.fixture(autouse=True)
-def _release_node_claims():
-    """Release the guard's claims after each test.
+def _isolated_claims_root(tmp_path, monkeypatch):
+    """Pin the global claims root at the tmp home.
 
-    A successful bg `--node` spawn deliberately KEEPS its dispatch/node claims
-    (the worker inherits them), and the global claims root outlives each test's
-    tmp graph - without this sweep, test N's held claim refuses test N+1's
-    spawn as already-running.
+    node:/dispatch: claims root at $FNO_CLAIMS_ROOT regardless of the tmp fno
+    home, so without this the spawn guard's reservation lands in the machine's
+    live claims store (and a run killed mid-flight leaves it held). Pinned
+    here, both directions stay in tmp; the release sweep below is belt-only.
     """
+    claims = tmp_path / "claims"
+    claims.mkdir()
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims))
     yield
     from fno.claims.core import claim_status, release_claim
     from fno.claims.io import claims_root_for
@@ -141,14 +146,14 @@ def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> 
     result = CliRunner().invoke(
         agents_app,
         ["spawn", "--name", "row-retry", "-H", "claude", "--substrate", "bg",
-         f"review {NODE} please"],
+         f"/code-review {NODE} please"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
     assert len(_node_rows()) == 1
 
     _stamp_spawned_session_row(
-        node=None, message=f"review {NODE} please", phase="review",
+        node=NODE, message="", phase="review",
         worker_name="row-retry", worker_harness="claude",
         worker_session_uuid=FULL_UUID,
     )
@@ -181,14 +186,15 @@ def test_spawn_without_uuid_skips_named(workdir_claude) -> None:
 
 
 def test_spawn_prompt_node_opens_row(workdir_claude, resolvable_uuid) -> None:
-    """A node id in the prompt (no --node) opens the same row; no guard path."""
+    """A review-verb prompt naming one node id (no --node) opens the same row;
+    no guard path."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
         agents_app,
         [
             "spawn", "--name", "prompt-worker", "-H", "claude", "--substrate", "bg",
-            f"review the diff for {NODE} and drain the threads",
+            f"/code-review the diff for {NODE} and drain the threads",
         ],
         catch_exceptions=False,
     )
@@ -200,14 +206,15 @@ def test_spawn_prompt_node_opens_row(workdir_claude, resolvable_uuid) -> None:
 
 
 def test_spawn_prompt_unresolvable_id_skips_named(workdir_claude, resolvable_uuid) -> None:
-    """An id-shaped token that names no graph node: exit 0, named skip, no row."""
+    """A review-verb prompt naming an id no graph node carries: exit 0, named
+    skip, no row."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
         agents_app,
         [
             "spawn", "--name", "ghost-worker", "-H", "claude", "--substrate", "bg",
-            "review x-deadbeef please",
+            "/code-review x-deadbeef please",
         ],
         catch_exceptions=False,
     )
@@ -215,6 +222,60 @@ def test_spawn_prompt_unresolvable_id_skips_named(workdir_claude, resolvable_uui
     assert _node_rows() == []
     assert "session row open skipped" in result.stderr
     assert "x-deadbeef" in result.stderr
+
+
+def test_spawn_prose_prompt_names_nothing_stays_silent(
+    workdir_claude, resolvable_uuid
+) -> None:
+    """Prose naming a node (no review verb, no --node) arms nothing: the prompt
+    lane is conservative because a bare id in prose names a sibling more often
+    than a target."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        ["spawn", "--name", "prose-worker", "-H", "claude", "--substrate", "bg",
+         f"look at {NODE} and report"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert _node_rows() == []
+    assert "session row open skipped" not in result.stderr
+
+
+def test_spawn_prompt_two_ids_arms_nothing(workdir_claude, resolvable_uuid) -> None:
+    """A review prompt naming TWO node ids is ambiguous; first-by-position would
+    assert a reviewer worked on a node the operator never targeted."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        ["spawn", "--name", "twoid-worker", "-H", "claude", "--substrate", "bg",
+         f"/review {NODE} then x-4ab2"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert _node_rows() == []
+
+
+def test_spawn_target_family_stamps_do(workdir_claude, resolvable_uuid) -> None:
+    """A /target-family payload names a do worker: the row stamps do (the
+    worker's own claim-acquire stamp duplicate-fills it), never review."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "/fno:target resume",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    rows = _node_rows()
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "do"
+    assert rows[0]["session_id"] == FULL_UUID
 
 
 def test_spawn_no_node_anywhere_writes_nothing_and_stays_silent(
@@ -348,6 +409,37 @@ def test_reap_open_fills_review_row_and_keeps_it(tmp_path: Path, monkeypatch) ->
     assert len(rows) == 1, "a reaped review row is closed, never erased"
     assert rows[0]["ended_at"], "the close fills ended_at"
     assert rows[0]["phase"] == "review"
+
+
+def test_reap_open_all_closes_every_open_row(tmp_path: Path, monkeypatch) -> None:
+    """The death-cascade spelling: one session holding a do window AND a review
+    window settles both - the do row removed, the review row filled."""
+    import fno.graph.cli as graph_cli
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_graph()
+    for phase in ("do", "review"):
+        CliRunner().invoke(
+            graph_cli.cli,
+            ["session", "add", NODE, "--phase", phase,
+             "--harness", "claude", "--session-id", FULL_UUID,
+             "--started-at", "2026-08-23T10:00:00Z"],
+            catch_exceptions=False,
+        )
+
+    result = CliRunner().invoke(
+        graph_cli.cli,
+        ["session", "reap-open", NODE, "--harness", "claude",
+         "--session-id", FULL_UUID, "--phase", "all", "--json"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert receipt["row_removed"] is True and receipt["row_closed"] is True
+
+    rows = _node_rows()
+    assert len(rows) == 1, f"the review row survives, got {rows!r}"
+    assert rows[0]["phase"] == "review" and rows[0]["ended_at"]
 
 
 def test_reap_open_do_default_still_removes(tmp_path: Path, monkeypatch) -> None:
