@@ -575,8 +575,13 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # Any-typed to match the probe arms below, whose reads return the
         # same untyped dicts; a first binding of `0` would narrow the
         # variable to int and fail the reassignments' type check.
-        reviews: Any = {"optional_reviews": [], "optional_reviews_unresolved": 0}
+        reviews: Any = {
+            "optional_reviews": [],
+            "optional_reviews_unresolved": 0,
+            "optional_reviews_resolved_unchanged": 0,
+        }
         unresolved: Any = 0
+        resolved_unchanged: Any = 0
         coverage: Any = dict(_NOT_ASKED_COVERAGE)
         review_lane = False
         code_review_required = False
@@ -599,8 +604,13 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         try:
             reviews = reader(pr, cwd)
         except Exception:
-            reviews = {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+            reviews = {
+                "optional_reviews": "unknown",
+                "optional_reviews_unresolved": None,
+                "optional_reviews_resolved_unchanged": None,
+            }
         unresolved = reviews.get("optional_reviews_unresolved")
+        resolved_unchanged = reviews.get("optional_reviews_resolved_unchanged")
 
         # x-0eaf: coverage signal, same additive/fail-open discipline as the
         # optional review read above. Read from the review_coverage event so a
@@ -714,6 +724,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         "checks": counts,
         "optional_reviews": reviews.get("optional_reviews", "unknown"),
         "optional_reviews_unresolved": unresolved,
+        "optional_reviews_resolved_unchanged": resolved_unchanged,
         "review_coverage": coverage,
         # Reported whether or not it blocked. The original complaint was an
         # empty `ready_blockers` next to a live review: a reader has to be able
@@ -796,6 +807,12 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             "'mutation($t: ID!){resolveReviewThread(input:{threadId: $t})"
             "{thread{isResolved}}}' -F t=<threadId>` (thread ids come from "
             "`reviewThreads` on the pullRequest).\n"
+        )
+    if isinstance(resolved_unchanged, int) and resolved_unchanged > 0:
+        sys.stderr.write(
+            f"note: {resolved_unchanged} optional review thread(s) resolved while the "
+            "original diff line remains current; this does not block ready. Verify "
+            "the explicit resolution rationale before merge.\n"
         )
 
     # Coverage used to print a word and a number with no way to check either.

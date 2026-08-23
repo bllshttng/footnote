@@ -707,7 +707,11 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
         "read_optional_review_state",
-        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+        lambda pr, cwd: {
+            "optional_reviews": [],
+            "optional_reviews_unresolved": 0,
+            "optional_reviews_resolved_unchanged": 0,
+        },
     )
     monkeypatch.setattr(
         _status,
@@ -742,6 +746,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         },
         "optional_reviews": [],
         "optional_reviews_unresolved": 0,
+        "optional_reviews_resolved_unchanged": 0,
         "review_coverage": {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
         "review_activity": {
             "blocker": "",
@@ -1436,6 +1441,7 @@ def test_closed_pr_skips_the_probes_and_the_coverage_conjunct(monkeypatch, capsy
     # The no-pending answers, not `unknown`: nothing failed, it was not asked.
     assert out["optional_reviews"] == []
     assert out["optional_reviews_unresolved"] == 0
+    assert out["optional_reviews_resolved_unchanged"] == 0
 
 
 def test_read_review_coverage_from_events(tmp_path):
@@ -1887,8 +1893,12 @@ def _threads_payload(nodes):
     }}}}}
 
 
-def _thread(login, resolved):
-    return {"isResolved": resolved, "comments": {"nodes": [{"author": {"login": login}}]}}
+def _thread(login, resolved, outdated):
+    return {
+        "isResolved": resolved,
+        "isOutdated": outdated,
+        "comments": {"nodes": [{"author": {"login": login}}]},
+    }
 
 
 def test_ac1_hp_unresolved_optional_findings_surface():
@@ -1898,8 +1908,8 @@ def test_ac1_hp_unresolved_optional_findings_surface():
         runner=_fake_runner(
             reviews=[{"author": {"login": "gemini-code-assist[bot]"}, "state": "COMMENTED"}],
             threads=_threads_payload([
-                _thread("gemini-code-assist[bot]", False),
-                _thread("gemini-code-assist[bot]", False),
+                _thread("gemini-code-assist[bot]", False, False),
+                _thread("gemini-code-assist[bot]", False, False),
             ]),
         ),
     )
@@ -1916,13 +1926,45 @@ def test_ac1_edge_resolving_drops_count_to_zero():
         runner=_fake_runner(
             reviews=[{"author": {"login": "gemini-code-assist[bot]"}, "state": "COMMENTED"}],
             threads=_threads_payload([
-                _thread("gemini-code-assist[bot]", True),
-                _thread("gemini-code-assist[bot]", True),
+                _thread("gemini-code-assist[bot]", True, True),
+                _thread("gemini-code-assist[bot]", True, True),
             ]),
         ),
     )
     assert state["optional_reviews_unresolved"] == 0
     assert state["optional_reviews"][0]["author"] == "gemini-code-assist"
+
+
+def test_ac1_hp_resolved_unchanged_optional_thread_is_counted():
+    """AC1-HP: resolved + current line is visible as a separate fact."""
+    state = _reviews.read_optional_review_state(
+        "42",
+        runner=_fake_runner(
+            reviews=[{"author": {"login": "gemini-code-assist[bot]"}, "state": "COMMENTED"}],
+            threads=_threads_payload([
+                _thread("gemini-code-assist[bot]", True, False),
+            ]),
+        ),
+    )
+    assert state["optional_reviews_unresolved"] == 0
+    assert state["optional_reviews_resolved_unchanged"] == 1
+
+
+def test_ac1_edge_counts_fixed_unresolved_and_resolved_unchanged_threads():
+    """AC1-EDGE: the two booleans classify each optional thread independently."""
+    state = _reviews.read_optional_review_state(
+        "42",
+        runner=_fake_runner(
+            reviews=[{"author": {"login": "gemini-code-assist[bot]"}, "state": "COMMENTED"}],
+            threads=_threads_payload([
+                _thread("gemini-code-assist[bot]", True, True),
+                _thread("gemini-code-assist[bot]", False, False),
+                _thread("gemini-code-assist[bot]", True, False),
+            ]),
+        ),
+    )
+    assert state["optional_reviews_unresolved"] == 1
+    assert state["optional_reviews_resolved_unchanged"] == 1
 
 
 def test_ac1_fr_non_optional_review_excluded():
@@ -1931,7 +1973,7 @@ def test_ac1_fr_non_optional_review_excluded():
         "42",
         runner=_fake_runner(
             reviews=[{"author": {"login": "some-human"}, "state": "CHANGES_REQUESTED"}],
-            threads=_threads_payload([_thread("some-human", False)]),
+            threads=_threads_payload([_thread("some-human", False, False)]),
         ),
     )
     assert state["optional_reviews"] == []
@@ -1971,7 +2013,7 @@ def test_above_floor_reads_threads_normally():
     runner, calls = _fake_runner_with_quota(
         remaining=5000,
         reviews=[{"author": {"login": "gemini-code-assist[bot]"}, "state": "COMMENTED"}],
-        threads=_threads_payload([_thread("gemini-code-assist[bot]", False)]),
+        threads=_threads_payload([_thread("gemini-code-assist[bot]", False, False)]),
     )
     state = _reviews.read_optional_review_state("42", runner=runner)
     assert state["optional_reviews_unresolved"] == 1
@@ -2009,7 +2051,7 @@ def test_ac1_err_view_failure_degrades_to_unknown():
     state = _reviews.read_optional_review_state(
         "42", runner=_fake_runner(reviews=[], threads={}, view_ok=False)
     )
-    assert state == {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+    assert state == dict(_reviews._UNKNOWN)
 
 
 def test_graphql_failure_degrades_to_unknown():
@@ -2022,7 +2064,7 @@ def test_graphql_failure_degrades_to_unknown():
             graphql_ok=False,
         ),
     )
-    assert state == {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+    assert state == dict(_reviews._UNKNOWN)
 
 
 def test_graphql_errors_envelope_degrades_to_unknown():
@@ -2037,7 +2079,24 @@ def test_graphql_errors_envelope_degrades_to_unknown():
         return Result(0, _json.dumps({"url": _URL, "reviews": []}), "")
 
     state = _reviews.read_optional_review_state("42", runner=runner)
-    assert state == {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+    assert state == dict(_reviews._UNKNOWN)
+
+
+def test_missing_is_outdated_degrades_to_unknown():
+    """AC3-ERR: missing discriminator evidence is unavailable, never false."""
+    state = _reviews.read_optional_review_state(
+        "42",
+        runner=_fake_runner(
+            reviews=[{"author": {"login": "gemini-code-assist[bot]"}, "state": "COMMENTED"}],
+            threads=_threads_payload([
+                {
+                    "isResolved": True,
+                    "comments": {"nodes": [{"author": {"login": "gemini-code-assist[bot]"}}]},
+                },
+            ]),
+        ),
+    )
+    assert state == dict(_reviews._UNKNOWN)
 
 
 def test_non_object_json_degrades_to_unknown():
@@ -2046,7 +2105,7 @@ def test_non_object_json_degrades_to_unknown():
         return Result(0, _json.dumps(["not", "an", "object"]), "")
 
     state = _reviews.read_optional_review_state("42", runner=runner)
-    assert state == {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+    assert state == dict(_reviews._UNKNOWN)
 
 
 def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys):
@@ -2081,6 +2140,43 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
     assert out["green"] is True
     assert out["optional_reviews_unresolved"] == 2
     assert out["ready"] is False  # green but not ready: the actionable signal
+
+
+def test_status_surfaces_resolved_unchanged_as_advisory(monkeypatch, capsys):
+    """AC2-HP: the count is visible without changing readiness or exit code."""
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {
+            "optional_reviews": [{"author": "gemini-code-assist", "state": "COMMENTED", "inline_count": 1}],
+            "optional_reviews_unresolved": 0,
+            "optional_reviews_resolved_unchanged": 1,
+        },
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
+    )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    code = _status.run_status("42")
+    captured = capsys.readouterr()
+    out = _json.loads(captured.out)
+    assert code == 0
+    assert out["optional_reviews_resolved_unchanged"] == 1
+    assert out["ready"] is True
+    assert out["ready_blockers"] == []
+    assert "original diff line remains current" in captured.err
+    assert "does not block ready" in captured.err
+    assert "explicit resolution rationale" in captured.err
 
 
 def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys):
