@@ -129,6 +129,10 @@ jobs:
         env:
           CHANGED_BASE: ${{ github.event.pull_request.base.sha }}
           CHANGED_HEAD: ${{ github.event.pull_request.head.sha }}
+          # The full stress contract remains 20 trials. The changed packet is
+          # partial evidence with a 15-minute cap; one trial proves the shell
+          # harness and the full rust-ci job owns the denominator.
+          FNO_STRESS_TRIALS: "1"
         run: |
           set +e
           uv run --project cli fno-py doctor test smoke --changed \

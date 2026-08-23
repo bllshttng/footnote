@@ -4,7 +4,7 @@
 # Cargo artifact-lock contention cannot be counted as a test red.
 set -uo pipefail
 
-trials=20
+trials="${FNO_STRESS_TRIALS:-20}"
 while (($# > 0)); do
     case "$1" in
         --trials)
