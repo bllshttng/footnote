@@ -1200,6 +1200,32 @@ fn harness_can_self_review(harness: Option<&str>) -> bool {
     matches!(harness, Some("claude") | Some("codex") | Some("opencode"))
 }
 
+/// The KNOWN harnesses with no native self-review verb. A set, not
+/// `!harness_can_self_review()`, so an UNRECOGNIZED spelling floors instead of
+/// passing through as verbless; mirrors the verbless derivation in
+/// cli/src/fno/pr/_merge.py (`_harness_can_self_review`).
+const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy"];
+
+/// The self-review FLOOR policy on the author harness (x-129b). Distinct from
+/// the capability question above: `None` answers "unattributable", not
+/// "verbless". A KNOWN harness with a native verb floors; a KNOWN verbless
+/// harness (gemini/agy) does not, because the floor would demand an
+/// attestation no native verb there produces. An UNRESOLVED harness (absent
+/// or ambiguous ambient markers - a claude session started from a codex
+/// shell) floors, because ambiguity about who authored the run is not
+/// permission to skip its review. The explicit `--author-harness none` pin is
+/// the hermetic opt-out and stays unfloored. Mirrors `_harness_can_self_review`
+/// in cli/src/fno/pr/_merge.py so the stop gate and the merge gate cannot
+/// disagree on the same PR.
+fn self_review_floor_applies(author_harness: Option<&str>, pinned_none: bool) -> bool {
+    match author_harness {
+        Some(h) => {
+            harness_can_self_review(Some(h)) || !KNOWN_VERBLESS_HARNESSES.contains(&h)
+        }
+        None => !pinned_none,
+    }
+}
+
 /// Pure payload classifier: CODE iff any changed path is not documentation.
 /// An empty diff is NOT a code payload (no ship, so no gate). Pure over a path
 /// slice so unit tests need no git; the git-caller wrapper is `classify_payload`.
@@ -6159,6 +6185,9 @@ pub(crate) struct ReviewInputs {
     pub(crate) settings: Settings,
     /// The ambient author harness (env markers, or the explicit override).
     pub(crate) author_harness: Option<String>,
+    /// Whether the caller explicitly pinned `--author-harness none` (the
+    /// hermetic opt-out). Distinct from an UNRESOLVED harness, which floors.
+    pub(crate) author_harness_pinned_none: bool,
     pub(crate) required_bots: Vec<String>,
     pub(crate) required_reviewers: Vec<String>,
     pub(crate) optional_bots: Vec<String>,
@@ -6313,6 +6342,10 @@ pub(crate) fn resolve_review_inputs(
     // the same-model peer guard (x-c2e7); None leaves the set unchanged.
     // `--author-harness none` pins the no-harness case, which an absent flag
     // cannot express, and an absent flag keeps reading the ambient markers.
+    // The pin is recorded separately: a PINNED none is the hermetic opt-out,
+    // while an UNRESOLVED None (absent or ambiguous markers) floors the
+    // self-review reviewer instead of dropping it (x-129b).
+    let author_harness_pinned_none = matches!(author_harness_override, Some("none") | Some(""));
     let author_harness = match author_harness_override {
         Some("none") | Some("") => None,
         Some(h) => Some(h.to_string()),
@@ -6334,6 +6367,7 @@ pub(crate) fn resolve_review_inputs(
         repo_slug,
         settings,
         author_harness,
+        author_harness_pinned_none,
         required_bots,
         required_reviewers,
         optional_bots,
@@ -6482,15 +6516,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
     let lane_configured =
         !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
-    // The floor only applies where a session can satisfy it: a harness with a
+    // The floor applies where a session can satisfy it: a harness with a
     // self-review verb (claude /code-review, codex /review, opencode
-    // /review-changes). Flooring gemini/agy would demand an attestation no
+    // /review-changes), or a harness that could not be attributed at all -
+    // ambiguity is not permission (x-129b). A KNOWN verbless harness
+    // (gemini/agy) stays unfloored: the floor would demand an attestation no
     // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
     // those harnesses' path and is deferred. classify_payload forks git, so it
     // runs only when the floor could apply - a configured lane makes it moot,
     // and most fires have one.
-    let harness_can_self_review = harness_can_self_review(author_harness.as_deref());
-    let self_review_floor = if !lane_configured && self_review_required && harness_can_self_review {
+    let floor_applies =
+        self_review_floor_applies(author_harness.as_deref(), inputs.author_harness_pinned_none);
+    let self_review_floor = if !lane_configured && self_review_required && floor_applies {
         let payload = classify_payload(&parsed.git_bin, &cwd);
         floor_self_review(&required_reviewers, false, payload.0, true)
     } else {
@@ -10360,7 +10397,10 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         && required_reviewers.is_empty());
     if !lane_configured
         && inputs.settings.self_review_required.unwrap_or(true)
-        && harness_can_self_review(inputs.author_harness.as_deref())
+        && self_review_floor_applies(
+            inputs.author_harness.as_deref(),
+            inputs.author_harness_pinned_none,
+        )
     {
         let payload = classify_payload(&git_bin, &cwd);
         if let Some(floored) = floor_self_review(&required_reviewers, false, payload.0, true) {
@@ -13872,6 +13912,24 @@ mod tests {
         assert!(!harness_can_self_review(Some("gemini")));
         assert!(!harness_can_self_review(Some("agy")));
         assert!(!harness_can_self_review(None));
+    }
+
+    #[test]
+    fn unresolved_harness_floors_the_self_review_gate() {
+        // x-129b: `None` means UNATTRIBUTABLE, not verbless. A claude session
+        // started from a codex shell resolves no single family, and reading
+        // that ambiguity as "no floor" silently disengaged the only review a
+        // stock install demands. Ambiguity is not permission; the explicit
+        // `--author-harness none` pin stays the hermetic opt-out.
+        assert!(self_review_floor_applies(None, false));
+        assert!(!self_review_floor_applies(None, true));
+        assert!(self_review_floor_applies(Some("claude"), false));
+        assert!(self_review_floor_applies(Some("codex"), true));
+        assert!(!self_review_floor_applies(Some("gemini"), false));
+        assert!(!self_review_floor_applies(Some("agy"), false));
+        // An unrecognized spelling is an unattributed run: it floors rather
+        // than passing an unknown name through the verb table.
+        assert!(self_review_floor_applies(Some("hermes"), false));
     }
 
     #[test]
