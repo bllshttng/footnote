@@ -1429,6 +1429,7 @@ def _claude_create_path(
     account_env: Optional[Mapping[str, str]] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
+    succession: bool = False,
     route_provider: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
@@ -1773,10 +1774,10 @@ def _claude_create_path(
                 if e.crown_scope == crown_scope and e.status not in TERMINAL_STATUSES
             ]
 
-            if holders and all(is_caller_row(h, spawned_by_session, spawned_by_harness) for h in holders):
+            if succession and succession_caller_name and holders and all(h.name == succession_caller_name for h in holders):
                 entries = [
                     replace(e, crown_level=None, crown_scope=None, crown_grantor=None)
-                    if e.crown_scope == crown_scope and is_caller_row(e, spawned_by_session, spawned_by_harness)
+                    if e.crown_scope == crown_scope and e.name == succession_caller_name
                     else e
                     for e in entries
                 ]
@@ -2483,6 +2484,7 @@ def dispatch_spawn(
     account_env: Optional[Mapping[str, str]] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
+    succession: bool = False,
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
 ) -> SpawnResult:
@@ -2630,10 +2632,13 @@ def dispatch_spawn(
         # authority you do not hold. Refuses BEFORE the launch rather than
         # declining after, because an unauthorized grant is an authority error,
         # not a race - nothing should exist as a result of it.
+        succession_caller = calling_agent_row()
+        succession_caller_name = getattr(succession_caller, "name", None)
         grant_problem = grant_error(
             crown_scope or "",
-            calling_agent_row(),
+            succession_caller,
             allow_terminal_recovery=True,
+            allow_succession=succession,
         )
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
@@ -2937,6 +2942,7 @@ def dispatch_spawn(
                         account_env=account_env,
                         crown_level=crown_level,
                         crown_scope=crown_scope,
+                        succession=succession,
                         route_provider=route_provider,
                     )
                     return SpawnResult(
