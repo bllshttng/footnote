@@ -113,6 +113,10 @@ Load [waves.md](references/waves.md) and execute it in full, in this context. Th
 
 **Zero-wave plan.** `/execute waves` on a plan with no declared waves runs it as a single wave (the waves flow falls back to sequential execution of all phases when no execution strategy is found).
 
+## Known Limitations and Deferred Work
+
+- Unsupported harnesses force waves into sequential execution. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## Multi-CLI
 
 Claude-Code primary. Both modes need `fno` and `git`. If a dependency is missing, the mode fails loud and reports it - it never fakes execution. On a CLI without parallel subagent dispatch (e.g. Gemini sequential fallback), waves mode degrades to main-thread sequential execution with an explicit downgrade reason; the rest of each flow is markdown the runtime follows directly.

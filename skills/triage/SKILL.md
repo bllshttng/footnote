@@ -362,6 +362,10 @@ The monitor is pull-based (poll every interval) and never auto-mutates
 the graph; breaches notify and the human (or a follow-up `/triage`)
 decides what to do.
 
+## Known Limitations and Deferred Work
+
+- Unreadable graphs block ownership decisions. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## References
 
 - `fno backlog triage` (canonical) — the v2 CLI sub-app; source in

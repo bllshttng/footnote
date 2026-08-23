@@ -155,3 +155,7 @@ User input at any point naturally cancels the ScheduleWakeup loop. No explicit c
 - NEVER read files or run other tools (except ScheduleWakeup) during pings
 - NEVER block user input (ScheduleWakeup yields to user naturally)
 - NEVER activate without project opt-in (when auto-activated via hook)
+
+## Known Limitations and Deferred Work
+
+- Keepalive cannot restore an expired cache or session. See [LIMITATIONS.md](LIMITATIONS.md).

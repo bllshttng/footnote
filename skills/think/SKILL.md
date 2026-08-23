@@ -34,3 +34,7 @@ Read the argument left to right: an optional substrate token, an optional brief 
 3. **Write one Markdown file** at the path `fno do plan path --slug "<slug>" [--node <id>]` prints, citing each claim's source. List only sources you actually read.
 
 Print the file path and stop. Turning findings into a plan is `/fno:blueprint <path>`.
+
+## Known Limitations and Deferred Work
+
+- Think produces findings, not implementation. See [LIMITATIONS.md](LIMITATIONS.md).

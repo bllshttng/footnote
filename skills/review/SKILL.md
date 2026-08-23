@@ -159,6 +159,10 @@ For a guardrail that has an exit code, skip all of this and use a probe: top-lev
 Both the project's list and any a plan declares must pass; a plan can add probes and can never silence the project's.
 A probe is an *observation* - one that mutates the repo races the session's own edits.
 
+## Known Limitations and Deferred Work
+
+- Green CI does not prove reviewer coverage. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## Multi-CLI
 
 Claude-Code primary. All modes need `fno` and `gh`/`git`; peer mode additionally needs the `fno agents` daemon for the `codex`/`gemini` one-shot lane, and research mode needs the Task/Agent tool to dispatch its roster. If a dependency is missing, the mode fails loud and reports it - it never fakes a review.

@@ -509,6 +509,10 @@ Environment-specific traps that defy reasonable assumptions.
 - **`done_probes` must end in a predicate and assert freshness.** `... | tail -5` masks the real exit status (reads as a pass); `test -f <file>` passes vacuously against launch-day residue. Bound every probe in time.
 - **Plans save to the Obsidian vault, not git `docs/`.** Use `fno do plan path --slug`; never hand-assemble the filename.
 
+## Known Limitations and Deferred Work
+
+- Blueprints cannot resolve unanswered architecture decisions. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## References
 
 - [references/blueprint-gates.md](references/blueprint-gates.md) - All state-keyed gates (claims, schema, executor, model, provenance, PRODUCT.md, impeccable_stages, done_probes, kill-criteria detail, collision, peer heads-up)

@@ -275,3 +275,7 @@ Otherwise -> not TDD
 ```
 
 No exceptions.
+
+## Known Limitations and Deferred Work
+
+- TDD does not prove untested integration boundaries. See [LIMITATIONS.md](LIMITATIONS.md).

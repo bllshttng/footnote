@@ -189,6 +189,10 @@ and only then does the bundle become `approved-draft-bundle`.
 The skill holds no tool that could dispatch: the subagents cannot publish, and
 this orchestrator only composes their drafts and the evaluator verdicts.
 
+## Known Limitations and Deferred Work
+
+- Growth launch drafts but does not publish. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## Exit states
 
 - Refusal, pack not active: the activate line, non-zero exit, no campaign dir.

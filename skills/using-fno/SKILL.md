@@ -75,13 +75,11 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 **Discovery:** `fno help` for the catalog, `fno help <verb>` for call shapes.
 
-## 3. Forbidden surfaces
+## Known Limitations and Deferred Work
 
-- NEVER edit `~/.fno/graph.json` directly (Edit/Write/`jq -i`/`sed -i`). Use `fno backlog`.
-- NEVER mutate `.fno/target-state.md` after init (immutable manifest; sole exception above).
-- Cancel: `touch .fno/.target-cancelled` or `TARGET_CANCEL=1`.
+- Live receipts can become stale. See [LIMITATIONS.md](LIMITATIONS.md).
 
-## 4. Picking the right surface
+## Picking the right surface
 
 | You want to... | Use |
 |----------------|-----|

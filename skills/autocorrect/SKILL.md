@@ -88,3 +88,7 @@ After setup, the loop runs unattended. The user only interacts during triage (~2
 ## Retirement
 
 The loop self-retires when, for two consecutive years, no S0 event has been caught only by this loop (i.e., every S0 was also caught by a deterministic verifier). At that point the verifier layer has fully absorbed the work and the meta-loop is no longer load-bearing. Delete the schedule, leave the capture infrastructure running as a paper trail, and move on.
+
+## Known Limitations and Deferred Work
+
+- Human triage is required before autocorrect changes guidance. See [LIMITATIONS.md](LIMITATIONS.md).

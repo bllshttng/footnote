@@ -145,6 +145,10 @@ Load [check.md](references/check.md) and execute it in full, in this context. Th
 
 Load [merged.md](references/merged.md) and execute it in full, in this context. That body is the canonical post-merge ritual: resolve the per-project inbox path from settings (fail loud if unset), close + stamp the backlog node via `fno backlog reconcile`, project stale plan frontmatter status from graph truth via `fno do plan reconcile-status --apply` (x-f34f), harvest retro / carveout items, write prose follow-ups to the project's vault inbox, file triage-worthy work as backlog nodes, and offer a backfill / handoff slot before close. It runs in the router's own main context.
 
+## Known Limitations and Deferred Work
+
+- PR reconciliation cannot prove unreadable external state. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## Multi-CLI
 
 Claude-Code primary. All three modes need `fno`, `gh`, and `git`. The create worker additionally needs the Task/Agent dispatch surface and a provider for the configured `pr-create` route (or the invoking harness's primary model when unconfigured); check needs the review bots configured in settings; merged needs the project's `config.post_merge.parking_lot_path`. If a dependency is missing, the mode fails loud and reports it - it never fakes a PR, a review, or a ritual.

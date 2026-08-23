@@ -305,3 +305,7 @@ loud and nothing is written - it degrades honestly, never fakes a delivery. See
 [docs/SKILL-COMPAT-MATRIX.md](../../docs/SKILL-COMPAT-MATRIX.md).
 
 To dispatch or observe a worker (rather than message one), use `/agent`.
+
+## Known Limitations and Deferred Work
+
+- Agy worker projection remains limited. See [LIMITATIONS.md](LIMITATIONS.md).

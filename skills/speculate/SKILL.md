@@ -178,6 +178,10 @@ Remove all speculate worktrees and branches:
 fno workspace worktree cleanup --prefix speculate/
 ```
 
+## Known Limitations and Deferred Work
+
+- Speculation does not select or merge a winner. See [LIMITATIONS.md](LIMITATIONS.md).
+
 ## See Also
 
 - `fno workspace worktree` - Worktree status, cleanup, archive

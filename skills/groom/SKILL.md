@@ -102,3 +102,7 @@ Still send the report, and still lead it with the Mechanical line - a quiet nigh
 - **Empty delta day** - nothing changed since the last pass: report "no action", exit 0.
 - **Dies mid-run** - every lever is an atomic CLI verb, so a partial run leaves only completed mutations, each with its receipt. Report what completed; do not attempt to unwind.
 - **Second run same day** - `fno backlog groom` dedups on a daily claim, so this should not happen. If you were invoked anyway, check the day's report was already sent before acting.
+
+## Known Limitations and Deferred Work
+
+- Ambiguous rows still need a human decision. See [LIMITATIONS.md](LIMITATIONS.md).

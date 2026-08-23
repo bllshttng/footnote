@@ -805,3 +805,7 @@ See [docs/SKILL-COMPAT-MATRIX.md](../../docs/SKILL-COMPAT-MATRIX.md).
 - **interactive (`-i`):** the TUI genuinely waits at approval prompts. See it via
   `fno agents grid <name>` / `fno agents drive <name> --mode interactive`.
 - **no proactive push** fires for a codex/gemini worker today. When a claude `--bg` `/target` worker stalls, it does fire `fno inbox notify`.
+
+## Known Limitations and Deferred Work
+
+- Fleet caps can reject spawns before worker creation. See [LIMITATIONS.md](LIMITATIONS.md).

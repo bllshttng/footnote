@@ -30,6 +30,10 @@ LOC_HELPER="$PLUGIN_ROOT/hooks/helpers/check-impl-location.sh"
 [[ -f "$LOC_HELPER" ]] && bash "$LOC_HELPER" || echo "verdict=ok"
 ```
 
+## Known Limitations and Deferred Work
+
+- Unreadable probes cannot prove a repair worked. See [LIMITATIONS.md](LIMITATIONS.md).
+
 If the output carries `verdict=canonical-protected` AND `TARGET_LOCATION_OK` is not `main-acknowledged`, REFUSE: do not resolve the mode, do not write. Name the branch (from the `branch=` line) and print the exact escape, then stop:
 
 ```

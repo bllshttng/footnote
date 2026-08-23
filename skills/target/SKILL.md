@@ -416,3 +416,7 @@ Loaded by state — the "read X when Y" load conditions are inline above; this i
 - [references/gate-artifacts.md](references/gate-artifacts.md) - SUPERSEDED: see docs/architecture/control-plane-loop.md
 - [references/phase-verifiers.md](references/phase-verifiers.md) - SUPERSEDED: see docs/architecture/control-plane-loop.md
 - `docs/architecture/control-plane-loop.md` (repo root) - Post-wedge stop hook architecture: shim + loop-check verb + immutable manifest
+
+## Known Limitations and Deferred Work
+
+- Sandbox enforcement can fail open on some hosts. See [LIMITATIONS.md](LIMITATIONS.md).
