@@ -239,6 +239,13 @@ def enabled(monkeypatch, tmp_path):
         lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1}, ""),
     )
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
+    # x-129b flipped the unattributable default to fail-closed, so a hermetic
+    # (markerless, manifestless) test env now floors the self-review
+    # attestation. Merge-behavior tests below are not about that gate; tests
+    # that exercise it override this with their own monkeypatch.
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
     # No 3am valve by default. The gate reads the override label on every
     # verdict, and an unstubbed read is a real `gh pr view` per merge case.
     monkeypatch.setattr(
@@ -948,6 +955,57 @@ def test_review_lane_configured_floors_a_code_payload(monkeypatch, tmp_path):
     assert _merge._review_lane_configured(str(tmp_path), 42) is False
 
 
+def test_review_floor_is_caller_independent_across_env_shapes(
+    monkeypatch, tmp_path
+):
+    """x-129b: the same PR owes the same review whatever process asks.
+
+    Measured on PR 1108: a claude session started from a codex shell resolves
+    two harness families, and the pre-fix predicate read that ambiguity as
+    'no floor', silently disengaging the only review a stock install demands.
+    Ambiguity is not permission - every unattributable shape floors - and a
+    KNOWN verbless run (manifest agy) is the only stock-install release."""
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
+
+    def requires_review():
+        _point_lane_read_at(monkeypatch)
+        return (
+            _merge._review_lane_configured(str(tmp_path), 42),
+            _merge._code_review_attestation_required(str(tmp_path), 42),
+        )
+
+    # Clean env (a plain shell merging by hand): unattributable, floors.
+    assert requires_review() == (True, True)
+    # The defect's default state: claude session started from a codex shell.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "c1")
+    monkeypatch.setenv("CODEX_THREAD_ID", "t1")
+    monkeypatch.setenv("CODEX_SESSION_ID", "s1")
+    assert requires_review() == (True, True)
+    # A multi-marker exotic shape, and the manifest-less poisoned env.
+    monkeypatch.setenv("GEMINI_SESSION_ID", "g1")
+    assert requires_review() == (True, True)
+    monkeypatch.delenv("GEMINI_SESSION_ID")
+    assert requires_review() == (True, True)
+
+    # The run's own manifest attribution decides, not the asking process: a
+    # verbless-harness run keeps its designed no-floor state, and a verbful
+    # one floors even under the poisoned env above.
+    state = tmp_path / ".fno"
+    state.mkdir(exist_ok=True)
+    (state / "target-state.md").write_text(
+        "---\nharness: agy\n---\n", encoding="utf-8"
+    )
+    assert requires_review() == (False, False)
+    (state / "target-state.md").write_text(
+        "---\nharness: claude\n---\n", encoding="utf-8"
+    )
+    assert requires_review() == (True, True)
+
+
 def test_stock_code_floor_skips_a_harness_without_a_self_review_verb(
     monkeypatch, tmp_path
 ):
@@ -967,7 +1025,9 @@ def test_stock_code_floor_skips_a_harness_without_a_self_review_verb(
 def test_stock_code_floor_does_not_guess_between_mixed_harness_markers(
     monkeypatch, tmp_path
 ):
-    """Match Rust: inherited markers from two harness families are ambiguous."""
+    """Match Rust: inherited markers from two harness families are ambiguous,
+    and ambiguity is not permission (x-129b) - the floor holds rather than
+    guessing which marker is the caller's own."""
     from fno.harness_identity import HARNESS_SESSION_MARKERS
 
     for marker, _harness in HARNESS_SESSION_MARKERS:
@@ -977,8 +1037,8 @@ def test_stock_code_floor_does_not_guess_between_mixed_harness_markers(
     _point_lane_read_at(monkeypatch)
     monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
 
-    assert _merge._review_lane_configured(str(tmp_path), 42) is False
-    assert _merge._code_review_attestation_required(str(tmp_path), 42) is False
+    assert _merge._review_lane_configured(str(tmp_path), 42) is True
+    assert _merge._code_review_attestation_required(str(tmp_path), 42) is True
 
 
 def test_pr_payload_classifier_is_documentation_aware_and_fail_closed(monkeypatch):
@@ -1967,6 +2027,13 @@ def test_code_review_gate_rejects_unrelated_github_app_coverage(
     enabled, monkeypatch, capsys, tmp_path
 ):
     """A required local code-review cannot be replaced by an unrelated App review."""
+    # This test IS about the attestation gate, so restore the real predicate
+    # the `enabled` fixture defaults off (hermetic-env floor release).
+    monkeypatch.setattr(
+        _merge,
+        "_code_review_attestation_required",
+        lambda repo, pr_number=0: True,
+    )
     state = tmp_path / ".fno"
     state.mkdir()
     (state / "config.toml").write_text(

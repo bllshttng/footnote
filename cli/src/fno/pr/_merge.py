@@ -455,13 +455,69 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     return any(not _is_documentation_path(p) for p in names)
 
 
-def _harness_can_self_review() -> bool:
-    """Mirror loop-check's floor boundary for the ambient harness."""
+def _manifest_harness(repo: str) -> Optional[str]:
+    """The harness stamped on this run's target manifest, or None.
+
+    `fno do target init` writes it from the process-tree identity resolver, so
+    it names the run being judged even when the merging process carries
+    inherited foreign markers. A line scan, not the schema: the merge gate
+    needs one field and loopcheck's scan_manifest_field reads the same file
+    the same way for the same reason."""
+    from pathlib import Path
+
+    try:
+        manifest = Path(_repo_state_dir(repo)) / "target-state.md"
+        text = manifest.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("harness:"):
+            value = stripped[len("harness:") :].strip().strip("\"'")
+            if value and value.lower() not in {"unknown", "none"}:
+                return value.lower()
+            return None
+    return None
+
+
+def _ambient_harness() -> Optional[str]:
+    """The single-family ambient harness, or None (absent or ambiguous).
+
+    Ambient markers describe the process ASKING, never the run being judged,
+    so this is only one input to the floor - never the whole answer."""
     from fno.harness_identity import present_harness_markers
-    from fno.review_capability import harness_can_self_review
 
     families = {harness for _marker, harness, _value in present_harness_markers()}
-    return len(families) == 1 and harness_can_self_review(next(iter(families)))
+    return next(iter(families)) if len(families) == 1 else None
+
+
+def _harness_can_self_review(repo: str = "") -> bool:
+    """Whether the self-review floor engages for this run (x-129b).
+
+    Inputs, in trust order: the manifest harness (property of the run), the
+    single-family ambient harness (the merging caller is usually the authoring
+    session). A harness with a native self-review verb floors; a KNOWN
+    verbless harness (gemini/agy) does not - the floor would demand an
+    attestation no native verb there produces. Unanimous known-verbless
+    releases; anything else - an unrecognized spelling, one unattributable
+    input, no input at all - floors, because ambiguity about who authored the
+    change is not permission to skip its review. The pre-x-129b shape read
+    ONLY ambient markers and treated multi-family ambiguity as 'no floor',
+    which silently disengaged review on any claude session started from a
+    codex shell. Mirrors self_review_floor_applies in loopcheck.rs so the
+    merge gate and the stop gate cannot disagree on the same PR."""
+    from fno.harness_names import KNOWN_HARNESSES
+    from fno.review_capability import harness_can_self_review
+
+    inputs = [h for h in (_manifest_harness(repo), _ambient_harness()) if h is not None]
+    if not inputs:
+        return True
+    if any(harness_can_self_review(h) for h in inputs):
+        return True
+    # Release only on unanimous KNOWN verbless harnesses; an unrecognized
+    # spelling is still an unattributed run and floors.
+    verbless = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
+    return not all(h in verbless for h in inputs)
 
 
 def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
@@ -508,7 +564,7 @@ def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
         if (
             getattr(r, "self_review_required", True)
             and pr_number
-            and _harness_can_self_review()
+            and _harness_can_self_review(repo)
             and _pr_payload_is_code(repo, pr_number)
         ):
             return True
@@ -547,7 +603,7 @@ def _code_review_attestation_required(repo: str, pr_number: int = 0) -> bool:
             not lane_configured
             and getattr(review, "self_review_required", True)
             and pr_number
-            and _harness_can_self_review()
+            and _harness_can_self_review(repo)
             and _pr_payload_is_code(repo, pr_number)
         )
     except Exception:

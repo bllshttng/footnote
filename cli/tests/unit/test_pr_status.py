@@ -191,12 +191,26 @@ def test_genuine_latest_cancel_stays_red():
 # (a result that was taken away) can never read as decided.
 
 
+def _no_floor(monkeypatch):
+    """Isolate from the x-129b fail-closed self-review floor.
+
+    A hermetic (markerless, manifestless) env is an UNATTRIBUTABLE caller and
+    now floors, so status tests that are not about the floor pin the
+    required-conjunct off; tests about it override this with their own patch."""
+    from fno.pr import _merge
+
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+
+
 def _run_status_on(monkeypatch, capsys, rollup):
     """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr)."""
 
     def _patch(name, value):
         monkeypatch.setattr(_status, name, value)
 
+    _no_floor(monkeypatch)
     _patch("_fetch", lambda pr, cwd: ({"state": "OPEN", "statusCheckRollup": rollup}, ""))
     _patch(
         "read_optional_review_state",
@@ -518,6 +532,7 @@ def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, caps
 
 def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
     """The hint is advice, not decoration: silent when there is nothing to do."""
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status, "_fetch",
         lambda pr, cwd: ({
@@ -651,6 +666,7 @@ def test_run_status_keeps_stdout_a_pure_json_contract(monkeypatch, capsys):
     """AC2-HP: stdout carries exactly one JSON object with the pre-change
     keys, and the human line lands on stderr - the fleet's watcher greps
     stdout with stderr discarded, so the two streams must never trade."""
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status, "_fetch",
         lambda pr, cwd: ({
@@ -694,6 +710,7 @@ def test_run_status_keeps_stdout_a_pure_json_contract(monkeypatch, capsys):
 
 
 def test_run_status_emits_json_and_code(monkeypatch, capsys):
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
@@ -767,6 +784,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
 
 
 def test_dispatch_hold_removes_green_pr_from_ready_set(monkeypatch, capsys):
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
@@ -2360,6 +2378,7 @@ def test_no_lane_repo_never_fires_the_recompute(monkeypatch, capsys, tmp_path):
     rows nobody acts on; status must not fire it either, now that ready
     ignores the conjunct there. A read that surfaces an EXISTING row is fine -
     only the producer spawn is the cost being gated."""
+    _no_floor(monkeypatch)
     import json
 
     from fno.pr import _reviews
@@ -2469,6 +2488,7 @@ def test_a_running_review_blocks_ready_even_with_no_lane_configured(monkeypatch,
 
 def test_the_verdict_and_exit_code_are_untouched_by_the_conjunct(monkeypatch, capsys):
     """`ready` tightens; the CI verdict is authoritative and stays green."""
+    _no_floor(monkeypatch)
     from fno.pr._review_hold import ReviewActivity
 
     code, out, _err, _seen = _run_status_with_activity(
@@ -2485,6 +2505,7 @@ def test_the_verdict_and_exit_code_are_untouched_by_the_conjunct(monkeypatch, ca
 def test_a_clear_reading_is_still_reported(monkeypatch, capsys):
     """An empty `ready_blockers` was the whole complaint: a reader must be able
     to see that both probes RAN, not just that nothing came back."""
+    _no_floor(monkeypatch)
     from fno.pr._review_hold import ReviewActivity
 
     _code, out, _err, _seen = _run_status_with_activity(
