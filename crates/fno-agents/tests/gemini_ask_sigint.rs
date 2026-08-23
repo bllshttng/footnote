@@ -48,6 +48,21 @@ printf '{"session_id":"%s","response":"done","stats":{}}' "$FAKE_GEMINI_SESSION_
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+fn install_warn_config(dir: &Path) -> Option<std::ffi::OsString> {
+    let config = dir.join("config.toml");
+    fs::write(&config, "[sandbox]\non_unavailable = \"warn\"\n").unwrap();
+    let old = std::env::var_os("FNO_CONFIG");
+    unsafe { std::env::set_var("FNO_CONFIG", &config) };
+    old
+}
+
+fn restore_config(old: Option<std::ffi::OsString>) {
+    match old {
+        Some(path) => unsafe { std::env::set_var("FNO_CONFIG", path) },
+        None => unsafe { std::env::remove_var("FNO_CONFIG") },
+    }
+}
+
 /// cv-cfdb7a56 (shared driver): an operator Ctrl-C must be FORWARDED to the
 /// gemini process group (so gemini + descendants tear down instead of
 /// orphaning), and the dispatch must report exit 130. The fake traps the
@@ -60,6 +75,7 @@ fn gemini_create_ctrl_c_forwards_sigint_and_exits_130() {
     let bin_dir = tmpdir("bin");
     let cwd = tmpdir("cwd");
     install_fake_gemini_sigint(&bin_dir);
+    let old_config = install_warn_config(&cwd);
 
     let sentinel = tmpdir("sentinel").join("caught.txt");
     let sentinel_str = sentinel.to_string_lossy().to_string();
@@ -104,6 +120,7 @@ fn gemini_create_ctrl_c_forwards_sigint_and_exits_130() {
     unsafe { std::env::remove_var("FAKE_GEMINI_SESSION_ID") };
     unsafe { std::env::remove_var("FAKE_GEMINI_SLEEP") };
     unsafe { std::env::remove_var("FAKE_GEMINI_SIGINT_SENTINEL") };
+    restore_config(old_config);
 
     assert_eq!(
         outcome.exit_code, 130,
@@ -128,6 +145,7 @@ fn sigint_ignored_parent_disposition_is_preserved() {
     let bin_dir = tmpdir("ign-bin");
     let cwd = tmpdir("ign-cwd");
     install_fake_gemini_sigint(&bin_dir);
+    let old_config = install_warn_config(&cwd);
 
     // SAFETY: standard libc signal calls, serialized by SIGNAL_TEST_LOCK.
     let original = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
@@ -163,6 +181,7 @@ fn sigint_ignored_parent_disposition_is_preserved() {
     }
     unsafe { std::env::remove_var("FAKE_GEMINI_SESSION_ID") };
     unsafe { std::env::remove_var("FAKE_GEMINI_SLEEP") };
+    restore_config(old_config);
 
     assert_eq!(
         outcome.exit_code, 0,
