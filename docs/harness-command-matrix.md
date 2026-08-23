@@ -12,8 +12,8 @@ What each harness fundamentally is, from fno's point of view:
 
 | | claude | codex | gemini | agy | opencode |
 |---|---|---|---|---|---|
-| Substrates | pane, **bg**, headless | pane, headless | pane, headless | pane, headless | pane, headless |
-| Detached-thread lane (`--substrate bg`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | no |
+| Substrates | pane, **bg**, headless | pane, headless | pane, headless | pane, headless | pane, **bg**, headless |
+| Detached-thread lane (`--substrate bg`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | yes (a persistent session on a shared `opencode serve`, driven over HTTP) |
 | Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | yes (`opencode run`) |
 | Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none** (stateless: plain-text output, no parseable ID) | `harness_session_id` (the `ses_` id, captured at spawn) |
 | Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | no | `resume` |
@@ -24,6 +24,17 @@ The pane substrate (the default) is the great equalizer: all five harnesses can 
 Codex pane spawn waits for rollout binding for 60 seconds. A bound receipt includes `status: live`, `session_id`, and the derived eight-character `short_id`. If binding expires, fno reaps the pane and exits nonzero. It does not return an unaddressable `status: spawning` receipt.
 
 agy pane spawns trust the exact cwd before launch. The shared gate clears remaining trust prompts. It submits seeds after the composer paints.
+
+## The opencode bg serve lane
+
+`spawn --harness opencode --substrate bg` (x-d9f9) is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted:
+
+- fno-agents manages one shared `opencode serve` per agents home (state file `opencode-serve.json`, health-gated reuse). The serve starts with a generated `OPENCODE_CONFIG` granting `permission."*" = "allow"` - the unattended posture every other worker lane gets from its own bypass flag; an unanswered permission `ask` on a headless server is a hang, not a refusal.
+- The spawn mints a session with `POST /session?directory=<cwd>`, so one serve hosts workers across worktrees.
+- The computed writable-dirs set (`FNO_WORKER_ADD_DIRS`, published by the Python seam for every non-pane spawn) rides `PATCH /session/:id` as per-session `external_directory` allow rules - the codex `--add-dir` pattern through opencode's native cell, closing the claim-writes double-writer hazard.
+- A detached `opencode run --attach <serve> --session <id> --format json` writer drives the initial turn with native command-template expansion and streams structured events to the registry row's log path. No pane scraping, no template text duplicated into fno-agents.
+- Registry identity: `harness_session_id` = the `ses_` id; reachability is the existing store-membership probe (serve sessions share the global opencode store).
+- Steering over the API (mail inject, ask, peek, resume) is a filed follow-up; the `ask` verb still refuses with the pane-send pointer.
 
 ## Machine-readable interactive capabilities
 
