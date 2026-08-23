@@ -1145,6 +1145,175 @@ HANDOVER_HOLDER_PREFIX = _HANDOVER_HOLDER_PREFIX
 
 
 
+
+
+
+
+
+
+def _node_settlement(reading: Optional[RosterReading] = None):
+    """The closure-shaped reading ``sweep_verdict`` runs FIRST on a node claim
+    (x-94f8): is this claim's own node still the holder's workplace?
+
+    Two positive findings, both proven by FINDING things, never by failing to:
+
+      * The claim's node is terminal in the graph (done/superseded). The
+        closure release should have dropped the claim already; one that
+        outlived its node (pre-fix leaks, a closer that crashed mid-release)
+        protects nothing whoever holds it. Holder-independent evidence.
+      * The lease is EXPIRED and the holder's roster row resolves to a
+        DIFFERENT node. An expired lease is the holder's own statement that
+        it stopped renewing; a row on another node is where it went. An
+        unexpired lease is never settled away from a live holder.
+
+    Everything else answers None, and None keeps: an unreadable graph, an
+    unconsulted roster, an absent row (not-found is not gone), a row whose
+    node did not resolve, an unparseable holder, a handover launch window.
+    Mirrors ``_abandonment_probe``: never raises, instruments read lazily and
+    cached across the sweep, one roster reading shareable from a caller that
+    already took it outside whatever lock it holds.
+    """
+    cache: dict = {}
+
+    def _terminal_ids():
+        if "terminal" not in cache:
+            try:
+                from fno.tracker import active_backend_name
+
+                if active_backend_name() != "graph":
+                    # graph.json is not the store under an external tracker
+                    # backend; a terminal reading taken from it would be a
+                    # wrong answer, and unknown keeps.
+                    cache["terminal"] = None
+                    return None
+                from fno.graph.statuses import is_terminal_entry
+                from fno.graph.store import read_graph
+                from fno.paths import graph_json
+
+                # is_terminal_entry, not a bare completed_at test: read_graph
+                # does not run the recompute migration, so a legacy
+                # "deferred:<ts>" row still carries deferral inside
+                # completed_at, and deferral is a returnable rung.
+                cache["terminal"] = frozenset(
+                    e.get("id")
+                    for e in read_graph(graph_json())
+                    if is_terminal_entry(e)
+                )
+            except Exception:  # noqa: BLE001 - an unreadable graph proves nothing
+                cache["terminal"] = None
+        return cache["terminal"]
+
+    def _probe(claim, now=None) -> Optional[bool]:
+        node_id = claim.key[len("node:"):]
+        terminal = _terminal_ids()
+        if terminal is not None and node_id in terminal:
+            return True
+        from .staleness import is_expired
+
+        if not is_expired(claim, now=now):
+            return None
+        if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
+            # A launch window, never a settled abandonment: same reasoning as
+            # the suspect probe below.
+            return None
+        session_id = _holder_session_id(claim.holder)
+        if not session_id:
+            return None
+        if "reading" not in cache:
+            cache["reading"] = (
+                reading
+                if reading is not None
+                else read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
+            )
+        seen: RosterReading = cache["reading"]
+        if not seen.consulted:
+            return None
+        if seen.row_for_session(session_id) is None:
+            # Not found is not gone. See _abandonment_probe.
+            return None
+        # The roster indexes rows BY node; invert it for this session. A row
+        # present but under no node (never ran target init) says the holder
+        # is alive but nothing about THIS claim.
+        holder_node = next(
+            (
+                nid
+                for nid, rows in seen.workers_by_node.items()
+                for r in rows
+                if r.get("row_id") == session_id
+            ),
+            None,
+        )
+        if holder_node is None:
+            return None
+        # A different node is positive abandonment; the same node falls
+        # through to liveness, which keeps it.
+        return True if holder_node != node_id else None
+
+    return _probe
+
+
+def _transcript_activity(session_id: str, cwd: str):
+    """Tri-state: True finished, False still moving, None unreadable.
+
+    ``_transcript_says_finished`` folds "unreadable" into False because its
+    caller reaps, and there the safe answer is "still working". A reader that
+    only wants to OVERRULE a row needs the third value, or an aged-out
+    transcript reads as a live worker forever.
+    """
+    try:
+        import time
+
+        from fno.agents.watchdog import (
+            REAP_QUIET_AFTER_S,
+            finished_with_the_tree,
+            tail_facts,
+        )
+
+        facts = tail_facts(session_id, cwd)
+        if facts is None:
+            return None
+        return finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S)
+    except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
+        return None
+
+
+def _transcript_says_finished(session_id: str, cwd: str) -> bool:
+    """Has this session gone quiet with a tail that is not engaged?
+
+    ``finished_with_the_tree`` is the one question the occupancy tally and the
+    reap predicate both ask, so asking it here cannot drift from either. Every
+    unreadable input answers False, and False keeps the claim.
+    """
+    try:
+        import time
+
+        from fno.agents.watchdog import (
+            REAP_QUIET_AFTER_S,
+            finished_with_the_tree,
+            tail_facts,
+        )
+
+        return finished_with_the_tree(
+            tail_facts(session_id, cwd), time.time(), REAP_QUIET_AFTER_S
+        )
+    except Exception:  # noqa: BLE001 - an unreadable transcript proves nothing
+        return False
+
+
+def _holder_session_id(holder: str) -> Optional[str]:
+    """The session id inside a claim holder, via the canonical parser.
+
+    One holder vocabulary, owned by ``fno.agents.truth_status``. A foreign
+    holder shape returns None and condemns nothing.
+    """
+    try:
+        from fno.agents.truth_status import _session_from_holder
+
+        return _session_from_holder(holder)
+    except Exception:  # noqa: BLE001 - an unparseable holder proves nothing
+        return None
+
+
 def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optional[bool]:
     """True when the mux enumerated its panes and none plausibly hosts WORKER.
 
@@ -1179,11 +1348,13 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
         runner = _subprocess.run
 
     def _mux(*args: str):
-        from fno.agents.mux_spawn import _fno_bin
+        import os
+
+        fno_bin = os.environ.get("FNO_BIN") or "fno"
 
         try:
             return runner(
-                [_fno_bin(), *args], capture_output=True, text=True, timeout=10
+                [fno_bin, *args], capture_output=True, text=True, timeout=10
             )
         except Exception:  # noqa: BLE001 - a probe never fails a sweep
             return None
@@ -1212,7 +1383,7 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
         except (TypeError, ValueError):
             return None
         if not n_panes:
-            # A zero-pane (or unparseable) session would only contribute an
+            # A zero-pane session would only contribute an
             # ambiguous []; the probe never raises on a malformed row.
             continue
         panes = _mux(
@@ -1391,170 +1562,6 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
         return _transcript_says_finished(session_id, row.get("cwd") or "")
 
     return _probe
-
-
-def _node_settlement(reading: Optional[RosterReading] = None):
-    """The closure-shaped reading ``sweep_verdict`` runs FIRST on a node claim
-    (x-94f8): is this claim's own node still the holder's workplace?
-
-    Two positive findings, both proven by FINDING things, never by failing to:
-
-      * The claim's node is terminal in the graph (done/superseded). The
-        closure release should have dropped the claim already; one that
-        outlived its node (pre-fix leaks, a closer that crashed mid-release)
-        protects nothing whoever holds it. Holder-independent evidence.
-      * The lease is EXPIRED and the holder's roster row resolves to a
-        DIFFERENT node. An expired lease is the holder's own statement that
-        it stopped renewing; a row on another node is where it went. An
-        unexpired lease is never settled away from a live holder.
-
-    Everything else answers None, and None keeps: an unreadable graph, an
-    unconsulted roster, an absent row (not-found is not gone), a row whose
-    node did not resolve, an unparseable holder, a handover launch window.
-    Mirrors ``_abandonment_probe``: never raises, instruments read lazily and
-    cached across the sweep, one roster reading shareable from a caller that
-    already took it outside whatever lock it holds.
-    """
-    cache: dict = {}
-
-    def _terminal_ids():
-        if "terminal" not in cache:
-            try:
-                from fno.tracker import active_backend_name
-
-                if active_backend_name() != "graph":
-                    # graph.json is not the store under an external tracker
-                    # backend; a terminal reading taken from it would be a
-                    # wrong answer, and unknown keeps.
-                    cache["terminal"] = None
-                    return None
-                from fno.graph.statuses import is_terminal_entry
-                from fno.graph.store import read_graph
-                from fno.paths import graph_json
-
-                # is_terminal_entry, not a bare completed_at test: read_graph
-                # does not run the recompute migration, so a legacy
-                # "deferred:<ts>" row still carries deferral inside
-                # completed_at, and deferral is a returnable rung.
-                cache["terminal"] = frozenset(
-                    e.get("id")
-                    for e in read_graph(graph_json())
-                    if is_terminal_entry(e)
-                )
-            except Exception:  # noqa: BLE001 - an unreadable graph proves nothing
-                cache["terminal"] = None
-        return cache["terminal"]
-
-    def _probe(claim, now=None) -> Optional[bool]:
-        node_id = claim.key[len("node:"):]
-        terminal = _terminal_ids()
-        if terminal is not None and node_id in terminal:
-            return True
-        from .staleness import is_expired
-
-        if not is_expired(claim, now=now):
-            return None
-        if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
-            # A launch window, never a settled abandonment: same reasoning as
-            # the suspect probe below.
-            return None
-        session_id = _holder_session_id(claim.holder)
-        if not session_id:
-            return None
-        if "reading" not in cache:
-            cache["reading"] = (
-                reading
-                if reading is not None
-                else read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
-            )
-        seen: RosterReading = cache["reading"]
-        if not seen.consulted:
-            return None
-        if seen.row_for_session(session_id) is None:
-            # Not found is not gone. See _abandonment_probe.
-            return None
-        # The roster indexes rows BY node; invert it for this session. A row
-        # present but under no node (never ran target init) says the holder
-        # is alive but nothing about THIS claim.
-        holder_node = next(
-            (
-                nid
-                for nid, rows in seen.workers_by_node.items()
-                for r in rows
-                if r.get("row_id") == session_id
-            ),
-            None,
-        )
-        if holder_node is None:
-            return None
-        # A different node is positive abandonment; the same node falls
-        # through to liveness, which keeps it.
-        return True if holder_node != node_id else None
-
-    return _probe
-
-
-def _transcript_activity(session_id: str, cwd: str):
-    """Tri-state: True finished, False still moving, None unreadable.
-
-    ``_transcript_says_finished`` folds "unreadable" into False because its
-    caller reaps, and there the safe answer is "still working". A reader that
-    only wants to OVERRULE a row needs the third value, or an aged-out
-    transcript reads as a live worker forever.
-    """
-    try:
-        import time
-
-        from fno.agents.watchdog import (
-            REAP_QUIET_AFTER_S,
-            finished_with_the_tree,
-            tail_facts,
-        )
-
-        facts = tail_facts(session_id, cwd)
-        if facts is None:
-            return None
-        return finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S)
-    except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
-        return None
-
-
-def _transcript_says_finished(session_id: str, cwd: str) -> bool:
-    """Has this session gone quiet with a tail that is not engaged?
-
-    ``finished_with_the_tree`` is the one question the occupancy tally and the
-    reap predicate both ask, so asking it here cannot drift from either. Every
-    unreadable input answers False, and False keeps the claim.
-    """
-    try:
-        import time
-
-        from fno.agents.watchdog import (
-            REAP_QUIET_AFTER_S,
-            finished_with_the_tree,
-            tail_facts,
-        )
-
-        return finished_with_the_tree(
-            tail_facts(session_id, cwd), time.time(), REAP_QUIET_AFTER_S
-        )
-    except Exception:  # noqa: BLE001 - an unreadable transcript proves nothing
-        return False
-
-
-def _holder_session_id(holder: str) -> Optional[str]:
-    """The session id inside a claim holder, via the canonical parser.
-
-    One holder vocabulary, owned by ``fno.agents.truth_status``. A foreign
-    holder shape returns None and condemns nothing.
-    """
-    try:
-        from fno.agents.truth_status import _session_from_holder
-
-        return _session_from_holder(holder)
-    except Exception:  # noqa: BLE001 - an unparseable holder proves nothing
-        return None
-
 
 @cli.command(name="reap")
 def reap_cmd(
