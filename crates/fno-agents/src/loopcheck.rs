@@ -1221,9 +1221,7 @@ const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy"];
 /// disagree on the same PR.
 fn self_review_floor_applies(author_harness: Option<&str>, pinned_none: bool) -> bool {
     match author_harness {
-        Some(h) => {
-            harness_can_self_review(Some(h)) || !KNOWN_VERBLESS_HARNESSES.contains(&h)
-        }
+        Some(h) => harness_can_self_review(Some(h)) || !KNOWN_VERBLESS_HARNESSES.contains(&h),
         None => !pinned_none,
     }
 }
@@ -10970,10 +10968,7 @@ mod tests {
         let tip = git(&repo, &["rev-parse", "HEAD"]);
         // The machine's pre-push hook protects even scratch `main`s, so move
         // the remote-tracking ref directly.
-        git(
-            &repo,
-            &["update-ref", "refs/remotes/origin/main", &tip],
-        );
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &tip]);
 
         git(&repo, &["checkout", "-q", "feature"]);
         let rebase = Command::new("git")
