@@ -81,6 +81,31 @@ def test_ac4_edge_sustained_cpu_exits_three_and_names_top_consumers(monkeypatch)
     assert "fno-agents-daemon --serve (40.0%)" in result.stdout
 
 
+def test_ac4_edge_process_count_also_exits_three(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            """\
+            PID ELAPSED %CPU RSS COMMAND
+            211 02:00:00 10.0 1024 fno worker-a
+            212 02:00:00 10.0 1024 fno worker-b
+            """,
+            [],
+            [],
+        ),
+    )
+    monkeypatch.setattr(doctor_footprint.shutil, "which", lambda name: "/usr/local/bin/fno")
+
+    result = runner.invoke(app, ["doctor", "footprint"])
+
+    assert result.exit_code == 3
+    assert "sustained CPU: 0.200 cores" in result.stdout
+    assert "processes: 2 (threshold 1)" in result.stdout
+
+
 def test_ac5_edge_roster_failure_exits_four_without_a_default_threshold(monkeypatch) -> None:
     from fno import doctor_footprint
 
