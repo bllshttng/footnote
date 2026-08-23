@@ -42,7 +42,7 @@ Pass the positional `no-merge` modifier at invocation time to revoke merge autho
 /megawalk once no-merge
 ```
 
-Enabling per-run is deliberately NOT symmetric. A positional `auto-merge` grants nothing on its own; to allow merging, set `auto_merge.enabled` in config or spawn the run with `TARGET_AUTO_MERGE=1` (folded into the manifest at init; exporting it on a merge command line grants nothing).
+Enabling per-run is deliberately NOT symmetric. A positional `auto-merge` grants nothing on its own. To allow merging, set `auto_merge.enabled` in config. Or spawn the run with `TARGET_AUTO_MERGE=1`. The env grant is folded into the manifest at init. Exporting it on a merge command line grants nothing.
 
 ## Resolution Order (First Match Wins)
 
@@ -55,7 +55,7 @@ Enabling per-run is deliberately NOT symmetric. A positional `auto-merge` grants
 
 Every refusal outranks every grant, so `no-merge` wins whenever it appears. Rung 2 sits above rung 3 on purpose: nothing in the codebase sets `TARGET_AUTO_MERGE`, so the only way it is ever set is inheritance from an ancestor shell or a spawning parent, and an inherited grant must not defeat a refusal typed into this run. The match is whole-token, so `no-merger` or a path like `plans/no-merge-notes.md` does not revoke a configured grant.
 
-At merge and arm time both gates (`fno do pr merge`, `fno-agents finalize`) resolve the same posture: granted = (live `auto_merge.enabled` OR the per-run env grant) AND NOT a per-run refusal. The manifest refusal (`auto_merge_approved: false`) outranks everything. `enabled` is re-read live, so an operator disarm mid-flight withholds even a manifest that reads true (x-2270); the one exception is a run explicitly granted at spawn (`auto_merge_source: env-target-auto-merge`), which arms on its own. Every posture refusal names its sanctioned override in its own text.
+At merge and arm time both gates resolve the same posture. The gates are `fno do pr merge` and `fno-agents finalize`. Granted means live `auto_merge.enabled` or the per-run env grant. A per-run refusal is manifest `auto_merge_approved: false`. The refusal outranks every grant. `enabled` is re-read live. An operator disarm mid-flight withholds even a manifest that reads true (x-2270). One exception exists. A run granted at spawn carries `auto_merge_source: env-target-auto-merge`. That run arms on its own. Every posture refusal names its sanctioned override in its own text.
 
 ## External Review Is Mandatory Under Auto-Merge
 
