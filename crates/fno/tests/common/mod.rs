@@ -469,6 +469,7 @@ pub struct ServerProc(pub std::process::Child);
 pub struct ServerTermination {
     pub pid: u32,
     pub status: std::process::ExitStatus,
+    pub forced: bool,
 }
 
 impl ServerProc {
@@ -477,8 +478,24 @@ impl ServerProc {
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGTERM);
         }
-        let status = self.0.wait().expect("owned server waits after termination");
-        ServerTermination { pid, status }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Some(status) = self.0.try_wait().expect("owned server status") {
+                return ServerTermination {
+                    pid,
+                    status,
+                    forced: false,
+                };
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = self.0.kill();
+        let status = self.0.wait().expect("owned server waits after escalation");
+        ServerTermination {
+            pid,
+            status,
+            forced: true,
+        }
     }
 }
 
