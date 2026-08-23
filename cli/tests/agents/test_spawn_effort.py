@@ -42,6 +42,7 @@ def _no_harness_markers(monkeypatch):
         ("claude", "high", ["--effort", "high"]),
         ("codex", "medium", ["-c", "model_reasoning_effort=medium"]),
         ("codex", "xhigh", ["-c", "model_reasoning_effort=xhigh"]),
+        ("agy", "medium", ["--effort", "medium"]),
         ("opencode", "max", []),
     ],
 )
@@ -51,7 +52,7 @@ def test_effort_mapping_accepts_native_values(provider, value, expected):
 
 @pytest.mark.parametrize(
     "provider,value",
-    [("codex", "max"), ("claude", "minimal"), ("gemini", "high"), ("agy", "low"), ("claude", "")],
+    [("codex", "max"), ("claude", "minimal"), ("gemini", "high"), ("claude", "")],
 )
 def test_effort_mapping_fails_closed(provider, value):
     with pytest.raises(DispatchAskError) as exc:
@@ -66,12 +67,14 @@ def test_pane_argv_threads_effort_and_unset_is_noop(monkeypatch):
     monkeypatch.setattr("fno.agents.mux_spawn.worker_writable_dirs", lambda *a, **k: [])
     claude = build_pane_argv("claude", "hi", CWD, False, "uuid", effort="high")
     codex = build_pane_argv("codex", "hi", CWD, False, None, effort="medium")
+    agy = build_pane_argv("agy", "hi", CWD, False, None, effort="medium")
     assert claude[-4:] == ["--effort", "high", "--", "hi"]
     effort_pos = codex.index("model_reasoning_effort=medium")
     assert codex[effort_pos - 1:effort_pos + 1] == [
         "-c",
         "model_reasoning_effort=medium",
     ]
+    assert agy[agy.index("--effort") : agy.index("--effort") + 2] == ["--effort", "medium"]
     assert build_pane_argv("claude", "hi", CWD, False, "uuid", effort=None) == build_pane_argv(
         "claude", "hi", CWD, False, "uuid"
     )
