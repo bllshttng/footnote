@@ -1008,6 +1008,9 @@ struct View {
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
     confirm: Option<ConfirmAction>,
+    /// A left-button release paired with a click on a modal's close chip must
+    /// stay swallowed after that click closes the modal.
+    modal_release_swallow: bool,
     /// (x-9e5e) The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to [`create_keys`]: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
@@ -2296,6 +2299,7 @@ impl View {
             row_drag: None,
             press_hold: None,
             confirm: None,
+            modal_release_swallow: false,
             create: None,
             create_esc: Vec::new(),
             rename: None,
@@ -3553,6 +3557,51 @@ impl View {
                 *t == crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
             })
         })
+    }
+
+    fn active_overlay_layout(&self) -> Option<OverlayLayout> {
+        let rows = self.term.0 as usize;
+        if let Some(action) = &self.confirm {
+            return Some(self.confirm_overlay_layout(rows, action));
+        }
+        if let Some(name) = &self.create {
+            return Some(self.name_modal_layout("new workspace", name, None));
+        }
+        if let Some((target, name)) = &self.rename {
+            let noun = match target {
+                RenameTarget::Tab(_) => "tab",
+                RenameTarget::Squad(_) => "workspace",
+            };
+            return Some(self.name_modal_layout(
+                &format!("rename {noun}"),
+                name,
+                Some("empty resets to auto"),
+            ));
+        }
+        self.recruit.as_ref().map(|name| {
+            self.name_modal_layout(
+                &format!("recruit {} into", self.marks.len()),
+                name,
+                Some("create-if-absent"),
+            )
+        })
+    }
+
+    fn cancel_active_overlay(&mut self) {
+        if self.confirm.take().is_some() {
+            return;
+        }
+        if self.create.take().is_some() {
+            self.create_esc.clear();
+            return;
+        }
+        if self.rename.take().is_some() {
+            self.rename_esc.clear();
+            return;
+        }
+        if self.recruit.take().is_some() {
+            self.recruit_esc.clear();
+        }
     }
 
     /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
@@ -6230,18 +6279,7 @@ impl View {
     /// and no esc chip, which under a named theme read as a different
     /// application dropped into the middle of the screen. That was the last
     /// modal still inventing its own look.
-    fn draw_name_modal(
-        &self,
-        cells: &mut [Cell],
-        rows: usize,
-        cols: usize,
-        label: &str,
-        name: &str,
-        hint: Option<&str>,
-    ) {
-        for c in 0..cols {
-            cells[(rows - 1) * cols + c] = Cell::default();
-        }
+    fn name_modal_layout(&self, label: &str, name: &str, hint: Option<&str>) -> OverlayLayout {
         let (origin, dims) = self.overlay_viewport();
         // The typed name plus its cursor IS the body; the target and the
         // blank-clears rule move into the chrome, where every other modal puts
@@ -6267,17 +6305,25 @@ impl View {
         } else {
             text
         };
-        draw_lines_overlay(
-            cells,
-            rows,
-            cols,
-            origin,
-            dims,
-            &chrome,
-            &[text],
-            &self.theme,
-            None,
-        );
+        layout_lines_overlay(origin, dims, &chrome, &[text], None, OverlayAnchor::Center)
+    }
+
+    fn draw_name_modal(
+        &self,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        label: &str,
+        name: &str,
+        hint: Option<&str>,
+    ) {
+        if rows > 0 {
+            for c in 0..cols {
+                cells[(rows - 1) * cols + c] = Cell::default();
+            }
+        }
+        let layout = self.name_modal_layout(label, name, hint);
+        draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
     }
 
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
@@ -6467,40 +6513,30 @@ impl View {
             })
     }
 
-    fn draw_confirm_line(
-        &self,
-        cells: &mut [Cell],
-        rows: usize,
-        cols: usize,
-        action: &ConfirmAction,
-    ) {
-        let r = self.confirm_anchor_row(rows, action);
-        for c in 0..cols {
-            cells[r * cols + c] = Cell::default();
-        }
+    fn confirm_text(&self, action: &ConfirmAction) -> String {
         let label = &action.label;
         let text = match &action.action {
-            ConfirmKind::Dispatch { .. } => format!(" start session on {label}? ⏎/esc"),
+            ConfirmKind::Dispatch { .. } => format!("start session on {label}?"),
             ConfirmKind::RemoveSquad {
                 panes, last: true, ..
             } => format!(
-                " close workspace {label} ({panes} panes) - last workspace, ends the session? ⏎/esc"
+                "close workspace {label} ({panes} panes) - last workspace, ends the session?"
             ),
             ConfirmKind::RemoveSquad {
                 panes, last: false, ..
             } => {
-                format!(" close workspace {label} ({panes} panes)? ⏎/esc")
+                format!("close workspace {label} ({panes} panes)?")
             }
-            ConfirmKind::StopAgent { .. } => format!(" stop {label}? ⏎/esc"),
-            ConfirmKind::RemoveAgent { .. } => format!(" remove {label}? ⏎/esc"),
-            ConfirmKind::ReapAgents => " reap all exited fno agents? ⏎/esc".to_string(),
-            ConfirmKind::StopExternal { .. } => format!(" stop {label}? ⏎/esc"),
+            ConfirmKind::StopAgent { .. } => format!("stop {label}?"),
+            ConfirmKind::RemoveAgent { .. } => format!("remove {label}?"),
+            ConfirmKind::ReapAgents => "reap all exited fno agents?".to_string(),
+            ConfirmKind::StopExternal { .. } => format!("stop {label}?"),
             ConfirmKind::RemoveExternal { .. } => {
-                format!(" remove {label} and worktree? ⏎/esc")
+                format!("remove {label} and worktree?")
             }
-            ConfirmKind::DismissMember { .. } => format!(" dismiss {label}? ⏎/esc"),
+            ConfirmKind::DismissMember { .. } => format!("dismiss {label}?"),
             ConfirmKind::ClearDead { dead, .. } => {
-                format!(" clear {dead} dead row(s) in {label}? ⏎/esc")
+                format!("clear {dead} dead row(s) in {label}?")
             }
             // A tab close is a GROUP close on the wire: the server reaps every
             // leaf in the tab, not the focused pane. Say the count when there is
@@ -6510,19 +6546,47 @@ impl View {
             // commit re-resolves the tab for exactly the same reason.
             ConfirmKind::CloseTab { tab } => match self.find_tab(*tab) {
                 Some((_, _, t)) if t.panes.len() > 1 => {
-                    format!(" close tab {label} and its {} panes? ⏎/esc", t.panes.len())
+                    format!("close tab {label} and its {} panes?", t.panes.len())
                 }
-                _ => format!(" close tab {label}? ⏎/esc"),
+                _ => format!("close tab {label}?"),
             },
         };
-        for (i, ch) in text.chars().take(cols).enumerate() {
-            cells[r * cols + i] = Cell {
-                c: ch,
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: cell_flags::BOLD,
-            };
+        text
+    }
+
+    fn confirm_overlay_layout(&self, rows: usize, action: &ConfirmAction) -> OverlayLayout {
+        let (origin, dims) = self.overlay_viewport();
+        let chrome = chrome::Chrome::new("confirm", Anchor::Center)
+            .footer("enter confirm · esc cancel")
+            .fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
+        let lines = [self.confirm_text(action)];
+        layout_lines_overlay(
+            origin,
+            dims,
+            &chrome,
+            &lines,
+            None,
+            OverlayAnchor::At {
+                row: self.confirm_anchor_row(rows, action),
+                col: origin.1,
+            },
+        )
+    }
+
+    fn draw_confirm_line(
+        &self,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        action: &ConfirmAction,
+    ) {
+        if rows > 0 {
+            for c in 0..cols {
+                cells[(rows - 1) * cols + c] = Cell::default();
+            }
         }
+        let layout = self.confirm_overlay_layout(rows, action);
+        draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
     }
 
     /// Build the move-tab picker overlay lines (x-96e8): a header plus one
@@ -8809,29 +8873,65 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
     p.to_string()
 }
 
-/// Draw overlay lines centered in the content viewport (right of the sideline,
-/// above any splits), framed with `chrome` and colored by `theme`. The seven
-/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
-/// peek, navigator) all route through here, so framing them all is this one
-/// change - the point of chrome being a frame function rather than a field on
-/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
-///
-/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
-/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
-/// on its FRAMED dimensions (x-e9c3 placement; x-9f75 policy).
-#[allow(clippy::too_many_arguments)] // one shared framer for all family-B overlays; see doc above
-fn draw_lines_overlay<S: AsRef<str>>(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
+#[derive(Debug, Clone, Copy)]
+enum OverlayAnchor {
+    Center,
+    At { row: usize, col: usize },
+}
+
+/// One family-B overlay layout. Drawing and mouse hit-testing consume this same
+/// framed block and origin, so a close chip cannot drift away from the glyph it
+/// paints.
+#[derive(Debug, Clone)]
+struct OverlayLayout {
+    origin: (usize, usize),
+    framed: chrome::Framed,
+}
+
+impl OverlayLayout {
+    fn hit_at(&self, row: u16, col: u16) -> Option<usize> {
+        chrome::framed_hit_at(&self.framed, self.origin, row as usize, col as usize)
+    }
+}
+
+fn family_b_origin(
+    anchor: OverlayAnchor,
+    block_w: usize,
+    block_h: usize,
+    content_origin: (usize, usize),
+    content_dims: (usize, usize),
+) -> (usize, usize) {
+    let (base_r, base_c) = content_origin;
+    let (content_rows, content_cols) = content_dims;
+    let max_r = base_r + content_rows.saturating_sub(block_h);
+    let max_c = base_c + content_cols.saturating_sub(block_w);
+    match anchor {
+        OverlayAnchor::Center => (
+            base_r + content_rows.saturating_sub(block_h) / 2,
+            base_c + content_cols.saturating_sub(block_w) / 2,
+        ),
+        OverlayAnchor::At { row, col } => {
+            let origin_r = if row.saturating_add(block_h) <= base_r + content_rows {
+                row.max(base_r).min(max_r)
+            } else {
+                row.saturating_sub(block_h).max(base_r).min(max_r)
+            };
+            (origin_r, col.max(base_c).min(max_c))
+        }
+    }
+}
+
+/// Lay out family-B overlay lines in the content viewport. The body window,
+/// frame, origin, and hit spans are calculated once for both drawing and input.
+#[allow(clippy::too_many_arguments)]
+fn layout_lines_overlay<S: AsRef<str>>(
     content_origin: (usize, usize),
     content_dims: (usize, usize),
     chrome: &chrome::Chrome,
     lines: &[S],
-    theme: &Theme,
     follow: Option<usize>,
-) {
-    let (base_r, base_c) = content_origin;
+    anchor: OverlayAnchor,
+) -> OverlayLayout {
     let (content_rows, content_cols) = content_dims;
     // Body width: the widest line (across the whole body, windowed-out rows
     // included), capped to the viewport minus the side borders.
@@ -8886,14 +8986,24 @@ fn draw_lines_overlay<S: AsRef<str>>(
     let framed = chrome::frame(&body, chrome, body_w, scroll);
     let box_h = framed.lines.len().min(content_rows);
     let box_w = framed.width.min(content_cols);
-    let origin_r = base_r + content_rows.saturating_sub(box_h) / 2;
-    let origin_c = base_c + content_cols.saturating_sub(box_w) / 2;
+    let origin = family_b_origin(anchor, box_w, box_h, content_origin, content_dims);
+    OverlayLayout { origin, framed }
+}
+
+fn draw_overlay_layout(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    layout: &OverlayLayout,
+    theme: &Theme,
+) {
+    let (origin_r, origin_c) = layout.origin;
     // (x-b465) A framed block stamps a SUB-RANGE of each row, so a double-width
     // glyph in the pane content underneath can straddle either edge, leaving one
     // half painted and the row corrupted. The name modal carried this guard when
     // it hand-painted its own block; every family-B overlay needs it for the same
     // reason, so it lives here, once, rather than travelling with one caller.
-    for i in 0..framed.lines.len() {
+    for i in 0..layout.framed.lines.len() {
         let r = origin_r + i;
         if r >= rows {
             break;
@@ -8908,10 +9018,43 @@ fn draw_lines_overlay<S: AsRef<str>>(
             cols,
             r,
             origin_c,
-            (origin_c + framed.width).min(cols),
+            (origin_c + layout.framed.width).min(cols),
         );
     }
-    chrome::blit(cells, rows, cols, (origin_r, origin_c), &framed, theme);
+    chrome::blit(cells, rows, cols, layout.origin, &layout.framed, theme);
+}
+
+/// Draw overlay lines centered in the content viewport (right of the sideline,
+/// above any splits), framed with `chrome` and colored by `theme`. The seven
+/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
+/// peek, navigator) all route through here, so framing them all is this one
+/// change - the point of chrome being a frame function rather than a field on
+/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
+///
+/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
+/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
+/// on its FRAMED dimensions (x-e9c3 placement; x-9f75 policy).
+#[allow(clippy::too_many_arguments)]
+fn draw_lines_overlay<S: AsRef<str>>(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    content_origin: (usize, usize),
+    content_dims: (usize, usize),
+    chrome: &chrome::Chrome,
+    lines: &[S],
+    theme: &Theme,
+    follow: Option<usize>,
+) {
+    let layout = layout_lines_overlay(
+        content_origin,
+        content_dims,
+        chrome,
+        lines,
+        follow,
+        OverlayAnchor::Center,
+    );
+    draw_overlay_layout(cells, rows, cols, &layout, theme);
 }
 
 /// The answer-overlay content width; lines truncate to it (AC3-UI: a long
@@ -10793,6 +10936,35 @@ enum StdinFlow {
     Detach,
 }
 
+fn consume_modal_close_gesture(view: &mut View, kind: MouseKind) -> bool {
+    if view.modal_release_swallow {
+        if matches!(kind, MouseKind::Release(MouseButton::Left)) {
+            view.modal_release_swallow = false;
+        }
+        return true;
+    }
+    false
+}
+
+/// Family-B name and confirmation overlays own every pointer event while open.
+/// Only the shared Chrome esc hit cancels; outside clicks are swallowed so they
+/// cannot dismiss the modal or reach a pane underneath it.
+fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
+    if consume_modal_close_gesture(view, rep.kind) {
+        return true;
+    }
+    let Some(layout) = view.active_overlay_layout() else {
+        return false;
+    };
+    if matches!(rep.kind, MouseKind::Press(MouseButton::Left))
+        && layout.hit_at(rep.row, rep.col) == Some(crate::chrome::ESC_CLOSE_HIT)
+    {
+        view.cancel_active_overlay();
+        view.modal_release_swallow = true;
+    }
+    true
+}
+
 /// Route one stdin chunk: the selector consumes keys while open (AC6-FR
 /// validates against the CURRENT layout before sending); otherwise the
 /// prefix scanner splits it into forwards and commands.
@@ -10839,7 +11011,12 @@ async fn handle_stdin(
                 || view.tab_drag.is_some()
                 || view.row_drag.is_some()
                 || view.press_hold.is_some());
-        if rep.shift && !ends_a_drag {
+        // A close-chip gesture is also release-owned state. Let every event in
+        // it reach `modal_mouse`, even when the terminal marks it as Shift.
+        if rep.shift && !ends_a_drag && !view.modal_release_swallow {
+            continue;
+        }
+        if consume_modal_close_gesture(view, rep.kind) {
             continue;
         }
         // A pointer action - click/press/wheel/drag, anything but passive hover
@@ -11210,24 +11387,9 @@ async fn handle_stdin(
                 _ => view.end_sideline_drag(rep.row, rep.col),
             }
         }
-        // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
-        // PRESS / scroll cancels it and is SWALLOWED - it must never leak to a
-        // pane underneath (the confirm prompt spans the full-width bottom row) nor
-        // silently open a second card's confirm (codex peer review). Hover (Move)
-        // still falls through to update the highlight beneath the prompt.
-        //
-        // A Release is swallowed like the rest but does NOT cancel. Every real
-        // dismissal starts with a press, which this arm already ate, so the only
-        // release that can reach here is the tail of the click that ARMED the
-        // confirm - and cancelling on that made every menu entry ending in a
-        // confirm dead to the mouse: the prompt opened and vanished inside one
-        // click, which reads as "the menu item does nothing". Swallowing it
-        // still matters: a release forwarded to the inner app would arrive with
-        // no press before it.
-        if view.confirm.is_some() && !matches!(rep.kind, MouseKind::Move) {
-            if !matches!(rep.kind, MouseKind::Release(_)) {
-                view.confirm = None;
-            }
+        // Name and confirmation overlays share the same framed layout and own
+        // every pointer event, including clicks outside their block.
+        if modal_mouse(view, rep) {
             continue;
         }
         // Bare motion is hover (x-a496): record the sideline highlight + the
@@ -16532,10 +16694,23 @@ mod tests {
 
         let frame = view.compose();
         let cols = frame.cols as usize;
-        let row2: String = (0..cols).map(|c| frame.cells[2 * cols + c].c).collect();
+        let screen: String = (0..frame.rows as usize)
+            .map(|r| {
+                (0..cols)
+                    .map(|c| frame.cells[r * cols + c].c)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let layout = view.confirm_overlay_layout(rows, view.confirm.as_ref().unwrap());
         assert!(
-            row2.contains("close workspace"),
-            "the confirm prompt paints at the target row: {row2:?}"
+            layout.origin.0 == anchor,
+            "the framed confirm starts at the target row: {:?}",
+            layout.origin
+        );
+        assert!(
+            screen.contains("close workspace"),
+            "the confirm prompt paints at the target row: {screen}"
         );
     }
 
@@ -20585,6 +20760,435 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_confirm_variant_renders_shared_chrome_and_controls() {
+        let variants = vec![
+            (ConfirmKind::Dispatch { node: "x-1".into() }, "dispatch"),
+            (
+                ConfirmKind::RemoveSquad {
+                    squad: 1,
+                    panes: 2,
+                    last: false,
+                },
+                "remove squad",
+            ),
+            (
+                ConfirmKind::StopAgent {
+                    name: "agent".into(),
+                },
+                "stop agent",
+            ),
+            (
+                ConfirmKind::RemoveAgent {
+                    name: "agent".into(),
+                },
+                "remove agent",
+            ),
+            (ConfirmKind::ReapAgents, "reap"),
+            (
+                ConfirmKind::StopExternal {
+                    attach_id: "a-1".into(),
+                    name: "external".into(),
+                },
+                "stop external",
+            ),
+            (
+                ConfirmKind::RemoveExternal {
+                    attach_id: "a-1".into(),
+                    name: "external".into(),
+                },
+                "remove external",
+            ),
+            (
+                ConfirmKind::DismissMember {
+                    squad: 1,
+                    attach_id: "a-1".into(),
+                },
+                "dismiss member",
+            ),
+            (
+                ConfirmKind::ClearDead {
+                    key: crate::view_store::SectionKey::Missions,
+                    squad: None,
+                    dead: 3,
+                },
+                "clear dead",
+            ),
+            (ConfirmKind::CloseTab { tab: 1 }, "close tab"),
+        ];
+
+        for (action, label) in variants {
+            let mut view = two_pane_view();
+            view.confirm = Some(ConfirmAction {
+                action,
+                label: label.into(),
+            });
+            let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
+            let mut cells = vec![Cell::default(); rows * cols];
+            view.draw_bottom_row(&mut cells, rows, cols);
+            let screen: String = (0..rows)
+                .map(|r| {
+                    cells[r * cols..(r + 1) * cols]
+                        .iter()
+                        .map(|cell| cell.c)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                screen.contains('┌'),
+                "{label} has no shared top border: {screen}"
+            );
+            assert!(
+                screen.contains("enter confirm · esc cancel"),
+                "{label} has no actual controls footer: {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn modal_esc_chips_cancel_name_and_confirm_states_without_outside_dismissal() {
+        let close_cell = |view: &View| {
+            let layout = view
+                .active_overlay_layout()
+                .expect("an active modal has a family-B layout");
+            let (line, offset, len) = layout
+                .framed
+                .lines
+                .iter()
+                .enumerate()
+                .find_map(|(line, row)| {
+                    row.hits
+                        .iter()
+                        .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                        .map(|(_, offset, len)| (line, *offset, *len))
+                })
+                .expect("the modal exposes a shared esc chip");
+            (
+                (layout.origin.0 + line) as u16,
+                (layout.origin.1 + offset + len / 2) as u16,
+            )
+        };
+        let click = |view: &mut View| {
+            let (row, col) = close_cell(view);
+            let press = crate::mouse::MouseReport {
+                row,
+                col,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            };
+            assert!(modal_mouse(view, press));
+            assert!(modal_mouse(
+                view,
+                crate::mouse::MouseReport {
+                    kind: MouseKind::Release(MouseButton::Left),
+                    ..press
+                },
+            ));
+        };
+
+        let mut view = two_pane_view();
+        view.open_create();
+        click(&mut view);
+        assert!(
+            view.create.is_none(),
+            "create closes from the shared esc chip"
+        );
+
+        view.open_rename(RenameTarget::Tab(1));
+        click(&mut view);
+        assert!(
+            view.rename.is_none(),
+            "rename closes from the shared esc chip"
+        );
+
+        view.marks.insert("a-1".into());
+        view.open_recruit();
+        click(&mut view);
+        assert!(
+            view.recruit.is_none(),
+            "recruit closes from the shared esc chip"
+        );
+        assert!(view.marks.contains("a-1"), "recruit cancel keeps its marks");
+
+        view.confirm = Some(ConfirmAction {
+            action: ConfirmKind::Dispatch { node: "x-1".into() },
+            label: "dispatch".into(),
+        });
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                row: 0,
+                col: 0,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            },
+        ));
+        assert!(
+            view.confirm.is_some(),
+            "an outside click is swallowed without dismissing the confirm"
+        );
+        click(&mut view);
+        assert!(
+            view.confirm.is_none(),
+            "confirm closes from the shared esc chip"
+        );
+    }
+
+    #[test]
+    fn esc_chip_close_swallows_its_matching_left_release() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let click = crate::mouse::MouseReport {
+            row: (layout.origin.0 + line) as u16,
+            col: (layout.origin.1 + offset + len / 2) as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        assert!(modal_mouse(&mut view, click));
+        assert!(view.create.is_none(), "the chip press closes the modal");
+        assert!(
+            modal_mouse(
+                &mut view,
+                crate::mouse::MouseReport {
+                    kind: MouseKind::Release(MouseButton::Left),
+                    ..click
+                },
+            ),
+            "the release paired with the closing click stays swallowed"
+        );
+        assert!(
+            !modal_mouse(
+                &mut view,
+                crate::mouse::MouseReport {
+                    kind: MouseKind::Release(MouseButton::Left),
+                    ..click
+                },
+            ),
+            "only the matching release is consumed"
+        );
+    }
+
+    #[test]
+    fn name_modal_clears_the_reserved_bottom_row() {
+        let mut view = two_pane_view();
+        view.rename = Some((RenameTarget::Tab(1), "typed".into()));
+        let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        for cell in &mut cells[(rows - 1) * cols..rows * cols] {
+            *cell = Cell {
+                c: 'x',
+                ..Cell::default()
+            };
+        }
+
+        view.draw_bottom_row(&mut cells, rows, cols);
+
+        assert!(
+            cells[(rows - 1) * cols..rows * cols]
+                .iter()
+                .all(|cell| *cell == Cell::default()),
+            "the reserved bottom row is blank beneath a name modal"
+        );
+    }
+
+    #[tokio::test]
+    async fn shifted_release_after_esc_chip_close_is_consumed_before_prefilter() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let row = (layout.origin.0 + line) as u16;
+        let col = (layout.origin.1 + offset + len / 2) as u16;
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                row,
+                col,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            },
+        ));
+
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf = Vec::new();
+        let shifted_release = format!("\x1b[<4;{};{}m", col + 1, row + 1);
+        handle_stdin(
+            &mut view,
+            &mut scanner,
+            &mut carry,
+            shifted_release.as_bytes(),
+            &mut buf,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !view.modal_release_swallow,
+            "the shifted release clears the latch"
+        );
+        assert!(buf.is_empty(), "the shifted release never reaches the pane");
+    }
+
+    #[test]
+    fn esc_chip_close_swallows_drag_until_left_release() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let click = crate::mouse::MouseReport {
+            row: (layout.origin.0 + line) as u16,
+            col: (layout.origin.1 + offset + len / 2) as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        assert!(modal_mouse(&mut view, click));
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                kind: MouseKind::Drag(MouseButton::Left),
+                ..click
+            },
+        ));
+        assert!(
+            view.modal_release_swallow,
+            "drag keeps the closing gesture armed"
+        );
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                kind: MouseKind::Release(MouseButton::Left),
+                ..click
+            },
+        ));
+        assert!(
+            !view.modal_release_swallow,
+            "left release ends the closing gesture"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_latch_consumes_release_before_an_intervening_modal_router() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let row = (layout.origin.0 + line) as u16;
+        let col = (layout.origin.1 + offset + len / 2) as u16;
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                row,
+                col,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            },
+        ));
+        view.open_keys_modal();
+        assert!(
+            view.modal_release_swallow,
+            "the close gesture remains armed"
+        );
+
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf = Vec::new();
+        let release = format!("\x1b[<0;{};{}m", col + 1, row + 1);
+        handle_stdin(
+            &mut view,
+            &mut scanner,
+            &mut carry,
+            release.as_bytes(),
+            &mut buf,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !view.modal_release_swallow,
+            "the release clears the latch first"
+        );
+        assert!(
+            view.keys_modal.is_some(),
+            "the release does not dismiss the new modal"
+        );
+        assert!(buf.is_empty(), "the release never reaches the pane");
+    }
+
+    #[test]
+    fn confirm_clears_the_reserved_bottom_row_on_fallback() {
+        let mut view = two_pane_view();
+        view.confirm = Some(ConfirmAction {
+            action: ConfirmKind::ReapAgents,
+            label: "all agents".into(),
+        });
+        let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        for cell in &mut cells[(rows - 1) * cols..rows * cols] {
+            *cell = Cell {
+                c: 'x',
+                ..Cell::default()
+            };
+        }
+
+        view.draw_bottom_row(&mut cells, rows, cols);
+
+        assert!(
+            cells[(rows - 1) * cols..rows * cols]
+                .iter()
+                .all(|cell| *cell == Cell::default()),
+            "the reserved bottom row is blank beneath a fallback confirm"
+        );
+    }
+
     #[tokio::test]
     async fn clear_dead_refolds_the_set_at_commit_not_at_open() {
         // Concurrency: the confirm pins the SECTION, not the row list. A row
@@ -21184,10 +21788,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_press_still_cancels_an_armed_confirm() {
-        // The narrowing is release-only: a genuine dismissal starts with a
-        // PRESS, and that still cancels and is still swallowed (no leak to the
-        // pane underneath).
+    async fn an_outside_press_does_not_dismiss_an_armed_confirm() {
+        // The confirm owns every pointer event. An outside press is swallowed,
+        // while only its rendered shared Chrome esc chip cancels it.
         let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
         let row = agent_row_at(&v, |a| a.name == "w");
         assert!(v.open_row_menu(row, Anchor::Center));
@@ -21198,10 +21801,10 @@ mod tests {
 
         let mut scanner = Scanner::default();
         let mut carry = Vec::new();
-        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<0;31;6M", &mut buf)
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<0;1;1M", &mut buf)
             .await
             .unwrap();
-        assert!(v.confirm.is_none(), "a press cancels");
+        assert!(v.confirm.is_some(), "an outside press does not cancel");
         assert!(buf.is_empty(), "and is swallowed, never reaching the pane");
     }
 
@@ -21894,11 +22497,10 @@ mod tests {
             .unwrap();
         assert!(v.row_menu.is_none(), "no menu under an open overlay");
         assert!(v.rename.is_some(), "the overlay survives untouched");
-        let mut cur = std::io::Cursor::new(buf);
-        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-            ClientMsg::Mouse { pane, .. } => assert_eq!(pane, 10),
-            other => panic!("expected the pane forward, got {other:?}"),
-        }
+        assert!(
+            buf.is_empty(),
+            "a name modal swallows outside pointer input instead of leaking to a pane"
+        );
     }
 
     #[test]
