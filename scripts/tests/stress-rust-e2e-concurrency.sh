@@ -60,7 +60,7 @@ build_test_binary() {
     local candidate
     if ! cargo test --manifest-path "$manifest" --test "$test_name" --no-run --message-format=json >>"$build_log" 2>&1; then
         echo "stress_setup=unavailable binary=$key log=$build_log" >&2
-        if rg -q 'Blocking waiting for file lock|could not acquire.*lock|resource temporarily unavailable' "$build_log"; then
+        if grep -Eq 'Blocking waiting for file lock|could not acquire.*lock|resource temporarily unavailable' "$build_log"; then
             echo "stress_setup_note=cargo-artifact-lock-contention (not counted as a test failure)" >&2
         fi
         exit 2
@@ -116,9 +116,9 @@ for ((trial = 1; trial <= trials; trial++)); do
     daemon_verdict=pass
     persistence_verdict=pass
     workspace_verdict=pass
-    [[ "$daemon_rc" == 0 ]] && rg -q '^daemon_child_env_isolated ' "$trial_dir/daemon_e2e.log" || daemon_verdict=fail
+    [[ "$daemon_rc" == 0 ]] && grep -Eq '^daemon_child_env_isolated ' "$trial_dir/daemon_e2e.log" || daemon_verdict=fail
     [[ "$persistence_rc" == 0 ]] || persistence_verdict=fail
-    [[ "$workspace_rc" == 0 ]] && rg -q 'old_server_reaped_before_rebind old_pid=' "$trial_dir/workspace_persistence_e2e.log" || workspace_verdict=fail
+    [[ "$workspace_rc" == 0 ]] && grep -Eq 'old_server_reaped_before_rebind old_pid=' "$trial_dir/workspace_persistence_e2e.log" || workspace_verdict=fail
 
     if [[ "$daemon_verdict" != pass || "$persistence_verdict" != pass || "$workspace_verdict" != pass ]]; then
         failures=$((failures + 1))
