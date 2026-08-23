@@ -488,6 +488,32 @@ fn finalize_ledger_every_exit() {
     );
 }
 
+#[test]
+fn finalize_binary_closes_the_shadow_run_after_success() {
+    let run = "20260823T060900Z-cx73523-e04109";
+    let env = setup(run, false);
+    let run_log = env.cwd.join(".fno/run-log.jsonl");
+    fno_agents::run_state::append_transition(
+        &run_log,
+        run,
+        fno_agents::run_state::RunEvent::DispatchClassified,
+    )
+    .unwrap();
+    fno_agents::run_state::append_transition(
+        &run_log,
+        run,
+        fno_agents::run_state::RunEvent::TerminalDecided,
+    )
+    .unwrap();
+
+    let out = run_finalize(&env, "DonePRGreen");
+    assert!(out.status.success(), "finalize must succeed: {:?}", out);
+    assert_eq!(
+        fno_agents::run_state::fold_run_state(&run_log, run).unwrap(),
+        fno_agents::run_state::RunState::Closed
+    );
+}
+
 /// x-8fc0: a ship reason now gets a completion eval too (the trigger fires on
 /// every reason but NoWork), but its body is the lighter eval prose, never
 /// the stuck-triage "(stuck: exited without shipping)" wording. NoWork is the

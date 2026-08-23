@@ -941,6 +941,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     let delivery_retry = delivery_ship && !failed.is_empty();
     if failed.is_empty() {
         emit_to_both(&project_events, &global_events, "session_finalized", data);
+        record_finalize_done(&cwd, &session_id);
     } else {
         data["failed_steps"] = json!(failed);
         // session_finalized intentionally NOT emitted: a later fire retries the
@@ -956,6 +957,15 @@ pub fn run_finalize(args: &[String]) -> i32 {
         1
     } else {
         0
+    }
+}
+
+fn record_finalize_done(cwd: &Path, run: &str) {
+    let path = cwd.join(".fno/run-log.jsonl");
+    if let Err(error) =
+        crate::run_state::append_transition(&path, run, crate::run_state::RunEvent::FinalizeDone)
+    {
+        eprintln!("finalize: run-state finalize_done observer failed: {error}");
     }
 }
 
@@ -3499,6 +3509,29 @@ mod tests {
         assert!(!planned.ship_reason);
         assert!(!planned.stuck);
         assert!(eval_should_fire("DonePlanned"));
+    }
+
+    #[test]
+    fn finalize_done_closes_a_sealing_shadow_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = "20260823T060900Z-cx73523-e04109";
+        let log = dir.path().join(".fno/run-log.jsonl");
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        crate::run_state::append_transition(
+            &log,
+            run,
+            crate::run_state::RunEvent::DispatchClassified,
+        )
+        .unwrap();
+        crate::run_state::append_transition(&log, run, crate::run_state::RunEvent::TerminalDecided)
+            .unwrap();
+
+        record_finalize_done(dir.path(), run);
+
+        assert_eq!(
+            crate::run_state::fold_run_state(&log, run).unwrap(),
+            crate::run_state::RunState::Closed
+        );
     }
 
     #[test]

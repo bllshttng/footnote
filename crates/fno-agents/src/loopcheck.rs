@@ -5864,32 +5864,79 @@ fn observe_shadow_transition(
     project_events: &Path,
     global_events: &Path,
 ) {
-    let result = if session_id == "unknown" || session_id.trim().is_empty() {
-        Err("manifest carries no full run id".to_string())
-    } else {
-        crate::run_state::append_transition(run_log, session_id, event)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    };
-    let Err(error) = result else {
+    if !is_full_run_id(session_id) {
+        emit_transition_rejection(
+            session_id,
+            event,
+            "invalid_run_id",
+            "manifest carries no valid full run id".to_string(),
+            None,
+            run_log,
+            project_events,
+            global_events,
+        );
+        return;
+    }
+
+    let Err(error) = crate::run_state::append_transition(run_log, session_id, event) else {
         return;
     };
+    let (kind, from) = match &error {
+        crate::run_state::RunStateError::InvalidTransition(invalid) => (
+            "invalid_transition",
+            Some(serde_json::to_value(invalid.from).unwrap_or(serde_json::Value::Null)),
+        ),
+        _ => ("observer_io", None),
+    };
+    emit_transition_rejection(
+        session_id,
+        event,
+        kind,
+        error.to_string(),
+        from,
+        run_log,
+        project_events,
+        global_events,
+    );
+}
 
+fn emit_transition_rejection(
+    session_id: &str,
+    event: crate::run_state::RunEvent,
+    kind: &str,
+    error: String,
+    from: Option<serde_json::Value>,
+    run_log: &Path,
+    project_events: &Path,
+    global_events: &Path,
+) {
     let event_name = serde_json::to_value(event)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string());
-    emit_to_both(
-        project_events,
-        global_events,
-        "transition_rejected",
-        serde_json::json!({
-            "session_id": session_id,
-            "event": event_name,
-            "error": error,
-            "run_log": run_log.display().to_string(),
-        }),
-    );
+    let mut data = serde_json::json!({
+        "session_id": session_id,
+        "kind": kind,
+        "event": event_name,
+        "error": error,
+        "run_log": run_log.display().to_string(),
+    });
+    if let Some(from) = from {
+        data["from"] = from;
+    }
+    emit_to_both(project_events, global_events, "transition_rejected", data);
+}
+
+fn is_full_run_id(value: &str) -> bool {
+    static SESSION_ID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    SESSION_ID
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"^(?:\d{8}T\d{6}Z-[a-z]{0,2}\d+-[0-9a-f]{6}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+            )
+            .expect("full run id regex is valid")
+        })
+        .is_match(value)
 }
 
 // ── cancel sentinel ───────────────────────────────────────────────────────────
@@ -10142,7 +10189,7 @@ fn observe_decision(args: &[String], output: &str) {
     let Ok(manifest) = std::fs::read_to_string(&parsed.state_path) else {
         return;
     };
-    let Some(session_id) = scan_manifest_field(&manifest, "session_id") else {
+    let Some(session_id) = parse_manifest(&manifest).and_then(|value| value.session_id) else {
         return;
     };
     let project_events = parsed
@@ -11846,6 +11893,65 @@ mod tests {
             crate::run_state::RunState::Sealing
         );
         assert!(!events.exists());
+    }
+
+    #[test]
+    fn decision_chokepoint_prefers_canonical_fno_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("target-state.md");
+        let events = dir.path().join("events.jsonl");
+        let canonical = "20260823T060900Z-cx73523-e04109";
+        std::fs::write(
+            &state,
+            format!("---\nfno_id: {canonical}\nsession_id: legacy-run\n---\n"),
+        )
+        .unwrap();
+        let args = vec![
+            "loop-check".to_string(),
+            "--state".to_string(),
+            state.display().to_string(),
+            "--transcript".to_string(),
+            dir.path().join("transcript.jsonl").display().to_string(),
+            "--cwd".to_string(),
+            dir.path().display().to_string(),
+            "--events".to_string(),
+            events.display().to_string(),
+            "--global-events".to_string(),
+            events.display().to_string(),
+        ];
+
+        observe_decision(&args, &allow_output("block", None, "keep working", 1, None));
+
+        assert_eq!(
+            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), canonical)
+                .unwrap(),
+            crate::run_state::RunState::Working
+        );
+        assert_eq!(
+            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), "legacy-run")
+                .unwrap(),
+            crate::run_state::RunState::Open
+        );
+    }
+
+    #[test]
+    fn shadow_observer_rejects_short_run_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_log = dir.path().join("run-log.jsonl");
+        let events = dir.path().join("events.jsonl");
+
+        observe_shadow_transition(
+            &run_log,
+            "short-run",
+            crate::run_state::RunEvent::DispatchClassified,
+            &events,
+            &events,
+        );
+
+        assert!(!run_log.exists());
+        assert!(std::fs::read_to_string(events)
+            .unwrap()
+            .contains("manifest carries no valid full run id"));
     }
 
     #[test]

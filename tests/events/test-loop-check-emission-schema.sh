@@ -323,6 +323,60 @@ MANIFEST
         fail "S4 bonus: loop_check_legacy_manifest event missing; content: $(cat "$EVENTS_FILE" 2>/dev/null)"
     fi
 
+rm -rf "$TMP_DIR"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S5: observer rejection -- legacy block remains unchanged while Closed rejects
+# ─────────────────────────────────────────────────────────────────────────────
+log "S5: observer rejection preserves legacy block"
+{
+    TMP_DIR="$(mktemp -d)"
+    HOME_DIR="${TMP_DIR}/home"
+    STUB_BIN="${TMP_DIR}/stubs"
+    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
+
+    printf '# isolated\n' > "${TMP_DIR}/.fno/config.toml"
+
+    MANIFEST="${TMP_DIR}/state.md"
+    cat > "$MANIFEST" <<'MANIFEST'
+---
+fno_id: 20260823T060900Z-cx73523-e04109
+session_id: legacy-run
+created_at: 2026-06-05T00:00:00Z
+attended: true
+---
+MANIFEST
+
+    cat > "${TMP_DIR}/.fno/run-log.jsonl" <<'RUNLOG'
+{"run_id":"20260823T060900Z-cx73523-e04109","from":"open","event":"dispatch_classified","to":"working"}
+{"run_id":"20260823T060900Z-cx73523-e04109","from":"working","event":"prepare_handoff","to":"delegating"}
+{"run_id":"20260823T060900Z-cx73523-e04109","from":"delegating","event":"successor_proven","to":"closed"}
+RUNLOG
+
+    TRANSCRIPT="${TMP_DIR}/transcript.jsonl"
+    printf '{"message":{"role":"user","content":"go"}}\n' > "$TRANSCRIPT"
+    EVENTS_FILE="${TMP_DIR}/.fno/events.jsonl"
+    make_no_pr_gh "${STUB_BIN}/gh"
+    make_git_stub "${STUB_BIN}/git" "ffffffffffffffffffffffffffffffff00000001"
+
+    OUTPUT=$(HOME="${HOME_DIR}" FNO_LOOPCHECK_GH_BIN="${STUB_BIN}/gh" FNO_LOOPCHECK_GIT_BIN="${STUB_BIN}/git" \
+        "$REAL_BIN" loop-check \
+        --state "$MANIFEST" \
+        --transcript "$TRANSCRIPT" \
+        --cwd "$TMP_DIR" \
+        --now "2026-06-05T01:00:00Z" \
+        --events "$EVENTS_FILE" 2>/dev/null || true)
+
+    if [[ "$(jq -r '.decision // empty' <<< "$OUTPUT" 2>/dev/null)" == "block" ]] && \
+        validate_events_file "S5" "$EVENTS_FILE" && \
+        grep -q '"type":"transition_rejected"' "$EVENTS_FILE" && \
+        grep -q '"kind":"invalid_transition"' "$EVENTS_FILE"; then
+        pass "S5: observer rejection is recorded and legacy block remains"
+    else
+        fail "S5: observer rejection or legacy block missing; output: $OUTPUT events: $(cat "$EVENTS_FILE" 2>/dev/null)"
+    fi
+
     rm -rf "$TMP_DIR"
 }
 

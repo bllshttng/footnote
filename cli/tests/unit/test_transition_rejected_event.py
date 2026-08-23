@@ -10,6 +10,7 @@ def test_transition_rejected_event_validates() -> None:
         "source": "hook",
         "data": {
             "session_id": "20260823T060900Z-cx73523-e04109",
+            "kind": "invalid_transition",
             "event": "terminal_decided",
             "error": "invalid transition open + terminal_decided",
         },

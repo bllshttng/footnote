@@ -2199,11 +2199,15 @@ event_types:
     description: "Emitted by the shadow run-state observer when the transition table rejects a decision that the legacy loop still follows. The event is diagnostic only until the table is promoted after real shadow traffic."
     sources: [hook]
     data:
-      required: [session_id, event, error]
+      required: [session_id, kind, event, error]
       properties:
         session_id:
           type: string
           description: "Full target run identifier used as the run-log key."
+        kind:
+          type: string
+          enum: [invalid_run_id, invalid_transition, observer_io]
+          description: "Whether the observer rejected a transition, could not identify the run, or could not write the log."
         from:
           type: string
           enum: [open, working, delegating, sealing, closed, aborted]
