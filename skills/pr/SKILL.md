@@ -47,6 +47,8 @@ Parse the first argument token:
     /pr merged     run the post-merge ritual on an already-merged PR
   ```
 
+  If the caller meant `fno do pr merge` and the verb REFUSES, the refusal text names the sanctioned override; take that path or escalate to the king/operator. A gate refusal is never routed around by synthesizing a config file, flipping a shared config key for the call's duration, or exporting a merge-time env var. Two workers improvised exactly those within sixty seconds of each other on 2026-08-19; the exposure (a global merge switch left ON machine-wide mid-merge) is not reversible the way a merge is.
+
 - **any other non-empty token** -> this is an unknown mode (likely a typo). Do NOT default, do NOT guess. Print:
 
   ```

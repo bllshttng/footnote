@@ -175,8 +175,9 @@ struct ManifestFields {
     auto_merge_approved: Option<bool>,
     /// Which input set the posture (x-9d11): config | flag-no-merge |
     /// env-target-auto-merge | default-off. `None` = pre-provenance manifest;
-    /// surfaced as `unknown`, never guessed. Advisory only: arming still reads
-    /// `auto_merge_approved`.
+    /// surfaced as `unknown`, never guessed. No longer advisory (x-01b9):
+    /// `env-target-auto-merge` on an approved run satisfies the standing
+    /// config arm on its own, exactly as init folded it and the docs promise.
     auto_merge_source: Option<String>,
 }
 
@@ -867,9 +868,23 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // stamps above.
     let approved = m.auto_merge_approved.unwrap_or(false);
     let should_arm = should_arm_auto_merge(&reason, approved);
+    // The explicit per-run grant (x-01b9): `auto_merge_source:
+    // env-target-auto-merge` is TARGET_AUTO_MERGE=1 folded by init at spawn,
+    // and it satisfies the standing arm on its own - the path
+    // references/auto-merge.md promises and a config-only read made
+    // unreachable. Every other `true` merely mirrored config (source:
+    // config) and must not outlive the operator flipping the live switch off
+    // (x-2270: the manifest is a snapshot; the live switch wins a disarm).
+    // The source is init's fold, never re-read from the environment here: a
+    // worker cannot export the grant at finalize time to arm its own merge.
+    let env_grant = approved && m.auto_merge_source.as_deref() == Some("env-target-auto-merge");
     let (auto_merge_armed, auto_merge_blocked_reason) = if should_arm {
-        if !crate::agents_config::auto_merge_enabled(&cwd) {
-            let blocked = "config.auto_merge.enabled=false".to_string();
+        if !env_grant && !crate::agents_config::auto_merge_enabled(&cwd) {
+            let blocked = "config.auto_merge.enabled=false; sanctioned override: \
+arm the standing switch (`fno config set auto_merge.enabled true`) or re-spawn \
+the run with TARGET_AUTO_MERGE=1 (per-run grant, folded into the manifest at \
+init; never synthesized config or a merge-time env var)"
+                .to_string();
             eprintln!("finalize: native auto-merge withheld: {blocked}");
             (false, Some(blocked))
         } else {
