@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
 const STORE_VERSION: u32 = 1;
@@ -208,29 +209,151 @@ impl Density {
     }
 }
 
-/// Extended-table row order (x-b186).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// The column an extended table sorts by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentSort {
-    /// Tree order: rows stay under their squad.
-    Squad,
-    /// Attention order: evidence of neglect first (needs fold rank, then
-    /// stale-live over working, then longest-silent). The default, because a
-    /// table the operator adjudicates exists to answer "who needs me". The
-    /// old `status` name is kept as a serde alias so a stored preference
-    /// written before the rename keeps pointing at this variant rather than
-    /// silently resetting to the tree order.
-    #[default]
-    #[serde(alias = "status")]
-    Attention,
+pub enum AgentSortColumn {
+    Status,
+    Agent,
+    LastMessage,
+    Pr,
+    Age,
+}
+
+/// Direction for one active table column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+/// One persisted table sort choice. Legacy string values remain readable so a
+/// preference upgrade cannot silently reset the operator's selected order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AgentSort {
+    pub column: AgentSortColumn,
+    pub direction: SortDirection,
+}
+
+impl Default for AgentSort {
+    fn default() -> Self {
+        Self::default_for(AgentSortColumn::Status)
+    }
 }
 
 impl AgentSort {
-    pub fn toggle(self) -> AgentSort {
-        match self {
-            AgentSort::Squad => AgentSort::Attention,
-            AgentSort::Attention => AgentSort::Squad,
+    #[allow(non_upper_case_globals)]
+    pub const Squad: Self = Self {
+        column: AgentSortColumn::Agent,
+        direction: SortDirection::Ascending,
+    };
+    #[allow(non_upper_case_globals)]
+    pub const Attention: Self = Self {
+        column: AgentSortColumn::Status,
+        direction: SortDirection::Ascending,
+    };
+
+    pub const fn default_for(column: AgentSortColumn) -> Self {
+        let direction = match column {
+            AgentSortColumn::Age => SortDirection::Descending,
+            AgentSortColumn::Status
+            | AgentSortColumn::Agent
+            | AgentSortColumn::LastMessage
+            | AgentSortColumn::Pr => SortDirection::Ascending,
+        };
+        Self { column, direction }
+    }
+
+    pub const fn toggle_direction(self) -> Self {
+        Self {
+            column: self.column,
+            direction: match self.direction {
+                SortDirection::Ascending => SortDirection::Descending,
+                SortDirection::Descending => SortDirection::Ascending,
+            },
         }
+    }
+
+    pub const fn advance(self) -> Self {
+        use AgentSortColumn::*;
+        use SortDirection::*;
+        match (self.column, self.direction) {
+            (Status, Ascending) => Self {
+                column: Status,
+                direction: Descending,
+            },
+            (Status, Descending) => Self {
+                column: Agent,
+                direction: Ascending,
+            },
+            (Agent, Ascending) => Self {
+                column: Agent,
+                direction: Descending,
+            },
+            (Agent, Descending) => Self {
+                column: LastMessage,
+                direction: Ascending,
+            },
+            (LastMessage, Ascending) => Self {
+                column: LastMessage,
+                direction: Descending,
+            },
+            (LastMessage, Descending) => Self {
+                column: Pr,
+                direction: Ascending,
+            },
+            (Pr, Ascending) => Self {
+                column: Pr,
+                direction: Descending,
+            },
+            (Pr, Descending) => Self {
+                column: Age,
+                direction: Descending,
+            },
+            (Age, Descending) => Self {
+                column: Age,
+                direction: Ascending,
+            },
+            (Age, Ascending) => Self {
+                column: Status,
+                direction: Ascending,
+            },
+        }
+    }
+
+    pub const fn toggle(self) -> Self {
+        match self {
+            Self::Squad => Self::Attention,
+            Self::Attention => Self::Squad,
+            _ => self.toggle_direction(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentSort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(legacy) = value.as_str() {
+            return match legacy {
+                "squad" => Ok(Self::Squad),
+                "attention" | "status" => Ok(Self::Attention),
+                _ => Err(de::Error::custom("unknown agent sort")),
+            };
+        }
+        #[derive(Deserialize)]
+        struct Wire {
+            column: AgentSortColumn,
+            direction: SortDirection,
+        }
+        let wire = Wire::deserialize(value).map_err(de::Error::custom)?;
+        Ok(Self {
+            column: wire.column,
+            direction: wire.direction,
+        })
     }
 }
 
@@ -755,6 +878,36 @@ mod tests {
         // And the next gesture writes cleanly over it.
         save_prefs(Density::Extended, AgentSort::Squad);
         assert_eq!(load_prefs().0, Density::Extended);
+    }
+
+    #[test]
+    fn sort_preferences_persist_explicit_shape_and_migrate_legacy_values() {
+        let _s = Scratch::new("legacy-sort-values");
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{},"density":"extended","sort":"squad"}"#,
+        )
+        .unwrap();
+        assert_eq!(load_prefs().1, AgentSort::Squad);
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{},"density":"extended","sort":"attention"}"#,
+        )
+        .unwrap();
+        assert_eq!(load_prefs().1, AgentSort::Attention);
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{},"density":"extended","sort":"status"}"#,
+        )
+        .unwrap();
+        assert_eq!(load_prefs().1, AgentSort::Attention);
+        save_prefs(Density::Extended, AgentSort::Squad);
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(view_path()).unwrap()).unwrap();
+        assert!(
+            raw["sort"].get("column").is_some(),
+            "new preferences persist an explicit sort column and direction"
+        );
     }
 
     #[test]

@@ -698,7 +698,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "cycle-section",
             CycleSection,
             WorkspacesTabs,
-            "cycle section view",
+            "cycle active section",
         ),
         b(
             b'<',
@@ -791,7 +791,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sort-agents",
             ToggleAgentSort,
             Global,
-            "sort agents: squad/status",
+            "sort table columns",
         ),
         b(b's', "toggle-status", ToggleStatus, Global, "toggle status"),
         b(b'?', "show-keys", ShowKeys, Global, "this key table"),
@@ -1156,6 +1156,29 @@ mod tests {
             ]
         );
         assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
+    }
+
+    #[test]
+    fn sort_shortcut_and_z_section_shortcut_do_not_overlap() {
+        assert_eq!(resolve_chord(b'o'), Event::ToggleAgentSort);
+        assert_eq!(resolve_chord(b'z'), Event::CycleSection);
+        let bindings = key_bindings();
+        assert_eq!(
+            bindings
+                .iter()
+                .find(|binding| binding.key == b'o')
+                .unwrap()
+                .label,
+            "sort table columns"
+        );
+        assert_eq!(
+            bindings
+                .iter()
+                .find(|binding| binding.key == b'z')
+                .unwrap()
+                .label,
+            "cycle active section"
+        );
     }
 
     #[test]

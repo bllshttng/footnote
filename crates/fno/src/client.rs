@@ -16,6 +16,7 @@
 //! Every error surface while the compositor owns the terminal goes through
 //! the rendered UI (tab-bar notice + BEL), never stderr (x-0175 pitfall).
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -38,7 +39,9 @@ use crate::proto::{
 };
 use crate::theme::Theme;
 use crate::tree::{Axis, Dir, Rect, TabId};
-use crate::view_store::{self, next_view, AgentSort, Density, SectionKey, SectionView};
+use crate::view_store::{
+    self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
+};
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,6 +83,12 @@ const COL_MIN_TAIL: u16 = 8;
 struct ColumnSpan {
     start: u16,
     width: u16,
+}
+
+impl ColumnSpan {
+    fn contains(self, col: u16) -> bool {
+        col >= self.start && col < self.start + self.width
+    }
 }
 
 /// The one geometry authority for the extended table. Header text, row text,
@@ -4570,6 +4579,9 @@ impl View {
         // the sideline owns row 0), so invert with the offset - else a click on a
         // scrolled row activates the wrong row. Mirrors sideline_row_at.
         let i = row as usize + self.sideline_offset;
+        if let Some(hit) = self.table_header_hit(i, col) {
+            return Some(hit);
+        }
         // x-8ccf US4: a click on the footer's `☰ menu` region opens the sideline
         // MENU popup; the rest of the footer row keeps its `+ new` create action.
         if matches!(self.display_rows().get(i), Some(DisplayRow::NewSquad)) {
@@ -4580,6 +4592,28 @@ impl View {
             }
         }
         self.row_action(i)
+    }
+
+    fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
+        if self.density != Density::Extended
+            || !matches!(self.display_rows().get(row), Some(DisplayRow::TableHead))
+        {
+            return None;
+        }
+        let layout = TableLayout::fitting(self.panel_w().saturating_sub(1))?;
+        if layout.status.contains(col) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::Status))
+        } else if layout.agent.contains(col) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
+        } else if layout.tail.is_some_and(|span| span.contains(col)) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::LastMessage))
+        } else if layout.pr.contains(col) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::Pr))
+        } else if layout.age.contains(col) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::Age))
+        } else {
+            None
+        }
     }
 
     /// What acting on sideline display row `i` does - the single resolver both
@@ -4982,8 +5016,7 @@ impl View {
         // a scrape tick that flips one badge RE-ORDERS the rows, so preserving
         // only the numeric index would silently move the cursor onto a different
         // agent and point the next Enter / lifecycle key at the wrong worker.
-        let agent_prev = (self.density == Density::Extended
-            && self.agent_sort == AgentSort::Attention)
+        let agent_prev = (self.density == Density::Extended)
             .then(|| self.selected_agent_name())
             .flatten();
         // (x-4374) Capture the focused pane before the swap so a focus CHANGE can
@@ -5242,11 +5275,22 @@ impl View {
         self.clamp_sideline_offset();
     }
 
+    fn set_agent_sort_column(&mut self, column: AgentSortColumn) {
+        let held = self.selected_agent_name();
+        self.agent_sort = if self.agent_sort.column == column {
+            self.agent_sort.toggle_direction()
+        } else {
+            AgentSort::default_for(column)
+        };
+        view_store::save_prefs(self.density, self.agent_sort);
+        self.reanchor_selector(held);
+    }
+
     /// (x-b186) One press of the sort control. Persisted even outside Extended
     /// so the choice survives a round trip through another density.
     fn toggle_agent_sort(&mut self) {
         let held = self.selected_agent_name();
-        self.agent_sort = self.agent_sort.toggle();
+        self.agent_sort = self.agent_sort.advance();
         view_store::save_prefs(self.density, self.agent_sort);
         self.reanchor_selector(held);
     }
@@ -6917,6 +6961,7 @@ impl View {
     fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
         let (rows, depths) = self.tree_rows_with_depths();
         let needs = self.attention_needs();
+        let now = crate::digest_overlay::now_secs();
         let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len() + 1);
         let mut group = Vec::new();
         let mut iter = rows.into_iter().zip(depths).peekable();
@@ -6930,16 +6975,22 @@ impl View {
                     }
                     group.push((item, agent));
                     if !matches!(iter.peek(), Some((DisplayRow::Agent(_), _))) {
-                        append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs);
+                        append_sorted_agent_group(
+                            &mut out,
+                            &mut group,
+                            self.agent_sort,
+                            &needs,
+                            now,
+                        );
                     }
                 }
                 row => {
-                    append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs);
+                    append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
                     out.push((row, depth));
                 }
             }
         }
-        append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs);
+        append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
 
         let has_agent = out
             .iter()
@@ -7921,16 +7972,87 @@ fn append_sorted_agent_group<'a>(
     group: &mut Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
     sort: AgentSort,
     needs: &HashMap<String, NeedKind>,
+    now_secs: u64,
 ) {
-    if sort == AgentSort::Attention {
-        group.sort_by(|(_, a), (_, b)| {
-            attention_key(a, needs.get(a.name.as_str()).copied())
-                .cmp(&attention_key(b, needs.get(b.name.as_str()).copied()))
-        });
-    }
+    group.sort_by(|(_, a), (_, b)| {
+        compare_agent_rows(
+            a,
+            b,
+            sort,
+            needs.get(a.name.as_str()).copied(),
+            needs.get(b.name.as_str()).copied(),
+            now_secs,
+        )
+    });
     for (rows, _) in group.drain(..) {
         out.extend(rows);
     }
+}
+
+fn compare_agent_rows(
+    a: &AgentRow,
+    b: &AgentRow,
+    sort: AgentSort,
+    need_a: Option<NeedKind>,
+    need_b: Option<NeedKind>,
+    now_secs: u64,
+) -> Ordering {
+    let order = match sort.column {
+        AgentSortColumn::Status => {
+            let a_key = attention_key(a, need_a);
+            let b_key = attention_key(b, need_b);
+            let a_state = if a.exited {
+                u8::MAX
+            } else {
+                pane_state(a.badge, a.seen) as u8
+            };
+            let b_state = if b.exited {
+                u8::MAX
+            } else {
+                pane_state(b.badge, b.seen) as u8
+            };
+            apply_direction(
+                a_state
+                    .cmp(&b_state)
+                    .then_with(|| a_key.0.cmp(&b_key.0))
+                    .then_with(|| a_key.1.cmp(&b_key.1))
+                    .then_with(|| a_key.2.cmp(&b_key.2)),
+                sort.direction,
+            )
+        }
+        AgentSortColumn::Agent => apply_direction(a.name.cmp(&b.name), sort.direction),
+        AgentSortColumn::LastMessage => cmp_optional(
+            a.tail.as_deref().filter(|value| !value.is_empty()),
+            b.tail.as_deref().filter(|value| !value.is_empty()),
+            sort.direction,
+        ),
+        AgentSortColumn::Pr => cmp_optional(a.pr, b.pr, sort.direction),
+        AgentSortColumn::Age => {
+            cmp_optional(row_age(a, now_secs), row_age(b, now_secs), sort.direction)
+        }
+    };
+    order
+}
+
+fn cmp_optional<T: Ord>(a: Option<T>, b: Option<T>, direction: SortDirection) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a), Some(b)) => apply_direction(a.cmp(&b), direction),
+    }
+}
+
+fn apply_direction(order: Ordering, direction: SortDirection) -> Ordering {
+    match direction {
+        SortDirection::Ascending => order,
+        SortDirection::Descending => order.reverse(),
+    }
+}
+
+fn row_age(a: &AgentRow, now_secs: u64) -> Option<u64> {
+    a.last_activity_age_s
+        .or_else(|| a.updated_at.map(|updated| now_secs.saturating_sub(updated)))
 }
 
 /// (x-6851 US3) The project basename a section is keyed by (the squad's
@@ -8132,6 +8254,8 @@ enum ChromeHit {
     /// Flip the active squad row's caret locally (x-2f99); no socket write.
     /// (x-975a) Advance one sideline section through the view cycle.
     CycleSection(SectionKey),
+    /// Sort the extended table by the clicked header column.
+    SortColumn(AgentSortColumn),
     /// (x-c5ee) Toggle a squad's top-K idle expansion - the idle sibling of
     /// `CycleSection`. A pure local set flip, no socket write.
     ToggleIdle(SectionKey),
@@ -9403,14 +9527,39 @@ fn table_row_text(a: &AgentRow, layout: TableLayout, depth: usize, now_secs: u64
 /// Carries the active sort label, which is what makes the sort toggle visible
 /// even when the two orders coincide (one agent, or every row in one band): the
 /// rows may not move, but this line always changes, so no press is inert.
-fn table_head_text(layout: TableLayout, _sort: AgentSort) -> String {
-    let mut out = pad_cols("st", layout.status.width as usize);
-    out.push_str(&pad_cols("agent", layout.agent.width as usize));
+fn table_head_text(layout: TableLayout, sort: AgentSort) -> String {
+    let marker = |column| {
+        if sort.column == column {
+            match sort.direction {
+                SortDirection::Ascending => " ↑",
+                SortDirection::Descending => " ↓",
+            }
+        } else {
+            ""
+        }
+    };
+    let mut out = pad_cols(
+        &format!("st{}", marker(AgentSortColumn::Status)),
+        layout.status.width as usize,
+    );
+    out.push_str(&pad_cols(
+        &format!("agent{}", marker(AgentSortColumn::Agent)),
+        layout.agent.width as usize,
+    ));
     if let Some(tail) = layout.tail {
-        out.push_str(&pad_cols("last message", tail.width as usize));
+        out.push_str(&pad_cols(
+            &format!("last msg{}", marker(AgentSortColumn::LastMessage)),
+            tail.width as usize,
+        ));
     }
-    out.push_str(&pad_cols("pr", layout.pr.width as usize));
-    out.push_str(&pad_cols("age", layout.age.width as usize));
+    out.push_str(&pad_cols(
+        &format!("pr{}", marker(AgentSortColumn::Pr)),
+        layout.pr.width as usize,
+    ));
+    out.push_str(&pad_cols(
+        &format!("age{}", marker(AgentSortColumn::Age)),
+        layout.age.width as usize,
+    ));
     debug_assert_eq!(
         out.chars().map(glyph_cols).sum::<usize>(),
         layout.text_w as usize
@@ -11673,6 +11822,7 @@ async fn apply_hit(
         // Pure state flip, no I/O - usable even when the socket write path
         // is failing (x-2f99, AC1-FR).
         ChromeHit::CycleSection(key) => view.cycle_section(key),
+        ChromeHit::SortColumn(column) => view.set_agent_sort_column(column),
         // (x-c5ee) Pure local set flip, like CycleSection - no I/O.
         ChromeHit::ToggleIdle(key) => view.toggle_idle(key),
         // (x-b186) The density button. The panel width moved with the density,
@@ -17751,6 +17901,7 @@ mod tests {
             Some(ChromeHit::Confirm(_)) => "Confirm",
             Some(ChromeHit::OpenCreate) => "OpenCreate",
             Some(ChromeHit::CycleSection(_)) => "CycleSection",
+            Some(ChromeHit::SortColumn(_)) => "SortColumn",
             Some(ChromeHit::ToggleIdle(_)) => "ToggleIdle",
             Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
             Some(ChromeHit::OpenAttachPlace { .. }) => "OpenAttachPlace",
@@ -27373,16 +27524,57 @@ mod tests {
             ["fresh-live", "gone", "stale-live"],
             "by-squad keeps the tree's own order"
         );
-        assert!(frame_text(&v.compose()).contains("sort: workspace"));
+        assert!(frame_text(&v.compose()).contains("agent ↑"));
 
         v.toggle_agent_sort();
         assert_eq!(
             names(&v),
-            ["stale-live", "fresh-live", "gone"],
-            "by-attention floats the stale-live worker above the fresh one \
-             and sinks the confirmed-gone row last, regardless of badges"
+            ["stale-live", "gone", "fresh-live"],
+            "the next prefix+o state reverses the agent-name order"
         );
-        assert!(frame_text(&v.compose()).contains("sort: attention"));
+        assert!(frame_text(&v.compose()).contains("agent ↓"));
+    }
+
+    #[test]
+    fn missing_sort_values_stay_after_known_values_in_both_directions() {
+        let mut message = agent_row("message", 4, Some(AgentBadge::Working), false);
+        message.tail = Some("hello".into());
+        let mut pr = agent_row("pr", 5, Some(AgentBadge::Working), false);
+        pr.pr = Some(482);
+        let mut age = agent_row("age", 6, Some(AgentBadge::Working), false);
+        age.last_activity_age_s = Some(30);
+        let mut v = wide_view(vec![message, pr, age]);
+        set_density(&mut v, Density::Extended);
+
+        let names = |v: &View| {
+            v.display_rows()
+                .iter()
+                .filter_map(|row| match row {
+                    DisplayRow::Agent(agent) => Some(agent.name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for column in [
+            AgentSortColumn::LastMessage,
+            AgentSortColumn::Pr,
+            AgentSortColumn::Age,
+        ] {
+            v.agent_sort = AgentSort {
+                column,
+                direction: SortDirection::Ascending,
+            };
+            let ascending = names(&v);
+            v.agent_sort.direction = SortDirection::Descending;
+            let descending = names(&v);
+            if column == AgentSortColumn::Age {
+                assert_eq!(ascending.first().unwrap(), "age");
+                assert_eq!(descending.first().unwrap(), "age");
+            } else {
+                assert_eq!(ascending.last().unwrap(), "age");
+                assert_eq!(descending.last().unwrap(), "age");
+            }
+        }
     }
 
     // The mux ranker's attention order, pinned to the shared fixture: the
@@ -27606,7 +27798,7 @@ mod tests {
             .insert(SectionKey::Elsewhere, SectionView::Expanded);
         v.section_view
             .insert(SectionKey::WorkQueue, SectionView::Expanded);
-        v.agent_sort = AgentSort::Attention;
+        v.agent_sort = AgentSort::Squad;
         set_density(&mut v, Density::Extended);
 
         let rows = v.display_rows();
@@ -27660,6 +27852,27 @@ mod tests {
         assert!(rows[backlog..]
             .iter()
             .any(|r| matches!(r, DisplayRow::Card(c) if c.id == "x-ready")));
+    }
+
+    #[test]
+    fn table_header_click_sets_one_column_and_toggles_direction() {
+        let mut v = wide_view(vec![agent_row(
+            "agent",
+            4,
+            Some(AgentBadge::Working),
+            false,
+        )]);
+        set_density(&mut v, Density::Extended);
+        let layout = TableLayout::fitting(v.panel_w() - 1).unwrap();
+        assert!(matches!(
+            v.chrome_hit(0, layout.agent.start),
+            Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
+        ));
+        v.set_agent_sort_column(AgentSortColumn::Agent);
+        assert_eq!(v.agent_sort.column, AgentSortColumn::Agent);
+        assert_eq!(v.agent_sort.direction, SortDirection::Ascending);
+        v.set_agent_sort_column(AgentSortColumn::Agent);
+        assert_eq!(v.agent_sort.direction, SortDirection::Descending);
     }
 
     // AC5-EDGE at startup: a persisted Extended restored onto a now-narrow
