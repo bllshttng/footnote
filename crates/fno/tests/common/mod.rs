@@ -466,10 +466,28 @@ impl Drop for ClientHarness {
 /// A `fno --server` child, always killed on test exit.
 pub struct ServerProc(pub std::process::Child);
 
+pub struct ServerTermination {
+    pub pid: u32,
+    pub status: std::process::ExitStatus,
+}
+
+impl ServerProc {
+    pub fn terminate_and_wait(mut self) -> ServerTermination {
+        let pid = self.0.id();
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+        let status = self.0.wait().expect("owned server waits after termination");
+        ServerTermination { pid, status }
+    }
+}
+
 impl Drop for ServerProc {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 }
 

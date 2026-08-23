@@ -11,23 +11,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use common::{connect_with_retry, spawn_server, FakeClient, Scratch, ServerProc};
+use common::{
+    connect_with_retry, spawn_server, FakeClient, Scratch, ServerProc, ServerTermination,
+};
 use fno::proto::Command;
 
 /// Same module-local serialization gate as `persistence.rs`: these tests own
 /// real PTYs + Unix sockets, and parallel runs contend for the runner's CPU.
 static PTY_GATE: Mutex<()> = Mutex::new(());
-
-fn kill_server(scratch: &Scratch) {
-    let _ = std::process::Command::new("pkill")
-        .arg("-9")
-        .arg("-f")
-        .arg(scratch.main_sock().to_str().unwrap())
-        .status();
-    // The socket file outlives a -9; give the respawn's unlink-in-bind a
-    // moment so connect_with_retry never races a stale socket.
-    std::thread::sleep(Duration::from_millis(300));
-}
 
 /// Attach a fresh client once the server is accepting.
 fn attach_client(scratch: &Scratch) -> FakeClient {
@@ -40,54 +31,35 @@ fn attach_client(scratch: &Scratch) -> FakeClient {
 struct Restarted {
     _server: ServerProc,
     client: FakeClient,
+    _old_server: ServerTermination,
 }
 
-fn restart(scratch: &Scratch) -> Restarted {
-    kill_server(scratch);
+fn restart(scratch: &Scratch, incumbent: ServerProc) -> Restarted {
+    let termination = incumbent.terminate_and_wait();
     let server = spawn_server(&scratch.main_sock(), &[]);
     let client = attach_client(scratch);
     Restarted {
         _server: server,
         client,
+        _old_server: termination,
     }
-}
-
-fn process_stat(pid: u32) -> String {
-    String::from_utf8(
-        std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .expect("inspect server process")
-            .stdout,
-    )
-    .unwrap_or_default()
-    .trim()
-    .to_string()
 }
 
 #[test]
 fn old_server_reaped_before_rebind_probe() {
     let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     let scratch = Scratch::new("reap-probe");
-    let mut incumbent = spawn_server(&scratch.main_sock(), &[]);
-    let old_pid = incumbent.0.id();
-
-    kill_server(&scratch);
-    let stat = process_stat(old_pid);
-    assert!(
-        !stat.starts_with('Z'),
-        "old_server_reaped_before_rebind old_pid={old_pid} socket={} process_stat={stat:?}",
-        scratch.main_sock().display()
-    );
+    let incumbent = spawn_server(&scratch.main_sock(), &[]);
+    let termination = incumbent.terminate_and_wait();
 
     let replacement = spawn_server(&scratch.main_sock(), &[]);
     println!(
-        "old_server_reaped_before_rebind old_pid={} new_pid={} socket={}",
-        old_pid,
+        "old_server_reaped_before_rebind old_pid={} new_pid={} socket={} status={:?}",
+        termination.pid,
         replacement.0.id(),
-        scratch.main_sock().display()
+        scratch.main_sock().display(),
+        termination.status,
     );
-    let _ = incumbent.0.wait();
 }
 
 /// The squad id currently named `name`, from the last absorbed layout.
@@ -103,7 +75,7 @@ fn squad_id(c: &FakeClient, name: &str) -> u64 {
 fn symptom_rename_survives_restart() {
     let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     let scratch = Scratch::new("rename");
-    let _server = spawn_server(&scratch.main_sock(), &[]);
+    let server = spawn_server(&scratch.main_sock(), &[]);
     let mut c = attach_client(&scratch);
     c.wait_layout(10, "squads appear", |l| !l.squads.is_empty());
 
@@ -124,7 +96,7 @@ fn symptom_rename_survives_restart() {
     });
     c.detach();
 
-    let mut r = restart(&scratch);
+    let mut r = restart(&scratch, server);
     // Restore materializes persisted squads on the first attach, after the
     // initial layout: wait for the renamed workspace BY NAME so a slow
     // restore is never misread as a lost one.
@@ -154,7 +126,7 @@ fn symptom_rename_survives_restart() {
 fn symptom_hand_split_survives_restart() {
     let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     let scratch = Scratch::new("split");
-    let _server = spawn_server(&scratch.main_sock(), &[]);
+    let server = spawn_server(&scratch.main_sock(), &[]);
     let mut c = attach_client(&scratch);
     c.wait_layout(10, "squads appear", |l| !l.squads.is_empty());
 
@@ -175,7 +147,7 @@ fn symptom_hand_split_survives_restart() {
     });
     c.detach();
 
-    let mut r = restart(&scratch);
+    let mut r = restart(&scratch, server);
     // Wait for the SHAPE, not just the name, exactly as the pre-restart wait
     // ten lines up does. Restore materializes a squad and its panes in more
     // than one step, so a predicate satisfied by the name alone returns while
@@ -215,7 +187,7 @@ fn symptom_hand_split_survives_restart() {
 fn symptom_removed_workspace_stays_removed() {
     let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     let scratch = Scratch::new("removed");
-    let _server = spawn_server(&scratch.main_sock(), &[]);
+    let server = spawn_server(&scratch.main_sock(), &[]);
     let mut c = attach_client(&scratch);
     c.wait_layout(10, "squads appear", |l| !l.squads.is_empty());
 
@@ -233,7 +205,7 @@ fn symptom_removed_workspace_stays_removed() {
     });
     c.detach();
 
-    let mut r = restart(&scratch);
+    let mut r = restart(&scratch, server);
     r.client
         .wait_layout(10, "squads appear", |l| !l.squads.is_empty());
     // Give a would-be resurrection the same window the other repros give the
