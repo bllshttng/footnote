@@ -95,6 +95,20 @@ pub fn parse_transcript_entries(line: &str) -> Vec<TranscriptEntry> {
 /// Read and parse a JSONL transcript.
 pub fn read_transcript(path: &Path) -> Result<Vec<TranscriptEntry>, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "empty transcript",
+        ));
+    }
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        serde_json::from_str::<Value>(line).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("malformed transcript line: {error}"),
+            )
+        })?;
+    }
     Ok(content.lines().flat_map(parse_transcript_entries).collect())
 }
 
@@ -272,5 +286,20 @@ mod tests {
             classify_interrupted(&entries),
             InterruptedCallOutcome::Unresolved
         );
+    }
+
+    #[test]
+    fn malformed_transcript_is_not_treated_as_retry_safe() {
+        let path = std::env::temp_dir().join(format!(
+            "fno-interrupt-malformed-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "not-json\n").unwrap();
+        assert!(read_transcript(&path).is_err());
+        std::fs::remove_file(path).ok();
     }
 }
