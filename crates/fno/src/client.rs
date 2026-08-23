@@ -6878,7 +6878,7 @@ impl View {
                         || matches!(r, DisplayRow::Header { .. })
                 })
                 .collect(),
-            Density::Extended => self.table_rows(),
+            Density::Extended => self.table_rows_with_depths().0,
         }
     }
 
@@ -6907,65 +6907,48 @@ impl View {
                 }
                 (kept_rows, kept_depths)
             }
-            Density::Extended => {
-                let rows = self.table_rows();
-                let depths = vec![0usize; rows.len()];
-                (rows, depths)
-            }
+            Density::Extended => self.table_rows_with_depths(),
         }
     }
 
-    /// (x-b186) The extended density's rows: an inert column header, then one
-    /// row per agent in the chosen order.
-    ///
-    /// Flat by design - this is the agents view, not the tree. By-squad keeps
-    /// the tree's own order; by-status re-bands it worst-first. Cards, spacers,
-    /// sublines, and the create-workspace footer are tree furniture and have no
-    /// place in a table, so they are suppressed; the density cycle is one press
-    /// away from all of them.
-    fn table_rows(&self) -> Vec<DisplayRow<'_>> {
-        // Built from the full agent catalog, NOT from `tree_rows` - the table's
-        // job is to list every agent, so it must not inherit the tree's section
-        // state. Filtering tree rows made a collapsed squad (the normal resting
-        // state for an inactive workspace) and a LiveOnly section drop their
-        // agents from the very view that exists to show them.
-        //
-        // By-squad still means the tree's ORDER: squads in layout order, their
-        // agents in catalog order, squadless rows last. Only the visibility
-        // gating is dropped, not the ordering.
-        let mut agents: Vec<&AgentRow> = Vec::with_capacity(self.layout.agents.len());
-        for s in &self.layout.squads {
-            agents.extend(self.layout.agents.iter().filter(|a| a.squad == Some(s.id)));
+    /// The extended density keeps the regular structural enumeration. Agent
+    /// rows are grouped with their optional sublines and sorted only within
+    /// the contiguous group beneath one section header.
+    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
+        let (rows, depths) = self.tree_rows_with_depths();
+        let needs = self.attention_needs();
+        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len() + 1);
+        let mut group = Vec::new();
+        let mut iter = rows.into_iter().zip(depths).peekable();
+
+        while let Some((row, depth)) = iter.next() {
+            match row {
+                DisplayRow::Agent(agent) => {
+                    let mut item = vec![(DisplayRow::Agent(agent), depth)];
+                    while matches!(iter.peek(), Some((DisplayRow::Sub(_), _))) {
+                        item.push(iter.next().expect("peeked subline"));
+                    }
+                    group.push((item, agent));
+                    if !matches!(iter.peek(), Some((DisplayRow::Agent(_), _))) {
+                        append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs);
+                    }
+                }
+                row => {
+                    append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs);
+                    out.push((row, depth));
+                }
+            }
         }
-        let known: HashSet<u64> = self.layout.squads.iter().map(|s| s.id).collect();
-        agents.extend(
-            self.layout
-                .agents
-                .iter()
-                .filter(|a| a.squad.is_none_or(|id| !known.contains(&id))),
-        );
-        if self.agent_sort == AgentSort::Attention {
-            // ONE ordering authority: the attention key (needs fold rank, then
-            // evidence of neglect, then oldest-silent, then name). The previous
-            // key banded on the in-TTL badge - a scraped report that reads
-            // healthy for a worker dead under two hours, which is how a
-            // stale-live row could sit below every row that mattered. The
-            // status word and the reachability verdict are barred from this
-            // key for the same reason: both answer a different question than
-            // "who needs the operator". `sort_by_key` is stable, so rows
-            // inside a band keep their tree order.
-            let needs = self.attention_needs();
-            agents.sort_by_key(|a| attention_key(a, needs.get(a.name.as_str()).copied()));
+        append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs);
+
+        let has_agent = out
+            .iter()
+            .any(|(row, _)| matches!(row, DisplayRow::Agent(_)));
+        out.insert(0, (DisplayRow::TableHead, 0));
+        if !has_agent {
+            out.insert(1, (DisplayRow::TableEmpty, 0));
         }
-        let mut out = Vec::with_capacity(agents.len() + 1);
-        out.push(DisplayRow::TableHead);
-        if agents.is_empty() {
-            // A bare column header reads as a stalled or broken table. Say so.
-            out.push(DisplayRow::TableEmpty);
-            return out;
-        }
-        out.extend(agents.into_iter().map(DisplayRow::Agent));
-        out
+        out.into_iter().unzip()
     }
 
     // (x-c5ee) The sideline tree, with the top-K idle cap applied. A PURE
@@ -7931,6 +7914,23 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty
     )
+}
+
+fn append_sorted_agent_group<'a>(
+    out: &mut Vec<(DisplayRow<'a>, usize)>,
+    group: &mut Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
+    sort: AgentSort,
+    needs: &HashMap<String, NeedKind>,
+) {
+    if sort == AgentSort::Attention {
+        group.sort_by(|(_, a), (_, b)| {
+            attention_key(a, needs.get(a.name.as_str()).copied())
+                .cmp(&attention_key(b, needs.get(b.name.as_str()).copied()))
+        });
+    }
+    for (rows, _) in group.drain(..) {
+        out.extend(rows);
+    }
 }
 
 /// (x-6851 US3) The project basename a section is keyed by (the squad's
@@ -27580,6 +27580,86 @@ mod tests {
         assert_eq!(wide.agent.width + tail.width, 54);
         assert!(wide.agent.width > COL_MIN_NAME);
         assert!(tail.width > COL_MIN_TAIL);
+    }
+
+    #[test]
+    fn extended_preserves_section_hierarchy_and_sorts_within_groups() {
+        let mut notes = agent_row("notes-agent", 6, Some(AgentBadge::Working), false);
+        notes.squad = Some(2);
+        let mut orphan = agent_row("orphan-agent", 7, Some(AgentBadge::Working), false);
+        orphan.squad = None;
+        let mut v = view_with_agents(vec![
+            agent_row("zeta", 4, Some(AgentBadge::Blocked), false),
+            agent_row("alpha", 5, Some(AgentBadge::Blocked), false),
+            notes,
+            orphan,
+        ]);
+        let mut layout = two_squad_layout(1);
+        layout.agents = v.layout.agents.clone();
+        layout.backlog = vec![bcard("x-ready", CardState::Ready)];
+        v.set_layout(layout);
+        v.section_view.insert(
+            SectionKey::Squad("/code/notes".into()),
+            SectionView::Expanded,
+        );
+        v.section_view
+            .insert(SectionKey::Elsewhere, SectionView::Expanded);
+        v.section_view
+            .insert(SectionKey::WorkQueue, SectionView::Expanded);
+        v.agent_sort = AgentSort::Attention;
+        set_density(&mut v, Density::Extended);
+
+        let rows = v.display_rows();
+        let first_squad = rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    DisplayRow::Sel(SelRow {
+                        squad: 1,
+                        tab: None
+                    })
+                )
+            })
+            .unwrap();
+        let second_squad = rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    DisplayRow::Sel(SelRow {
+                        squad: 2,
+                        tab: None
+                    })
+                )
+            })
+            .unwrap();
+        let elsewhere = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ elsewhere"))
+            .unwrap();
+        let backlog = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ backlog"))
+            .unwrap();
+        assert!(first_squad < second_squad && second_squad < elsewhere && elsewhere < backlog);
+        let squad_names: Vec<_> = rows[first_squad..second_squad]
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(squad_names, ["alpha", "zeta"]);
+        assert!(rows[second_squad..elsewhere]
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Agent(a) if a.name == "notes-agent")));
+        assert!(rows[elsewhere..backlog]
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Agent(a) if a.name == "orphan-agent")));
+        assert!(rows[backlog..]
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Card(c) if c.id == "x-ready")));
     }
 
     // AC5-EDGE at startup: a persisted Extended restored onto a now-narrow
