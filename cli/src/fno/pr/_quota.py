@@ -169,6 +169,23 @@ def _pr_number(args: Sequence[str]) -> str:
     return "<n>"
 
 
+def _malformed_argv_refusal(first: str) -> str:
+    """Teach the shape at the point a flag-first argv would exec into noise.
+
+    Everything after ``--`` becomes gh's argv, command words first. Flags with
+    no command word make gh print its root command list, which reads as
+    unrelated output rather than an error, so the caller cannot tell the route
+    failed (a king lost a merge-precondition read this way).
+    """
+    return (
+        f"graphql-exec passes everything after -- to gh as its full argv, "
+        f"command words first; an argv starting with '{first}' is flags with no "
+        "command, which gh answers with its root command list. Route the "
+        "refused call as: fno do pr graphql-exec --purpose discretionary -- "
+        "api graphql -f query=... --jq ..."
+    )
+
+
 def _refusal(args: Sequence[str], *, reset: Optional[int], unavailable: bool = False) -> str:
     pr = _pr_number(args)
     if unavailable:
@@ -207,6 +224,8 @@ def execute_graphql(
         return Result(2, "", "purpose must be discretionary or coverage")
     if not gh_args:
         return Result(2, "", "graphql-exec needs gh arguments after --")
+    if gh_args[0].startswith("-"):
+        return Result(2, "", _malformed_argv_refusal(gh_args[0]))
     if purpose == "coverage" and not _coverage_read(gh_args):
         return Result(2, "", "coverage reserve accepts review-coverage reads only")
     # A caller spelling bare ``gh`` inside a protected worker would resolve to
