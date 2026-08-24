@@ -1460,6 +1460,22 @@ def test_sweep_file_persists_terminal_harness_residue(monkeypatch, tmp_path):
     assert json.loads(path.read_text())["terminal_harness_rows"] == 3
 
 
+def test_sweep_file_stamps_recoverable_count_and_preserves_it_on_manual_sweep(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: path)
+
+    watchdog.write_sweep_file("tick", {LEAVE: 3}, NOW_1840, recoverable_count=4)
+    first = json.loads(path.read_text())
+    watchdog.write_sweep_file("manual", {LEAVE: 3}, NOW_1840 + 60)
+    second = json.loads(path.read_text())
+
+    assert first["recoverable_count"] == 4
+    assert second["recoverable_count"] == 4
+    assert second["last_tick_epoch"] == first["last_tick_epoch"]
+
+
 def test_stopped_row_survives_claude_agents_json(monkeypatch):
     from fno.agents.harnesses import claude as claude_mod
 
@@ -1666,6 +1682,25 @@ def test_recoverable_apply_names_a_vanished_candidate(tmp_path):
 
     assert results[0]["outcome"] == "refused"
     assert "vanished" in results[0]["detail"]
+
+
+def test_recoverable_apply_defers_remaining_candidates_when_budget_is_spent(tmp_path):
+    from fno.agents.discover import CodexRecoveryScan, RecoverableCodexRollout
+
+    candidates = tuple(
+        RecoverableCodexRollout(
+            f"019f48e1-deferred-{index}", str(tmp_path), tmp_path / f"{index}.jsonl", NOW_1840
+        )
+        for index in range(2)
+    )
+    results = watchdog.apply_recoverable(
+        CodexRecoveryScan(candidates, True, 2, 0, 0, ()),
+        scope_cwd=tmp_path,
+        should_apply=lambda: False,
+    )
+
+    assert [result["outcome"] for result in results] == ["deferred", "deferred"]
+    assert all("next tick" in result["detail"] for result in results)
 
 
 def test_cli_prints_the_terminal_harness_row_count(monkeypatch, capsys):

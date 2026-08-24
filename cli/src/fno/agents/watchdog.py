@@ -195,6 +195,7 @@ def apply_recoverable(
     adopt_fn: Optional[Callable] = None,
     confine_fn: Optional[Callable] = None,
     load_registry_fn: Optional[Callable] = None,
+    should_apply: Optional[Callable[[], bool]] = None,
 ) -> list[dict]:
     """Adopt a complete scan through the shared store-hit writer only."""
     if not scan.complete:
@@ -213,8 +214,15 @@ def apply_recoverable(
     confine = confine_fn or store_fallback.confine_store_hits
     load = load_registry_fn or load_registry
     results: list[dict] = []
-    for candidate in scan.recoverable:
+    for index, candidate in enumerate(scan.recoverable):
         session_id = candidate.session_id
+        if should_apply is not None and not should_apply():
+            results.extend({
+                "session_id": remaining.session_id,
+                "outcome": "deferred",
+                "detail": "tick budget spent; retry on the next tick",
+            } for remaining in scan.recoverable[index:])
+            break
         try:
             if not candidate.rollout_path.is_file():
                 raise ValueError(f"rollout vanished before adoption: {candidate.rollout_path}")

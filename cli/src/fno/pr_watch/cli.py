@@ -151,6 +151,20 @@ def _catchup_roots() -> list[Path]:
     return [p for p in roots.values() if p.is_dir()]
 
 
+def _watchdog_recovery_root() -> Optional[Path]:
+    """Resolve one exact project scope for the launchd watchdog scan."""
+    try:
+        from fno.paths import resolve_repo_root
+
+        root = resolve_repo_root()
+        if (root / ".git").exists():
+            return root
+    except Exception:  # noqa: BLE001 - an unknown scope must not scan `/`
+        pass
+    roots = _catchup_roots()
+    return roots[0] if len(roots) == 1 else None
+
+
 class ClaimAdapter:
     """Thin adapter that maps the tick() claim protocol to fno.claims."""
 
@@ -518,6 +532,48 @@ def tick() -> None:
                         f"a roster probe costs"
                     )
                 payload, rows = _wd.run_sweep(now_s=now, roster_timeout=budget)
+                recovery_payload = None
+                recovery_rows = []
+                recovery_scan = None
+                try:
+                    recovery_root = _watchdog_recovery_root()
+                    if recovery_root is None:
+                        raise ValueError(
+                            "Codex recovery scope unresolved; no unique checkout root"
+                        )
+                    (
+                        recovery_payload,
+                        recovery_rows,
+                        recovery_scan,
+                    ) = _wd.run_recoverable_sweep(
+                        cwd=recovery_root,
+                        recency_seconds=24 * 3600,
+                        now_s=now,
+                    )
+                    if not recovery_scan.complete:
+                        log.warning(
+                            "pr-watch: Codex recovery scan refused: %s",
+                            "; ".join(recovery_payload.get("warnings") or [])
+                            or "coverage incomplete",
+                        )
+                    elif not payload.get("refused"):
+                        payload = {
+                            **payload,
+                            "verdicts": [
+                                *payload["verdicts"],
+                                *recovery_payload["verdicts"],
+                            ],
+                            "counts": {
+                                **payload["counts"],
+                                **recovery_payload["counts"],
+                            },
+                            "recoverable_count": recovery_payload[
+                                "recoverable_count"
+                            ],
+                        }
+                        rows = [*rows, *recovery_rows]
+                except Exception as exc:  # noqa: BLE001 - recovery never breaks the tick
+                    log.warning("pr-watch: Codex recovery scan failed: %s", exc)
                 # Read BEFORE any write and defaulted here: the refused branch
                 # writes nothing, and an unbound read after the if/else crashed
                 # every refused tick into the outer except.
@@ -551,6 +607,7 @@ def tick() -> None:
                         "tick", payload["counts"], now, signature,
                         events_signature=_wd.verdict_signature(payload),
                         terminal_harness_rows=payload.get("terminal_harness_rows", 0),
+                        recoverable_count=payload.get("recoverable_count"),
                     )
                     try:
                         from fno.agents.stale_escalate import StaleRow, escalate_stale
@@ -582,6 +639,7 @@ def tick() -> None:
                         log.warning("pr-watch: watchdog escalation failed", exc_info=True)
                 fresh_ids = _wd.fresh_non_leave(payload, prev_events_sig)
                 acted = 0
+                recoverable_results = []
                 for d, row in zip(payload["verdicts"], rows):
                     verdict = _wd.Verdict(**d)
                     if verdict.verdict == _wd.LEAVE:
@@ -628,10 +686,44 @@ def tick() -> None:
                                 "detail": detail,
                             },
                         )
+                if (
+                    recovery_scan is not None
+                    and recovery_scan.complete
+                    and settings.recovery.watchdog == "wake"
+                ):
+                    recoverable_results = _wd.apply_recoverable(
+                        recovery_scan,
+                        scope_cwd=recovery_root,
+                        should_apply=lambda: (
+                            deadline - (time.monotonic() - started)
+                        ) >= _WAKE_APPLY_FLOOR_S,
+                    )
+                    for result_item in recoverable_results:
+                        if result_item["outcome"] in {"applied", "refused"}:
+                            _wd.emit_event(
+                                "watchdog_applied"
+                                if result_item["outcome"] == "applied"
+                                else "watchdog_refused",
+                                {
+                                    "row_id": result_item["session_id"],
+                                    "verdict": _wd.RECOVERABLE,
+                                    "detail": result_item["detail"],
+                                },
+                            )
                 counts = " ".join(
                     f"{k}={v}" for k, v in sorted(payload["counts"].items())
                 )
-                typer.echo(f"watchdog sweep: {counts} acted={acted}")
+                recoverable_applied = sum(
+                    item["outcome"] == "applied" for item in recoverable_results
+                )
+                recoverable_remaining = sum(
+                    item["outcome"] == "deferred" for item in recoverable_results
+                )
+                typer.echo(
+                    f"watchdog sweep: {counts} acted={acted} "
+                    f"recoverable_applied={recoverable_applied} "
+                    f"recoverable_remaining={recoverable_remaining}"
+                )
             except _WatchdogBudgetSpent as exc:
                 log.info("pr-watch: watchdog leg skipped: %s", exc)
             except Exception as exc:  # noqa: BLE001 - never let the watchdog break pr-watch
