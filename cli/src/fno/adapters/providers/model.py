@@ -96,8 +96,9 @@ class ProviderRecord(BaseModel):
     id: str = Field(..., pattern=_ID_PATTERN)
     name: str
     # Renamed from `cli`, which named the harness axis under a binary-ish word.
-    # The `cli` alias keeps a pre-rename config.toml loading; `extra="forbid"`
-    # means without it an unmigrated record would be rejected outright.
+    # The `cli` alias keeps pre-rename config.toml loading. Unknown record
+    # metadata is retained for forward-compatible round trips, while these
+    # known account fields remain strictly typed.
     harness: _HARNESS_LITERAL = Field(
         ..., validation_alias=AliasChoices("harness", "cli")
     )

@@ -651,7 +651,7 @@ def _run_tick(
             if key not in batch_states:
                 failed.add(key)
         for key, current in batch_states.items():
-            if current != "UNKNOWN":
+            if current in ("OPEN", "CLOSED", "MERGED"):
                 swept.add(key)
             elif key in query_keys:
                 failed.add(key)
