@@ -2114,13 +2114,20 @@ fn parse_dir(s: &str, flag: &str) -> Result<Dir, String> {
     }
 }
 
-/// A `--tab <spec>` selector (x-d865). Grammar: `active` | `new` | `id:<n>` (the
-/// STABLE tab id, preferred in scripts) | `name:<s>` | a bare integer (an
-/// ordinal Index, convenience only - ordinals renumber) | any other bare word
-/// (a tab Name).
+/// A `--tab <spec>` selector (x-d865, ordinals x-1499). Grammar: `active` |
+/// `new` | `id:<n>` (the STABLE tab id, preferred in scripts) | `ordinal:<n>`
+/// (explicit form of a bare integer) | `name:<s>` | a bare integer (the
+/// 1-based ordinal the UI shows as `·N`; convenience only - ordinals renumber
+/// when tabs close) | any other bare word (a tab Name).
 fn parse_tab_sel(s: &str) -> Result<TabSel, String> {
     if let Some(n) = s.strip_prefix("id:") {
         return parse_u64(n, "--tab id:").map(TabSel::Id);
+    }
+    if let Some(n) = s.strip_prefix("ordinal:") {
+        return match n.parse::<usize>() {
+            Ok(i) => Ok(TabSel::Index(i)),
+            Err(_) => Err(format!("--tab ordinal: needs a number, got {n:?}")),
+        };
     }
     if let Some(name) = s.strip_prefix("name:") {
         return Ok(TabSel::Name(name.to_string()));

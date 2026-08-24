@@ -2929,8 +2929,10 @@ impl Core {
 
     // ---- v41 (x-d865) layout script API ---------------------------------
 
-    /// Resolve a [`TabSel`] to a tab INDEX within `sid`. `New` is not a
-    /// selector here (callers that support creation handle it before calling).
+    /// Resolve a [`TabSel`] to a tab INDEX within `sid`, through the squad's
+    /// tab dictionary (x-1499): `Index(n)` is the 1-based ordinal the UI
+    /// shows, never a zero-based vector index. `New` is not a selector here
+    /// (callers that support creation handle it before calling).
     fn resolve_tab_index(&self, sid: u64, sel: &TabSel) -> Result<usize, String> {
         let sq = self
             .session
@@ -2939,30 +2941,7 @@ impl Core {
         if sq.tabs.is_empty() {
             return Err(format!("squad {sid} has no tabs"));
         }
-        match sel {
-            TabSel::Active => Ok(sq.active_tab.min(sq.tabs.len() - 1)),
-            TabSel::Index(i) => (*i < sq.tabs.len())
-                .then_some(*i)
-                .ok_or_else(|| format!("no tab at index {i}")),
-            TabSel::Id(id) => sq
-                .tabs
-                .iter()
-                .position(|t| t.id == *id)
-                .ok_or_else(|| format!("no tab with id {id}")),
-            TabSel::Name(n) => {
-                let mut hits = sq
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, t)| t.name.as_deref() == Some(n.as_str()));
-                match (hits.next(), hits.next()) {
-                    (Some((i, _)), None) => Ok(i),
-                    (Some(_), Some(_)) => Err(format!("ambiguous tab name: {n}")),
-                    (None, _) => Err(format!("no tab named {n}")),
-                }
-            }
-            TabSel::New => Err("cannot select the 'new' tab of an existing set".into()),
-        }
+        sq.resolve_tab(sel)
     }
 
     /// Placement that honors `placement.tab` / `placement.at` (v41), reaping
@@ -13413,7 +13392,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tab_index_by_id_name_and_index() {
+    fn resolve_tab_index_by_id_name_and_ordinal() {
         let core = two_tab_core();
         assert_eq!(core.resolve_tab_index(1, &TabSel::Id(20)).unwrap(), 1);
         assert_eq!(
@@ -13421,11 +13400,21 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(core.resolve_tab_index(1, &TabSel::Index(0)).unwrap(), 0);
+        // `Index` is the 1-based ordinal the UI shows: 1 names the first tab,
+        // 0 is a refusal, never a silent zero-based vector index (x-1499).
+        assert_eq!(core.resolve_tab_index(1, &TabSel::Index(1)).unwrap(), 0);
+        assert_eq!(core.resolve_tab_index(1, &TabSel::Index(2)).unwrap(), 1);
+        assert_eq!(
+            core.resolve_tab_index(1, &TabSel::Index(0)).unwrap_err(),
+            "tab ordinal starts at 1"
+        );
         assert!(core
             .resolve_tab_index(1, &TabSel::Name("nope".into()))
             .is_err());
-        assert!(core.resolve_tab_index(1, &TabSel::Index(9)).is_err());
+        assert_eq!(
+            core.resolve_tab_index(1, &TabSel::Index(9)).unwrap_err(),
+            "no tab at ordinal 9"
+        );
     }
 
     #[test]

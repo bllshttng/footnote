@@ -466,16 +466,17 @@ pub enum PaneTarget {
 }
 
 /// Which tab a [`PanePlacement`] / [`LayoutScope`] addresses within a squad
-/// (v41, layout-api). `Index` is an ordinal convenience for interactive
-/// one-shots ONLY - ordinals renumber as tabs open and close, so a script that
-/// captured one earlier may hit a different tab; receipts return `Id`/`Name`,
-/// which are stable. `New` forces a fresh tab.
+/// (v41, layout-api). `Index` is the 1-based ORDINAL the UI shows (`·N`,
+/// x-1499): 1 is the first tab in display order and 0 is always refused. It
+/// is an interactive convenience ONLY - ordinals renumber as tabs open and
+/// close, so a script that captured one earlier may hit a different tab;
+/// receipts return `Id`/`Name`, which are stable. `New` forces a fresh tab.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum TabSel {
     /// The squad's currently active tab.
     #[default]
     Active,
-    /// The nth tab in display order (convenience only; ordinals renumber).
+    /// The tab at 1-based display ordinal `n` (the UI's `·N`; 0 is refused).
     Index(usize),
     /// A stable tab id (preferred in scripts).
     Id(TabId),
