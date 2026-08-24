@@ -292,7 +292,7 @@ class TestRunGate:
         monkeypatch.setattr(
             doctor_footprint,
             "_read_ps",
-            lambda: (
+            lambda **_kwargs: (
                 """\
                 PID PPID ELAPSED %CPU RSS COMMAND
                 100 1 01:00:00 86.0 1024 fno-agents-worker --run
@@ -316,10 +316,24 @@ class TestRunGate:
         from fno import doctor_footprint
 
         monkeypatch.setattr(
-            doctor_footprint, "_read_ps", lambda: (None, "ps unavailable")
+            doctor_footprint, "_read_ps", lambda **_kwargs: (None, "ps unavailable")
         )
 
         assert spawn_gate._footprint_cause_evidence() is None
+
+    def test_footprint_cause_reader_uses_bounded_ps_timeout(self, monkeypatch):
+        from fno import doctor_footprint
+
+        calls: list[dict[str, object]] = []
+
+        def unavailable_ps(**kwargs):
+            calls.append(kwargs)
+            return None, "ps unavailable: timed out after 5.0s"
+
+        monkeypatch.setattr(doctor_footprint, "_read_ps", unavailable_ps)
+
+        assert spawn_gate._footprint_cause_evidence() is None
+        assert calls == [{"timeout": 5.0}]
 
     def test_under_cap_passes_silently(self, monkeypatch, capsys):
         """AC1-HP: nothing on stderr, no queue, guard holds the mutex."""

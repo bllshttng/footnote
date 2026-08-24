@@ -26,6 +26,20 @@ def _fake_runner(ps_output: str, roster: list[dict], calls: list[list[str]]):
     return run
 
 
+def test_ac9_edge_ps_timeout_is_unavailable(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    def timed_out(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(doctor_footprint.subprocess, "run", timed_out)
+
+    output, error = doctor_footprint._read_ps(timeout=5.0)
+
+    assert output is None
+    assert error == "ps unavailable: timed out after 5.0s"
+
+
 def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:
     from fno import doctor_footprint
 

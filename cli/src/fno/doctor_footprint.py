@@ -24,26 +24,32 @@ def _fno_binary() -> str:
     return shutil.which("fno") or shutil.which("fno-py") or "fno"
 
 
-def _read_ps() -> tuple[str | None, str | None]:
+def _read_ps(*, timeout: float | None = None) -> tuple[str | None, str | None]:
     path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w+", encoding="utf-8", prefix=".fno-footprint-", delete=False
         ) as output:
             path = Path(output.name)
-            result = subprocess.run(
-                ["ps", "-Ao", _PS_COLUMNS],
-                stdout=output,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
+            run_kwargs: dict[str, Any] = {
+                "stdout": output,
+                "stderr": subprocess.PIPE,
+                "text": True,
+                "check": False,
+            }
+            if timeout is not None:
+                run_kwargs["timeout"] = timeout
+            result = subprocess.run(["ps", "-Ao", _PS_COLUMNS], **run_kwargs)
             if result.returncode != 0:
                 detail = (result.stderr or "").strip() or f"exit {result.returncode}"
                 return None, f"ps unavailable: {detail}"
             output.flush()
             output.seek(0)
             return output.read(), None
+    except subprocess.TimeoutExpired:
+        if timeout is None:
+            return None, "ps unavailable: timed out"
+        return None, f"ps unavailable: timed out after {timeout:.1f}s"
     except OSError as exc:
         return None, f"ps unavailable: {exc}"
     finally:

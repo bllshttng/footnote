@@ -5,6 +5,18 @@ from __future__ import annotations
 from fno.footprint import parse_footprint
 
 
+def test_ac3_edge_truncated_new_format_row_is_unparsed() -> None:
+    reading = parse_footprint(
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        101 1 5 20 fno --version
+        """,
+    )
+
+    assert reading.unparsed_lines == 1
+    assert reading.process_count == 0
+
+
 def test_ac1_hp_attributes_transitive_build_descendants_and_excludes_negative_tree() -> None:
     reading = parse_footprint(
         """\

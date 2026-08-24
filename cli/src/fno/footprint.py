@@ -93,35 +93,49 @@ def parse_footprint(
     """
     processes: dict[int, _Process] = {}
     unparsed_lines = 0
+    new_format = False
 
     for raw_line in ps_output.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("PID "):
+        if not line:
+            continue
+        if line.startswith("PID "):
+            new_format = len(line.split()) >= 2 and line.split()[1] == "PPID"
             continue
         try:
             fields = line.split(None, 5)
-            new_shape = False
-            if len(fields) == 6:
-                try:
-                    pid = int(fields[0])
-                    ppid = int(fields[1])
-                    elapsed = _elapsed_seconds(fields[2])
-                    cpu_percent = float(fields[3])
-                    rss = int(fields[4])
-                    command = fields[5].strip()
-                    new_shape = True
-                except (TypeError, ValueError):
-                    new_shape = False
-            if not new_shape:
-                fields = line.split(None, 4)
-                if len(fields) != 5:
-                    raise ValueError("wrong field count")
+            if new_format:
+                if len(fields) != 6:
+                    raise ValueError("wrong new-format field count")
                 pid = int(fields[0])
-                ppid = None
-                elapsed = _elapsed_seconds(fields[1])
-                cpu_percent = float(fields[2])
-                rss = int(fields[3])
-                command = fields[4].strip()
+                ppid = int(fields[1])
+                elapsed = _elapsed_seconds(fields[2])
+                cpu_percent = float(fields[3])
+                rss = int(fields[4])
+                command = fields[5].strip()
+            else:
+                new_shape = False
+                if len(fields) == 6:
+                    try:
+                        pid = int(fields[0])
+                        ppid = int(fields[1])
+                        elapsed = _elapsed_seconds(fields[2])
+                        cpu_percent = float(fields[3])
+                        rss = int(fields[4])
+                        command = fields[5].strip()
+                        new_shape = True
+                    except (TypeError, ValueError):
+                        new_shape = False
+                if not new_shape:
+                    fields = line.split(None, 4)
+                    if len(fields) != 5:
+                        raise ValueError("wrong field count")
+                    pid = int(fields[0])
+                    ppid = None
+                    elapsed = _elapsed_seconds(fields[1])
+                    cpu_percent = float(fields[2])
+                    rss = int(fields[3])
+                    command = fields[4].strip()
             if pid < 0 or (ppid is not None and ppid < 0) or not command or cpu_percent < 0 or rss < 0:
                 raise ValueError("invalid process fields")
         except (TypeError, ValueError):
