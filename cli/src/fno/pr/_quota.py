@@ -169,6 +169,36 @@ def _pr_number(args: Sequence[str]) -> str:
     return "<n>"
 
 
+def command_args(args: Sequence[str]) -> list[str]:
+    """Drop gh-wide options so equivalent command spellings share one policy.
+
+    Lives here (not in gh_proxy) because the broker and this module's argv
+    guard must agree on what counts as the command word; gh_proxy imports this
+    module, never the reverse.
+    """
+    def strip(tokens: list[str]) -> list[str]:
+        while tokens:
+            token = tokens[0]
+            if token in {"-R", "--repo", "--hostname"}:
+                if len(tokens) < 2:
+                    return []
+                tokens = tokens[2:]
+            elif (
+                (token.startswith("-R") and token != "-R")
+                or token.startswith("--repo=")
+                or token.startswith("--hostname=")
+            ):
+                tokens = tokens[1:]
+            else:
+                break
+        return tokens
+
+    normalized = strip(list(args))
+    if normalized[:1] == ["pr"]:
+        normalized = ["pr", *strip(normalized[1:])]
+    return normalized
+
+
 def _malformed_argv_refusal(first: str) -> str:
     """Teach the shape at the point a flag-first argv would exec into noise.
 
@@ -224,8 +254,14 @@ def execute_graphql(
         return Result(2, "", "purpose must be discretionary or coverage")
     if not gh_args:
         return Result(2, "", "graphql-exec needs gh arguments after --")
-    if gh_args[0].startswith("-"):
-        return Result(2, "", _malformed_argv_refusal(gh_args[0]))
+    # Judge the command word, not the raw first token: gh legalizes gh-wide
+    # options before the command word (`gh -R o/r api graphql ...`), and the
+    # broker forwards that spelling verbatim. The exec below still uses the
+    # full argv, so the option values ride along.
+    command = command_args(list(gh_args))
+    if not command or command[0].startswith("-"):
+        first = command[0] if command else gh_args[0]
+        return Result(2, "", _malformed_argv_refusal(first))
     if purpose == "coverage" and not _coverage_read(gh_args):
         return Result(2, "", "coverage reserve accepts review-coverage reads only")
     # A caller spelling bare ``gh`` inside a protected worker would resolve to

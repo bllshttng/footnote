@@ -130,6 +130,47 @@ def test_flag_first_argv_is_refused_for_coverage_too(tmp_path):
     assert calls == []
 
 
+def test_gh_global_flags_before_the_command_word_still_execute(tmp_path):
+    """`gh -R o/r api graphql ...` is legal gh and the broker forwards it."""
+    calls: list[list[str]] = []
+    argv = ["-R", "o/r", "api", "graphql", "-f", "query={viewer{login}}"]
+    result = _quota.execute_graphql(
+        "discretionary",
+        argv,
+        runner=_runner(5000, calls, Result(0, "ok", "")),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == 0
+    assert calls[-1] == ["/real/gh", *argv], "the exec must keep the full argv"
+
+    attached = ["--repo=o/r", "api", "graphql", "-f", "query={viewer{login}}"]
+    calls.clear()
+    result = _quota.execute_graphql(
+        "discretionary",
+        attached,
+        runner=_runner(5000, calls, Result(0, "ok", "")),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == 0
+    assert calls[-1] == ["/real/gh", *attached]
+
+
+def test_dangling_gh_global_flag_is_refused(tmp_path):
+    calls: list[list[str]] = []
+    result = _quota.execute_graphql(
+        "discretionary",
+        ["-R"],
+        runner=_runner(5000, calls),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == 2
+    assert "command words first" in result.stderr
+    assert calls == []
+
+
 def test_command_word_argv_still_reaches_the_runner(tmp_path):
     calls: list[list[str]] = []
     result = _quota.execute_graphql(

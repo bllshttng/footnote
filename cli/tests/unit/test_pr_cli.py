@@ -123,15 +123,32 @@ _ROUTE_RE = re.compile(r"fno do pr ([a-z][a-z0-9-]*)")
 def _refusal_named_pr_verbs() -> set[str]:
     """Every `fno do pr <verb>` a refusal surface names, read from source.
 
-    Scans the PreToolUse hook text and the quota broker's floor-refusal
-    output, so a future refusal naming a missing or shape-broken verb fails
-    the guard test instead of advertising a remedy nobody executed.
+    Scans the PreToolUse hook text, the quota broker's floor refusal, and the
+    broker's malformed-argv refusal, so a future refusal naming a missing or
+    shape-broken verb fails the guard test instead of advertising a remedy
+    nobody executed. One hop through each surface's rendered help covers help
+    text that names further routes (the graphql-exec epilog teaches its own
+    argv); deeper text like an unrelated verb's skill reference stays out.
     """
-    texts = [_HOOK_SOURCE.read_text()]
-    texts.append(_quota._refusal(["pr", "view", "930"], reset=None))
-    verbs: set[str] = set()
+    texts = [
+        _HOOK_SOURCE.read_text(),
+        _quota._refusal(["pr", "view", "930"], reset=None),
+        _quota._malformed_argv_refusal("-f"),
+    ]
+    frontier: set[str] = set()
     for text in texts:
-        verbs.update(_ROUTE_RE.findall(text))
+        frontier.update(_ROUTE_RE.findall(text))
+    verbs: set[str] = set()
+    while frontier:
+        verb = frontier.pop()
+        if verb in verbs:
+            continue
+        result = runner.invoke(app, ["do", "pr", verb, "--help"])
+        assert result.exit_code == 0, (
+            f"refusal names `fno do pr {verb}` but --help fails"
+        )
+        verbs.add(verb)
+        frontier.update(_ROUTE_RE.findall(result.stdout))
     assert verbs, "route scan found nothing; the guard went blind"
     return verbs
 
