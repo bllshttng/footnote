@@ -379,7 +379,20 @@ pub fn load() -> Loaded {
         // demo env inherits nothing from the operator's root.
         Err(e) if e.kind() == io::ErrorKind::NotFound => match legacy_read() {
             Ok(s) => return loaded_from_raw(&legacy_path(), s),
-            Err(_) => return Loaded::default(),
+            // Absent or gated fallback: a fresh store, no notice - the
+            // normal first-run shape after the state root moves.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Loaded::default(),
+            // An UNREADABLE legacy file still speaks, matching the primary
+            // path's arm: the same bytes at the primary location would say
+            // so, and silent-empty would report "no squads persisted".
+            Err(e) => {
+                return Loaded {
+                    notice: Some(format!(
+                        "could not read the legacy squads.json ({e}); treating as empty"
+                    )),
+                    ..Loaded::default()
+                }
+            }
         },
         // Unreadable is NOT missing. Collapsing the two made a permission
         // error or non-UTF-8 content render as an empty store, so prune

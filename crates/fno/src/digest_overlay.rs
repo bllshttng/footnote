@@ -502,7 +502,7 @@ fn resolve_config_key(cwd: &Path, from_file: &dyn Fn(&Path) -> Option<String>) -
 
 /// `std::env::var_os` but an empty value reads as unset, the OsString twin of
 /// [`non_empty_env`] for callers that build paths rather than parse text.
-fn non_empty_env_os(key: &str) -> Option<std::ffi::OsString> {
+pub(crate) fn non_empty_env_os(key: &str) -> Option<std::ffi::OsString> {
     match std::env::var_os(key) {
         Some(v) if !v.is_empty() => Some(v),
         _ => None,

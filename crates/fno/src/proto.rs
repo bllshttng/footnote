@@ -2702,13 +2702,14 @@ fn warn_once_unexpandable_state_dir(raw: &str) {
     });
 }
 
-/// The legacy global settings.yaml sibling, when it exists and mentions a
-/// state_dir the TOML-only reader can never see. Python keeps BOTH global
-/// files as read candidates (`_prefer_toml`: config.toml wins per key, the
-/// yaml still loads), so a state_dir that lives only in the yaml moves every
-/// Python surface while this reader - and the mux - stay on the default root.
-/// Substring detection is a heuristic that only gates a WARNING: it can fire
-/// on a comment, but it never silently swallows a real divergence.
+/// The legacy global settings.yaml sibling, when it exists and names a
+/// state_dir VALUE that diverges from the root this resolver would use.
+/// Python keeps BOTH global files as read candidates (`_prefer_toml`:
+/// config.toml wins per key, the yaml still loads), so a state_dir that
+/// lives only in the yaml moves every Python surface while this reader -
+/// and the mux - stay on the default root. A yaml whose value AGREES (the
+/// explicit pre-migration spelling of the default root) is not a
+/// divergence and never warns.
 #[cfg(not(test))]
 pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> {
     if non_empty_env_is_set("FNO_CONFIG") {
@@ -2716,15 +2717,22 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
     }
     let yaml = crate::digest_overlay::global_settings_yaml_sibling()?;
     let body = std::fs::read_to_string(&yaml).ok()?;
-    // The VALUE, not a substring: a yaml whose state_dir names the default
-    // root (the explicit pre-migration spelling) agrees with this resolver,
-    // and a comment or nested mention is not a key at all. Warning in either
-    // case would fire on every verb forever over no divergence.
+    // The top-level VALUE, not a substring: an indented line is a nested
+    // mapping's key, not the global one, and a trailing `# comment` is not
+    // part of the value yaml hands Python. Either misread would warn on
+    // every verb forever over no divergence.
     let value = body.lines().find_map(|l| {
+        if l.starts_with(|c| c == ' ' || c == '\t') {
+            return None;
+        }
         let (key, val) = l.split_once(':')?;
-        key.trim()
-            .eq_ignore_ascii_case("state_dir")
-            .then(|| val.trim().trim_matches(|c| c == '\'' || c == '"'))
+        key.trim().eq_ignore_ascii_case("state_dir").then(|| {
+            val.split(" #")
+                .next()
+                .unwrap_or(val)
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+        })
     })?;
     if value.is_empty() {
         return None;
@@ -2739,7 +2747,7 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
 }
 
 fn non_empty_env_is_set(key: &str) -> bool {
-    std::env::var_os(key).is_some_and(|v| !v.is_empty())
+    crate::digest_overlay::non_empty_env_os(key).is_some()
 }
 
 /// Whether a legacy-location read fallback is allowed at all: only under
