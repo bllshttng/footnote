@@ -4,9 +4,10 @@ use serde::Deserialize;
 
 pub const CAPABILITY_TOML: &str = include_str!("harness_capabilities.toml");
 
-const SESSION_LANES: [&str; 4] = [
+const SESSION_LANES: [&str; 5] = [
     "interactive_create",
     "interactive_resume",
+    "interactive_attach",
     "headless_create",
     "headless_resume",
 ];
@@ -265,6 +266,9 @@ impl HarnessContract {
                 if !RESUME_KINDS.contains(&form.kind.as_str())
                     || form.tokens.iter().any(String::is_empty)
                     || (form.kind == "unsupported" && !form.tokens.is_empty())
+                    || (lane == "interactive_attach"
+                        && form.kind != "unsupported"
+                        && !form.tokens.iter().any(|token| token == "{short_id}"))
                     || (lane.ends_with("resume")
                         && form.kind != "unsupported"
                         && !form.tokens.iter().any(|token| token == "{session_id}"))
@@ -312,6 +316,16 @@ impl HarnessContract {
         lane: &str,
         session_id: Option<&str>,
     ) -> Result<Vec<String>, ContractError> {
+        self.render_session_argv_with_ids(harness, lane, session_id, None)
+    }
+
+    pub fn render_session_argv_with_ids(
+        &self,
+        harness: &str,
+        lane: &str,
+        session_id: Option<&str>,
+        short_id: Option<&str>,
+    ) -> Result<Vec<String>, ContractError> {
         let caps = self.capabilities(harness)?;
         let form =
             caps.resume_strategy.forms.get(lane).ok_or_else(|| {
@@ -322,6 +336,32 @@ impl HarnessContract {
                 harness,
                 "resume_strategy",
                 &format!("lane {lane:?} is unsupported"),
+            ));
+        }
+        if let Some(index) = form.tokens.iter().position(|token| token == "{short_id}") {
+            if session_id.is_some_and(|id| !id.is_empty()) {
+                return Err(field_error(
+                    harness,
+                    "resume_strategy",
+                    &format!("lane {lane:?} needs a short_id, not a session_id"),
+                ));
+            }
+            let Some(id) = short_id.filter(|id| !id.is_empty()) else {
+                return Err(field_error(
+                    harness,
+                    "resume_strategy",
+                    &format!("lane {lane:?} needs a non-empty short_id"),
+                ));
+            };
+            let mut tokens = form.tokens.clone();
+            tokens[index] = id.to_string();
+            return Ok(tokens);
+        }
+        if short_id.is_some_and(|id| !id.is_empty()) {
+            return Err(field_error(
+                harness,
+                "resume_strategy",
+                &format!("lane {lane:?} accepts a session_id, not a short_id"),
             ));
         }
         let Some(index) = form.tokens.iter().position(|token| token == "{session_id}") else {
@@ -396,6 +436,15 @@ pub fn render_session_argv(
     HarnessContract::packaged()?.render_session_argv(harness, lane, session_id)
 }
 
+pub fn render_session_argv_with_ids(
+    harness: &str,
+    lane: &str,
+    session_id: Option<&str>,
+    short_id: Option<&str>,
+) -> Result<Vec<String>, ContractError> {
+    HarnessContract::packaged()?.render_session_argv_with_ids(harness, lane, session_id, short_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,14 +457,14 @@ mod tests {
             "Python and packaged Rust contract copies diverged",
         );
         let contract = HarnessContract::packaged().unwrap();
-        assert_eq!(contract.map_version, 8);
+        assert_eq!(contract.map_version, 9);
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
             ["agy", "claude", "codex", "gemini", "opencode"]
         );
         for (name, caps) in &contract.harness {
             assert_eq!(caps.permission_response.len(), 3, "{name}");
-            assert_eq!(caps.resume_strategy.forms.len(), 4, "{name}");
+            assert_eq!(caps.resume_strategy.forms.len(), 5, "{name}");
             assert!(!caps.submit_keys.is_empty(), "{name}");
             assert!(!caps.stop_strategy.is_empty(), "{name}");
             assert!(!caps.remove_strategy.is_empty(), "{name}");
@@ -431,6 +480,27 @@ mod tests {
                 .unwrap(),
             ["claude", "--session-id", "c-1"]
         );
+        assert_eq!(
+            contract
+                .render_session_argv_with_ids(
+                    "claude",
+                    "interactive_attach",
+                    None,
+                    Some("deadbeef")
+                )
+                .unwrap(),
+            ["claude", "attach", "deadbeef"]
+        );
+        assert!(contract
+            .render_session_argv_with_ids(
+                "claude",
+                "interactive_attach",
+                Some("00000000-1111-2222-3333-444444444444"),
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("short_id"));
         assert_eq!(
             contract
                 .render_session_argv("codex", "interactive_resume", Some("cx-1"))

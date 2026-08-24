@@ -247,7 +247,10 @@ def _build_argv(
     """
     from fno.agents.harness_map import render_session_argv
 
-    lane = "headless_resume" if resume_session_id else "headless_create"
+    # A --bg supervisor is interactive even though it is hosted by the
+    # daemon. Keep it on the interactive create/resume forms; the headless
+    # resume form owns `-p` and would turn this worker into a one-shot process.
+    lane = "interactive_resume" if resume_session_id else "interactive_create"
     identity = render_session_argv("claude", lane, resume_session_id)
     argv = [identity[0], "--bg", "--name", name]
     # x-6de8: a routed bg session's serving process is forked by the daemon

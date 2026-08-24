@@ -1964,10 +1964,14 @@ where
         // fno-py's before -> after line) is what actually describes what
         // happened.
         eprintln!("fno agents resume: {name} is live");
-        Ok((
-            vec!["claude".into(), "attach".into(), short_id.into()],
+        let argv = crate::harness_capabilities::render_session_argv_with_ids(
+            "claude",
+            "interactive_attach",
             None,
-        ))
+            Some(short_id),
+        )
+        .map_err(|_| 13)?;
+        Ok((argv, None))
     } else if dead && has_uuid {
         // x-ae2d: this arm RELAUNCHES (the live arm above only attaches), so it
         // is the one door on this verb that can lose a route. A row that records
@@ -1980,7 +1984,12 @@ where
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|p| !p.is_empty());
-        let mut argv: Vec<String> = vec!["claude".into()];
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "claude",
+            "interactive_resume",
+            Some(uuid),
+        )
+        .map_err(|_| 13)?;
         if let Some(path) = route_settings {
             // Present is not enough. The file is the auth-scrub floor with the
             // route written on top, and claude reads an empty settings value as
@@ -2011,12 +2020,9 @@ where
                 return Err(13);
             }
             eprintln!("fno agents resume: restoring recorded route from {path}");
-            argv.push("--settings".into());
-            argv.push(path.into());
+            argv.splice(1..1, ["--settings".into(), path.into()]);
         }
         eprintln!("fno agents resume: {name} has exited - resuming in your terminal");
-        argv.push("--resume".into());
-        argv.push(uuid.into());
         Ok((argv, Some(uuid.to_string())))
     } else if !has_uuid {
         // No resumable uuid and no live socket to attach through: name the cause.
@@ -4328,7 +4334,7 @@ mod tests {
         );
         assert_eq!(
             build_resume_argv("claude", "abc123", None),
-            Some(vec!["claude".into(), "attach".into(), "abc123".into()])
+            Some(vec!["claude".into(), "--resume".into(), "abc123".into()])
         );
         assert_eq!(
             build_resume_argv("gemini", "g-1", None),

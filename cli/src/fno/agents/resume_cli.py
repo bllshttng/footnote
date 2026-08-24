@@ -23,11 +23,11 @@ instead of exec):
   a no-op detectable instead of a lie. Up to two wake attempts, each
   bounded by a fixed ~19s send sequence plus a 60s subprocess timeout, so
   a full failure takes up to roughly two minutes wall-clock, not instant.
-  ``--print-command`` still prints the OLD interactive form
-  (``claude attach <short_id>``) for a claude row: that is the manual
-  escape hatch for a human who wants to type into the session directly,
-  distinct from (and no longer equivalent to) what a direct
-  ``fno agents resume <name>`` now does.
+  ``--print-command`` prints the interactive attach form
+  (``claude attach <short_id>``) for a Claude background row: that is the
+  manual escape hatch for a human who wants to type into the session directly,
+  distinct from the verified PTY wake used by direct
+  ``fno agents resume <name>``.
 - ``gemini`` / ``opencode`` → exec into the provider's own resume CLI,
   same as codex.
 
@@ -120,6 +120,16 @@ def _build_resume_argv(
         grant = git_writable_config_args(Path(cwd)) if cwd else []
         return [argv[0], *grant, *argv[1:]]
     return argv
+
+
+def _build_attach_argv(short_id: str) -> Optional[list[str]]:
+    """Render Claude's live-supervisor attach form from its short id."""
+    from fno.agents.harness_map import DispatchResolveError, render_session_argv
+
+    try:
+        return render_session_argv("claude", "interactive_attach", short_id=short_id)
+    except DispatchResolveError:
+        return None
 
 
 _DEFAULT_WAKE_MESSAGE = "continue"
@@ -749,10 +759,9 @@ def resume_logic(
     # to keep wrapper diagnostics unambiguous. Codex P2 round 2.
     from fno.agents.harness_map import DispatchResolveError, capabilities
 
+    form_lane = "interactive_attach" if harness == "claude" else "interactive_resume"
     try:
-        resume_form = capabilities(harness or "?")["resume_strategy"]["forms"][
-            "interactive_resume"
-        ]
+        resume_form = capabilities(harness or "?")["resume_strategy"]["forms"][form_lane]
         resume_supported = resume_form["kind"] != "unsupported"
     except (DispatchResolveError, KeyError, TypeError):
         resume_supported = False
@@ -774,7 +783,10 @@ def resume_logic(
             ),
         )
 
-    argv = _build_resume_argv(harness or "?", session_id, cwd)
+    if harness == "claude":
+        argv = _build_attach_argv(getattr(entry, "short_id", "") or "")
+    else:
+        argv = _build_resume_argv(harness or "?", session_id, cwd)
     if argv is None:
         return ResumeResult(
             exit_code=13,
@@ -843,7 +855,7 @@ def resume_logic(
             emit_event = events_mod.emit
         return _resume_claude_wake(
             name=name,
-            short_id=session_id or "",
+            short_id=getattr(entry, "short_id", "") or "",
             session_id=session_id,
             cwd=cwd,
             harness=harness,

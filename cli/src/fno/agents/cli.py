@@ -4283,7 +4283,9 @@ def cmd_rm(
     check does not even cover). Do not tear a session down by hand: the
     harness session record IS the resume handle, and dropping it directly
     spends that handle for nothing this command has not already done. If one
-    is already orphaned, ``fno agents adopt <short-id>`` brings it back.
+    is already orphaned, use the retained full ``harness_session_id`` with
+    ``fno agents adopt``. A short id is only a best-effort lookup while durable
+    harness evidence still resolves it.
 
     Worktrees are NOT removed here (the harness row does not prove that its
     cwd is disposable). Reap them with

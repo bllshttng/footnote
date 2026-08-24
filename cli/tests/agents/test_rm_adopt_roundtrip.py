@@ -122,7 +122,7 @@ def test_rm_warns_before_the_teardown_and_names_adopt(
     # Positive markers, not an absence: assert the exact strings the recovery
     # needs, so a crashed writer that prints nothing cannot pass as a warning.
     warned = seen_before_shellout["stderr"]
-    assert SHORT_ID in warned, warned
+    assert SESSION_ID in warned, warned
     assert "fno agents adopt" in warned, warned
     assert "resume handle" in warned, warned
     assert seen_before_shellout["short_id"] == SHORT_ID
@@ -165,6 +165,19 @@ def test_rm_notice_prefers_the_full_session_id():
         short_id=SHORT_ID,
     )
     assert rm_notice.resume_handle_for(short_only) == SHORT_ID
+
+
+def test_rm_notice_labels_short_only_recovery_as_evidence_dependent():
+    notice = rm_notice.resume_handle_notice("b", "claude", SHORT_ID)
+    assert "best-effort" in notice
+    assert "durable" in notice
+    assert "fno agents adopt 0a6e775f" in notice
+
+
+def test_rm_notice_calls_the_full_uuid_the_recovery_handle():
+    notice = rm_notice.resume_handle_notice("a", "claude", SESSION_ID)
+    assert "full harness session UUID" in notice
+    assert f"fno agents adopt {SESSION_ID}" in notice
 
 
 # --------------------------------------------------------------------------
