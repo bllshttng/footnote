@@ -159,7 +159,10 @@ def _identity_receipt_refusal(
             f"({actual_fno_id or '<unknown>'})",
             None,
         )
-    return None, str(payload.get("text") or "")
+    frame_text = payload.get("text")
+    if not isinstance(frame_text, str):
+        return f"pane {pane_id} identity receipt has invalid text", None
+    return None, frame_text
 
 
 def prompt_refusal(

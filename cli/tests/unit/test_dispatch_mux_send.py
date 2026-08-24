@@ -133,6 +133,45 @@ def test_read_receipt_identity_mismatch_refuses_before_typing(monkeypatch, capsy
     assert "identity mismatch" in capsys.readouterr().err
 
 
+def test_read_receipt_without_text_refuses_before_typing(monkeypatch, capsys):
+    calls: list[dict] = []
+    entry = _entry()
+    entry.name = "worker"
+    monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+
+    def run(argv, **kwargs):
+        calls.append({"argv": list(argv), "input": kwargs.get("input")})
+        if argv[1:4] == ["mux", "pane", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='[{"pane_id":7,"name":"worker","fno_id":"worker-session"}]',
+                stderr="",
+            )
+        if argv[1:4] == ["mux", "pane", "read"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"pane_id":7,"pane_name":"worker",'
+                '"registry_fno_id":"worker-session"}',
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", run)
+    _detector(monkeypatch, [])
+
+    failure: list[str] = []
+    assert (
+        dispatch._mux_pane_send(
+            entry, "status?", guarded=False, failure_out=failure
+        )
+        is False
+    )
+    assert failure == ["pre-submit"]
+    assert not any(call["argv"][1:4] == ["mux", "pane", "send"] for call in calls)
+    assert "text" in capsys.readouterr().err
+
+
 def test_raw_send_is_byte_identical_and_still_audits(monkeypatch):
     """`raw=True` types exactly the caller's bytes and keeps the audit row.
 
