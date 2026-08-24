@@ -713,3 +713,78 @@ def test_a_future_stamp_is_not_an_age_on_either_board_reader():
     assert board._age_from_iso((now + timedelta(hours=3)).isoformat(), now) == "unknown age"
     assert board._age_from_iso((now + timedelta(seconds=2)).isoformat(), now) == "1m ago"
     assert board._age_from_iso((now - timedelta(hours=3)).isoformat(), now) == "3h ago"
+
+
+def test_stale_serve_makes_no_failure_diagnosis(capsys, tmp_path, monkeypatch):
+    """A degraded serve declares the check set unreadable; carrying the row's
+    `failures` beside that verdict would assert a diagnosis the same payload
+    calls unverifiable (verdict_line prints it, failures_note re-states it)."""
+    monkeypatch.setenv("FNO_PR_STATUS_CACHE_DIR", str(tmp_path))
+    from fno.pr import _cache
+
+    row = {
+        "ts": 1.0,
+        "exit": 0,
+        "output": {
+            "pr": "9",
+            "verdict": "red",
+            "settled": True,
+            "green": False,
+            "head": "abc",
+            "checks": {"total": 2},
+            "failures": [
+                {"check": "smoke", "step": "Lint", "first_error": "E1 boom"}
+            ],
+        },
+        "fail_count": 0,
+        "backoff_until": 0,
+    }
+    code = _cache._serve(row, stale=True)
+    cap = capsys.readouterr()
+    assert code == 3
+    assert "unknown" in cap.out
+    assert "failing:" not in cap.err
+    assert "smoke failed" not in cap.err
+    assert '"failures"' not in cap.out
+
+
+def test_live_backoff_window_serves_degraded_with_zero_network(capsys, tmp_path, monkeypatch):
+    """x-4eac: inside a secondary-rate-limit window the HEAD read is itself
+    the refused call, so a waiter's tick must answer from the row without
+    touching GitHub. A fresh (< TTL) row does NOT short-circuit: a push keeps
+    being noticed on the next tick, exactly as before."""
+    import json as _json
+    import time as _time
+
+    monkeypatch.setenv("FNO_PR_STATUS_CACHE_DIR", str(tmp_path))
+    from fno.pr import _cache, _rest
+
+    (tmp_path / "Owner--Repo-9-abc123def000.json").write_text(
+        _json.dumps(
+            {
+                "ts": _time.time() - 120,
+                "exit": 0,
+                "output": {
+                    "pr": "9",
+                    "verdict": "green",
+                    "settled": True,
+                    "green": True,
+                    "head": "abc123def000",
+                    "checks": {"total": 1},
+                },
+                "fail_count": 1,
+                "backoff_until": _time.time() + 300,
+            }
+        )
+    )
+
+    def boom(*a, **k):
+        raise AssertionError("head read fired inside a live backoff window")
+
+    monkeypatch.setattr(_rest, "fetch_pr_info_rest", boom)
+    monkeypatch.setattr(_rest, "_repo_slug", lambda cwd, runner=None: "Owner/Repo")
+    rc = _cache.cached_status("9")
+    cap = capsys.readouterr()
+    assert rc == 3
+    assert "unknown" in cap.out
+    assert "secondary rate limit backoff" in cap.out

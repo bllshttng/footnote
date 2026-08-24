@@ -19,6 +19,7 @@ allowed to disagree - a cancelled latest run is red AND unsettled:
     4  error    - could not fetch PR state (no PR, gh error, bad JSON)
     127 gh missing
 """
+
 from __future__ import annotations
 
 import json
@@ -274,6 +275,35 @@ def coverage_recompute_note(coverage: dict) -> None:
         sys.stderr.write(f"note: coverage recompute: {note}\n")
 
 
+def failures_note(payload: dict) -> None:
+    """Print the per-check failure notes on stderr.
+
+    Same discipline as `coverage_recompute_note`: the note reads the PAYLOAD,
+    never run_status locals, so the cache serve (`_cache._serve`) prints the
+    same failure detail the live read produced and every watcher sharing the
+    row sees why the PR is red without any of them re-reading the log.
+    """
+    import sys
+
+    for f in payload.get("failures") or []:
+        if not isinstance(f, dict):
+            continue
+        check = str(f.get("check") or "(unnamed check)")
+        line = f"note: {check} failed"
+        if f.get("step"):
+            line += f" at step '{f['step']}'"
+        if f.get("first_error"):
+            line += f": {f['first_error']}"
+        sys.stderr.write(line + "\n")
+        if f.get("unreached_steps"):
+            names = ", ".join(str(n) for n in f["unreached_steps"])
+            sys.stderr.write(
+                f"note: {check}: fail-fast never ran: {names}. An unreached step is not a pass.\n"
+            )
+        if f.get("detail"):
+            sys.stderr.write(f"note: {check}: {f['detail']}\n")
+
+
 def verdict_line(payload: dict) -> str:
     """One human line for the payload `fno do pr status` prints as JSON.
 
@@ -320,9 +350,7 @@ def verdict_line(payload: dict) -> str:
     cov_head = str(coverage.get("head_sha") or "")
     # Printed only on a mismatch: its presence is itself the signal, and a
     # matching coverage head is a fact nobody needs to check by eye.
-    coverage_at = (
-        f" (coverage at {cov_head[:12]})" if cov_head and cov_head != head else ""
-    )
+    coverage_at = f" (coverage at {cov_head[:12]})" if cov_head and cov_head != head else ""
     blockers = [str(b) for b in (payload.get("ready_blockers") or [])]
     if payload.get("stale_reason"):
         # The stale serve rewrites `ready` to False without touching
@@ -339,6 +367,18 @@ def verdict_line(payload: dict) -> str:
         clause = f"{len(blockers)} blockers: {', '.join(blockers)}"
     else:
         clause = "no blockers"
+    # A red line names its first failing check and step, so the one-line read
+    # already separates a pytest red from a lint red (the d-bdb035b6 incident:
+    # two `smoke` reds fifteen minutes apart, unrelated remedies). The full
+    # list rides in the JSON `failures` field and the stderr notes.
+    failures = payload.get("failures") or []
+    fail_slot = ""
+    if isinstance(failures, list) and failures and isinstance(failures[0], dict):
+        first = failures[0]
+        label = str(first.get("check") or "?")
+        if first.get("step"):
+            label += f"[{first['step']}]"
+        fail_slot = f" failing: {label}"
     return (
         f"{payload.get('pr')} "
         f"{str(payload.get('pr_state') or 'UNKNOWN').upper()} "
@@ -346,7 +386,7 @@ def verdict_line(payload: dict) -> str:
         f"{settled_slot} "
         f"{mergeable_slot} "
         f"{'ready' if payload.get('ready') else 'NOT-ready'} "
-        f"@ {head[:12] or 'unknown'}{coverage_at} - {clause}"
+        f"@ {head[:12] or 'unknown'}{coverage_at} - {clause}{fail_slot}"
     )
 
 
@@ -394,9 +434,17 @@ def _review_activity(branch: str, head: str, cwd: Optional[str]):
 
     if not branch:
         return ReviewActivity(
-            False, "", "", None,
-            {"probed": False, "path": None, "dirty": None, "head": None,
-             "note": "no head branch on the PR read"},
+            False,
+            "",
+            "",
+            None,
+            {
+                "probed": False,
+                "path": None,
+                "dirty": None,
+                "head": None,
+                "note": "no head branch on the PR read",
+            },
         )
     try:
         return review_activity(branch, pr_head=head, repo=cwd or os.getcwd())
@@ -564,6 +612,31 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     verdict, code, counts = verdict_for(rollup)
     green = verdict == "green"
 
+    # x-c124 / d-bdb035b6: a red verdict must name WHICH check failed and, so
+    # far as the job log tells, WHICH step and error - counts alone let a
+    # reader generalize one `smoke` red onto an unrelated PR. Runs inside this
+    # read (never on a second, per-watcher one), so the detail lands in the
+    # row `cached_status` serves and the whole fleet shares one enrichment
+    # per TTL. Additive: a detail failure degrades to counts, never to a
+    # wrong verdict.
+    failures = None
+    if verdict == "red":
+        from fno.pr._failures import collect_failures
+
+        try:
+            # Only SETTLED fails: a CANCELLED or STALE latest run is a
+            # taken-away run, not a concluded failure - its instruction is
+            # already the "push again or rerun" note, and a detail entry would
+            # read as a diagnosed defect that does not exist.
+            failing_rows = [
+                c
+                for c in _latest_per_name(rollup)
+                if _classify(c) == "fail" and _has_settled_marker(c)
+            ]
+            failures = collect_failures(failing_rows, cwd)
+        except Exception:  # noqa: BLE001 - the verdict stays authoritative
+            failures = None
+
     # A terminal PR (round 3) has no would-merge left: the coverage conjunct
     # guards what WOULD merge, and the probes that feed it are live reads a
     # closed PR can still burn - `gh pr view --json reviews` and a 120s
@@ -591,9 +664,17 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         from fno.pr._review_hold import ReviewActivity
 
         activity: Any = ReviewActivity(
-            False, "", "", None,
-            {"probed": False, "path": None, "dirty": None, "head": None,
-             "note": "not asked: PR is terminal"},
+            False,
+            "",
+            "",
+            None,
+            {
+                "probed": False,
+                "path": None,
+                "dirty": None,
+                "head": None,
+                "note": "not asked: PR is terminal",
+            },
         )
     else:
         # Additive review signal (x-705b): computed AFTER the authoritative CI
@@ -701,9 +782,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             posted, note = _reviews.publish_coverage_status(
                 int(pr), head=pr_json.get("headRefOid"), cwd=cwd
             )
-            coverage_status_repost = (
-                "reposted" if posted else f"repost failed: {note}"
-            )
+            coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
     payload = {
         "pr": pr,
         # The commit this verdict describes, so a caller can pin the
@@ -716,12 +795,15 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # verdict != unknown too (x-4271): a zero-real-check-run
         # rollup can have zero unsettled entries (every StatusContext
         # already settled) while still being an undecided read.
-        "settled": verdict != "unknown" and counts["total"] > 0
-        and counts["unsettled"] == 0,
+        "settled": verdict != "unknown" and counts["total"] > 0 and counts["unsettled"] == 0,
         "green": green,
         "pr_state": pr_json.get("state"),
         "mergeable": pr_json.get("mergeable"),
         "checks": counts,
+        # Red reads only: name the failing checks and, where the job log
+        # reads, the failing step, its first error line, and the steps
+        # fail-fast never reached (an unreached step is not a pass).
+        **({"failures": failures} if failures is not None else {}),
         "optional_reviews": reviews.get("optional_reviews", "unknown"),
         "optional_reviews_unresolved": unresolved,
         "optional_reviews_resolved_unchanged": resolved_unchanged,
@@ -758,9 +840,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # `2>/dev/null | grep '"settled": true'`), and stderr is already the
     # note channel this function uses below.
     sys.stderr.write(verdict_line(payload) + "\n")
-    sys.stdout.write(
-        json.dumps(payload) + "\n"
-    )
+    sys.stdout.write(json.dumps(payload) + "\n")
     # Same discipline as the unresolved-findings note below: a number a human
     # would misread gets its instruction beside it, on stderr. An unsettled
     # entry has two distinct causes and they need distinct instructions: a
@@ -857,6 +937,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # this" are different facts; the recompute note is the only thing that
     # separates them, and the JSON field alone would never reach a terminal.
     coverage_recompute_note(coverage)
+    failures_note(payload)
     return code
 
 
@@ -887,7 +968,16 @@ def main(argv: Sequence[str]) -> int:
         # polling one PR issue one network read per TTL. The
         # library entry (run_status) stays uncached for programmatic callers
         # and tests.
-        return cached_status(str(args[0]), refresh=refresh)
+        rc = cached_status(str(args[0]), refresh=refresh)
+        # x-4eac: the call counter. No agent could see its own spend, so the
+        # fleet's polls were invisible to the pollers. One stderr line on the
+        # CLI path only - library callers read `_proc.GH_CALLS` directly.
+        import sys
+
+        from fno.pr import _proc
+
+        sys.stderr.write(f"note: {_proc.GH_CALLS} gh call(s) this invocation\n")
+        return rc
     except ToolMissing:
         import sys
 

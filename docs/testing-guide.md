@@ -161,6 +161,8 @@ until ! grep -q pending out; do sleep 45; fno do pr status "$PR" --json > out; d
 until grep -q '"settled": true' out; do sleep 45; fno do pr status "$PR" --json > out; done
 ```
 
+The sanctioned watcher applies this rule for you. `fno do pr wait "$PR" --until settled --timeout 30m` polls the positive settled marker through the coalescing cache. N waiters on one PR cost one network read per TTL. The verb exits with the status verb's own code. Reach for it instead of writing either loop by hand.
+
 Both wait on a file the loop keeps rewriting, and they are one condition apart.
 The first tests for an ABSENCE, and an absence has two explanations: the checks really finished, or the command never produced usable output.
 When `gh` failed with a transient TLS error, the error text went into the file, contained no "pending", and the watcher announced that CI had settled while it was still running.

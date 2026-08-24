@@ -21,6 +21,7 @@ Code defaults, deliberately not operator config: TTL 60s, backoff base 60s,
 cap 900s. Env overrides exist for tests and one-off
 tuning: FNO_PR_STATUS_TTL, FNO_PR_STATUS_BACKOFF_CAP, FNO_PR_STATUS_CACHE_DIR.
 """
+
 from __future__ import annotations
 
 import fcntl
@@ -186,6 +187,10 @@ def _serve(row: dict, *, stale: bool) -> int:
         out["green"] = False
         out["settled"] = False
         out["ready"] = False
+        # The failure diagnosis goes with it: a payload that declares the
+        # check set unreadable must not also print `failing:` slots and
+        # per-check notes asserting a diagnosis it just called unverifiable.
+        out.pop("failures", None)
         out["stale_reason"] = (
             "secondary rate limit backoff - the check set is unreadable, so "
             "this is the last cached row degraded to unknown, not a verdict"
@@ -199,9 +204,7 @@ def _serve(row: dict, *, stale: bool) -> int:
     # the conversion is guarded where it happens rather than by widening
     # `finite_or_zero` into a timestamp validator it is not.
     try:
-        out["cached_at"] = (
-            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
-        )
+        out["cached_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
     except (OSError, OverflowError, ValueError):
         out["cached_at"] = None
         ts = 0.0
@@ -213,11 +216,12 @@ def _serve(row: dict, *, stale: bool) -> int:
     # A degraded-coverage note must survive the coalescing this module
     # exists to do: without this, the note reaches only the one session
     # whose live read produced the row and none of the serves that follow.
-    from fno.pr._status import coverage_recompute_note, verdict_line
+    from fno.pr._status import coverage_recompute_note, failures_note, verdict_line
 
     sys.stderr.write(verdict_line(out) + "\n")
     sys.stdout.write(json.dumps(out) + "\n")
     coverage_recompute_note(out.get("review_coverage") or {})
+    failures_note(out)
     return code
 
 
@@ -255,6 +259,28 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
         return run_status(pr, cwd)
 
     slug_key = slug.replace("/", "--")
+    # Backoff pre-check, zero network (x-4eac): inside a secondary-rate-limit
+    # window the HEAD read itself is the refused call, so every waiter's tick
+    # re-hit GitHub before reaching the serve it was going to make anyway -
+    # and a fixed-interval retry is exactly what sustains the window. Only a
+    # LIVE window short-circuits, and the row serves in the mode the normal
+    # path would have chosen: VERBATIM while fresh (a loud first-read error
+    # row keeps its exit 4 - degrading it would soften a refusal into an
+    # "unknown" nobody asked for), degraded once stale. Outside a window the
+    # head read fires on every call exactly as before, so a push is still
+    # noticed on the very next tick.
+    if not refresh:
+        for row in _rows_newest_first(slug_key, pr):
+            now = time.time()
+            if _num(row, "backoff_until") > now:
+                code = _serve(row, stale=now - _num(row, "ts") >= _ttl())
+                if code >= 0:
+                    return code
+            break  # newest row only: an expired window means read on, and so
+            # does an unservable one (no output / corrupt exit) - a row that
+            # cannot answer cannot stand in for the live read the window is
+            # trying to avoid; the live read is the only path left, exactly
+            # the choice the head-unreadable arm below makes when no row serves.
     info, _head_reason = fetch_pr_info_rest(pr, cwd=cwd)
     if info is None:
         if refresh:
@@ -351,15 +377,11 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 # clock: a read spanning the expiry then pushed the window
                 # PAST where it stood, extending the fleet's wait by the
                 # duration of the read.
-                backoff = (
-                    None if held else min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
-                )
+                backoff = None if held else min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
                 # Keep the last GOOD verdict for stale serving - its exit code
                 # too, so the served JSON and the process exit never disagree;
                 # with none, keep the error row itself (loud: verdict error).
-                had_prior = (
-                    (row or {}).get("exit") not in (4, None) and (row or {}).get("output")
-                )
+                had_prior = (row or {}).get("exit") not in (4, None) and (row or {}).get("output")
                 _write_row_locked(
                     p,
                     {
@@ -383,8 +405,13 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 # immediately instead of replaying an error from disk.
                 _write_row_locked(
                     p,
-                    {"ts": now, "exit": code, "output": output,
-                     "fail_count": 0, "backoff_until": 0},
+                    {
+                        "ts": now,
+                        "exit": code,
+                        "output": output,
+                        "fail_count": 0,
+                        "backoff_until": 0,
+                    },
                 )
                 # One row per PR: a served verdict must describe the current
                 # head, so superseded heads' rows (and locks) go now, not on

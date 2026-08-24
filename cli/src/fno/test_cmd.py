@@ -1258,6 +1258,19 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     return rc
 
 
+def _planned_step_lines(
+    steps: Sequence[tuple[str, str, str]], selected: Sequence[int]
+) -> list[str]:
+    """The one-line-per-step plan the full-mode prologue prints.
+
+    `fno.pr._failures.unreached_runner_steps` parses this exact prefix
+    (`smoke: planned: <name>`), so a red log names the steps fail-fast never
+    reached without re-deriving the registry. Emitter and parser share the
+    format through this function's docstring; change both together.
+    """
+    return [f"smoke: planned: {steps[i][0]}" for i in selected]
+
+
 def _execute_steps(
     root: Path, env: dict, steps: Sequence[tuple[str, str, str]], keep_going: bool
 ) -> tuple[list[tuple[str, str, float]], int]:
@@ -1456,6 +1469,12 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         label = "SKIP SUBSET"
     kg = " keep-going" if keep_going else ""
     print(f"smoke: mode={label} steps={len(selected)}/{total}{kg}", flush=True)
+    # One line per planned step: fail-fast means later steps never run, and a
+    # reader diffing these lines against the `smoke: pass|fail` lines below can
+    # name what was unreached from the log alone. Per-line, never a joined
+    # list: three registry step names contain a comma of their own.
+    for line in _planned_step_lines(steps, selected):
+        print(line, flush=True)
     if retry_fell_back:
         print("smoke: no usable failure record - falling back to FULL run", flush=True)
     if len(selected) != total:
