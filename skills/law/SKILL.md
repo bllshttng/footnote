@@ -33,7 +33,7 @@ If the enact command returns a real `d-...` receipt, report that id and the subj
 
 ## Safety boundary
 
-The only positive authority marker is the permission decision for the exact proposal-bound command. The hidden arm action also requires a hook proof, so an ordinary CLI call cannot stage consent. The engine validates the proposal id, content hash, session id, permission posture, tool input, expiry, and single-use status. It does this before minting a decision id or writing any store. Direct operator-authority CLI calls keep their existing refusal behavior. Environment scrubbing is forbidden.
+The only positive authority marker is the permission decision for the exact proposal-bound command. Arming is hook-only and is not exposed as a CLI command. The engine validates the proposal id, content hash, session id, permission posture, tool input, expiry, and single-use status. It does this before minting a decision id or writing any store. Direct operator-authority CLI calls keep their existing refusal behavior. Environment scrubbing is forbidden.
 
 ## Known Limitations and Deferred Work
 

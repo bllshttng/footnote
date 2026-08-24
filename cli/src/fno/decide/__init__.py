@@ -299,11 +299,30 @@ def record_decision(
         rationale=rationale,
         supersedes=supersedes,
     )
-    append_event(event, events_path=events_path(events_root))
+    if consent is not None:
+        from fno.law import claim_operator_consent
+
+        claim_operator_consent(
+            consent,
+            expected=consent_expected or {},
+            decision_id=decision_id,
+        )
+    try:
+        append_event(event, events_path=events_path(events_root))
+    except Exception:
+        if consent is not None:
+            from fno.law import release_operator_consent
+
+            release_operator_consent(consent, decision_id=decision_id)
+        raise
     if consent is not None:
         from fno.law import consume_operator_consent
 
-        consume_operator_consent(consent, expected=consent_expected or {})
+        consume_operator_consent(
+            consent,
+            expected=consent_expected or {},
+            decision_id=decision_id,
+        )
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:

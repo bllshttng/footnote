@@ -62,6 +62,7 @@ def test_exact_enact_command_asks_and_binds_preview_fields() -> None:
             "session_id": "human-session-1",
             "permission_mode": "default",
             "tool_input": COMMAND,
+            "cwd": str(REPO_ROOT),
         }
     ]
 
@@ -76,6 +77,16 @@ def test_non_prompting_modes_deny_without_arming() -> None:
         assert "/fno:law resume <proposal-id>" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
     assert calls == []
+
+
+def test_accept_edits_is_a_supported_prompting_mode() -> None:
+    gate = _gate()
+    result = gate.evaluate(
+        _payload(permission_mode="acceptEdits"),
+        arm=lambda **kwargs: {"proposal_id": PROPOSAL_ID},
+    )
+
+    assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 
 def test_malformed_or_wrapped_commands_deny() -> None:

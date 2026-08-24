@@ -84,6 +84,11 @@ def classify(payload: dict[str, Any], sentinel: str) -> tuple[dict[str, Any], in
     missing = sorted(REQUIRED_KEYS - payload.keys())
     if missing:
         return _receipt(payload, "unknown_schema", "required field missing"), 2
+    if any(
+        not isinstance(payload[key], str) or not payload[key].strip()
+        for key in REQUIRED_KEYS
+    ):
+        return _receipt(payload, "unknown_schema", "required field has invalid shape"), 2
 
     if payload.get("hook_event_name") != "UserPromptSubmit":
         return _receipt(payload, "unknown_schema", "unexpected hook event"), 2

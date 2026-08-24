@@ -4,24 +4,19 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import hmac
 import os
 import re
-import secrets
 import shlex
-import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 
-PROMPTING_MODES = frozenset({"default", "manual", "plan"})
+PROMPTING_MODES = frozenset({"default", "acceptEdits", "plan"})
 PROPOSAL_ID = re.compile(r"^lp-[0-9a-f]{12}$")
 CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
 RECOVERY = "/fno:law resume <proposal-id>"
-HOOK_SECRET = ".hook-secret"
 
 
 def _output(decision: str, reason: str) -> dict[str, Any]:
@@ -40,25 +35,6 @@ def _deny(reason: str) -> dict[str, Any]:
 
 def _mentions_enact(command: Any) -> bool:
     return isinstance(command, str) and re.search(r"\bfno\s+law\s+enact\b", command) is not None
-
-
-def _hook_proof(proposal_id: str, content_hash: str, session_id: str, mode: str, tool_input: str) -> str:
-    directory = Path.cwd() / ".fno" / "law-proposals"
-    directory.mkdir(parents=True, exist_ok=True)
-    secret_path = directory / HOOK_SECRET
-    try:
-        secret = secret_path.read_bytes()
-    except FileNotFoundError:
-        secret = secrets.token_bytes(32)
-        try:
-            fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            secret = secret_path.read_bytes()
-        else:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(secret)
-    message = "\0".join((proposal_id, content_hash, session_id, mode, tool_input))
-    return hmac.new(secret, message.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _parse_command(command: Any) -> tuple[str, str] | None:
@@ -83,44 +59,26 @@ def _parse_command(command: Any) -> tuple[str, str] | None:
     return proposal_id, content_hash
 
 
-def _arm_with_cli(**kwargs: str) -> dict[str, Any]:
-    binary = os.environ.get("FNO_BIN", "fno")
-    proc = subprocess.run(
-        [
-            binary,
-            "law",
-            "arm",
-            "--proposal",
+def _arm_from_current_source(**kwargs: str) -> dict[str, Any]:
+    cwd = Path(kwargs["cwd"]).resolve()
+    if not cwd.is_dir():
+        raise RuntimeError("session cwd is not a directory")
+    plugin_root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(plugin_root / "cli" / "src"))
+    from fno import law
+
+    previous = Path.cwd()
+    os.chdir(cwd)
+    try:
+        return law._arm_proposal_from_hook(
             kwargs["proposal_id"],
-            "--hash",
-            kwargs["content_hash"],
-            "--session-id",
-            kwargs["session_id"],
-            "--permission-mode",
-            kwargs["permission_mode"],
-            "--tool-input",
-            kwargs["tool_input"],
-            "--proof",
-            _hook_proof(
-                kwargs["proposal_id"],
-                kwargs["content_hash"],
-                kwargs["session_id"],
-                kwargs["permission_mode"],
-                kwargs["tool_input"],
-            ),
-        ],
-        cwd=kwargs.get("cwd") or None,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=5,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or "arm command failed")
-    value = json.loads(proc.stdout)
-    if not isinstance(value, dict):
-        raise RuntimeError("arm command returned an invalid receipt")
-    return value
+            content_hash=kwargs["content_hash"],
+            session_id=kwargs["session_id"],
+            permission_mode=kwargs["permission_mode"],
+            tool_input=kwargs["tool_input"],
+        )
+    finally:
+        os.chdir(previous)
 
 
 def _preview(proposal: dict[str, Any]) -> str:
@@ -136,7 +94,7 @@ def _preview(proposal: dict[str, Any]) -> str:
 def evaluate(
     payload: dict[str, Any],
     *,
-    arm: Callable[..., dict[str, Any]] = _arm_with_cli,
+    arm: Callable[..., dict[str, Any]] = _arm_from_current_source,
 ) -> dict[str, Any] | None:
     """Return a permission decision only for the canonical enact command."""
     tool_name = payload.get("tool_name")
@@ -165,6 +123,7 @@ def evaluate(
             session_id=session_id,
             permission_mode=mode,
             tool_input=command,
+            cwd=str(payload.get("cwd") or ""),
         )
     except Exception as exc:  # noqa: BLE001 - a hook failure must deny this action
         return _deny(f"proposal arm failed: {exc}")

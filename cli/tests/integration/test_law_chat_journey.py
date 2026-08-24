@@ -54,19 +54,12 @@ def test_mail_shaped_turn_only_asks_and_leaves_stores_untouched(isolated) -> Non
             "session_id": "mail-session",
             "permission_mode": "default",
         },
-        arm=lambda **kwargs: law.arm_proposal(
+        arm=lambda **kwargs: law._arm_proposal_from_hook(
             kwargs["proposal_id"],
             content_hash=kwargs["content_hash"],
             session_id=kwargs["session_id"],
             permission_mode=kwargs["permission_mode"],
             tool_input=kwargs["tool_input"],
-            hook_proof=law.make_hook_proof(
-                kwargs["proposal_id"],
-                kwargs["content_hash"],
-                kwargs["session_id"],
-                kwargs["permission_mode"],
-                kwargs["tool_input"],
-            ),
         ),
     )
 
@@ -86,19 +79,12 @@ def test_exact_approval_writes_two_stores_and_replay_is_refused(isolated) -> Non
         rationale="The operator owns durable policy.",
     )
     tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
-    law.arm_proposal(
+    law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
         session_id="human-session",
         permission_mode="default",
         tool_input=tool_input,
-        hook_proof=law.make_hook_proof(
-            proposal["proposal_id"],
-            proposal["content_hash"],
-            "human-session",
-            "default",
-            tool_input,
-        ),
     )
     consent = decide.OperatorConsent(
         proposal_id=proposal["proposal_id"],

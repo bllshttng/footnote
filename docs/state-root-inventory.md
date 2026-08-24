@@ -96,7 +96,7 @@ The rule above governs the state root, but its shape repeats inside a checkout: 
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `.claude/worktrees/preflight` (or `<worktrees_base>/<repo>/preflight` when configured) | `scripts/ci/preflight.sh` | permanent; hard-reset to the candidate SHA each run, caches deliberately preserved |
-| `.fno/law-proposals/<proposal-id>.json`, `.hook-secret` | `cli/src/fno/law.py` and `hooks/law-authority-gate.py` via `paths.law_proposals_dir()` | proposals pending for 15 minutes, armed for 2 minutes, consumed or expired for at most 24 hours, then pruned by the proposal writer; hook secret persists per worktree |
+| `.fno/law-proposals/<proposal-id>.json` | `cli/src/fno/law.py` and `hooks/law-authority-gate.py` via `paths.law_proposals_dir()` | proposals pending for 15 minutes, armed for 2 minutes, consumed or expired for at most 24 hours, then pruned by the proposal writer |
 
 The sweep's matching keep rule is `kept (permanent)` in `scripts/lib/worktree-lifecycle.sh`, keyed on the basename so it follows the worktree base wherever config puts it.
 

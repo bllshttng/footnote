@@ -82,3 +82,14 @@ def test_unrecognized_provenance_field_fails_closed(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert json.loads(result.stdout)["origin_provenance"] == "unknown_schema"
+
+
+def test_malformed_required_path_shape_fails_closed(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        _payload(cwd={"path": "/private/worktree"}),
+        "sentinel-typed-7f8c",
+    )
+
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["origin_provenance"] == "unknown_schema"
