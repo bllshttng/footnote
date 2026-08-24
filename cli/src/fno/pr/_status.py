@@ -883,7 +883,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # unsettled entries that are all still-running settles as `pending`, not
     # `red`, and the note must not claim otherwise.
     if counts.get("unsettled"):
-        unsettled_now = [c for c in _latest_per_name(rollup) if not _has_settled_marker(c)]
+        unsettled_now = [
+            c for c in _latest_per_name(generic_rollup) if not _has_settled_marker(c)
+        ]
         absent = [
             c for c in unsettled_now if str(c.get("status") or "").upper() in ("", "COMPLETED")
         ]

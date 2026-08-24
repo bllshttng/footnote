@@ -379,6 +379,27 @@ def test_pending_and_cancelled_get_their_own_distinct_notes(monkeypatch, capsys)
     assert "smoke" in pending_note and "ci" not in pending_note
 
 
+def test_pending_note_skips_coverage_contexts(monkeypatch, capsys):
+    """codex P2: coverage StatusContexts are filtered out of the
+    generic CI verdict, so the pending-check guidance must not resurrect them
+    from the unfiltered rollup. A pending coverage context means "retry the
+    review verb", never "wait for the run" - naming it in the wait note sent
+    the operator to sleep on a read that needed a retry."""
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [
+            {"name": "ci", "status": "QUEUED", "conclusion": None},
+            {"context": "fno/review-coverage", "state": "PENDING"},
+            {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+        ],
+    )
+    assert code == 2
+    assert out["checks"]["unsettled"] == 1
+    assert "still queued or running" in err
+    assert "fno/review-coverage" not in err
+
+
 def test_latest_in_progress_over_earlier_success_is_pending():
     """AC3: latest ci run IN_PROGRESS (empty conclusion, startedAt after the
     earlier ci SUCCESS completed) -> pending, never green or red."""
