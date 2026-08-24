@@ -1968,9 +1968,16 @@ def _checks_verdict(
     rollup = data.get("statusCheckRollup") or []
     ignored = set(ignore_contexts)
     if ignored:
-        # StatusContexts use `context`; CheckRuns use `name`. Keep those
-        # namespaces distinct so a same-named real check is never discarded.
-        rollup = [entry for entry in rollup if entry.get("context") not in ignored]
+        # StatusContexts use `context`; CheckRuns use `name`. The shared
+        # filter (without_coverage_statuses) drops on BOTH keys, and this
+        # path must classify the same rollup it does: an internal-gh rollup
+        # spells a status row's name as its context, so dropping on `context`
+        # alone leaves the projections in as name-keyed rows.
+        rollup = [
+            entry
+            for entry in rollup
+            if entry.get("context") not in ignored and entry.get("name") not in ignored
+        ]
     # Whole-rollup semantics: with require_checks_pass, every check must pass.
     # A required-vs-optional split would need branch-protection context that
     # `gh pr view` does not expose - its statusCheckRollup entries carry no
