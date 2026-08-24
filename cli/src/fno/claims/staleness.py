@@ -97,14 +97,18 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     A TTL claim within its window is LIVE when its pid is live, else SUSPECT
     (x-ba4b) - never reclaimable until the TTL actually expires.
 
-    HYBRID liveness (ab-cc5553f2): a TTL claim whose clock has lapsed is NOT
-    unconditionally STALE - if its recorded pid is a live process on this host
-    it is still LIVE, because the session is alive (incl. SIGSTOP-suspended)
-    even though the TTL expired. This is purely additive: it only ever extends
-    liveness, never shortens it. A transient/dead/off-host pid (today's default
-    ``os.getpid()`` of the acquire subprocess) fails ``is_live`` -> STALE
-    exactly as before, so every non-suspended case is byte-for-byte today.
-    ``is_live`` already guards host + pid-reuse (create_time < acquired_at).
+    HYBRID liveness (ab-cc5553f2), corroborated: a TTL claim whose clock has
+    lapsed is NOT unconditionally STALE - a live recorded pid keeps it LIVE
+    only when that pid was PROVEN to be the holder session's own process at
+    write time (``pid_provenance == "session-prover"``, verified against the
+    process-tree prover when the claim was filed). A live pid under any other
+    provenance - caller-supplied, resolved through an ambient harness marker,
+    or a legacy claim with no field - falls to STALE at expiry, exactly as a
+    pre-hybrid claim did. The corroboration is what keeps the arm load-bearing
+    without letting a foreign process answer for the holder: a TTL is a lease,
+    and a live foreign pid (the specimen: a chat app's app-server) must not
+    make it permanent. ``is_live`` still guards host + pid-reuse
+    (create_time < acquired_at).
 
     SUSPECT arm (x-ba4b): a TTL claim still inside its window whose recorded pid
     is NOT live reads SUSPECT, not LIVE. Dead-pid-but-unexpired is the respawned-
@@ -113,9 +117,12 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     frees the claim (-> STALE). Mirrors ``claims.rs::classify``.
     """
     if is_expired(claim, now=now):
-        # HYBRID: an expired clock does NOT imply a dead session - check the
-        # pid before declaring stale (a transient/dead pid still falls to STALE).
-        return ClaimState.LIVE if is_live(claim) else ClaimState.STALE
+        # HYBRID, corroborated: an expired clock does NOT imply a dead session,
+        # but a live pid speaks for the holder only when it was prover-proven
+        # at write time. Anything else - an ambient pid a foreign process
+        # answers for, or a legacy claim that cannot prove its pid - is STALE.
+        corroborated = claim.pid_provenance == "session-prover" and is_live(claim)
+        return ClaimState.LIVE if corroborated else ClaimState.STALE
     if claim.expires_at is None:
         return ClaimState.LIVE if is_live(claim) else ClaimState.STALE
     # TTL claim, not yet expired: live pid => LIVE, dead/replaced pid => SUSPECT
@@ -141,8 +148,10 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
 
     A dead-pid-but-unexpired TTL claim is SUSPECT, not STALE: the TTL still
     protects the slot for a respawned worker. And on this machine an expired
-    TTL whose pid is still live reads LIVE (the hybrid arm in ``classify``),
-    so the expiry arm never reaps a running local session.
+    TTL whose pid is still live reads LIVE only when that pid was prover-proven
+    (the corroborated hybrid arm in ``classify``), so the expiry arm never reaps
+    a running local session - but it does reap an expired claim whose pid a
+    foreign process merely answers for.
 
     Host-independent expiry is what keeps the store from filling forever
     (x-cd1e). ``machine_id`` is authoritative when present, but a claim written
@@ -174,9 +183,10 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
     # existed, identified by a hostname that MOVES, so it can never satisfy a
     # same-machine proof and stays unreapable for the life of the disk.
     #
-    # A claim that DOES name another machine keeps the gate. classify()'s hybrid
-    # arm reads an expired claim as LIVE when its pid is live, and that pid is
-    # only meaningful on the machine that wrote it. Reaping from here would let
+    # A claim that DOES name another machine keeps the gate. classify()'s
+    # corroborated hybrid arm reads an expired claim as LIVE when its pid is
+    # live AND prover-proven, and that pid is only meaningful on the machine
+    # that wrote it. Reaping from here would let
     # this host archive a claim its owner is still refreshing, and the next
     # reader would see the node free and staff a second worker onto it.
     unidentifiable = not claim.machine_id

@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
+import sys
+import time
 from unittest.mock import patch
 
 import psutil
@@ -26,6 +29,7 @@ from fno.claims.core import (
     HolderMismatch,
     acquire_claim,
     claim_status,
+    compare_and_rebind,
     force_release_claim,
     list_claims,
     refresh_claim,
@@ -229,23 +233,26 @@ class TestAcquire:
         assert new.holder == HOLDER_B
 
     def test_hybrid_expired_live_pid_not_reclaimable(self, tmp_path):
-        """HYBRID (codex P1): an expired TTL claim whose recorded pid is a live
-        process on this host is NOT reclaimable - acquire must honor the same
-        hybrid liveness as classify(), so a peer parks instead of stealing the
-        node from a suspended-but-alive session (AC1-ERR)."""
+        """CORROBORATED HYBRID (codex P1): an expired TTL claim whose recorded
+        pid is a live PROVER-PROVEN process is NOT reclaimable - acquire must
+        honor the same hybrid liveness as classify(), so a peer parks instead
+        of stealing the node from a suspended-but-alive session (AC1-ERR)."""
         # Anchor acquired_at AFTER this process's create_time so is_live's
         # pid-reuse guard (create_time < acquired_at) passes; both timestamps
-        # are in the past so the TTL is expired.
+        # are now-relative and in the past so the TTL is expired on any runner
+        # speed (a create-relative expiry is still future on a fast one).
         proc_create_ms = int(psutil.Process(os.getpid()).create_time() * 1000)
+        assert now_ms() - 100 > proc_create_ms
         path = claim_path("k", root=tmp_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         expired_live = Claim(
             key="k",
             holder=HOLDER_A,
-            acquired_at=proc_create_ms + 1000,  # after this proc started -> live
-            expires_at=proc_create_ms + 2000,   # in the past -> TTL lapsed
-            pid=os.getpid(),                     # alive on this host
+            acquired_at=now_ms() - 100,   # after this proc started -> live
+            expires_at=now_ms() - 50,     # in the past -> TTL lapsed
+            pid=os.getpid(),               # alive on this host
             host=socket.gethostname(),
+            pid_provenance="session-prover",
         )
         path.write_text(serialize_claim(expired_live))
 
@@ -255,6 +262,169 @@ class TestAcquire:
         # The live claim was NOT archived.
         archive_dir = claims_dir(tmp_path) / ".expired"
         assert not (archive_dir.exists() and any(archive_dir.iterdir()))
+
+    def test_expired_live_ambient_pid_is_reclaimable(self, tmp_path):
+        """THE SPECIMEN'S ACQUIRE SIDE: the same expired claim WITHOUT
+        provenance (a foreign process merely answers for the pid) IS
+        reclaimable. A live pid that was never proven to be the holder
+        session's own process cannot outrank the TTL, or the lease is not a
+        lease - this is what unblocks a fenced merge peer."""
+        proc_create_ms = int(psutil.Process(os.getpid()).create_time() * 1000)
+        # now-relative, not create-relative: acquired 100ms ago (after proc
+        # start, so the pid-reuse guard passes) and expired 50ms ago. A
+        # create-relative expiry is in the future on a fast runner and the
+        # claim lands in the unexpired arm for an unrelated reason.
+        assert now_ms() - 100 > proc_create_ms
+        path = claim_path("k", root=tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        expired_foreign = Claim(
+            key="k",
+            holder=HOLDER_A,
+            acquired_at=now_ms() - 100,
+            expires_at=now_ms() - 50,
+            pid=os.getpid(),
+            host=socket.gethostname(),
+            pid_provenance="ambient",
+        )
+        path.write_text(serialize_claim(expired_foreign))
+
+        new = acquire_claim("k", HOLDER_B, root=tmp_path)
+        assert new.holder == HOLDER_B
+
+
+# ---------------------------------------------------------------------------
+# pid provenance stamping: every writer earns its field or says ambient
+# ---------------------------------------------------------------------------
+
+
+class TestPidProvenanceStamping:
+    """The corroborated hybrid arm is only as honest as the stamp, so the
+    stamp is earned centrally at write time against the process-tree prover -
+    never asserted by a writer that merely had a pid lying around."""
+
+    def test_prover_resolved_pid_on_a_ttl_claim_stamps_session_prover(self, tmp_path, monkeypatch):
+        """The target-init shape: the caller resolved its pid through the
+        process-tree prover (here: the prover answers our own pid), so the
+        long live session keeps its hybrid-arm protection past TTL expiry."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        claim = acquire_claim(
+            "node:x-1", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+        )
+        assert claim.pid_provenance == "session-prover"
+
+    def test_foreign_live_pid_stamps_ambient(self, tmp_path):
+        """THE SPECIMEN WRITER SHAPE: a reattach resolved its incarnation
+        through an ambient codex process tree and recorded a foreign live pid
+        (a chat app's app-server). The pid is real and alive, but it is not
+        the prover's answer for this session, so the stamp must say ambient -
+        the claim then expires on its TTL instead of reading live forever."""
+        foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            assert psutil.pid_exists(foreign.pid)
+            claim = acquire_claim(
+                "session:uuid-reattach", HOLDER_A, ttl_ms=120_000,
+                pid=foreign.pid, root=tmp_path,
+            )
+            assert claim.pid == foreign.pid
+            assert claim.pid_provenance == "ambient"
+        finally:
+            foreign.terminate()
+            foreign.wait()
+
+    def test_specimen_shape_ambient_codex_marker_does_not_launder_provenance(
+        self, tmp_path, monkeypatch
+    ):
+        """The specimen's enabling condition: an inherited CODEX marker in the
+        environment of a process that is not codex. Even with the marker set,
+        provenance is decided by the process tree, not the ambient id, so a
+        foreign pid still stamps ambient and the TTL stays a lease."""
+        monkeypatch.setenv("CODEX_THREAD_ID", "01a02125-ambient-foreign")
+        foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            claim = acquire_claim(
+                "session:uuid-reattach2", HOLDER_A, ttl_ms=120_000,
+                pid=foreign.pid, root=tmp_path,
+            )
+            assert claim.pid_provenance == "ambient"
+        finally:
+            foreign.terminate()
+            foreign.wait()
+
+    def test_no_pid_ttl_claim_stamps_ambient_without_walking(self, tmp_path, monkeypatch):
+        """A defaulted pid is the transient acquiring subprocess: ambient, and
+        no process walk is paid for it (provenance is only read on TTL claims,
+        but a transient pid can never earn session-proven anyway)."""
+        def _boom(**_kw):
+            raise AssertionError("no walk should run for a defaulted pid")
+
+        monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", _boom)
+        claim = acquire_claim("node:x-2", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+        assert claim.pid_provenance == "ambient"
+
+    def test_pid_liveness_claim_skips_the_walk(self, tmp_path, monkeypatch):
+        """PID-liveness claims never reach the expired-TTL arm, so provenance
+        is never consulted; the walk is skipped entirely."""
+        def _boom(**_kw):
+            raise AssertionError("no walk should run for a PID-liveness claim")
+
+        monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", _boom)
+        claim = acquire_claim(
+            "node:x-3", HOLDER_A, pid=os.getpid(), root=tmp_path
+        )
+        assert claim.expires_at is None
+        assert claim.pid_provenance == "ambient"
+
+    def test_explicit_provenance_from_a_caller_that_did_its_own_proving(self, tmp_path):
+        """The escape hatch: a caller that holds its own positive proof stamps
+        the field itself; the central resolution defers to it verbatim."""
+        claim = acquire_claim(
+            "node:x-4", HOLDER_A, ttl_ms=60_000, pid=424242,
+            pid_provenance="session-prover", root=tmp_path,
+        )
+        assert claim.pid_provenance == "session-prover"
+
+    def test_rebind_earns_provenance_for_the_new_pid(self, tmp_path, monkeypatch):
+        """A rebind rewrites the pid, so the prior record's provenance must
+        not survive it: the new pid earns its own stamp (the handover path
+        passes a prover-resolved pid, so the rebond claim reads session-prover)."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        # A dead-prior handover claim the worker's init takes over.
+        handover = Claim(
+            key="node:x-5", holder="spawn-handover:bp-x5",
+            acquired_at=now_ms(), expires_at=now_ms() + 900_000,
+            pid=999_999_999, host=socket.gethostname(), pid_provenance="ambient",
+        )
+        path = claim_path("node:x-5", root=tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialize_claim(handover))
+
+        claim, mode = compare_and_rebind(
+            "node:x-5", "spawn-handover:bp-x5",
+            new_holder=HOLDER_A, new_pid=os.getpid(), ttl_ms=3_600_000,
+            root=tmp_path,
+        )
+        assert mode == "handover"
+        assert claim.pid == os.getpid()
+        assert claim.pid_provenance == "session-prover"
+
+    def test_refresh_reanchor_stamps_session_prover(self, tmp_path, monkeypatch):
+        """The renewal re-anchor's pid IS the prover's answer by construction,
+        so the refreshed claim keeps hybrid protection; a bare TTL extension
+        (no anchor) leaves the written provenance untouched."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        first = acquire_claim(
+            "node:x-6", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+        )
+        assert first.pid_provenance == "session-prover"
+        refreshed = refresh_claim("node:x-6", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+        assert refreshed is not None
+        assert refreshed.pid_provenance == "session-prover"
 
 
 # ---------------------------------------------------------------------------
