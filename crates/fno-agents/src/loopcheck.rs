@@ -1856,6 +1856,11 @@ fn read_pr_head_oid(
 struct GraphqlQuota {
     remaining: i64,
     reset_epoch: i64,
+    /// The CORE bucket from the same probe read. `refusal_is_secondary`
+    /// classifies a rate-limit refusal on it (a refusal with core still high
+    /// is the request-rate limit, not this bucket). Option because a payload
+    /// can name graphql and not core.
+    core_remaining: Option<i64>,
 }
 
 /// Below this GraphQL remaining count, a no-promise fire stands down entirely:
@@ -1877,19 +1882,53 @@ fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
     Some(GraphqlQuota {
         remaining: g.get("remaining").and_then(|x| x.as_i64())?,
         reset_epoch: g.get("reset").and_then(|x| x.as_i64())?,
+        core_remaining: v
+            .pointer("/resources/core/remaining")
+            .and_then(|x| x.as_i64()),
     })
 }
 
-/// GitHub's secondary (burst/concurrency) limit is a DIFFERENT thing from the
-/// primary hourly quota `probe_graphql_quota` reads: a 403 whose body names
-/// "secondary rate limit" can fire with both the core and graphql buckets
-/// reporting thousands remaining (measured live: core 4922/5000, graphql
-/// 1392/5000, a call refused anyway). `gh api rate_limit` cannot see it -
-/// there is no bucket for it - so it is detected only from a refusal's own
-/// stderr, never from advertised remaining. Mirrors `_SECONDARY` in
-/// `cli/src/fno/pr/_rest.py`; keep the two patterns in sync.
-fn is_secondary_limit_stderr(stderr: &str) -> bool {
-    stderr.to_lowercase().contains("secondary rate limit")
+/// Whether a refusal's stderr smells like ANY rate limit. This is the wide
+/// TRIGGER only, never the verdict: GitHub controls the wording, and its
+/// measured 2026-08-24 secondary body says only "API rate limit exceeded for
+/// user ID ... (HTTP 403)" - no "secondary" anywhere - so a phrase gate
+/// missed the real refusal and read it as an unclassified blip.
+fn stderr_smells_rate_limit(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("rate limit")
+}
+
+/// Whether a failed gh read's refusal is GitHub's SECONDARY (request-rate)
+/// limit, judged against the LIVE exempt bucket, never against wording.
+///
+/// `gh api rate_limit` is exempt from both limits and answered DURING the
+/// measured refusal with core 4980/5000, so the probe is the one signal
+/// GitHub cannot reword: a rate-limit refusal that no drained bucket
+/// explains IS the secondary limit. A drained bucket that does explain it
+/// (graphql at 0 on a graphql read, core at EXACTLY 0 - a low-but-positive
+/// core is not proof, a secondary refusal lands with core wherever it
+/// stood) is the primary quota, whose own reasons live elsewhere. No probe
+/// at all still says secondary: an unreadable instrument must not send the
+/// session to wait for a primary reset that never comes, while backing off
+/// is safe under either truth. Mirrors `fno.pr._rest`'s live-bucket
+/// classifier and its fail-safe. One deliberate difference: this fn also
+/// classifies GRAPHQL reads, so a drained graphql bucket on a graphql read
+/// names the primary quota here; the Python classifier sees REST reads only
+/// (whose primary quota is core) and needs no graphql arm.
+fn refusal_is_secondary(
+    stderr: &str,
+    probe: Option<&GraphqlQuota>,
+    failed_read_was_graphql: bool,
+) -> bool {
+    if !stderr_smells_rate_limit(stderr) {
+        return false;
+    }
+    let Some(q) = probe else {
+        return true;
+    };
+    if failed_read_was_graphql && q.remaining == 0 {
+        return false;
+    }
+    !matches!(q.core_remaining, Some(0))
 }
 
 fn internal_gh_adapter(gh_bin: &str) -> bool {
@@ -1939,6 +1978,11 @@ fn is_graphql_read(read: &str) -> bool {
 /// log (every session's `loop_check_gh_error` rows already land there via
 /// `emit_to_both`, so this reuses an existing write path rather than adding
 /// one) with no session filter, by design.
+/// A row counts on its `rate_limit_class` FIELD - the verdict the emitting
+/// session computed against the live exempt bucket - never on its
+/// `stderr_tail` prose: GitHub reworded the refusal body once already, and a
+/// prose match here would miss the real body again. Rows emitted before the
+/// field existed simply age out of the window.
 /// The primary-quota floor (`GRAPHQL_FLOOR`) is blind to this failure mode by
 /// construction - advertised remaining looks healthy while calls are being
 /// refused - so a fire must ALSO stand down on observed refusals, not only
@@ -1964,11 +2008,11 @@ fn recent_secondary_refusal(events_path: &Path, now: DateTime<Utc>, window_secs:
         if (now - ts).num_seconds() > window_secs {
             break;
         }
-        let tail = val
-            .pointer("/data/stderr_tail")
+        if val
+            .pointer("/data/rate_limit_class")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if is_secondary_limit_stderr(tail) {
+            == Some("secondary")
+        {
             return true;
         }
     }
@@ -6883,13 +6927,15 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     let quota_probe = probe_graphql_quota(gh_bin, &cwd);
     // The primary-quota floor is blind to GitHub's SECONDARY (burst/
     // concurrency) limit by construction: advertised `remaining` can read
-    // thousands healthy while a call is refused, because there is no bucket
-    // for it in `gh api rate_limit` (measured live: core 4922/5000, graphql
-    // 1392/5000, a 403 anyway). A floor keyed only on advertised remaining
-    // never fires when THAT is the limiter, so a fire also stands down on an
-    // observed secondary refusal in the last 5 minutes, independent of what
-    // the probe reports (and independent of whether the probe itself
-    // succeeded). Reads `global_events`, not `project_events`: the limit is
+    // thousands healthy while a call is refused (measured live: core
+    // 4922/5000, graphql 1392/5000, a 403 anyway). A floor keyed only on
+    // advertised remaining never fires when THAT is the limiter, so a fire
+    // also stands down on an observed secondary refusal in the last 5
+    // minutes, independent of what this fire's probe reports (and
+    // independent of whether the probe itself succeeded). The observed rows
+    // carry the refusing session's live-bucket verdict in
+    // `rate_limit_class`, which is what `recent_secondary_refusal` matches.
+    // Reads `global_events`, not `project_events`: the limit is
     // per-USER, shared by every session on the machine, so a refusal any one
     // of them observed must stand every fleet member down, not just the one
     // that hit it.
@@ -8167,7 +8213,22 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // Reuse the fire-start probe; re-probe only if it failed, so a
                 // blip at the top still gets its one retry without a second
                 // `gh api rate_limit` on every error fire (request-rate cost).
+                //
+                // pulls_comments(_parse) and pr_commits share this error arm but
+                // are not all GraphQL: pulls_comments is a REST endpoint
+                // (`gh api .../pulls/N/comments`). A zero-remaining probe
+                // must not blame GraphQL for a REST read's own failure - that
+                // reads as "stop retrying gh pr view" advice for a call that was
+                // never gh pr view and might succeed on the very next fire.
+                let is_graphql_read = is_graphql_read(&failed_read);
                 let quota = quota_probe.or_else(|| probe_graphql_quota(gh_bin, &cwd));
+                // Classified against the LIVE exempt bucket, never wording
+                // (see `refusal_is_secondary`), and the verdict rides the
+                // event as a FIELD: `recent_secondary_refusal` matches the
+                // field, so a GitHub reword cannot blind the fleet-wide
+                // stand-down again.
+                let secondary =
+                    refusal_is_secondary(&failed_stderr, quota.as_ref(), is_graphql_read);
                 emit(
                     "loop_check_gh_error",
                     serde_json::json!({
@@ -8175,7 +8236,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         "read": failed_read,
                         "stderr_tail": failed_stderr,
                         "graphql_remaining": quota.as_ref().map(|q| q.remaining),
-                        "graphql_reset": quota.as_ref().map(|q| q.reset_epoch)
+                        "graphql_reset": quota.as_ref().map(|q| q.reset_epoch),
+                        "rate_limit_class": secondary.then_some("secondary")
                     }),
                 );
                 emit(
@@ -8195,23 +8257,18 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         "fp_read_failed": true
                     }),
                 );
-                // pulls_comments(_parse) and pr_commits share this error arm but
-                // are not all GraphQL: pulls_comments is a REST endpoint
-                // (`gh api .../pulls/N/comments`). A zero-remaining probe
-                // must not blame GraphQL for a REST read's own failure - that
-                // reads as "stop retrying gh pr view" advice for a call that was
-                // never gh pr view and might succeed on the very next fire.
-                let is_graphql_read = is_graphql_read(&failed_read);
                 // Checked BEFORE the primary-quota branch and independent of
-                // it: a secondary (burst/concurrency) refusal has its OWN
-                // stderr signature and can fire with the primary quota
-                // reading thousands remaining (measured live: core 4922/5000,
-                // graphql 1392/5000, refused anyway). Naming it as primary
-                // exhaustion sends the caller to wait for a reset that can be
-                // 40 minutes away for a limit that actually clears in
-                // seconds - the exact "assert a positive marker, never an
-                // absence" trap this whole diagnosis exists to avoid.
-                let reason = if is_secondary_limit_stderr(&failed_stderr) {
+                // it: a secondary (burst/concurrency) refusal can fire with
+                // the primary quota reading thousands remaining (measured
+                // live: core 4922/5000, graphql 1392/5000, refused anyway).
+                // `secondary` above already classified it against the LIVE
+                // exempt bucket - wording alone missed GitHub's measured body
+                // - and naming it as primary exhaustion sends the caller to
+                // wait for a reset that can be 40 minutes away for a limit
+                // that actually clears in seconds - the exact "assert a
+                // positive marker, never an absence" trap this whole
+                // diagnosis exists to avoid.
+                let reason = if secondary {
                     format!(
                         "gh read '{failed_read}' hit GitHub's SECONDARY rate limit (burst/\
                          concurrency, not the hourly quota - `gh api rate_limit` can read \
@@ -10394,9 +10451,11 @@ fn insert_quota_diagnostic(out: &mut Value, quota: &Option<GraphqlQuota>) {
 
 /// The exit-4 reason for a secondary (burst) limit refusal. Shared by BOTH
 /// exit-4 arms so the stdout contract does not fork on whether `--pr` was
-/// passed: the refusal names itself in the failed read's stderr, the quota
-/// probe is skipped (one more spawn against a refusing gh is the doomed
-/// kind), and `graphql_*` read null because no probe ran.
+/// passed: the verdict came from the ONE exempt `gh api rate_limit` probe
+/// (`refusal_is_secondary` - the endpoint answers during a refusal and counts
+/// against no bucket), and `graphql_*` read null because the secondary
+/// verdict keeps the quota diagnostics out rather than blame a bucket that
+/// still reads healthy.
 fn secondary_limit_reason() -> &'static str {
     "GitHub secondary rate limit refused this gh read (a burst limit, distinct \
      from the hourly quota; advertised remaining stays healthy). Stop retrying \
@@ -10552,11 +10611,22 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     "review_coverage",
                     data.clone(),
                 );
-                let secondary = is_secondary_limit_stderr(&tail);
+                // One exempt probe when the failure smells like a rate limit
+                // (or is a graphql read needing quota diagnostics): the probe
+                // answers during a refusal and counts against no bucket, so
+                // it is the classifier (`refusal_is_secondary`), not a doomed
+                // extra call against the limiter.
+                let probed = if stderr_smells_rate_limit(&tail) || is_graphql_read(&read) {
+                    probe_graphql_quota(&gh_bin, &cwd)
+                } else {
+                    None
+                };
+                let secondary =
+                    refusal_is_secondary(&tail, probed.as_ref(), is_graphql_read(&read));
                 let quota = if secondary || !is_graphql_read(&read) {
                     None
                 } else {
-                    probe_graphql_quota(&gh_bin, &cwd)
+                    probed
                 };
                 let mut out = data;
                 insert_quota_diagnostic(&mut out, &quota);
@@ -10703,17 +10773,22 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 // the reader was told to re-review a PR whose only problem
                 // was an exhausted quota window.
                 //
-                // A secondary-limit refusal names itself in the failed read's
-                // own stderr (advertised remaining stays healthy - the case
-                // is_secondary_limit_stderr documents), so classify from
-                // `tail` and skip the probe: one more spawn against a
-                // refusing gh is the doomed kind. Quota exhaustion, the other
-                // cause, still probes for the reset time its reason names.
-                let secondary = is_secondary_limit_stderr(&tail);
+                // One exempt probe when the failure smells like a rate limit
+                // (or is a graphql read needing quota diagnostics): the probe
+                // answers during a refusal and counts against no bucket, so
+                // it is the classifier (`refusal_is_secondary`), not a doomed
+                // extra call against the limiter.
+                let probed = if stderr_smells_rate_limit(&tail) || is_graphql_read(&read) {
+                    probe_graphql_quota(&gh_bin, &cwd)
+                } else {
+                    None
+                };
+                let secondary =
+                    refusal_is_secondary(&tail, probed.as_ref(), is_graphql_read(&read));
                 let quota = if secondary || !is_graphql_read(&read) {
                     None
                 } else {
-                    probe_graphql_quota(&gh_bin, &cwd)
+                    probed
                 };
                 let mut out = data;
                 insert_quota_diagnostic(&mut out, &quota);
@@ -10725,13 +10800,18 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             // The emitted unknown row above is schema-gated, so the exhaustion
             // diagnosis rides this stdout-only branch (and the stop hook's own
             // block reason); it must not fork the event contract. The same
-            // secondary-limit classification as the --pr arm: a refusal with no
-            // PR number must not spawn the probe the other arm already skips.
-            let secondary = is_secondary_limit_stderr(&tail);
+            // exempt-probe classification as the --pr arm: a refusal with no
+            // PR number gets the same verdict, not a divergent wording gate.
+            let probed = if stderr_smells_rate_limit(&tail) || is_graphql_read(&read) {
+                probe_graphql_quota(&gh_bin, &cwd)
+            } else {
+                None
+            };
+            let secondary = refusal_is_secondary(&tail, probed.as_ref(), is_graphql_read(&read));
             let quota = if secondary || !is_graphql_read(&read) {
                 None
             } else {
-                probe_graphql_quota(&gh_bin, &cwd)
+                probed
             };
             let mut out = serde_json::json!({
                 "error": format!("gh read failed: {read}"),
@@ -14450,6 +14530,7 @@ mod tests {
         let q = GraphqlQuota {
             remaining: 0,
             reset_epoch: Utc::now().timestamp() + 40 * 60 + 5,
+            core_remaining: None,
         };
         let msg = graphql_exhausted_reason(&q);
         assert!(msg.contains("GraphQL quota exhausted"), "got: {msg}");
@@ -14463,6 +14544,7 @@ mod tests {
         let q = GraphqlQuota {
             remaining: 0,
             reset_epoch: Utc::now().timestamp() - 120,
+            core_remaining: None,
         };
         assert!(graphql_exhausted_reason(&q).contains("~0m"));
     }
@@ -14485,7 +14567,8 @@ mod tests {
             tmp.path(),
             "gh",
             "#!/bin/sh\n[ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
-             echo '{\"resources\":{\"graphql\":{\"remaining\":0,\"reset\":1750000000}}}' && exit 0\n\
+             echo '{\"resources\":{\"graphql\":{\"remaining\":0,\"reset\":1750000000},\
+             \"core\":{\"remaining\":4980,\"limit\":5000,\"reset\":1750000000}}}' && exit 0\n\
              exit 1\n",
         );
         // Retry the spawn a few times: under a loaded CI runner (this crate's
@@ -14505,6 +14588,9 @@ mod tests {
         let q = q.expect("gh spawn kept failing across 5 retries - a real regression, not a blip");
         assert_eq!(q.remaining, 0);
         assert_eq!(q.reset_epoch, 1750000000);
+        // The core bucket from the SAME probe read feeds the secondary-limit
+        // classifier; a payload without it must degrade to None, not to 0.
+        assert_eq!(q.core_remaining, Some(4980));
     }
 
     #[test]
@@ -14519,8 +14605,15 @@ mod tests {
     /// One stub gh for the pr_num > 0 failure-arm tests: `pr view` fails with a
     /// rate-limit stderr (NOT the "no pull requests found" no-PR wording, which
     /// would take the Ok(PrState::None) branch), `api rate_limit` answers the
-    /// given graphql bucket.
-    fn write_failing_pr_view_gh(dir: &Path, graphql_remaining: i64, reset_in_secs: i64) -> String {
+    /// given buckets. `core_remaining` Some(0) keeps the refusal explainable
+    /// by the primary quota (not classified secondary) when the test wants
+    /// the graphql-diagnosis arm.
+    fn write_failing_pr_view_gh(
+        dir: &Path,
+        graphql_remaining: i64,
+        reset_in_secs: i64,
+        core_remaining: i64,
+    ) -> String {
         let reset = Utc::now().timestamp() + reset_in_secs;
         write_exec(
             dir,
@@ -14530,10 +14623,12 @@ mod tests {
                  [ \"$1\" = pr ] && [ \"$2\" = view ] && \
                  echo 'GraphQL: API rate limit exceeded for user ID 1.' >&2 && exit 1\n\
                  [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
-                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":{remaining},\"reset\":{reset}}}}}}}' && exit 0\n\
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":{remaining},\"reset\":{reset}}},\
+                 \"core\":{{\"remaining\":{core},\"limit\":5000,\"reset\":{reset}}}}}}}' && exit 0\n\
                  exit 1\n",
                 remaining = graphql_remaining,
                 reset = reset,
+                core = core_remaining,
             ),
         )
         .to_str()
@@ -14572,7 +14667,7 @@ mod tests {
         // indistinguishable from "nobody reviewed this" and sent operators to
         // re-review PRs whose only problem was an exhausted quota window.
         let tmp = tempfile::tempdir().unwrap();
-        let gh = write_failing_pr_view_gh(tmp.path(), 0, 14 * 60);
+        let gh = write_failing_pr_view_gh(tmp.path(), 0, 14 * 60, 0);
         let events = tmp.path().join("ev.jsonl");
         let global = tmp.path().join("gev.jsonl");
         let args: Vec<String> = [
@@ -14623,7 +14718,7 @@ mod tests {
         // left is an outage, not exhaustion, and stdout saying exhausted=false
         // is what lets a reader stop guessing between the two.
         let tmp = tempfile::tempdir().unwrap();
-        let gh = write_failing_pr_view_gh(tmp.path(), 4890, 0);
+        let gh = write_failing_pr_view_gh(tmp.path(), 4890, 0, 0);
         let args: Vec<String> = [
             "review-coverage",
             "--cwd",
@@ -14651,14 +14746,13 @@ mod tests {
     }
 
     #[test]
-    fn review_coverage_pr_failure_secondary_limit_names_cause_and_skips_probe() {
-        // The other exit-4 cause: a secondary (burst) limit refusal fires with
-        // advertised quota healthy, so the quota probe cannot see it. The
-        // cause names itself in the failed read's stderr; stdout must carry
-        // it, and the probe must not even fire (its spawn is one more call
-        // against the limiter that just refused). The stub's rate_limit arm
-        // answers HEALTHY and drops a marker file - if the probe fired, the
-        // marker exists and graphql_remaining reads a number.
+    fn review_coverage_pr_failure_verbatim_403_classifies_secondary_via_the_exempt_probe() {
+        // The p0 shape on this verb: the failed read's stderr is the
+        // MEASURED 2026-08-24 body (no "secondary" anywhere) while the exempt
+        // rate_limit endpoint still answers healthy. The classifier is that
+        // one probe - it fires exactly once (the marker), never counts
+        // against a bucket, and the verdict keeps the graphql diagnostics
+        // null so the reason names the burst limit, not a healthy bucket.
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("probe-fired");
         let gh = write_exec(
@@ -14667,9 +14761,10 @@ mod tests {
             &format!(
                 "#!/bin/sh\n\
                  [ \"$1\" = pr ] && [ \"$2\" = view ] && \
-                 echo 'You have exceeded a secondary rate limit and have been temporarily blocked.' >&2 && exit 1\n\
+                 echo 'API rate limit exceeded for user ID 4994564. If you reach out to GitHub Support for help, please include the request ID FAEB:283161:6EF36:99B72:6A8B97DD ... (HTTP 403)' >&2 && exit 1\n\
                  [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
-                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4890,\"reset\":1750000000}}}}}}' && \
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4446,\"reset\":1750000000}},\
+                 \"core\":{{\"remaining\":4980,\"limit\":5000,\"reset\":1750000000}}}}}}' && \
                  echo probe > {marker} && exit 0\n\
                  exit 1\n",
                 marker = marker.display()
@@ -14714,21 +14809,23 @@ mod tests {
         );
         assert!(
             v["graphql_exhausted"].is_null(),
-            "probe skipped on secondary: exhausted reads null, got: {v}"
+            "secondary keeps the quota diagnostics null: exhausted reads null, got: {v}"
         );
+        // The exempt probe FIRED exactly as the classifier; the marker is the
+        // positive control that classification came from a live reading.
         assert!(
-            !marker.exists(),
-            "probe_graphql_quota spawned against a refusing gh"
+            marker.exists(),
+            "the exempt probe is the classifier - it must fire"
         );
         assert_eq!(v["coverage"], "unknown");
     }
 
     #[test]
-    fn review_coverage_no_pr_secondary_limit_also_skips_probe() {
-        // The pr_num == 0 arm (no --pr passed) shares the secondary
-        // classification: without it a refusal with no PR number would spawn
-        // the probe the --pr arm skips - one more call against the limiter
-        // that just refused - and emit no reason for the same failure.
+    fn review_coverage_no_pr_secondary_limit_classifies_the_same_way() {
+        // The pr_num == 0 arm (no --pr passed) shares the classification: a
+        // refusal with no PR number gets the same live-bucket verdict (here
+        // with the OLD phrase in the stderr - the bucket, not the wording,
+        // must stay the discriminator) and the same exempt-probe cost.
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("probe-fired");
         let gh = write_exec(
@@ -14739,7 +14836,8 @@ mod tests {
                  [ \"$1\" = pr ] && [ \"$2\" = view ] && \
                  echo 'You have exceeded a secondary rate limit and have been temporarily blocked.' >&2 && exit 1\n\
                  [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
-                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4890,\"reset\":1750000000}}}}}}' && \
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4890,\"reset\":1750000000}},\
+                 \"core\":{{\"remaining\":4922,\"limit\":5000,\"reset\":1750000000}}}}}}' && \
                  echo probe > {marker} && exit 0\n\
                  exit 1\n",
                 marker = marker.display()
@@ -14780,21 +14878,120 @@ mod tests {
             "reason must name the secondary limit, got: {v}"
         );
         assert!(
-            !marker.exists(),
-            "probe_graphql_quota spawned against a refusing gh on the no-PR arm"
+            marker.exists(),
+            "the no-PR arm must classify through the same exempt probe"
         );
     }
 
+    /// Verbatim as measured 2026-08-24T01:01:17Z during a live secondary
+    /// refusal: GitHub's own wording contains NO "secondary" - that absence is
+    /// the premise the live-bucket classifier exists for. The `...` gaps are
+    /// where the live capture was truncated, not paraphrase.
+    const VERBATIM_403: &str = "gh: API rate limit exceeded for user ID 4994564. If you reach \
+         out to GitHub Support for help, please include the request ID \
+         FAEB:283161:6EF36:99B72:6A8B97DD ... Terms of Service (...) (HTTP 403)";
+
+    fn quota_with(graphql_remaining: i64, core_remaining: Option<i64>) -> GraphqlQuota {
+        GraphqlQuota {
+            remaining: graphql_remaining,
+            reset_epoch: 1_750_000_000,
+            core_remaining,
+        }
+    }
+
     #[test]
-    fn is_secondary_limit_stderr_matches_ghs_real_wording_case_insensitively() {
-        assert!(is_secondary_limit_stderr(
-            "You have exceeded a secondary rate limit. Please wait a few minutes."
+    fn refusal_is_secondary_classifies_the_verbatim_body_by_the_live_bucket() {
+        // The p0 shape: the measured 403 says only "API rate limit exceeded"
+        // with both buckets healthy - that IS the secondary limit, whatever
+        // the prose says.
+        assert!(!VERBATIM_403.to_lowercase().contains("secondary"));
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(4980))),
+            true
         ));
-        assert!(is_secondary_limit_stderr("SECONDARY RATE LIMIT hit"));
-        assert!(!is_secondary_limit_stderr(
-            "API rate limit exceeded for user ID 1."
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(4980))),
+            false
         ));
-        assert!(!is_secondary_limit_stderr(""));
+    }
+
+    #[test]
+    fn refusal_is_secondary_names_the_drained_buckets_as_the_primary_quota() {
+        // A drained explaining bucket is primary exhaustion, not secondary -
+        // on either transport.
+        assert!(!refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(0, Some(4980))),
+            true
+        ));
+        assert!(!refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(0))),
+            true
+        ));
+    }
+
+    #[test]
+    fn refusal_is_secondary_low_but_positive_core_is_not_proof_of_the_quota() {
+        // A secondary refusal lands with core wherever it stood; only 0
+        // names the core quota. Mislabeling 1..=20 as the primary quota
+        // sends the session to wait for a reset instead of backing off -
+        // the exact harm this classifier exists to prevent.
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(3))),
+            false
+        ));
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(20))),
+            true
+        ));
+    }
+
+    #[test]
+    fn refusal_is_secondary_fails_toward_back_off_on_an_unreadable_probe() {
+        // No probe (failed, or a caller with none), or a probe that names no
+        // core bucket: reading unknown as the primary quota sends the
+        // session to wait for a reset that never comes, so unknown still
+        // says secondary. This is the fail-safe the Python side ships.
+        assert!(refusal_is_secondary(VERBATIM_403, None, true));
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, None)),
+            true
+        ));
+    }
+
+    #[test]
+    fn refusal_is_secondary_ignores_stderr_that_does_not_smell_of_a_rate_limit() {
+        // The wide wording is only the TRIGGER; without it there is nothing
+        // to classify and the transient wording stands.
+        assert!(!refusal_is_secondary(
+            "gh: Not Found (https://api.github.com/)",
+            Some(&quota_with(0, Some(0))),
+            true
+        ));
+        assert!(!refusal_is_secondary("", None, false));
+    }
+
+    #[test]
+    fn refusal_is_secondary_phrase_alone_does_not_classify_the_bucket_does() {
+        // Even stderr that DOES say "secondary rate limit" classifies by the
+        // bucket: wording is GitHub's to change, so it is never the verdict.
+        let phrase = "HTTP 403: You have exceeded a secondary rate limit";
+        assert!(!refusal_is_secondary(
+            phrase,
+            Some(&quota_with(0, Some(0))),
+            true
+        ));
+        assert!(refusal_is_secondary(
+            phrase,
+            Some(&quota_with(4890, Some(4922))),
+            true
+        ));
     }
 
     #[test]
@@ -14812,7 +15009,8 @@ mod tests {
                     "data": {
                         "session_id": "sess-sec",
                         "read": "pulls_comments",
-                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
+                        "rate_limit_class": "secondary"
                     }
                 })
             ),
@@ -14842,13 +15040,42 @@ mod tests {
                     "data": {
                         "session_id": "sess-a",
                         "read": "pulls_comments",
-                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
+                        "rate_limit_class": "secondary"
                     }
                 })
             ),
         )
         .unwrap();
         assert!(recent_secondary_refusal(&events, now, 300));
+    }
+
+    #[test]
+    fn recent_secondary_refusal_ignores_prose_without_the_verdict_field() {
+        // The pre-fix consumer matched the phrase; GitHub's measured body
+        // does not carry it, so the phrase was never load-bearing. A row
+        // with the phrase but no field (an emitter older than the field)
+        // must not count: the verdict is the field, never the wording.
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "loop_check_gh_error",
+                    "ts": "2026-06-05T00:28:00Z",
+                    "data": {
+                        "session_id": "sess-old",
+                        "read": "pulls_comments",
+                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        assert!(!recent_secondary_refusal(&events, now, 300));
     }
 
     #[test]

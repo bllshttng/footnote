@@ -74,12 +74,13 @@ def read_row(key: str) -> Optional[dict]:
         return None
 
 
-def _rows_newest_first(slug_key: str, pr: str):
-    """Every cached row for (slug_key, pr), newest mtime first. No network.
+def _row_paths_newest(slug_key: str, pr: str) -> list[Path]:
+    """Every row file for (slug_key, pr), newest mtime first. No network.
 
-    Shared by `newest_row_offline` (wants the first readable row) and
-    `cached_status`'s head-unreadable arm (wants the first servable row) so
-    the candidate-collection-and-sort logic lives in exactly one place.
+    A racing prune loses a candidate, not a crash. `_rows_newest_first` reads
+    through this; the head-unreadable arm's backoff writer needs the PATH (the
+    row it arms is the newest one, lock and all), which the row dicts alone
+    do not carry.
     """
     candidates = []
     for candidate in cache_dir().glob(f"{slug_key}-{pr}-*.json"):
@@ -87,7 +88,17 @@ def _rows_newest_first(slug_key: str, pr: str):
             candidates.append((candidate.stat().st_mtime, candidate))
         except OSError:
             continue  # a racing prune won; fewer candidates, not a crash
-    for _, candidate in sorted(candidates, reverse=True):
+    return [p for _, p in sorted(candidates, reverse=True)]
+
+
+def _rows_newest_first(slug_key: str, pr: str):
+    """Every cached row for (slug_key, pr), newest mtime first. No network.
+
+    Shared by `newest_row_offline` (wants the first readable row) and
+    `cached_status`'s head-unreadable arm (wants the first servable row) so
+    the candidate-collection-and-sort logic lives in exactly one place.
+    """
+    for candidate in _row_paths_newest(slug_key, pr):
         row = read_row(candidate.stem)
         if row is not None:
             yield row
@@ -109,6 +120,79 @@ def _write_row_locked(p: Path, row: dict) -> None:
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(row), encoding="utf-8")
     os.replace(tmp, p)
+
+
+def _backoff_seconds(fails: int) -> int:
+    """2^k * 60s exponential window, capped - one formula, two writers."""
+    return min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
+
+
+def _row_can_serve(row: Optional[dict]) -> bool:
+    """Mirror of `_serve`'s servability guard (output present, exit parses).
+
+    A backoff window written on a row the pre-check cannot serve exists on
+    disk but short-circuits nothing: every tick breaks out of the pre-check,
+    re-fires the head read, and re-arms to no effect. The head arm arms only
+    rows this guard passes."""
+    if not row or not row.get("output"):
+        return False
+    exit_raw = row.get("exit")
+    if exit_raw is None:
+        return True
+    try:
+        int(exit_raw)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _arm_backoff_row(p: Path, *, fresh_output: Optional[dict] = None) -> None:
+    """Open/extend the secondary-limit backoff window on the row at `p`.
+
+    The head read is the first network call every waiter makes, so a
+    secondary-limit refusal THERE is the moment the window must open - without
+    this writer, every waiter re-attempts the head read on each tick at full
+    rate (the fixed-interval retry that sustains the refusal) while the
+    zero-network pre-check reads a `backoff_until` nothing ever wrote.
+
+    `fresh_output` builds a row where none exists: the sentinel case (a
+    never-cached PR, nothing to protect) still needs a servable error row or
+    the window it opens protects nothing.
+
+    The write always stamps `head_unverified`: this arm runs precisely
+    because the head could NOT be read, so the row's fresh green is a fact
+    about a head the PR may since have moved past, and `_serve` degrades it
+    inside the window instead of serving it verbatim (the operator's court
+    zero-checks fail-open finding).
+
+    Runs under the row's own flock, re-reading inside the lock, so a
+    concurrent winner's fresh success row is merged onto - fail_count climbs,
+    the window widens - never clobbered by a stale resurrect. Same keep-prior
+    rule as the locked-miss writer: the last good verdict, its exit code and
+    its ts survive for degraded serving.
+    """
+    lock_path = p.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            row = read_row(p.stem) or {}
+            now = time.time()
+            fails = int(_num(row, "fail_count")) + 1
+            had_prior = row.get("exit") not in (4, None) and row.get("output")
+            _write_row_locked(
+                p,
+                {
+                    "ts": row.get("ts") if had_prior else now,
+                    "exit": row.get("exit") if had_prior else 4,
+                    "output": row.get("output") or fresh_output,
+                    "fail_count": fails,
+                    "backoff_until": now + _backoff_seconds(fails),
+                    "head_unverified": True,
+                },
+            )
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def finite_or_zero(value: object) -> float:
@@ -176,7 +260,7 @@ def _serve(row: dict, *, stale: bool) -> int:
         # a corrupt exit code falls through to one clean live read rather
         # than a served line followed by a second, live-read line.
         return -1
-    if stale:
+    if stale or row.get("head_unverified"):
         # Fail-closed stale serve (operator's court): inside a backoff window
         # the fresh check set is UNREADABLE, so the row's green is a fact
         # about a past read, not about the head now. Degrade the served line
@@ -289,6 +373,34 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
             # degraded row here would answer the question --refresh was
             # raised to refuse.
             return run_status(pr, cwd)
+        # The head read itself was refused by the secondary limit: arm the
+        # window NOW (see `_arm_backoff_row`) so the next tick's pre-check
+        # short-circuits instead of re-attempting this very read. The verdict
+        # comes from the reason's structured field, never its prose.
+        if getattr(_head_reason, "rate_limit_class", "") == "secondary":
+            armed = False
+            for candidate in _row_paths_newest(slug_key, pr):
+                if _row_can_serve(read_row(candidate.stem)):
+                    _arm_backoff_row(candidate)
+                    armed = True
+                    break
+            if not armed:
+                # Nothing servable exists (a never-cached PR, or only foreign
+                # schema): open a sentinel row keyed without a head, carrying
+                # the refusal itself as the error payload. Without it the
+                # fallback live read re-attempts the head read every tick and
+                # the verdict is printed but never persisted.
+                _arm_backoff_row(
+                    cache_dir() / f"{slug_key}-{pr}-refused.json",
+                    fresh_output={
+                        "pr": int(pr),
+                        "verdict": "error",
+                        "settled": False,
+                        "green": False,
+                        "reason": str(_head_reason),
+                        "rate_limit_class": "secondary",
+                    },
+                )
         # Head unreadable (secondary window, network): fail CLOSED. Serve the
         # PR's newest existing row degraded (unknown, unsettled - keeps the
         # zero-network collapse without ever answering green off data nobody
@@ -358,8 +470,16 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 output = None
 
             now = time.time()
-            reason = str((output or {}).get("reason", "")).lower()
-            if code == 4 and output is not None and "secondary rate limit" in reason:
+            # The window arms on the structured verdict `run_status` carries
+            # as a FIELD, never on a substring of the reason prose: GitHub's
+            # measured 403 body contains no "secondary", so the prose gate
+            # never fired and the fleet polled at full rate through the very
+            # refusal this window exists to ride out.
+            if (
+                code == 4
+                and output is not None
+                and output.get("rate_limit_class") == "secondary"
+            ):
                 # A manual --refresh punches THROUGH a live backoff window (the
                 # window may have cleared server-side, and the escape hatch is
                 # worth the one read). Being refused by it must not DEEPEN it:
@@ -377,7 +497,7 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 # clock: a read spanning the expiry then pushed the window
                 # PAST where it stood, extending the fleet's wait by the
                 # duration of the read.
-                backoff = None if held else min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
+                backoff = None if held else _backoff_seconds(fails)
                 # Keep the last GOOD verdict for stale serving - its exit code
                 # too, so the served JSON and the process exit never disagree;
                 # with none, keep the error row itself (loud: verdict error).

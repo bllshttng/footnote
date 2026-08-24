@@ -136,7 +136,11 @@ def _rest_pages(
             ["gh", "api", f"{endpoint}?per_page=100&page={page}"], cwd=cwd
         )
         if not result.ok:
-            return None, f"{label} read failed: {_rest._rest_reason(result)}"
+            # runner/cwd ride along so a rate-limit refusal classifies against
+            # the LIVE exempt bucket: without them the classifier has no
+            # instrument and fails toward secondary even on a drained core
+            # bucket (the one case the reading must name).
+            return None, f"{label} read failed: {_rest._rest_reason(result, runner=runner, cwd=cwd)}"
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
