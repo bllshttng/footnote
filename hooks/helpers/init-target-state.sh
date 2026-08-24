@@ -353,10 +353,30 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
     AUTO_MERGE_ENABLED="false"
   }
 fi
+# The env grant is the OPERATOR's lever (x-3855, codex P1 on PR 1131):
+# TARGET_AUTO_MERGE reaches a child only by inheritance, and a mesh-spawned
+# worker can export it before init to mint merge authority no config
+# granted. The bar here is the crown's own (cli/src/fno/agents/crown.py:
+# no FNO_AGENT_SELF = an attended human) plus the unattended derivation,
+# so spawned and unattended runs cannot stamp the grant. The autonomous
+# grant is auto_merge.grant = dispatch, never this variable. Residual,
+# named rather than solved: an interactive session the OPERATOR launched
+# carries no mesh identity either, and sits inside the operator's trust
+# boundary - the documented carrier of this grant, with the stamp
+# (auto_merge_source) keeping every use auditable. Provenance an env test
+# cannot establish is the x-f3d0 class.
+_AUTO_MERGE_ENV_GRANT="false"
+if [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
+  if [[ -z "${FNO_AGENT_SELF:-}" && "$_attended" == "true" ]]; then
+    _AUTO_MERGE_ENV_GRANT="true"
+  else
+    echo "[init-target-state] note: TARGET_AUTO_MERGE=1 ignored on an agent-origin or unattended run; config decides (autonomous grant: auto_merge.grant = dispatch)" >&2
+  fi
+fi
 if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="false"
   AUTO_MERGE_SOURCE="flag-no-merge"
-elif [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
+elif [[ "$_AUTO_MERGE_ENV_GRANT" == "true" ]]; then
   AUTO_MERGE_APPROVED="true"
   AUTO_MERGE_SOURCE="env-target-auto-merge"
 elif _is_true "$AUTO_MERGE_ENABLED"; then

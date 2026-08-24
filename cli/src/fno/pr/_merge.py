@@ -139,6 +139,19 @@ def _closes_quoted_scalar(raw: str) -> bool:
     return not raw[:-1].endswith("\\")
 
 
+def _approved_true(value: Optional[str]) -> bool:
+    """The truthy spellings this verb accepts for ``auto_merge_approved``.
+    One helper, not a re-typed literal per read inside ``run_merge``. The
+    posture predicate is mirrored, not shared: ``finalize.rs`` accepts only
+    the literal ``true`` and the git-protection hook carries its own copy of
+    this set (a standalone script cannot import it). Init never writes
+    another spelling, so the wider set here is tolerance for hand-edited
+    manifests, and any widening must be replicated in all three or the gates
+    split on exactly that spelling.
+    """
+    return value is not None and value.strip().lower() in ("true", "yes", "1")
+
+
 def _read_state_field(state_file: str, field: str) -> str:
     """Read ``field:`` from frontmatter, dequoting a matched pair (parser parity).
 
@@ -1652,48 +1665,86 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         )
         return 2
 
-    # (1) Short-circuit if auto-merge is disabled. The who-may-merge gate
+    # (1) One authoritative posture (x-3855, x-01b9), resolved in the same
+    # order init folds it: granted = (live `auto_merge.enabled` OR an explicit
+    # per-run env grant) AND NOT a per-run refusal. The who-may-merge gate
     # (--invoker + allowed_invokers) was removed (x-04ab): auto-merge is gated
-    # by `enabled` plus the CI-green / external-review / stub-manifest guards.
+    # by posture plus the CI-green / external-review / stub-manifest guards.
+    #
+    # The manifest's `auto_merge_approved` is init's fold of the documented
+    # chain (hooks/helpers/init-target-state.sh, references/auto-merge.md). A
+    # `false` is a per-run REFUSAL (--no-merge, the `/target bg` injected
+    # default via harness_map._AUTONOMOUS_COMMAND, TARGET_NO_MERGE) and
+    # outranks every grant: without this the sanctioned verb is a WEAKER gate
+    # than raw `gh pr merge`, which the git-protection hook already guards on
+    # this same field. A `true` with `auto_merge_source: env-target-auto-merge`
+    # is an explicit per-run GRANT (TARGET_AUTO_MERGE=1 at spawn) that
+    # satisfies the standing arm on its own - the sanctioned path the docs
+    # promise and that a config-first order made unreachable: consulting
+    # `enabled` before the manifest let the config leaf refuse a run init had
+    # granted (x-01b9: two workers read this seam the same night).
+    #
+    # `enabled` is still re-read LIVE, so a manifest whose `true` merely
+    # mirrored config (source: config) does not outlive an operator flipping
+    # the switch off mid-flight (x-2270: the manifest is a snapshot; the live
+    # switch wins). Absent manifest or absent field -> live config decides: a
+    # manual `fno do pr merge` outside a target session is legitimate and must
+    # not start refusing. TARGET_AUTO_MERGE is never read HERE - a grant is
+    # folded at spawn where it is attributable, never exported on a merge
+    # command line by the very worker that wants the merge.
+    #
+    # Every refusal names the sanctioned override in its own text (x-3855): a
+    # refusal that closes a door without pointing at the key is the one that
+    # had two workers improvising config mutations inside sixty seconds.
     auto_merge = _load_auto_merge()
-    if not auto_merge.enabled:
-        _emit(
-            pr_number,
-            "skipped",
-            "auto_merge disabled",
-            "none",
-            err=False,
-        )
-        return 2
-
-    # (1b) Honor THIS run's resolved decision, not just the project policy.
-    # `auto_merge.enabled` is standing policy; the manifest's
-    # `auto_merge_approved` is what init resolved after folding in the per-run
-    # modifiers, and a per-run `no-merge` (which `/target bg` injects by
-    # default, via harness_map._AUTONOMOUS_COMMAND) sets it false while
-    # `enabled` stays true. That fold is one-directional by design: the
-    # `auto-merge` token grants nothing on its own. Without this the
-    # sanctioned verb is a WEAKER gate than raw `gh pr merge`, which the
-    # git-protection hook already guards on this same field.
-    # Absent manifest or absent field -> proceed: a manual `fno do pr merge`
-    # outside a target session is legitimate and must not start refusing.
-    approved = _read_state_field(
-        os.path.join(_repo_state_dir(repo), "target-state.md"),
-        "auto_merge_approved",
-    )
-    if approved and approved.strip().lower() not in ("true", "yes", "1"):
+    state_file = os.path.join(_repo_state_dir(repo), "target-state.md")
+    approved = _read_state_field(state_file, "auto_merge_approved")
+    if approved and not _approved_true(approved):
         # Name WHICH input set the posture (x-9d11): the operator's first
         # question on this refusal is "what layer said no". A pre-provenance
         # manifest carries no source; that reads as unknown, never a guess.
-        source = (_read_state_field(
-            os.path.join(_repo_state_dir(repo), "target-state.md"),
-            "auto_merge_source",
-        ) or "").strip() or "unknown (pre-provenance manifest)"
+        # The override names levers that exist for the source it names: a
+        # flag-no-merge run was refused by its dispatcher (the `/target bg`
+        # default), not by anything typed by hand, so "without --no-merge"
+        # alone would point at a door that is not there.
+        source = (
+            _read_state_field(state_file, "auto_merge_source") or ""
+        ).strip() or "unknown (pre-provenance manifest)"
         _emit(
             pr_number,
             "skipped",
             f"per-run no-merge (manifest auto_merge_approved is not true; "
-            f"auto_merge_source: {source})",
+            f"auto_merge_source: {source}); sanctioned override: an "
+            "out-of-band merge by the operator (any such merge satisfies "
+            "done()), or re-arm the run's dispatch (attended and without "
+            "--no-merge, or auto_merge.grant = dispatch); on a repo whose "
+            "standing switch is off, that alone is not enough - arm "
+            "auto_merge.enabled or spawn with TARGET_AUTO_MERGE=1 (the "
+            "config refusal names those levers)",
+            "none",
+            err=False,
+        )
+        return 2
+    if not auto_merge.enabled and not (
+        _approved_true(approved)
+        and (_read_state_field(state_file, "auto_merge_source") or "").strip()
+        == "env-target-auto-merge"
+    ):
+        # "resolves enabled=false", not "is set false": the same refusal fires
+        # on a stock install with no key and on a malformed block degraded to
+        # defaults, and prescribing `config set true` against a parse error
+        # masks it. The named levers are the OPERATOR's; a worker reading this
+        # escalates rather than pulling either one (skills/pr hard rule).
+        _emit(
+            pr_number,
+            "skipped",
+            "auto_merge disabled (live config resolves auto_merge.enabled="
+            "false); sanctioned override (operator levers): `fno config set "
+            "auto_merge.enabled true`, or start the run with "
+            "TARGET_AUTO_MERGE=1 from the operator's shell. The env grant "
+            "is folded into the manifest at init - mesh-spawned and "
+            "unattended runs scrub it, it is never a merge-time variable, "
+            "and never a synthesized config",
             "none",
             err=False,
         )

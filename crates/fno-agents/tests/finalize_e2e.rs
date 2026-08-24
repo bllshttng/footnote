@@ -1352,6 +1352,10 @@ const GH_OPTIONAL_MALFORMED: &str = "#!/bin/sh\n\
 
 /// Rewrite the manifest with an explicit merge posture, keeping the node id.
 fn set_posture(env: &Env, session_id: &str, approved: bool) {
+    set_posture_source(env, session_id, approved, "config");
+}
+
+fn set_posture_source(env: &Env, session_id: &str, approved: bool, source: &str) {
     fs::write(
         &env.state,
         format!(
@@ -1362,7 +1366,7 @@ fn set_posture(env: &Env, session_id: &str, approved: bool) {
              plan_path: \"plan.md\"\n\
              provider: claude\n\
              auto_merge_approved: {approved}\n\
-             auto_merge_source: config\n\
+             auto_merge_source: {source}\n\
              claude_transcript_id: tid-{session_id}\n\
              ---\n\
              # Target Session State\n\
@@ -1535,24 +1539,52 @@ fn finalize_completed_review_wins_over_stale_usage_limit_comment() {
 fn finalize_live_auto_merge_switch_vetoes_an_approved_run() {
     let env = setup("S-live-switch-off", false);
     set_posture(&env, "S-live-switch-off", true);
-    write_auto_merge_config(&env, "[auto_merge]\nenabled = true\n");
     write_auto_merge_config(&env, "[auto_merge]\nenabled = false\n");
 
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("config.auto_merge.enabled=false"),
+        stderr.contains("auto_merge.enabled=false"),
         "stderr must name the live-switch veto: {stderr}"
     );
     let event = finalized_event(&env, "S-live-switch-off");
     assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&false.into()));
-    assert_eq!(
-        event
-            .pointer("/data/auto_merge_blocked_reason")
-            .and_then(|v| v.as_str()),
-        Some("config.auto_merge.enabled=false")
+    // x-3855: the withhold names the sanctioned override, not just the
+    // blocked state - a refusal that names no way forward is the one workers
+    // improvised config mutations past.
+    let blocked = event
+        .pointer("/data/auto_merge_blocked_reason")
+        .and_then(|v| v.as_str())
+        .expect("live-switch veto must record a blocked reason");
+    assert!(blocked.contains("auto_merge.enabled=false"));
+    assert!(blocked.contains("sanctioned override"));
+    assert!(blocked.contains("TARGET_AUTO_MERGE=1"));
+}
+
+/// x-01b9's positive marker: an explicit spawn-time grant
+/// (`auto_merge_source: env-target-auto-merge`) arms on a repo whose standing
+/// config switch is OFF. The docs promise TARGET_AUTO_MERGE=1 allows merging;
+/// before this, the live-switch read vetoed the run init had granted.
+#[test]
+fn finalize_env_grant_arms_despite_live_switch_off() {
+    let env = setup("S-env-grant", false);
+    set_posture_source(&env, "S-env-grant", true, "env-target-auto-merge");
+    write_auto_merge_config(&env, "[auto_merge]\nenabled = false\n");
+
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+    assert!(
+        out.status.success(),
+        "arming must never raise the exit code"
     );
+    let c = calls(&env);
+    assert!(
+        c.contains("gh pr merge 358 --auto --merge"),
+        "the per-run env grant must arm despite enabled=false: {c}"
+    );
+    let event = finalized_event(&env, "S-env-grant");
+    assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&true.into()));
+    assert!(event.pointer("/data/auto_merge_blocked_reason").is_none());
 }
 
 #[test]
