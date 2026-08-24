@@ -737,6 +737,18 @@ def get_cmd(
         ok, node = _traverse(key[len("config.") :])
     if not ok and not key.startswith("config."):
         ok, node = _traverse(f"config.{key}")
+    if not ok and (
+        key.startswith("providers.")
+        or key.startswith("config.providers.")
+        or key == "providers"
+        or key == "config.providers"
+    ):
+        aliased = key.replace("providers", "accounts", 1)
+        ok, node = _traverse(aliased)
+        if not ok and aliased.startswith("config."):
+            ok, node = _traverse(aliased[len("config.") :])
+        if not ok and not aliased.startswith("config."):
+            ok, node = _traverse(f"config.{aliased}")
     if not ok:
         typer.echo(f"error: unknown config key '{key}'", file=sys.stderr)
         raise typer.Exit(code=1)

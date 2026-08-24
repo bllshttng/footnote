@@ -103,6 +103,8 @@ def _resolve_parent_block(
     """
     if parts and parts[0] == "config":
         parts = parts[1:]
+    if parts and parts[0] == "providers":
+        parts = ["accounts"] + parts[1:]
     if not parts:
         # A bare `config` key (parts == ["config"]) strips to empty; there is no
         # leaf to resolve. Return None so the caller raises a clean unknown-key
@@ -128,7 +130,10 @@ def _storage_parts(parts: list[str]) -> list[str]:
     """The dotted path a key is STORED at in config.toml: flat (top-level
     blocks, no ``config:`` wrapper). A ``config.``-prefixed key and its bare flat
     form both map to the same flat location, so the file stays single-shape."""
-    return parts[1:] if parts and parts[0] == "config" else list(parts)
+    stored = parts[1:] if parts and parts[0] == "config" else list(parts)
+    if stored and stored[0] == "providers":
+        stored = ["accounts"] + stored[1:]
+    return stored
 
 
 def _coerce(value: str, ann: Any) -> Any:

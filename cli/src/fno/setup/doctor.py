@@ -361,6 +361,29 @@ def check_agent_profiles(settings: object) -> list[str]:
     return problems
 
 
+def check_accounts() -> list[str]:
+    """Validate configured accounts / providers and combos (x-e90a)."""
+    from fno.adapters.providers.loader import load_combos, load_providers
+    from fno.adapters.providers.model import ProviderConfigError
+
+    problems: list[str] = []
+    try:
+        load_providers()
+    except ProviderConfigError as exc:
+        problems.append(f"accounts/providers: {exc}")
+    except Exception as exc:
+        problems.append(f"accounts/providers load error: {exc}")
+
+    try:
+        load_combos()
+    except ProviderConfigError as exc:
+        problems.append(f"combos: {exc}")
+    except Exception as exc:
+        problems.append(f"combos load error: {exc}")
+
+    return problems
+
+
 def run_doctor() -> int:
     """Run the doctor diagnostic. Returns 0 if clean, non-zero on errors or suspicious paths."""
     import os
@@ -478,7 +501,14 @@ def run_doctor() -> int:
             "grant is yours to make."
         )
 
-    if errors or issues or cap_problems or wt_problems or profile_problems or store_problems:
+    account_problems = check_accounts()
+    if account_problems:
+        print(f"\n[doctor] {len(account_problems)} account / provider issue(s):")
+        for reason in account_problems:
+            print(f"  - {reason}")
+        print("\nFix the accounts or combos configuration in config.toml.")
+
+    if errors or issues or cap_problems or wt_problems or profile_problems or store_problems or account_problems:
         return 1
 
     print("\n[doctor] OK; no suspicious paths detected.")

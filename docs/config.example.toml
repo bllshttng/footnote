@@ -515,3 +515,19 @@ retries = 2
 enabled = false
 # Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work.
 autonomous_merge = false
+
+[accounts]
+# active = <unset>   # optional; no default
+auto_switch = false
+# active_combo = <unset>   # optional; no default
+records = []
+combos = {}
+# failover = <unset>   # optional; no default
+agents = {}
+
+[accounts.quota]
+defer_dispatch = false
+defer_threshold_pct = 90.0
+probe_ttl_seconds = 300
+defer_horizon_minutes = 60
+pick_on_launch = false

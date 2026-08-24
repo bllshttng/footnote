@@ -205,4 +205,16 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `status_fanout.retries` | int | `2` | advanced | Retry budget per webhook dispatch before drop/short-circuit. |
 | `king.enabled` | bool | `false` | advanced | Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false. |
 | `king.autonomous_merge` | bool | `false` | advanced | Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work. |
+| `accounts.active` | str (optional) | _(none)_ | never |  |
+| `accounts.auto_switch` | bool | `false` | never |  |
+| `accounts.active_combo` | str (optional) | _(none)_ | never |  |
+| `accounts.records` | list[dict[str, Any]] | `[]` | never |  |
+| `accounts.combos` | dict[str, ComboBlock] | `{}` | never |  |
+| `accounts.quota.defer_dispatch` | bool | `false` | never |  |
+| `accounts.quota.defer_threshold_pct` | float | `90.0` | never |  |
+| `accounts.quota.probe_ttl_seconds` | int | `300` | never |  |
+| `accounts.quota.defer_horizon_minutes` | int | `60` | never |  |
+| `accounts.quota.pick_on_launch` | bool | `false` | never |  |
+| `accounts.failover` | FailoverBlock (optional) | _(none)_ | never |  |
+| `accounts.agents` | dict[str, Any] | `{}` | never |  |
 | `schema_version` | int | `1` | never | Settings schema version; managed by fno, not hand-set. |
