@@ -365,15 +365,17 @@ def test_status_json_emits_liveness_verdict(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _write_tick_events(events_file, *, tick_ts, attempt_ts=None, end=None):
+def _write_tick_events(events_file, *, tick_ts, attempt_ts=None, end=None, tick_data=None):
     lines = []
     if attempt_ts:
         lines.append({"type": "pr_watch_tick_attempt", "ts": attempt_ts,
                       "data": {"pid": 111, "phase": "entry"}})
     if tick_ts:
         lines.append({"type": "pr_watch_tick", "ts": tick_ts,
-                      "data": {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
-                               "dropped_count": 0, "dropped": {}}})
+                      "data": tick_data or {
+                          "open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
+                          "dropped_count": 0, "dropped": {},
+                      }})
     if end:
         lines.append({"type": "pr_watch_tick_end", "ts": tick_ts, "data": end})
     events_file.parent.mkdir(parents=True, exist_ok=True)
@@ -398,7 +400,7 @@ def test_status_prints_healthy_verdict_and_both_watermarks(
     _os.utime(plist_path, (old, old))
     monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
     events_file = tmp_home / ".fno" / "events.jsonl"
     _write_tick_events(
         events_file, tick_ts=now, attempt_ts=now,
@@ -411,6 +413,74 @@ def test_status_prints_healthy_verdict_and_both_watermarks(
     assert re.search(r"^Verdict: +healthy \(", out, re.M), out
     assert re.search(r"^Last tick outcome: +ok \(14\.2s\)", out, re.M), out
     assert re.search(r"^Last attempt: ", out, re.M), out
+
+
+def test_status_prints_completed_tick_marker_for_valid_receipt(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch
+):
+    """AC5-HP: status exposes a positive, count-consistent completed marker."""
+    import os as _os
+    import re
+    from datetime import datetime, timezone
+    import fno.pr_watch._install as m
+
+    (tmp_home / ".fno" / "config.toml").write_text("[pr_watch]\nenabled = true\n")
+    plist_path = tmp_launch_agents / m._PLIST_FILENAME
+    plist_path.write_text("<plist/>")
+    old = _os.path.getmtime(plist_path) - 60
+    _os.utime(plist_path, (old, old))
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    _write_tick_events(
+        events_file,
+        tick_ts=now,
+        tick_data={
+            "open_prs": 2,
+            "acted": 0,
+            "swept_count": 2,
+            "swept": {"owner/repo": [41, 42]},
+        },
+    )
+
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+    assert re.search(rf"^Completed tick: +{re.escape(now)} swept=2$", out, re.M), out
+
+
+@pytest.mark.parametrize(
+    "tick_data",
+    [
+        {"swept_count": 0, "swept": {}},
+        {"swept_count": 1, "swept": {}},
+        {"swept_count": 2, "swept": {"owner/repo": [41]}},
+        {"swept_count": 1, "swept": {"owner/repo": [41, 42]}},
+    ],
+)
+def test_status_rejects_invalid_completed_tick_receipts(
+    tick_data, tmp_home, tmp_launch_agents, capsys, monkeypatch
+):
+    """AC5-ERR: zero, empty, or inconsistent receipts cannot claim completion."""
+    import os as _os
+    import re
+    from datetime import datetime, timezone
+    import fno.pr_watch._install as m
+
+    (tmp_home / ".fno" / "config.toml").write_text("[pr_watch]\nenabled = true\n")
+    plist_path = tmp_launch_agents / m._PLIST_FILENAME
+    plist_path.write_text("<plist/>")
+    old = _os.path.getmtime(plist_path) - 60
+    _os.utime(plist_path, (old, old))
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    _write_tick_events(events_file, tick_ts=now, tick_data=tick_data)
+
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+    assert not re.search(r"^Completed tick: +20[0-9]{2}-.* swept=[1-9][0-9]*$", out, re.M), out
 
 
 def test_status_prints_dead_verdict_with_fix_command(
