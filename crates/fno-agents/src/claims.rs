@@ -46,6 +46,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// On-disk schema version this implementation reads and writes. Readers
 /// refuse anything newer rather than guess at a future writer's semantics.
 pub const SCHEMA_VERSION: u32 = 1;
+/// Version used only for the incompatible nullable-PID claim shape. Version 1
+/// remains the writer format for integer-PID claims and remains readable.
+pub const PID_UNAVAILABLE_SCHEMA_VERSION: u32 = 2;
+pub const MAX_SUPPORTED_SCHEMA_VERSION: u32 = PID_UNAVAILABLE_SCHEMA_VERSION;
 /// Raw key cap (mirrors `types.MAX_KEY_LENGTH`).
 pub const MAX_KEY_LENGTH: usize = 256;
 /// Encoded-filename cap (mirrors `types.MAX_ENCODED_FILENAME_BYTES`):
@@ -576,6 +580,12 @@ fn validate_record(rec: &ClaimRecord) -> Result<(), String> {
     if rec.key.is_empty() || rec.holder.is_empty() {
         return Err("claim key/holder must be non-empty".into());
     }
+    if rec.pid_unavailable && rec.schema_version != PID_UNAVAILABLE_SCHEMA_VERSION {
+        return Err("pid_unavailable claims require schema_version=2".into());
+    }
+    if !rec.pid_unavailable && rec.schema_version == PID_UNAVAILABLE_SCHEMA_VERSION {
+        return Err("schema_version=2 requires pid_unavailable: true".into());
+    }
     match (rec.pid, rec.pid_unavailable, rec.expires_at) {
         (Some(pid), false, _) if pid > 0 => Ok(()),
         (None, true, Some(_)) => Ok(()),
@@ -589,9 +599,9 @@ fn validate_record(rec: &ClaimRecord) -> Result<(), String> {
 fn parse_claim_str(text: &str) -> Result<ClaimRecord, ReadError> {
     let rec: ClaimRecord = serde_yaml_ng::from_str(text)
         .map_err(|e| ReadError::Corrupted(format!("claim parse/schema failed: {e}")))?;
-    if rec.schema_version > SCHEMA_VERSION {
+    if rec.schema_version > MAX_SUPPORTED_SCHEMA_VERSION {
         return Err(ReadError::Corrupted(format!(
-            "claim schema_version={} > supported={SCHEMA_VERSION}; refusing to read from a newer writer",
+            "claim schema_version={} > supported={MAX_SUPPORTED_SCHEMA_VERSION}; refusing to read from a newer writer",
             rec.schema_version
         )));
     }
@@ -1268,7 +1278,11 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
     let acquired = now_ms();
     let pid_unavailable = opts.pid_unavailable;
     ClaimRecord {
-        schema_version: SCHEMA_VERSION,
+        schema_version: if pid_unavailable {
+            PID_UNAVAILABLE_SCHEMA_VERSION
+        } else {
+            SCHEMA_VERSION
+        },
         key: key.into(),
         holder: holder.into(),
         acquired_at: acquired,
@@ -2421,6 +2435,7 @@ mod tests {
         };
         assert_eq!(rec.pid, None);
         assert!(rec.pid_unavailable);
+        assert_eq!(rec.schema_version, 2);
         let text = std::fs::read_to_string(lockfile(&td, "session:u3")).unwrap();
         assert!(text.contains("pid: null"));
         assert!(text.contains("pid_unavailable: true"));
@@ -2429,7 +2444,7 @@ mod tests {
     #[test]
     fn pid_unavailable_without_ttl_is_rejected() {
         let rec = parse_claim_str(
-            "schema_version: 1\nkey: k\nholder: h\nacquired_at: 5\npid: null\npid_unavailable: true\nhost: x\n",
+            "schema_version: 2\nkey: k\nholder: h\nacquired_at: 5\npid: null\npid_unavailable: true\nhost: x\n",
         );
         assert!(rec.is_err());
     }
@@ -2456,7 +2471,7 @@ mod tests {
     #[test]
     fn reader_rejects_newer_schema_non_dict_and_garbage_as_corrupted() {
         for text in [
-            "schema_version: 2\nkey: k\nholder: h\nacquired_at: 5\npid: 1\nhost: x\n",
+            "schema_version: 3\nkey: k\nholder: h\nacquired_at: 5\npid: 1\nhost: x\n",
             "- just\n- a\n- list\n",
             "{{{{not yaml",
             "key: ''\nholder: h\nacquired_at: 5\npid: 1\nhost: x\n",

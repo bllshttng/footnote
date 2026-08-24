@@ -219,6 +219,7 @@ def test_classify_pid_unavailable_ttl_is_suspect_until_expiry():
     claim = _live_claim(
         pid=None,
         pid_unavailable=True,
+        schema_version=2,
         expires_at=now_ms() + 60_000,
     )
     assert is_live(claim) is False

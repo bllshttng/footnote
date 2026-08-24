@@ -72,6 +72,7 @@ class TestAcquire:
         )
         assert claim.pid is None
         assert claim.pid_unavailable is True
+        assert claim.schema_version == 2
         payload = claim_path("k", root=tmp_path).read_text()
         assert "pid: null" in payload
         assert "pid_unavailable: true" in payload

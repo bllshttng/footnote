@@ -2643,7 +2643,11 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
     try:
         from fno.agents.watchdog import REAP_RECENT_MESSAGE_S, tail_facts
 
-        facts = tail_facts(session_id, row.cwd)
+        facts = tail_facts(
+            session_id,
+            row.cwd,
+            agent=getattr(row, "harness", None) or "claude",
+        )
     except Exception as exc:  # noqa: BLE001 - unreadable transcript is unknown
         return "unknown", {"reason": "transcript-read-failed", "detail": str(exc)}
     last_epoch = getattr(facts, "last_event_epoch", None) if facts else None

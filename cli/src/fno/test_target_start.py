@@ -1735,12 +1735,18 @@ def test_worktree_occupancy_dirty_recent_transcript_refuses(monkeypatch, tmp_pat
     monkeypatch.setattr(
         "fno.agents.registry.load_registry",
         lambda: [
-            SimpleNamespace(cwd=str(wt), harness_session_id="worker-session")
+            SimpleNamespace(
+                cwd=str(wt), harness_session_id="worker-session", harness="codex"
+            )
         ],
     )
     monkeypatch.setattr(
         "fno.agents.watchdog.tail_facts",
-        lambda sid, cwd: SimpleNamespace(last_event_epoch=time.time() - 5),
+        lambda sid, cwd, **kwargs: (
+            SimpleNamespace(last_event_epoch=time.time() - 5)
+            if kwargs.get("agent") == "codex"
+            else None
+        ),
     )
     verdict, info = target_cli._classify_worktree_occupancy(wt)
     assert verdict == "occupied_worktree"

@@ -1248,7 +1248,11 @@ def _holder_session(holder: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def tail_facts(
-    session_id: str, cwd: str, *, max_records: int = _TAIL_RECORDS
+    session_id: str,
+    cwd: str,
+    *,
+    agent: str = "claude",
+    max_records: int = _TAIL_RECORDS,
 ) -> Optional[TailFacts]:
     """Resolve a session's transcript and tail-read it. Never raises.
 
@@ -1261,7 +1265,7 @@ def tail_facts(
     from fno.provenance.observed import resolve_transcript_path
 
     try:
-        path = resolve_transcript_path("claude", session_id, cwd)
+        path = resolve_transcript_path(agent, session_id, cwd)
     except Exception:  # noqa: BLE001 - a broken resolver is "no transcript"
         return None
     if path is None:

@@ -3683,6 +3683,10 @@ pub fn run_claim(args: &[String]) -> i32 {
             if let Some(rec) = rec {
                 out.insert("holder".into(), Value::String(rec.holder));
                 out.insert(
+                    "schema_version".into(),
+                    Value::Number(rec.schema_version.into()),
+                );
+                out.insert(
                     "pid".into(),
                     rec.pid.map(Value::from).unwrap_or(Value::Null),
                 );

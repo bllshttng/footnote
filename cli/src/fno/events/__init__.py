@@ -261,6 +261,10 @@ def validate(event: dict[str, Any]) -> None:
     # deliberate PID-unavailable claim become indistinguishable in the audit log.
     if type_name.startswith("claim_") and "pid" in data:
         pid = data.get("pid")
+        if "pid_unavailable" in data and not isinstance(data["pid_unavailable"], bool):
+            raise ValidationError(
+                f"event type {type_name} pid_unavailable must be boolean"
+            )
         unavailable = data.get("pid_unavailable") is True
         if pid is None and (not unavailable or data.get("expires_at") is None):
             raise ValidationError(

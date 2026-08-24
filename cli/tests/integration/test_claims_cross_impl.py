@@ -100,8 +100,8 @@ def rust_json(proc: subprocess.CompletedProcess) -> dict:
 
 
 STATUS_PARITY_FIELDS = (
-    "state", "holder", "pid", "pid_unavailable", "host", "machine_id",
-    "acquired_at", "expires_at", "metadata",
+    "state", "holder", "pid", "pid_unavailable", "schema_version", "host",
+    "machine_id", "acquired_at", "expires_at", "metadata",
 )
 
 
@@ -225,6 +225,7 @@ def test_pid_unavailable_ttl_round_trips_between_python_and_rust(tmp_path: Path)
     rs = rust_json(rust("status", "session:py-unavailable", tmp_path, tmp_path))
     assert_status_parity("python-writes-rust-reads (pid unavailable)", py, rs)
     assert py["pid"] is None and py["pid_unavailable"] is True
+    assert py["schema_version"] == 2
 
     r = rust(
         "acquire",
@@ -585,7 +586,7 @@ def test_rust_pid_claim_omits_expires_at_line(tmp_path: Path) -> None:
     [
         "{{{{not yaml",
         "- a\n- list\n",
-        "schema_version: 2\nkey: k\nholder: h\nacquired_at: 5\npid: 1\nhost: x\n",
+        "schema_version: 3\nkey: k\nholder: h\nacquired_at: 5\npid: 1\nhost: x\n",
     ],
     ids=["invalid-yaml", "non-dict-root", "newer-schema"],
 )

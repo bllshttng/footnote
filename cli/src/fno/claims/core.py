@@ -58,6 +58,8 @@ from .types import (
     MAX_KEY_LENGTH,
     MAX_TTL_MS,
     MIN_TTL_MS,
+    PID_UNAVAILABLE_SCHEMA_VERSION,
+    SCHEMA_VERSION,
     Claim,
     ClaimState,
 )
@@ -246,6 +248,9 @@ def _make_claim(
 ) -> Claim:
     acquired = now_ms()
     return Claim(
+        schema_version=(
+            PID_UNAVAILABLE_SCHEMA_VERSION if pid_unavailable else SCHEMA_VERSION
+        ),
         key=key,
         holder=holder,
         acquired_at=acquired,
@@ -602,7 +607,11 @@ def _rebound_claim(
     else:
         expires_at = None
     return Claim(
-        schema_version=existing.schema_version,
+        schema_version=(
+            PID_UNAVAILABLE_SCHEMA_VERSION
+            if new_pid_unavailable
+            else SCHEMA_VERSION
+        ),
         key=existing.key,
         holder=new_holder or existing.holder,
         acquired_at=acquired,
@@ -1231,6 +1240,7 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
         "holder": claim.holder,
         "pid": claim.pid,
         "pid_unavailable": claim.pid_unavailable,
+        "schema_version": claim.schema_version,
         "host": claim.host,
         # Callers classify ownership from this dict, so it has to carry what
         # liveness actually compares; host alone sends them down the fallback.
