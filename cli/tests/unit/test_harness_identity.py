@@ -732,6 +732,17 @@ def test_strip_flags_skip_foreign_name_with_matching_keep_session_id():
     assert ambient_identity_strip_flags("claude", env) == []
 
 
+def test_strip_flags_keep_equal_foreign_resolver_marker_for_ambiguity_remedy():
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_THREAD_ID": "own-session",
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == ["-u", "CODEX_THREAD_ID"]
+
+
 def test_strip_flags_keep_foreign_name_with_different_session_id():
     from fno.harness_identity import ambient_identity_strip_flags
 

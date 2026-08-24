@@ -147,6 +147,10 @@ AMBIENT_IDENTITY_FAMILY: dict[str, str] = {
     **dict(_EXTRA_IDENTITY_NAMES),
 }
 
+_RESOLVER_IDENTITY_NAMES: frozenset[str] = frozenset(
+    marker for marker, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)
+)
+
 
 def scrub_ambient_identity(environ: Optional[dict] = None) -> tuple[str, ...]:
     """Remove every ambient session-identity name from ``environ`` (default
@@ -228,17 +232,25 @@ def ambient_identity_strip_flags(
 
     flags: list[str] = []
     for name in AMBIENT_IDENTITY_ENV:
-        family = AMBIENT_IDENTITY_FAMILY.get(name)
+        candidate_family = AMBIENT_IDENTITY_FAMILY.get(name)
         # An unmapped name is skipped, which is what the docstring has always
         # said and what the code did not do: `.get(name) in (...)` compares None
         # against the keep list, finds no match, and strips it. So a name added
         # to AMBIENT_IDENTITY_ENV without a family entry landed in the remedy
         # line by default. Fail closed instead - never suggest deleting a
         # variable nobody has classified.
-        if family is None or family == keep_family or family in _NEVER_STRIPPED_FAMILIES:
+        if (
+            candidate_family is None
+            or candidate_family == keep_family
+            or candidate_family in _NEVER_STRIPPED_FAMILIES
+        ):
             continue
         value = (environ.get(name) or "").strip()
-        if not value or value == keep_session_id:
+        # Resolver markers remain removable: equal values across families still
+        # leave the resolver ambiguous, so the remedy must clear that marker.
+        if not value or (
+            value == keep_session_id and name not in _RESOLVER_IDENTITY_NAMES
+        ):
             continue
         flags += ["-u", name]
     return flags
