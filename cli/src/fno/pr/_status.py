@@ -805,12 +805,21 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             _reviews.COVERAGE_STATUS_CONTEXT: required_state,
             _reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT: unavailable_state,
         }
-        if any(
-            # Absent counts as a mismatch: a head published before the
-            # diagnostic context existed (or by the carry arm) never gets the
-            # instrument stamp unless the absent row itself triggers the
-            # publish that writes it.
-            posted_states.get(context) != wanted
+        # The publisher stamps the head the coverage row pins, so when that is
+        # a DIFFERENT head than this one, comparing this head's posted states
+        # can never converge - each republish lands on the pinned head and the
+        # next run reads the same absent rows here. The moved head gets its
+        # stamp from the refresher invalidate arm or the next review at it.
+        covered_head = str(coverage.get("head_sha") or "")
+        read_head = str(pr_json.get("headRefOid") or "")
+        converges_here = not (covered_head and read_head and covered_head != read_head)
+        if converges_here and any(
+            # Absent stays absent: the status read is deliberately not the
+            # FIRST coverage-status writer (a PR no publisher has touched gets
+            # its contexts from a publisher, not from a read). Only a POSTED
+            # state that disagrees with the wanted one triggers the republish.
+            posted_states.get(context) is not None
+            and posted_states.get(context) != wanted
             for context, wanted in wanted_states.items()
         ):
             posted, note = _reviews.publish_coverage_status(
