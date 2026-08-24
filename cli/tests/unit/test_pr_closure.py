@@ -325,3 +325,91 @@ def test_bind_skips_already_done_node_without_refusing_batch():
     actions = {b.node_id: b.action for b in result.bindings}
     assert actions["x-1111"] == "filled_primary"
     assert actions["x-2222"] == "already_done"
+
+
+# ---- Open-PR binding classification (x-d3c6) ----
+#
+# The pure projection the reconcile heal, `fno do pr list`, and the king board
+# all share: one open-PR row -> bound / missing / untracked / ambiguous, with a
+# node id only when exactly one real node resolves.
+
+def _open_row(number: int, branch: str, owner: str = "o/r") -> dict:
+    return {
+        "number": number,
+        "url": f"https://github.com/{owner}/pull/{number}",
+        "headRefName": branch,
+    }
+
+
+def _classify(rows, entries):
+    from fno.graph._reconcile import classify_open_pr_bindings
+
+    return classify_open_pr_bindings(rows, entries)
+
+
+def test_open_binding_bound_when_the_node_points_back():
+    entries = [_node(id="x-1a2b", pr_number=5, pr_url="https://github.com/o/r/pull/5")]
+    verdicts = _classify([_open_row(5, "feature/x-1a2b")], entries)
+    assert verdicts[0].verdict == "bound"
+    assert verdicts[0].node_id == "x-1a2b"
+
+
+def test_open_binding_bound_via_additional_prs_ref():
+    # The negative control for the task-3.1 reporters: a PR already present in
+    # the node's additional refs is bound, never reported missing.
+    entries = [
+        _node(
+            id="x-1a2b", pr_number=None,
+            additional_prs=[{"number": 5, "url": "https://github.com/o/r/pull/5"}],
+        )
+    ]
+    verdicts = _classify([_open_row(5, "feature/x-1a2b")], entries)
+    assert verdicts[0].verdict == "bound"
+
+
+def test_open_binding_missing_when_the_node_lacks_the_ref():
+    entries = [_node(id="x-1a2b", pr_number=None)]
+    verdicts = _classify([_open_row(5, "feature/x-1a2b")], entries)
+    assert verdicts[0].verdict == "missing"
+    assert verdicts[0].node_id == "x-1a2b"
+
+
+def test_open_binding_untracked_when_the_branch_names_no_real_node():
+    entries = [_node(id="x-1a2b")]
+    verdicts = _classify([_open_row(5, "chore/tidy-docs")], entries)
+    assert verdicts[0].verdict == "untracked"
+    assert verdicts[0].node_id is None
+
+
+def test_open_binding_untracked_on_a_prefix_collision():
+    # x-5b66 is a prefix of x-5b667; delimiter-bounded matching must not
+    # resolve the shorter id off the longer branch (same rule as the merged
+    # reverse map's _branch_matches_node).
+    entries = [_node(id="x-5b66")]
+    verdicts = _classify([_open_row(5, "feature/x-5b667")], entries)
+    assert verdicts[0].verdict == "untracked"
+
+
+def test_open_binding_ambiguous_when_the_branch_names_several_real_nodes():
+    entries = [_node(id="x-1a2b"), _node(id="x-cdef")]
+    verdicts = _classify([_open_row(5, "x-1a2b-x-cdef-tally")], entries)
+    assert verdicts[0].verdict == "ambiguous"
+    assert verdicts[0].node_id is None
+
+
+def test_open_binding_ambiguous_when_one_node_has_several_open_prs():
+    entries = [_node(id="x-1a2b", pr_number=None)]
+    verdicts = _classify(
+        [_open_row(5, "feature/x-1a2b"), _open_row(6, "target/x-1a2b")], entries
+    )
+    assert [v.verdict for v in verdicts] == ["ambiguous", "ambiguous"]
+
+
+def test_open_binding_reads_only_the_branch_never_a_body():
+    # AC7: a PR body's prose mentions are invisible here by construction -
+    # the classifier's only inputs are the row's headRefName and the graph.
+    # Pinned so a future "helpful" body scan cannot creep in silently.
+    entries = [_node(id="x-1a2b"), _node(id="x-prose")]
+    verdicts = _classify([_open_row(5, "feature/x-1a2b")], entries)
+    assert verdicts[0].node_id == "x-1a2b"
+    assert all(v.node_id != "x-prose" for v in verdicts)

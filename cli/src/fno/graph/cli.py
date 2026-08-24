@@ -9057,6 +9057,63 @@ def cmd_reconcile(
                         err=True,
                     )
 
+    # Open-PR binding heal (x-d3c6): an open PR whose branch names an open,
+    # ref-less node leaves that node invisible to every graph-first reader
+    # until something fills pr_number. One bounded open-PR listing per repo
+    # BEFORE the scan, so the healed rows feed the forward scan and the status
+    # derivation below. Full and explicit-node runs only: a --pr-number call
+    # is bounded to its own PR and must not sweep unrelated repos.
+    open_bound: list[dict] = []
+    open_binding_advisories: list[str] = []
+    if _full_sweep or node is not None:
+        from fno.graph._reconcile import bind_pr_rows, collect_open_binding_heals
+
+        _open_heals, open_binding_advisories = collect_open_binding_heals(
+            entries, node_id=node
+        )
+        if _open_heals:
+
+            def _open_fill(_entries: list[dict]) -> list[dict]:
+                _kept: list[dict] = []
+                for h in _open_heals:
+                    result = bind_pr_rows(
+                        _entries, [h.node_id],
+                        pr_number=h.pr_number, pr_url=h.pr_url,
+                    )
+                    if result.outcome == "bound" and result.bound_ids:
+                        _kept.append(
+                            {"node": h.node_id, "pr": h.pr_number, "url": h.pr_url}
+                        )
+                return _kept
+
+            if dry_run:
+                # In-memory only (same contract as _bind_and_report's dry-run):
+                # the forward-scan preview below sees the healed rows, disk
+                # never moves.
+                open_bound = [
+                    dict(fill, would=True) for fill in _open_fill(entries)
+                ]
+            else:
+                _box: list[dict] = []
+
+                def _open_mutator(entries2):
+                    _box.extend(_open_fill(entries2))
+                    return entries2
+
+                locked_mutate_graph(_graph_path(), _open_mutator)
+                open_bound = _box
+                # Real fills just persisted: reread so the scan below consumes
+                # the healed rows rather than the pre-heal snapshot.
+                entries = read_graph(_graph_path())
+        if not json_out:
+            for b in open_bound:
+                typer.echo(
+                    f"open_pr_bound: {b['node']} -> PR #{b['pr']} ({b['url']})",
+                    err=True,
+                )
+            for advisory in open_binding_advisories:
+                typer.echo(f"warning: {advisory}", err=True)
+
     # A --pr-number call scans only what THIS PR could touch - its own
     # stamped ref plus every exact trailer claim - never the whole graph
     # (x-59a6 review fix: this used to fall through to an unscoped scan on
@@ -9881,6 +9938,11 @@ def cmd_reconcile(
             "closure_claims": closure_claims,
             "closure_bound": closure_bound,
             "closure_refused": closure_refused,
+            # Open-PR binding heals (x-d3c6), reported separately from
+            # closure_*: these FILL pr_number/pr_url for visibility and never
+            # close a node; advisories name ambiguity / gh read failure.
+            "open_pr_bound": open_bound,
+            "open_binding_advisories": open_binding_advisories,
             "supersession_unverified": supersession_unverified,
             # Parent epics of this run's closure claims that are still open,
             # each naming its still-open sibling children exactly (x-59a6).

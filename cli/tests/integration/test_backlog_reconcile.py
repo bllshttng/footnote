@@ -61,9 +61,11 @@ def _make_graph(path: Path, entries: list[dict]) -> None:
 def _no_revert_fetch(monkeypatch):
     """Keep reconcile hermetic: never shell `gh pr list` from tests. W4 revert
     detection has its own unit tests (test_causal_fields.py); the reverse-map
-    pass has its own stubbed tests below."""
+    pass has its own stubbed tests below; the open-binding heal (x-d3c6) has
+    its own stubbed tests below too."""
     monkeypatch.setattr(rec, "fetch_recent_merged_prs", lambda **kw: [])
     monkeypatch.setattr(rec, "list_merged_pr_branches", lambda **kw: [])
+    monkeypatch.setattr(rec, "list_open_pr_branches", lambda **kw: [])
 
 
 @pytest.fixture(autouse=True)
@@ -1880,3 +1882,145 @@ def test_reconcile_epics_waiting_ignores_a_superseded_sibling(cli_env, monkeypat
     payload = json.loads(result.output)
     assert {c["node_id"] for c in payload["closed"]} == {"ab-e10002"}
     assert payload["epics_waiting"] == []
+
+
+# ---------------------------------------------------------------------------
+# Open-PR binding heal: a live open PR naming an unstamped node (x-d3c6)
+# ---------------------------------------------------------------------------
+
+def _open_rows(rows: dict, url_owner: str = "test-owner/test-repo"):
+    """Return a list_open stub: yields open-PR rows for number -> headRefName."""
+    payload = [
+        {
+            "number": num,
+            "url": f"https://github.com/{url_owner}/pull/{num}",
+            "headRefName": branch,
+        }
+        for num, branch in rows.items()
+    ]
+    return lambda **kw: payload
+
+
+def test_open_pr_heal_fills_an_unstamped_node(cli_env, tmp_path, monkeypatch):
+    """AC3: an open PR on feature/<id> + that open node with no PR refs ->
+    reconcile fills pr_number/pr_url, reports open_pr_bound, closes nothing."""
+    graph_path, _sentinel = cli_env
+    # ab-22af is named only as a dependency (a prose-shaped relation): the heal
+    # must leave it ref-less (AC7 - only the branch-named node is touched).
+    _make_graph(graph_path, [
+        _node("ab-11fe", cwd=str(tmp_path)),
+        _node("ab-22af", blocked_by=["ab-11fe"], cwd=str(tmp_path)),
+    ])
+    monkeypatch.setattr(rec, "list_open_pr_branches", _open_rows({1134: "feature/ab-11fe"}))
+    # The healed ref feeds the forward scan below, which queries its state.
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({1134: "OPEN"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["open_pr_bound"] == [
+        {
+            "node": "ab-11fe", "pr": 1134,
+            "url": "https://github.com/test-owner/test-repo/pull/1134",
+        }
+    ]
+
+    entries = _read_entries(graph_path)
+    node = next(e for e in entries if e["id"] == "ab-11fe")
+    assert node["pr_number"] == 1134
+    assert node["pr_url"].endswith("/pull/1134")
+    assert node["completed_at"] is None   # visibility fill, never a closure claim
+    assert node["status"] == "in_review"  # statuses recompute over the filled ref
+    dep = next(e for e in entries if e["id"] == "ab-22af")
+    assert dep["pr_number"] is None
+
+
+def test_open_pr_heal_ambiguous_prs_mutate_nothing(cli_env, tmp_path, monkeypatch):
+    """AC4: one node named by two open PRs -> advisory, no graph mutation."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [_node("ab-3b9e", cwd=str(tmp_path))])
+    before = graph_path.read_bytes()
+    monkeypatch.setattr(
+        rec, "list_open_pr_branches", _open_rows({10: "feature/ab-3b9e", 11: "target/x-ab-3b9e"})
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["open_pr_bound"] == []
+    assert any("ab-3b9e" in a for a in payload["open_binding_advisories"])
+    node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-3b9e")
+    assert node["pr_number"] is None
+    assert graph_path.read_bytes() == before  # no lock fired, bytes untouched
+
+
+def test_open_pr_heal_ignores_a_branch_naming_no_real_node(cli_env, tmp_path, monkeypatch):
+    """AC4: zero real nodes -> untracked, silently - a human branch is the
+    common case and must not spam an advisory on every sweep."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [_node("ab-4c5d", cwd=str(tmp_path))])
+    monkeypatch.setattr(rec, "list_open_pr_branches", _open_rows({9: "chore/tidy-docs"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["open_pr_bound"] == []
+    assert payload["open_binding_advisories"] == []
+
+
+def test_open_pr_heal_runs_on_a_node_scoped_sweep(cli_env, tmp_path, monkeypatch):
+    """AC3: `--node` runs the heal scoped to that node, binding it alone."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [
+        _node("ab-5e6f", cwd=str(tmp_path)), _node("ab-6a7b", cwd=str(tmp_path)),
+    ])
+    monkeypatch.setattr(
+        rec, "list_open_pr_branches", _open_rows({21: "feature/ab-5e6f", 22: "feature/ab-6a7b"})
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({21: "OPEN", 22: "OPEN"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--node", "ab-5e6f", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [b["node"] for b in payload["open_pr_bound"]] == ["ab-5e6f"]
+
+
+def test_open_pr_heal_never_fires_on_a_pr_number_call(cli_env, tmp_path, monkeypatch):
+    """A --pr-number call is bounded to its own PR; the open-binding sweep
+    must not run as its side effect."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [_node("ab-7c8d", pr_number=906, cwd=str(tmp_path))])
+
+    def _boom(**kw):
+        raise AssertionError("list_open must not run on a --pr-number call")
+
+    monkeypatch.setattr(rec, "list_open_pr_branches", _boom)
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({906: "OPEN"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "906", "--json"])
+    assert result.exit_code == 0, result.output
+    # Positive marker that the --pr-number leg itself ran to its payload (the
+    # tripwire above proves the heal leg did not).
+    payload = json.loads(result.output)
+    assert "closure_claims" in payload
+
+
+def test_open_pr_heal_dry_run_binds_in_memory_only(cli_env, tmp_path, monkeypatch):
+    """--dry-run previews the heal (payload carries would: true) and leaves
+    graph.json byte-identical."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [_node("ab-8e9f", cwd=str(tmp_path))])
+    before = graph_path.read_bytes()
+    monkeypatch.setattr(rec, "list_open_pr_branches", _open_rows({31: "feature/ab-8e9f"}))
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({31: "OPEN"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["open_pr_bound"] == [
+        {
+            "node": "ab-8e9f", "pr": 31, "would": True,
+            "url": "https://github.com/test-owner/test-repo/pull/31",
+        }
+    ]
+    assert graph_path.read_bytes() == before
