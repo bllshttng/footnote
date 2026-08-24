@@ -27,9 +27,9 @@ class FakeRun:
 
     gh shapes are exhaustive by intent: a gh command no branch matches RAISES
     echoing the argv, so the next gh call added to production code fails loud
-    here instead of silently passing a fabricated Result through (x-ee3f - an
-    unmatched `gh pr view --json number,body,url,state,mergedAt,files` fell
-    through to the view_url tail and a fail-closed reader blamed the PR body).
+    here instead of silently passing a fabricated Result through (an unmatched
+    `gh pr view --json number,body,url,state,mergedAt,files` once fell through
+    to the view_url tail and a fail-closed reader blamed the PR body).
     git and bash stay permissive; incidental git reads are noise, not the trap.
     """
 
@@ -2321,9 +2321,9 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
 
 
 def test_fake_run_raises_on_an_unmatched_gh_shape():
-    """x-ee3f, the class fix: a gh shape no branch serves must RAISE, never
-    fall through to a fabricated Result. That fall-through is what let a
-    fixture gap masquerade as a held merge (CI job 96169117491)."""
+    """The class fix: a gh shape no branch serves must RAISE, never fall
+    through to a fabricated Result. That fall-through is what let a fixture
+    gap masquerade as a held merge (CI job 96169117491)."""
     fake = FakeRun()
     with pytest.raises(AssertionError, match="gh pr view"):
         fake(["gh", "pr", "view", "42", "--json", "title"])
@@ -2336,7 +2336,7 @@ def test_fake_run_raises_on_an_unmatched_gh_shape():
 def test_populated_graph_closure_fetch_does_not_hold_the_merge(
     enabled, monkeypatch, capsys, tmp_path
 ):
-    """x-ee3f: with a non-empty graph the hold pays its closure fetch over the
+    """With a non-empty graph the hold pays its closure fetch over the
     _merge.run seam, and the fake must serve that fetch a real JSON object -
     an unmatched shape falling through to a fabricated Result is the
     absence-as-success trap. In CI (job 96169117491) a per-worker sandbox graph
