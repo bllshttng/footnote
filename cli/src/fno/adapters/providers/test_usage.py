@@ -521,15 +521,16 @@ class TestZaiProbe:
             seen.append((request, timeout))
             return _Response()
 
-        monkeypatch.setattr(
-            usage_mod,
-            "_env_for_api_key",
-            lambda _record: {
+        dispatch_roots: list[Path | None] = []
+
+        def fake_dispatch(_provider_id: str, repo_root: Path | None = None) -> dict[str, str]:
+            dispatch_roots.append(repo_root)
+            return {
                 "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
                 "ANTHROPIC_AUTH_TOKEN": "live-token",
-            },
-            raising=False,
-        )
+            }
+
+        monkeypatch.setattr(usage_mod, "dispatch_env", fake_dispatch)
         monkeypatch.setattr(
             usage_mod.urllib.request,
             "urlopen",
@@ -539,7 +540,8 @@ class TestZaiProbe:
         probe = getattr(usage_mod, "_probe_zai", None)
         if probe is None:
             pytest.fail("Z.AI probe is not implemented")
-        snapshot, reason = probe(_zai_record(), now=1000.0)
+        repo_root = Path("/project")
+        snapshot, reason = probe(_zai_record(), now=1000.0, repo_root=repo_root)
 
         assert reason is None
         assert snapshot is not None
@@ -549,6 +551,7 @@ class TestZaiProbe:
         assert request.full_url == "https://api.z.ai/api/monitor/usage/quota/limit"
         assert request.headers["Authorization"] == "Bearer live-token"
         assert timeout == 10
+        assert dispatch_roots == [repo_root]
 
     def test_zai_probe_http_failure_is_explicit_unknown(
         self, monkeypatch: pytest.MonkeyPatch
@@ -560,12 +563,11 @@ class TestZaiProbe:
 
         monkeypatch.setattr(
             usage_mod,
-            "_env_for_api_key",
-            lambda _record: {
+            "dispatch_env",
+            lambda _provider_id, **_kwargs: {
                 "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
                 "ANTHROPIC_AUTH_TOKEN": "live-token",
             },
-            raising=False,
         )
         monkeypatch.setattr(
             usage_mod.urllib.request,
@@ -746,6 +748,36 @@ class TestProbeUnknownReason:
 
 
 class TestRefreshObservation:
+    def test_refresh_passes_repo_root_to_probe(
+        self, state_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cross-project refresh probes the route using its record's repository."""
+        from fno.adapters.providers import runtime_state as rs
+
+        repo_root = tmp_path / "foreign-repo"
+        repo_root.mkdir()
+        snap = _snap("p1", UsageWindow("5h", 12.0, 9000.0))
+        seen_roots: list[Path | None] = []
+        monkeypatch.setattr(
+            "fno.adapters.providers.loader.load_providers",
+            lambda *a, **k: type(
+                "C", (), {"by_id": {"p1": _claude_record(repo_root)}}
+            )(),
+        )
+
+        def fake_probe(record, now=None, repo_root=None):  # noqa: ANN001
+            seen_roots.append(repo_root)
+            return snap, None
+
+        monkeypatch.setattr("fno.adapters.providers.usage.probe_usage_detail", fake_probe)
+
+        obs = rs.refresh_usage_detailed(
+            "p1", ttl_seconds=0, now=2000.0, repo_root=repo_root
+        )
+
+        assert obs.snapshot is snap
+        assert seen_roots == [repo_root]
+
     def test_a_probed_snapshot_survives_a_failed_cache_write(
         self, state_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

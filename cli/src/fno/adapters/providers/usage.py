@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from fno.adapters.providers.dispatch import _env_for_api_key
+from fno.adapters.providers.dispatch import dispatch_env
 from fno.adapters.providers.model import ProviderRecord
 from fno.agents.model_routing import _parse_target
 
@@ -728,11 +728,11 @@ def _parse_zai_windows(payload: Any) -> tuple[UsageWindow, ...]:
 
 
 def _probe_zai(
-    record: ProviderRecord, now: float
+    record: ProviderRecord, now: float, *, repo_root: Path | None = None
 ) -> tuple[UsageSnapshot | None, str | None]:
     """Probe the configured Z.AI route's quota endpoint without logging secrets."""
     try:
-        route_env = _env_for_api_key(record)
+        route_env = dispatch_env(record.id, repo_root=repo_root)
     except Exception:  # noqa: BLE001 - route resolution is advisory
         return None, "probe-failed"
     bearer = route_env.get("ANTHROPIC_AUTH_TOKEN") or route_env.get("ANTHROPIC_API_KEY")
@@ -773,7 +773,7 @@ def _probe_zai(
 # request. Deriving it afterwards from a bare None is what mislabels a rejected
 # credential as an endpoint failure.
 _PROBES: dict[
-    str, Callable[[ProviderRecord, float], "tuple[UsageSnapshot | None, str | None]"]
+    str, Callable[..., "tuple[UsageSnapshot | None, str | None]"]
 ] = {
     "claude": _probe_claude,
     "codex": _probe_codex,
@@ -782,7 +782,9 @@ _PROBES: dict[
 
 
 def probe_usage_detail(
-    record: ProviderRecord, now: float | None = None
+    record: ProviderRecord,
+    now: float | None = None,
+    repo_root: Path | None = None,
 ) -> tuple[UsageSnapshot | None, str | None]:
     """``(snapshot, unknown_reason)`` - the probe plus WHY it came back unknown.
 
@@ -836,7 +838,10 @@ def probe_usage_detail(
         if not _attributed_credential_dir(record)[0]:
             return None, "unattributed"
     try:
-        snapshot, reason = probe(record, now)
+        if probe_key == "zai" and repo_root is not None:
+            snapshot, reason = probe(record, now, repo_root=repo_root)
+        else:
+            snapshot, reason = probe(record, now)
     except Exception as exc:  # noqa: BLE001 - crash containment boundary (AC1-FR)
         logger.debug("usage probe crashed for %r: %s", record.id, exc)
         return None, "probe-error"
@@ -845,7 +850,9 @@ def probe_usage_detail(
     return snapshot, None
 
 
-def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapshot | None:
+def probe_usage(
+    record: ProviderRecord, now: float | None = None, repo_root: Path | None = None
+) -> UsageSnapshot | None:
     """Return a fresh usage snapshot for ``record``, or None if unknown.
 
     Compatibility wrapper over :func:`probe_usage_detail` for callers that only
@@ -861,4 +868,4 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
     ``fno config accounts usage`` printed ``unknown`` at exit 0 while the endpoint,
     the bearer discovery, and the parser all worked.
     """
-    return probe_usage_detail(record, now)[0]
+    return probe_usage_detail(record, now, repo_root=repo_root)[0]
