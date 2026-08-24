@@ -1511,6 +1511,163 @@ def test_sweep_payload_shape():
     assert out_rows == rows
 
 
+def test_recoverable_verdict_has_a_bounded_since_parser():
+    assert watchdog.RECOVERABLE in watchdog.VERDICTS
+    assert watchdog.parse_recovery_since("24h") == 24 * 3600
+    with pytest.raises(ValueError, match="since"):
+        watchdog.parse_recovery_since("yesterday")
+
+
+def test_recoverable_sweep_zero_is_positive_evidence(monkeypatch, tmp_path):
+    from fno.agents.discover import CodexRecoveryScan
+
+    scan = CodexRecoveryScan((), True, 0, 0, 0, ())
+    monkeypatch.setattr(
+        watchdog,
+        "scan_recoverable_codex_rollouts",
+        lambda *args, **kwargs: scan,
+    )
+
+    payload, rows, result = watchdog.run_recoverable_sweep(
+        cwd=tmp_path, recency_seconds=24 * 3600, now_s=NOW_1840
+    )
+
+    assert result is scan
+    assert rows == []
+    assert payload["complete"] is True
+    assert payload["counts"] == {watchdog.RECOVERABLE: 0}
+
+
+def test_recoverable_apply_requires_complete_coverage_before_adoption(monkeypatch, tmp_path):
+    from fno.agents.discover import CodexRecoveryScan
+
+    scan = CodexRecoveryScan(
+        (), False, 1, 1, 0, ("rollout JSON failed: broken.jsonl",)
+    )
+    adopted = []
+
+    results = watchdog.apply_recoverable(
+        scan,
+        scope_cwd=tmp_path,
+        adopt_fn=lambda *args, **kwargs: adopted.append(args),
+    )
+
+    assert adopted == []
+    assert results == [{
+        "session_id": None,
+        "outcome": "refused",
+        "detail": "recovery coverage incomplete: rollout JSON failed: broken.jsonl",
+    }]
+
+
+def test_cli_recoverable_rejects_invalid_since_before_scanning(monkeypatch, tmp_path, capsys):
+    from fno.agents import cli as agents_cli
+
+    with pytest.raises(typer.Exit) as exc:
+        agents_cli.cmd_watchdog(
+            json_out=False,
+            apply=False,
+            apply_all=False,
+            only=watchdog.RECOVERABLE,
+            mail_to="",
+            since="yesterday",
+            cwd=str(tmp_path),
+        )
+
+    assert exc.value.exit_code == 2
+    assert "invalid since" in capsys.readouterr().err
+
+
+def test_cli_recoverable_dry_run_prints_completed_zero(monkeypatch, tmp_path, capsys):
+    from fno.agents import cli as agents_cli
+    from fno.agents.discover import CodexRecoveryScan
+
+    scan = CodexRecoveryScan((), True, 0, 0, 0, ())
+    real_run = watchdog.run_recoverable_sweep
+    monkeypatch.setattr(
+        watchdog,
+        "run_recoverable_sweep",
+        lambda **kwargs: real_run(
+            **kwargs, scan_fn=lambda *args, **kw: scan
+        ),
+    )
+    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(watchdog, "emit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
+
+    agents_cli.cmd_watchdog(
+        json_out=False,
+        apply=False,
+        apply_all=False,
+        only=watchdog.RECOVERABLE,
+        mail_to="",
+        since="24h",
+        cwd=str(tmp_path),
+    )
+
+    assert "recoverable=0 complete=true" in capsys.readouterr().out
+
+
+def test_recoverable_apply_checks_the_exact_adopted_registry_row(tmp_path):
+    from types import SimpleNamespace
+    from fno.agents.discover import CodexRecoveryScan, RecoverableCodexRollout
+
+    session_id = "019f48e1-apply-candidate"
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text(
+        json.dumps({
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": str(tmp_path)},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    candidate = RecoverableCodexRollout(
+        session_id, str(tmp_path), rollout, NOW_1840
+    )
+    scan = CodexRecoveryScan((candidate,), True, 1, 0, 0, ())
+    adopted = []
+
+    def adopt(hit, **kwargs):
+        adopted.append(hit)
+
+    results = watchdog.apply_recoverable(
+        scan,
+        scope_cwd=tmp_path,
+        adopt_fn=adopt,
+        confine_fn=lambda token, hits, **kwargs: hits,
+        load_registry_fn=lambda path: [SimpleNamespace(
+            harness="codex",
+            harness_session_id=session_id,
+            cwd=str(tmp_path),
+            origin="adopted",
+            name="019f48e1",
+        )],
+    )
+
+    assert len(adopted) == 1
+    assert results == [{
+        "session_id": session_id,
+        "outcome": "applied",
+        "detail": f"adopted {session_id} handle=019f48e1",
+    }]
+
+
+def test_recoverable_apply_names_a_vanished_candidate(tmp_path):
+    from fno.agents.discover import CodexRecoveryScan, RecoverableCodexRollout
+
+    session_id = "019f48e1-vanished-candidate"
+    candidate = RecoverableCodexRollout(
+        session_id, str(tmp_path), tmp_path / "gone.jsonl", NOW_1840
+    )
+    results = watchdog.apply_recoverable(
+        CodexRecoveryScan((candidate,), True, 1, 0, 0, ()),
+        scope_cwd=tmp_path,
+    )
+
+    assert results[0]["outcome"] == "refused"
+    assert "vanished" in results[0]["detail"]
+
+
 def test_cli_prints_the_terminal_harness_row_count(monkeypatch, capsys):
     from fno.agents import cli as agents_cli
 
