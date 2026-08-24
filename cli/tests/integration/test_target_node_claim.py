@@ -149,7 +149,6 @@ def test_node_without_proven_harness_identity_does_not_claim(tmp_path):
     env.pop("TARGET_SESSION_ID", None)
     env.pop("CODEX_THREAD_ID", None)
     env.pop("CLAUDE_CODE_SESSION_ID", None)
-    env.pop("TARGET_SESSION_ID", None)
     result = _run_init(repo, env)
     state = _state(repo)
     assert result.returncode == 0, result.stderr
