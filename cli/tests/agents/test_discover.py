@@ -17,6 +17,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -2308,16 +2309,18 @@ def _write_opencode_session(
 
 def _run_opencode(tmp_path, storage, **kw):
     """Discover with every other source empty so only opencode rows surface."""
-    return discover.discover_live_sessions(
-        sessions_dir=tmp_path / "no-sessions",
-        projects_dir=tmp_path / "no-projects",
-        codex_sessions_dir=tmp_path / "no-codex",
-        opencode_storage_dir=storage,
-        name_map_path=tmp_path / ".fno" / "session-names.json",
-        psutil_mod=_FakePsutil(alive={}),
-        project_resolver=kw.pop("project_resolver", lambda c: None),
-        **kw,
-    )
+    with patch.object(discover, "_discover_from_roster", return_value=[]):
+        return discover.discover_live_sessions(
+            sessions_dir=tmp_path / "no-sessions",
+            projects_dir=tmp_path / "no-projects",
+            codex_sessions_dir=tmp_path / "no-codex",
+            opencode_storage_dir=storage,
+            name_map_path=tmp_path / ".fno" / "session-names.json",
+            registry_path=tmp_path / "no-registry.json",
+            psutil_mod=_FakePsutil(alive={}),
+            project_resolver=kw.pop("project_resolver", lambda c: None),
+            **kw,
+        )
 
 
 def test_us6_opencode_session_surfaces_live(tmp_path):
