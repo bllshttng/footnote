@@ -140,13 +140,14 @@ def _closes_quoted_scalar(raw: str) -> bool:
 
 
 def _approved_true(value: Optional[str]) -> bool:
-    """The truthy spellings every posture reader accepts for
-    ``auto_merge_approved``. One helper, not a re-typed literal per gate: the
-    two reads inside ``run_merge`` and the git-protection hook's authorize
-    path must not drift apart on a hand-edited manifest. ``finalize.rs``
-    accepts only the literal ``true`` (init never writes another spelling);
-    the wider set here is tolerance, and it can only refuse less on spellings
-    init does not produce.
+    """The truthy spellings this verb accepts for ``auto_merge_approved``.
+    One helper, not a re-typed literal per read inside ``run_merge``. The
+    posture predicate is mirrored, not shared: ``finalize.rs`` accepts only
+    the literal ``true`` and the git-protection hook carries its own copy of
+    this set (a standalone script cannot import it). Init never writes
+    another spelling, so the wider set here is tolerance for hand-edited
+    manifests, and any widening must be replicated in all three or the gates
+    split on exactly that spelling.
     """
     return value is not None and value.strip().lower() in ("true", "yes", "1")
 
@@ -1701,7 +1702,10 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             f"auto_merge_source: {source}); sanctioned override: an "
             "out-of-band merge by the operator (any such merge satisfies "
             "done()), or re-arm the run's dispatch (attended and without "
-            "--no-merge, or auto_merge.grant = dispatch)",
+            "--no-merge, or auto_merge.grant = dispatch); on a repo whose "
+            "standing switch is off, that alone is not enough - arm "
+            "auto_merge.enabled or spawn with TARGET_AUTO_MERGE=1 (the "
+            "config refusal names those levers)",
             "none",
             err=False,
         )

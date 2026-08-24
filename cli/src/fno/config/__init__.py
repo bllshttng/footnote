@@ -2390,6 +2390,13 @@ class AutoMergeBlock(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    # MIRROR NOTE (posture readers): the Rust reader at
+    # crates/fno-agents/src/agents_config.rs `auto_merge_enabled` accepts only
+    # a real TOML boolean for this key - deliberately stricter at the
+    # irreversible native-arm - while this coercer also accepts the string
+    # spellings. A config carrying `enabled = "true"` arms the merge verb but
+    # not the finalize arm. Any change to either spelling set must move both,
+    # or the gates split on exactly that spelling.
     enabled: bool = False
     # ACTOR scope (x-4be1): who may merge once `enabled` passes. Replaces
     # `dispatch.auto_merge`, which spelled the same decision in another table.

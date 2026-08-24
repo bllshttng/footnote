@@ -833,11 +833,13 @@ def _live_merge_switch_armed(repo_root, fm):
     live switch off mid-flight (x-2270) - without this read, the raw path was
     the weaker gate, merging past a disarm the sanctioned verb refuses.
 
-    The config answer comes from the resolver CLI, never a local TOML parse:
-    layer precedence and the legacy dispatch.auto_merge -> auto_merge.grant
-    fold live in the resolver (x-93ff), and a second parser here is how the
-    hook drifts from every other reader. fno unavailable or slow -> fail
-    closed (decline to authorize); the sanctioned verb remains available.
+    The config answer comes from the shared resolver, never a local TOML
+    parse: layer precedence and the legacy dispatch.auto_merge ->
+    auto_merge.grant fold live there (x-93ff), and a second parser here is
+    how the hook drifts from every other reader. In-process first (the hook
+    interpreter often carries the package); the resolver CLI as the fallback
+    when it does not. Either resolver unavailable, slow, or unreadable ->
+    fail closed (decline to authorize); the sanctioned verb remains available.
     """
     if (
         str(fm.get("auto_merge_approved", "")).lower() in ("true", "yes", "1")
@@ -845,16 +847,27 @@ def _live_merge_switch_armed(repo_root, fm):
     ):
         return True
     try:
-        proc = subprocess.run(
-            ["fno", "config", "get", "auto_merge.enabled"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            cwd=str(repo_root),
+        from fno.config import load_settings_for_repo
+    except ImportError:
+        try:
+            proc = subprocess.run(
+                ["fno", "config", "get", "auto_merge.enabled"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=str(repo_root),
+            )
+        except Exception:  # noqa: BLE001 - fail closed on any resolver failure
+            return False
+        return proc.returncode == 0 and proc.stdout.strip().lower() in (
+            "true",
+            "yes",
+            "1",
         )
-    except Exception:  # noqa: BLE001 - fail closed on any resolver failure
+    try:
+        return bool(load_settings_for_repo(repo_root).auto_merge.enabled)
+    except Exception:  # noqa: BLE001 - a config the resolver cannot read never arms
         return False
-    return proc.returncode == 0 and proc.stdout.strip().lower() in ("true", "yes", "1")
 
 
 def _check_pr_merge_allowed(command=""):
