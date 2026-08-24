@@ -110,6 +110,13 @@ codex_item_completed() {
       item:{type:"ExitedReviewMode", review_output:$output}}}'
 }
 
+codex_exited_review_mode() {
+  local turn="$1" review_output="$2"
+  jq -nc --arg turn "$turn" --argjson output "$review_output" \
+    '{type:"event_msg", payload:{type:"exited_review_mode", turn_id:$turn,
+      review_output:$output}}'
+}
+
 codex_stop() {
   local transcript="$1" turn="$2" message="${3-}"
   local dir="$TMP/codex"
@@ -215,9 +222,17 @@ CODEX_CLEAN_ITEM="$(codex_item_completed "$CODEX_TURN" '{"findings":[]}')"
 run_hook "$(codex_stop "$CODEX_CLEAN_ITEM" "$CODEX_TURN" "no findings")"
 expect_attest "codex-stop-empty-findings"
 
+CODEX_DIRECT_CLEAN="$(codex_exited_review_mode "$CODEX_TURN" '{"findings":[]}')"
+run_hook "$(codex_stop "$CODEX_DIRECT_CLEAN" "$CODEX_TURN" "no findings")"
+expect_attest "codex-stop-direct-empty-findings"
+
 CODEX_DIRTY_ITEM="$(codex_item_completed "$CODEX_TURN" '{"findings":[{"file":"a.py","summary":"boom"}]}')"
 run_hook "$(codex_stop "$CODEX_DIRTY_ITEM" "$CODEX_TURN" "no findings")"
 expect_silent "codex-stop-nonempty-findings"
+
+CODEX_DIRECT_DIRTY="$(codex_exited_review_mode "$CODEX_TURN" '{"findings":[{"file":"a.py","summary":"boom"}]}')"
+run_hook "$(codex_stop "$CODEX_DIRECT_DIRTY" "$CODEX_TURN" "no findings")"
+expect_silent "codex-stop-direct-nonempty-findings"
 
 CODEX_NULL_ITEM="$(codex_item_completed "$CODEX_TURN" 'null')"
 run_hook "$(codex_stop "$CODEX_NULL_ITEM" "$CODEX_TURN" "no findings")"

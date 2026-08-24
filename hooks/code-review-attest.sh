@@ -172,20 +172,23 @@ print("[]")
     transcript="${transcript/#\~/$HOME}"
     [[ -r "$transcript" ]] || exit 0
 
-    # Codex's review verdict is a structured transcript item, not the final
-    # assistant prose. Slurp the complete JSONL so a malformed later row, a
-    # duplicate completion, or a wrong-turn row cannot be normalized into a
-    # clean result by a partial grep.
+    # Codex has emitted both a direct `exited_review_mode` payload and an
+    # `item_completed` payload containing an `ExitedReviewMode` item. Both are
+    # structured transcript evidence, not final assistant prose. Slurp the
+    # complete JSONL so a malformed later row, a duplicate completion, or a
+    # wrong-turn row cannot be normalized into a clean result by a partial grep.
     review_outputs="$(jq -s --arg turn "$turn_id" '
       [
         .[]
-        | select(
-            .type == "event_msg"
-            and .payload.type == "item_completed"
-            and .payload.turn_id == $turn
-            and .payload.item.type == "ExitedReviewMode"
-          )
-        | .payload.item.review_output
+        | select(.type == "event_msg" and .payload.turn_id == $turn)
+        | if (.payload.type == "item_completed"
+              and .payload.item.type == "ExitedReviewMode") then
+            .payload.item.review_output
+          elif .payload.type == "exited_review_mode" then
+            .payload.review_output
+          else
+            empty
+          end
       ]
     ' "$transcript" 2>/dev/null)" || exit 0
 

@@ -147,12 +147,9 @@ def _drive_codex_code_review(repo: Path) -> None:
             {
                 "type": "event_msg",
                 "payload": {
-                    "type": "item_completed",
+                    "type": "exited_review_mode",
                     "turn_id": turn_id,
-                    "item": {
-                        "type": "ExitedReviewMode",
-                        "review_output": {"findings": []},
-                    },
+                    "review_output": {"findings": []},
                 },
             }
         )
