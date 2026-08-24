@@ -6177,9 +6177,11 @@ def _mux_pane_send(
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
 
-    def _run(args: list[str], stdin_text: Optional[str] = None) -> int:
-        """Run one ``fno mux pane`` verb; return its exit code (-1 on spawn
-        failure). A non-zero code's stderr detail is surfaced, never swallowed."""
+    def _run(args: list[str], stdin_text: Optional[str] = None):
+        """Run one ``fno mux pane`` verb; return its CompletedProcess, or None
+        on spawn failure. A non-zero code's stderr detail is surfaced, never
+        swallowed. The process (not a bare code) is the return so the claim
+        gate can read the refusal reason without a second wrapper."""
         try:
             proc = subprocess.run(
                 [fno_bin, "mux", "pane", *args, "--session", str(session)],
@@ -6190,14 +6192,14 @@ def _mux_pane_send(
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"fno mux pane {args[0]} failed: {exc}", file=sys.stderr)
-            return -1
+            return None
         if proc.returncode != 0:
             detail = (proc.stderr or "").strip()
             print(
                 f"fno mux pane {args[0]} exited {proc.returncode}: {detail}",
                 file=sys.stderr,
             )
-        return proc.returncode
+        return proc
 
     def _paste_then_submit() -> bool:
         # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
@@ -6208,7 +6210,8 @@ def _mux_pane_send(
         send_args = ["send", pane, "--stdin", "--raw"]
         if guarded:
             send_args.append("--guarded")
-        rc = _run(send_args, stdin_text=text)
+        pasted = _run(send_args, stdin_text=text)
+        rc = pasted.returncode if pasted is not None else -1
         if rc != 0:
             if rc == _MUX_EXIT_TARGET_NOT_IDLE:
                 # Turn not taken: the recipient is mid-turn, so the paste never
@@ -6223,7 +6226,9 @@ def _mux_pane_send(
         time.sleep(enter_delay_s)
         # A submit key is a control byte, never a message: always --raw.
         return all(
-            _run(["send", pane, "--text", key, "--raw"]) == 0 for key in submit_text
+            (proc := _run(["send", pane, "--text", key, "--raw"])) is not None
+            and proc.returncode == 0
+            for key in submit_text
         )
 
     if guarded:
@@ -6252,24 +6257,13 @@ def _mux_pane_send(
     def _claim_writer() -> tuple[bool, str]:
         """Acquire the pane writer claim; return (ok, stderr detail).
 
-        The detail carries the server's refusal REASON: "held by pid" is
-        another live writer mid-burst; anything else (not claim-eligible,
+        The detail carries the server's refusal REASON: the held-claim marker
+        is another live writer mid-burst; anything else (not claim-eligible,
         dead pane) is a pane with no writer interlock at all."""
-        try:
-            proc = subprocess.run(
-                [fno_bin, "mux", "pane", "claim", pane, "--pid", str(os.getpid()),
-                 "--session", str(session)],
-                capture_output=True,
-                text=True,
-                timeout=_MAIL_INJECT_TIMEOUT_S,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            print(f"fno mux pane claim failed: {exc}", file=sys.stderr)
+        proc = _run(["claim", pane, "--pid", str(os.getpid())])
+        if proc is None:
             return False, ""
-        detail = (proc.stderr or "").strip()
-        if proc.returncode != 0 and detail:
-            print(f"fno mux pane claim exited {proc.returncode}: {detail}", file=sys.stderr)
-        return proc.returncode == 0, detail
+        return proc.returncode == 0, (proc.stderr or "").strip()
 
     claimed, claim_detail = _claim_writer()
     if not claimed and _MUX_CLAIM_HELD_MARKER in claim_detail:

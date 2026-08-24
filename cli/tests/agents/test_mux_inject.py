@@ -198,6 +198,22 @@ def test_held_writer_claim_past_the_wait_demotes_without_pasting(monkeypatch) ->
     assert verbs == ["claim"]
 
 
+def test_held_claim_marker_is_pinned_on_both_sides_of_the_contract() -> None:
+    """The pane-claim gate greps the server's refusal stderr for a phrase. Pin
+    the phrase at BOTH ends so a wording change on either side fails a test
+    instead of silently degrading the gate back to fail-open (the fakes in the
+    tests above hardcode the same string, so they alone cannot detect drift).
+    If the refusal messages ever localize, replace this grep with a dedicated
+    held-claim exit code and branch on that."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    server = (root / "crates/fno/src/server.rs").read_text(encoding="utf-8")
+    python = (root / "cli/src/fno/agents/dispatch.py").read_text(encoding="utf-8")
+    assert "writer claim held by pid" in server
+    assert '_MUX_CLAIM_HELD_MARKER = "held by pid"' in python
+
+
 def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None:
     from fno.agents import dispatch as dispatch_mod
     from fno.agents import harness_map
