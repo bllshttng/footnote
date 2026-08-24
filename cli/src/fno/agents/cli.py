@@ -2676,6 +2676,37 @@ def cmd_rename(
     typer.echo(f"renamed {worker} -> {entry.name} (session={entry.harness_session_id or 'unknown'})")
 
 
+@agents_app.command("retask", hidden=True)
+def cmd_retask(
+    worker: str = typer.Argument(..., help="Blueprint worker registry label or session id."),
+    node: str = typer.Option(..., "--node", help="Target backlog node."),
+    model: Optional[str] = typer.Option(None, "--model"),
+    effort: Optional[str] = typer.Option(None, "--effort"),
+    json_out: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Retask one finished blueprint pane through the verified transaction."""
+    from fno.agents.retask import run_retask
+    from fno.config import load_settings
+
+    try:
+        receipt = run_retask(
+            worker,
+            node=node,
+            settings=load_settings(),
+            model=model,
+            effort=effort,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        typer.echo(f"agents retask: {exc}", err=True)
+        raise typer.Exit(code=2)
+    if json_out:
+        typer.echo(json.dumps(receipt))
+    else:
+        typer.echo(json.dumps(receipt, sort_keys=True))
+    if receipt.get("status") != "retasked":
+        raise typer.Exit(code=1)
+
+
 @agents_app.command("spawn-guard", hidden=True)
 def cmd_spawn_guard(
     node_id: str = typer.Argument(

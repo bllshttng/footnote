@@ -115,6 +115,17 @@ Everywhere else, resume first and deliver the instruction with `fno agents mail 
 
 `fno agents mail send` can hang for minutes. A send that has not returned is pending, not failed.
 
+## Blueprint retask
+
+Close blueprint provenance before clearing its pane:
+
+```bash
+fno backlog session close <node> --summary "<summary>" --launch "/fno:target <node>"
+fno agents retask <blueprint-worker> --node <node>
+```
+
+The retask receipt has separate `cleared`, `session_restamped`, `switch`, `switch_verified`, and `target_submit_confirmed` fields. `retasked` means the no-merge target submit was confirmed by the pane transport. `spawn_required` means the target coordinate cannot be switched in place. Any other refusal preserves the original pane for inspection.
+
 A receipt reading `queued (durable)` is NOT delivery. Verify by transcript content (`fno agents peek <handle>`), never by a roster field.
 
 Answer a message with `fno agents mail reply --to <msg-id>`. It threads the reply and resolves the sender itself. Never re-type a handle.

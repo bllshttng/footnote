@@ -403,7 +403,14 @@ Reporting is push-based - the completion mail live-injects into your pane and wa
 
 ### One session per node, across phases
 
-The unit of continuity is the **node**, not the phase: one teammate session carries a node from think through blueprint through do. Mailing the next verb into the live pane IS the dispatch - no stop, no respawn, no re-explaining context the session already holds. The blueprint phase is the one exception. One session takes up to three nodes there and hands each back for its own `/fno:target` (3d above).
+The unit of continuity is the **node**, not the phase: one teammate session carries a node from think through blueprint through do. Mailing the next verb into the live pane IS the dispatch - no stop, no respawn, no re-explaining context the session already holds. A finished blueprint closes its provenance before the pane is cleared, then the king calls one read-and-verified retask transaction:
+
+```bash
+fno backlog session close <node> --summary "<what the plan settled>" --launch "/fno:target <node>"
+fno agents retask <blueprint-worker> --node <node>
+```
+
+`session close` refuses unresolved identity and records the blueprint session with its honest end. `retask` proves the positive idle marker, clears, waits for the changed session id, renames the registry label, verifies the model tier, and submits the no-merge target only after the switch is verified. A `spawn_required` or other refusal preserves the pane and routes through the existing fresh-spawn path. At or above the context threshold, use a fresh successor instead of clearing. Do not drive the picker or target verb by hand.
 
 ```bash
 fno backlog update <node> --dispatch-brief "<sibling facts that bear on this node, or 'none'>"

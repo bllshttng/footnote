@@ -136,3 +136,160 @@ def test_explicit_model_and_effort_override_target_profile():
 
     assert target.model == "gpt-5.6-luna"
     assert target.effort == "xhigh"
+
+
+def test_execute_retask_same_tier_orders_clear_rename_status_then_target():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="codex", model="gpt-5.6-sol", effort="high"),
+        env={},
+    )
+    sends: list[tuple[str, bool]] = []
+    tiers: list[tuple[str, str]] = []
+    frames = iter([
+        "› Ask Codex to do anything\n",
+        "Model: gpt-5.6-sol (reasoning high, summaries auto)",
+    ])
+
+    def send(text: str, submit: bool) -> bool:
+        sends.append((text, submit))
+        return True
+
+    receipt = execute_retask(
+        _row(screen_state={"state": "idle", "rule": "idle_prompt"}),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: next(frames),
+        send=send,
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+        project_tier=lambda model, effort: tiers.append((model, effort)),
+    )
+
+    assert receipt == {
+        "status": "retasked",
+        "cleared": True,
+        "session_restamped": True,
+        "switch": "skipped_same_tier",
+        "switch_verified": True,
+        "target_submit_confirmed": True,
+        "registry_name": "target-x-bdb9",
+    }
+    assert [text for text, _submit in sends] == [
+        "/clear", "/status", "$fno:target --no-merge x-bdb9"
+    ]
+    assert tiers == [("gpt-5.6-sol", "high")]
+
+
+def test_execute_retask_codex_menu_walk_verifies_each_target_before_submit():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="codex", model="gpt-5.6-luna", effort="xhigh"),
+        env={},
+    )
+    sends: list[tuple[str, bool]] = []
+    tiers: list[tuple[str, str]] = []
+    frames = iter([
+        "› Ask Codex to do anything\n",
+        "Model: gpt-5.6-sol (reasoning high, summaries auto)",
+        "Select Model and Effort\n› 1. gpt-5.6-sol (current)\n  3. gpt-5.6-luna\n",
+        "Select Model and Effort\n  1. gpt-5.6-sol\n› 3. gpt-5.6-luna (current)\n",
+        "Select Reasoning Level for gpt-5.6-luna\n› 2. Medium (default)\n  4. Extra high\n",
+        "Select Reasoning Level for gpt-5.6-luna\n  2. Medium (default)\n› 4. Extra high\n",
+        "Model: gpt-5.6-luna (reasoning xhigh, summaries auto)",
+    ])
+
+    def send(text: str, submit: bool) -> bool:
+        sends.append((text, submit))
+        return True
+
+    receipt = execute_retask(
+        _row(screen_state={"state": "idle", "rule": "idle_prompt"}),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: next(frames),
+        send=send,
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+        project_tier=lambda model, effort: tiers.append((model, effort)),
+    )
+
+    assert receipt["status"] == "retasked"
+    assert receipt["switch"] == "switched"
+    assert receipt["switch_verified"] is True
+    assert receipt["target_submit_confirmed"] is True
+    assert sends[0] == ("/clear", True)
+    assert sends[-1] == ("$fno:target --no-merge x-bdb9", True)
+    assert ("/model", True) in sends
+    assert ("", True) in sends
+    assert any(text == "\x1b[B" and not submit for text, submit in sends)
+    assert tiers == [("gpt-5.6-sol", "high"), ("gpt-5.6-luna", "xhigh")]
+
+
+def test_execute_retask_claude_uses_direct_strategy_commands():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="claude", model="new-model", effort="xhigh"),
+        env={},
+    )
+    sends: list[tuple[str, bool]] = []
+    frames = iter([
+        "ready",
+        "Model: old-model (reasoning high, summaries auto)",
+        "Model: new-model (reasoning xhigh, summaries auto)",
+    ])
+
+    receipt = execute_retask(
+        _row(
+            harness="claude",
+            model="old-model",
+            effort="high",
+            screen_state={"state": "idle", "rule": "live_prompt_box"},
+        ),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: next(frames),
+        send=lambda text, submit: (sends.append((text, submit)) or True),
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["status"] == "retasked"
+    assert ("/model new-model", True) in sends
+    assert ("/effort xhigh", True) in sends
+    assert [text for text, _submit in sends if text.startswith("/model")] == ["/model new-model"]
+
+
+def test_execute_retask_refuses_missing_positive_menu_row_before_target():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="codex", model="gpt-5.6-luna", effort="xhigh"),
+        env={},
+    )
+    frames = iter([
+        "› Ask Codex to do anything\n",
+        "Model: gpt-5.6-sol (reasoning high, summaries auto)",
+        "Select Model and Effort\n› 1. gpt-5.6-sol (current)\n",
+    ])
+
+    receipt = execute_retask(
+        _row(screen_state={"state": "idle", "rule": "idle_prompt"}),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: next(frames),
+        send=lambda _text, _submit: True,
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "model_row_missing"
+    assert receipt["target_submit_confirmed"] is False

@@ -219,6 +219,8 @@ This table shows how autonomous dispatch renders a footnote `/verb` for each har
 | codex | `$fno:verb ...` | `codex exec` expands the plugin skill. |
 | gemini | **refused** | Deprecated; the dispatch lane is a loud error naming its successor (agy). No prose build brief is generated. |
 
+Retask is a read-and-verified transaction over a live mux pane. It clears before switching. It waits for a changed harness session id. It renames the fno registry label. It verifies model and effort before submitting the no-merge target. Claude uses the declarative `direct` strategy. Codex uses `menu_walk` with live cursor reads. Gemini, agy, and opencode expose an unsupported strategy and return `spawn_required`.
+
 Only two spawn payloads render through this table: an **explicit `/verb` passthrough**, and a **resolved node-id build** (a node id -> `/target <id>`, the one surviving implicit `/target`, config-driven not shape-inferred). Any other free text is NOT wrapped - `spawn "<free text>"` sends it **verbatim as the session seed**, no `/target`, no per-harness render. To build free text, write `spawn /target <text>` or pass a node id. (The retired `ask`/`discuss` verbs are subsumed: a one-shot Q&A is the `headless` substrate; a conversational session is the default seed.)
 
 ## See also

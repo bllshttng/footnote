@@ -1715,6 +1715,39 @@ def rename_agent(
     return result[0]
 
 
+def project_verified_tier(
+    name: str,
+    session_id: str,
+    *,
+    model: str,
+    effort: str,
+    registry_path: Optional[Path] = None,
+) -> AgentEntry:
+    """Persist model and effort read from the same verified pane status."""
+    result: list[AgentEntry] = []
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        target = next(
+            (
+                entry
+                for entry in entries
+                if entry.name == name and entry.harness_session_id == session_id
+            ),
+            None,
+        )
+        if target is None:
+            raise AgentResolutionError(
+                f"registry row {name!r} was not restamped to session {session_id!r}"
+            )
+        target.model = model
+        target.effort = effort
+        result.append(target)
+        return entries
+
+    update_registry(_updater, path=registry_path)
+    return result[0]
+
+
 def _identity_signature(entry: AgentEntry) -> tuple[str, str, str, str]:
     """Fields whose mutation can change what token addresses a registry row."""
     return (

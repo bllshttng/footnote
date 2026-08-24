@@ -38,3 +38,27 @@ def test_rename_refuses_a_label_collision(tmp_path):
 
     with pytest.raises(ValueError, match="already names"):
         rename_agent("one", "two", registry_path=registry)
+
+
+def test_verified_tier_projection_updates_the_restamped_row_atomically(tmp_path):
+    from fno.agents.registry import project_verified_tier
+
+    registry = tmp_path / "agents.json"
+    write_registry([
+        AgentEntry(
+            name="target-new",
+            cwd="/repo",
+            log_path="",
+            harness="codex",
+            harness_session_id="session-2",
+            model="gpt-5.6-sol",
+            effort="high",
+        )
+    ], path=registry)
+
+    updated = project_verified_tier(
+        "target-new", "session-2", model="gpt-5.6-luna", effort="xhigh", registry_path=registry
+    )
+
+    assert (updated.model, updated.effort) == ("gpt-5.6-luna", "xhigh")
+    assert resolve_agent("session-2", path=registry).entry.model == "gpt-5.6-luna"
