@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -2631,6 +2632,38 @@ class TestQuotaPreflight:
                 now_iso="2026-06-14T12:00:00Z",
                 graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
             )
+
+    def test_dispatch_budget_skips_new_action_and_mints_receipt(self, tmp_path):
+        """A spent cadence budget leaves work for the next tick, not timeout."""
+        from fno.pr_watch._dispatch import tick
+
+        candidate = _make_candidate(pr_number=77, repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path,
+            candidates=[candidate],
+            obs_map={77: _make_obs(77, "MERGED")},
+        )
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=tmp_path / "state.json",
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "MERGED" for key in keys}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            dispatch_deadline=time.monotonic() - 1,
+        )
+
+        assert result.acted == 0
+        assert deps["fired"] == []
+        assert {event["data"].get("reason") for event in deps["events"]} >= {"tick-budget"}
+        receipt = next(event["data"] for event in deps["events"] if event["type"] == "pr_watch_tick")
+        assert receipt["swept_count"] == 1
 
     def test_degraded_sweep_still_completes_and_receipts(self, tmp_path):
         """AC4-EDGE at the tick boundary: a sweep WITH failures completed -

@@ -460,6 +460,7 @@ def tick() -> None:
                 max_retries=cfg.retries,
                 graphql_min_remaining=cfg.graphql_min_remaining,
                 enabled=tick_enabled,
+                dispatch_deadline=started + deadline,
             )
         except TickDeadlineExceeded:
             raise

@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -235,6 +236,11 @@ _DEFAULT_MODEL = "claude-haiku-4-5"
 _TIMEOUT_FOR_VERB: dict[str, float] = {"check": 180.0}
 _DEFAULT_FIRE_TIMEOUT = 300.0
 _SPAWN_TIMEOUT_GRACE = 30.0
+# Leave enough cadence budget for one bounded ritual and the post-dispatch legs.
+# A later action can retry on the next tick; starting it with less time would
+# turn a completed sweep into the same global deadline timeout this daemon is
+# meant to avoid.
+_DISPATCH_RESERVE_S = 360.0
 
 
 def fire_skill(
@@ -429,6 +435,7 @@ def tick(
     # which bills the shared per-user GraphQL pool by point cost.
     graphql_remaining_fn: Optional[Callable] = None,
     graphql_min_remaining: int = 200,
+    dispatch_deadline: Optional[float] = None,
     # x-aaaf wave 2: config.pr_watch.enabled was declared but never actually
     # consulted here - the launchd activation coupling (x-e106: "enabled means
     # running") stops a NEWLY-toggled watcher at install time, but a config
@@ -538,6 +545,7 @@ def tick(
             max_retries=_max_retries,
             graphql_remaining_fn=_graphql_remaining,
             graphql_min_remaining=graphql_min_remaining,
+            dispatch_deadline=dispatch_deadline,
             holder=holder,
         )
     finally:
@@ -566,6 +574,7 @@ def _run_tick(
     max_retries,
     graphql_remaining_fn,
     graphql_min_remaining,
+    dispatch_deadline,
     holder,
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
@@ -712,6 +721,13 @@ def _run_tick(
     for cand in candidates:
         pr = cand.pr_number
         slug = cand.repo_slug
+        if (
+            dispatch_deadline is not None
+            and dispatch_deadline - time.monotonic() < _DISPATCH_RESERVE_S
+        ):
+            emit("pr_watch_skipped", {"pr": pr, "reason": "tick-budget"})
+            skipped += 1
+            break
         try:
             key = make_watermark_key(repo_slug=slug, pr_number=pr)
         except ValueError:
