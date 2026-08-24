@@ -367,23 +367,27 @@ impl<'de> Deserialize<'de> for AgentSort {
 }
 
 /// The raw file, entries untyped. Missing, empty, or corrupt all read as a
-/// fresh store - never a refusal to start. A MISSING file falls back to the
-/// pre-state-root location once per read (no copy), but ONLY when no
-/// `FNO_CONFIG` is pinned: the fallback exists for an upgrading user whose
-/// prefs sit at the old spot, and a pinned demo env must inherit nothing from
-/// the operator's real root.
+/// fresh store - never a refusal to start. A MISSING (NotFound only) file
+/// falls back to the pre-state-root location once per read (no copy), but
+/// ONLY when no `FNO_CONFIG` is pinned: the fallback exists for an upgrading
+/// user whose prefs sit at the old spot, and a pinned demo env must inherit
+/// nothing from the operator's real root. Any other read error stays an
+/// error-shaped miss (defaults): an unreadable primary must never seed the
+/// next mutate with legacy content, which would overwrite the file's own
+/// prefs.
 fn read_raw() -> StoreFile {
     let path = view_path();
-    let raw = std::fs::read_to_string(&path).or_else(|_| {
+    let raw = std::fs::read_to_string(&path).or_else(|e| {
         #[cfg(not(test))]
         {
-            if std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty()) {
-                return std::io::Result::Err(std::io::ErrorKind::NotFound.into());
+            if e.kind() != std::io::ErrorKind::NotFound || !crate::proto::legacy_fallback_allowed()
+            {
+                return std::io::Result::Err(e);
             }
             std::fs::read_to_string(crate::proto::legacy_mux_root().with_file_name("mux-view.json"))
         }
         #[cfg(test)]
-        std::io::Result::Err(std::io::ErrorKind::NotFound.into())
+        std::io::Result::Err(e)
     });
     raw.ok()
         .and_then(|raw| serde_json::from_str::<StoreFile>(&raw).ok())

@@ -311,6 +311,19 @@ pub fn run(session: &str) -> i32 {
 }
 
 fn run_inner(session: &str) -> Result<i32, String> {
+    // Resolve + record the config warning BEFORE any early exit below (the
+    // nested-session guard, an invalid session name): a pinned config whose
+    // dir diverged must say so on every path, not only the happy attach. The
+    // write rides the client log, never stderr - we are pre-alternate-screen,
+    // and any stderr byte lands in the PTY the harness is about to read as
+    // the TUI (the x-0296 NEVER-stderr rule). The mux dir is ensured first:
+    // on a fresh state root nothing creates it until connect_or_spawn, and an
+    // append to a missing parent silently drops the warning.
+    let _ = proto::mux_dir();
+    if let Some((w, _remedy)) = proto::pending_config_warning() {
+        let _ = proto::ensure_mux_dir();
+        client_log_append(&proto::mux_dir().join("client-warnings.log"), w);
+    }
     // Nested same-session guard (AC3-UI/EDGE): BEFORE any socket, spawn, or
     // terminal mode change. `FNO_SESSION` is set in every pane the server
     // spawns, so target == env means "attaching to the session I am already
@@ -324,19 +337,6 @@ fn run_inner(session: &str) -> Result<i32, String> {
         ));
     }
     let path = proto::socket_path(session)?;
-
-    // A config warning recorded during resolution rides the client log, never
-    // stderr: we are still pre-alternate-screen here, and any stderr byte
-    // lands in the PTY the harness (and a human) is about to read as the TUI
-    // (the x-0296 NEVER-stderr rule). Written BEFORE the connect attempt so a
-    // wedged server or a failed spawn cannot swallow it, and after ensuring
-    // the mux dir exists - on a fresh state root nothing creates it until
-    // connect_or_spawn, and an append to a missing parent silently drops the
-    // warning this exists to deliver.
-    if let Some((w, _remedy)) = proto::pending_config_warning() {
-        let _ = proto::ensure_mux_dir();
-        client_log_append(&proto::mux_dir().join("client-warnings.log"), w);
-    }
 
     let stream = connect_or_spawn(&path)?;
 

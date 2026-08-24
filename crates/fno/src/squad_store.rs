@@ -377,18 +377,10 @@ pub fn load() -> Loaded {
         // pre-state-root one (no copy), gated on no pinned FNO_CONFIG for the
         // same reason as view_store: an upgrading user keeps their squads, a
         // demo env inherits nothing from the operator's root.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            #[cfg(not(test))]
-            {
-                if std::env::var_os("FNO_CONFIG").is_none_or(|v| v.is_empty()) {
-                    let legacy = crate::proto::legacy_mux_root().with_file_name("squads.json");
-                    if let Ok(s) = std::fs::read_to_string(&legacy) {
-                        return loaded_from_raw(&legacy, s);
-                    }
-                }
-            }
-            return Loaded::default();
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => match legacy_read() {
+            Ok(s) => return loaded_from_raw(&path, s),
+            Err(_) => return Loaded::default(),
+        },
         // Unreadable is NOT missing. Collapsing the two made a permission
         // error or non-UTF-8 content render as an empty store, so prune
         // reported nothing to do and restore brought back zero workspaces,
@@ -403,6 +395,23 @@ pub fn load() -> Loaded {
         }
     };
     loaded_from_raw(&path, raw)
+}
+
+/// The pre-state-root squads file, readable only under fully ambient state
+/// resolution (the one gate, spelled once - see
+/// `proto::legacy_fallback_allowed`). NotFound when absent or deliberately
+/// overridden; every caller treats that as "no fallback".
+#[cfg(not(test))]
+fn legacy_read() -> io::Result<String> {
+    if !crate::proto::legacy_fallback_allowed() {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    std::fs::read_to_string(crate::proto::legacy_mux_root().with_file_name("squads.json"))
+}
+
+#[cfg(test)]
+fn legacy_read() -> io::Result<String> {
+    Err(io::ErrorKind::NotFound.into())
 }
 
 /// Parse the store body shared by the primary and legacy reads, so the
@@ -1324,7 +1333,18 @@ fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
         .open(&lock_path)?;
     let _guard = FlockGuard::acquire(lock)?;
 
-    let mut file = match std::fs::read_to_string(&path) {
+    // The seed read mirrors load()'s resolution, legacy fallback included:
+    // seeding from NotFound alone would collapse the store to just this one
+    // mutation on the first write after the root moves, silently dropping
+    // every persisted squad while prune reports the ones it just erased.
+    let seed = std::fs::read_to_string(&path).or_else(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            legacy_read()
+        } else {
+            Err(e)
+        }
+    });
+    let mut file = match seed {
         Ok(raw) if raw.trim().is_empty() => StoreFile::default(),
         Ok(raw) => serde_json::from_str::<StoreFile>(&raw)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,

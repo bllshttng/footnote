@@ -131,3 +131,54 @@ fn mux_ls_fail_closed_when_fno_config_cannot_be_parsed() {
         case.stdout
     );
 }
+
+#[test]
+fn squad_store_reads_the_legacy_file_under_a_global_state_dir() {
+    // The upgrading-user path: state_dir comes from the GLOBAL config tier
+    // (the FNO_GLOBAL_SETTINGS_PATH sibling, no FNO_CONFIG pin), the resolved
+    // root has no squads.json yet, and the operator's old store sits at the
+    // HOME default. The READ must fall back and COUNT the squads (a positive
+    // marker: a broken fallback reads as "no squads persisted"). The WRITE
+    // seeding shares this same legacy_read, and cannot run from a build-tree
+    // binary by the store's own guard, so the write path is covered by that
+    // sharing rather than an exec.
+    let scratch = Scratch::new("muxsqd");
+    let demo = scratch.0.join("demo");
+    std::fs::create_dir_all(demo.join("mux")).unwrap();
+    // The global tier: the config.toml SIBLING of FNO_GLOBAL_SETTINGS_PATH
+    // (which Scratch points inside the scratch).
+    let global_cfg = scratch.0.join("iso-cfg");
+    std::fs::create_dir_all(&global_cfg).unwrap();
+    std::fs::write(
+        global_cfg.join("config.toml"),
+        format!("state_dir = {:?}\n", demo),
+    )
+    .unwrap();
+    // The operator's old store at the HOME default (<home>/.fno/squads.json,
+    // a SIBLING of the mux dir): a named squad plus an attach-born one whose
+    // origin is gone.
+    let legacy = scratch.0.join("home").join(".fno").join("squads.json");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(
+        &legacy,
+        r#"{"version":1,"squads":[
+            {"name":"upgrading-user-squad"},
+            {"name":"","key":"dead","origins":["/gone-origin"],"members":[]}
+        ]}"#,
+    )
+    .unwrap();
+
+    // Both explicit overrides must come OFF: FNO_MUX_DIR would relocate the
+    // sockets, FNO_AGENTS_HOME would point the store at its own root, and
+    // either one legitimately disables the ambient fallback under test.
+    let mut cmd = scratch.command();
+    cmd.env_remove("FNO_MUX_DIR");
+    cmd.env_remove("FNO_AGENTS_HOME");
+    cmd.current_dir(&demo);
+    let out = cmd.args(["mux", "doctor"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        stdout.contains("1 orphaned squad(s)"),
+        "both legacy squads must load through the fallback; got: {stdout}"
+    );
+}

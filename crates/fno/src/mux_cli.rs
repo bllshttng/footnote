@@ -1510,6 +1510,19 @@ fn gather_checks() -> Vec<Check> {
 /// the old root.
 #[cfg(not(test))]
 fn legacy_mux_root_check() -> Check {
+    // An explicit FNO_MUX_DIR relocates the sockets ON PURPOSE (the documented
+    // test seam, scratch dirs, operator partitions). Sessions at the global
+    // root are then live for every normal client, and "restart them under the
+    // resolved root" would direct an operator to kill a healthy fleet into a
+    // tempdir. The check is about CONFIG-CHAIN divergence only.
+    if std::env::var_os("FNO_MUX_DIR").is_some_and(|v| !v.is_empty()) {
+        return Check {
+            name: "legacy mux root".into(),
+            verdict: Verdict::Na,
+            detail: "FNO_MUX_DIR relocates the sockets on purpose".into(),
+            remedy: None,
+        };
+    }
     // The same helper the resolver's own fallback uses, so this comparison
     // can never drift from what mux_dir actually falls back to.
     let legacy = proto::legacy_mux_root();

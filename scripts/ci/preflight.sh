@@ -1223,14 +1223,39 @@ fi
 # asserting exclusive ownership.
 _real_squads_state() {
     python3 -c "
-import os
-p = os.path.expanduser('~/.fno/squads.json')
+import os, re
+# The store follows the mux state root (state_dir off the global config), so
+# guard BOTH the legacy location and the resolved one: a machine with state_dir
+# configured no longer touches ~/.fno/squads.json, and a guard watching only
+# the legacy file reads vacuously green there. One token out: 'present:<all
+# mtimes>' when any copy exists, 'absent' when none does, 'unavailable' when
+# any stat cannot answer (fail closed).
+roots = [os.path.expanduser('~/.fno')]
+cfg = os.path.expanduser('~/.fno/config.toml')
 try:
-    print(f'present:{os.stat(p).st_mtime_ns}')
-except FileNotFoundError:
-    print('absent')
+    body = open(cfg).read()
+    m = re.search(r'^state_dir\s*=\s*[\"\\']([^\"\\']+)[\"\\']', body, re.M)
+    if m:
+        v = m.group(1)
+        if not v.startswith(('{', '\$')) and not v.startswith('~/'):
+            roots.append(os.path.abspath(os.path.expanduser(v)))
 except OSError:
+    pass
+states = []
+for r in roots:
+    p = os.path.join(r, 'squads.json')
+    try:
+        states.append(f'present:{os.stat(p).st_mtime_ns}')
+    except FileNotFoundError:
+        states.append('absent')
+    except OSError:
+        states.append('unavailable')
+if any(s == 'unavailable' for s in states):
     print('unavailable')
+elif any(s.startswith('present:') for s in states):
+    print('present:' + ','.join(s for s in states if s.startswith('present:')))
+else:
+    print('absent')
 " 2>/dev/null
 }
 # The leak guard snapshots the real store around the crates/fno cargo test leg,

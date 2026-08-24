@@ -2702,6 +2702,21 @@ fn non_empty_env_is_set(key: &str) -> bool {
     std::env::var_os(key).is_some_and(|v| !v.is_empty())
 }
 
+/// Whether a legacy-location read fallback is allowed at all: only under
+/// fully AMBIENT state resolution, where no explicit override names where
+/// state lives. A pinned `FNO_CONFIG` (isolation requested) or a set
+/// `FNO_AGENTS_HOME` (an explicit agents-state override) both mean the
+/// operator pointed state elsewhere on purpose, so no fallback may reach the
+/// real root. This is the ONE spelling of the gate - hand-rolled variants in
+/// three files once drifted apart (head-review round eight), and one flipped
+/// gate would leak the operator's real prefs into an isolated env.
+pub fn legacy_fallback_allowed() -> bool {
+    fn non_empty(key: &str) -> bool {
+        std::env::var_os(key).is_some_and(|v| !v.is_empty())
+    }
+    !non_empty("FNO_CONFIG") && !non_empty("FNO_AGENTS_HOME")
+}
+
 /// The one config-resolution warning this process recorded, if any: a pinned
 /// `FNO_CONFIG` with no usable state_dir, a state_dir value this mirror had
 /// to decline, or a state_dir that lives only where this reader cannot look.
