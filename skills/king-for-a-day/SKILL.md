@@ -320,6 +320,8 @@ Set the dispatch verb anyway when you file the node, so the routing is already c
 
 ### 4. Kick off
 
+Before any pass kickoff, read `fno backlog decisions <id>` for every node in the wave alongside status and `plan_path`. A recorded verdict stops dispatch until reconciled.
+
 ```bash
 fno backlog advance --epic <epic>             # mark mission active + fan out ready leaves
 fno backlog advance --epic <epic> --max 2     # cap the fan-out

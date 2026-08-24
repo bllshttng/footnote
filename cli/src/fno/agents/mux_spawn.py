@@ -1648,13 +1648,17 @@ def _resolve_group_tab(requested: str) -> tuple[Optional[str], Optional[str]]:
     """Split a ``--tab`` value into a placement selector and a pane-group name.
 
     An explicit selector the operator typed (``active``/``new``/``id:``/``name:``
-    /an ordinal) rides the placement path untouched: they named a target, and fno
-    has nothing to resolve. A bare name is a GROUP, and a group is placed after
-    the spawn rather than before it - see :func:`place_pane_in_group_tab`.
+    /``ordinal:``/a bare integer) rides the placement path untouched: they named
+    a target, and fno has nothing to resolve. A bare integer is the VISIBLE
+    1-based ordinal the tab bar shows; the Rust tab dictionary owns resolving
+    it against the live tab order (x-1499), so Python forwards it verbatim and
+    never converts it to a stable id or predicts one with a tab read. A bare
+    name is a GROUP, and a group is placed after the spawn rather than before
+    it - see :func:`place_pane_in_group_tab`.
     """
     if (
         requested in {"active", "new"}
-        or requested.startswith(("id:", "name:"))
+        or requested.startswith(("id:", "name:", "ordinal:"))
         or requested.isdigit()
     ):
         return requested, None

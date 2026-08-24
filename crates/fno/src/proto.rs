@@ -263,6 +263,14 @@ fn default_true() -> bool {
 /// the registry identity used to address it. Additive fields remain defaulted,
 /// but the send identity is a safety contract, so the handshake must reject an
 /// older peer rather than let it type into an unverified pane.
+///
+/// v51 (x-1499, tab dictionary): `ControlVerb::TabWhere` +
+/// `ServerMsg::TabLocation`/`TabPaneOccupant` - the reverse location lookup
+/// (what lives at the tab the operator is looking at). `TabSel::Index`
+/// becomes the 1-based ordinal the UI shows, where it was a 0-based vector
+/// index, so a captured `--tab <n>` selector changes meaning across the
+/// bump; the handshake is what tells an old client to restart. New variants
+/// are not additive-tolerant either.
 pub const PROTO_VERSION: u32 = 51;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
@@ -472,16 +480,17 @@ pub enum PaneTarget {
 }
 
 /// Which tab a [`PanePlacement`] / [`LayoutScope`] addresses within a squad
-/// (v41, layout-api). `Index` is an ordinal convenience for interactive
-/// one-shots ONLY - ordinals renumber as tabs open and close, so a script that
-/// captured one earlier may hit a different tab; receipts return `Id`/`Name`,
-/// which are stable. `New` forces a fresh tab.
+/// (v41, layout-api). `Index` is the 1-based ORDINAL the UI shows (`·N`,
+/// x-1499): 1 is the first tab in display order and 0 is always refused. It
+/// is an interactive convenience ONLY - ordinals renumber as tabs open and
+/// close, so a script that captured one earlier may hit a different tab;
+/// receipts return `Id`/`Name`, which are stable. `New` forces a fresh tab.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum TabSel {
     /// The squad's currently active tab.
     #[default]
     Active,
-    /// The nth tab in display order (convenience only; ordinals renumber).
+    /// The tab at 1-based display ordinal `n` (the UI's `·N`; 0 is refused).
     Index(usize),
     /// A stable tab id (preferred in scripts).
     Id(TabId),
@@ -515,6 +524,13 @@ pub struct ResolvedPlacement {
     pub fallback: PlacementFallback,
     pub squad: u64,
     pub tab: TabId,
+    /// (v51, x-1499) The landed tab's name and 1-based ordinal, so the
+    /// human receipt can print `tab=<name-or-·N> tab_id=<id>` - the stable id
+    /// alone names something the operator cannot find on screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_ordinal: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -673,8 +689,17 @@ pub enum ControlVerb {
     },
     /// Dump a layout scope's nested tree + per-pane geometry ->
     /// [`ServerMsg::LayoutTree`] (structure + rects, so templates/reconcile can
-    /// diff topology - Locked Decision 5).
-    LayoutGet { scope: LayoutScope },
+    /// diff topology - Locked Decision 5). `workers` (v51, x-1499) additionally
+    /// joins each pane's registry worker into `TabLayout.workers` for the
+    /// human rendering; `false` (the default) keeps every `--json` reply
+    /// byte-shape identical to the pre-v51 output. A `workers: true` request
+    /// against an unreadable registry is its own refusal
+    /// ([`err_code::REGISTRY_UNAVAILABLE`]), never a silent all-empty join.
+    LayoutGet {
+        scope: LayoutScope,
+        #[serde(default)]
+        workers: bool,
+    },
     /// Resolve an `fno_id` to its live location -> [`ServerMsg::PaneLocation`],
     /// or one of three DISTINCT error codes ([`err_code::REGISTRY_UNAVAILABLE`] /
     /// [`err_code::NOT_FOUND`] / [`err_code::NOT_PANE_HOSTED`]); an empty
@@ -736,6 +761,18 @@ pub enum ControlVerb {
         spec: AnchoredLayoutSpec,
         #[serde(default)]
         focus: bool,
+    },
+    /// Resolve a tab LOCATION to what lives there (x-1499) ->
+    /// [`ServerMsg::TabLocation`]. `sel` is the location grammar:
+    /// `ordinal:<n>` | `id:<n>` | `name:<s>` | a bare number (ordinal or
+    /// stable id - refused when the two readings name different live tabs) |
+    /// any other bare word (a tab name). `squad` qualifies through the
+    /// existing [`PaneTarget`] grammar; an unqualified selector that
+    /// resolves in more than one workspace refuses with the candidates.
+    TabWhere {
+        #[serde(default)]
+        squad: PaneTarget,
+        sel: String,
     },
 }
 
@@ -1901,11 +1938,22 @@ pub enum ServerMsg {
         squad_name: Option<String>,
         /// The tabs hosting this id's panes, each with its optional name.
         tabs: Vec<(TabId, Option<String>)>,
+        /// (v51, x-1499) Each hosting tab's current 1-based ordinal, parallel
+        /// to `tabs`, so the human receipt prints label and id together.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_ordinals: Option<Vec<usize>>,
         /// The pane ids hosting this id.
         panes: Vec<u64>,
     },
-    /// Answer to [`ControlVerb::PaneBreak`]: the id of the freshly created tab.
-    TabSpawned { tab_id: TabId },
+    /// Answer to [`ControlVerb::PaneBreak`]: the id of the freshly created
+    /// tab, plus (v51, x-1499) its label pair for the human receipt.
+    TabSpawned {
+        tab_id: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_ordinal: Option<usize>,
+    },
     /// Answer to [`ControlVerb::PaneFocus`]: where the pane was found, and how
     /// many viewers actually ended up looking at it.
     ///
@@ -1919,6 +1967,12 @@ pub enum ServerMsg {
         squad_id: u64,
         squad_name: Option<String>,
         tab_id: TabId,
+        /// (v51, x-1499) Label pair for the human receipt; see
+        /// [`ResolvedPlacement::tab_name`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_ordinal: Option<usize>,
         clients_moved: usize,
     },
     /// (v42, x-c4d4) Answer to [`ControlVerb::LayoutApply`]: one [`SlotResult`]
@@ -1934,8 +1988,39 @@ pub enum ServerMsg {
         anchor: u64,
         squad: u64,
         tab: TabId,
+        /// (v51, x-1499) Label pair for the human receipt; see
+        /// [`ResolvedPlacement::tab_name`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_ordinal: Option<usize>,
         results: Vec<GraftSlotResult>,
     },
+    /// (v51, x-1499) Answer to [`ControlVerb::TabWhere`]: what lives at a tab
+    /// location right now. `panes` is every pane in the tab in tree order,
+    /// each with its joined worker identity; an occupant with `fno_id: None`
+    /// is an EXPLICIT empty pane, never a failed lookup. A tab always holds
+    /// at least one pane, so this is never emitted empty.
+    TabLocation {
+        squad_id: u64,
+        squad_name: Option<String>,
+        tab_id: TabId,
+        name: Option<String>,
+        /// The tab's current 1-based ordinal (the UI's `·N`).
+        ordinal: usize,
+        /// The tab's focused pane - where `mux view` moves the operator.
+        focus: u64,
+        panes: Vec<TabPaneOccupant>,
+    },
+}
+
+/// One pane of a [`ServerMsg::TabLocation`] (v51, x-1499): the pane id plus
+/// the registry worker it hosts, if any. `fno_id: None` is the explicit
+/// empty marker for a pane nobody occupies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TabPaneOccupant {
+    pub pane_id: u64,
+    pub fno_id: Option<String>,
 }
 
 /// One named slot's outcome in a [`ServerMsg::LayoutGrafted`] receipt (v44,
@@ -1987,6 +2072,12 @@ pub struct TabLayout {
     pub focus: PaneId,
     pub root: Node,
     pub panes: Vec<(u64, Rect)>,
+    /// (v51, x-1499) Per-pane worker identities joined from the registry,
+    /// parallel to `panes`, filled on the control-verb path so the human
+    /// layout rendering can name occupants. `None` keeps the machine JSON
+    /// byte-shape unchanged for every existing consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<Vec<TabPaneOccupant>>,
 }
 
 /// One pane's metadata in a [`ServerMsg::PaneList`]. `cwd` is the squad's
@@ -1999,6 +2090,13 @@ pub struct PaneInfo {
     pub cwd: String,
     pub child_pid: Option<u32>,
     pub title: Option<String>,
+    /// (v51, x-1499) The pane's tab name and 1-based ordinal, so the human
+    /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` for a pane
+    /// mid-teardown (not in any tab) or on a pre-v51 reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_ordinal: Option<usize>,
     /// (v41, layout-api) The `fno_id` of the session hosting this pane, filled
     /// server-side from the registry join the mux already caches. `None` for a
     /// pane with no registry row (an ad-hoc shell). `#[serde(default)]` keeps a
@@ -3074,8 +3172,9 @@ fn probe_status(path: &Path) -> ProbeOutcome {
 
 /// Stop an unresponsive holder before takeover. Without this coordination, its
 /// later `SocketGuard` can unlink the replacement server's socket and sidecars.
-/// The pid sidecar is identity-checked before each signal; an absent or reused
-/// identity refuses takeover rather than risking a signal to another process.
+/// The pid sidecar is identity-checked before each signal. An unreadable
+/// identity refuses takeover, while a positive start-time mismatch proves the
+/// recorded holder exited and its pid was reused, so takeover is safe.
 fn reclaim_unresponsive_holder(path: &Path) -> std::io::Result<()> {
     let pid_path = pid_sidecar_path(path);
     let raw = std::fs::read_to_string(&pid_path).map_err(|e| {
@@ -3103,19 +3202,25 @@ fn reclaim_unresponsive_holder(path: &Path) -> std::io::Result<()> {
         ));
     }
 
-    let identity_matches = || match recorded_start {
-        None => true,
-        Some(recorded) => pid_start_time(pid as u32) == Some(recorded),
+    let identity_matches = || -> std::io::Result<bool> {
+        match recorded_start {
+            None => Ok(true),
+            Some(recorded) => pid_start_time(pid as u32)
+                .map(|observed| observed == recorded)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("cannot verify holder pid {pid} from {}", pid_path.display()),
+                    )
+                }),
+        }
     };
     let gone = || pid_confirmed_dead(pid) || pid_is_zombie(pid);
     if gone() {
         return Ok(());
     }
-    if !identity_matches() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("holder pid {pid} no longer matches {}", pid_path.display()),
-        ));
+    if !identity_matches()? {
+        return Ok(());
     }
     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0
         && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
@@ -3132,7 +3237,7 @@ fn reclaim_unresponsive_holder(path: &Path) -> std::io::Result<()> {
     if gone() {
         return Ok(());
     }
-    if !identity_matches() {
+    if !identity_matches()? {
         // The recorded process exited and its pid was reused. That is safe for
         // takeover: the old SocketGuard cannot run in the replacement process.
         return Ok(());
@@ -3151,7 +3256,7 @@ fn reclaim_unresponsive_holder(path: &Path) -> std::io::Result<()> {
     }
     if gone() {
         Ok(())
-    } else if !identity_matches() {
+    } else if !identity_matches()? {
         // As above, a changed start time proves the holder we needed to stop is
         // gone, even if the OS has already reused its pid.
         Ok(())
@@ -3347,7 +3452,8 @@ mod tests {
         // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47; the
         // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
         // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
-        // pane identity receipts (x-588a) bumped it 50 -> 51.
+        // pane identity receipts (x-588a) and the tab dictionary (x-1499)
+        // share the 50 -> 51 bump.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3432,6 +3538,8 @@ mod tests {
             fallback: PlacementFallback::Refuse,
             squad: 1,
             tab: 10,
+            tab_name: Some("bee".into()),
+            tab_ordinal: Some(2),
         };
         let exact_receipt = ServerMsg::PaneSpawned {
             pane_id: 9,
@@ -3861,6 +3969,8 @@ mod tests {
                     cwd: "/code/footnote".into(),
                     child_pid: Some(4242),
                     title: None,
+                    tab_name: None,
+                    tab_ordinal: Some(1),
                     fno_id: None,
                     name: None,
                 }],
@@ -4243,6 +4353,7 @@ mod tests {
                     squad: PaneTarget::SquadId(1),
                     tab: TabSel::Index(2),
                 },
+                workers: false,
             },
         ];
         for v in verbs {
@@ -4272,6 +4383,7 @@ mod tests {
                             cols: 40,
                         },
                     )],
+                    workers: None,
                 }],
             }],
         };
@@ -4284,6 +4396,7 @@ mod tests {
             squad_id: 1,
             squad_name: None,
             tabs: vec![(10, Some("bee".into()))],
+            tab_ordinals: Some(vec![2]),
             panes: vec![4],
         };
         let bytes = serde_json::to_vec(&loc).unwrap();
@@ -4297,6 +4410,8 @@ mod tests {
             squad_id: 2,
             squad_name: Some("other".into()),
             tab_id: 3,
+            tab_name: None,
+            tab_ordinal: Some(3),
             clients_moved: 2,
         };
         let bytes = serde_json::to_vec(&focused).unwrap();

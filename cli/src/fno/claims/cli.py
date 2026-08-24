@@ -1145,73 +1145,10 @@ HANDOVER_HOLDER_PREFIX = _HANDOVER_HOLDER_PREFIX
 
 
 
-def _abandonment_probe(reading: Optional[RosterReading] = None):
-    """The roster-backed probe :func:`reap_dead_claims` calls on a SUSPECT node.
 
-    Returns a callable answering ``True`` (proven abandoned), ``False`` (the
-    holder is still working) or ``None`` (unproven, so the claim is kept). One
-    roster READING is taken lazily and shared across every claim in the sweep.
 
-    ABANDONMENT IS PROVEN BY FINDING THE HOLDER, NEVER BY FAILING TO FIND IT.
-    The probe resolves the claim's own holder session id and requires its roster
-    row to exist and read terminal. An absent row answers ``None``.
 
-    That asymmetry is the whole safety argument, and an earlier version of this
-    function got it wrong in the exact way the third pitfalls entry describes.
-    It asked "does any row resolve to this node", read the empty answer as
-    abandonment, and defended it with a scanned-row count. But a row count
-    validates the INSTRUMENT, never the TARGET. ``fleet_rows`` enumerates
-    ``claude agents --json --all`` and drops interactive rows, so a codex worker,
-    an opencode worker, and any hand-started session are invisible to it BY
-    CONSTRUCTION. A forty-row scan that cannot represent the holder at all would
-    have read as forty rows of proof, and reaping on it archives a live worker's
-    claim - x-ba4b's disaster from the other side, which the
-    ``reaped_a_live_worker`` kill criterion exists to stop.
 
-    So the roster's coverage gap now costs a missed reap rather than a wrongly
-    archived claim. That is the correct direction to fail: an unreaped claim
-    expires on its own TTL, and a wrongly reaped one hands a live worker's node
-    to a second worker.
-    """
-    cache: dict = {}
-
-    def _probe(claim) -> Optional[bool]:
-        if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
-            # A launch window, not an abandoned session. Between spawn and
-            # `target init` the worker has no worktree manifest and no ledger
-            # row, so the roster cannot resolve it to the node BY CONSTRUCTION.
-            # Nothing is stranded by declining: the handover claim is TTL-bound,
-            # and an expired claim is provably dead on its own.
-            return None
-        session_id = _holder_session_id(claim.holder)
-        if not session_id:
-            # A holder shape this lane cannot parse names no session to look up.
-            return None
-        if "reading" not in cache:
-            cache["reading"] = (
-                reading
-                if reading is not None
-                else read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
-            )
-        seen: RosterReading = cache["reading"]
-        if not seen.consulted:
-            return None
-        row = seen.row_for_session(session_id)
-        if row is None:
-            # Not found is not gone. See the docstring.
-            return None
-        if row.get("state") not in _finished_row_states():
-            return False
-        # The row state alone does NOT authorize a reap. `_TERMINAL_STATES`
-        # carries its own warning: the roster called a WORKING session done on
-        # 2026-08-15, and occupancy stopped keying on it for exactly that
-        # reason. Reaping on a field known to lie in this direction archives a
-        # live worker's claim, which is the `reaped_a_live_worker` kill
-        # criterion. So the row narrows the candidates and the transcript
-        # decides, which is the instrument the watchdog itself trusts.
-        return _transcript_says_finished(session_id, row.get("cwd") or "")
-
-    return _probe
 
 
 def _node_settlement(reading: Optional[RosterReading] = None):
@@ -1376,6 +1313,255 @@ def _holder_session_id(holder: str) -> Optional[str]:
     except Exception:  # noqa: BLE001 - an unparseable holder proves nothing
         return None
 
+
+def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optional[bool]:
+    """True when the mux enumerated its panes and none plausibly hosts WORKER.
+
+    The evidence a handover claim's death leaves outside the claim: the
+    spawner launched the worker into a mux pane. Presence is matched against
+    EVERY identity a spawned worker's pane can carry, because a miss on any
+    one of them reaps a LIVE worker's claim (the ``reaped_a_live_worker``
+    disaster): the pane's ``fno_id`` is the SESSION uuid, not the worker
+    name (mux_spawn stamps ``fno_id=stored_session_uuid or name``), the OSC
+    ``title`` is whatever the pane's shell set, and the load-bearing join is
+    the worktree: dispatch names the worker's worktree after the worker
+    (``workspace worktree ensure --name <agent_name>``), so
+    ``basename(pane.cwd) == worker`` is the normal live-launch marker, with
+    the node id covering the ``target start`` naming. Follows
+    ``_pane_absent_from_listing``'s empty-is-ambiguous rule: ``pane ls``
+    prints ``[]`` both for a session with no panes and for an unreachable
+    socket, so only a NON-EMPTY listing somewhere proves the instrument ran
+    and absence from it is a finding. True = positively absent, False =
+    present, None = cannot tell (and None keeps the claim).
+
+    Residual, named: a ``worktree.policy = never`` project launches the
+    worker at its repo root, where no pane identity names the worker - there
+    this helper can read absence while a live worker runs, so the handover
+    early-reap arm must not be the only thing standing between that worker
+    and a steal (its TTL expiry still governs, and the pid check still
+    refuses while the spawner lives).
+    """
+    import json as _json
+    import subprocess as _subprocess
+
+    if runner is None:
+        runner = _subprocess.run
+
+    def _mux(*args: str):
+        import os
+
+        fno_bin = os.environ.get("FNO_BIN") or "fno"
+
+        try:
+            return runner(
+                [fno_bin, *args], capture_output=True, text=True, timeout=10
+            )
+        except Exception:  # noqa: BLE001 - a probe never fails a sweep
+            return None
+
+    ls = _mux("mux", "ls", "--json")
+    if ls is None or getattr(ls, "returncode", 1) != 0:
+        return None
+    try:
+        sessions = _json.loads(ls.stdout or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(sessions, list):
+        return None
+    names = {worker, node_id} - {""}
+    saw_content = False
+    for row in sessions:
+        if not isinstance(row, dict) or row.get("state") != "live":
+            continue
+        session = row.get("session")
+        if session is None or session == "":
+            return None
+        if "panes" not in row:
+            return None
+        try:
+            n_panes = int(row["panes"])
+        except (TypeError, ValueError):
+            return None
+        if not n_panes:
+            # A zero-pane session would only contribute an
+            # ambiguous []; the probe never raises on a malformed row.
+            continue
+        panes = _mux(
+            "mux", "pane", "ls", "--session", str(session), "--json"
+        )
+        if panes is None or getattr(panes, "returncode", 1) != 0:
+            return None
+        try:
+            listing = _json.loads(panes.stdout or "")
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(listing, list) or not listing:
+            return None
+        saw_content = True
+        for pane in listing:
+            if not isinstance(pane, dict):
+                continue
+            cwd_name = str(pane.get("cwd") or "").rstrip("/").rsplit("/", 1)[-1]
+            if (
+                pane.get("fno_id") in names
+                or pane.get("title") in names
+                or cwd_name in names
+            ):
+                return False
+    return True if saw_content else None
+
+
+def _claim_worktree_cwd(claim) -> Optional[str]:
+    """The worktree path a claim's writer stamped into metadata, if any.
+
+    The transcript fallback needs a cwd to find the session's tree; the
+    roster row (the usual source) is absent on exactly the paths that need
+    the fallback, so the claim itself carries it when its writer could.
+    """
+    meta = getattr(claim, "metadata", None) or {}
+    for key in ("worktree", "cwd"):
+        value = meta.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _handover_pane_probe_blocked(claim) -> bool:
+    """Return True when pane identity cannot prove an in-place worker dead.
+
+    ``worktree.policy = never`` launches the worker at the repository root, so
+    its pane cwd cannot carry the worker identity. An unreadable policy is the
+    same safety answer: keep the claim until its TTL rather than reap on pane
+    absence.
+    """
+    try:
+        from fno.worktree_paths import resolve_worktree_policy
+
+        cwd = _claim_worktree_cwd(claim)
+        repo_root = Path(cwd) if cwd else Path.cwd()
+        return resolve_worktree_policy(repo_root).policy == "never"
+    except Exception:  # noqa: BLE001 - an unreadable policy proves nothing
+        return True
+
+
+def _abandonment_probe(reading: Optional[RosterReading] = None):
+    """The roster-backed probe :func:`reap_dead_claims` calls on a SUSPECT node.
+
+    Returns a callable answering ``True`` (proven abandoned), ``False`` (the
+    holder is still working) or ``None`` (unproven, so the claim is kept). One
+    roster READING is taken lazily and shared across every claim in the sweep.
+
+    ABANDONMENT IS PROVEN BY FINDING THE HOLDER, NEVER BY FAILING TO FIND IT.
+    The probe resolves the claim's own holder session id and requires its roster
+    row to exist and read terminal. An absent row answers ``None``.
+
+    That asymmetry is the whole safety argument, and an earlier version of this
+    function got it wrong in the exact way the third pitfalls entry describes.
+    It asked "does any row resolve to this node", read the empty answer as
+    abandonment, and defended it with a scanned-row count. But a row count
+    validates the INSTRUMENT, never the TARGET. ``fleet_rows`` enumerates
+    ``claude agents --json --all`` and drops interactive rows, so a codex worker,
+    an opencode worker, and any hand-started session are invisible to it BY
+    CONSTRUCTION. A forty-row scan that cannot represent the holder at all would
+    have read as forty rows of proof, and reaping on it archives a live worker's
+    claim - x-ba4b's disaster from the other side, which the
+    ``reaped_a_live_worker`` kill criterion exists to stop.
+
+    So the roster's coverage gap now costs a missed reap rather than a wrongly
+    archived claim. That is the correct direction to fail: an unreaped claim
+    expires on its own TTL, and a wrongly reaped one hands a live worker's node
+    to a second worker.
+
+    THREE additions feed it evidence that lives outside the claim (the king's
+    2026-08-23 specimens, both of which needed a manual --force release):
+
+    1. A handover holder is no longer unconditionally unprovable. Its launch
+       window is observable: the mux pane the spawner created is ABSENT from
+       every live listing AND the recorded pid is dead. Both absences together
+       are the window over - a positive finding, never a failed lookup.
+    2. A roster reading that degraded (``roster not consulted``) is retried
+       ONCE before the sweep answers, so a transient ``claude not on PATH``
+       does not strand the whole pass.
+    3. A dead recorded pid with a parseable session id continues to the
+       transcript check even without a roster row, when the claim carries a
+       worktree path to find the tree with. A finished tree is a positive
+       finding.
+    """
+    cache: dict = {}
+
+    def _reading() -> RosterReading:
+        """Take (and cache) the shared reading; retry once on a degraded read."""
+        if "reading" not in cache:
+            first = (
+                reading
+                if reading is not None
+                else read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
+            )
+            if not first.consulted and reading is None:
+                # One retry, never a loop: a degraded read is usually a
+                # transient spawn failure, and a second degradation is a real
+                # one the sweep should report rather than paper over.
+                cache["reading"] = read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
+            else:
+                cache["reading"] = first
+        return cache["reading"]
+
+    def _probe(claim) -> Optional[bool]:
+        from .staleness import is_live
+
+        if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
+            # The launch window, not an abandoned session - but the window is
+            # observable from outside: the pane the spawner created and the
+            # spawner's own pid. BOTH absent is the window over (a positive
+            # finding); a pane that still hosts the worker, a live spawner
+            # pid, or a mux that cannot answer all keep the claim. The pid
+            # check is local and cheap, so it runs before the pane subprocess;
+            # the pane answer is cached per worker for the sweep's lifetime,
+            # like the shared roster reading.
+            if is_live(claim):
+                return None
+            if _handover_pane_probe_blocked(claim):
+                return None
+            worker = claim.holder[len(HANDOVER_HOLDER_PREFIX):]
+            node_id = claim.key[len("node:"):] if claim.key.startswith("node:") else ""
+            pane_key = f"pane_absent:{worker}"
+            if pane_key not in cache:
+                cache[pane_key] = _mux_pane_absent_for(worker, node_id)
+            if cache[pane_key] is not True:
+                return None
+            return True
+        session_id = _holder_session_id(claim.holder)
+        if not session_id:
+            # A holder shape this lane cannot parse names no session to look up.
+            return None
+        seen: RosterReading = _reading()
+        if not seen.consulted:
+            return None
+        row = seen.row_for_session(session_id)
+        if row is None:
+            # Not found is not gone - but with the holder's own pid dead, one
+            # more positive instrument remains: the transcript. It needs only
+            # a cwd to find the tree, and the claim carries one when its
+            # writer stamped it. A finished tree is abandonment proven by
+            # FINDING the end, never by failing to find the worker.
+            if is_live(claim):
+                return None
+            cwd = _claim_worktree_cwd(claim)
+            if not cwd:
+                return None
+            return True if _transcript_says_finished(session_id, cwd) else None
+        if row.get("state") not in _finished_row_states():
+            return False
+        # The row state alone does NOT authorize a reap. `_TERMINAL_STATES`
+        # carries its own warning: the roster called a WORKING session done on
+        # 2026-08-15, and occupancy stopped keying on it for exactly that
+        # reason. Reaping on a field known to lie in this direction archives a
+        # live worker's claim, which is the `reaped_a_live_worker` kill
+        # criterion. So the row narrows the candidates and the transcript
+        # decides, which is the instrument the watchdog itself trusts.
+        return _transcript_says_finished(session_id, row.get("cwd") or "")
+
+    return _probe
 
 @cli.command(name="reap")
 def reap_cmd(

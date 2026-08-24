@@ -129,14 +129,44 @@ def test_classify_stale_ttl_expired_dead_pid():
     assert classify(claim) == ClaimState.STALE
 
 
-def test_classify_live_ttl_expired_with_live_pid():
-    """HYBRID ARM (AC1-HP): an expired TTL claim whose recorded pid is a live
-    process on this host (create_time < acquired_at) is LIVE, not STALE - the
-    session is alive (incl. suspended) even though the clock lapsed.
+def test_classify_live_ttl_expired_with_live_prover_pid():
+    """CORROBORATED HYBRID ARM: an expired TTL claim whose recorded pid is a
+    live process on this host (create_time < acquired_at) AND was prover-proven
+    at write time is LIVE, not STALE - the session is alive (incl. suspended)
+    even though the clock lapsed. refresh_claim has no automatic caller, so
+    this arm is what keeps a long live session's claim LIVE past its TTL
+    window; only its foreign-pid case was the defect."""
+    claim = _live_claim(
+        expires_at=now_ms() - 1000, pid_provenance="session-prover"
+    )  # live pid via _live_claim
+    assert classify(claim) == ClaimState.LIVE
 
-    This is the one new case the hybrid liveness introduces. Before the change
-    this returned STALE; the pid arm only ever extends liveness."""
-    claim = _live_claim(expires_at=now_ms() - 1000)  # live pid via _live_claim
+
+def test_classify_stale_ttl_expired_with_live_foreign_pid():
+    """THE SPECIMEN (PR 1031): an expired TTL claim whose recorded pid is a
+    live process the holder does not own (a chat app's app-server) reads
+    STALE, not LIVE. A live pid alone no longer extends the lease - only a
+    pid proven to be the holder session's own process does, or the TTL is a
+    lease in name only. Provenance here is explicitly "ambient"."""
+    claim = _live_claim(expires_at=now_ms() - 1000, pid_provenance="ambient")
+    assert classify(claim) == ClaimState.STALE
+
+
+def test_classify_stale_ttl_expired_live_pid_legacy_claim():
+    """A legacy claim written before pid_provenance existed (field absent)
+    reads STALE at expiry, exactly as a pre-hybrid claim did: a claim that
+    cannot prove its pid cannot outrank its own TTL."""
+    claim = _live_claim(expires_at=now_ms() - 1000)  # no pid_provenance field
+    assert claim.pid_provenance is None
+    assert classify(claim) == ClaimState.STALE
+
+
+def test_classify_live_ttl_unexpired_with_live_pid_regardless_of_provenance():
+    """The corroboration gate touches ONLY the expired arm: inside the TTL
+    window a live pid reads LIVE whether or not its provenance is proven (the
+    TTL itself is the protection; provenance governs only past-expiry
+    extension)."""
+    claim = _live_claim(expires_at=now_ms() + 60_000, pid_provenance="ambient")
     assert classify(claim) == ClaimState.LIVE
 
 
@@ -236,11 +266,15 @@ def test_is_live_survives_hostname_flip(monkeypatch):
 
 def test_classify_live_ttl_expired_after_hostname_flip(monkeypatch):
     """The observed failure: a TTL claim whose clock lapsed while its holder
-    kept working. The hybrid-liveness rescue (pid is the live original holder)
-    was short-circuited by the host mismatch, so the claim read STALE and any
-    re-dispatch could steal the node out from under the live session."""
+    kept working. The hybrid-liveness rescue (pid is the live original holder,
+    prover-proven at write time) was short-circuited by the host mismatch, so
+    the claim read STALE and any re-dispatch could steal the node out from
+    under the live session."""
     _requires_stable_machine_id()
-    claim = _live_claim(machine_id=hostid.machine_id(), expires_at=now_ms() - 1000)
+    claim = _live_claim(
+        machine_id=hostid.machine_id(), expires_at=now_ms() - 1000,
+        pid_provenance="session-prover",
+    )
     monkeypatch.setattr(hostid, "hostname", lambda: "BB16s-MBP")
     hostid.machine_id.cache_clear()
     assert classify(claim) == ClaimState.LIVE

@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
+use crate::proto::TabSel;
 use crate::tree::{self, PaneId, Tab, TabId};
 
 /// How long the one `git rev-parse` per distinct cwd may take before the
@@ -79,6 +80,79 @@ impl Squad {
                     .is_some_and(|r| r.starts_with('/'))
         })
     }
+
+    /// The tab dictionary entry for the tab at vector index `idx` (x-1499):
+    /// all three identifier forms of one live tab in one workspace. The
+    /// ordinal is 1-based and positional (the UI's `·N`), the id is stable
+    /// and never reused, the name is optional and mutable.
+    pub fn tab_dict(&self, idx: usize) -> Option<TabDictEntry> {
+        let t = self.tabs.get(idx)?;
+        Some(TabDictEntry {
+            ordinal: idx + 1,
+            tab_id: t.id,
+            name: t.name.clone(),
+        })
+    }
+
+    /// Resolve any addressable tab form - 1-based ordinal, stable id, unique
+    /// name, or the active tab - to the current vector index (x-1499). The
+    /// one translation point between the identifier the operator can SEE (the
+    /// ordinal) and the one every reference should HOLD (the id).
+    pub fn resolve_tab(&self, sel: &TabSel) -> Result<usize, String> {
+        match sel {
+            TabSel::Active => Ok(self.active_tab.min(self.tabs.len().saturating_sub(1))),
+            TabSel::Index(n) => {
+                if *n == 0 {
+                    Err("tab ordinal starts at 1".into())
+                } else if *n <= self.tabs.len() {
+                    Ok(n - 1)
+                } else {
+                    Err(format!("no tab at ordinal {n}"))
+                }
+            }
+            TabSel::Id(id) => self
+                .tabs
+                .iter()
+                .position(|t| t.id == *id)
+                .ok_or_else(|| format!("no tab with id {id}")),
+            TabSel::Name(n) => {
+                let mut hits = self
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.name.as_deref() == Some(n.as_str()));
+                match (hits.next(), hits.next()) {
+                    (Some((i, _)), None) => Ok(i),
+                    (Some(_), Some(_)) => Err(format!("ambiguous tab name: {n}")),
+                    (None, _) => Err(format!("no tab named {n}")),
+                }
+            }
+            TabSel::New => Err("cannot select the 'new' tab of an existing set".into()),
+        }
+    }
+
+    /// The operator-facing label for the tab at `idx`: the name when present,
+    /// else the visible `·N` ordinal the UI already renders (client.rs
+    /// `TabContext::Ordinal`). Renderers pair this with the stable id -
+    /// neither identifier alone tells the operator both what they are looking
+    /// at and what to type next.
+    pub fn tab_label(&self, idx: usize) -> String {
+        match self.tabs.get(idx) {
+            Some(t) => t.name.clone().unwrap_or_else(|| format!("·{}", idx + 1)),
+            None => "-".into(),
+        }
+    }
+}
+
+/// One live tab's three identifier forms (x-1499). See [`Squad::tab_dict`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabDictEntry {
+    /// 1-based positional ordinal; shifts when an earlier tab closes.
+    pub ordinal: usize,
+    /// Stable, session-scoped, never reused (Locked Decision 6).
+    pub tab_id: TabId,
+    /// Optional mutable operator name.
+    pub name: Option<String>,
 }
 
 /// The server's whole layout world: squads in creation order (stable sideline
@@ -523,6 +597,66 @@ mod tests {
         // Last tab removes the squad; last squad ends the session.
         assert_eq!(s.remove_tab(1, 0), RemoveOutcome::SessionEmpty);
         assert_eq!(s.active_squad, None);
+    }
+
+    // -- x-1499 tab dictionary: ordinal <-> stable id ---------------------
+
+    #[test]
+    fn tab_ordinal_shifts_on_close_while_tab_id_is_stable() {
+        // The x-1499 regression: closing an earlier tab moves every later
+        // ordinal down one while every stable tab id stays put. A test that
+        // only creates or renames tabs cannot see this instability.
+        let mut s = Session::default();
+        s.add_squad(1, vec!["/a".into()], None, tab(&[10]));
+        s.squad_mut(1).unwrap().tabs.push(tab(&[20]));
+        s.squad_mut(1).unwrap().tabs.push(tab(&[30]));
+        let sq = s.squad(1).unwrap();
+        // Both forms of the third tab resolve to the same index.
+        assert_eq!(sq.resolve_tab(&TabSel::Index(3)).unwrap(), 2);
+        assert_eq!(sq.resolve_tab(&TabSel::Id(30)).unwrap(), 2);
+        // Ordinals are 1-based: 0 never silently selects the first tab.
+        assert_eq!(
+            sq.resolve_tab(&TabSel::Index(0)).unwrap_err(),
+            "tab ordinal starts at 1"
+        );
+
+        // Close the FIRST tab through the real removal path.
+        assert_eq!(s.remove_tab(1, 0), RemoveOutcome::TabRemoved);
+        let sq = s.squad(1).unwrap();
+        assert_eq!(sq.tabs[1].id, 30, "the stable id is unchanged");
+        assert_eq!(
+            sq.resolve_tab(&TabSel::Index(2)).unwrap(),
+            1,
+            "the ordinal moved 3 -> 2"
+        );
+        assert_eq!(
+            sq.resolve_tab(&TabSel::Id(30)).unwrap(),
+            1,
+            "the stable id still resolves"
+        );
+        assert_eq!(
+            sq.resolve_tab(&TabSel::Index(3)).unwrap_err(),
+            "no tab at ordinal 3",
+            "the old ordinal no longer names it"
+        );
+    }
+
+    #[test]
+    fn tab_dict_entry_and_label_are_name_first_then_ordinal() {
+        let mut s = Session::default();
+        s.add_squad(1, vec!["/a".into()], None, tab(&[10]));
+        let mut named = tab(&[20]);
+        named.name = Some("targets".into());
+        s.squad_mut(1).unwrap().tabs.push(named);
+        let sq = s.squad(1).unwrap();
+        let d = sq.tab_dict(1).expect("live tab");
+        assert_eq!(d.ordinal, 2);
+        assert_eq!(d.tab_id, 20);
+        assert_eq!(d.name.as_deref(), Some("targets"));
+        // The label the operator's eye already has: the name when present,
+        // else the visible `·N` ordinal the UI renders (client.rs).
+        assert_eq!(sq.tab_label(1), "targets");
+        assert_eq!(sq.tab_label(0), "·1");
     }
 
     #[test]

@@ -300,6 +300,7 @@ def test_hybrid_arm_parity_expired_ttl(tmp_path: Path) -> None:
     write_raw_claim(tmp_path, Claim(
         key="session:hyb-live", holder="h", acquired_at=now_ms(),
         expires_at=now_ms() - 1_000, pid=os.getpid(), host=host,
+        pid_provenance="session-prover",
     ))
     # Expired TTL + DEAD pid -> both classify STALE.
     write_raw_claim(tmp_path, Claim(
@@ -534,6 +535,8 @@ def test_rust_pid_claim_omits_expires_at_line(tmp_path: Path) -> None:
         assert "machine_id" not in data, (
             "no stable id on this host: both implementations must omit the field"
         )
+    expected.add("pid_provenance")
+    assert data["pid_provenance"] == "ambient"
     assert set(data) - {"harness"} == expected
     assert data["host"] == socket.gethostname(), (
         "host stays the hostname a pre-change reader compares against"
