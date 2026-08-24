@@ -2049,7 +2049,17 @@ def _do_merge(
                 from fno.pr import _coverage_gate, _reviews
 
                 if gate_verdict[0] == _coverage_gate.COVERED:
-                    ignore_contexts = (_reviews.COVERAGE_STATUS_CONTEXT,)
+                    # Both coverage contexts are THIS merge's own projections,
+                    # not generic CI: the required context (covered verdict)
+                    # and the diagnostic (an unknown-read stamp that says
+                    # "retry the review verb", not "wait"). Ignoring only the
+                    # required one let a pending diagnostic hold a covered,
+                    # CI-green merge, and the clearing publish runs after this
+                    # verdict, so a bare retry held again.
+                    ignore_contexts = (
+                        _reviews.COVERAGE_STATUS_CONTEXT,
+                        _reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+                    )
             verdict, counts, head_read = _checks_verdict(
                 pr_number, repo, ignore_contexts=ignore_contexts
             )
