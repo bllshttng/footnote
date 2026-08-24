@@ -3568,6 +3568,20 @@ event_types:
           type: string
           description: "chain-empty (config named no chain), all-tried, all-exhausted (every remaining link's own provider reads EXHAUSTED), or chain-malformed:<detail> (the chain refused validation and nothing was spawned)."
 
+  - name: failover_swapped
+    description: "A recovery sweep rotated the provider for a refused worker and records whether a replacement worker was actually redispatched."
+    sources: [daemon]
+    data:
+      required: [short_id, redispatched]
+      properties:
+        short_id:
+          type: string
+          description: "The refusing worker's 8-hex jobId."
+        redispatched:
+          type: boolean
+          description: "True only when a replacement worker actually started."
+    consumers: [operator]
+
   - name: provider_window_closing
     description: "A provider record's PROJECTED usage window is within the configured warning threshold of closing. A projection from a recorded window open plus a configured length, never a utilization measurement - a record with no probe still reads UNKNOWN for headroom. Emitted once per window so a long tick loop does not re-warn."
     sources: [daemon, cli]
