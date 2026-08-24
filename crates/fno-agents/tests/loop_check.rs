@@ -2922,7 +2922,11 @@ fn no_external_on_active_gate_serializes_unknown_coverage_not_uncovered() {
         &format!("--git-bin={}", mock.git.display()),
     ]);
 
-    assert_eq!(d.decision, "allow", "no_external must not block: {}", d.message);
+    assert_eq!(
+        d.decision, "allow",
+        "no_external must not block: {}",
+        d.message
+    );
     let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
     assert!(
         events.contains("\"coverage\":\"unknown\""),
