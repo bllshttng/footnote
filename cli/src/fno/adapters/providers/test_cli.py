@@ -378,6 +378,28 @@ class TestAdd:
         assert "auth_strategy_mismatch" in err_text
         assert "bad-provider" in err_text
 
+    def test_add_route_backed_account_without_secret(self, tmp_path: Path):
+        """AC1-HP: add stores the route string and no resolved token."""
+        from fno.adapters.providers.loader import load_providers
+
+        result = _invoke(
+            [
+                "add", "zai",
+                "--harness", "claude",
+                "--auth", "api_key",
+                "--route", "zai/glm-5.3[1m]",
+                "--scope", "global",
+            ],
+            cwd=tmp_path,
+            home=tmp_path,
+        )
+
+        assert result.exit_code == 0, result.output
+        record = load_providers(repo_root=tmp_path).by_id["zai"]
+        assert record.route == "zai/glm-5.3[1m]"
+        assert record.env is None
+        assert "ANTHROPIC_AUTH_TOKEN" not in (record.model_dump(mode="json") or {})
+
     def test_add_duplicate_refuses_without_force(self, tmp_path: Path):
         """add with existing id refuses without --force."""
         creds = tmp_path / ".claude"
