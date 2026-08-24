@@ -806,8 +806,11 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             _reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT: unavailable_state,
         }
         if any(
-            posted_states.get(context) is not None
-            and posted_states.get(context) != wanted
+            # Absent counts as a mismatch: a head published before the
+            # diagnostic context existed (or by the carry arm) never gets the
+            # instrument stamp unless the absent row itself triggers the
+            # publish that writes it.
+            posted_states.get(context) != wanted
             for context, wanted in wanted_states.items()
         ):
             posted, note = _reviews.publish_coverage_status(

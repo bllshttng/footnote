@@ -498,7 +498,6 @@ def _bounded_remediation(
     if auto_merge.require_checks_pass:
         try:
             from fno.pr import _reviews as _reviews_mod
-            from fno.pr._status import without_coverage_statuses
 
             # The SECOND merge path (a guard on one of N reachable paths is
             # decorative): the do-merge path ignores the coverage projections
