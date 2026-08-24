@@ -2466,10 +2466,10 @@ fn mux_dir_uncached() -> PathBuf {
 }
 
 /// The state root the mux (and its non-socket sidecars, via
-/// [`mux_sidecar_root`]) resolve under: `<state_dir>` off the EXPLICIT config
-/// tier (`FNO_CONFIG` sole candidate, else global; see
-/// `digest_overlay::config_explicit_top_str` for why the project tier is
-/// deliberately absent).
+/// [`mux_sidecar_root`]) resolve under, latched once per process like
+/// [`MUX_DIR`]: `<state_dir>` off the EXPLICIT config tier (`FNO_CONFIG` sole
+/// candidate, else global; see `digest_overlay::config_explicit_top_str` for
+/// why the project tier is deliberately absent).
 ///
 /// Fail closed on an explicit `FNO_CONFIG` that yielded no state_dir at all
 /// (yaml-pinned, unreadable, missing key): isolation was requested, so the
@@ -2480,15 +2480,20 @@ fn mux_dir_uncached() -> PathBuf {
 /// than the graph; that asymmetry is deliberate and the warning names it.
 #[cfg(not(test))]
 fn resolved_state_root() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match config_state_root() {
-        Some(StateRoot::Root(root)) => return root,
-        // A found-but-declined value already said why, once; it lands on the
-        // same fallback as a miss without a second, contradictory message.
-        Some(StateRoot::Declined) => return fallback_state_root(&cwd, false),
-        None => {}
-    }
-    fallback_state_root(&cwd, true)
+    static STATE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    STATE_ROOT
+        .get_or_init(|| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            match config_state_root() {
+                Some(StateRoot::Root(root)) => root,
+                // A found-but-declined value already said why, once; it lands
+                // on the same fallback as a miss without a second,
+                // contradictory message.
+                Some(StateRoot::Declined) => fallback_state_root(&cwd, false),
+                None => fallback_state_root(&cwd, true),
+            }
+        })
+        .clone()
 }
 
 /// The root for mux sidecars that are not sockets (`mux-view.json`): the same
@@ -2543,10 +2548,11 @@ pub(crate) fn legacy_mux_root() -> PathBuf {
 enum StateRoot {
     /// The state root, resolved and expanded.
     Root(PathBuf),
-    /// A value was found but this mirror cannot expand it (`{vault}`
-    /// templates, `$VAR` references, `~user` prefixes). Python expands all
-    /// three; this mirror declines rather than create a literal `{vault}`,
-    /// `$HOME`, or `$HOME/user` directory, and has already warned once.
+    /// A value was found but this mirror cannot use it (`{vault}` templates,
+    /// `$VAR` references, `~user` prefixes, or a RELATIVE path - see
+    /// [`expand_state_dir`] for why relative anchors are refused). Python
+    /// expands the first three and anchors the fourth; this mirror declines
+    /// rather than fork the fleet across cwds, and has already warned once.
     Declined,
 }
 
@@ -2557,8 +2563,7 @@ enum StateRoot {
 #[cfg(not(test))]
 fn config_state_root() -> Option<StateRoot> {
     let raw = crate::digest_overlay::config_explicit_top_str("state_dir")?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match expand_state_dir(&raw, &cwd) {
+    match expand_state_dir(&raw) {
         Some(root) => Some(StateRoot::Root(root)),
         None => {
             warn_once_unexpandable_state_dir(&raw);
@@ -2567,19 +2572,22 @@ fn config_state_root() -> Option<StateRoot> {
     }
 }
 
-/// Expand a leading `~` and anchor a still-relative value to `cwd`, matching
-/// `fno.paths`' resolution of `state_dir` (expanduser, relative against the
-/// process cwd). `None` when the value is empty, carries a `{template}`
-/// variable or a `$VAR` reference (Python's expandvars/vars pass runs first
-/// there; this mirror expands neither), is a `~user` form (Python resolves it
-/// through the passwd database; `$HOME/user` would be a different root), or
-/// is `~`-prefixed with no HOME to expand against.
-fn expand_state_dir(raw: &str, cwd: &std::path::Path) -> Option<PathBuf> {
+/// Expand a leading `~` for an otherwise-absolute value. `None` when the
+/// value is empty or RELATIVE: Python's own cross-project surfaces
+/// (`paths.ledger_json`, `operator_lane`) follow `state_dir` only when it is
+/// an absolute anchor, because a cwd-anchored root would fork shared
+/// per-machine state into whichever checkout a process started in - and the
+/// mux is the most cross-project surface there is. Also `None` for
+/// `{template}` variables and `$VAR` references (Python's expandvars pass
+/// runs first there; this mirror expands neither) and `~user` forms (Python
+/// resolves them through the passwd database; `$HOME/user` would be a
+/// different root).
+fn expand_state_dir(raw: &str) -> Option<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() || raw.contains('{') || raw.contains('$') {
         return None;
     }
-    let path = if let Some(rest) = raw.strip_prefix('~') {
+    if let Some(rest) = raw.strip_prefix('~') {
         if !rest.is_empty() && !rest.starts_with('/') {
             return None;
         }
@@ -2589,15 +2597,10 @@ fn expand_state_dir(raw: &str, cwd: &std::path::Path) -> Option<PathBuf> {
         if !rest.is_empty() {
             p.push(rest);
         }
-        p
-    } else {
-        PathBuf::from(raw)
-    };
-    Some(if path.is_absolute() {
-        path
-    } else {
-        cwd.join(path)
-    })
+        return Some(p);
+    }
+    let path = PathBuf::from(raw);
+    path.is_absolute().then_some(path)
 }
 
 /// A pinned `$FNO_CONFIG` that yielded no usable state_dir (a yaml-pinned
@@ -2636,9 +2639,10 @@ fn warn_once_unexpandable_state_dir(raw: &str) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         eprintln!(
-            "fno: config state_dir {raw:?} carries a template variable or $VAR the \
-             mux cannot expand; the mux dir falls back instead of following it. \
-             Use an absolute, ~-relative, or repo-relative state_dir."
+            "fno: config state_dir {raw:?} is not a value the mux can follow (it \
+             must be an absolute or ~ path, free of template variables, $VAR \
+             references, and ~user forms); the mux dir falls back instead of \
+             following it."
         );
     });
 }
@@ -3915,36 +3919,36 @@ mod tests {
     }
 
     #[test]
-    fn state_dir_values_expand_and_anchor() {
-        let cwd = std::path::Path::new("/cwd");
+    fn state_dir_values_expand_absolute_only() {
         assert_eq!(
-            expand_state_dir("/demo/state", cwd),
+            expand_state_dir("/demo/state"),
             Some(PathBuf::from("/demo/state"))
         );
         assert_eq!(
-            expand_state_dir("  /demo/state  ", cwd),
+            expand_state_dir("  /demo/state  "),
             Some(PathBuf::from("/demo/state"))
-        );
-        assert_eq!(
-            expand_state_dir("rel/state", cwd),
-            Some(PathBuf::from("/cwd/rel/state"))
         );
         // `~` expands against HOME like Python's expanduser; trailing slashes
         // and a bare `~` both land on HOME itself.
         let home = std::env::var_os("HOME").map(PathBuf::from);
         if let Some(home) = home {
-            assert_eq!(expand_state_dir("~/.fno/", cwd), Some(home.join(".fno")));
-            assert_eq!(expand_state_dir("~", cwd), Some(home));
+            assert_eq!(expand_state_dir("~/.fno/"), Some(home.join(".fno")));
+            assert_eq!(expand_state_dir("~"), Some(home));
         }
-        // Unusable values decline rather than guess: template variables,
-        // $VAR references, and ~user forms this mirror cannot expand (Python
-        // resolves ~user through the passwd database, not $HOME/user).
-        assert_eq!(expand_state_dir("{vault}/.fno", cwd), None);
-        assert_eq!(expand_state_dir("$HOME/demo", cwd), None);
-        assert_eq!(expand_state_dir("${HOME}/demo", cwd), None);
-        assert_eq!(expand_state_dir("~demo/.fno", cwd), None);
-        assert_eq!(expand_state_dir("", cwd), None);
-        assert_eq!(expand_state_dir("   ", cwd), None);
+        // Relative values decline, matching Python's own cross-project
+        // surfaces (ledger, operator lane): a cwd-anchored root would fork
+        // the shared fleet into whichever checkout a process started in.
+        assert_eq!(expand_state_dir("rel/state"), None);
+        assert_eq!(expand_state_dir("state"), None);
+        // Template variables, $VAR references, and ~user forms decline too
+        // (Python resolves ~user through the passwd database, not
+        // $HOME/user).
+        assert_eq!(expand_state_dir("{vault}/.fno"), None);
+        assert_eq!(expand_state_dir("$HOME/demo"), None);
+        assert_eq!(expand_state_dir("${HOME}/demo"), None);
+        assert_eq!(expand_state_dir("~demo/.fno"), None);
+        assert_eq!(expand_state_dir(""), None);
+        assert_eq!(expand_state_dir("   "), None);
     }
 
     /// A peer that dribbles progress must NOT be able to extend the bound.

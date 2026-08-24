@@ -367,10 +367,20 @@ impl<'de> Deserialize<'de> for AgentSort {
 }
 
 /// The raw file, entries untyped. Missing, empty, or corrupt all read as a
-/// fresh store - never a refusal to start.
+/// fresh store - never a refusal to start. A MISSING file falls back to the
+/// pre-state-root location once per read (no copy): an upgrading user's saved
+/// density/sort/width keep loading until the next save writes the new path.
 fn read_raw() -> StoreFile {
-    std::fs::read_to_string(view_path())
-        .ok()
+    let path = view_path();
+    let raw = std::fs::read_to_string(&path).or_else(|_| {
+        #[cfg(not(test))]
+        {
+            std::fs::read_to_string(crate::proto::legacy_mux_root().with_file_name("mux-view.json"))
+        }
+        #[cfg(test)]
+        std::io::Result::Err(std::io::ErrorKind::NotFound.into())
+    });
+    raw.ok()
         .and_then(|raw| serde_json::from_str::<StoreFile>(&raw).ok())
         .unwrap_or_default()
 }

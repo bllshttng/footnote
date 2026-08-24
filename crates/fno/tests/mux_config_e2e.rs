@@ -55,6 +55,22 @@ fn ls_under_config(scratch: &Scratch, config: &Path) -> Case {
     }
 }
 
+/// The session names `ls --json` reported. Parsed per row rather than
+/// substring-matched, so a future field carrying the string "main" (a path,
+/// a version stamp) cannot trip the leak assertions.
+fn session_names(stdout: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|v| v.as_array().map(|rows| rows.to_vec()))
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.get("session").and_then(|s| s.as_str()))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[test]
 fn mux_ls_under_demo_config_names_the_demo_session_not_the_home_fleet() {
     let scratch = Scratch::new("muxcfg");
@@ -73,14 +89,15 @@ fn mux_ls_under_demo_config_names_the_demo_session_not_the_home_fleet() {
     plant_socket(&demo.join("mux").join("isolated-session.sock"));
 
     let case = ls_under_config(&scratch, &config);
+    let names = session_names(&case.stdout);
     assert!(
-        case.stdout.contains("isolated-session"),
+        names.iter().any(|n| n == "isolated-session"),
         "ls must name the demo session; got stdout: {} stderr: {}",
         case.stdout,
         case.stderr
     );
     assert!(
-        !case.stdout.contains("main"),
+        !names.iter().any(|n| n == "main"),
         "the HOME fleet session leaked through FNO_CONFIG isolation: {}",
         case.stdout
     );
@@ -101,14 +118,15 @@ fn mux_ls_fail_closed_when_fno_config_cannot_be_parsed() {
     plant_socket(&demo.join("mux").join("yaml-session.sock"));
 
     let case = ls_under_config(&scratch, &config);
+    let names = session_names(&case.stdout);
     assert!(
-        case.stdout.contains("yaml-session"),
+        names.iter().any(|n| n == "yaml-session"),
         "ls must name the session beside the pinned config; got stdout: {} stderr: {}",
         case.stdout,
         case.stderr
     );
     assert!(
-        !case.stdout.contains("main"),
+        !names.iter().any(|n| n == "main"),
         "an unparseable FNO_CONFIG fell back to the HOME fleet: {}",
         case.stdout
     );
