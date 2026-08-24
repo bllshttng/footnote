@@ -197,7 +197,9 @@ def ambient_identity_strip_flags(
 ) -> list[str]:
     """``env -u`` flag pairs for identity names PRESENT in ``env`` that belong
     to a foreign HARNESS family (every family except ``keep_family`` and fno
-    plumbing).
+    plumbing). A foreign-family name with the same value as the resolved
+    keep-family session id is a duplicate naming this session, not foreign
+    lineage, and is omitted.
 
     The one-line self-rescue for a poisoned session: it cannot prove which
     harness it is (that is the ambiguity), but the operator reading the
@@ -207,6 +209,23 @@ def ambient_identity_strip_flags(
     family in :data:`_NEVER_STRIPPED_FAMILIES`.
     """
     environ = os.environ if env is None else env
+    keep_session_id: Optional[str] = None
+    for marker, family in HARNESS_SESSION_MARKERS:
+        if family != keep_family:
+            continue
+        value = (environ.get(marker) or "").strip()
+        if value:
+            keep_session_id = value
+            break
+    if keep_session_id is None:
+        for marker, family in LEGACY_HARNESS_SESSION_MARKERS:
+            if family != keep_family:
+                continue
+            value = (environ.get(marker) or "").strip()
+            if value:
+                keep_session_id = value
+                break
+
     flags: list[str] = []
     for name in AMBIENT_IDENTITY_ENV:
         family = AMBIENT_IDENTITY_FAMILY.get(name)
@@ -218,8 +237,10 @@ def ambient_identity_strip_flags(
         # variable nobody has classified.
         if family is None or family == keep_family or family in _NEVER_STRIPPED_FAMILIES:
             continue
-        if (environ.get(name) or "").strip():
-            flags += ["-u", name]
+        value = (environ.get(name) or "").strip()
+        if not value or value == keep_session_id:
+            continue
+        flags += ["-u", name]
     return flags
 
 
