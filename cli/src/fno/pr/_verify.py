@@ -382,6 +382,29 @@ def run_verify_merged(
             sys.stdout.write(f"required_checks_failing: {failing_csv}\n")
             return 1
 
+    # The coverage gate the unfiltered rollup enforced accidentally: filtering
+    # the projections out of the checks precondition removed the only local
+    # refusal an uncovered PR had on this path, and the server-side ruleset is
+    # an opt-in operator step a fresh install has not applied. The merge
+    # verb's own gate, not a second truth table; no review lane configured
+    # reads COVERED inside the gate itself.
+    from fno.pr import _coverage_gate
+
+    gate_state, gate_refusal, _gate_head, gate_note = _coverage_gate.coverage_verdict(
+        int(pr_number), repo, recompute=True
+    )
+    if gate_state != _coverage_gate.COVERED:
+        line = _coverage_gate.refusal_line(gate_refusal, gate_note)
+        _emit_audit(
+            repo_root,
+            state_file,
+            pr_number,
+            "coverage_gate_refused",
+            {"line": line},
+        )
+        sys.stdout.write(f"coverage_gate_refused: {line}\n")
+        return 1
+
     # All preconditions clean.
     if remediation == "verify_only":
         _emit_audit(
