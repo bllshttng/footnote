@@ -5911,6 +5911,15 @@ def _build_mail_ctx(
 _MUX_CONFIRM_ATTEMPTS = 40
 _MUX_CONFIRM_INTERVAL_S = 0.25
 
+_CODEX_QUEUE_MARKER = "tab to queue message"
+_CODEX_QUEUED_MARKERS = ("queued review", "review queued", "queued")
+_CODEX_ACTIVE_REVIEW_MARKERS = (
+    "review in progress",
+    "reviewing",
+    "review mode",
+    "analyzing diff",
+)
+
 
 def _mux_recipient_transcript(entry: "AgentEntry") -> Optional[Path]:
     """Locate the mux recipient's OWN claude transcript by session uuid, the
@@ -5998,7 +6007,8 @@ def _mux_pane_send(
     raw: bool = False,
     gate: Optional[bool] = None,
     failure_out: Optional[list[str]] = None,
-) -> bool:
+    review: bool = False,
+) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
     When ``guarded``, the paste rides the server-side turn-taken interlock: a
@@ -6038,6 +6048,15 @@ def _mux_pane_send(
     itself standing in for a confirm, and this flag governs the unguarded path
     replacing it), and ignored for a non-claude recipient, which has no
     ~/.claude/projects transcript to confirm against.
+
+    ``review`` is a private review-request lane. It is only set by the target
+    final-head producer after it has validated the explicit PR payload. On a
+    Codex pane, the submitted payload is then classified from a positive frame:
+    a composer showing ``tab to queue message`` plus the exact payload gets one
+    literal Tab and a second frame must positively show a queued marker plus
+    that same payload; a positive active-review marker returns ``started`` and
+    sends no control key. Any unreadable or unmatched frame returns
+    ``unconfirmed``. Other payloads keep the ordinary boolean contract.
 
     ``raw`` (default False) is the keystroke opt-out. By default the text is
     gated and enveloped through :func:`fno.mail.pane_transport.prepare`, so an
@@ -6358,12 +6377,61 @@ def _mux_pane_send(
                 return False
         return True
 
+    def _read_screen() -> Optional[str]:
+        proc = _run(["read", pane])
+        if (
+            proc is None
+            or proc == _MUX_SEND_UNKNOWN
+            or proc.returncode != 0
+        ):
+            return None
+        return proc.stdout or ""
+
+    def _contains_payload(screen: str) -> bool:
+        # Codex may wrap a long slash request across visual lines. Compare the
+        # positive content after collapsing whitespace, never on screen growth.
+        import re
+
+        compact = re.sub(r"\s+", " ", screen).strip()
+        expected = re.sub(r"\s+", " ", text).strip()
+        return bool(expected) and expected in compact
+
+    def _review_outcome() -> str:
+        if (getattr(entry, "harness", "") or "") != "codex":
+            return "started"
+        screen = _read_screen()
+        if screen is None or not _contains_payload(screen):
+            return "unconfirmed"
+        lowered = screen.lower()
+        if _CODEX_QUEUE_MARKER in lowered:
+            tab_args = ["send", pane, "--text", "\t", "--raw"]
+            if expected_fno_id:
+                tab_args.extend(["--fno-id", str(expected_fno_id)])
+            tab = _run(tab_args)
+            if tab is None or tab == _MUX_SEND_UNKNOWN or tab.returncode != 0:
+                return "unconfirmed"
+            queued_screen = _read_screen()
+            if queued_screen is None:
+                return "unconfirmed"
+            queued_lower = queued_screen.lower()
+            if _contains_payload(queued_screen) and any(
+                marker in queued_lower for marker in _CODEX_QUEUED_MARKERS
+            ):
+                return "queued"
+            return "unconfirmed"
+        if any(marker in lowered for marker in _CODEX_ACTIVE_REVIEW_MARKERS):
+            return "started"
+        return "unconfirmed"
+
     if guarded:
         sent = _paste_then_submit()
         if not sent:
             _record_failure(last_attempt_phase)
-        _audit_raw_inject(sent)
-        return sent
+        outcome: bool | str = sent
+        if sent and review and (getattr(entry, "harness", "") or "") == "codex":
+            outcome = _review_outcome()
+        _audit_raw_inject(outcome in {True, "started", "queued"})
+        return outcome
 
     if not _verify_pane_occupant():
         _audit_raw_inject(False)
@@ -6445,7 +6513,10 @@ def _mux_pane_send(
             return False
     try:
         sent = _paste_then_submit()
-        if sent and confirm:
+        outcome: bool | str = sent
+        if sent and review and (getattr(entry, "harness", "") or "") == "codex":
+            outcome = _review_outcome()
+        elif sent and confirm:
             # Bytes-written alone is Locked-Decision-4 banned as a hosted
             # verdict; confirm by content against the recipient's own
             # transcript, never optimistically on an unreadable one.
@@ -6455,12 +6526,13 @@ def _mux_pane_send(
             sent = confirm_transcript is not None and confirm_baseline is not None and (
                 _mux_content_confirm(confirm_transcript, marker, confirm_baseline)
             )
+            outcome = "started" if review and sent else sent
             if not sent:
                 _record_failure("unconfirmed")
         elif not sent:
             _record_failure(last_attempt_phase)
-        _audit_raw_inject(sent)
-        return sent
+        _audit_raw_inject(outcome in {True, "started", "queued"})
+        return outcome
     finally:
         if claimed:
             _run(["release", pane])

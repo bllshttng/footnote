@@ -274,6 +274,118 @@ def test_mux_pane_send_delivers_to_a_codex_pane(monkeypatch, capsys) -> None:
     assert "\r" in written
 
 
+def test_codex_review_request_queues_only_on_positive_composer_marker(monkeypatch):
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _mux_pane_send
+
+    class ReviewMux(FakeMux):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def __call__(self, argv, input=None, **kwargs):
+            if argv[3] == "read":
+                self.calls.append((list(argv), input))
+                self.reads += 1
+                screen = (
+                    "working\n/review HEAD abc1234 of PR 123 against origin/main\n"
+                    "tab to queue message"
+                    if self.reads == 1
+                    else "queued review\n/review HEAD abc1234 of PR 123 against origin/main"
+                )
+                return subprocess.CompletedProcess(argv, 0, screen, "")
+            return super().__call__(argv, input=input, **kwargs)
+
+    fake = ReviewMux()
+    _patch_mux(monkeypatch, fake)
+    monkeypatch.setattr(dispatch_mod.time, "sleep", lambda _s: None)
+
+    result = _mux_pane_send(
+        _mux_entry("muxed", "codex"),
+        "/review HEAD abc1234 of PR 123 against origin/main",
+        guarded=False,
+        raw=True,
+        review=True,
+    )
+
+    assert result == "queued"
+    controls = [
+        call[0][call[0].index("--text") + 1]
+        for call in fake.calls
+        if "--text" in call[0]
+    ]
+    assert "\t" in controls
+    assert "\x1b" not in controls
+
+
+def test_codex_review_request_does_not_tab_when_review_is_already_running(monkeypatch):
+    from fno.agents.dispatch import _mux_pane_send
+
+    class ActiveReviewMux(FakeMux):
+        def __call__(self, argv, input=None, **kwargs):
+            if argv[3] == "read":
+                self.calls.append((list(argv), input))
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    "review in progress\n/review HEAD abc1234 of PR 123 against origin/main",
+                    "",
+                )
+            return super().__call__(argv, input=input, **kwargs)
+
+    fake = ActiveReviewMux()
+    _patch_mux(monkeypatch, fake)
+
+    result = _mux_pane_send(
+        _mux_entry("muxed", "codex"),
+        "/review HEAD abc1234 of PR 123 against origin/main",
+        guarded=False,
+        raw=True,
+        review=True,
+    )
+
+    assert result == "started"
+    assert not any(
+        "--text" in call[0]
+        and call[0][call[0].index("--text") + 1] in {"\t", "\x1b"}
+        for call in fake.calls
+    )
+
+
+def test_codex_review_request_stays_unconfirmed_without_a_positive_frame(monkeypatch):
+    from fno.agents.dispatch import _mux_pane_send
+
+    class UnclearReviewMux(FakeMux):
+        def __call__(self, argv, input=None, **kwargs):
+            if argv[3] == "read":
+                self.calls.append((list(argv), input))
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    "idle prompt\n/review HEAD abc1234 of PR 123 against origin/main",
+                    "",
+                )
+            return super().__call__(argv, input=input, **kwargs)
+
+    fake = UnclearReviewMux()
+    _patch_mux(monkeypatch, fake)
+
+    result = _mux_pane_send(
+        _mux_entry("muxed", "codex"),
+        "/review HEAD abc1234 of PR 123 against origin/main",
+        guarded=False,
+        raw=True,
+        review=True,
+    )
+
+    assert result == "unconfirmed"
+    assert not any(
+        "--text" in call[0]
+        and call[0][call[0].index("--text") + 1] in {"\t", "\x1b"}
+        for call in fake.calls
+    )
+
+
 def test_mux_pane_send_delivers_to_an_agy_pane(monkeypatch) -> None:
     """Measured agy pane behavior uses an Enter submit after the pasted text."""
     from fno.agents.dispatch import _mux_pane_send
