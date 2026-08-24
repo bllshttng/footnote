@@ -2585,6 +2585,10 @@ fn run_on_existing_server(
             eprintln!("fno mux: {e}");
             EXIT_ERROR
         }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux: {msg}");
+            EXIT_ERROR
+        }
     }
 }
 
@@ -3312,6 +3316,10 @@ fn focus_pane(verb: &str, session: &str, pane: u64, json: bool) -> i32 {
             eprintln!("{verb}: {e}");
             EXIT_ERROR
         }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("{verb}: {msg}");
+            EXIT_ERROR
+        }
     }
 }
 
@@ -3786,6 +3794,10 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
             eprintln!("fno mux where: {e}");
             EXIT_ERROR
         }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux where: {msg}");
+            EXIT_ERROR
+        }
     }
 }
 
@@ -4003,6 +4015,10 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             eprintln!("fno mux pane: {e}");
             EXIT_ERROR
         }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux pane: {msg}");
+            EXIT_ERROR
+        }
     }
 }
 
@@ -4011,6 +4027,8 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
 enum ControlError {
     /// The exchange failed and nothing is running because of it.
     Fatal(String),
+    /// The server refused with an actionable protocol error code.
+    FatalCode { code: u32, msg: String },
     /// The verb reached the server and no reply came back inside the deadline.
     /// The server's side of the exchange is UNKNOWN, not failed.
     Unanswered(String),
@@ -4020,6 +4038,7 @@ impl std::fmt::Display for ControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ControlError::Fatal(s) | ControlError::Unanswered(s) => write!(f, "{s}"),
+            ControlError::FatalCode { msg, .. } => write!(f, "{msg}"),
         }
     }
 }
@@ -4712,6 +4731,9 @@ fn send_pane_bytes(
         },
     )? {
         ServerMsg::Ok => Ok(()),
+        ServerMsg::Err { code, msg } if code == err_code::TARGET_IDENTITY_MISMATCH => {
+            Err(ControlError::FatalCode { code, msg })
+        }
         ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
         other => Err(ControlError::Fatal(format!(
             "unexpected pane send reply while submitting: {other:?}"
@@ -4733,12 +4755,21 @@ fn submit_pane(
         return match e {
             ControlError::Unanswered(_) => EXIT_CONTROL_UNANSWERED,
             ControlError::Fatal(_) => EXIT_ERROR,
+            ControlError::FatalCode { code, .. } if code == err_code::TARGET_IDENTITY_MISMATCH => {
+                EXIT_TARGET_IDENTITY_MISMATCH
+            }
+            ControlError::FatalCode { .. } => EXIT_ERROR,
         };
     }
     std::thread::sleep(Duration::from_millis(CR_SETTLE_MS));
     let baseline = pane_text(sock, session, pane).ok();
     if let Err(e) = send_pane_bytes(sock, session, pane, vec![b'\r'], false, expected_identity) {
         eprintln!("fno mux pane: text delivered, submission unconfirmed: {e}");
+        if let ControlError::FatalCode { code, .. } = e {
+            if code == err_code::TARGET_IDENTITY_MISMATCH {
+                return EXIT_TARGET_IDENTITY_MISMATCH;
+            }
+        }
         return EXIT_SUBMIT_UNCONFIRMED;
     }
     for attempt in 0..SUBMIT_CONFIRM_ATTEMPTS {
@@ -4810,6 +4841,10 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux block: {e}");
             return EXIT_ERROR;
         }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux block: {msg}");
+            return EXIT_ERROR;
+        }
     };
     // 1b. Only a completed, typed, untruncated block pipes: open, truncated,
     //     and markerless-implicit blocks all refuse here (partial or unbounded
@@ -4859,6 +4894,10 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
         }
         Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
+            return EXIT_ERROR;
+        }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux block: {msg}");
             return EXIT_ERROR;
         }
     }
@@ -5003,6 +5042,10 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
         }
         Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
+            return EXIT_ERROR;
+        }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux block: {msg}");
             return EXIT_ERROR;
         }
     };
@@ -6885,6 +6928,7 @@ mod tests {
         let exit = match result {
             Err(ControlError::Unanswered(_)) => EXIT_CONTROL_UNANSWERED,
             Err(ControlError::Fatal(_)) => EXIT_ERROR,
+            Err(ControlError::FatalCode { .. }) => EXIT_ERROR,
             Ok(_) => EXIT_OK,
         };
         assert_eq!(exit, EXIT_CONTROL_UNANSWERED);
