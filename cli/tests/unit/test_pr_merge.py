@@ -2370,6 +2370,15 @@ def test_populated_graph_closure_fetch_does_not_hold_the_merge(
 
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
+    # Positive marker, pinned to the thing measured: hold_for_pr has two early
+    # None exits before the fetch (empty by_id, the cwd scan), and a green
+    # merge alone cannot tell "fetch paid and unheld" from "fetch never paid".
+    closure_calls = [
+        c
+        for c in fake.calls
+        if c[:3] == ["gh", "pr", "view"] and "number,body,url,state,mergedAt" in c[-1]
+    ]
+    assert closure_calls, "the hold reader must pay its closure fetch through the fake"
     assert fake.merge_cmds, "the closure fetch must not hold the merge"
     i = fake.merge_cmds[0].index("--match-head-commit")
     assert fake.merge_cmds[0][i + 1] == "coveredSHA"
