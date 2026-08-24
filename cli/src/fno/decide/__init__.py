@@ -43,6 +43,22 @@ AUTHORITY_SOURCES: tuple[str, ...] = (
     "beastmode",  # an agent acting under an explicit grant
 )
 
+# Origin is evidence about the channel, not an authority claim. Keep the two
+# axes separate: only operator-origin evidence can carry operator intent into
+# a machine-readable gate.
+MAIL_ORIGINS: tuple[str, ...] = (
+    "operator",
+    "peer",
+    "scheduler",
+    "recovery",
+)
+MAX_AUTHORITY_BY_ORIGIN: dict[str, str] = {
+    "operator": "operator",
+    "peer": "agent",
+    "scheduler": "agent",
+    "recovery": "agent",
+}
+
 PROJECTION_FIELDS = (
     "decision_id",
     "decision",
@@ -79,11 +95,22 @@ class IndexWriteError(RuntimeError):
 class RefusedAuthorityError(RuntimeError):
     """An agent session tried to record a ruling as operator law."""
 
-    def __init__(self, agent_handle: str) -> None:
+    def __init__(self, agent_handle: str, origin: str | None = None) -> None:
+        detail = f" from {origin} origin" if origin else ""
         super().__init__(
-            f"agent {agent_handle} cannot record under operator authority"
+            f"agent {agent_handle} cannot record under operator authority{detail}"
         )
         self.agent_handle = agent_handle
+        self.origin = origin
+
+
+class UnknownOriginError(RuntimeError):
+    """A claimed origin is not in the closed mail-origin vocabulary."""
+
+    def __init__(self, origin: str) -> None:
+        super().__init__(
+            f"mail origin {origin!r} is unknown; use one of {', '.join(MAIL_ORIGINS)}"
+        )
 
 
 class UnattributedAuthorityError(RuntimeError):
@@ -174,7 +201,10 @@ def _attended_terminal() -> bool:
 
 
 def _resolve_decider(
-    decided_by: str | None, authority_source: str | None
+    decided_by: str | None,
+    authority_source: str | None,
+    *,
+    origin: str | None = None,
 ) -> Provenance:
     """Resolve provenance from the ambient harness identity.
 
@@ -202,6 +232,9 @@ def _resolve_decider(
     State 3 exists because state 2 used to be everything that was not state 1,
     which made it an absence. Scrubbing the environment was enough to reach it.
     """
+    if origin is not None and origin not in MAIL_ORIGINS:
+        raise UnknownOriginError(origin)
+
     from fno.agents.self_stamp import resolve_self_identity
     from fno.harness_identity import canonical_handle
 
@@ -211,11 +244,18 @@ def _resolve_decider(
         if ident.session_id and ident.harness
         else None
     )
+    max_authority = (
+        MAX_AUTHORITY_BY_ORIGIN.get(origin) if origin is not None else None
+    )
+    if authority_source == "operator" and max_authority not in (None, "operator"):
+        raise RefusedAuthorityError(agent or "unattributed-caller", origin)
     if agent and authority_source == "operator":
         raise RefusedAuthorityError(agent)
     if agent:
         # State 1. Relayed only when it says something the stamp does not. A
         # caller passing its own handle relayed nothing.
+        if origin == "operator":
+            return Provenance(agent, authority_source or "agent", origin, agent)
         relayed = decided_by if decided_by and decided_by != agent else None
         return Provenance(agent, authority_source or "agent", None, relayed)
 
@@ -227,7 +267,8 @@ def _resolve_decider(
         # by silence, in any state: a caller who wants the operator lane says
         # so. Forging law then costs two deliberate acts rather than one.
         decider = decided_by or "operator"
-        return Provenance(decider, authority_source, decider, None)
+        attested = origin if origin is not None else decider
+        return Provenance(decider, authority_source, attested, None)
 
     # State 3, and it fails closed. No session identity and no terminal, so
     # nothing here positively marks anyone. Law is refused rather than
@@ -249,6 +290,7 @@ def record_decision(
     decided_by: str | None = None,
     authority_source: str | None = None,
     consent: OperatorConsent | None = None,
+    origin: str | None = None,
     rationale: str | None = None,
     options: "list[str] | None" = None,
     supersedes: str | None = None,
@@ -298,7 +340,7 @@ def record_decision(
         # and the reader lanes the row accordingly.
         provenance = Provenance("operator", authority_source, "operator", None)
     else:
-        provenance = _resolve_decider(decided_by, authority_source)
+        provenance = _resolve_decider(decided_by, authority_source, origin=origin)
 
     if events_root is None:
         from fno.carveout.core import resolve_carveout_root

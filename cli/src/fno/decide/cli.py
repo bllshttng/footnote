@@ -137,6 +137,7 @@ def legacy_record(
         supersedes=supersedes,
         decided_by=decided_by,
         authority=authority,
+        origin=None,
     )
 
 
@@ -150,6 +151,7 @@ def _record(
     supersedes: Optional[str],
     decided_by: Optional[str],
     authority: Optional[str],
+    origin: Optional[str],
 ) -> None:
     """Record a decision as a durable event plus a graph projection."""
     if not decision or not subject:
@@ -162,6 +164,7 @@ def _record(
         AUTHORITY_SOURCES,
         IndexWriteError,
         RefusedAuthorityError,
+        UnknownOriginError,
         UnattributedAuthorityError,
         record_decision,
     )
@@ -191,10 +194,14 @@ def _record(
             # who quotes only decided_by must never be handed a name an agent
             # typed. Authority stays stated, validated against the enum above.
             authority_source=authority,
+            origin=origin,
             rationale=rationale,
             options=list(option) or None,
             supersedes=supersedes,
         )
+    except UnknownOriginError as exc:
+        typer.echo(f"backlog decide: refused. {exc}", err=True)
+        raise typer.Exit(3)
     except RefusedAuthorityError as exc:
         typer.echo(
             f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
@@ -294,6 +301,12 @@ def backlog_decide(
         "--authority",
         help="How the decider was entitled to decide.",
     ),
+    origin: Optional[str] = typer.Option(
+        None,
+        "--origin",
+        hidden=True,
+        help="Carried mail origin used by the machine law gate.",
+    ),
     subject_legacy: Optional[str] = typer.Option(
         None, "--subject", hidden=True, help="Deprecated alias for the subject argument."
     ),
@@ -327,6 +340,7 @@ def backlog_decide(
         supersedes=supersedes,
         decided_by=decided_by,
         authority=authority,
+        origin=origin,
     )
 
 

@@ -208,6 +208,57 @@ _BODY_WARN_BYTES = _cap_env_int("FNO_MAIL_BODY_WARN", 3000)
 _BODY_REFUSE_BYTES = _cap_env_int("FNO_MAIL_BODY_REFUSE", 5000)
 
 
+def classify_origin(explicit_origin: str | None = None) -> str:
+    """Classify the sender once, before a mail lane can narrow behavior."""
+    from fno.decide import MAIL_ORIGINS
+
+    if explicit_origin is not None:
+        if explicit_origin not in MAIL_ORIGINS:
+            raise ValueError(
+                f"unknown mail origin {explicit_origin!r}; expected one of "
+                f"{', '.join(MAIL_ORIGINS)}"
+            )
+        return explicit_origin
+
+    from fno.agents.self_stamp import resolve_self_identity
+
+    ident = resolve_self_identity()
+    if ident.session_id and ident.harness:
+        return "peer"
+    try:
+        attended = bool(sys.stdin.isatty())
+    except (AttributeError, OSError, ValueError):
+        attended = False
+    return "operator" if attended else "unknown"
+
+
+def _record_mail_origin(
+    *,
+    origin: str,
+    lane: str,
+    sender: str | None = None,
+    target_session: str | None = None,
+) -> None:
+    """Best-effort positive measurement of the classified send origin."""
+    try:
+        from fno import events
+        from fno.events import append_event, mail_origin_classified
+
+        append_event(
+            mail_origin_classified(
+                origin=origin,
+                lane=lane,
+                presumed_human=origin == "operator",
+                sender=sender,
+                target_session=target_session,
+            ),
+            events.daemon_lifecycle_log(),
+            lock_timeout_seconds=2,
+        )
+    except Exception:
+        pass
+
+
 def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
     """Warn over WARN bytes, refuse over REFUSE bytes.
 
@@ -691,6 +742,7 @@ def _reply_to_name_handle(
     require_resolution: bool = False,
     style_exception: Optional[str] = None,
     sender_session: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> None:
     """Send a name-lane reply to ``target`` (a canonical handle): resolve it live
     and inject, else durable-floor to it. Shared by the bus-record reply path and
@@ -718,6 +770,7 @@ def _reply_to_name_handle(
             resolved=resolved,
             reply_to=to_msg,
             style_exception=style_exception,
+            origin=origin,
         )
     else:
         try:
@@ -788,6 +841,7 @@ def _reply_to_name_handle(
                     token=chosen,
                     reply_to=to_msg,
                     style_exception=style_exception,
+                    origin=origin,
                 )
                 return
             raise typer.BadParameter(
@@ -804,6 +858,7 @@ def _reply_to_name_handle(
                 token=target,
                 reply_to=to_msg,
                 style_exception=style_exception,
+                origin=origin,
             )
             return
         if require_resolution:
@@ -821,6 +876,7 @@ def _reply_to_name_handle(
             recipient=target,
             reply_to=to_msg,
             style_exception=style_exception,
+            origin=origin,
         )
 
 
@@ -881,6 +937,9 @@ def cmd_reply(
     _refuse_forged_envelope(body_text)
     _enforce_body_cap(body_text)
     _enforce_style(body_text, allow_reason=style_exception)
+    mail_origin = classify_origin()
+    _record_mail_origin(origin=mail_origin, lane="reply", sender=from_project)
+    mail_origin = None if mail_origin == "unknown" else mail_origin
 
     # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
     # and answer name/session/node mail back to its original sender. Anything else
@@ -938,6 +997,7 @@ def cmd_reply(
             require_resolution=require_resolution,
             style_exception=style_exception,
             sender_session=sender_session,
+            origin=mail_origin,
         )
         return
     if orig is None:
@@ -957,6 +1017,7 @@ def cmd_reply(
                 to_msg=to_msg,
                 style_exception=style_exception,
                 sender_session=sender_session,
+                origin=mail_origin,
             )
             return
         # AC1-ERR / LD4: the name lane cannot invent a target from nothing. An id
@@ -1022,6 +1083,7 @@ def cmd_reply(
             replies_to=to_msg,
             refs=refs,
             word_count=authored_words,
+            origin=mail_origin,
         )
     except Exception:
         _release_budget(reservation)
@@ -1997,6 +2059,7 @@ def _name_lane_send(
     token: Optional[str] = None,
     style_exception: Optional[str] = None,
     force: bool = False,
+    origin: Optional[str] = None,
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
     ``mail reply`` -- the ONE choke point every delivery ladder rung lives in.
@@ -2151,6 +2214,7 @@ def _name_lane_send(
         id=msg_id,
         reply_to=reply_to,
         from_session=sender_session,
+        origin=origin,
     )
 
     # --force (node x-3a64): change the TRANSPORT, keep every mail semantic. The
@@ -2416,6 +2480,7 @@ def _name_lane_send(
             # address exactly as a live one does (node x-3a64).
             from_session=sender_session,
             word_count=authored_words,
+            origin=origin,
         )
     except (OSError, ValueError, RuntimeError) as exc2:
         if not injected:
@@ -2486,6 +2551,7 @@ def _job_lane_send(
     *,
     from_name: Optional[str],
     style_exception: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> None:
     """Deliver to a JOB address (``node:<id>`` / ``pr:<n>``), resolved to whoever
     holds the claim RIGHT NOW (x-8f8c part 2).
@@ -2576,6 +2642,7 @@ def _job_lane_send(
         node=job.node_id,
         id=msg_id,
         from_session=sender_session,
+        origin=origin,
     )
 
     # Live-inject to the current holder's session. Inject targets the session id
@@ -2636,6 +2703,7 @@ def _job_lane_send(
             to_kind="node",
             owner=owner.value,
             from_session=sender_session,
+            origin=origin,
             word_count=authored_words,
         )
     except (OSError, ValueError, RuntimeError) as exc:
@@ -2872,6 +2940,7 @@ def _raw_send(
     check: bool = False,
     style_exception: Optional[str] = None,
     review_request: bool = False,
+    origin: Optional[str] = None,
 ) -> None:
     """``fno agents mail send --raw``: fire a verb in a peer by injecting ``payload``
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
@@ -3149,6 +3218,7 @@ def _raw_send(
                 audit_payload=stripped[:512],
                 audit_sender=transport_sender,
                 audit_target_cwd=getattr(entry, "cwd", None),
+                origin=origin,
             )
             if receipt.get("delivered"):
                 _record_raw(raw_msg_id, authored_words)
@@ -3266,6 +3336,7 @@ def _raw_send(
             guarded=False,
             confirm=True,
             sender=transport_sender,
+            origin=origin,
             # raw: this lane exists to make the REPL slash parser fire, which an
             # envelope defeats.
             raw=True,
@@ -3284,6 +3355,7 @@ def _raw_send(
             session_id,
             stripped,
             sender=transport_sender,
+            origin=origin,
         )
 
     # 8. Four-state receipt (never a boolean; never a durable write).
@@ -3369,6 +3441,12 @@ def cmd_send(
             "Unset defaults to 'fno' for an agent send, or the working "
             "dir's project for an inbox-kind send."
         ),
+    ),
+    origin: str | None = typer.Option(
+        None,
+        "--origin",
+        hidden=True,
+        help="Stamped machine mail origin: operator, peer, scheduler, or recovery.",
     ),
     from_self: bool = typer.Option(
         False, "--from-self",
@@ -3527,6 +3605,22 @@ def cmd_send(
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
 
+    try:
+        mail_origin = classify_origin(origin)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=2) from exc
+    _record_mail_origin(
+        origin=mail_origin,
+        lane="raw" if raw else "inbox" if kind is not None else "project" if to_project else "peer",
+        sender=from_name,
+        target_session=name if raw else None,
+    )
+    # Unknown is an explicit audit result, not a wire authority. Legacy
+    # carriers omit the attribute so a law gate cannot mistake silence for an
+    # operator origin.
+    mail_origin = None if mail_origin == "unknown" else mail_origin
+
     # --to-self: the recipient is THIS session, derived from ambient identity, so
     # the positional parks the payload (positional #1) exactly as under
     # --to-project. Fail loud without identity - never a silent floor - and refuse
@@ -3634,6 +3728,7 @@ def cmd_send(
             self_ok=to_self,
             check=check,
             style_exception=style_exception,
+            origin=mail_origin,
         )
         return
     if check:
@@ -3853,6 +3948,7 @@ def cmd_send(
                 refs=refs or None,
                 msg_id=msg_id,
                 word_count=authored_words,
+                origin=mail_origin,
             )
         except ValueError as exc:
             _release_budget(reservation)
@@ -3918,6 +4014,7 @@ def cmd_send(
                 provider=harness,
                 cwd=workdir,
                 from_name=stamp_from(from_name),
+                origin=mail_origin,
                 any_=any_live,
                 budget_enforce=_budget_enforced(
                     content, allow_reason=style_exception
@@ -3990,6 +4087,7 @@ def cmd_send(
                 name,
                 from_name=stamp_from(from_name),
                 style_exception=style_exception,
+                origin=mail_origin,
             )
             return
 
@@ -4028,6 +4126,7 @@ def cmd_send(
                 provider=harness,
                 style_exception=style_exception,
                 force=True,
+                origin=mail_origin,
             )
         except AmbiguousTokenError as amb:
             # Discovery is liveness-gated, so a registered worker whose listing
@@ -4074,6 +4173,7 @@ def cmd_send(
             provider=harness,
             cwd=workdir,
             from_name=stamp_from(from_name),
+            origin=mail_origin,
             budget_enforce=_budget_enforced(
                 message, allow_reason=style_exception
             ),
@@ -4112,6 +4212,7 @@ def cmd_send(
                 from_name=from_name,
                 resolved=resolved,
                 style_exception=style_exception,
+                origin=mail_origin,
             )
             return
 
@@ -4141,6 +4242,7 @@ def cmd_send(
                 resolved=None,
                 token=name,
                 style_exception=style_exception,
+                origin=mail_origin,
             )
         except AmbiguousTokenError as amb:
             print(

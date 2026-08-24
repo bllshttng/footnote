@@ -1015,6 +1015,7 @@ def agent_raw_inject(
     target_cwd: str | None = None,
     target_head: str | None = None,
     confirmed: bool | None = None,
+    origin: str | None = None,
     source: str = "daemon",
 ) -> dict[str, Any]:
     """Build an ``agent_raw_inject`` provenance event.
@@ -1044,7 +1045,35 @@ def agent_raw_inject(
         data["target_head"] = target_head
     if confirmed is not None:
         data["confirmed"] = confirmed
+    if origin is not None:
+        data["origin"] = origin
     return _build("agent_raw_inject", source, data)
+
+
+def mail_origin_classified(
+    *,
+    origin: str,
+    lane: str,
+    presumed_human: bool,
+    sender: str | None = None,
+    target_session: str | None = None,
+    source: str = "daemon",
+) -> dict[str, Any]:
+    """Build the positive mail-origin measurement emitted before delivery.
+
+    ``presumed_human`` records the measured positive case rather than treating
+    a missing non-human row as proof that classification ran.
+    """
+    data: dict[str, Any] = {
+        "origin": origin,
+        "lane": lane,
+        "presumed_human": presumed_human,
+    }
+    if sender is not None:
+        data["sender"] = sender
+    if target_session is not None:
+        data["target_session"] = target_session
+    return _build("mail_origin_classified", source, data)
 
 
 def done_race_collision(

@@ -217,7 +217,16 @@ def _push_to_parent(
         msg += f": {reason}"
     try:
         result = subprocess.run(
-            ["fno", "agents", "mail", "send", parent, msg],
+            [
+                "fno",
+                "agents",
+                "mail",
+                "send",
+                parent,
+                msg,
+                "--origin",
+                "scheduler",
+            ],
             check=False,
             capture_output=True,
             timeout=20,

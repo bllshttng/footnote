@@ -271,6 +271,28 @@ fn review_start_audit_fields(
     audit_target_cwd: Option<&str>,
     confirmed: bool,
 ) -> serde_json::Map<String, serde_json::Value> {
+    review_start_audit_fields_with_origin(
+        thread_id,
+        target_raw,
+        delivery,
+        audit_payload,
+        audit_sender,
+        audit_target_cwd,
+        confirmed,
+        None,
+    )
+}
+
+fn review_start_audit_fields_with_origin(
+    thread_id: &str,
+    target_raw: &str,
+    delivery: ReviewDelivery,
+    audit_payload: Option<&str>,
+    audit_sender: Option<&str>,
+    audit_target_cwd: Option<&str>,
+    confirmed: bool,
+    audit_origin: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("target_session".into(), thread_id.into());
     fields.insert(
@@ -295,6 +317,9 @@ fn review_start_audit_fields(
     if let Some(cwd) = audit_target_cwd {
         fields.insert("target_cwd".into(), cwd.into());
     }
+    if let Some(origin) = audit_origin {
+        fields.insert("origin".into(), origin.into());
+    }
     fields
 }
 
@@ -310,6 +335,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
     let mut audit_payload: Option<String> = None;
     let mut audit_sender: Option<String> = None;
     let mut audit_target_cwd: Option<String> = None;
+    let mut audit_origin: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -343,6 +369,9 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
             }
             "--audit-target-cwd" => {
                 audit_target_cwd = it.next().cloned();
+            }
+            "--audit-origin" => {
+                audit_origin = it.next().cloned();
             }
             other => {
                 eprintln!("review-start: unknown flag: {other}");
@@ -384,7 +413,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
     // marker in the recipient thread, so it needs the same ledger record the
     // mail-inject lane writes -- a guard on one of two reachable paths is
     // decorative. Best-effort; a write failure never changes the exit code.
-    let fields = review_start_audit_fields(
+    let fields = review_start_audit_fields_with_origin(
         &thread_id,
         &target_raw,
         delivery,
@@ -392,6 +421,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
         audit_sender.as_deref(),
         audit_target_cwd.as_deref(),
         outcome.is_ok(),
+        audit_origin.as_deref(),
     );
     let _ = crate::events::EventEmitter::new(
         crate::paths::AgentsHome::from_env().events_jsonl(),
