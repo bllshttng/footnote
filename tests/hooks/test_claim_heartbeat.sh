@@ -79,7 +79,14 @@ case "\$1 \$2" in
     exit "\${STUB_STATUS_RC:-0}"
     ;;
   "claim refresh")
-    [[ "\${STUB_REFRESH_RC:-0}" -eq 0 ]] && touch "${TMP_DIR}/refresh-observed"
+    if [[ "\${STUB_REFRESH_RC:-0}" -eq 0 ]]; then
+      touch "${TMP_DIR}/refresh-observed"
+      if [[ -n "\${STUB_REFRESH_JSON+x}" ]]; then
+        printf '%s\n' "\$STUB_REFRESH_JSON"
+      else
+        printf '{"refreshed": true, "expires_at": %s}\n' "\${STUB_EXPIRES_AFTER:-200}"
+      fi
+    fi
     exit "\${STUB_REFRESH_RC:-0}"
     ;;
   "do pr")
@@ -103,7 +110,7 @@ teardown_env() {
   rm -rf "$TMP_DIR"
   unset STUB_HOLDER STUB_STATE STUB_STATUS_JSON STUB_STATUS_RC STUB_REFRESH_RC
   unset STUB_HOLDER_AFTER STUB_STATE_AFTER STUB_EXPIRES_BEFORE STUB_EXPIRES_AFTER
-  unset STUB_BIND_OUTPUT STUB_BIND_RC STUB_BIND_SLEEP
+  unset STUB_BIND_OUTPUT STUB_BIND_RC STUB_BIND_SLEEP STUB_REFRESH_JSON
 }
 
 mtime_of() {
@@ -750,6 +757,122 @@ else
   pass "T40 exit-zero without positive lease extension remains due"
 fi
 unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T41: a verified renewal writes the outcome ledger ─────────────────────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=200
+run_hook >/dev/null 2>&1
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ -f "$stamp" ]] && grep -q '^outcome=renewed$' "$stamp" \
+      && grep -q '^expires_at=200$' "$stamp" \
+      && grep -q '^node=x-a166$' "$stamp" \
+      && grep -q '^session_id=20260707T203700Z-cl55246-f3fe72$' "$stamp" \
+      && grep -q '^holder_state=live$' "$stamp"; then
+  pass "T41 renewed cycle stamps outcome, node, session id, and new deadline"
+else
+  fail "T41 ledger wrong: $(cat "$stamp" 2>/dev/null || echo missing)"
+fi
+teardown_env
+
+# ── T42: exit 0 without lease extension is refresh_unverified, loudly ──────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=100
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=refresh_unverified$' "$stamp" \
+      && [[ "$err" == *"did not advance"* ]]; then
+  pass "T42 exit-zero non-extension is unverified with a diagnostic"
+else
+  fail "T42 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err]"
+fi
+teardown_env
+
+# ── T43: refreshed:false (PID-liveness no-op) is unverified, not renewed ───
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+export STUB_REFRESH_JSON='{"key":"node:x-a166","refreshed":false,"reason":"pid_liveness"}'
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=refresh_unverified$' "$stamp" \
+      && [[ "$err" == *"no-op"* ]]; then
+  pass "T43 PID-liveness no-op reports unverified, never renewed"
+else
+  fail "T43 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err]"
+fi
+teardown_env
+
+# ── T44: a refresh failure stamps refresh_failed ───────────────────────────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+export STUB_REFRESH_RC=1
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=refresh_failed$' "$stamp" \
+      && [[ "$err" == *"refresh failed"* ]]; then
+  pass "T44 refresh failure stamps refresh_failed with diagnostic"
+else
+  fail "T44 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err]"
+fi
+teardown_env
+
+# ── T45: no claim at all -> no_claim ledger + UNPROTECTED line, no refresh ──
+setup_env
+export STUB_STATUS_JSON='{"key":"node:x-a166","state":"free"}'
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=no_claim$' "$stamp" \
+      && grep -q '^holder_state=free$' "$stamp" \
+      && [[ "$err" == *"UNPROTECTED"* && "$err" == *"x-a166"* ]] \
+      && ! grep -q "claim refresh" "$CALLLOG"; then
+  pass "T45 free claim stamps no_claim, says UNPROTECTED, never refreshes"
+else
+  fail "T45 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err] calls=$(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T46: another live holder -> not_holder ledger + split-brain line ────────
+setup_env
+export STUB_HOLDER="target-session:some-other-session"
+export STUB_STATUS_JSON='{"key":"node:x-a166","state":"live","holder":"target-session:some-other-session","expires_at":900}'
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=not_holder$' "$stamp" \
+      && [[ "$err" == *"held by target-session:some-other-session"* ]] \
+      && ! grep -q "claim refresh" "$CALLLOG"; then
+  pass "T46 foreign live holder stamps not_holder with split-brain diagnostic"
+else
+  fail "T46 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err] calls=$(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T47: unreadable status is named, never read as not-holder ──────────────
+setup_env
+export STUB_STATUS_JSON=""
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=status_unreadable$' "$stamp" \
+      && [[ "$err" == *"unreadable"* ]] \
+      && ! grep -q "claim refresh" "$CALLLOG"; then
+  pass "T47 empty status output stamps status_unreadable, no refresh"
+else
+  fail "T47 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err] calls=$(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T48: any outcome ledger still throttles the next window ────────────────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+run_hook >/dev/null 2>&1
+: > "$CALLLOG"
+run_hook >/dev/null 2>&1
+if [[ ! -s "$CALLLOG" ]]; then
+  pass "T48 a written ledger throttles the next window like the touch did"
+else
+  fail "T48 ledger cycle did not throttle: $(cat "$CALLLOG")"
+fi
 teardown_env
 
 echo "[heartbeat] ${PASS} passed, ${FAIL} failed"
