@@ -54,7 +54,7 @@ See [usage-detail.md](usage-detail.md) for model-optimization rationale (when to
 - **/blueprint**: run it whenever you started from a bare idea, or the bound plan is still design-stage. It self-grounds on a bare idea via its own discovery gate (`fno do think inspect` + up to 3-5 targeted questions). It never awaits a `/think` doc (x-42c5). A prior `/think` doc is consumed as already-cited findings, never required. A blueprint-complete plan skips straight to implement.
 - **/execute waves**: for a multi-task plan with parallelizable waves. A single-file or locked refactor runs **inline**, not through the wave orchestrator.
 - **/simplify (clean)**: only with the `clean` modifier, or on AI-slop-prone new code.
-- **review**: after the PR exists, run `fno do target request-self-review --pr <n>` on the final HEAD. It must return a positive native-review outcome and produce the clean head-pinned attestation before promise; a busy Codex mux `queued` result ends the turn at the boundary. Docs-only payloads and the explicit opt-out keep their exemptions.
+- **review**: after the PR exists, run `fno do target request-self-review --pr <n>` on the final HEAD. It must return a positive result. It must produce the clean head-pinned attestation before promise. A busy Codex mux `queued` result ends the turn at the boundary. Docs-only payloads and the explicit opt-out keep their exemptions.
 - **/ship-docs**: skip for an internal refactor with no public API or architecture change; run it when behavior or a public surface changed.
 - **browser testing**: only if `has_ui`.
 - **/pr create + `<promise>`**: always. That is the deliverable.
