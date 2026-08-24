@@ -88,12 +88,181 @@ LEAVE = "leave"
 #: the row surfaces in the digest, which is the whole point: nothing today
 #: notices a live worker on a node no claim covers.
 UNCLAIMED = "unclaimed"
+RECOVERABLE = "recoverable"
 
 #: Every verdict this module can return. `--only` validates against THIS, not
 #: against a hand-copied tuple in the CLI: the copy went stale the moment a
 #: verdict was added, and `--only unclaimed` exited 2 on a verdict the sweep
 #: had been producing all along.
-VERDICTS = frozenset({GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED})
+VERDICTS = frozenset({
+    GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE,
+})
+
+_RECOVERY_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$", re.IGNORECASE)
+MAX_RECOVERY_SINCE_S = 30 * 24 * 3600
+
+
+def parse_recovery_since(value: str) -> float:
+    """Parse a positive, bounded Codex recovery age such as ``24h``."""
+    raw = str(value).strip().lower()
+    match = _RECOVERY_DURATION_RE.fullmatch(raw)
+    if match is None:
+        raise ValueError(
+            f"invalid since duration {value!r}; use a positive value with s, m, h, or d"
+        )
+    amount = float(match.group(1))
+    seconds = amount * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
+    if seconds <= 0 or seconds > MAX_RECOVERY_SINCE_S:
+        raise ValueError(
+            f"since duration {value!r} is outside the bounded 1s-30d recovery window"
+        )
+    return seconds
+
+
+def resolve_recovery_cwd(value: Optional[str] = None) -> Path:
+    """Resolve the exact checkout scope before touching the registry."""
+    candidate = Path(value).expanduser() if value else Path.cwd()
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"cwd {value or str(candidate)!r} could not be resolved: {exc}") from exc
+    if not resolved.is_dir():
+        raise ValueError(f"cwd {value or str(candidate)!r} is not a directory")
+    return resolved
+
+
+def scan_recoverable_codex_rollouts(cwd: Path, recency_seconds: float, *, now: Optional[float] = None):
+    """Use the strict Codex rollout-minus-registry scanner for watchdog callers."""
+    from fno.agents.discover import scan_recoverable_codex_rollouts as scan
+
+    return scan(cwd, recency_seconds, now=now)
+
+
+def run_recoverable_sweep(
+    *,
+    cwd: Path,
+    recency_seconds: float,
+    now_s: Optional[float] = None,
+    scan_fn: Optional[Callable] = None,
+) -> tuple[dict, list[Row], Any]:
+    """Build a non-destructive watchdog payload for Codex store recoverables."""
+    now_s = now_s if now_s is not None else time.time()
+    scan = (scan_fn or scan_recoverable_codex_rollouts)(
+        cwd, recency_seconds, now=now_s
+    )
+    from fno.harness_identity import canonical_handle
+
+    rows: list[Row] = []
+    verdicts_out: list[Verdict] = []
+    for candidate in scan.recoverable:
+        handle = canonical_handle(candidate.session_id)
+        rows.append(Row(candidate.session_id, handle, "orphaned", None, candidate.cwd, "adopted"))
+        verdicts_out.append(
+            Verdict(
+                candidate.session_id,
+                handle,
+                "orphaned",
+                RECOVERABLE,
+                f"Codex rollout {candidate.rollout_path} is absent from the registry",
+                "adopt",
+            )
+        )
+    complete = bool(scan.complete)
+    counts = {RECOVERABLE: len(verdicts_out)} if complete else {}
+    payload = {
+        "generated_at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "verdicts": [v._asdict() for v in verdicts_out],
+        "counts": counts,
+        "warnings": list(scan.failures),
+        "complete": complete,
+        "scanned_count": scan.scanned_count,
+        "malformed_count": scan.malformed_count,
+        "unreadable_count": scan.unreadable_count,
+        "cwd": str(cwd),
+    }
+    if complete:
+        payload["recoverable_count"] = len(verdicts_out)
+    return payload, rows, scan
+
+
+def apply_recoverable(
+    scan: Any,
+    *,
+    scope_cwd: Path,
+    registry_path: Optional[Path] = None,
+    adopt_fn: Optional[Callable] = None,
+    confine_fn: Optional[Callable] = None,
+    load_registry_fn: Optional[Callable] = None,
+    should_apply: Optional[Callable[[], bool]] = None,
+) -> list[dict]:
+    """Adopt a complete scan through the shared store-hit writer only."""
+    if not scan.complete:
+        reason = "; ".join(scan.failures) or "coverage could not be established"
+        return [{
+            "session_id": None,
+            "outcome": "refused",
+            "detail": f"recovery coverage incomplete: {reason}",
+        }]
+
+    from fno.agents import store_fallback
+    from fno.agents.discover import _codex_meta
+    from fno.agents.registry import load_registry
+
+    adopt = adopt_fn or store_fallback.adopt_store_hit
+    confine = confine_fn or store_fallback.confine_store_hits
+    load = load_registry_fn or load_registry
+    results: list[dict] = []
+    for index, candidate in enumerate(scan.recoverable):
+        session_id = candidate.session_id
+        if should_apply is not None and not should_apply():
+            results.extend({
+                "session_id": remaining.session_id,
+                "outcome": "deferred",
+                "detail": "tick budget spent; retry on the next tick",
+            } for remaining in scan.recoverable[index:])
+            break
+        try:
+            if not candidate.rollout_path.is_file():
+                raise ValueError(f"rollout vanished before adoption: {candidate.rollout_path}")
+            if _codex_meta(candidate.rollout_path) != (session_id, candidate.cwd):
+                raise ValueError(
+                    f"rollout changed before adoption: {candidate.rollout_path}"
+                )
+            hits = confine(
+                session_id,
+                [store_fallback.StoreHit("codex", session_id, candidate.cwd)],
+                scope_cwd=str(scope_cwd),
+                cross_project=False,
+            )
+            if len(hits) != 1:
+                raise ValueError("project confinement did not return one verified hit")
+            adopt(hits[0], registry_path=registry_path, token=session_id)
+            entries = load(registry_path)
+            exact = [
+                entry for entry in entries
+                if getattr(entry, "harness", None) == "codex"
+                and getattr(entry, "harness_session_id", None) == session_id
+                and getattr(entry, "cwd", None) == candidate.cwd
+                and getattr(entry, "origin", None) == "adopted"
+            ]
+            if len(exact) != 1:
+                raise ValueError(
+                    "registry did not contain exactly one adopted Codex row"
+                )
+            results.append({
+                "session_id": session_id,
+                "outcome": "applied",
+                "detail": f"adopted {session_id} handle={exact[0].name}",
+            })
+        except Exception as exc:  # noqa: BLE001 - one vanished row never aborts the batch
+            results.append({
+                "session_id": session_id,
+                "outcome": "refused",
+                "detail": str(exc),
+            })
+    return results
 
 
 #: How long a finished worker stays parked before the retire lane stops it.
@@ -1771,6 +1940,7 @@ def write_sweep_file(
     *,
     events_signature: str = "",
     terminal_harness_rows: int = 0,
+    recoverable_count: Optional[int] = None,
 ) -> None:
     """Freshness evidence for the done probe: one small state file per sweep,
     best-effort (an unwritable state root must never break a tick). The
@@ -1782,6 +1952,10 @@ def write_sweep_file(
     try:
         path = sweep_path()
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            previous = {}
         # The cadence stamp survives a hand-run. One file serves both
         # cadences, so a manual write used to erase the only evidence the
         # TICK had run, and `pr-watch status` then read a healthy cadence as
@@ -1798,6 +1972,10 @@ def write_sweep_file(
             "signature": signature,
             "events_signature": events_signature,
         }
+        if recoverable_count is not None:
+            payload["recoverable_count"] = int(recoverable_count)
+        elif isinstance(previous.get("recoverable_count"), int):
+            payload["recoverable_count"] = previous["recoverable_count"]
         if last_tick is not None:
             payload["last_tick_epoch"] = last_tick
         path.write_text(json.dumps(payload), encoding="utf-8")

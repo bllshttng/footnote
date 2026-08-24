@@ -268,6 +268,23 @@ def _run_tick_command(monkeypatch, result):
     return CliRunner().invoke(app, [])
 
 
+def test_watchdog_recovery_roots_include_all_distinct_checkouts(monkeypatch, tmp_path):
+    from fno.pr_watch import cli as prcli
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / ".git").mkdir()
+    (second / ".git").mkdir()
+    monkeypatch.setattr(
+        "fno.paths.resolve_repo_root", lambda: first, raising=True
+    )
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [first, second])
+
+    assert prcli._watchdog_recovery_roots() == [first, second]
+
+
 def test_AC6_lock_held_tick_prints_holder_and_no_counts(monkeypatch) -> None:
     """A wedged tick must name the holder and never print open_prs=."""
     from fno.pr_watch._dispatch import TickResult
