@@ -11,6 +11,7 @@ decision id, or the decision history as JSON), guidance goes to stderr.
 from __future__ import annotations
 
 import json
+import os
 from typing import List, Optional
 
 import typer
@@ -28,6 +29,59 @@ _DEPRECATION_NOTICE = (
     "`fno backlog decisions`, `fno decide reindex` -> `fno backlog "
     "decide-reindex`). This spelling is removed next release."
 )
+
+
+def _render_claim_receipt(node_id: str, event: dict) -> None:
+    """Print advisory claim context for a recorded node decision."""
+    key = f"node:{node_id}"
+    caller_label = event.get("data", {}).get("decided_by") or "unknown caller"
+    try:
+        from fno.agents.self_stamp import resolve_self_identity
+        from fno.claims.core import claim_status
+        from fno.claims.io import claims_root_for
+
+        status = claim_status(key, root=claims_root_for(key))
+    except Exception as exc:  # noqa: BLE001 - receipt failure cannot undo a ruling
+        typer.echo(
+            f"backlog decide: claim {key} unavailable for caller {caller_label}: "
+            f"{exc}; caller comparison unavailable",
+            err=True,
+        )
+        return
+
+    state = status.get("state") or "unavailable"
+    line = f"backlog decide: claim {key}; claim state: {state}; caller: {caller_label}"
+    if state == "free":
+        typer.echo(line, err=True)
+        return
+
+    holder = status.get("holder")
+    if holder:
+        line += f"; holder: {holder}"
+
+    comparison = "caller comparison unavailable"
+    if state in {"live", "suspect"} and isinstance(holder, str):
+        prefix, separator, holder_session = holder.partition(":")
+        # Target init gives the driver-assigned run id precedence over the
+        # harness session id when it stamps a target-session claim. Keep that
+        # precedence here so the receipt does not call the current run foreign.
+        caller_session = os.environ.get("TARGET_SESSION_ID", "").strip()
+        if not caller_session:
+            try:
+                identity = resolve_self_identity()
+                caller_session = (identity.session_id or "").strip()
+            except Exception:  # noqa: BLE001 - missing identity is an honest unknown
+                caller_session = ""
+        if prefix == "target-session" and separator and holder_session and caller_session:
+            if holder_session == caller_session:
+                comparison = "this caller holds the node"
+            else:
+                comparison = "another session holds the node, not this caller"
+
+    error = status.get("error")
+    if error:
+        line += f"; error: {error}"
+    typer.echo(f"{line}; {comparison}", err=True)
 
 
 @shim_app.callback(invoke_without_command=True)
@@ -206,6 +260,7 @@ def _record(
             f"Recover with: fno backlog decisions {result['node_id']}",
             err=True,
         )
+        _render_claim_receipt(result["node_id"], result["event"])
     # stdout carries the value: the new decision id.
     typer.echo(did)
 

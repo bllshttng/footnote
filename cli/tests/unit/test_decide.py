@@ -62,6 +62,243 @@ def test_backlog_decide_records_with_positional_subject_and_decision(
     assert decision_id.startswith("d-")
 
 
+def _patch_claim_receipt_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, session_id: str | None
+) -> Path:
+    from types import SimpleNamespace
+
+    claims_root = tmp_path / "claims"
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id=session_id, harness="codex", disposition="proven"
+        ),
+    )
+    monkeypatch.setattr("fno.claims.io.claims_root_for", lambda _key: claims_root)
+    return claims_root
+
+
+def test_backlog_decide_receipts_foreign_live_claim(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    caller = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    other = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae5"
+    _patch_claim_receipt_identity(monkeypatch, tmp_path, caller)
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, *, root: {
+            "key": key,
+            "state": "live",
+            "holder": f"target-session:{other}",
+        },
+    )
+
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "rule on another holder"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip().splitlines()[-1].startswith("d-")
+    assert f"target-session:{other}" in result.stderr
+    assert "another session holds the node, not this caller" in result.stderr
+
+
+def test_backlog_decide_receipts_same_caller_live_claim(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    caller = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    _patch_claim_receipt_identity(monkeypatch, tmp_path, caller)
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, *, root: {
+            "key": key,
+            "state": "live",
+            "holder": f"target-session:{caller}",
+        },
+    )
+
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "rule on my node"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "this caller holds the node" in result.stderr
+    assert "another session holds the node" not in result.stderr
+
+
+def test_backlog_decide_receipts_driver_assigned_claim_uses_target_session_id(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness_session = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    target_session = "20260823T152504Z-mw12345-abcdef"
+    _patch_claim_receipt_identity(monkeypatch, tmp_path, harness_session)
+    monkeypatch.setenv("TARGET_SESSION_ID", target_session)
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, *, root: {
+            "key": key,
+            "state": "live",
+            "holder": f"target-session:{target_session}",
+        },
+    )
+
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "rule on driver-owned node"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "this caller holds the node" in result.stderr
+    assert "another session holds the node" not in result.stderr
+
+
+def test_backlog_decide_receipts_free_claim(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_claim_receipt_identity(
+        monkeypatch, tmp_path, "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    )
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, *, root: {"key": key, "state": "free"},
+    )
+
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "rule on a free node"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "claim state: free" in result.stderr
+
+
+def test_backlog_decide_receipts_ambiguous_claim_without_comparison(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_claim_receipt_identity(
+        monkeypatch, tmp_path, "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    )
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, *, root: {
+            "key": key,
+            "state": "live",
+            "holder": "legacy-holder",
+        },
+    )
+
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "rule with legacy holder"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "legacy-holder" in result.stderr
+    assert "caller comparison unavailable" in result.stderr
+
+
+def test_backlog_decide_receipts_unreadable_claim_stays_advisory(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_claim_receipt_identity(
+        monkeypatch, tmp_path, "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    )
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, *, root: {
+            "key": key,
+            "state": "corrupted",
+            "error": "invalid yaml",
+        },
+    )
+
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "rule despite claim read"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip().splitlines()[-1].startswith("d-")
+    assert "claim state: corrupted" in result.stderr
+    assert "caller comparison unavailable" in result.stderr
+
+
+def test_backlog_decide_receipts_missing_caller_identity_stays_advisory(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_claim_receipt_identity(monkeypatch, tmp_path, None)
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, *, root: {
+            "key": key,
+            "state": "live",
+            "holder": "target-session:019f48e1-5b09-72a0-9bc8-6b364bcf4ae5",
+        },
+    )
+
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "rule without caller identity"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "target-session:019f48e1-5b09-72a0-9bc8-6b364bcf4ae5" in result.stderr
+    assert "caller comparison unavailable" in result.stderr
+
+
+def test_backlog_decide_skips_claim_read_for_non_node_subject(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[str] = []
+
+    def fail_if_called(key: str, *, root: Path):
+        calls.append(key)
+        raise AssertionError("claim reader must not run for non-node subjects")
+
+    monkeypatch.setattr("fno.claims.core.claim_status", fail_if_called)
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "area:coordination", "--decision", "rule on an area"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "subject names no graph node" in result.stderr
+    assert calls == []
+
+
 def test_backlog_decisions_reads_a_positional_subject_and_filters_lane(
     root: Path, tmp_graph: Path, index: Path
 ):
