@@ -259,7 +259,7 @@ fn default_true() -> bool {
 /// instead. (Numbered one past the x-5f7f resume-gesture v49 it rebases
 /// onto.)
 ///
-/// v51 (x-588a): pane reads and sends carry the pane's captured identity and
+/// v52 (x-588a): pane reads and sends carry the pane's captured identity and
 /// the registry identity used to address it. Additive fields remain defaulted,
 /// but the send identity is a safety contract, so the handshake must reject an
 /// older peer rather than let it type into an unverified pane.
@@ -271,7 +271,7 @@ fn default_true() -> bool {
 /// index, so a captured `--tab <n>` selector changes meaning across the
 /// bump; the handshake is what tells an old client to restart. New variants
 /// are not additive-tolerant either.
-pub const PROTO_VERSION: u32 = 51;
+pub const PROTO_VERSION: u32 = 52;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -3452,8 +3452,8 @@ mod tests {
         // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47; the
         // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
         // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
-        // pane identity receipts (x-588a) and the tab dictionary (x-1499)
-        // share the 50 -> 51 bump.
+        // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
+        // receipts (x-588a) bumped it 51 -> 52.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3462,7 +3462,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 51);
+        assert_eq!(PROTO_VERSION, 52);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
