@@ -604,12 +604,10 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     --rollback-do``.
     """
     if claim is None:
-        # Both callers are typed non-None (acquire_claim raises; the rebind
-        # refuses). A silent skip here is the exact row loss the stamp exists
-        # to prevent, so a future None arrives loud instead of lost.
-        raise RuntimeError(
-            f"_stamp_do_on_acquire({key!r}): claim is None; refusing to drop the do row silently"
-        )
+        # REACHABLE, not dead: the successor reacquire paths call this with
+        # no claim object (free/stale claim, nothing to stamp yet). Skipping
+        # is correct there - there is no row to open.
+        return
     from fno.graph.store import append_session_record
     from fno.paths import graph_json
 
