@@ -133,3 +133,34 @@ credentials_source = "~/.claude"
     problems = check_accounts()
     assert len(problems) > 0
     assert any("accounts" in p for p in problems)
+
+
+def test_doctor_check_accounts_quota_typo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = _write_config(tmp_path, '''
+[accounts.quota]
+defer_dispatchh = true
+''')
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("PWD", str(tmp_path))
+    monkeypatch.setenv("FNO_TEST_MODE", "1")
+    load_settings.cache_clear()  # type: ignore[attr-defined]
+
+    problems = check_accounts()
+    assert len(problems) > 0
+    assert any("accounts.quota has unknown key 'defer_dispatchh'" in p for p in problems)
+
+
+def test_doctor_check_accounts_root_typo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = _write_config(tmp_path, '''
+[accounts]
+autto_switch = true
+''')
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("PWD", str(tmp_path))
+    monkeypatch.setenv("FNO_TEST_MODE", "1")
+    load_settings.cache_clear()  # type: ignore[attr-defined]
+
+    problems = check_accounts()
+    assert len(problems) > 0
+    assert any("accounts has unknown key 'autto_switch'" in p for p in problems)
+

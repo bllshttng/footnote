@@ -361,10 +361,80 @@ def check_agent_profiles(settings: object) -> list[str]:
     return problems
 
 
+_KNOWN_ACCOUNTS_KEYS = frozenset(
+    {"active", "auto_switch", "active_combo", "records", "combos", "quota", "failover", "agents"}
+)
+_KNOWN_QUOTA_KEYS = frozenset(
+    {"defer_dispatch", "defer_threshold_pct", "probe_ttl_seconds", "defer_horizon_minutes", "pick_on_launch"}
+)
+_KNOWN_FAILOVER_KEYS = frozenset({"max_swaps_per_phase"})
+_KNOWN_COMBO_KEYS = frozenset({"strategy", "sticky_limit", "providers"})
+_KNOWN_RECORD_KEYS = frozenset(
+    {
+        "id", "name", "harness", "auth", "credentials_source", "priority",
+        "model", "limits", "cost_per_session", "status", "last_used_at",
+        "notes", "cooldown_until", "rate_limited_until", "provider",
+        "model_tier", "disabled", "disabled_reason", "tier",
+    }
+)
+
+
+def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list[str]:
+    problems: list[str] = []
+    config = raw_data.get("config") if isinstance(raw_data.get("config"), dict) else {}
+    for block_key in ("accounts", "providers"):
+        for scope, prefix in ((raw_data, block_key), (config, f"config.{block_key}")):
+            block = scope.get(block_key)
+            if not isinstance(block, dict):
+                continue
+            for k in block:
+                if k not in _KNOWN_ACCOUNTS_KEYS:
+                    problems.append(
+                        f"{source_label}: {prefix} has unknown key {k!r}; it will be ignored"
+                    )
+            quota = block.get("quota")
+            if isinstance(quota, dict):
+                for k in quota:
+                    if k not in _KNOWN_QUOTA_KEYS:
+                        problems.append(
+                            f"{source_label}: {prefix}.quota has unknown key {k!r}; it will be ignored"
+                        )
+            failover = block.get("failover")
+            if isinstance(failover, dict):
+                for k in failover:
+                    if k not in _KNOWN_FAILOVER_KEYS:
+                        problems.append(
+                            f"{source_label}: {prefix}.failover has unknown key {k!r}; it will be ignored"
+                        )
+            combos = block.get("combos")
+            if isinstance(combos, dict):
+                for combo_name, combo_val in combos.items():
+                    if isinstance(combo_val, dict):
+                        for k in combo_val:
+                            if k not in _KNOWN_COMBO_KEYS:
+                                problems.append(
+                                    f"{source_label}: {prefix}.combos.{combo_name} has unknown key {k!r}; it will be ignored"
+                                )
+            records = block.get("records")
+            if isinstance(records, list):
+                for idx, record in enumerate(records):
+                    if isinstance(record, dict):
+                        rec_id = record.get("id") or f"records[{idx}]"
+                        for k in record:
+                            if k not in _KNOWN_RECORD_KEYS:
+                                problems.append(
+                                    f"{source_label}: {prefix}.records[{rec_id!r}] has unknown key {k!r}; it will be ignored"
+                                )
+    return problems
+
+
 def check_accounts() -> list[str]:
     """Validate configured accounts / providers and combos (x-e90a)."""
+    import tomllib
+    import yaml
     from fno.adapters.providers.loader import load_combos, load_providers
     from fno.adapters.providers.model import ProviderConfigError
+    from fno.config import _candidate_paths
 
     problems: list[str] = []
     try:
@@ -380,6 +450,24 @@ def check_accounts() -> list[str]:
         problems.append(f"combos: {exc}")
     except Exception as exc:
         problems.append(f"combos load error: {exc}")
+
+    seen_paths: set[Path] = set()
+    for candidate in _candidate_paths():
+        if not candidate.is_file() or candidate in seen_paths:
+            continue
+        seen_paths.add(candidate)
+        try:
+            content = candidate.read_text(encoding="utf-8")
+            if candidate.suffix in (".toml", ".tml"):
+                data = tomllib.loads(content)
+            elif candidate.suffix in (".yaml", ".yml"):
+                data = yaml.safe_load(content) or {}
+            else:
+                data = {}
+            if isinstance(data, dict):
+                problems.extend(_check_accounts_in_dict(data, str(candidate)))
+        except Exception:
+            continue
 
     return problems
 
