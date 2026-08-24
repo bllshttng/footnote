@@ -10,6 +10,7 @@ the single runner convention the sweep now carries end to end.
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
 
 from fno.pr._proc import Result
@@ -395,6 +396,33 @@ class TestRestReaderHardening:
 
         assert states == {"owner/repo#1": "UNKNOWN"}
         assert failures == 1
+
+    def test_exact_terminal_fallback_is_capped_and_timeout_bounded(self):
+        """AC4-HP/ERR: exact reads stop at the cap and never exceed five seconds."""
+        from fno.pr_watch._discover import (
+            EXACT_TERMINAL_READ_TIMEOUT_S,
+            MAX_EXACT_TERMINAL_READS,
+            read_tracked_pr_states,
+        )
+
+        keys = {f"owner/repo#{number}" for number in range(1, MAX_EXACT_TERMINAL_READS + 3)}
+        exact_calls: list[list] = []
+        exact_timeouts: list[float] = []
+
+        def runner(cmd, timeout=None, **_kw):
+            path = cmd[2]
+            if "state=open" in path or "state=closed" in path:
+                return _page([])
+            exact_calls.append(list(cmd))
+            exact_timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(cmd, timeout)
+
+        states, failures = read_tracked_pr_states(keys, runner=runner)
+
+        assert states == {key: "UNKNOWN" for key in keys}
+        assert len(exact_calls) == MAX_EXACT_TERMINAL_READS
+        assert exact_timeouts == [EXACT_TERMINAL_READ_TIMEOUT_S] * MAX_EXACT_TERMINAL_READS
+        assert failures >= len(keys)
 
     def test_graphql_remaining_bounds_the_subprocess_wait(self):
         """The preflight read must not hand a black-holed gh an unbounded

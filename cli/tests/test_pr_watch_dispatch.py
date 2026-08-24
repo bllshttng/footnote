@@ -264,7 +264,7 @@ class TestTrackedStateBatch:
         def runner(cmd, **_kwargs):
             calls.append(list(cmd))
             # owner/one: tracked #2 closed+merged (absent from the open list,
-            # resolved by its per-key read) plus untracked open #99; owner/two:
+            # resolved by its closed batch) plus untracked open #99; owner/two:
             # tracked #3 closed.
             open_rows = {
                 "owner/one": [{"number": 1, "state": "open", "merged": False},
@@ -279,6 +279,13 @@ class TestTrackedStateBatch:
             if path.startswith("repos/") and path.endswith("/pulls?state=open&per_page=100&page=1"):
                 repo = path[len("repos/"): path.index("/pulls?")]
                 return _rest_ok(json.dumps(open_rows[repo]))
+            if path.startswith("repos/") and path.endswith("/pulls?state=closed&per_page=100&page=1"):
+                repo = path[len("repos/"): path.index("/pulls?")]
+                return _rest_ok(
+                    json.dumps([
+                        row for key, row in per_key.items() if key.startswith(f"{repo}#")
+                    ])
+                )
             number = path.rsplit("/", 1)[-1]
             repo = path[len("repos/"): -len(f"/pulls/{number}")]
             return _rest_ok(json.dumps(per_key[f"{repo}#{number}"]))
@@ -294,8 +301,8 @@ class TestTrackedStateBatch:
             "owner/two#3": "CLOSED",
         }
         assert sweep_failures == 0
-        # One open-listing per repo plus one per-key read for each tracked
-        # key the open list did not answer.
+        # One open-listing and one closed-listing per repository. No exact
+        # per-key fallback is needed when the terminal batch finds both keys.
         assert len(calls) == 4
 
     def test_repo_read_failure_returns_unknown_for_each_requested_key(self):
@@ -2660,3 +2667,5 @@ class TestQuotaPreflight:
         assert result.sweep_failures == 1
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
         assert receipt["sweep_failures"] == 1
+        assert receipt["swept_count"] == 1
+        assert receipt["swept"] == {"owner/repo": [7]}

@@ -36,6 +36,12 @@ from fno.pr._proc import run as _rest_run
 
 log = logging.getLogger(__name__)
 
+# Exact terminal reads are only a bounded fallback after the repository-level
+# open and closed listings. A missing key is not permission to spend the whole
+# tick on one black-holed endpoint.
+MAX_EXACT_TERMINAL_READS = 3
+EXACT_TERMINAL_READ_TIMEOUT_S = 5.0
+
 
 @dataclass(frozen=True)
 class PrCandidate:
@@ -388,6 +394,7 @@ def read_tracked_pr_states(
         states[canonical] = "UNKNOWN"
 
     sweep_failures = 0
+    exact_reads_used = 0
     for repo, requested in sorted(grouped.items()):
         try:
             rows, reason = list_prs_rest(repo, state="open", runner=runner, timeout=timeout_s)
@@ -439,9 +446,30 @@ def read_tracked_pr_states(
         # per-key failure counts toward the failure total: a sweep whose keys
         # stay unresolved must never read as outcome ok (the AC4 swallowed-
         # failure shape).
-        for number in sorted(requested - returned):
+        unresolved = sorted(requested - returned)
+        if exact_reads_used >= MAX_EXACT_TERMINAL_READS:
+            if unresolved:
+                log.warning(
+                    "pr-watch: exact terminal-read cap exhausted; keeping %d keys UNKNOWN",
+                    len(unresolved),
+                )
+                sweep_failures += len(unresolved)
+            continue
+        exact_timeout_s = min(float(timeout_s), EXACT_TERMINAL_READ_TIMEOUT_S)
+        for offset, number in enumerate(unresolved):
+            if exact_reads_used >= MAX_EXACT_TERMINAL_READS:
+                remaining = len(unresolved) - offset
+                log.warning(
+                    "pr-watch: exact terminal-read cap exhausted; keeping %d keys UNKNOWN",
+                    remaining,
+                )
+                sweep_failures += remaining
+                break
+            exact_reads_used += 1
             try:
-                res = runner(["gh", "api", f"repos/{repo}/pulls/{number}"], timeout=timeout_s)
+                res = runner(
+                    ["gh", "api", f"repos/{repo}/pulls/{number}"], timeout=exact_timeout_s
+                )
             except (subprocess.TimeoutExpired, OSError, ToolMissing) as exc:
                 log.warning("pr-watch: per-key read failed for %s#%d: %s", repo, number, exc)
                 sweep_failures += 1
