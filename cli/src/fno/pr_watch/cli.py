@@ -151,18 +151,21 @@ def _catchup_roots() -> list[Path]:
     return [p for p in roots.values() if p.is_dir()]
 
 
-def _watchdog_recovery_root() -> Optional[Path]:
-    """Resolve one exact project scope for the launchd watchdog scan."""
+def _watchdog_recovery_roots() -> list[Path]:
+    """Resolve every distinct project scope for the launchd watchdog scan."""
+    roots: list[Path] = []
     try:
         from fno.paths import resolve_repo_root
 
         root = resolve_repo_root()
         if (root / ".git").exists():
-            return root
+            roots.append(root)
     except Exception:  # noqa: BLE001 - an unknown scope must not scan `/`
         pass
-    roots = _catchup_roots()
-    return roots[0] if len(roots) == 1 else None
+    for root in _catchup_roots():
+        if root not in roots:
+            roots.append(root)
+    return roots
 
 
 class ClaimAdapter:
@@ -532,46 +535,63 @@ def tick() -> None:
                         f"a roster probe costs"
                     )
                 payload, rows = _wd.run_sweep(now_s=now, roster_timeout=budget)
-                recovery_payload = None
-                recovery_rows = []
-                recovery_scan = None
+                recovery_payloads = []
+                recovery_scans = []
                 try:
-                    recovery_root = _watchdog_recovery_root()
-                    if recovery_root is None:
+                    recovery_roots = _watchdog_recovery_roots()
+                    if not recovery_roots:
                         raise ValueError(
-                            "Codex recovery scope unresolved; no unique checkout root"
+                            "Codex recovery scope unresolved; no checkout roots"
                         )
-                    (
-                        recovery_payload,
-                        recovery_rows,
-                        recovery_scan,
-                    ) = _wd.run_recoverable_sweep(
-                        cwd=recovery_root,
-                        recency_seconds=24 * 3600,
-                        now_s=now,
-                    )
-                    if not recovery_scan.complete:
-                        log.warning(
-                            "pr-watch: Codex recovery scan refused: %s",
-                            "; ".join(recovery_payload.get("warnings") or [])
-                            or "coverage incomplete",
+                    for recovery_root in recovery_roots:
+                        recovery_payload, recovery_rows, recovery_scan = (
+                            _wd.run_recoverable_sweep(
+                                cwd=recovery_root,
+                                recency_seconds=24 * 3600,
+                                now_s=now,
+                            )
                         )
-                    elif not payload.get("refused"):
+                        if not recovery_scan.complete:
+                            log.warning(
+                                "pr-watch: Codex recovery scan refused for %s: %s",
+                                recovery_root,
+                                "; ".join(recovery_payload.get("warnings") or [])
+                                or "coverage incomplete",
+                            )
+                            continue
+                        recovery_payloads.append(
+                            (recovery_root, recovery_payload, recovery_rows)
+                        )
+                        recovery_scans.append((recovery_root, recovery_scan))
+                    if recovery_payloads and not payload.get("refused"):
+                        recovery_verdicts = [
+                            verdict
+                            for _root, recovery_payload, _root_rows in recovery_payloads
+                            for verdict in recovery_payload["verdicts"]
+                        ]
+                        recovery_count = sum(
+                            recovery_payload["recoverable_count"]
+                            for _root, recovery_payload, _root_rows in recovery_payloads
+                        )
                         payload = {
                             **payload,
                             "verdicts": [
                                 *payload["verdicts"],
-                                *recovery_payload["verdicts"],
+                                *recovery_verdicts,
                             ],
                             "counts": {
                                 **payload["counts"],
-                                **recovery_payload["counts"],
+                                _wd.RECOVERABLE: recovery_count,
                             },
-                            "recoverable_count": recovery_payload[
-                                "recoverable_count"
-                            ],
                         }
+                        recovery_rows = [
+                            row
+                            for _root, _recovery_payload, root_rows in recovery_payloads
+                            for row in root_rows
+                        ]
                         rows = [*rows, *recovery_rows]
+                        if len(recovery_payloads) == len(recovery_roots):
+                            payload["recoverable_count"] = recovery_count
                 except Exception as exc:  # noqa: BLE001 - recovery never breaks the tick
                     log.warning("pr-watch: Codex recovery scan failed: %s", exc)
                 # Read BEFORE any write and defaulted here: the refused branch
@@ -686,30 +706,28 @@ def tick() -> None:
                                 "detail": detail,
                             },
                         )
-                if (
-                    recovery_scan is not None
-                    and recovery_scan.complete
-                    and settings.recovery.watchdog == "wake"
-                ):
-                    recoverable_results = _wd.apply_recoverable(
-                        recovery_scan,
-                        scope_cwd=recovery_root,
-                        should_apply=lambda: (
-                            deadline - (time.monotonic() - started)
-                        ) >= _WAKE_APPLY_FLOOR_S,
-                    )
-                    for result_item in recoverable_results:
-                        if result_item["outcome"] in {"applied", "refused"}:
-                            _wd.emit_event(
-                                "watchdog_applied"
-                                if result_item["outcome"] == "applied"
-                                else "watchdog_refused",
-                                {
-                                    "row_id": result_item["session_id"],
-                                    "verdict": _wd.RECOVERABLE,
-                                    "detail": result_item["detail"],
-                                },
-                            )
+                if settings.recovery.watchdog == "wake":
+                    for recovery_root, recovery_scan in recovery_scans:
+                        results = _wd.apply_recoverable(
+                            recovery_scan,
+                            scope_cwd=recovery_root,
+                            should_apply=lambda: (
+                                deadline - (time.monotonic() - started)
+                            ) >= _WAKE_APPLY_FLOOR_S,
+                        )
+                        recoverable_results.extend(results)
+                        for result_item in results:
+                            if result_item["outcome"] in {"applied", "refused"}:
+                                _wd.emit_event(
+                                    "watchdog_applied"
+                                    if result_item["outcome"] == "applied"
+                                    else "watchdog_refused",
+                                    {
+                                        "row_id": result_item["session_id"],
+                                        "verdict": _wd.RECOVERABLE,
+                                        "detail": result_item["detail"],
+                                    },
+                                )
                 counts = " ".join(
                     f"{k}={v}" for k, v in sorted(payload["counts"].items())
                 )
