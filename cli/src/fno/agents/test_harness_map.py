@@ -49,7 +49,17 @@ def test_packaged_contract_is_complete_for_every_known_harness():
     [
         ("claude", "interactive_create", "c-1", ["claude", "--session-id", "c-1"]),
         ("claude", "interactive_resume", "c-1", ["claude", "--resume", "c-1"]),
-        ("claude", "headless_resume", "c-1", ["claude", "-p", "--resume", "c-1"]),
+        (
+            "claude",
+            "headless_resume",
+            "c-1",
+            [
+                "claude",
+                "-p",
+                "--resume",
+                "c-1",
+            ],
+        ),
         ("codex", "interactive_resume", "cx-1", ["codex", "resume", "cx-1"]),
         ("codex", "headless_resume", "cx-1", ["codex", "exec", "resume", "cx-1"]),
         ("opencode", "headless_resume", "ses_1", ["opencode", "run", "--session", "ses_1"]),
