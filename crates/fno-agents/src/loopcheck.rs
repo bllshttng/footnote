@@ -2579,12 +2579,15 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
+        // The GitHub axis was intentionally not queried, so this is a known
+        // zero rather than an unavailable read. `Unknown` is reserved for a
+        // failed GitHub read and must retain the retry remedy.
         let coverage = classify_coverage(
             &[],
             &[],
             &events_text,
             &[],
-            false,
+            true,
             author_session,
             &freshness,
             &head_branch,

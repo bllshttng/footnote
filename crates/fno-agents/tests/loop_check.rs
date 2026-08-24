@@ -7384,15 +7384,15 @@ fn coverage_status_publish_requires_local_code_review_pass_when_configured() {
         posts
             .iter()
             .any(|post| post.contains("context=fno/review-coverage ")
-                && post.contains("state=pending")),
-        "an unreadable local coverage read must stay pending: {posts:?}"
+                && post.contains("state=failure")),
+        "a bot review must not satisfy the local code-review lane: {posts:?}"
     );
     assert!(
         posts.iter().any(
             |post| post.contains("context=fno/review-coverage-unavailable ")
-                && post.contains("state=pending")
+                && post.contains("state=success")
         ),
-        "the diagnostic context must name the unavailable read: {posts:?}"
+        "the diagnostic context must clear for a known uncovered result: {posts:?}"
     );
 }
 
