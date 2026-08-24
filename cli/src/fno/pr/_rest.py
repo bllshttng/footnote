@@ -28,11 +28,75 @@ from typing import Any, Callable, Optional
 from fno.pr._proc import run
 from fno.pr._ritual import _parse_origin_slug
 
-# GitHub's secondary (request-rate) limit says "You have exceeded a secondary
-# rate limit". The primary REST limit is also an HTTP 403 but says only "API
-# rate limit exceeded" - the word "secondary" is the discriminator, so a 403
-# without it must fall through to the core-bucket branch.
-_SECONDARY = re.compile(r"secondary rate limit", re.IGNORECASE)
+# The fno gh-proxy shim execve's the real gh inside its own process, so the
+# shim's own startup lines (config deprecation warnings, proxy refusals) ride
+# the same captured stderr as gh's error. They are not evidence about the
+# read: quoting the first line blamed fno's own config warning for a
+# rate-limit refusal (measured on `fno do pr info`), so they drop out before
+# classification and before any line is quoted.
+_WRAPPER_NOISE = re.compile(r"^(fno config|gh proxy):", re.IGNORECASE)
+# A 403 rate-limit refusal is classified against the LIVE exempt bucket,
+# never against GitHub's wording. The measured 2026-08-24 secondary refusal
+# said only "API rate limit exceeded ..." - no "secondary" anywhere - so the
+# phrase match missed, the caller was told to wait for a core reset that
+# never comes, and the fleet's backoff (armed on that same phrase, one module
+# over) never armed. `gh api rate_limit` is exempt from both limits and
+# answered DURING that refusal (core 4980/5000), so the bucket reading is the
+# one signal GitHub cannot reword. Core refuses at 0 remaining; the floor
+# only absorbs concurrent in-flight drains.
+_CORE_DRAINED_FLOOR = 20
+
+
+class RestReason(str):
+    """A failure reason that carries its rate-limit class as data.
+
+    The text stays prose for humans; `rate_limit_class` ("secondary"|"core"|"")
+    is what machines gate on. `_cache` arms the fleet-wide backoff on the
+    field, never on a substring of the prose: prose is GitHub's to reword, and
+    a cache keying on a sibling module's sentence is a coupling that breaks
+    silently and fails open.
+    """
+
+    rate_limit_class: str = ""
+
+    def __new__(cls, text: str, rate_limit_class: str = "") -> "RestReason":
+        self = super().__new__(cls, text)
+        self.rate_limit_class = rate_limit_class
+        return self
+
+
+def _bucket_remaining(
+    bucket: str,
+    runner: Optional[Callable],
+    cwd: Optional[str],
+    timeout: Optional[float] = 30.0,
+) -> "tuple[Optional[int], Optional[float]]":
+    """`(remaining, reset_epoch)` for `bucket` from the exempt rate_limit read.
+
+    `gh api rate_limit` does not count against any bucket. `(None, None)` on
+    any failure (no runner, dead read, malformed payload), and a caller MUST
+    read None as unknown, never as zero: skipping work because the instrument
+    is unreadable is an absence read as evidence.
+    """
+    if runner is None:
+        return None, None
+    try:
+        res = runner(["gh", "api", "rate_limit"], cwd=cwd, timeout=timeout)
+    except Exception:  # noqa: BLE001 - unreadable instrument, never a skip
+        return None, None
+    if not res.ok:
+        return None, None
+    try:
+        row = json.loads(res.stdout)["resources"][bucket]
+        remaining = row["remaining"]
+        reset_epoch = row["reset"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None, None
+    if not isinstance(remaining, int) or not isinstance(reset_epoch, (int, float)):
+        return None, None
+    return remaining, reset_epoch
+
+
 # x-4eac: the 2026-08-19 incident died as `Post .../graphql: unexpected EOF`
 # and read downstream as three fresh merge blockers on the PR. A transport or
 # auth failure is a fact about the READ, not about the PR, and the reason must
@@ -64,33 +128,63 @@ def _repo_slug(cwd: Optional[str], runner: Callable = run) -> Optional[str]:
     return _parse_origin_slug(r.stdout.strip())
 
 
-def _rest_reason(res) -> str:
+def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] = None) -> str:
     """Explain a failed REST read, naming the failure class that changes what
-    the caller should do next (back off vs. wait for reset vs. transient)."""
-    lines = [ln.strip() for ln in (getattr(res, "stderr", "") or "").splitlines() if ln.strip()]
+    the caller should do next (back off vs. wait for reset vs. transient).
+
+    The quoted evidence is the line that MATCHED the classifier, never merely
+    the first stderr line, and wrapper noise never enters the explanation. A
+    rate-limit refusal is classified against the live exempt bucket (see
+    `_CORE_DRAINED_FLOOR`), and the reason comes back as a `RestReason`
+    carrying `rate_limit_class` for machine consumers.
+    """
+    lines = [
+        ln.strip()
+        for ln in (getattr(res, "stderr", "") or "").splitlines()
+        if ln.strip() and not _WRAPPER_NOISE.match(ln.strip())
+    ]
     text = " ".join(lines)
-    if _SECONDARY.search(text):
-        base = lines[0] if lines else "gh api failed with no message"
-        return (
-            base + " | this is the SECONDARY rate limit (request rate, not budget:"
-            " the core bucket can read 5000 remaining here). Back off - retrying"
-            " on a fixed interval sustains the refusal."
-        )
+    fallback = lines[0] if lines else "gh api failed with no message"
+
+    def matched(predicate) -> str:
+        for ln in lines:
+            if predicate(ln):
+                return ln
+        return fallback
+
     if "rate limit" in text.lower():
-        base = lines[0] if lines else "gh api failed with no message"
-        return (
-            base + " | this is the CORE REST quota. Check"
-            " `gh api rate_limit --jq .resources.core` and wait for its reset."
+        base = matched(lambda ln: "rate limit" in ln.lower())
+        remaining, _reset = _bucket_remaining("core", runner, cwd)
+        if remaining is not None and remaining <= _CORE_DRAINED_FLOOR:
+            return RestReason(
+                base + " | this is the CORE REST quota (the live exempt bucket"
+                f" reads {remaining} core remaining). Check"
+                " `gh api rate_limit --jq .resources.core` and wait for its reset.",
+                rate_limit_class="core",
+            )
+        budget = (
+            f"the live exempt bucket reads {remaining} core remaining"
+            if remaining is not None
+            else "the exempt rate_limit endpoint itself was unreadable, so the"
+            " bucket could not be checked and this backs off rather than trust"
+            " the wording"
+        )
+        return RestReason(
+            base + " | this is the SECONDARY rate limit (request rate, not"
+            f" budget: {budget}). Back off - retrying on a fixed interval"
+            " sustains the refusal.",
+            rate_limit_class="secondary",
         )
     if _AUTH.search(text):
-        base = lines[0] if lines else "gh api failed with no message"
+        base = matched(lambda ln: bool(_AUTH.search(ln)))
         return (
-            base + " | this is an AUTHENTICATION failure (gh is not logged in). Run"
+            base
+            + " | this is an AUTHENTICATION failure (gh is not logged in). Run"
             " `gh auth login`. It is not a verdict about this PR, and any"
             " blocker derived from this read is not content."
         )
     if _TRANSPORT.search(text):
-        base = lines[0] if lines else "gh api failed with no message"
+        base = matched(lambda ln: bool(_TRANSPORT.search(ln)))
         return (
             base + " | this is a TRANSPORT failure (the network between you and"
             " GitHub), not a verdict about this PR, and any blocker derived"
@@ -98,12 +192,14 @@ def _rest_reason(res) -> str:
             " harder, which deepens the condition."
         )
     if "not found" in text.lower() or re.search(r"\b404\b", text):
-        base = lines[0] if lines else "gh api failed with no message"
+        base = matched(
+            lambda ln: "not found" in ln.lower() or bool(re.search(r"\b404\b", ln))
+        )
         return (
             base + " | not found. Check the PR number (and that this branch"
             " still has an open PR); this is not a verdict about any PR."
         )
-    return lines[0] if lines else "gh api failed with no message"
+    return fallback
 
 
 def _map_pr_state(data: dict) -> str:
@@ -137,7 +233,7 @@ def fetch_pr_info_rest(
 
     pulls = runner(["gh", "api", f"repos/{slug}/pulls/{pr}"], cwd=cwd)
     if not pulls.ok:
-        return None, _rest_reason(pulls)
+        return None, _rest_reason(pulls, runner=runner, cwd=cwd)
     try:
         pr_data = json.loads(pulls.stdout)
     except json.JSONDecodeError:
@@ -197,7 +293,7 @@ def resolve_current_pr_number_rest(
         cwd=cwd,
     )
     if not rows.ok:
-        return None, _rest_reason(rows)
+        return None, _rest_reason(rows, runner=runner, cwd=cwd)
     try:
         payload = json.loads(rows.stdout)
     except json.JSONDecodeError:
@@ -243,7 +339,7 @@ def fetch_pr_rest(
             cwd=cwd,
         )
         if not checks.ok:
-            return None, _rest_reason(checks)
+            return None, _rest_reason(checks, runner=runner, cwd=cwd)
         try:
             payload = json.loads(checks.stdout)
             if not isinstance(payload, dict):
@@ -282,7 +378,7 @@ def fetch_pr_rest(
     # prove an unread required legacy context is green.
     statuses = runner(["gh", "api", f"repos/{slug}/commits/{sha}/status"], cwd=cwd)
     if not statuses.ok:
-        return None, _rest_reason(statuses)
+        return None, _rest_reason(statuses, runner=runner, cwd=cwd)
     if statuses.ok:
         try:
             status_payload = json.loads(statuses.stdout)
@@ -356,7 +452,7 @@ def list_prs_rest(
             timeout=timeout,
         )
         if not res.ok:
-            return None, _rest_reason(res)
+            return None, _rest_reason(res, runner=runner, cwd=cwd)
         try:
             payload = json.loads(res.stdout)
         except json.JSONDecodeError:
@@ -413,19 +509,8 @@ def graphql_remaining(
     zero: skipping work because the instrument is unreadable is an absence
     read as evidence.
     """
-    try:
-        res = runner(["gh", "api", "rate_limit"], cwd=cwd, timeout=timeout)
-    except Exception:  # noqa: BLE001 - unreadable instrument, never a skip (AC6)
-        return None, None
-    if not res.ok:
-        return None, None
-    try:
-        graphql = json.loads(res.stdout)["resources"]["graphql"]
-        remaining = graphql["remaining"]
-        reset_epoch = graphql["reset"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return None, None
-    if not isinstance(remaining, int) or not isinstance(reset_epoch, (int, float)):
+    remaining, reset_epoch = _bucket_remaining("graphql", runner, cwd, timeout)
+    if remaining is None:
         return None, None
     reset_iso = datetime.fromtimestamp(reset_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return remaining, reset_iso
