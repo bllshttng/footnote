@@ -34,7 +34,9 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
+from fno.adapters.providers.dispatch import _env_for_api_key
 from fno.adapters.providers.model import ProviderRecord
 
 logger = logging.getLogger(__name__)
@@ -54,6 +56,11 @@ _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"  # macOS Keychain item (orc
 # seven_day* object) so a maxed Opus weekly binds headroom instead of being
 # dropped, letting Opus work dispatch until the reactive 429 (x-6bcf review).
 _CLAUDE_KNOWN_LABELS = {"five_hour": "5h", "seven_day": "weekly"}
+
+_ZAI_UNIT_MINUTES = {1: 1440, 3: 60, 5: 1, 6: 10080}
+_ZAI_UNIT_SUFFIX = {1: "d", 3: "h", 5: "m", 6: "w"}
+_ZAI_LIMIT_TYPES = frozenset({"TOKENS_LIMIT", "TIME_LIMIT", "CREDIT_LIMIT"})
+_ZAI_HOSTS = frozenset({"api.z.ai", "open.bigmodel.cn"})
 
 
 def _clamp_pct(value: float) -> float:
@@ -637,6 +644,118 @@ def _probe_codex(
                 source="session-events",
             ), None
     return None, "probe-failed"
+
+
+def _zai_integer(value: Any) -> int | None:
+    """Return an actual JSON integer, excluding booleans and float coercion."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _zai_window_label(unit: int, number: int, window_minutes: int) -> str:
+    if window_minutes == 300:
+        return "5h"
+    if window_minutes == 10080:
+        return "weekly"
+    return f"{number}{_ZAI_UNIT_SUFFIX[unit]}"
+
+
+def _parse_zai_windows(payload: Any) -> tuple[UsageWindow, ...]:
+    """Parse Z.AI's quota/limit response into reset-bearing usage windows.
+
+    The endpoint's percentage is a fallback only. A window is usable only
+    when its limit, unit, and millisecond reset are all valid; this prevents a
+    percentage-only response from becoming a false green headroom reading.
+    """
+    if (
+        not isinstance(payload, dict)
+        or payload.get("success") is not True
+        or payload.get("code") != 200
+    ):
+        return ()
+    data = payload.get("data")
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(limits, list):
+        return ()
+
+    windows: list[UsageWindow] = []
+    for raw in limits:
+        if not isinstance(raw, dict) or raw.get("type") not in _ZAI_LIMIT_TYPES:
+            continue
+        unit = _zai_integer(raw.get("unit"))
+        number = _zai_integer(raw.get("number"))
+        percentage = _zai_integer(raw.get("percentage"))
+        reset_millis = _zai_integer(raw.get("nextResetTime"))
+        if (
+            unit not in _ZAI_UNIT_MINUTES
+            or number is None
+            or number <= 0
+            or percentage is None
+            or reset_millis is None
+            or reset_millis <= 0
+        ):
+            continue
+        window_minutes = number * _ZAI_UNIT_MINUTES[unit]
+        used_pct = float(percentage)
+        usage = _zai_integer(raw.get("usage"))
+        current = _zai_integer(raw.get("currentValue"))
+        remaining = _zai_integer(raw.get("remaining"))
+        if usage is not None and usage > 0:
+            if remaining is not None:
+                used = max(usage - remaining, current if current is not None else usage - remaining)
+                used_pct = 100.0 * used / usage
+            elif current is not None:
+                used_pct = 100.0 * current / usage
+        windows.append(
+            UsageWindow(
+                label=_zai_window_label(unit, number, window_minutes),
+                used_pct=used_pct,
+                resets_at=reset_millis / 1000.0,
+            )
+        )
+    return tuple(windows)
+
+
+def _probe_zai(
+    record: ProviderRecord, now: float
+) -> tuple[UsageSnapshot | None, str | None]:
+    """Probe the configured Z.AI route's quota endpoint without logging secrets."""
+    try:
+        route_env = _env_for_api_key(record)
+    except Exception:  # noqa: BLE001 - route resolution is advisory
+        return None, "probe-failed"
+    bearer = route_env.get("ANTHROPIC_AUTH_TOKEN") or route_env.get("ANTHROPIC_API_KEY")
+    base_url = route_env.get("ANTHROPIC_BASE_URL") or ""
+    parsed = urlparse(base_url)
+    if not bearer or parsed.scheme != "https" or parsed.hostname not in _ZAI_HOSTS:
+        return None, "probe-failed"
+    endpoint = f"{parsed.scheme}://{parsed.hostname}/api/monitor/usage/quota/limit"
+    request = urllib.request.Request(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "User-Agent": "fno-provider-usage/1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
+            body = response.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
+        return None, "probe-failed"
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return None, "probe-failed"
+    windows = _parse_zai_windows(payload)
+    if not windows:
+        return None, "probe-failed"
+    return UsageSnapshot(
+        provider_id=record.id,
+        windows=windows,
+        probed_at=now,
+        source="quota-endpoint",
+    ), None
 
 
 # Each probe returns ``(snapshot, unknown_reason)``: the reason is decided where

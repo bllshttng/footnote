@@ -77,6 +77,16 @@ def _snap(provider_id: str, *windows: UsageWindow, probed_at: float = 1000.0) ->
     )
 
 
+def _zai_record() -> ProviderRecord:
+    return ProviderRecord(
+        id="zai",
+        name="Z.AI",
+        harness="claude",
+        auth="api_key",
+        route="zai/glm-5.3[1m]",
+    )
+
+
 # ---------------------------------------------------------------------------
 # UsageWindow clamp invariant (Boundaries: 0, 100, >100, <0)
 # ---------------------------------------------------------------------------
@@ -385,6 +395,161 @@ class TestProbeFailOpen:
         assert snap.source == "session-events"
         got = {w.label: (w.used_pct, w.resets_at) for w in snap.windows}
         assert got == {"5h": (4.0, 1783807404.0), "weekly": (5.0, 1784372823.0)}
+
+
+class TestZaiProbe:
+    def test_zai_parser_maps_live_shaped_five_hour_limit(self) -> None:
+        """AC3-HP: Z.AI's integer quota fields become a reset-bearing 5h window."""
+        import fno.adapters.providers.usage as usage_mod
+
+        parse = getattr(usage_mod, "_parse_zai_windows", None)
+        if parse is None:
+            pytest.fail("Z.AI parser is not implemented")
+
+        payload = {
+            "success": True,
+            "code": 200,
+            "data": {
+                "limits": [
+                    {
+                        "type": "TOKENS_LIMIT",
+                        "unit": 3,
+                        "number": 5,
+                        "usage": 1000,
+                        "currentValue": 150,
+                        "remaining": 850,
+                        "percentage": 99,
+                        "nextResetTime": 1783807404000,
+                    }
+                ]
+            },
+        }
+
+        windows = parse(payload)
+
+        assert len(windows) == 1
+        assert windows[0].label == "5h"
+        assert windows[0].used_pct == 15.0
+        assert windows[0].resets_at == 1783807404.0
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"success": False, "code": 200, "data": {"limits": []}},
+            {"success": True, "code": 200, "data": {"limits": []}},
+            {
+                "success": True,
+                "code": 200,
+                "data": {
+                    "limits": [
+                        {
+                            "type": "TOKENS_LIMIT",
+                            "unit": 3,
+                            "number": 5,
+                            "percentage": 20,
+                            "nextResetTime": None,
+                        }
+                    ]
+                },
+            },
+        ],
+    )
+    def test_zai_parser_never_emits_percentage_only_success(self, payload) -> None:
+        """AC3-ERR: unknown/malformed Z.AI payloads have no positive window marker."""
+        import fno.adapters.providers.usage as usage_mod
+
+        parse = getattr(usage_mod, "_parse_zai_windows", None)
+        if parse is None:
+            pytest.fail("Z.AI parser is not implemented")
+        assert parse(payload) == ()
+
+    def test_zai_probe_uses_route_bearer_and_returns_quota_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.usage as usage_mod
+
+        class _Response:
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(self, *args):  # noqa: ANN001
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "success": True,
+                    "code": 200,
+                    "data": {"limits": [{
+                        "type": "TOKENS_LIMIT",
+                        "unit": 3,
+                        "number": 5,
+                        "percentage": 12,
+                        "nextResetTime": 1783807404000,
+                    }]},
+                }).encode()
+
+        seen: list[object] = []
+        monkeypatch.setattr(
+            usage_mod,
+            "_env_for_api_key",
+            lambda _record: {
+                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "live-token",
+            },
+            raising=False,
+        )
+        monkeypatch.setattr(
+            usage_mod.urllib.request,
+            "urlopen",
+            lambda request, timeout: (seen.append((request, timeout)) or _Response()),
+        )
+
+        probe = getattr(usage_mod, "_probe_zai", None)
+        if probe is None:
+            pytest.fail("Z.AI probe is not implemented")
+        snapshot, reason = probe(_zai_record(), now=1000.0)
+
+        assert reason is None
+        assert snapshot is not None
+        assert snapshot.source == "quota-endpoint"
+        assert snapshot.windows[0] == UsageWindow("5h", 12.0, 1783807404.0)
+        request, timeout = seen[0]
+        assert request.full_url == "https://api.z.ai/api/monitor/usage/quota/limit"
+        assert request.headers["Authorization"] == "Bearer live-token"
+        assert timeout == 10
+
+    def test_zai_probe_http_failure_is_explicit_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import urllib.error
+
+        import fno.adapters.providers.usage as usage_mod
+
+        monkeypatch.setattr(
+            usage_mod,
+            "_env_for_api_key",
+            lambda _record: {
+                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "live-token",
+            },
+            raising=False,
+        )
+        monkeypatch.setattr(
+            usage_mod.urllib.request,
+            "urlopen",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                urllib.error.HTTPError("https://api.z.ai", 429, "limited", {}, None)
+            ),
+        )
+
+        probe = getattr(usage_mod, "_probe_zai", None)
+        if probe is None:
+            pytest.fail("Z.AI probe is not implemented")
+        snapshot, reason = probe(_zai_record(), now=1000.0)
+
+        assert snapshot is None
+        assert reason == "probe-failed"
 
 
 # ---------------------------------------------------------------------------
