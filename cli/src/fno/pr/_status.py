@@ -58,13 +58,18 @@ _SETTLED_STATES = _PASS_STATES | (_FAIL_STATES - {"CANCELLED", "STALE"})
 # second spelling.
 
 
-def without_coverage_statuses(rollup: Sequence[dict]) -> list[dict]:
-    """Remove review-coverage projections before classifying generic CI."""
+def without_coverage_statuses(
+    rollup: Sequence[dict], contexts: frozenset = COVERAGE_STATUS_CONTEXTS
+) -> list[dict]:
+    """Remove review-coverage projections before classifying generic CI.
+
+    `contexts` parameterizes the drop so the merge verdict's ignore set reuses
+    this one filter instead of re-spelling it inline.
+    """
     return [
         check
         for check in rollup
-        if check.get("context") not in COVERAGE_STATUS_CONTEXTS
-        and check.get("name") not in COVERAGE_STATUS_CONTEXTS
+        if check.get("context") not in contexts and check.get("name") not in contexts
     ]
 
 
