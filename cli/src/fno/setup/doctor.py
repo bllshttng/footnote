@@ -9,6 +9,7 @@ or settings could not be loaded.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 # Patterns that indicate misconfigured paths.
 # Each entry is (path_prefix, human_reason).

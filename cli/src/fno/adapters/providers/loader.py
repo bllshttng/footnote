@@ -414,25 +414,6 @@ def _parse_providers_block(
     return config_obj
 
 
-def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
-    """Read config.providers.combos from project-local or global settings.yaml.
-
-    Same precedence as load_providers (project-local wins over global).
-    Returns an empty dict when no combos block exists. Cross-validates
-    every combo's providers list against the declared record IDs in
-    config.providers.records and raises ProviderConfigError on any
-    unknown reference.
-
-    Raises:
-        ProviderConfigError: combos block is not a mapping, an entry
-            references an unknown provider id, or a Combo construction
-            fails (empty providers, invalid strategy).
-    """
-    # Local import to avoid a load-order cycle: rotation imports from
-    # this module's siblings (model.ProviderConfigError) but combos are
-    # loaded only by code that already has the loader available.
-    from fno.adapters.providers.rotation import Combo
-
 def _provider_candidates(repo_root: Path | None = None) -> list[Path]:
     """Candidate config file paths for provider loading (FNO_CONFIG or [local, global])."""
     env_cfg = os.environ.get("FNO_CONFIG")
