@@ -783,7 +783,7 @@ export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=100
 err="$(run_hook 2>&1 >/dev/null)"; rc=$?
 stamp="${CWD}/.fno/.claim-heartbeat.stamp"
 if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=refresh_unverified$' "$stamp" \
-      && [[ "$err" == *"did not advance"* ]]; then
+      && [[ "$err" == *"re-read=100"* ]]; then
   pass "T42 exit-zero non-extension is unverified with a diagnostic"
 else
   fail "T42 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err]"
@@ -872,6 +872,64 @@ if [[ ! -s "$CALLLOG" ]]; then
   pass "T48 a written ledger throttles the next window like the touch did"
 else
   fail "T48 ledger cycle did not throttle: $(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T49: non-JSON status output is status_unreadable, never no_claim ───────
+setup_env
+export STUB_STATUS_JSON='Traceback (most recent call last): boom'
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=status_unreadable$' "$stamp" \
+      && [[ "$err" != *"UNPROTECTED"* ]] && [[ "$err" == *"unreadable"* ]] \
+      && ! grep -q "claim refresh" "$CALLLOG"; then
+  pass "T49 garbage status stdout is unreadable, not free"
+else
+  fail "T49 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err] calls=$(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T50: corrupted claim is unknown ownership, not positively free ─────────
+setup_env
+export STUB_STATUS_JSON='{"key":"node:x-a166","state":"corrupted","error":"bad yaml"}'
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=corrupted$' "$stamp" \
+      && [[ "$err" == *"corrupted"* && "$err" != *"UNPROTECTED"* ]] \
+      && ! grep -q "claim refresh" "$CALLLOG"; then
+  pass "T50 corrupted claim stamps corrupted without take-a-claim advice"
+else
+  fail "T50 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err] calls=$(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T51: refresh rc carries the failure class, not a generic line ──────────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+export STUB_REFRESH_RC=2
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=refresh_failed$' "$stamp" \
+      && [[ "$err" == *"rc=2"* && "$err" == *"expired"* ]]; then
+  pass "T51 refresh failure names its exit code class"
+else
+  fail "T51 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err]"
+fi
+teardown_env
+
+# ── T52: a renewed echo the store does not confirm stays unverified ─────────
+setup_env
+export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
+export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=100
+export STUB_REFRESH_JSON='{"key":"node:x-a166","holder":"target-session:20260707T203700Z-cl55246-f3fe72","refreshed":true,"expires_at":900}'
+err="$(run_hook 2>&1 >/dev/null)"; rc=$?
+stamp="${CWD}/.fno/.claim-heartbeat.stamp"
+if [[ "$rc" -eq 0 && -f "$stamp" ]] && grep -q '^outcome=refresh_unverified$' "$stamp" \
+      && [[ "$err" == *"re-read=100"* ]] \
+      && ! grep -q '^expires_at=' "$stamp"; then
+  pass "T52 receipt disagrees with the store -> unverified, no deadline stamped"
+else
+  fail "T52 rc=$rc ledger=$(cat "$stamp" 2>/dev/null || echo missing) err=[$err]"
 fi
 teardown_env
 
