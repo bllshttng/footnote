@@ -125,6 +125,7 @@ jobs:
         run: |
           set -euo pipefail
           ctx=fno/review-coverage
+          diag_ctx=fno/review-coverage-unavailable
           # This job has no checkout and gh does not fall back to
           # GITHUB_REPOSITORY without a git repo, so every gh call names the
           # repository explicitly or dies client-side.
@@ -133,10 +134,10 @@ jobs:
           # transient 5xx, which GitHub's own status page says to resubmit:
           # three attempts with a backoff before a failure counts.
           post() {
-            local attempt
+            local attempt context="${3:-$ctx}"
             for attempt in 1 2 3; do
               if gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
-                -f state="$1" -f context="$ctx" -f description="$2" >/dev/null; then
+                -f state="$1" -f context="$context" -f description="$2" >/dev/null; then
                 return 0
               fi
               echo "status post attempt $attempt failed; retrying after a backoff" >&2
@@ -301,6 +302,15 @@ jobs:
                         ;;
                       *)
                         post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
+                        # The invalidate arm is the refresher's only chance to
+                        # move the diagnostic on heads no fno emitter will
+                        # reach: a new head nobody read carries the honest
+                        # unavailable-pending stamp (what the publisher writes
+                        # on an UNANSWERED read), never the prior head's
+                        # instrument verdict frozen as pending forever.
+                        post pending \
+                          "coverage read unavailable at ${HEAD_SHA:0:8}; retry the review verb" \
+                          "$diag_ctx"
                         echo "synchronize: invalidated at ${HEAD_SHA:0:8} (${decision})"
                         ;;
                     esac
