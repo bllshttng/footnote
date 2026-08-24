@@ -2124,7 +2124,9 @@ def main():
         else:
             reason = (
                 "[fno GraphQL reserve] direct `gh api graphql` is discretionary; route it "
-                "through `fno do pr graphql-exec --purpose discretionary -- ...`. This "
+                "through `fno do pr graphql-exec --purpose discretionary -- api graphql "
+                "-f query=...`. Everything after -- is gh's argv, command words first, "
+                "so repeat the refused command's flags after the endpoint tokens. This "
                 "refusal is unconditional, so waiting for a quota reset changes nothing."
             )
         _emit("deny", reason)

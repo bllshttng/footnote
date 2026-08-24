@@ -270,6 +270,14 @@ def list_cmd(
     "graphql-exec",
     hidden=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help="Run one gh GraphQL read under the reserve accounting.",
+    epilog=(
+        "Everything after -- is passed to gh verbatim as its argv, command "
+        "words first: fno do pr graphql-exec --purpose discretionary -- api "
+        "graphql -f query=... --jq ... . A flag-first argv is refused, "
+        "because gh answers flags with no command word by printing its root "
+        "command list."
+    ),
 )
 def graphql_exec(
     ctx: typer.Context,
