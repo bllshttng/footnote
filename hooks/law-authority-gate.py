@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 
@@ -17,6 +21,7 @@ PROMPTING_MODES = frozenset({"default", "manual", "plan"})
 PROPOSAL_ID = re.compile(r"^lp-[0-9a-f]{12}$")
 CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
 RECOVERY = "/fno:law resume <proposal-id>"
+HOOK_SECRET = ".hook-secret"
 
 
 def _output(decision: str, reason: str) -> dict[str, Any]:
@@ -31,6 +36,29 @@ def _output(decision: str, reason: str) -> dict[str, Any]:
 
 def _deny(reason: str) -> dict[str, Any]:
     return _output("deny", f"fno law refused: {reason}. Resume from an attended chat with {RECOVERY}.")
+
+
+def _mentions_enact(command: Any) -> bool:
+    return isinstance(command, str) and re.search(r"\bfno\s+law\s+enact\b", command) is not None
+
+
+def _hook_proof(proposal_id: str, content_hash: str, session_id: str, mode: str, tool_input: str) -> str:
+    directory = Path.cwd() / ".fno" / "law-proposals"
+    directory.mkdir(parents=True, exist_ok=True)
+    secret_path = directory / HOOK_SECRET
+    try:
+        secret = secret_path.read_bytes()
+    except FileNotFoundError:
+        secret = secrets.token_bytes(32)
+        try:
+            fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            secret = secret_path.read_bytes()
+        else:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(secret)
+    message = "\0".join((proposal_id, content_hash, session_id, mode, tool_input))
+    return hmac.new(secret, message.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _parse_command(command: Any) -> tuple[str, str] | None:
@@ -72,6 +100,14 @@ def _arm_with_cli(**kwargs: str) -> dict[str, Any]:
             kwargs["permission_mode"],
             "--tool-input",
             kwargs["tool_input"],
+            "--proof",
+            _hook_proof(
+                kwargs["proposal_id"],
+                kwargs["content_hash"],
+                kwargs["session_id"],
+                kwargs["permission_mode"],
+                kwargs["tool_input"],
+            ),
         ],
         cwd=kwargs.get("cwd") or None,
         capture_output=True,
@@ -104,12 +140,14 @@ def evaluate(
 ) -> dict[str, Any] | None:
     """Return a permission decision only for the canonical enact command."""
     tool_name = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not _mentions_enact(command):
+        return None
     if tool_name != "Bash":
         return _deny("tool name is missing") if tool_name is None else None
-    tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         return _deny("tool input is unreadable")
-    command = tool_input.get("command")
     parsed = _parse_command(command)
     if parsed is None:
         return _deny("command is not the exact canonical enact action")

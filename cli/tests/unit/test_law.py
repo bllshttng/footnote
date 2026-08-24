@@ -74,6 +74,27 @@ def test_prepare_rejects_coordination_wording(
         )
 
 
+def test_arm_requires_hook_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno import law
+
+    proposal = law.prepare_proposal(
+        subject="x-12ba",
+        decision="Merges belong to the operator",
+        rationale="Durable policy needs human approval.",
+    )
+    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+
+    with pytest.raises(law.InvalidOperatorConsentError, match="hook proof"):
+        law.arm_proposal(
+            proposal["proposal_id"],
+            content_hash=proposal["content_hash"],
+            session_id="human-session-1",
+            permission_mode="default",
+            tool_input=tool_input,
+        )
+
+
 def test_armed_proposal_cannot_be_rebound_to_another_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -92,6 +113,13 @@ def test_armed_proposal_cannot_be_rebound_to_another_session(
         session_id="human-session-1",
         permission_mode="default",
         tool_input=tool_input,
+        hook_proof=law.make_hook_proof(
+            proposal["proposal_id"],
+            proposal["content_hash"],
+            "human-session-1",
+            "default",
+            tool_input,
+        ),
     )
 
     with pytest.raises(law.InvalidOperatorConsentError, match="already armed"):
@@ -125,6 +153,13 @@ def test_valid_consent_records_once_and_replay_refuses_before_writes(
         session_id="human-session-1",
         permission_mode="default",
         tool_input=tool_input,
+        hook_proof=law.make_hook_proof(
+            proposal["proposal_id"],
+            proposal["content_hash"],
+            "human-session-1",
+            "default",
+            tool_input,
+        ),
     )
     consent = decide.OperatorConsent(
         proposal_id=proposal["proposal_id"],
@@ -190,6 +225,13 @@ def test_mismatched_consent_refuses_before_any_decision_store(
         session_id="human-session-1",
         permission_mode="default",
         tool_input=tool_input,
+        hook_proof=law.make_hook_proof(
+            proposal["proposal_id"],
+            proposal["content_hash"],
+            "human-session-1",
+            "default",
+            tool_input,
+        ),
     )
     values = {
         "proposal_id": proposal["proposal_id"],
@@ -240,3 +282,58 @@ def test_expired_consent_refuses_and_leaves_proposal_staged(
             tool_input="fno law enact",
         )
     assert law.load_proposal(proposal["proposal_id"])["status"] == "expired"
+
+
+def test_event_failure_leaves_valid_consent_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno import decide, law, paths
+
+    index = tmp_path / "state" / "decisions.jsonl"
+    monkeypatch.setattr(paths, "decisions_jsonl", lambda: index)
+    proposal = law.prepare_proposal(
+        subject="x-12ba",
+        decision="Merges belong to the operator",
+        rationale="Durable policy needs human approval.",
+    )
+    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    law.arm_proposal(
+        proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="human-session-1",
+        permission_mode="default",
+        tool_input=tool_input,
+        hook_proof=law.make_hook_proof(
+            proposal["proposal_id"],
+            proposal["content_hash"],
+            "human-session-1",
+            "default",
+            tool_input,
+        ),
+    )
+    consent = decide.OperatorConsent(
+        proposal_id=proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="human-session-1",
+        permission_mode="default",
+        tool_input=tool_input,
+    )
+
+    import fno.events
+
+    def fail_append(*args: object, **kwargs: object) -> None:
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(fno.events, "append_event", fail_append)
+    with pytest.raises(OSError, match="journal unavailable"):
+        decide.record_decision(
+            subject=proposal["subject"],
+            decision=proposal["decision"],
+            rationale=proposal["rationale"],
+            authority_source="operator",
+            consent=consent,
+            events_root=tmp_path,
+        )
+    assert law.load_proposal(proposal["proposal_id"])["status"] == "armed"
+    assert not index.exists()

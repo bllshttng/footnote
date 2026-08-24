@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import typer
 PROPOSAL_TTL = timedelta(minutes=15)
 CONSENT_TTL = timedelta(minutes=2)
 RETENTION_TTL = timedelta(days=1)
+HOOK_SECRET = ".hook-secret"
 PROMPTING_MODES = frozenset({"default", "manual", "plan"})
 PROPOSAL_ID_RE = re.compile(r"^lp-[0-9a-f]{12}$")
 DECISION_ID_RE = re.compile(r"^d-[0-9a-f]{8}$")
@@ -107,6 +109,36 @@ def _canonical_fields(
 def _content_hash(fields: dict[str, Any]) -> str:
     canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _hook_secret_path() -> Path:
+    from fno import paths
+
+    return paths.law_proposals_dir() / HOOK_SECRET
+
+
+def make_hook_proof(
+    proposal_id: str,
+    content_hash: str,
+    session_id: str,
+    permission_mode: str,
+    tool_input: str,
+) -> str:
+    path = _hook_secret_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        secret = path.read_bytes()
+    except FileNotFoundError:
+        secret = secrets.token_bytes(32)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            secret = path.read_bytes()
+        else:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(secret)
+    message = "\0".join((proposal_id, content_hash, session_id, permission_mode, tool_input))
+    return hmac.new(secret, message.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def proposal_path(proposal_id: str) -> Path:
@@ -215,6 +247,7 @@ def arm_proposal(
     session_id: str,
     permission_mode: str,
     tool_input: str,
+    hook_proof: str | None = None,
 ) -> dict[str, Any]:
     _prune()
     proposal = _expire(load_proposal(proposal_id))
@@ -241,6 +274,11 @@ def arm_proposal(
     expected_tool = f"fno law enact --proposal {proposal_id} --hash {content_hash}"
     if tool_input != expected_tool:
         raise InvalidOperatorConsentError("tool input is not the canonical enact command")
+    expected_proof = make_hook_proof(
+        proposal_id, content_hash, session_id, permission_mode, tool_input
+    )
+    if not hook_proof or not hmac.compare_digest(hook_proof, expected_proof):
+        raise InvalidOperatorConsentError("hook proof is required")
     armed = dict(proposal)
     armed.update(
         {
@@ -256,7 +294,7 @@ def arm_proposal(
     return armed
 
 
-def consume_operator_consent(
+def _validate_operator_consent(
     consent: Any,
     *,
     expected: dict[str, Any],
@@ -283,6 +321,24 @@ def consume_operator_consent(
     fields = {key: proposal.get(key) for key in ("subject", "decision", "rationale", "options", "supersedes")}
     if fields != expected or _content_hash(fields) != consent.content_hash:
         raise InvalidOperatorConsentError("proposal content mismatch")
+    return proposal
+
+
+def validate_operator_consent(
+    consent: Any,
+    *,
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate consent without consuming it or changing proposal state."""
+    return _validate_operator_consent(consent, expected=expected)
+
+
+def consume_operator_consent(
+    consent: Any,
+    *,
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    proposal = _validate_operator_consent(consent, expected=expected)
     consumed = dict(proposal)
     consumed["status"] = "consumed"
     consumed["consumed_at"] = _iso(_utc_now())
@@ -356,6 +412,7 @@ def arm_command(
     session_id: str = typer.Option(..., "--session-id"),
     permission_mode: str = typer.Option(..., "--permission-mode"),
     tool_input: str = typer.Option(..., "--tool-input"),
+    hook_proof: str = typer.Option(..., "--proof", hidden=True),
 ) -> None:
     _json(
         arm_proposal(
@@ -364,6 +421,7 @@ def arm_command(
             session_id=session_id,
             permission_mode=permission_mode,
             tool_input=tool_input,
+            hook_proof=hook_proof,
         )
     )
 

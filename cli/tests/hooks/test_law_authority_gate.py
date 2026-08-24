@@ -99,6 +99,12 @@ def test_malformed_or_wrapped_commands_deny() -> None:
     assert missing_tool["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_unrelated_bash_commands_are_not_decided() -> None:
+    gate = _gate()
+
+    assert gate.evaluate(_payload("git status"), arm=lambda **kwargs: {}) is None
+
+
 def test_missing_session_and_arm_failure_deny() -> None:
     gate = _gate()
     missing = gate.evaluate(_payload(session_id=""), arm=lambda **kwargs: {})

@@ -261,19 +261,18 @@ def record_decision(
 
         raise InvalidOperatorConsentError("consent requires operator authority")
 
+    consent_expected = None
     if consent is not None:
-        from fno.law import consume_operator_consent
+        from fno.law import validate_operator_consent
 
-        consume_operator_consent(
-            consent,
-            expected={
-                "subject": subject,
-                "decision": decision,
-                "rationale": rationale,
-                "options": list(options or []),
-                "supersedes": supersedes,
-            },
-        )
+        consent_expected = {
+            "subject": subject,
+            "decision": decision,
+            "rationale": rationale,
+            "options": list(options or []),
+            "supersedes": supersedes,
+        }
+        validate_operator_consent(consent, expected=consent_expected)
         provenance = Provenance("operator", "operator", "operator", None)
     else:
         provenance = _resolve_decider(decided_by, authority_source)
@@ -301,6 +300,10 @@ def record_decision(
         supersedes=supersedes,
     )
     append_event(event, events_path=events_path(events_root))
+    if consent is not None:
+        from fno.law import consume_operator_consent
+
+        consume_operator_consent(consent, expected=consent_expected or {})
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:
