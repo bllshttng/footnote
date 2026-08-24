@@ -330,6 +330,12 @@ jobs:
                 exit 1
               fi
               post failure "manual invalidate at ${HEAD_SHA:0:8}; run the review verb at HEAD"
+              # Same diagnostic stamp as the synchronize twin: a head nobody
+              # read carries the honest unavailable-pending state, never a
+              # stale instrument verdict from an earlier read.
+              post pending \
+                "coverage read unavailable at ${HEAD_SHA:0:8}; retry the review verb" \
+                "$diag_ctx"
               echo "dispatch: invalidated PR ${PR_INPUT} at ${HEAD_SHA:0:8}"
               ;;
             *)
