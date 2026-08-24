@@ -1881,13 +1881,21 @@ fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
 }
 
 /// GitHub's secondary (burst/concurrency) limit is a DIFFERENT thing from the
-/// primary hourly quota `probe_graphql_quota` reads: a 403 whose body names
-/// "secondary rate limit" can fire with both the core and graphql buckets
-/// reporting thousands remaining (measured live: core 4922/5000, graphql
-/// 1392/5000, a call refused anyway). `gh api rate_limit` cannot see it -
-/// there is no bucket for it - so it is detected only from a refusal's own
-/// stderr, never from advertised remaining. Mirrors `_SECONDARY` in
-/// `cli/src/fno/pr/_rest.py`; keep the two patterns in sync.
+/// primary hourly quota `probe_graphql_quota` reads: a 403 can fire with both
+/// the core and graphql buckets reporting thousands remaining (measured live:
+/// core 4922/5000, graphql 1392/5000, a call refused anyway), so advertised
+/// remaining alone cannot classify a refusal.
+///
+/// KNOWN DRIFT, deliberate for now: this gate matches the phrase "secondary
+/// rate limit", and GitHub's measured 2026-08-24 refusal body does NOT
+/// contain it ("API rate limit exceeded for user ID ... (HTTP 403)"), so a
+/// real secondary refusal reads as unclassified here. The Python side
+/// (`_rest_reason` in `cli/src/fno/pr/_rest.py`) now classifies on the 403
+/// plus a live reading of the exempt `rate_limit` bucket - a 403 whose live
+/// core remaining is high IS the secondary limit - and passes the verdict as
+/// a field, never prose. Porting that classifier here means giving each call
+/// site a bucket probe; until then this stays a wording gate, which is why
+/// it no longer mirrors anything.
 fn is_secondary_limit_stderr(stderr: &str) -> bool {
     stderr.to_lowercase().contains("secondary rate limit")
 }
