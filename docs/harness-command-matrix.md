@@ -25,6 +25,8 @@ Codex pane spawn waits for rollout binding for 60 seconds. A bound receipt inclu
 
 agy pane spawns trust the exact cwd before launch. The shared gate clears remaining trust prompts. It submits seeds after the composer paints.
 
+Known limitation: the agy seed receipt is unverified. Until action confirmation lands, `seed: submitted`, `readiness: live`, and `pane_observation: painted` do not prove that the worker consumed its seed. After spawning, run `fno agents peek <name>` and require a first worker action. If the exact pane remains idle, recover once with `fno mux pane send <pane> --text '<prompt>' --raw --submit`, then run `fno agents peek <name>` again. Do not re-seed a pane that is already working because that can queue a duplicate target.
+
 ## The opencode bg serve lane
 
 `spawn --harness opencode --substrate bg` is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted:
