@@ -144,6 +144,42 @@ def test_dispatch_env_api_key_keychain(
     ]
 
 
+def test_dispatch_env_route_backed_account_uses_complete_route_overlay(
+    tmp_path: Path, staging_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2-HP: dispatch resolves the same route owner as account overlays."""
+    expected = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "live-token",
+        "ANTHROPIC_MODEL": "glm-5.3[1m]",
+    }
+    calls: list[tuple[str, str]] = []
+
+    def resolve(provider: str, model: str, **_kwargs: object) -> dict[str, str]:
+        calls.append((provider, model))
+        return expected
+
+    import fno.adapters.providers.dispatch as dispatch_mod
+
+    monkeypatch.setattr(dispatch_mod, "resolve_explicit_route", resolve)
+    record = ProviderRecord(
+        id="zai",
+        name="Z.AI",
+        harness="claude",
+        auth="api_key",
+        route="zai/glm-5.3[1m]",
+    )
+    repo_root = _write_settings(
+        tmp_path,
+        [record.model_dump(mode="json", exclude_none=True)],
+    )
+
+    env = dispatch_env(record.id, repo_root=repo_root, root=staging_root)
+
+    assert env == expected
+    assert calls == [("zai", "glm-5.3[1m]")]
+
+
 # ---------------------------------------------------------------------------
 # ProviderNotFoundError
 # ---------------------------------------------------------------------------
