@@ -314,6 +314,36 @@ def test_mail_delivery_refuses_when_pane_ls_names_a_different_occupant(monkeypat
     assert [call[3] for call in calls if len(call) > 3 and call[1:3] == ["mux", "pane"]] == ["ls"]
 
 
+def test_mail_delivery_uses_fno_id_for_sessionless_harness(monkeypatch):
+    entry = _entry(session_id=None)
+    entry.name = "addressed"
+    entry.fno_id = "addressed-id"
+    calls: list[list[str]] = []
+
+    def _run(argv, **_kwargs):
+        calls.append(list(argv))
+        if argv[1:4] == ["mux", "pane", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{
+                    "pane_id": 3,
+                    "name": "addressed",
+                    "fno_id": "addressed-id",
+                }]),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _run)
+    assert dispatch._mux_pane_send(entry, "hi", guarded=False, raw=True) is True
+    sends = [call for call in calls if len(call) > 3 and call[1:3] == ["mux", "pane"] and call[3] == "send"]
+    assert sends
+    assert all(
+        "--fno-id" in call and call[call.index("--fno-id") + 1] == "addressed-id"
+        for call in sends
+    )
+
+
 @pytest.mark.parametrize("harness", ["gemini", "opencode"])
 def test_non_claude_recipient_refuses_unpinned_submit_contract(harness, monkeypatch):
     """A successful byte write is not delivery when the harness-specific

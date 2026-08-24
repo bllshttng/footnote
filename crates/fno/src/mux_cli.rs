@@ -4184,11 +4184,6 @@ fn render_reply(
                 }
                 println!("{obj}");
             } else {
-                println!(
-                    "pane {pane_id} pane_name={} registry_fno_id={}",
-                    pane_name.as_deref().unwrap_or("-"),
-                    registry_fno_id.as_deref().unwrap_or("-"),
-                );
                 println!("{text}");
             }
             EXIT_OK
