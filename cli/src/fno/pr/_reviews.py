@@ -1131,7 +1131,6 @@ def publish_coverage_status(
                 f"coverage read unavailable at {head[:8]}; retry the review verb{detail}"
             )
         else:
-            head = covered_head or head
             line = (
                 _coverage_gate.refusal_line(refusal, note)
                 if verdict == _coverage_gate.REFUSED

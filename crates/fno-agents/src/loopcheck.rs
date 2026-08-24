@@ -4701,11 +4701,14 @@ pub enum CoverageVerdict {
 /// honest). Collapsing an API error into 0 produces false refusals; collapsing
 /// it into a count reproduces the bug.
 ///
-/// NOTE (x-0eaf finding 4): `Unknown` is not currently reachable in production.
-/// When the GitHub reviews API call fails, `read_pr_info` returns `Err`, which
-/// the caller handles by block-retry (fail-safe: the session retries, it does
-/// not green or merge). The variant, its receipt, schema enum, and tests exist
-/// so that softening the error path to terminate (rather than block) is a
+/// NOTE (x-0eaf finding 4): a FAILED GitHub reviews read still never yields
+/// `Unknown` - `read_pr_info` returns `Err` and the caller block-retries
+/// (fail-safe: the session retries, it does not green or merge). `Unknown` IS
+/// reachable in production through the login_skipped arm: a `no_external`
+/// session on a repo with an active login gate suppressed the reads the
+/// config demanded, and the honest answer for that axis is Unknown with its
+/// retry remedy (pinned by the no_external-on-active-gate tests). The
+/// receipt, schema enum, and tests exist so softening the error path is a
 /// one-line change, not a redesign. Do not delete it as dead code without
 /// understanding this.
 #[derive(Debug, Clone, PartialEq, Eq)]
