@@ -19,6 +19,8 @@ init script owns the owner_cwd worktree binding and all state.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -949,6 +951,166 @@ def review_invocation_cmd(
     from fno.review_capability import render_self_review_invocation
 
     typer.echo(render_self_review_invocation(harness=harness, project_root=Path.cwd()))
+
+
+def _read_pr_metadata(pr_number: int, cwd: Path) -> dict[str, Any]:
+    """Read the PR identity required before a native self-review can fire."""
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "number,headRefOid,baseRefName",
+            ],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"cannot read PR {pr_number}: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "gh pr view failed").strip()
+        raise RuntimeError(f"cannot read PR {pr_number}: {detail[:240]}")
+    try:
+        metadata = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"PR {pr_number} returned invalid JSON") from exc
+    if not isinstance(metadata, dict):
+        raise RuntimeError(f"PR {pr_number} returned a non-object identity")
+    return metadata
+
+
+def _resolve_self_review_identity() -> tuple[str, str]:
+    """Return the owned harness and full session id for the self-send lane."""
+    from fno.claims.self_identity import resolve_self_identity
+
+    identity = resolve_self_identity()
+    harness = (identity.harness or "").strip()
+    session_id = (identity.session_id or "").strip()
+    if not harness or not session_id:
+        raise RuntimeError("no owned harness identity is available for self-review")
+    return harness, session_id
+
+
+def _send_self_review_payload(
+    *, payload: str, harness: str, session_id: str
+) -> dict[str, str]:
+    """Use the existing raw self-send router and normalize its receipt."""
+    from fno.harness_identity import canonical_handle
+    from fno.mail.cli import _raw_send
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = 0
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        try:
+            _raw_send(
+                canonical_handle(session_id),
+                payload,
+                self_ok=True,
+                review_request=True,
+            )
+        except typer.Exit as exc:
+            exit_code = int(exc.exit_code or 0)
+
+    if exit_code != 0:
+        reason = (stderr.getvalue() or stdout.getvalue()).strip()
+        return {"outcome": "refused", "transport": harness, "reason": reason}
+    receipt = stdout.getvalue().strip()
+    if receipt.startswith("review/start"):
+        transport = "codex-daemon"
+        outcome = "started"
+    elif receipt.startswith("queued"):
+        transport = "mux-pane"
+        outcome = "queued"
+    elif receipt.startswith("injected"):
+        transport = "prompt-line"
+        outcome = "started"
+    else:
+        transport = harness
+        outcome = "unconfirmed"
+    return {"outcome": outcome, "transport": transport}
+
+
+def _self_review_refusal(
+    pr_number: int, reason: str, *, head_sha: str = "", base_branch: str = ""
+) -> dict[str, Any]:
+    """Build one machine-readable refusal without ever entering the send lane."""
+    return {
+        "outcome": "refused",
+        "pr": pr_number,
+        "head_sha": head_sha,
+        "base_branch": base_branch,
+        "reason": reason,
+    }
+
+
+@target_app.command("request-self-review", hidden=True)
+def request_self_review_cmd(
+    pr_number: int = typer.Option(..., "--pr", help="PR number to review."),
+) -> None:
+    """Request one explicit final-head native review through the raw self lane."""
+    from fno.review_capability import (
+        harness_can_self_review,
+        render_self_review_invocation,
+    )
+
+    cwd = Path.cwd()
+    head_sha = _git_out(cwd, "rev-parse", "HEAD") or ""
+    base_branch = ""
+    metadata: dict[str, Any] = {}
+    try:
+        if pr_number <= 0:
+            raise RuntimeError("PR number must be positive")
+        metadata = _read_pr_metadata(pr_number, cwd)
+        pr_head = str(metadata.get("headRefOid") or "").strip()
+        base_branch = str(metadata.get("baseRefName") or "").strip()
+        if not head_sha:
+            raise RuntimeError("cannot resolve local HEAD")
+        if not pr_head:
+            raise RuntimeError("PR has no headRefOid")
+        if head_sha.lower() != pr_head.lower():
+            raise RuntimeError(
+                f"local HEAD {head_sha} does not match PR head {pr_head}; refusing review"
+            )
+        if not base_branch:
+            raise RuntimeError("PR baseRefName is unresolved; refusing review")
+        harness, session_id = _resolve_self_review_identity()
+        if not harness_can_self_review(harness):
+            raise RuntimeError(f"harness {harness!r} has no native review verb")
+        payload = render_self_review_invocation(
+            harness=harness,
+            project_root=cwd,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            base_branch=base_branch,
+        )
+        receipt = _send_self_review_payload(
+            payload=payload, harness=harness, session_id=session_id
+        )
+    except (RuntimeError, ValueError) as exc:
+        receipt = _self_review_refusal(
+            pr_number,
+            str(exc),
+            head_sha=head_sha,
+            base_branch=base_branch,
+        )
+    else:
+        receipt = {
+            **receipt,
+            "pr": pr_number,
+            "head_sha": head_sha,
+            "base_branch": base_branch,
+            "payload": payload,
+        }
+
+    typer.echo(json.dumps(receipt, sort_keys=True))
+    if receipt.get("outcome") in {"refused", "unconfirmed"}:
+        raise typer.Exit(code=2)
 
 
 @target_app.command("resolve-owned-identity", hidden=True)

@@ -1,12 +1,10 @@
-"""Target pre-ship review defaults to an advisory self-review; sigma is opt-in.
+"""Target pre-ship review defaults to a native final-head review; sigma is opt-in.
 
-AC11-HP: no `config.review.reviewers` -> the invoking agent does an advisory
-self-review of its own diff and no six-agent sigma panel is dispatched. The
-self-review is honest about what an in-session agent can actually do: it reads
-its changed files on the main thread. The harness review verb is self-servable
-now (Skill tool / `/review`, or `fno agents mail send '<verb>' --to-self --raw`), and
-the OBLIGATION to run one on a code payload is enforced at the stop gate - this
-function decides only the advisory pre-ship step, not that obligation.
+AC11-HP: no `config.review.reviewers` -> the ship step requests the harness-native
+review verb for the pushed final HEAD through the explicit-target self-send
+router, and no six-agent sigma panel is dispatched. The request is a producer,
+not advisory prose: it names the PR, HEAD SHA, and origin base before it can
+reach the transport.
 AC12-CON: `reviewers` includes `sigma` -> sigma runs exactly once (post-ship, on
 the final HEAD) and the skip logic reads in the same direction as its docs.
 
@@ -18,6 +16,7 @@ the old inverted framing where the bare default spawned the sigma panel.
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 from fno.config import ReviewBlock
 from fno.review_capability import preship_review_plan
@@ -31,10 +30,10 @@ def test_default_reviewers_is_empty_so_native_review_is_the_default():
     assert ReviewBlock().reviewers == []
 
 
-def test_no_reviewers_runs_self_review_and_dispatches_no_sigma():
+def test_no_reviewers_runs_native_review_and_dispatches_no_sigma():
     plan = preship_review_plan([])
-    assert plan.kind == "self"
-    assert "do not dispatch" in plan.reason
+    assert plan.kind == "native"
+    assert "request-self-review" in plan.reason
 
 
 def test_sigma_configured_skips_preship_and_runs_once_post_ship():
@@ -47,9 +46,80 @@ def test_sigma_configured_skips_preship_and_runs_once_post_ship():
 def test_sigma_presence_not_other_reviewers_decides_the_skip():
     # `/code-review` is a different local-attestation reviewer; sigma's presence
     # is what defers the pre-ship step, and a leading slash must not hide it.
-    assert preship_review_plan(["/code-review"]).kind == "self"
+    assert preship_review_plan(["/code-review"]).kind == "native"
     assert preship_review_plan(["/code-review", "sigma"]).kind == "skip"
     assert preship_review_plan(["sigma", "declare"]).kind == "skip"
+
+
+def test_request_self_review_pins_pr_head_and_uses_the_raw_self_route(
+    monkeypatch,
+):
+    import fno.target_cli as target_cli
+    from typer.testing import CliRunner
+
+    calls = []
+    monkeypatch.setattr(
+        target_cli,
+        "_git_out",
+        lambda _cwd, *args: "abc1234" if args == ("rev-parse", "HEAD") else None,
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_read_pr_metadata",
+        lambda _pr, _cwd: {
+            "number": 123,
+            "headRefOid": "abc1234",
+            "baseRefName": "main",
+        },
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_self_review_identity",
+        lambda: ("codex", "codex-session"),
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_send_self_review_payload",
+        lambda **kwargs: calls.append(kwargs) or {"outcome": "started", "transport": "codex-daemon"},
+    )
+
+    result = CliRunner().invoke(target_cli.target_app, ["request-self-review", "--pr", "123"])
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    assert receipt["outcome"] == "started"
+    assert calls[0]["payload"] == (
+        "/review HEAD abc1234 of PR 123 against origin/main"
+    )
+    assert calls[0]["harness"] == "codex"
+
+
+def test_request_self_review_refuses_when_local_head_does_not_match_pr(
+    monkeypatch,
+):
+    import fno.target_cli as target_cli
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(
+        target_cli,
+        "_git_out",
+        lambda _cwd, *args: "local999" if args == ("rev-parse", "HEAD") else None,
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_read_pr_metadata",
+        lambda _pr, _cwd: {
+            "number": 123,
+            "headRefOid": "abc1234",
+            "baseRefName": "main",
+        },
+    )
+    result = CliRunner().invoke(target_cli.target_app, ["request-self-review", "--pr", "123"])
+
+    assert result.exit_code != 0
+    receipt = json.loads(result.output)
+    assert receipt["outcome"] == "refused"
+    assert "HEAD" in receipt["reason"]
 
 
 def test_skill_prose_describes_the_same_direction_as_the_decision():
@@ -60,22 +130,15 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     ship = (REPO_ROOT / "skills" / "target" / "references" / "ship-and-promise.md").read_text()
     routing = (REPO_ROOT / "skills" / "target" / "references" / "phase-invocations.md").read_text()
 
-    # AC11: the default pre-ship step is an advisory self-review, never the sigma
-    # panel and never an instruction to invoke a harness built-in the agent
-    # cannot call (the trap). The old inverted spine advertised the panel as
-    # cheap insurance; it is gone.
+    # AC11: the default ship step requests a native review with an explicit
+    # final-head target. The old advisory default is gone.
     assert "internal sigma panel (cheap insurance)" not in skill
     assert "internal sigma panel (cheap insurance)" not in phase
-    assert "self-review" in skill.lower()
-    # The skill must not tell the in-session agent to run a harness built-in
-    # review verb (Claude /code-review, codex /review) as a self-invocation:
-    # those are user-triggered, so instructing the agent to invoke one itself
-    # ships green and runs no review. If /code-review is mentioned it must be
-    # qualified as not-self-invocable (user-triggered / user-shaped) and routed
-    # through a king trigger or a hand-run, never a self-call.
-    assert "code-review" not in skill.lower() or any(
-        w in skill.lower() for w in ("user-triggered", "user-shaped", "human-triggered", "king")
-    )
+    assert "request-self-review --pr" in skill
+    assert "HEAD" in skill and "origin/main" in skill
+    assert "queued" in skill.lower() and "turn boundary" in skill.lower()
+    assert "advisory self-review by default" not in skill
+    assert "optional escalation" not in skill
 
     # AC12: configured sigma runs once post-ship and the skip reads the same
     # direction as preship_review_plan (sigma configured -> pre-ship skipped).

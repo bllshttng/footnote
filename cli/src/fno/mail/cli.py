@@ -2721,6 +2721,10 @@ def _escalate_to_human(
 
 _CODEX_REVIEW_VERBS = frozenset({"/review", "/code-review"})
 _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
+_EXPLICIT_PR_REVIEW = re.compile(
+    r"^HEAD (?P<head>[0-9a-fA-F]{7,64}) of PR (?P<pr>[1-9][0-9]*) "
+    r"against origin/(?P<base>[A-Za-z0-9][A-Za-z0-9._/-]*)$"
+)
 
 
 def _codex_default_review_base(cwd: str | None) -> str | None:
@@ -2759,6 +2763,16 @@ def _codex_review_target(
         target = f"baseBranch:{default_base}" if default_base else None
         return target, False
     remainder = parts[1].strip()
+    explicit_pr = _EXPLICIT_PR_REVIEW.fullmatch(remainder)
+    if explicit_pr:
+        # The PR/HEAD identity remains in the raw payload for the author and
+        # audit trail. Codex review/start receives the PR's explicit base scope,
+        # which is the diff it must inspect rather than its ambient cwd.
+        return f"baseBranch:origin/{explicit_pr.group('base')}", False
+    if remainder.startswith("HEAD "):
+        # A malformed explicit target must not fall through to
+        # uncommittedChanges, which would review a different diff.
+        return None, False
     base = remainder.split()
     if base[0] == "--base":
         # A named base is an explicit scope request: a malformed form (dangling
@@ -2784,6 +2798,7 @@ def _raw_send(
     self_ok: bool,
     check: bool = False,
     style_exception: Optional[str] = None,
+    review_request: bool = False,
 ) -> None:
     """``fno agents mail send --raw``: fire a verb in a peer by injecting ``payload``
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
@@ -3189,6 +3204,7 @@ def _raw_send(
             # wall's default, the verb never runs, and codex has no transcript
             # confirm, so the receipt still reads `injected`.
             gate=True,
+            review=review_request,
         )
     else:  # claude control.sock - the only other keystroke lane
         delivered = _mail_inject_claude(
@@ -3211,8 +3227,11 @@ def _raw_send(
     # the advice, the same shape the unconfirmed branch below already uses. The
     # advice survives as retrospective ("would have"), which is what it is:
     # nothing here is actionable for the send that just happened.
-    if delivered:
+    if delivered is True or delivered in {"started", "queued"}:
         _record_raw(raw_msg_id, authored_words)
+        if review_request and isinstance(delivered, str):
+            print(delivered)
+            raise typer.Exit(code=0)
         note = ""
         if stripped == "/compact":
             note = (
@@ -3221,6 +3240,12 @@ def _raw_send(
                 "at ~100% context has no headroom left to summarize."
             )
         print(f"injected.{note}" if note else "injected")
+        raise typer.Exit(code=0)
+    if review_request and delivered == "unconfirmed":
+        print(
+            "unconfirmed (review request was not positively classified; do not retry blindly)",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=0)
     # not-confirmed: the transport returns one bool for two different worlds --
     # poll-budget exhaustion on a paste that DID land, and a clean send failure

@@ -19,6 +19,7 @@ is missing is a green gate with no review behind it.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, replace
@@ -545,7 +546,7 @@ class PreShipReviewPlan:
     A prose edit that re-inverts the default flips this contract red.
     """
 
-    kind: Literal["self", "skip"]
+    kind: Literal["native", "skip"]
     reason: str
 
 
@@ -595,8 +596,8 @@ def level_for_diff(changed_files: int, diff_lines: int) -> str:
 def self_review_invocation(harness: Optional[str], level: Optional[str] = "medium") -> str:
     """The recommended self-review invocation for a harness.
 
-    Codex is `/review` bare - prose after the verb flips it to a no-merge-base
-    review target, so nothing is appended. Claude is `/code-review <level>
+    Codex is `/review` bare for the verb, and an explicit target payload may
+    follow it only in the final-head renderer. Claude is `/code-review <level>
     --comment`: it takes its own argument grammar, and that form posts comments
     without writing. `--fix` is absent on purpose. Every caller of this function
     is machinery telling a worker how to clear a head-pinned gate, and a fix
@@ -685,9 +686,14 @@ def diff_review_level(project_root: Optional[Path]) -> Optional[str]:
 
 
 def render_self_review_invocation(
-    harness: Optional[str] = None, project_root: Optional[Path] = None
+    harness: Optional[str] = None,
+    project_root: Optional[Path] = None,
+    *,
+    pr_number: Optional[int] = None,
+    head_sha: Optional[str] = None,
+    base_branch: Optional[str] = None,
 ) -> str:
-    """The full self-review invocation for this session, level sized from the diff.
+    """Render the native review request, optionally pinned to one PR head.
 
     The render every refusal site names (x-dae5): a worker held at the stop
     gate reads THIS string, not a `<level>` placeholder it has no renderer for.
@@ -695,11 +701,33 @@ def render_self_review_invocation(
     never the builder's `medium` default - the standing instruction is to size
     from the diff. With no measurable diff the level is None and the
     placeholder stays: an honest unsized render beats a fabricated one.
-    Harness falls back to the ambient session when not given. Never raises."""
+    Harness falls back to the ambient session when not given. When PR identity
+    is supplied, all three fields are required and the exact PR, HEAD, and
+    origin base are rendered into the one-line payload. Never infer a missing
+    target from the ambient cwd."""
     try:
         h = harness or detect_session().harness
-        return self_review_invocation(h, level=diff_review_level(project_root))
+        rendered = self_review_invocation(h, level=diff_review_level(project_root))
+        target_fields = (pr_number, head_sha, base_branch)
+        if any(value is not None for value in target_fields):
+            if not all(value is not None for value in target_fields):
+                raise ValueError(
+                    "explicit self-review target requires pr_number, head_sha, and base_branch"
+                )
+            if pr_number is None or pr_number <= 0:
+                raise ValueError("explicit self-review target requires a positive PR number")
+            if not re.fullmatch(r"[0-9a-fA-F]{7,64}", str(head_sha or "")):
+                raise ValueError("explicit self-review target requires a commit SHA")
+            base = str(base_branch or "").strip()
+            if base.startswith("origin/"):
+                base = base[len("origin/") :]
+            if not base or any(char.isspace() for char in base) or base.startswith("-"):
+                raise ValueError("explicit self-review target requires a branch name")
+            rendered = f"{rendered} HEAD {head_sha} of PR {pr_number} against origin/{base}"
+        return rendered
     except Exception:  # noqa: BLE001 - advisory text; the gate stays the gate
+        if any(value is not None for value in (pr_number, head_sha, base_branch)):
+            raise
         return self_review_invocation(harness, level=None)
 
 
@@ -710,15 +738,10 @@ def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
     post-ship, against the final HEAD (the attestation gate in
     skills/target/references/ship-and-promise.md), so the pre-ship step is
     skipped to avoid a panel whose attestation any later fix would invalidate.
-    The default - no sigma reviewer - is an advisory SELF-REVIEW: the invoking
-    agent reads its own changed files and reasons about them on the main thread.
-    It is advisory (never gates the promise on its own) and dispatches no sigma
-    panel. A session that wants a real automated review self-invokes its
-    harness's verb (Claude `/code-review`, codex `/review`) or the
-    `fno agents mail send '<verb>' --to-self --raw` fallback, both self-servable now;
-    the obligation to run one on a code payload is enforced at the stop gate
-    (loopcheck.rs), not by this pre-ship step. Sigma is opt-in via
-    `reviewers: [sigma]`.
+    The default - no sigma reviewer - is a native review producer. The ship
+    step requests the harness verb through the explicit-target self-send lane
+    after the PR exists, and does not downgrade to advisory prose. Sigma is
+    opt-in via `reviewers: [sigma]`.
     """
     names = {str(r).strip().lstrip("/") for r in reviewers}
     if "sigma" in names:
@@ -728,9 +751,9 @@ def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
             "pre-ship self-review is skipped",
         )
     return PreShipReviewPlan(
-        "self",
-        "no sigma reviewer; run an advisory self-review of the diff and do not "
-        "dispatch the sigma panel",
+        "native",
+        "no sigma reviewer; run fno do target request-self-review --pr on the "
+        "final pushed HEAD and do not dispatch the sigma panel",
     )
 
 
