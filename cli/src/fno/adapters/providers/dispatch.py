@@ -107,7 +107,9 @@ def _env_for_oauth(record: ProviderRecord, root: Path) -> dict[str, str]:
         return {"HOME": str(account_dir / "home")}
 
 
-def _env_for_api_key(record: ProviderRecord) -> dict[str, str]:
+def _env_for_api_key(
+    record: ProviderRecord, *, settings: Any = None
+) -> dict[str, str]:
     """Build the env dict for an api_key provider; resolve all references.
 
     Raises ProviderUnavailableError naming the offending key if any value
@@ -120,7 +122,7 @@ def _env_for_api_key(record: ProviderRecord) -> dict[str, str]:
                 f"Cannot resolve route {record.route!r} for account {record.id!r}: "
                 "malformed provider/model"
             )
-        route_env = resolve_explicit_route(parsed[0], parsed[1])
+        route_env = resolve_explicit_route(parsed[0], parsed[1], settings=settings)
         if route_env is None:
             raise ProviderUnavailableError(
                 f"Cannot resolve route {record.route!r} for account {record.id!r}: "
@@ -190,7 +192,12 @@ def dispatch_env(
         return {}
 
     # api_key path
-    return _env_for_api_key(record)
+    settings = None
+    if record.route and repo_root is not None:
+        from fno.config import load_settings_for_repo
+
+        settings = load_settings_for_repo(repo_root)
+    return _env_for_api_key(record, settings=settings)
 
 
 # ---------------------------------------------------------------------------
