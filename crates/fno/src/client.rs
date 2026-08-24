@@ -3892,7 +3892,7 @@ impl View {
                 let toggle = |on: bool, label: &str| PopupRow::Entry {
                     glyph: if on { "☑".into() } else { "☐".into() },
                     label: label.into(),
-                    hint: "session only".into(),
+                    hint: String::new(),
                     enabled: true,
                 };
                 rows.push(toggle(self.hover_focus, "focus follows mouse"));
@@ -14141,6 +14141,12 @@ async fn execute_aux_action(
         }
         AuxAction::ToggleHoverFocus => {
             view.hover_focus = !view.hover_focus;
+            let enabled = if view.hover_focus { "true" } else { "false" };
+            let notice = match spawn_config_set("mux.hover_focus", enabled).await {
+                Ok(()) => format!("focus follows mouse: {enabled}"),
+                Err(_) => "focus follows mouse applied this session; save failed".into(),
+            };
+            view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
         AuxAction::BacklogGoto(node) => {
@@ -14166,6 +14172,12 @@ async fn execute_aux_action(
             write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
                 .await
                 .map_err(|e| format!("resize send failed: {e}"))?;
+            let enabled = if view.status_on { "true" } else { "false" };
+            let notice = match spawn_config_set("mux.status_row", enabled).await {
+                Ok(()) => format!("status row: {enabled}"),
+                Err(_) => "status row applied this session; save failed".into(),
+            };
+            view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
         AuxAction::ApplyTheme(name) => {
@@ -24971,8 +24983,8 @@ mod tests {
 
     #[tokio::test]
     async fn sideline_menu_settings_toggle_flips_session_state_and_stays_open() {
-        // US4->US5: MENU -> settings chains, and a toggle flips session state and
-        // keeps the modal open (labeled session-only, no config write).
+        // MENU -> settings chains, and a toggle flips session state and keeps
+        // the modal open while its persistence result is reported.
         let mut v = two_pane_view();
         v.term = (30, 100);
         v.open_sideline_menu(Anchor::Center);
@@ -25005,6 +25017,10 @@ mod tests {
         v.aux.as_mut().unwrap().popup.sel = hf;
         aux_execute_selected(&mut v, &mut buf).await.unwrap();
         assert_eq!(v.hover_focus, !before, "toggle flips session state");
+        assert!(v
+            .notice
+            .as_ref()
+            .is_some_and(|(notice, _)| notice.contains("focus follows mouse")));
         assert!(v.aux.is_some(), "settings stays open for another toggle");
     }
 
@@ -25107,6 +25123,26 @@ mod tests {
         let modal = v.build_settings_modal();
         assert!(modal.actions.contains(&AuxAction::ToggleHoverFocus));
         assert!(modal.actions.contains(&AuxAction::ToggleStatus));
+        assert!(modal.popup.rows.iter().all(|row| !matches!(
+            row,
+            PopupRow::Entry { hint, .. } if hint == "session only"
+        )));
+    }
+
+    #[tokio::test]
+    async fn settings_status_toggle_stays_live_when_the_save_fails() {
+        let mut v = two_pane_view();
+        let before = v.status_on;
+        let mut buf: Vec<u8> = Vec::new();
+        execute_aux_action(&mut v, AuxAction::ToggleStatus, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.status_on, !before);
+        assert!(!buf.is_empty(), "status toggle still sends the resize");
+        assert!(v.notice.as_ref().is_some_and(|(notice, _)| {
+            notice == "status row applied this session; save failed"
+                || notice.starts_with("status row: ")
+        }));
     }
 
     #[test]
