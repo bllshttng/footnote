@@ -6309,7 +6309,10 @@ def _mux_pane_send(
         if guarded:
             send_args.append("--guarded")
         pasted = _run(send_args, stdin_text=text)
-        rc = pasted.returncode if pasted is not None else -1
+        if pasted == _MUX_SEND_UNKNOWN:
+            rc = _MUX_SEND_UNKNOWN
+        else:
+            rc = pasted.returncode if pasted is not None else -1
         if rc != 0:
             if rc == _MUX_SEND_UNKNOWN:
                 last_attempt_phase = "unconfirmed"
