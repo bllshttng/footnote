@@ -2464,10 +2464,16 @@ fn mux_dir_uncached() -> PathBuf {
         return PathBuf::from(dir);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if let Some(dir) = config_state_mux_dir(&cwd) {
-        return dir;
+    match config_state_mux_dir(&cwd) {
+        Some(StateDirOutcome::Dir(dir)) => return dir,
+        // A found-but-declined value already said why, once; it lands on the
+        // same fallback as a miss without a second, contradictory message.
+        Some(StateDirOutcome::Declined) => {
+            return pinned_or_legacy_mux_root(&cwd);
+        }
+        None => {}
     }
-    // Fail closed on an explicit FNO_CONFIG that yielded no usable state_dir
+    // Fail closed on an explicit FNO_CONFIG that yielded no state_dir at all
     // (yaml-pinned, unreadable, missing key): isolation was requested, so the
     // socket dir stays beside the pinned file - standard layouts keep the
     // config inside the state dir, so its parent is the honest isolated root.
@@ -2476,10 +2482,31 @@ fn mux_dir_uncached() -> PathBuf {
     // config with no key leaves the mux MORE isolated than the graph; that
     // asymmetry is deliberate and the warning below names it.
     if let Some(explicit) = std::env::var_os("FNO_CONFIG").filter(|d| !d.is_empty()) {
-        let path = PathBuf::from(&explicit);
+        // Anchored against cwd so a bare relative pin resolves to one dir per
+        // invocation site instead of wherever each process happens to run.
+        let path = cwd.join(PathBuf::from(&explicit));
         warn_once_pinned_without_state_dir(&path);
         return path.with_file_name("mux");
     }
+    legacy_mux_root()
+}
+
+/// The fallback after the config ladder said nothing usable: beside a pinned
+/// `FNO_CONFIG` when one is set (isolation was requested), else the
+/// pre-config-chain global root.
+#[cfg(not(test))]
+fn pinned_or_legacy_mux_root(cwd: &std::path::Path) -> PathBuf {
+    if let Some(explicit) = std::env::var_os("FNO_CONFIG").filter(|d| !d.is_empty()) {
+        return cwd.join(PathBuf::from(&explicit)).with_file_name("mux");
+    }
+    legacy_mux_root()
+}
+
+/// The pre-config-chain global mux root, the ONE source for both the
+/// resolver's final fallback and `mux doctor`'s stranding check, so the two
+/// can never drift apart.
+#[cfg(not(test))]
+pub(crate) fn legacy_mux_root() -> PathBuf {
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
@@ -2488,19 +2515,30 @@ fn mux_dir_uncached() -> PathBuf {
         .join("mux")
 }
 
-/// `<state_dir>/mux` from the config ladder, or `None` when no candidate
-/// carries a usable value (absent, non-scalar, empty, or a value this mirror
-/// cannot expand - `{vault}` templates, `$VAR`. Python expands both; we
-/// decline rather than create a literal `{vault}` or `$HOME` directory, and
-/// say so once because the fallback then differs from Python's root).
+/// What the config ladder said about `state_dir`.
 #[cfg(not(test))]
-fn config_state_mux_dir(cwd: &std::path::Path) -> Option<PathBuf> {
+enum StateDirOutcome {
+    /// `<state_dir>/mux`, resolved.
+    Dir(PathBuf),
+    /// A value was found but this mirror cannot expand it (`{vault}`
+    /// templates, `$VAR` references, `~user` prefixes). Python expands all
+    /// three; this mirror declines rather than create a literal `{vault}`,
+    /// `$HOME`, or `$HOME/user` directory, and has already warned once.
+    Declined,
+}
+
+/// `<state_dir>/mux` from the config ladder. `None` means no candidate
+/// carried the key at all; [`StateDirOutcome::Declined`] means one carried a
+/// value this mirror cannot use, and the caller must not re-report that as a
+/// missing key.
+#[cfg(not(test))]
+fn config_state_mux_dir(cwd: &std::path::Path) -> Option<StateDirOutcome> {
     let raw = crate::digest_overlay::config_top_str(cwd, "state_dir")?;
     match expand_state_dir(&raw, cwd) {
-        Some(dir) => Some(dir.join("mux")),
+        Some(dir) => Some(StateDirOutcome::Dir(dir.join("mux"))),
         None => {
             warn_once_unexpandable_state_dir(&raw);
-            None
+            Some(StateDirOutcome::Declined)
         }
     }
 }
@@ -2509,14 +2547,18 @@ fn config_state_mux_dir(cwd: &std::path::Path) -> Option<PathBuf> {
 /// `fno.paths`' resolution of `state_dir` (expanduser, relative against the
 /// process cwd). `None` when the value is empty, carries a `{template}`
 /// variable or a `$VAR` reference (Python's expandvars/vars pass runs first
-/// there; this mirror expands neither), or is `~`-prefixed with no HOME to
-/// expand against.
+/// there; this mirror expands neither), is a `~user` form (Python resolves it
+/// through the passwd database; `$HOME/user` would be a different root), or
+/// is `~`-prefixed with no HOME to expand against.
 fn expand_state_dir(raw: &str, cwd: &std::path::Path) -> Option<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() || raw.contains('{') || raw.contains('$') {
         return None;
     }
     let path = if let Some(rest) = raw.strip_prefix('~') {
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return None;
+        }
         let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
         let rest = rest.strip_prefix('/').unwrap_or(rest);
         let mut p = PathBuf::from(home);
@@ -3870,11 +3912,13 @@ mod tests {
             assert_eq!(expand_state_dir("~/.fno/", cwd), Some(home.join(".fno")));
             assert_eq!(expand_state_dir("~", cwd), Some(home));
         }
-        // Unusable values decline rather than guess: template variables and
-        // $VAR references this mirror cannot expand, and emptiness.
+        // Unusable values decline rather than guess: template variables,
+        // $VAR references, and ~user forms this mirror cannot expand (Python
+        // resolves ~user through the passwd database, not $HOME/user).
         assert_eq!(expand_state_dir("{vault}/.fno", cwd), None);
         assert_eq!(expand_state_dir("$HOME/demo", cwd), None);
         assert_eq!(expand_state_dir("${HOME}/demo", cwd), None);
+        assert_eq!(expand_state_dir("~demo/.fno", cwd), None);
         assert_eq!(expand_state_dir("", cwd), None);
         assert_eq!(expand_state_dir("   ", cwd), None);
     }

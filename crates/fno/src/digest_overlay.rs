@@ -457,10 +457,12 @@ pub(crate) fn config_top_str(cwd: &Path, key: &str) -> Option<String> {
 
 /// The file ladder shared by both key shapes: `$FNO_CONFIG` (sole candidate,
 /// read as-is) -> project roots -> global. `from_file` reads one candidate; a
-/// `None` walks on to the next.
+/// `None` walks on to the next. The FNO_CONFIG read is `var_os` so a
+/// non-UTF-8 pin reaches the reader exactly as it reaches every other
+/// consumer of that variable.
 fn resolve_config_key(cwd: &Path, from_file: &dyn Fn(&Path) -> Option<String>) -> Option<String> {
-    if let Some(explicit) = non_empty_env("FNO_CONFIG") {
-        return from_file(Path::new(&explicit));
+    if let Some(explicit) = non_empty_env_os("FNO_CONFIG") {
+        return from_file(&PathBuf::from(explicit));
     }
     for root in config_roots(cwd) {
         if let Some(v) = from_file(&root.join(".fno/config.toml")) {
@@ -471,6 +473,15 @@ fn resolve_config_key(cwd: &Path, from_file: &dyn Fn(&Path) -> Option<String>) -
         .map(|p| PathBuf::from(p).with_file_name("config.toml"))
         .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")));
     global.and_then(|g| from_file(&g))
+}
+
+/// `std::env::var_os` but an empty value reads as unset, the OsString twin of
+/// [`non_empty_env`] for callers that build paths rather than parse text.
+fn non_empty_env_os(key: &str) -> Option<std::ffi::OsString> {
+    match std::env::var_os(key) {
+        Some(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
 }
 
 /// `mux.<key>` from a config body, kept as a thin wrapper over the general
@@ -508,13 +519,19 @@ fn read_value(content: &str, section: &str, key: &str) -> Option<String> {
     scalar(t.get(section)?.as_table()?.get(key)?)
 }
 
-/// Read a top-level `<key>` (no section) from a flat config.toml body. A key
-/// of the same name inside a section does NOT answer here: the file is flat
-/// by design, so `state_dir` at the top level and `[config] state_dir` are
-/// different addresses and only the first is this crate's address.
+/// Read a top-level `<key>` (no section) from a flat config.toml body,
+/// accepting the legacy `[config]`-wrapped shape Python's loader unwraps
+/// (`SettingsModel::_unwrap`), so a pre-migration file cannot split the mux
+/// from the root every Python surface uses. Other sections never answer: the
+/// file is flat by design, so `[paths] state_dir` is not this key.
 fn read_top_value(content: &str, key: &str) -> Option<String> {
     let t = content.parse::<toml::Table>().ok()?;
-    scalar(t.get(key)?)
+    let direct = t.get(key);
+    let wrapped = t
+        .get("config")
+        .and_then(|c| c.as_table())
+        .and_then(|c| c.get(key));
+    scalar(direct.or(wrapped)?)
 }
 
 /// `mux.<key>` from a body; thin wrapper over [`read_value`], retained for the
@@ -659,14 +676,18 @@ mod tests {
         let cfg = "schema_version = 1\nstate_dir = \"~/.fno/\"\n";
         assert_eq!(read_top_value(cfg, "state_dir"), Some("~/.fno/".into()));
         assert_eq!(read_top_value(cfg, "schema_version"), Some("1".into()));
-        // Absent key, and a same-named key inside a section is a different
-        // address: the file is flat by design.
-        assert_eq!(read_top_value(cfg, "plans_dir"), None);
+        // The legacy [config]-wrapped shape answers too (Python's loader
+        // unwraps it), but any OTHER section stays a different address.
         assert_eq!(
             read_top_value("[config]\nstate_dir = \"/x\"\n", "state_dir"),
+            Some("/x".into())
+        );
+        assert_eq!(
+            read_top_value("[paths]\nstate_dir = \"/x\"\n", "state_dir"),
             None
         );
-        // Malformed body and non-scalar values are misses, never guesses.
+        // Absent key, malformed body, non-scalar values: misses, never guesses.
+        assert_eq!(read_top_value(cfg, "plans_dir"), None);
         assert_eq!(read_top_value("not toml {{{", "state_dir"), None);
         assert_eq!(
             read_top_value("state_dir = [\"a\", \"b\"]\n", "state_dir"),

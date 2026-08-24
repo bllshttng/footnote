@@ -1499,18 +1499,9 @@ fn gather_checks() -> Vec<Check> {
 /// the old root.
 #[cfg(not(test))]
 fn legacy_mux_root_check() -> Check {
-    let legacy = std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(std::path::PathBuf::from)
-        .map(|h| h.join(".fno").join("mux"));
-    let Some(legacy) = legacy else {
-        return Check {
-            name: "legacy mux root".into(),
-            verdict: Verdict::Na,
-            detail: "no HOME to compare roots".into(),
-            remedy: None,
-        };
-    };
+    // The same helper the resolver's own fallback uses, so this comparison
+    // can never drift from what mux_dir actually falls back to.
+    let legacy = proto::legacy_mux_root();
     let resolved = proto::mux_dir();
     if resolved == legacy {
         return Check {
