@@ -43,7 +43,7 @@ from fno import paths
 from fno.agents.reachability import _ACTIVE_STATES as ACTIVE_STATES
 from fno.agents.session_truth import STALLED_AFTER_S
 from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
-from fno.pr._status import _classify, _latest_per_name
+from fno.pr._status import _classify, _latest_per_name, without_coverage_statuses
 
 #: Priorities a king treats as its own work. Lower bands are the operator's to
 #: rank up; a king that dispatched p2 would spend the fleet on the wrong thing.
@@ -620,7 +620,13 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         # conclusion into one flat set poisons that set with the stale result.
         # A body gate that re-ran green then still read red here, twice, the
         # night this was measured.
-        deduped = _latest_per_name(pr.get("statusCheckRollup") or [])
+        # The coverage projections are excluded here too (the PR's own
+        # every-surface-or-nowhere invariant): a pending diagnostic stamp on a
+        # covered, CI-green PR must not silently drop it from the king's
+        # ready list - every other surface filters both contexts.
+        deduped = without_coverage_statuses(
+            _latest_per_name(pr.get("statusCheckRollup") or [])
+        )
         classes = {_classify(c) for c in deduped}
         if "fail" in classes:
             continue
