@@ -407,3 +407,25 @@ def test_not_found_names_the_pr_number_as_the_thing_to_check() -> None:
     reason = _rest._rest_reason(Res())
     assert "not found" in reason.lower()
     assert "Check the PR number" in reason
+
+
+def test_digits_containing_404_are_not_a_not_found() -> None:
+    class Res:
+        stderr = "gh: run 14045 failed with status 8"
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    # "1404" as a substring of "14045" must not read as the 404 status;
+    # this failure has no class, so it names the raw line and nothing more.
+    assert "not found" not in reason.lower()
+    assert "Check the PR number" not in reason
+
+
+def test_bare_404_status_is_a_not_found() -> None:
+    class Res:
+        stderr = "gh: HTTP 404 (https://api.github.com/repos/o/r/pulls/999)"
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    assert "not found" in reason.lower()
+    assert "Check the PR number" in reason

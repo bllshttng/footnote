@@ -276,7 +276,11 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 code = _serve(row, stale=now - _num(row, "ts") >= _ttl())
                 if code >= 0:
                     return code
-            break  # newest row only: an expired window means read on
+            break  # newest row only: an expired window means read on, and so
+            # does an unservable one (no output / corrupt exit) - a row that
+            # cannot answer cannot stand in for the live read the window is
+            # trying to avoid; the live read is the only path left, exactly
+            # the choice the head-unreadable arm below makes when no row serves.
     info, _head_reason = fetch_pr_info_rest(pr, cwd=cwd)
     if info is None:
         if refresh:

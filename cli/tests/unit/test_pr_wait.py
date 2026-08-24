@@ -142,3 +142,29 @@ def test_cli_shape_flag_values_do_not_read_as_pr_numbers(monkeypatch, capsys) ->
     rc = _wait.main(["9", "--until", "settled", "--timeout", "1m", "--interval", "5"])
     assert rc == 0
     assert '"settled": true' in capsys.readouterr().out
+
+
+def test_torn_last_json_line_is_not_answered_by_an_older_line(monkeypatch, capsys) -> None:
+    # A partially-written newest line must not hand the wait an OLDER payload
+    # (stale JSON paired with the current exit code); the tick reads as no
+    # answer, the wait keeps polling, and the deadline decides.
+    from fno.pr import _cache
+
+    lines = [
+        '{"pr": "9", "verdict": "green", "settled": true, "green": true}\n',
+        '{"pr": "9", "verdict": "gr',
+    ]
+
+    def f(pr, cwd=None, refresh=False):
+        for ln in lines:
+            sys.stdout.write(ln)
+        return 0
+
+    monkeypatch.setattr(_cache, "cached_status", f)
+    rc = _wait.wait_status(
+        "9", until="settled", timeout=60, interval=5, sleeper=lambda s: None,
+        clock=_Clock(0, 0, 70),
+    )
+    # Never settled on the torn read: the deadline fires with the last code.
+    assert rc == 2
+    assert "still not settled" in capsys.readouterr().err

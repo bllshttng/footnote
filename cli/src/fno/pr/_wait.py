@@ -63,12 +63,16 @@ def _poll(pr: str, cwd: Optional[str]) -> "tuple[int, dict, str, str]":
     for line in reversed(out.getvalue().splitlines()):
         line = line.strip()
         if line.startswith("{"):
+            # The LAST JSON line is the answer, even when it is torn (a
+            # partially-written line): scanning on to an older parseable line
+            # would pair stale JSON with the current exit code.
             try:
                 parsed = json.loads(line)
             except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                payload = parsed
+                pass
+            else:
+                if isinstance(parsed, dict):
+                    payload = parsed
             break
     return rc, payload, out.getvalue(), err.getvalue()
 
