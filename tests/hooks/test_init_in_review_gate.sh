@@ -98,7 +98,8 @@ run_init() {
         cd "$cwd"
         unset TARGET_START TARGET_INPUT TARGET_PLAN_PATH TARGET_ALLOW_IN_REVIEW \
               TARGET_SIZE STUB_STATUS STUB_PR STUB_MARKER STUB_ARCHIVED STUB_ARCHIVED_RC
-        env TARGET_START=1 CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" \
+        env TARGET_START=1 TARGET_SESSION_ID=review-gate-test-session \
+            CLAUDE_PLUGIN_ROOT="$REPO_ROOT" HOME="$cwd" \
             PATH="$STUB_BIN:$PATH" "$@" bash "$INIT_SCRIPT" 2>&1
     )
     return $?
