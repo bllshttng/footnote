@@ -16,6 +16,41 @@ import time
 import pytest
 
 from fno.pr import _cache, _rest, _status
+from fno.pr._proc import Result
+
+# Verbatim as measured 2026-08-24T01:01:17Z during a live secondary refusal:
+# GitHub's own wording contains NO "secondary", so the refusal this suite
+# simulates must come through the REAL classifier against that body - a
+# paraphrase containing the phrase would gate on wording this fix removes.
+_VERBATIM_403 = (
+    "gh: API rate limit exceeded for user ID 4994564. If you reach out to "
+    "GitHub Support for help, please include the request ID "
+    "FAEB:283161:6EF36:99B72:6A8B97DD ... Terms of Service (...) (HTTP 403)"
+)
+
+
+def _secondary_reason():
+    """A refusal reason carrying the structured verdict, built the way the
+    live path builds it: the verbatim 403 body classified against an exempt
+    bucket that still reads healthy (core 4980/5000 - the measured shape)."""
+
+    def runner(cmd, cwd=None, timeout=None):
+        return Result(
+            0,
+            json.dumps(
+                {
+                    "resources": {
+                        "core": {"remaining": 4980, "limit": 5000, "reset": 4102444800},
+                        "graphql": {"remaining": 4446, "limit": 5000, "reset": 4102444800},
+                    }
+                }
+            ),
+            "",
+        )
+
+    reason = _rest._rest_reason(Result(1, "", _VERBATIM_403), runner=runner)
+    assert reason.rate_limit_class == "secondary"
+    return reason
 
 
 @pytest.fixture
@@ -33,13 +68,19 @@ def cache_env(tmp_path, monkeypatch):
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
     # The head read cached_status keys the row on: movable per test, countable,
-    # and failable to exercise the unreadable-head path.
-    head = {"sha": "a" * 40, "reads": 0, "fail": False}
+    # and failable to exercise the unreadable-head path. `fail_reason` decides
+    # whether a failure carries the structured secondary verdict.
+    head = {
+        "sha": "a" * 40,
+        "reads": 0,
+        "fail": False,
+        "fail_reason": "HTTP 403: You have exceeded a secondary rate limit",
+    }
 
     def fake_info(pr, cwd=None, runner=None, repo=None):
         head["reads"] += 1
         if head["fail"]:
-            return None, "HTTP 403: You have exceeded a secondary rate limit"
+            return None, head["fail_reason"]
         return (
             {
                 "pr": int(pr),
@@ -235,7 +276,7 @@ def test_secondary_limit_failure_sets_backoff_and_serves_degraded(cache_env, mon
     3 - the prior verdict survives only under stale_verdict. A watcher
     grepping settled:true must wait out the window, not wake on green."""
     cache_dir, head = cache_env
-    err = (None, "HTTP 403: You have exceeded a secondary rate limit | back off")
+    err = (None, _secondary_reason())
     fetch, calls = _fetch_spy([_GREEN, err])
     monkeypatch.setattr(_status, "_fetch", fetch)
     assert _cache.cached_status("42") == 0
@@ -282,7 +323,7 @@ def test_stale_serve_renders_the_degraded_line(cache_env, monkeypatch, capsys):
     `ready` without touching `ready_blockers`, so without the reason in the
     clause the line would read NOT-ready beside `no blockers`."""
     cache_dir, head = cache_env
-    err = (None, "HTTP 403: You have exceeded a secondary rate limit | back off")
+    err = (None, _secondary_reason())
     fetch, calls = _fetch_spy([_GREEN, err])
     monkeypatch.setattr(_status, "_fetch", fetch)
     assert _cache.cached_status("42") == 0
@@ -335,10 +376,64 @@ def test_head_unreadable_with_no_row_goes_loud(cache_env, monkeypatch, capsys):
     assert out["settled"] is False
 
 
+def test_head_read_refused_by_secondary_limit_arms_the_window(
+    cache_env, monkeypatch, capsys
+):
+    """The p0 chain: the head read is the first network call a waiter makes,
+    so its refusal is the moment the window must open. Without arming here the
+    head-unreadable arm serves the newest row degraded and returns BEFORE the
+    locked-miss writer ever runs, so every waiter re-attempts the head read
+    each tick at full rate - the fixed-interval retry that sustains a
+    secondary window - while the zero-network pre-check reads a backoff_until
+    nothing ever wrote."""
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
+    head["fail"] = True
+    head["fail_reason"] = _secondary_reason()
+    assert _cache.cached_status("42") == 3
+    row = json.loads(_row_path(cache_dir).read_text())
+    assert row["backoff_until"] > time.time(), "the head refusal must arm the window"
+    assert row["fail_count"] == 1
+    assert row["output"]["verdict"] == "green", "the last good verdict survives"
+    capsys.readouterr()
+    reads_after_refusal = head["reads"]
+    # Inside the window the pre-check short-circuits: the fresh row serves
+    # verbatim (x-4eac semantics) and the head read itself never fires.
+    assert _cache.cached_status("42") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["cached"] is True
+    assert head["reads"] == reads_after_refusal, "no head read inside the window"
+    assert calls["n"] == 1, "the window must not re-read the check set"
+
+
+def test_head_read_refused_without_the_verdict_arms_nothing(
+    cache_env, monkeypatch, capsys
+):
+    """A head failure that is NOT a classified secondary limit (plain prose,
+    no structured field) must not arm a window: gating on prose here would
+    rebuild the coupling this fix removes."""
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
+    head["fail"] = True  # default fail_reason is plain prose, no class
+    assert _cache.cached_status("42") == 3
+    row = json.loads(_row_path(cache_dir).read_text())
+    assert not row.get("backoff_until"), "prose alone must not arm a window"
+    # And the next tick still spends its head read (no window to ride out).
+    reads_before = head["reads"]
+    assert _cache.cached_status("42") == 3
+    assert head["reads"] == reads_before + 1
+
+
 def test_backoff_is_exponential_and_capped(cache_env, monkeypatch, capsys):
     cache_dir, head = cache_env
     monkeypatch.setattr(_cache, "_backoff_cap", lambda: 900)
-    err = (None, "HTTP 403: You have exceeded a secondary rate limit | back off")
+    err = (None, _secondary_reason())
     fetch, _ = _fetch_spy([err])
     monkeypatch.setattr(_status, "_fetch", fetch)
     for _ in range(6):
@@ -374,7 +469,7 @@ def test_first_read_secondary_failure_stays_loud(cache_env, monkeypatch, capsys)
     """No prior verdict exists: the backoff row serves the ERROR row (verdict
     error, settled false), never a fabricated green."""
     cache_dir, head = cache_env
-    err = (None, "HTTP 403: You have exceeded a secondary rate limit | back off")
+    err = (None, _secondary_reason())
     fetch, calls = _fetch_spy([err])
     monkeypatch.setattr(_status, "_fetch", fetch)
     assert _cache.cached_status("42") == 4
@@ -518,7 +613,7 @@ def test_a_refused_refresh_never_deepens_the_backoff_window(
     exists to refuse.
     """
     cache_dir, head = cache_env
-    err = (None, "HTTP 403: You have exceeded a secondary rate limit | back off")
+    err = (None, _secondary_reason())
     monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
     _cache.cached_status("42")
     p = _row_path(cache_dir)
@@ -609,7 +704,7 @@ def test_a_window_expiring_during_the_read_still_holds_the_refresh(
     fleet's wait - the exact harm the comment beside it refuses.
     """
     cache_dir, head = cache_env
-    err = (None, "HTTP 403: You have exceeded a secondary rate limit")
+    err = (None, _secondary_reason())
     monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
     _cache.cached_status("42")
     p = _row_path(cache_dir)

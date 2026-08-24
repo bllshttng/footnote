@@ -582,30 +582,22 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
 
     pr_json, reason = _fetch(pr, cwd)
     if pr_json is None:
-        sys.stderr.write(
-            verdict_line(
-                {
-                    "pr": pr,
-                    "verdict": "error",
-                    "settled": False,
-                    "green": False,
-                    "reason": reason,
-                }
-            )
-            + "\n"
-        )
-        sys.stdout.write(
-            json.dumps(
-                {
-                    "pr": pr,
-                    "verdict": "error",
-                    "settled": False,
-                    "green": False,
-                    "reason": reason,
-                }
-            )
-            + "\n"
-        )
+        error = {
+            "pr": pr,
+            "verdict": "error",
+            "settled": False,
+            "green": False,
+            "reason": reason,
+        }
+        # The rate-limit class rides as a FIELD, never as prose for a sibling
+        # module to substring-match: `_cache` arms the fleet backoff on this
+        # value, and prose gating broke silently the day GitHub reworded the
+        # refusal body (it contains no "secondary"; see `fno.pr._rest`).
+        rate_limit_class = getattr(reason, "rate_limit_class", "")
+        if rate_limit_class:
+            error["rate_limit_class"] = rate_limit_class
+        sys.stderr.write(verdict_line(error) + "\n")
+        sys.stdout.write(json.dumps(error) + "\n")
         return 4
 
     rollup = pr_json.get("statusCheckRollup") or []
