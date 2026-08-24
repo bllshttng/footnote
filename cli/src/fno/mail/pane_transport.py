@@ -100,19 +100,25 @@ def _identity_receipt_refusal(
     session: str,
     pane_id: int,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    check_identity: bool = True,
+    expected_name: Optional[str] = None,
+    expected_fno_id: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Read the target frame with its identity receipt when a row is known."""
     from fno.agents.mux_spawn import DispatchAskError, _run_mux
 
-    entry = _pane_entry(session, pane_id)
-    if entry is None:
+    if not check_identity:
         return None, None
-    expected_name = getattr(entry, "name", None)
-    expected_fno_id = (
-        getattr(entry, "fno_id", None)
-        or getattr(entry, "harness_session_id", None)
-        or getattr(entry, "session_id", None)
-    )
+    if expected_name is None or expected_fno_id is None:
+        entry = _pane_entry(session, pane_id)
+        if entry is None:
+            return None, None
+        expected_name = getattr(entry, "name", None)
+        expected_fno_id = (
+            getattr(entry, "fno_id", None)
+            or getattr(entry, "harness_session_id", None)
+            or getattr(entry, "session_id", None)
+        )
     # Legacy pane rows can carry the durable worker name before a canonical
     # fno_id is recorded. Keep their existing frame gate; the identity receipt
     # requires the full address and is enforced for that addressable shape.
@@ -162,6 +168,9 @@ def prompt_refusal(
     pane_id: int,
     harness: str,
     runner: Optional[Callable[..., "subprocess.CompletedProcess[str]"]] = None,
+    check_identity: bool = True,
+    expected_name: Optional[str] = None,
+    expected_fno_id: Optional[str] = None,
 ) -> Optional[str]:
     """Read the pane and return a refusal reason when it is showing an option prompt.
 
@@ -189,7 +198,12 @@ def prompt_refusal(
     runner = runner if runner is not None else subprocess.run
 
     identity_refusal, receipt_text = _identity_receipt_refusal(
-        session=session, pane_id=pane_id, runner=runner
+        session=session,
+        pane_id=pane_id,
+        runner=runner,
+        check_identity=check_identity,
+        expected_name=expected_name,
+        expected_fno_id=expected_fno_id,
     )
     if identity_refusal:
         return identity_refusal
@@ -316,6 +330,9 @@ def prepare(
     gate: bool = True,
     wrap_body: bool = True,
     runner: Optional[Callable[..., "subprocess.CompletedProcess[str]"]] = None,
+    check_identity: bool = True,
+    expected_name: Optional[str] = None,
+    expected_fno_id: Optional[str] = None,
 ) -> str:
     """Gate, then wrap. Returns the bytes an enveloped pane send should type.
 
@@ -338,7 +355,13 @@ def prepare(
         )
     if gate:
         refusal = prompt_refusal(
-            session=session, pane_id=pane_id, harness=resolved, runner=runner
+            session=session,
+            pane_id=pane_id,
+            harness=resolved,
+            runner=runner,
+            check_identity=check_identity,
+            expected_name=expected_name,
+            expected_fno_id=expected_fno_id,
         )
         if refusal:
             raise PaneSendRefused(refusal)

@@ -6070,6 +6070,12 @@ def _mux_pane_send(
 
     harness = getattr(entry, "harness", "") or ""
     input_caps = capabilities(harness)
+    expected_name = getattr(entry, "name", None)
+    expected_fno_id = (
+        getattr(entry, "fno_id", None)
+        or getattr(entry, "harness_session_id", None)
+        or getattr(entry, "session_id", None)
+    )
     submit_keys = input_caps["submit_keys"]
     if submit_keys == ["unsupported"]:
         # Name the TABLE and the KEY, not just the layer that did not run. The
@@ -6140,6 +6146,11 @@ def _mux_pane_send(
                 # `wrap=False` for the gate-only case: the body is already what
                 # has to land, byte for byte.
                 wrap_body=not raw,
+                check_identity=bool(expected_name and expected_fno_id),
+                expected_name=expected_name,
+                expected_fno_id=(
+                    str(expected_fno_id) if expected_fno_id is not None else None
+                ),
             )
         except PaneSendRefused as exc:
             print(f"mux pane {pane_id} send refused: {exc}", file=sys.stderr)
