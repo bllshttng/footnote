@@ -1938,6 +1938,10 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
         if let Some(anchor_pid) = anchor {
             existing.pid = Some(anchor_pid);
             existing.pid_unavailable = false;
+            // v2 exists ONLY to mark pid_unavailable; leaving it set after the
+            // repair makes serialize_claim's own validator refuse the renewal.
+            // `_rebound_claim(new_pid_unavailable=False)` resets it in kind.
+            existing.schema_version = SCHEMA_VERSION;
             existing.host = hostname();
             let mine = machine_id();
             existing.machine_id = if mine.is_empty() { None } else { Some(mine) };
@@ -2208,6 +2212,42 @@ mod tests {
             classify(&after, None),
             ClaimState::Live,
             "a held anchor must still read LIVE, or the repair did nothing"
+        );
+    }
+
+    #[test]
+    fn renew_resets_schema_version_when_the_anchor_repairs_a_pid_unavailable_claim() {
+        // A PID-unavailable claim carries schema_version 2, and the validator
+        // rejects version 2 without the marker. Re-anchoring clears the marker,
+        // so it must also reset the version or serialize_claim refuses the
+        // renewal outright - the Python twin _rebound_claim resets both.
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        o.pid_unavailable = true;
+        let _ = acquire("node:x-rebound", "target-session:me", o);
+        assert_eq!(read_claim(&td, "node:x-rebound").schema_version, 2);
+
+        let stub = stub_session_pid(td.path(), &std::process::id().to_string());
+        std::env::set_var("FNO_BIN", &stub);
+        let result = renew(
+            "node:x-rebound",
+            "target-session:me",
+            120_000,
+            Some(td.path()),
+        );
+        std::env::remove_var("FNO_BIN");
+        assert_eq!(result, Ok(true));
+
+        let after = read_claim(&td, "node:x-rebound");
+        assert!(!after.pid_unavailable);
+        assert_eq!(after.pid, Some(std::process::id() as i32));
+        assert_eq!(after.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            classify(&after, None),
+            ClaimState::Live,
+            "a re-anchored claim must read LIVE, not SUSPECT"
         );
     }
 
