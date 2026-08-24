@@ -30,7 +30,7 @@ Invoke via `/fno:<verb>`. Front door:
 | `/fno:pr` | PR lifecycle. Routes: `create` (Haiku worker), `check`, `merged`. |
 | `/fno:fix` | Repair. Routes: `fix` (default), `investigate`. |
 
-Everything else stays invocable by full name: `/fno:blueprint`, `/fno:execute` (`execute waves` for orchestration), `/fno:ship` (`ship pr` = `/fno:pr`, `ship doc`), `/fno:setup`, `/fno:triage`, `/fno:agent`, `/fno:mail`, `/fno:ship-docs`, `/fno:audit`, `/fno:speculate`. The session skill list enumerates all of them; this curated set is the entry point, not an access boundary.
+Everything else stays invocable by full name: `/fno:blueprint`, `/fno:execute` (`execute waves` for orchestration), `/fno:ship` (`ship pr` = `/fno:pr`, `ship doc`), `/fno:setup`, `/fno:triage`, `/fno:agent`, `/fno:mail`, `/fno:law`, `/fno:ship-docs`, `/fno:audit`, `/fno:speculate`. The session skill list enumerates all of them; this curated set is the entry point, not an access boundary.
 
 ## 2. CLI primitives (`fno <verb>`, mechanical, fast)
 
