@@ -2127,7 +2127,9 @@ fn acquire_named_session_claim(
             11,
             format!(
                 "fno agents resume: session {label} is held live by another writer \
-                 ({holder}, pid={pid:?}, host={host}); not opening a second writer on one transcript."
+                 ({holder}, pid={}, host={host}); not opening a second writer on one transcript.",
+                // The Python twins print the bare pid / `None`, never `Some(n)`.
+                pid.map(|p| p.to_string()).unwrap_or_else(|| "None".to_string())
             ),
         )),
         AcquireOutcome::Error(e) => Err((
