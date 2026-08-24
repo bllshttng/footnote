@@ -16,9 +16,20 @@
 #   - at most once per THROTTLE window (a stamp-file mtime gate makes almost
 #     every tool call a cheap stat+exit; only an aging claim shells `fno`).
 #
-# Never blocks the tool call: silent no-op on not-holder / throttled / no
-# manifest; a refresh error logs to stderr and still exits 0. Touches the claim
-# lockfile only (via `fno agents claim refresh`) - never the immutable manifest.
+# Never blocks the tool call: every exit is 0. Not-holder / throttled / no
+# manifest are still no-ops for the TOOL, but the first two now write an
+# outcome to the stamp ledger and say so on stderr. A heartbeat whose only
+# output was a fresh 0-byte stamp read as reassurance while the claim it
+# existed to protect had been gone for hours - success and nothing-happened
+# were indistinguishable, the assert-a-positive-marker trap firing inside the
+# claim machinery itself. The ledger is the fix: every cycle names what it
+# did (renewed / refresh_unverified / refresh_failed / not_holder / no_claim
+# / corrupted / status_unreadable), a renewal only counts when a re-read of
+# the claim store confirms expires_at advanced past the pre-read deadline,
+# and a ledger gone stale while a session works means the hook itself stopped
+# firing - its own actionable signal.
+# Touches the claim lockfile only (via `fno agents claim refresh`) - never
+# the immutable manifest.
 # `refresh_claim` takes the same per-key recovery mutex as `reap`/`acquire`
 # (closes a resurrection race - see core.py), so on rare contention with a
 # concurrent reap sweep or acquire on the SAME key this call can wait up to
@@ -75,6 +86,14 @@ fi
 # idempotent and only extends, so "at most once per 20 min while active" is both
 # correct and the cheapest thing that keeps a live claim from lapsing.
 THROTTLE="${FNO_CLAIM_HEARTBEAT_THROTTLE:-1200}"  # 20 min
+
+# One jq filter for "an integral expires_at, else nothing", shared by the
+# handover verification and the main-path renewal verification. A schema tweak
+# (float deadlines, a renamed field) then edits one filter, not four drifting
+# copies that already disagreed in strictness.
+_JQ_INTEGRAL_EXPIRES='
+  if ((.expires_at | type) == "number") and ((.expires_at | floor) == .expires_at)
+  then .expires_at else empty end'
 
 # Separate from claim TTL: a 30s stamp stays fresh inside the 120s peer window.
 LIVE_THROTTLE=30
@@ -282,10 +301,8 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       | jq -r '.state // empty' 2>/dev/null)"
     _RECORDED_HANDOVER_HOLDER="$(printf '%s' "$_HANDOVER_STATUS" \
       | jq -r '.holder // empty' 2>/dev/null)"
-    _RECORDED_HANDOVER_EXPIRES="$(printf '%s' "$_HANDOVER_STATUS" | jq -r '
-      if ((.expires_at | type) == "number") and
-         ((.expires_at | floor) == .expires_at)
-      then .expires_at else empty end' 2>/dev/null)"
+    _RECORDED_HANDOVER_EXPIRES="$(printf '%s' "$_HANDOVER_STATUS" \
+      | jq -r "$_JQ_INTEGRAL_EXPIRES" 2>/dev/null)"
     if [[ "$_HANDOVER_STATUS_VALID" != 1 ]]; then
       echo "claim-heartbeat: handover claim status unreadable for node:$_HANDOVER_NODE; refresh remains due" >&2
     # The short-lived spawner normally exits before init, so its unexpired
@@ -374,6 +391,16 @@ if [[ "$IS_CODEX_HOOK" -eq 1 ]]; then
   fi
 fi
 
+# The session identity the ledger reports: the claim holder's own credential
+# when it names one (target-session:<id>), else the manifest's harness id. The
+# recorded pid is deliberately not used - a harness restart invalidates the pid
+# while the session id stays correct for the session's whole life.
+LEDGER_SID="${CLAIM_HOLDER#target-session:}"
+if [[ -z "$LEDGER_SID" || "$LEDGER_SID" == "$CLAIM_HOLDER" || "$LEDGER_SID" == "null" ]]; then
+  LEDGER_SID="$MANIFEST_CLAUDE_SID"
+fi
+[[ -n "$LEDGER_SID" && "$LEDGER_SID" != "null" ]] || LEDGER_SID="$SESSION_ID"
+
 # Throttle: skip when the stamp is younger than THROTTLE seconds.
 STAMP="$CWD/.fno/.claim-heartbeat.stamp"
 if [[ -f "$STAMP" ]]; then
@@ -381,6 +408,27 @@ if [[ -f "$STAMP" ]]; then
   mtime="$(stat -c %Y "$STAMP" 2>/dev/null || stat -f %m "$STAMP" 2>/dev/null || echo 0)"
   (( now > 0 && mtime > 0 && now - mtime < THROTTLE )) && exit 0
 fi
+
+# One-snapshot outcome ledger, written atomically (temp + mv in the same dir).
+# key=value lines, not JSON: the readers are humans and grep mid-incident, and
+# one printf writes it. A throttle-window reader sees either the outcome of the
+# last completed cycle or a stale mtime (the hook stopped firing) - never a
+# bare touch that could mean anything.
+write_stamp() {
+  local outcome="$1" expires_at="${2:-}"
+  local tmp="${STAMP}.tmp.$$"
+  {
+    printf 'ts=%s\n' "$(date +%s 2>/dev/null || echo 0)"
+    printf 'outcome=%s\n' "$outcome"
+    printf 'node=%s\n' "$NODE_ID"
+    printf 'session_id=%s\n' "$LEDGER_SID"
+    printf 'holder_state=%s\n' "${HOLDER_STATE:-unknown}"
+    # An `if`, not `[[ ]] &&`: the group's exit status is its last command's,
+    # and a falsy short-circuit here would skip the mv and lose the ledger.
+    if [[ -n "$expires_at" ]]; then printf 'expires_at=%s\n' "$expires_at"; fi
+  } > "$tmp" 2>/dev/null && mv -f "$tmp" "$STAMP" 2>/dev/null || true
+  rm -f "$tmp" 2>/dev/null || true
+}
 
 command -v fno >/dev/null 2>&1 || exit 0   # no CLI -> silent no-op
 
@@ -417,20 +465,84 @@ _status_json() {
     fno agents claim status "node:$NODE_ID" --json 2>/dev/null)"
   printf '%s' "$out"
 }
-HOLDER="$(_status_json | jq -r '.holder // empty' 2>/dev/null)"
+_STATUS_ONCE="$(_status_json)"
+HOLDER="$(printf '%s' "$_STATUS_ONCE" | jq -r '.holder // empty' 2>/dev/null)"
+HOLDER_STATE="$(printf '%s' "$_STATUS_ONCE" | jq -r '.state // empty' 2>/dev/null)"
+PRE_EXPIRES="$(printf '%s' "$_STATUS_ONCE" | jq -r "$_JQ_INTEGRAL_EXPIRES" 2>/dev/null)"
+# An instrument that answers garbage answers nothing: shape-validate before
+# trusting any field, the same contract the handover block above enforces.
+# Without this, a traceback on stdout (or a missing jq making every parse
+# silently empty) reads as "no claim" and prints UNPROTECTED advice on an
+# unmeasured node, once per window, forever.
+_STATUS_SHAPE_OK="$(printf '%s' "$_STATUS_ONCE" | jq -r '
+  if (type == "object") and ((.state | type) == "string")
+     and (.state == "free" or .state == "live" or .state == "suspect"
+          or .state == "stale" or .state == "corrupted")
+  then 1 else 0 end' 2>/dev/null)"
+if [[ -z "$_STATUS_ONCE" || "$_STATUS_SHAPE_OK" != 1 ]]; then
+  # Empty or unparseable output is the instrument failing (bound fired,
+  # binary silent, non-JSON on stdout), not a verdict about the claim - name
+  # it as such instead of reading it as not-holder. The next window retries.
+  echo "claim-heartbeat: claim status unreadable for node:$NODE_ID; renewal UNVERIFIED this window" >&2
+  write_stamp status_unreadable
+  exit 0
+fi
+if [[ "$HOLDER_STATE" == "corrupted" ]]; then
+  # Corrupted is UNKNOWN ownership, not positively-free: the file exists, a
+  # holder may still be working the node, and every recovery verb refuses on
+  # it. Telling this session to "take a claim" dead-ends; say what is true.
+  echo "claim-heartbeat: node:$NODE_ID claim file corrupted; ownership unverifiable, renewal impossible this window" >&2
+  write_stamp corrupted
+  exit 0
+fi
 if [[ "$HOLDER" != "$CLAIM_HOLDER" ]]; then
-  touch "$STAMP" 2>/dev/null || true
+  if [[ -z "$HOLDER" || "$HOLDER_STATE" == "free" || "$HOLDER_STATE" == "stale" ]]; then
+    echo "claim-heartbeat: node:$NODE_ID NOT held by session $LEDGER_SID (state=${HOLDER_STATE:-unknown}) - work is UNPROTECTED; take a claim or leave this node" >&2
+    write_stamp no_claim
+  else
+    echo "claim-heartbeat: node:$NODE_ID held by $HOLDER (state=$HOLDER_STATE), not by this session - split-brain or handover in progress" >&2
+    write_stamp not_holder
+  fi
   exit 0
 fi
 
 # We hold it: renew the TTL. Best-effort - a failure (including a bound
 # firing on held-mutex contention) logs but never blocks the tool call past
-# REFRESH_TIMEOUT.
+# REFRESH_TIMEOUT. The renewal is then VERIFIED against EXTERNAL truth, not
+# the refresh command's own echo: a 0 exit proves nothing (the PID-liveness
+# no-op also exits 0), and a receipt of the write is not the write. The
+# post-read re-reads the same status resolver the pre-read used, so a
+# wrong-root write or a lost rename shows the old deadline and reads
+# unverified - one bounded status call per window.
 REFRESH_TIMEOUT="${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}"
-if ! with_timeout "$REFRESH_TIMEOUT" \
-    fno agents claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" \
-    >/dev/null 2>&1; then
-  echo "claim-heartbeat: refresh failed or timed out for node:$NODE_ID (non-fatal)" >&2
+REFRESH_JSON="$(with_timeout "$REFRESH_TIMEOUT" \
+  fno agents claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" --json \
+  2>/dev/null)"
+REFRESH_RC=$?
+if [[ "$REFRESH_RC" -ne 0 ]]; then
+  # rc names the failure class where stderr cannot (it is discarded at
+  # capture): 1 contention, 2 expired-before-refresh, 3 gone/corrupted,
+  # 4 holder mismatch, 124 the bound fired. A 2 means reclaim territory, a
+  # 4 means split-brain - neither should read as "transient, retry".
+  echo "claim-heartbeat: refresh failed for node:$NODE_ID rc=$REFRESH_RC (1 contention, 2 expired, 3 gone/corrupted, 4 holder mismatch, 124 timeout; non-fatal)" >&2
+  write_stamp refresh_failed
+  exit 0
 fi
-touch "$STAMP" 2>/dev/null || true
+# jq's `//` treats false as absent, so a boolean refreshed flag needs the
+# explicit type guard to be observable at all.
+REFRESHED_FLAG="$(printf '%s' "$REFRESH_JSON" | jq -r '
+  if (.refreshed | type) == "boolean" then .refreshed else empty end' 2>/dev/null)"
+NEW_EXPIRES="$(printf '%s' "$REFRESH_JSON" | jq -r "$_JQ_INTEGRAL_EXPIRES" 2>/dev/null)"
+POST_EXPIRES="$(_status_json | jq -r "$_JQ_INTEGRAL_EXPIRES" 2>/dev/null)"
+if [[ "$REFRESHED_FLAG" == "false" ]]; then
+  echo "claim-heartbeat: refresh of node:$NODE_ID was a no-op (PID-liveness claim); TTL not extended" >&2
+  write_stamp refresh_unverified
+elif [[ "$NEW_EXPIRES" =~ ^[0-9]+$ && "$POST_EXPIRES" =~ ^[0-9]+$ ]] \
+      && (( POST_EXPIRES >= NEW_EXPIRES )) \
+      && { [[ -z "$PRE_EXPIRES" ]] || (( POST_EXPIRES > PRE_EXPIRES )); }; then
+  write_stamp renewed "$POST_EXPIRES"
+else
+  echo "claim-heartbeat: refresh of node:$NODE_ID exited 0 but the store disagrees (pre=${PRE_EXPIRES:-unset} echoed=${NEW_EXPIRES:-unset} re-read=${POST_EXPIRES:-unset}); renewal UNVERIFIED" >&2
+  write_stamp refresh_unverified
+fi
 exit 0
