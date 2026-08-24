@@ -34,3 +34,10 @@ If the enact command returns a real `d-...` receipt, report that id and the subj
 ## Safety boundary
 
 The only positive authority marker is the permission decision for the exact proposal-bound command. The engine validates the proposal id, content hash, session id, permission posture, tool input, expiry, and single-use status. It does this before minting a decision id or writing any store. Direct operator-authority CLI calls keep their existing refusal behavior. Environment scrubbing is forbidden.
+
+## Known Limitations and Deferred Work
+
+- Claude Code is the only harness with the approval gate. Other harnesses can compose and resume proposals, but cannot enact them.
+- UserPromptSubmit exposes no human-origin discriminator on the measured payload. The permission fallback remains the authority event until a trusted field exists.
+
+- See [LIMITATIONS.md](LIMITATIONS.md).
