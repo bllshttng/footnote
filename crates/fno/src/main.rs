@@ -335,7 +335,17 @@ fn main() {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
         }
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
-        Role::MuxWeb(web_args) => exit_mux(fno::web::serve(web_args)),
+        Role::MuxWeb(web_args) => {
+            // The bridge serves for hours, so the warning its startup
+            // resolution recorded must surface NOW: exit_mux would print it
+            // only after the socket closes, and a signal kill never exits
+            // through it at all. The exit-time repeat is the cheap cost of
+            // the early word (run_server takes the same trade).
+            if let Some((warning, _)) = proto::pending_config_warning() {
+                eprintln!("{warning}");
+            }
+            exit_mux(fno::web::serve(web_args))
+        }
         Role::MuxPane(rest) => exit_mux(mux_cli::pane(&rest, env_session.as_deref())),
         Role::MuxBlock(rest) => exit_mux(mux_cli::block(&rest, env_session.as_deref())),
         Role::MuxTab(rest) => exit_mux(mux_cli::tab(&rest, env_session.as_deref())),
