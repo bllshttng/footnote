@@ -1910,7 +1910,10 @@ fn stderr_smells_rate_limit(stderr: &str) -> bool {
 /// at all still says secondary: an unreadable instrument must not send the
 /// session to wait for a primary reset that never comes, while backing off
 /// is safe under either truth. Mirrors `fno.pr._rest`'s live-bucket
-/// classifier and its fail-safe; keep the two in sync.
+/// classifier and its fail-safe. One deliberate difference: this fn also
+/// classifies GRAPHQL reads, so a drained graphql bucket on a graphql read
+/// names the primary quota here; the Python classifier sees REST reads only
+/// (whose primary quota is core) and needs no graphql arm.
 fn refusal_is_secondary(
     stderr: &str,
     probe: Option<&GraphqlQuota>,

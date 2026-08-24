@@ -47,6 +47,11 @@ _WRAPPER_NOISE = re.compile(r"^(fno config|gh proxy):", re.IGNORECASE)
 # (a secondary refusal lands with core wherever it stood), and mislabeling
 # secondary as CORE tells the fleet to wait for a reset instead of backing
 # off - the exact harm this classifier exists to prevent. Only 0 is CORE.
+# This classifier sees REST reads only, whose primary quota IS core; the
+# graphql bucket has no say here. The Rust twin (`refusal_is_secondary` in
+# crates/fno-agents/src/loopcheck.rs) classifies graphql reads too and adds
+# a drained-graphql guard for them - same verdict discipline, one more
+# explaining bucket where a second transport exists.
 
 
 class RestReason(str):
