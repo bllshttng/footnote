@@ -76,6 +76,10 @@
           },
           {
             "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/codex-review-findings.sh"
+          },
+          {
+            "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/target-stop-hook.sh"
           },
           {
