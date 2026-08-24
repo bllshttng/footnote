@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# check-coverage-context-parity.sh - one context string, one override label,
-# every surface that spells them.
+# check-coverage-context-parity.sh - required and diagnostic contexts, one
+# override label, every surface that spells them.
 #
-# The `fno/review-coverage` commit-status context and the `coverage-override`
+# The `fno/review-coverage` and `fno/review-coverage-unavailable` commit-status
+# contexts and the `coverage-override`
 # label each live in several places: the Python publisher (the canonical
 # consts), the ruleset data the operator applies, the Rust publisher, the
 # refresher workflow. Each suite pins only its own
@@ -43,6 +44,12 @@ if [ -z "$py_ctx" ]; then
   echo "FAIL: cannot read COVERAGE_STATUS_CONTEXT from cli/src/fno/pr/_reviews.py" >&2
   exit 1
 fi
+py_unavailable_ctx="$(grep -oE 'COVERAGE_UNAVAILABLE_STATUS_CONTEXT = "[^"]+"' \
+  "$ROOT/cli/src/fno/pr/_reviews.py" | head -1 | sed 's/.*"\(.*\)"/\1/')"
+if [ -z "$py_unavailable_ctx" ]; then
+  echo "FAIL: cannot read COVERAGE_UNAVAILABLE_STATUS_CONTEXT from cli/src/fno/pr/_reviews.py" >&2
+  exit 1
+fi
 py_label="$(grep -oE 'COVERAGE_OVERRIDE_LABEL = "[^"]+"' \
   "$ROOT/cli/src/fno/pr/_reviews.py" | head -1 | sed 's/.*"\(.*\)"/\1/')"
 if [ -z "$py_label" ]; then
@@ -67,8 +74,25 @@ then
 fi
 expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
   "const COVERAGE_STATUS_CONTEXT: &str = \"$py_ctx\";" "the Rust publisher"
+expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
+  "const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = \"$py_unavailable_ctx\";" "the Rust diagnostic publisher"
 expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
   "^[[:space:]]*ctx=$py_ctx\$" "the refresher workflow"
+if python3 - "$ROOT/scripts/ci/merge-ruleset.json" "$py_unavailable_ctx" <<'EOF'
+import json, sys
+
+d = json.load(open(sys.argv[1]))
+want = sys.argv[2]
+rsc = next((r for r in d.get("rules", []) if r.get("type") == "required_status_checks"), None)
+checks = (rsc or {}).get("parameters", {}).get("required_status_checks") or []
+contexts = [str(c.get("context")) for c in checks if isinstance(c, dict)]
+sys.exit(0 if want not in contexts else 1)
+EOF
+then
+  :
+else
+  mismatch "the ruleset data must not require diagnostic context '$py_unavailable_ctx'"
+fi
 # The override label: the 3am release valve, spelled by every writer. The Rust
 # needle includes the jq quoting because that inline string is the label's only
 # Rust spelling.

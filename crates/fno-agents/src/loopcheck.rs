@@ -2522,7 +2522,7 @@ fn read_pr_info(
         // failing-name set, and the pending flag can never answer off different
         // rollups (a superseded run read as the current one is the exact lie
         // this dedup exists to remove).
-        let checks = latest_per_name(&checks);
+        let checks = without_coverage_statuses(&latest_per_name(&checks));
 
         let failing = failing_check_names(&checks);
         let has_pending = ci_has_pending_checks(&checks);
@@ -2921,6 +2921,26 @@ fn latest_per_name(checks: &Value) -> Value {
     Value::Array(kept)
 }
 
+fn without_coverage_statuses(checks: &Value) -> Value {
+    let Some(arr) = checks.as_array() else {
+        return checks.clone();
+    };
+    Value::Array(
+        arr.iter()
+            .filter(|check| {
+                let name = check.get("name").and_then(|v| v.as_str());
+                let context = check.get("context").and_then(|v| v.as_str());
+                let is_coverage = |value: Option<&str>| {
+                    value == Some(COVERAGE_STATUS_CONTEXT)
+                        || value == Some(COVERAGE_UNAVAILABLE_STATUS_CONTEXT)
+                };
+                !is_coverage(name) && !is_coverage(context)
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
 fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     let arr = match checks.as_array() {
         Some(a) => a,
@@ -3213,6 +3233,24 @@ fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
 /// and refresher workflow pin the same name from their own surfaces, and a
 /// context string that splits in two is a green marker on nothing.
 const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
+const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = "fno/review-coverage-unavailable";
+
+fn coverage_unavailable_description(head: &str) -> String {
+    format!(
+        "coverage read unavailable at {}; retry the review verb",
+        short_sha(head)
+    )
+}
+
+fn coverage_instrument_status(coverage: &Coverage, head: &str) -> (&'static str, String) {
+    match coverage {
+        Coverage::Unknown => ("pending", coverage_unavailable_description(head)),
+        Coverage::Covered(_) => (
+            "success",
+            format!("coverage read healthy at {}", short_sha(head)),
+        ),
+    }
+}
 
 /// Whether `name` is the local reviewer Python's gate demands a pass from,
 /// with the same leading-slash tolerance `_coverage_has_local_pass` applies.
@@ -3298,10 +3336,17 @@ fn current_coverage_description(gh_bin: &str, cwd: &Path, head: &str) -> Option<
 }
 
 /// The one POST shape every coverage-marker writer uses.
-fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, description: &str) {
+fn post_coverage_status(
+    gh_bin: &str,
+    cwd: &Path,
+    head: &str,
+    context: &str,
+    state: &str,
+    description: &str,
+) {
     let target = format!("repos/:owner/:repo/statuses/{head}");
     let state_arg = format!("state={state}");
-    let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
+    let context_arg = format!("context={context}");
     let description_arg = format!("description={description}");
     let _ = Command::new(gh_bin)
         .args([
@@ -3377,8 +3422,19 @@ fn publish_coverage_status(
                 gh_bin,
                 cwd,
                 pr_head_oid,
+                COVERAGE_STATUS_CONTEXT,
                 "success",
                 "coverage-override label applied on the PR",
+            );
+            let (diagnostic_state, diagnostic_description) =
+                coverage_instrument_status(&coverage.coverage, pr_head_oid);
+            post_coverage_status(
+                gh_bin,
+                cwd,
+                pr_head_oid,
+                COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+                diagnostic_state,
+                &diagnostic_description,
             );
             return;
         }
@@ -3424,13 +3480,7 @@ fn publish_coverage_status(
             format!("covered: {} reviewed at {}", n, short_sha(pr_head_oid)),
         )
     } else if matches!(coverage.coverage, Coverage::Unknown) {
-        (
-            "failure",
-            format!(
-                "coverage unknown (gh read failed) at {}; retry the review verb",
-                short_sha(pr_head_oid)
-            ),
-        )
+        ("pending", coverage_unavailable_description(pr_head_oid))
     } else {
         // The sized invocation rides along when it fits: GitHub caps this
         // description at 140 chars and rejects an overflow whole, which would
@@ -3459,7 +3509,24 @@ fn publish_coverage_status(
         };
         ("failure", description)
     };
-    post_coverage_status(gh_bin, cwd, pr_head_oid, state, &description);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_STATUS_CONTEXT,
+        state,
+        &description,
+    );
+    let (diagnostic_state, diagnostic_description) =
+        coverage_instrument_status(&coverage.coverage, pr_head_oid);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+        diagnostic_state,
+        &diagnostic_description,
+    );
 }
 
 /// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
@@ -7076,7 +7143,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // Same dedup as the main CI read: the fingerprint's CI arm
                     // must describe the latest run per name, not a superseded
                     // one a newer push already replaced.
-                    compute_ci_conclusion(&latest_per_name(&cv)).unwrap_or(CiConclusion::None)
+                    compute_ci_conclusion(&without_coverage_statuses(&latest_per_name(&cv)))
+                        .unwrap_or(CiConclusion::None)
                 }
                 _ => CiConclusion::None,
             };
@@ -9373,6 +9441,10 @@ fn build_block_reason(
             "CI red on PR #{}: {} failed. Read the failing log: `fno do pr logs {}`.",
             pr.number, check_name, pr.number
         );
+    }
+
+    if matches!(pr.coverage.coverage, Coverage::Unknown) {
+        return coverage_unavailable_description(&pr.head_oid);
     }
 
     if !pr.reviewed {
@@ -12938,6 +13010,27 @@ mod tests {
     }
 
     #[test]
+    fn unknown_coverage_names_the_read_remedy_not_a_ci_failure() {
+        let mut pr = watch_pr();
+        pr.ci_conclusion = CiConclusion::Success;
+        pr.ci_has_pending = false;
+        pr.coverage = CoverageReport {
+            coverage: Coverage::Unknown,
+            verdicts: vec![],
+        };
+        let reason = build_block_reason(&pr, "abc", true, true);
+        assert!(
+            reason.contains("coverage read unavailable"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("retry the review verb"), "got: {reason}");
+        assert!(!reason.contains("CI red"), "got: {reason}");
+        assert!(!reason.contains("failed"), "got: {reason}");
+        assert!(!reason.contains("Read the failing log"), "got: {reason}");
+        assert!(!reason.contains("fno do pr logs"), "got: {reason}");
+    }
+
+    #[test]
     fn unwatched_async_nudge_ci_pending_teaches_arm_and_tag() {
         // AC3-HP: the CI-pending block message must instruct arming a
         // harness-tracked watcher with a timeout and emitting <watching>,
@@ -15076,6 +15169,35 @@ mod tests {
         assert!(failing_check_names(&checks).is_empty());
         // Malformed input never panics, yields empty.
         assert!(failing_check_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn coverage_statuses_are_not_generic_ci_checks() {
+        let checks = serde_json::json!([
+            {"name": "ci", "bucket": "pass"},
+            {"name": "fno/review-coverage", "bucket": "pending"},
+            {"name": "fno/review-coverage-unavailable", "bucket": "pending"}
+        ]);
+        let filtered = without_coverage_statuses(&checks);
+        assert_eq!(filtered.as_array().unwrap().len(), 1);
+        assert_eq!(
+            compute_ci_conclusion(&filtered).unwrap(),
+            CiConclusion::Success
+        );
+        assert!(failing_check_names(&filtered).is_empty());
+        assert!(!ci_has_pending_checks(&filtered));
+    }
+
+    #[test]
+    fn coverage_instrument_status_is_pending_only_when_the_read_is_unknown() {
+        let unknown = coverage_instrument_status(&Coverage::Unknown, "abc123456789");
+        assert_eq!(unknown.0, "pending");
+        assert!(unknown.1.contains("coverage read unavailable"));
+        assert!(unknown.1.contains("retry the review verb"));
+
+        let known = coverage_instrument_status(&Coverage::Covered(0), "abc123456789");
+        assert_eq!(known.0, "success");
+        assert!(known.1.contains("coverage read healthy"));
     }
 
     #[test]

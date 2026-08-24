@@ -7240,8 +7240,8 @@ fn status_posts(record: &Path) -> Vec<String> {
 
 const BOT_LANE: &str = "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n";
 
-/// Covered fixture: BOTH emitters post one status each, to the same PR head
-/// sha, under the one context string, green because the review is at HEAD.
+/// Covered fixture: BOTH emitters post the required verdict and the diagnostic
+/// instrument-health status to the same PR head sha.
 #[test]
 fn coverage_status_publish_fires_from_both_emitters_to_the_pr_head() {
     let tmp = TempDir::new().unwrap();
@@ -7288,21 +7288,42 @@ fn coverage_status_publish_fires_from_both_emitters_to_the_pr_head() {
     assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
 
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 2, "one POST per emitter, got: {posts:?}");
+    assert_eq!(posts.len(), 4, "two POSTs per emitter, got: {posts:?}");
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| post.contains("context=fno/review-coverage "))
+            .count(),
+        2,
+        "required context must be posted by both emitters: {posts:?}"
+    );
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| post.contains("context=fno/review-coverage-unavailable "))
+            .count(),
+        2,
+        "diagnostic context must be posted by both emitters: {posts:?}"
+    );
     for post in &posts {
         assert!(
             post.contains(&format!("statuses/{PUB_HEAD}")),
             "posted to the wrong sha: {post}"
         );
-        assert!(
-            post.contains("context=fno/review-coverage"),
-            "posted under the wrong context: {post}"
-        );
-        assert!(
-            post.contains("state=success")
-                && post.contains(&format!("reviewed at {}", &PUB_HEAD[..8])),
-            "covered fixture must post a success naming count+sha: {post}"
-        );
+        if post.contains("context=fno/review-coverage ") {
+            assert!(
+                post.contains("state=success")
+                    && post.contains(&format!("reviewed at {}", &PUB_HEAD[..8])),
+                "covered fixture must post a success naming count+sha: {post}"
+            );
+        } else {
+            assert!(
+                post.contains("context=fno/review-coverage-unavailable ")
+                    && post.contains("state=success")
+                    && post.contains("coverage read healthy"),
+                "covered fixture must clear instrument unavailability: {post}"
+            );
+        }
     }
 }
 
@@ -7325,9 +7346,17 @@ fn coverage_status_publish_posts_failure_when_unreviewed() {
     assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
 
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "verb arm posts exactly once: {posts:?}");
-    assert!(posts[0].contains("state=failure"), "got: {}", posts[0]);
-    assert!(posts[0].contains("context=fno/review-coverage"));
+    assert_eq!(posts.len(), 2, "verb arm posts both contexts: {posts:?}");
+    let required = posts
+        .iter()
+        .find(|post| post.contains("context=fno/review-coverage "))
+        .unwrap();
+    let diagnostic = posts
+        .iter()
+        .find(|post| post.contains("context=fno/review-coverage-unavailable "))
+        .unwrap();
+    assert!(required.contains("state=failure"), "got: {required}");
+    assert!(diagnostic.contains("state=success"), "got: {diagnostic}");
 }
 
 /// A configured local `code-review` reviewer with no head-pinned local pass:
@@ -7350,11 +7379,20 @@ fn coverage_status_publish_requires_local_code_review_pass_when_configured() {
     assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
 
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "verb arm posts exactly once: {posts:?}");
+    assert_eq!(posts.len(), 2, "verb arm posts both contexts: {posts:?}");
     assert!(
-        posts[0].contains("state=failure"),
-        "a bot review must not satisfy the local code-review lane: {}",
-        posts[0]
+        posts
+            .iter()
+            .any(|post| post.contains("context=fno/review-coverage ")
+                && post.contains("state=pending")),
+        "an unreadable local coverage read must stay pending: {posts:?}"
+    );
+    assert!(
+        posts.iter().any(
+            |post| post.contains("context=fno/review-coverage-unavailable ")
+                && post.contains("state=pending")
+        ),
+        "the diagnostic context must name the unavailable read: {posts:?}"
     );
 }
 
@@ -7409,9 +7447,20 @@ fn coverage_status_posts_covered_after_refused_label_reads_find_no_override() {
     let recorded = fs::read_to_string(&record).unwrap();
     assert_eq!(recorded.matches("label-read-").count(), 3, "{recorded}");
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "{recorded}");
-    assert!(posts[0].contains("state=success"), "{}", posts[0]);
-    assert!(posts[0].contains("covered: 1 reviewed at"), "{}", posts[0]);
+    assert_eq!(posts.len(), 2, "{recorded}");
+    assert!(
+        posts
+            .iter()
+            .any(|post| post.contains("state=success") && post.contains("covered: 1 reviewed at")),
+        "{posts:?}"
+    );
+    assert!(
+        posts.iter().any(
+            |post| post.contains("context=fno/review-coverage-unavailable ")
+                && post.contains("coverage read healthy")
+        ),
+        "{posts:?}"
+    );
 }
 
 #[test]
@@ -7432,8 +7481,14 @@ fn coverage_status_posts_failure_after_refused_label_reads_find_no_status() {
     let recorded = fs::read_to_string(&record).unwrap();
     assert_eq!(recorded.matches("label-read-").count(), 3, "{recorded}");
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "{recorded}");
-    assert!(posts[0].contains("state=failure"), "{}", posts[0]);
+    assert_eq!(posts.len(), 2, "{recorded}");
+    assert!(
+        posts
+            .iter()
+            .any(|post| post.contains("context=fno/review-coverage ")
+                && post.contains("state=failure")),
+        "{posts:?}"
+    );
 }
 
 #[test]
@@ -7455,9 +7510,22 @@ fn coverage_status_retries_a_label_read_then_honors_the_override() {
     assert_eq!(recorded.matches("label-read-").count(), 2, "{recorded}");
     assert!(!recorded.contains("status-description-read"), "{recorded}");
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "{recorded}");
-    assert!(posts[0].contains("state=success"), "{}", posts[0]);
-    assert!(posts[0].contains("coverage-override"), "{}", posts[0]);
+    assert_eq!(posts.len(), 2, "{recorded}");
+    assert!(
+        posts
+            .iter()
+            .any(|post| post.contains("context=fno/review-coverage ")
+                && post.contains("state=success")
+                && post.contains("coverage-override")),
+        "{posts:?}"
+    );
+    assert!(
+        posts.iter().any(
+            |post| post.contains("context=fno/review-coverage-unavailable ")
+                && post.contains("state=success")
+        ),
+        "{posts:?}"
+    );
 }
 
 // ── the king driver arm ───────────────────────────────────────────────────────
