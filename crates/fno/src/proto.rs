@@ -2717,23 +2717,29 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
     }
     let yaml = crate::digest_overlay::global_settings_yaml_sibling()?;
     let body = std::fs::read_to_string(&yaml).ok()?;
-    // The top-level VALUE, not a substring: an indented line is a nested
-    // mapping's key, not the global one, and a trailing `# comment` is not
-    // part of the value yaml hands Python. Either misread would warn on
-    // every verb forever over no divergence.
+    // The top-level VALUE, not a substring: a trailing `# comment` is not
+    // part of the value yaml hands Python, and a nested mapping's key is not
+    // the global one. The one nested shape that IS canonical is the legacy
+    // `config:` wrapper Python unwraps, so a state_dir directly under a
+    // top-level `config:` key counts. Any other misread would warn on every
+    // verb forever over no divergence.
+    let mut under_config = false;
     let value = body.lines().find_map(|l| {
-        if l.starts_with(|c| c == ' ' || c == '\t') {
-            return None;
-        }
+        let indented = l.starts_with(|c| c == ' ' || c == '\t');
         let (key, val) = l.split_once(':')?;
-        key.trim().eq_ignore_ascii_case("state_dir").then(|| {
-            val.split(" #")
-                .next()
-                .unwrap_or(val)
-                .trim()
-                .trim_matches(|c| c == '\'' || c == '"')
-        })
+        let key = key.trim();
+        if !indented {
+            under_config = key.eq_ignore_ascii_case("config") && val.trim().is_empty();
+            return key.eq_ignore_ascii_case("state_dir").then_some(val);
+        }
+        (under_config && key.eq_ignore_ascii_case("state_dir")).then_some(val)
     })?;
+    let value = value
+        .split(" #")
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"');
     if value.is_empty() {
         return None;
     }

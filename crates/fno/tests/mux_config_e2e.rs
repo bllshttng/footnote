@@ -232,3 +232,49 @@ fn a_global_yaml_state_dir_warns_only_when_it_diverges() {
         "a diverging yaml must warn: {stderr}"
     );
 }
+
+#[test]
+fn a_wrapped_yaml_state_dir_counts_like_a_top_level_one() {
+    // The legacy `config:` wrapper is the shape Python unwraps as canonical,
+    // so the divergence hint must read a state_dir indented under it. An
+    // agreeing wrapped value stays silent; a diverging one warns.
+    let agree = Scratch::new("muxwya");
+    std::fs::create_dir_all(agree.0.join("home").join(".fno")).unwrap();
+    std::fs::write(
+        agree.0.join("home").join(".fno").join("settings.yaml"),
+        format!(
+            "config:\n  state_dir: {}\n",
+            agree.0.join("home").join(".fno").display()
+        ),
+    )
+    .unwrap();
+    let mut cmd = agree.command();
+    cmd.env_remove("FNO_MUX_DIR");
+    cmd.env_remove("FNO_GLOBAL_SETTINGS_PATH");
+    let out = cmd.args(["mux", "ls"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("cannot read"),
+        "an agreeing wrapped yaml must not warn: {stderr}"
+    );
+
+    let diverge = Scratch::new("muxwyd");
+    std::fs::create_dir_all(diverge.0.join("home").join(".fno")).unwrap();
+    std::fs::write(
+        diverge.0.join("home").join(".fno").join("settings.yaml"),
+        format!(
+            "config:\n  state_dir: {}\n",
+            diverge.0.join("elsewhere").display()
+        ),
+    )
+    .unwrap();
+    let mut cmd = diverge.command();
+    cmd.env_remove("FNO_MUX_DIR");
+    cmd.env_remove("FNO_GLOBAL_SETTINGS_PATH");
+    let out = cmd.args(["mux", "ls"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("state_dir this mux cannot read"),
+        "a diverging wrapped yaml must warn: {stderr}"
+    );
+}
