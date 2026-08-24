@@ -1482,6 +1482,8 @@ fn gather_checks() -> Vec<Check> {
     #[cfg(not(test))]
     checks.push(legacy_mux_root_check());
     #[cfg(not(test))]
+    checks.push(legacy_squads_newer_check());
+    #[cfg(not(test))]
     if let Some((detail, remedy)) = proto::pending_config_warning() {
         checks.push(Check {
             name: "config".into(),
@@ -1578,6 +1580,57 @@ fn legacy_mux_root_check() -> Check {
              resolved root",
             legacy.display()
         )),
+    }
+}
+
+/// The migration-overlap window: a pre-upgrade daemon still bound to the
+/// legacy root keeps writing the legacy squads.json AFTER this process
+/// seeded the state-root copy, and the read path stops seeing the legacy
+/// file the moment the primary exists (the fallback is NotFound-only).
+/// Merging the two stores is reconciliation work beyond a check, but the
+/// DIVERGENCE is visible: warn when the legacy file is newer than the copy
+/// it seeded, which is exactly the old server's signature.
+#[cfg(not(test))]
+fn legacy_squads_newer_check() -> Check {
+    if !proto::legacy_fallback_allowed() {
+        return Check {
+            name: "legacy squads store".into(),
+            verdict: Verdict::Na,
+            detail: "an explicit override isolates the store on purpose".into(),
+            remedy: None,
+        };
+    }
+    let primary = crate::squad_store::squads_path();
+    let legacy = proto::legacy_sidecar_path("squads.json");
+    let newer = match (std::fs::metadata(&primary), std::fs::metadata(&legacy)) {
+        (Ok(p), Ok(l)) => match (p.modified(), l.modified()) {
+            (Ok(pm), Ok(lm)) => lm > pm,
+            _ => false,
+        },
+        _ => false,
+    };
+    if !newer {
+        return Check {
+            name: "legacy squads store".into(),
+            verdict: Verdict::Na,
+            detail: "no legacy copy is outrunning the resolved store".into(),
+            remedy: None,
+        };
+    }
+    Check {
+        name: "legacy squads store".into(),
+        verdict: Verdict::Warn,
+        detail: format!(
+            "the legacy {} is newer than the resolved {}; a pre-upgrade \
+             server may still be writing it",
+            legacy.display(),
+            primary.display()
+        ),
+        remedy: Some(
+            "restart the old mux server under the resolved root, then run \
+             `fno mux workspace prune` once"
+                .into(),
+        ),
     }
 }
 

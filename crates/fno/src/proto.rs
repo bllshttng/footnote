@@ -2729,7 +2729,15 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
         let (key, val) = l.split_once(':')?;
         let key = key.trim();
         if !indented {
-            under_config = key.eq_ignore_ascii_case("config") && val.trim().is_empty();
+            if key.eq_ignore_ascii_case("config") {
+                // The flow spelling `config: {state_dir: /x}` carries the
+                // wrapped key inline; Python unwraps it like the block form.
+                if let Some(inner) = extract_flow_state_dir(val) {
+                    return Some(inner);
+                }
+                under_config = val.trim().is_empty();
+                return None;
+            }
             return key.eq_ignore_ascii_case("state_dir").then_some(val);
         }
         (under_config && key.eq_ignore_ascii_case("state_dir")).then_some(val)
@@ -2764,6 +2772,21 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
             }
         }
     }
+}
+
+/// The `state_dir` value inside a flow mapping value (`{state_dir: /x}`),
+/// raw and untrimmed: the caller applies the same comment-strip and quote
+/// handling as the block form. None when the braces carry no such key.
+#[cfg(not(test))]
+fn extract_flow_state_dir(flow: &str) -> Option<&str> {
+    let inner = flow.trim().strip_prefix('{')?.strip_suffix('}')?;
+    inner.split(',').find_map(|pair| {
+        let (k, v) = pair.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case("state_dir")
+            .then(|| v.trim())
+            .filter(|v| !v.is_empty())
+    })
 }
 
 fn non_empty_env_is_set(key: &str) -> bool {

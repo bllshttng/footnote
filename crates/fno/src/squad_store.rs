@@ -1420,7 +1420,7 @@ fn parse_seed(raw: Option<String>, from_legacy: bool) -> io::Result<StoreFile> {
     };
     let parsed = match serde_json::from_str::<StoreFile>(&raw) {
         Ok(f) => f,
-        Err(e) if from_legacy => return Ok(StoreFile::default()),
+        Err(_) if from_legacy => return Ok(StoreFile::default()),
         Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
     };
     // load() quarantines a version this build does not understand rather

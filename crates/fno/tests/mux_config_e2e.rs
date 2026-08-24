@@ -278,3 +278,88 @@ fn a_wrapped_yaml_state_dir_counts_like_a_top_level_one() {
         "a diverging wrapped yaml must warn: {stderr}"
     );
 }
+
+#[test]
+fn a_flow_style_wrapped_yaml_state_dir_counts_too() {
+    // `config: {state_dir: /x}` is the flow spelling of the same legacy
+    // wrapper. An agreeing value stays silent; a diverging one warns.
+    let agree = Scratch::new("muxfy");
+    std::fs::create_dir_all(agree.0.join("home").join(".fno")).unwrap();
+    std::fs::write(
+        agree.0.join("home").join(".fno").join("settings.yaml"),
+        format!(
+            "config: {{state_dir: {}}}\n",
+            agree.0.join("home").join(".fno").display()
+        ),
+    )
+    .unwrap();
+    let mut cmd = agree.command();
+    cmd.env_remove("FNO_MUX_DIR");
+    cmd.env_remove("FNO_GLOBAL_SETTINGS_PATH");
+    let out = cmd.args(["mux", "ls"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("cannot read"),
+        "an agreeing flow yaml must not warn: {stderr}"
+    );
+
+    let diverge = Scratch::new("muxfyd");
+    std::fs::create_dir_all(diverge.0.join("home").join(".fno")).unwrap();
+    std::fs::write(
+        diverge.0.join("home").join(".fno").join("settings.yaml"),
+        format!(
+            "config: {{state_dir: {}}}\n",
+            diverge.0.join("elsewhere").display()
+        ),
+    )
+    .unwrap();
+    let mut cmd = diverge.command();
+    cmd.env_remove("FNO_MUX_DIR");
+    cmd.env_remove("FNO_GLOBAL_SETTINGS_PATH");
+    let out = cmd.args(["mux", "ls"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("state_dir this mux cannot read"),
+        "a diverging flow yaml must warn: {stderr}"
+    );
+}
+
+#[test]
+fn doctor_warns_when_the_legacy_store_outruns_the_seeded_copy() {
+    // The migration-overlap window: the primary was seeded from the legacy
+    // file, then an old server wrote the legacy file again. The read path
+    // cannot see it (the fallback is NotFound-only), so doctor must say so
+    // from the mtimes alone.
+    let scratch = Scratch::new("muxov");
+    let demo = scratch.0.join("demo");
+    std::fs::create_dir_all(demo.join("mux")).unwrap();
+    let global_cfg = scratch.0.join("iso-cfg");
+    std::fs::create_dir_all(&global_cfg).unwrap();
+    std::fs::write(
+        global_cfg.join("config.toml"),
+        format!("state_dir = {:?}\n", demo),
+    )
+    .unwrap();
+    // Seed the primary first, then write the legacy file LATER: the legacy
+    // mtime wins, which is the old server's signature.
+    std::fs::write(demo.join("squads.json"), r#"{"version":1,"squads":[]}"#).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let legacy = scratch.0.join("home").join(".fno").join("squads.json");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, r#"{"version":1,"squads":[]}"#).unwrap();
+
+    let mut cmd = scratch.command();
+    cmd.env_remove("FNO_MUX_DIR");
+    cmd.env_remove("FNO_AGENTS_HOME");
+    cmd.env(
+        "FNO_GLOBAL_SETTINGS_PATH",
+        scratch.0.join("iso-cfg").join("settings.yaml"),
+    );
+    cmd.current_dir(&demo);
+    let out = cmd.args(["mux", "doctor"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        stdout.contains("may still be writing it"),
+        "the outrunning legacy store must warn; got: {stdout}"
+    );
+}
