@@ -2360,6 +2360,9 @@ event_types:
         relayed_by:
           type: string
           description: "Optional. A name an agent SUPPLIED for someone else, kept apart from decided_by so a claimed decider and a stamped one never share a column. Present only when it differs from the stamped handle."
+        origin:
+          type: string
+          description: "Optional. Mail-channel provenance carried into this ruling. It is evidence, not attended-terminal attestation."
         authority_source:
           type: string
           description: "Optional. How the decider was entitled to decide: operator law, agent coordination from a resolvable session, or a beastmode grant."

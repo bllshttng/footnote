@@ -1062,6 +1062,7 @@ def cmd_reply(
                 body_text,
                 msg_id=reply_id,
                 word_count=authored_words,
+                origin=mail_origin,
             )
         except Exception:
             _release_budget(reservation)

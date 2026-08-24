@@ -7656,7 +7656,7 @@ def _deliver_live(
                 harness=harness_for_provider(entry.harness),
                 model="unknown",
                 to=mail.from_,
-                origin=mail.origin,
+                origin="peer",
             )
     if _switchboard_exchange(
         entry.name,

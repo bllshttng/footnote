@@ -70,6 +70,7 @@ PROJECTION_FIELDS = (
     "decided_by",
     "attested_by",
     "relayed_by",
+    "origin",
     "authority_source",
     "rationale",
     "supersedes",
@@ -255,7 +256,7 @@ def _resolve_decider(
         # State 1. Relayed only when it says something the stamp does not. A
         # caller passing its own handle relayed nothing.
         if origin == "operator":
-            return Provenance(agent, authority_source or "agent", origin, agent)
+            return Provenance(agent, authority_source or "agent", None, agent)
         relayed = decided_by if decided_by and decided_by != agent else None
         return Provenance(agent, authority_source or "agent", None, relayed)
 
@@ -360,6 +361,7 @@ def record_decision(
         decided_by=provenance.decided_by,
         attested_by=provenance.attested_by,
         relayed_by=provenance.relayed_by,
+        origin=origin,
         authority_source=provenance.authority_source,
         rationale=rationale,
         supersedes=supersedes,

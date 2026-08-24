@@ -93,6 +93,20 @@ def test_durable_thread_round_trips_origin(tmp_path, monkeypatch):
     assert list(iter_messages())[0].meta["origin"] == "recovery"
 
 
+def test_appended_thread_reply_stamps_the_reply_origin(tmp_path, monkeypatch):
+    from fno.bus.log import iter_messages
+    from fno.inbox.store import append_to_thread, write_new_thread
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    handle = write_new_thread(
+        "recipient", "sender", "send", "root", origin="operator"
+    )
+    append_to_thread(handle.path, "peer", "reply", origin="peer")
+    messages = list(iter_messages())
+    assert messages[-1].meta["origin"] == "peer"
+
+
 def test_mail_origin_event_marks_presumed_human_positively():
     from fno.events import mail_origin_classified
 
@@ -133,7 +147,20 @@ def test_operator_origin_can_be_recorded_as_relayed_agent_without_operator_autho
     result = _resolve_decider(None, None, origin="operator")
     assert result.authority_source == "agent"
     assert result.relayed_by == "session-"
-    assert result.attested_by == "operator"
+    assert result.attested_by is None
+
+    from fno.events import operator_decision
+
+    event = operator_decision(
+        decision_id="d-test",
+        decision="answer",
+        decided_by=result.decided_by,
+        relayed_by=result.relayed_by,
+        authority_source=result.authority_source,
+        origin="operator",
+    )
+    assert event["data"]["origin"] == "operator"
+    assert "attested_by" not in event["data"]
 
 
 def test_non_operator_origin_refuses_operator_authority(monkeypatch):

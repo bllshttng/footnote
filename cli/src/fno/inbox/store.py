@@ -766,6 +766,7 @@ def post_inbox_message(
                 body,
                 msg_id=msg_id,
                 word_count=word_count,
+                origin=origin,
             )
             return PostResult(
                 msg_id=new_id, thread_path=existing.path, appended=True, orphan=False
@@ -944,6 +945,7 @@ def append_to_thread(
     msg_id: Optional[str] = None,
     timestamp: Optional[datetime] = None,
     word_count: Optional[int] = None,
+    origin: Optional[str] = None,
 ) -> str:
     """Append a message block to an existing thread file. Returns new msg-id."""
     if not thread_path.exists():
@@ -978,7 +980,7 @@ def append_to_thread(
         in_reply_to=existing.thread_id,
         render_path=thread_path,
         word_count=word_count,
-        origin=existing.origin,
+        origin=origin,
     )
 
     # Best-effort: update the derived markdown render under the per-path lock.
