@@ -1535,7 +1535,7 @@ fn legacy_mux_root_check() -> Check {
             legacy.display()
         ),
         remedy: Some(format!(
-            "FNO_MUX_DIR={} fno mux ls; kill-server or restart them under the \
+            "FNO_MUX_DIR='{}' fno mux ls; kill-server or restart them under the \
              resolved root",
             legacy.display()
         )),

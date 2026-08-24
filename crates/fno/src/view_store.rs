@@ -137,8 +137,12 @@ pub(crate) fn clear_test_path() {
     TEST_PATH.with(|c| *c.borrow_mut() = None);
 }
 
-/// A sibling of the squad store: under `FNO_AGENTS_HOME`, else
-/// `$HOME/.fno/mux-view.json`.
+/// A sibling of the squad store: under `FNO_AGENTS_HOME`, else the mux's
+/// resolved state root (so a pinned `FNO_CONFIG` isolates the view prefs with
+/// the sockets; `FNO_MUX_DIR` relocates sockets alone and does not move this
+/// file). The test arm keeps the plain `$HOME` fallback: a test that reaches
+/// it sets either `TEST_PATH` or `FNO_AGENTS_HOME` and never wanted config
+/// resolution in the first place.
 pub fn view_path() -> PathBuf {
     #[cfg(test)]
     if let Some(p) = TEST_PATH.with(|c| c.borrow().clone()) {
@@ -147,10 +151,15 @@ pub fn view_path() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_AGENTS_HOME") {
         return PathBuf::from(v).join("mux-view.json");
     }
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(".fno").join("mux-view.json")
+    #[cfg(not(test))]
+    return crate::proto::mux_sidecar_root().join("mux-view.json");
+    #[cfg(test)]
+    {
+        let base = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        base.join(".fno").join("mux-view.json")
+    }
 }
 
 /// `sections` rather than a bare map so a later view preference (x-b186's

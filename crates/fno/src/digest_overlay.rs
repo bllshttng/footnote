@@ -448,14 +448,25 @@ pub(crate) fn config_str(cwd: &Path, section: &str, key: &str) -> Option<String>
     resolve_config_key(cwd, &|path| read_section_file(path, section, key))
 }
 
-/// A TOP-LEVEL key (no section) off the same ladder, e.g. `state_dir`. The
-/// flat config.toml keeps a few keys above any section; the mux socket dir's
-/// `state_dir` (x-f02b) is the one this reads.
-pub(crate) fn config_top_str(cwd: &Path, key: &str) -> Option<String> {
-    resolve_config_key(cwd, &|path| read_top_file(path, key))
+/// A TOP-LEVEL key (no section) read from the EXPLICIT tier only: `$FNO_CONFIG`
+/// (sole candidate) else the global config. The mux resolves its state root
+/// through this, deliberately NOT through the project tier below: one
+/// machine's mux fleet is shared infrastructure invoked from many cwds
+/// (kings, watchdogs, mail inject, pane transport), and a cwd-anchored
+/// project tier would silently split those external callers off a project's
+/// sessions. Explicit isolation (`FNO_CONFIG`, inherited by every subprocess
+/// an isolated environment spawns) is the supported isolation for the mux.
+pub(crate) fn config_explicit_top_str(key: &str) -> Option<String> {
+    if let Some(explicit) = non_empty_env_os("FNO_CONFIG") {
+        return read_top_file(&PathBuf::from(explicit), key);
+    }
+    let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
+        .map(|p| PathBuf::from(p).with_file_name("config.toml"))
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")));
+    global.and_then(|g| read_top_file(&g, key))
 }
 
-/// The file ladder shared by both key shapes: `$FNO_CONFIG` (sole candidate,
+/// The file ladder shared by the section reader: `$FNO_CONFIG` (sole candidate,
 /// read as-is) -> project roots -> global. `from_file` reads one candidate; a
 /// `None` walks on to the next. The FNO_CONFIG read is `var_os` so a
 /// non-UTF-8 pin reaches the reader exactly as it reaches every other
@@ -526,12 +537,16 @@ fn read_value(content: &str, section: &str, key: &str) -> Option<String> {
 /// file is flat by design, so `[paths] state_dir` is not this key.
 fn read_top_value(content: &str, key: &str) -> Option<String> {
     let t = content.parse::<toml::Table>().ok()?;
-    let direct = t.get(key);
+    // Wrapped beats direct on a dual-shape file, matching Python's
+    // `_unwrap_config_dict` (`_deep_merge(rest, cfg)`: the `config:` block is
+    // canonical, a stray top-level sibling is the legacy leftover).
     let wrapped = t
         .get("config")
         .and_then(|c| c.as_table())
-        .and_then(|c| c.get(key));
-    scalar(direct.or(wrapped)?)
+        .and_then(|c| c.get(key))
+        .and_then(scalar);
+    let direct = t.get(key).and_then(scalar);
+    wrapped.or(direct)
 }
 
 /// `mux.<key>` from a body; thin wrapper over [`read_value`], retained for the
@@ -677,10 +692,18 @@ mod tests {
         assert_eq!(read_top_value(cfg, "state_dir"), Some("~/.fno/".into()));
         assert_eq!(read_top_value(cfg, "schema_version"), Some("1".into()));
         // The legacy [config]-wrapped shape answers too (Python's loader
-        // unwraps it), but any OTHER section stays a different address.
+        // unwraps it) and WINS a dual-shape file, matching _unwrap_config_dict;
+        // any OTHER section stays a different address.
         assert_eq!(
             read_top_value("[config]\nstate_dir = \"/x\"\n", "state_dir"),
             Some("/x".into())
+        );
+        assert_eq!(
+            read_top_value(
+                "state_dir = \"/new\"\n[config]\nstate_dir = \"/old\"\n",
+                "state_dir"
+            ),
+            Some("/old".into())
         );
         assert_eq!(
             read_top_value("[paths]\nstate_dir = \"/x\"\n", "state_dir"),

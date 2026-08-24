@@ -2436,17 +2436,16 @@ thread_local! {
 }
 
 /// The mux socket directory: `$FNO_MUX_DIR` when set (tests point this at a
-/// tempdir), else `<state_dir>/mux` where `state_dir` comes off the same
-/// config ladder every other surface reads (`FNO_CONFIG` sole candidate ->
-/// project -> global; `digest_overlay::config_top_str`), else `~/.fno/mux`.
-/// `FNO_CONFIG` therefore isolates the mux with everything else (x-f02b): a
-/// demo config's state root gets its own socket dir, and a pinned config that
-/// cannot be parsed lands the dir beside the pinned file rather than reaching
-/// back to the real fleet's `~/.fno/mux`.
+/// tempdir), else `<state_dir>/mux` off the EXPLICIT config tier
+/// (`FNO_CONFIG` sole candidate, else the global config; the cwd-anchored
+/// project tier is deliberately absent - see `resolved_state_root`), else
+/// `~/.fno/mux`. `FNO_CONFIG` therefore isolates the mux with everything else
+/// (x-f02b): a demo config's state root gets its own socket dir, and a pinned
+/// config that cannot be parsed lands the dir beside the pinned file rather
+/// than reaching back to the real fleet's `~/.fno/mux`.
 ///
 /// Resolved once per process (`MUX_DIR`): the daemon binds at startup and
-/// one-shot clients ask once, while the ladder itself reads config files (and
-/// the project tier may walk to the canonical checkout).
+/// one-shot clients ask once.
 pub fn mux_dir() -> PathBuf {
     #[cfg(test)]
     return TEST_MUX_DIR.with(|dir| dir.0.clone());
@@ -2463,63 +2462,87 @@ fn mux_dir_uncached() -> PathBuf {
     if let Some(dir) = std::env::var_os("FNO_MUX_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(dir);
     }
+    resolved_state_root().join("mux")
+}
+
+/// The state root the mux (and its non-socket sidecars, via
+/// [`mux_sidecar_root`]) resolve under: `<state_dir>` off the EXPLICIT config
+/// tier (`FNO_CONFIG` sole candidate, else global; see
+/// `digest_overlay::config_explicit_top_str` for why the project tier is
+/// deliberately absent).
+///
+/// Fail closed on an explicit `FNO_CONFIG` that yielded no state_dir at all
+/// (yaml-pinned, unreadable, missing key): isolation was requested, so the
+/// root stays the pinned file's own directory - standard layouts keep the
+/// config inside the state dir. Falling back to `~/.fno` here is the exact
+/// leak x-f02b closes. Note Python's own loader defaults an absent state_dir
+/// to `~/.fno/`, so a pinned config with no key leaves the mux MORE isolated
+/// than the graph; that asymmetry is deliberate and the warning names it.
+#[cfg(not(test))]
+fn resolved_state_root() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match config_state_mux_dir(&cwd) {
-        Some(StateDirOutcome::Dir(dir)) => return dir,
+    match config_state_root() {
+        Some(StateRoot::Root(root)) => return root,
         // A found-but-declined value already said why, once; it lands on the
         // same fallback as a miss without a second, contradictory message.
-        Some(StateDirOutcome::Declined) => {
-            return pinned_or_legacy_mux_root(&cwd);
-        }
+        Some(StateRoot::Declined) => return fallback_state_root(&cwd, false),
         None => {}
     }
-    // Fail closed on an explicit FNO_CONFIG that yielded no state_dir at all
-    // (yaml-pinned, unreadable, missing key): isolation was requested, so the
-    // socket dir stays beside the pinned file - standard layouts keep the
-    // config inside the state dir, so its parent is the honest isolated root.
-    // Falling back to ~/.fno/mux here is the exact leak x-f02b closes. Note
-    // Python's own loader defaults an absent state_dir to ~/.fno/, so a pinned
-    // config with no key leaves the mux MORE isolated than the graph; that
-    // asymmetry is deliberate and the warning below names it.
+    fallback_state_root(&cwd, true)
+}
+
+/// The root for mux sidecars that are not sockets (`mux-view.json`): the same
+/// resolved state root, so a pinned `FNO_CONFIG` isolates them with the
+/// sockets. `FNO_MUX_DIR` relocates the sockets alone by design and does not
+/// move sidecars.
+#[cfg(not(test))]
+pub(crate) fn mux_sidecar_root() -> PathBuf {
+    resolved_state_root()
+}
+
+/// The fallback root: a pinned `FNO_CONFIG`'s own directory when one is set
+/// (anchored against cwd so a bare relative pin resolves to one dir per
+/// invocation site), else the pre-config-chain global root. `warn` names the
+/// pin once, for the miss case where nothing else has spoken.
+#[cfg(not(test))]
+fn fallback_state_root(cwd: &std::path::Path, warn: bool) -> PathBuf {
     if let Some(explicit) = std::env::var_os("FNO_CONFIG").filter(|d| !d.is_empty()) {
-        // Anchored against cwd so a bare relative pin resolves to one dir per
-        // invocation site instead of wherever each process happens to run.
         let path = cwd.join(PathBuf::from(&explicit));
-        warn_once_pinned_without_state_dir(&path);
-        return path.with_file_name("mux");
+        if warn {
+            warn_once_pinned_without_state_dir(&path);
+        }
+        return path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| cwd.to_path_buf());
     }
-    legacy_mux_root()
+    legacy_state_root()
 }
 
-/// The fallback after the config ladder said nothing usable: beside a pinned
-/// `FNO_CONFIG` when one is set (isolation was requested), else the
-/// pre-config-chain global root.
+/// The pre-config-chain global state root, the ONE source for the resolver's
+/// final fallback, `mux doctor`'s stranding check, and the sidecar root, so
+/// they can never drift apart.
 #[cfg(not(test))]
-fn pinned_or_legacy_mux_root(cwd: &std::path::Path) -> PathBuf {
-    if let Some(explicit) = std::env::var_os("FNO_CONFIG").filter(|d| !d.is_empty()) {
-        return cwd.join(PathBuf::from(&explicit)).with_file_name("mux");
-    }
-    legacy_mux_root()
-}
-
-/// The pre-config-chain global mux root, the ONE source for both the
-/// resolver's final fallback and `mux doctor`'s stranding check, so the two
-/// can never drift apart.
-#[cfg(not(test))]
-pub(crate) fn legacy_mux_root() -> PathBuf {
+fn legacy_state_root() -> PathBuf {
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".fno")
-        .join("mux")
 }
 
-/// What the config ladder said about `state_dir`.
+/// The pre-config-chain global mux dir (`<legacy_state_root>/mux`), what
+/// `mux doctor` compares against when it looks for stranded sessions.
 #[cfg(not(test))]
-enum StateDirOutcome {
-    /// `<state_dir>/mux`, resolved.
-    Dir(PathBuf),
+pub(crate) fn legacy_mux_root() -> PathBuf {
+    legacy_state_root().join("mux")
+}
+
+/// What the explicit config tier said about `state_dir`.
+#[cfg(not(test))]
+enum StateRoot {
+    /// The state root, resolved and expanded.
+    Root(PathBuf),
     /// A value was found but this mirror cannot expand it (`{vault}`
     /// templates, `$VAR` references, `~user` prefixes). Python expands all
     /// three; this mirror declines rather than create a literal `{vault}`,
@@ -2527,18 +2550,19 @@ enum StateDirOutcome {
     Declined,
 }
 
-/// `<state_dir>/mux` from the config ladder. `None` means no candidate
-/// carried the key at all; [`StateDirOutcome::Declined`] means one carried a
-/// value this mirror cannot use, and the caller must not re-report that as a
+/// The state root from the explicit config tier. `None` means no candidate
+/// carried the key at all; [`StateRoot::Declined`] means one carried a value
+/// this mirror cannot use, and the caller must not re-report that as a
 /// missing key.
 #[cfg(not(test))]
-fn config_state_mux_dir(cwd: &std::path::Path) -> Option<StateDirOutcome> {
-    let raw = crate::digest_overlay::config_top_str(cwd, "state_dir")?;
-    match expand_state_dir(&raw, cwd) {
-        Some(dir) => Some(StateDirOutcome::Dir(dir.join("mux"))),
+fn config_state_root() -> Option<StateRoot> {
+    let raw = crate::digest_overlay::config_explicit_top_str("state_dir")?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match expand_state_dir(&raw, &cwd) {
+        Some(root) => Some(StateRoot::Root(root)),
         None => {
             warn_once_unexpandable_state_dir(&raw);
-            Some(StateDirOutcome::Declined)
+            Some(StateRoot::Declined)
         }
     }
 }
