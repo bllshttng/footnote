@@ -78,6 +78,11 @@ expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
   "const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = \"$py_unavailable_ctx\";" "the Rust diagnostic publisher"
 expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
   "^[[:space:]]*ctx=$py_ctx\$" "the refresher workflow"
+# The workflow's own diagnostic spelling is an unpinned surface otherwise: a
+# rename that updates the consts and the Rust twin leaves the refresher
+# posting under the old name with every pinned needle green.
+expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
+  "^[[:space:]]*diag_ctx=$py_unavailable_ctx\$" "the refresher workflow (diagnostic context)"
 if python3 - "$ROOT/scripts/ci/merge-ruleset.json" "$py_unavailable_ctx" <<'EOF'
 import json, sys
 
