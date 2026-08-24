@@ -2522,15 +2522,26 @@ fn read_pr_info(
         // failing-name set, and the pending flag can never answer off different
         // rollups (a superseded run read as the current one is the exact lie
         // this dedup exists to remove).
-        let checks = without_coverage_statuses(&latest_per_name(&checks));
+        let deduped = latest_per_name(&checks);
+        // Did the unfiltered rollup carry rows the filter then removed? With
+        // the filtered array empty (the only case conclusion is None), that
+        // means "CI has not reported yet" (the refresher stamps both contexts
+        // within seconds of a push), never "no CI configured" - the Python
+        // twin answers unknown for the same state, and the declared-none
+        // lecture would send the session to edit settings for a repo whose
+        // CI simply has not started.
+        let had_rows = deduped.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+        let checks = without_coverage_statuses(&deduped);
 
         let failing = failing_check_names(&checks);
         let has_pending = ci_has_pending_checks(&checks);
-        (
-            compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?,
-            failing,
-            has_pending,
-        )
+        let conclusion = compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?;
+        let conclusion = if had_rows && matches!(conclusion, CiConclusion::None) {
+            CiConclusion::Pending
+        } else {
+            conclusion
+        };
+        (conclusion, failing, has_pending)
     };
 
     // Reads 3+4: reviews + inline findings. Skipped when the session declares
