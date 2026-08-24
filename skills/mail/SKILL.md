@@ -1,7 +1,7 @@
 ---
 name: mail
-description: "Message background agent workers and projects from a runner-less surface (phone / Happy app). One front door over the shipped `fno agents mail` messaging surface (live-inject first, durable queue as the fallback): send (message a peer or a project), reply (correlated response), unread / list / view / status (read your inbox), ack (advance your read cursor), drain (batch-consume at a loop boundary). Normalizes messy input (smart quotes, recipient, body), refuses an empty recipient or body before writing anything, runs the genuine `fno agents mail` command, and reports the real msg-id receipt - never a fabricated one. Messaging is free, so it never confirms - but it never reports a durable queue as delivered either. Use when: 'send tgt-foo a message', 'mail target about X', 'check my unread', 'reply to msg-abc', 'tell everyone on project Y', 'what's in my inbox'."
-argument-hint: "<verb> [args]  |  send <name> \"<body>\"  |  reply <msg-id> \"<body>\"  |  unread|list|status [name]"
+description: "Message background agent workers and projects from a runner-less surface (phone / Happy app), or hold this session's incoming mail while the operator needs uninterrupted time. One front door over the shipped `fno agents mail` surface: send, reply, unread/list/view/status, ack, drain, and timed DND hold. Runs the genuine CLI and reports real receipts. Use when: 'send tgt-foo a message', 'check my unread', 'hold my mail', 'turn on DND', 'do not interrupt me', or 'I need your time for ten minutes'."
+argument-hint: "<verb> [args]  |  send <name> \"<body>\"  |  reply <msg-id> \"<body>\"  |  hold [minutes|off|status]  |  unread|list|status [name]"
 metadata:
   internal: false
 requires:
@@ -96,10 +96,25 @@ the matching section. Messaging is free, so **nothing here confirms** (contrast
 | `view` | `fno agents mail view` | no (read) | free |
 | `status` | `fno agents mail status` | no (read) | free |
 | `drain` | `fno agents mail drain` | no | free |
+| `hold [minutes\|off\|status]` | `fno agents mail hold [--minutes N\|--off\|--status]` | natural-language duration | free |
 
 An unrecognized leading token is an error - tell the user the verb set above; do
 NOT guess a send. (Unlike `/agent`, a bare non-verb is not a default action here,
 because a misrouted `send` could publish a malformed message.)
+
+---
+
+## `hold` - timed DND for the current session
+
+Route explicit hold verbs and ordinary operator language to the shipped timed hold. Requests such as "hold my mail", "turn on DND", "do not interrupt me", or "I need your time for ten minutes" mean this session should stop prompt-line mail injection while the operator is talking to it.
+
+- A single duration runs `fno agents mail hold --minutes <N>`.
+- A duration range uses its upper bound: "5-10 minutes" runs `--minutes 10`, so DND does not expire inside the requested window.
+- "Turn DND off", "release the hold", or equivalent runs `fno agents mail hold --off`.
+- "Is DND on?" or equivalent runs `fno agents mail hold --status`.
+- No duration uses the CLI's five-minute default.
+
+Run the genuine command and report its exact receipt. Intent alone is not DND. The active registry row, `fno agents list` DND field, and mux `[DND]` marker are the proof. The hold blocks peer/script injection and drains on release or expiry; it does not mute the operator's ordinary typing in the attached mux client.
 
 ---
 
