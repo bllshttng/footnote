@@ -30,6 +30,8 @@ from fno.pr._proc import ToolMissing
 from fno.pr._reviews import (
     _NOT_ASKED_COVERAGE,
     _UNKNOWN_COVERAGE,
+    COVERAGE_STATUS_CONTEXT,
+    COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
     read_optional_review_state,
     read_review_coverage,
 )
@@ -52,11 +54,10 @@ _FAIL_STATES = {
 # trigger, a newer run". They stay in _FAIL_STATES because the verdict is red.
 _SETTLED_STATES = _PASS_STATES | (_FAIL_STATES - {"CANCELLED", "STALE"})
 
+# The canonical consts live in _reviews (the publisher); the parity script
+# pins them against the Rust twin, so this frozenset must not re-spell them.
 _COVERAGE_STATUS_CONTEXTS = frozenset(
-    {
-        "fno/review-coverage",
-        "fno/review-coverage-unavailable",
-    }
+    {COVERAGE_STATUS_CONTEXT, COVERAGE_UNAVAILABLE_STATUS_CONTEXT}
 )
 
 
