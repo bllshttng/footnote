@@ -2579,15 +2579,20 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
-        // The GitHub axis was intentionally not queried, so this is a known
-        // zero rather than an unavailable read. `Unknown` is reserved for a
-        // failed GitHub read and must retain the retry remedy.
+        // The GitHub axis was intentionally not queried. That is a known
+        // zero ONLY when the skip is the inactive gate (nothing configured to
+        // read). A `no_external` session on a repo with an ACTIVE login gate
+        // suppressed reads that the config demanded, so the honest answer for
+        // that axis is Unknown with its retry remedy - reporting a healthy
+        // read of zero bots fabricated "uncovered" and an instrument-health
+        // receipt for reviews that were never queried. A fresh local pass
+        // still rescues it inside classify_coverage (positive evidence).
         let coverage = classify_coverage(
             &[],
             &[],
             &events_text,
             &[],
-            true,
+            !no_external,
             author_session,
             &freshness,
             &head_branch,

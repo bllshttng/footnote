@@ -2880,6 +2880,60 @@ fn ac3_edge_no_external_orthogonal_to_required_bots() {
     assert_eq!(d.termination_reason.as_deref(), Some("DoneUnreviewed"));
 }
 
+/// A no_external session on a repo with an ACTIVE login gate suppressed reads
+/// the config demanded, so the coverage axis must serialize as "unknown"
+/// (retry remedy intact) - never a definitive "uncovered" for bots that were
+/// never queried. The inactive-gate skip (nothing configured) stays a known
+/// zero; see ac3_hp_empty_required_bots_skips_review_reads.
+#[test]
+fn no_external_on_active_gate_serializes_unknown_coverage_not_uncovered() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(
+        &settings_path,
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let manifest = "---\nsession_id: sess-noext2\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_external: true\n---\n";
+    fs::write(&manifest_path, manifest).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = green_reviews_unreachable();
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(d.decision, "allow", "no_external must not block: {}", d.message);
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"coverage\":\"unknown\""),
+        "no_external on an active gate must read unknown, not a fabricated zero: {events}"
+    );
+    assert!(
+        !events.contains("\"coverage\":\"uncovered\""),
+        "an unqueried GitHub axis must never serialize as a definitive uncovered: {events}"
+    );
+}
+
 // ── x-e703: config.review.reviewers local-attestation gate ──────────────────
 
 /// The green() git+gh mock's HEAD (== headRefOid, so head_shipped passes). An
