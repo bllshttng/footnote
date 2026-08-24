@@ -138,10 +138,7 @@ impl Squad {
     /// at and what to type next.
     pub fn tab_label(&self, idx: usize) -> String {
         match self.tabs.get(idx) {
-            Some(t) => t
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("·{}", idx + 1)),
+            Some(t) => t.name.clone().unwrap_or_else(|| format!("·{}", idx + 1)),
             None => "-".into(),
         }
     }

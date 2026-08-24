@@ -524,6 +524,9 @@ enum CoreMsg {
     },
     LayoutGet {
         scope: LayoutScope,
+        /// (x-1499) Fresh registry rows for the per-pane worker join the
+        /// human layout rendering needs; `None` keeps the machine shape.
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     PaneWhere {
@@ -2708,13 +2711,21 @@ impl Core {
             .panes
             .iter()
             .map(|(&pid, entry)| {
-                let (squad_id, tab_id, cwd) = match self.session.find_pane(pid) {
-                    Some((sid, ti)) => {
-                        let sq = self.session.squad(sid).expect("find_pane live squad");
-                        (sid, sq.tabs[ti].id, sq.canonical_cwd().to_string())
-                    }
-                    None => (0, 0, String::new()),
-                };
+                let (squad_id, tab_id, cwd, tab_name, tab_ordinal) =
+                    match self.session.find_pane(pid) {
+                        Some((sid, ti)) => {
+                            let sq = self.session.squad(sid).expect("find_pane live squad");
+                            let dict = sq.tab_dict(ti);
+                            (
+                                sid,
+                                sq.tabs[ti].id,
+                                sq.canonical_cwd().to_string(),
+                                dict.as_ref().and_then(|d| d.name.clone()),
+                                dict.map(|d| d.ordinal),
+                            )
+                        }
+                        None => (0, 0, String::new(), None, None),
+                    };
                 PaneInfo {
                     pane_id: pid,
                     squad_id,
@@ -2722,6 +2733,8 @@ impl Core {
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
+                    tab_name,
+                    tab_ordinal,
                     // (x-d865) The fno_id join: the registry row whose mux ref
                     // points at this pane in THIS session carries the durable
                     // identity. Server-owned (self.agents is the cached read).
@@ -3353,7 +3366,9 @@ impl Core {
     }
 
     /// The nested tree + per-pane geometry of one tab (Locked Decision 5).
-    fn tab_layout(&self, tab: &Tab) -> TabLayout {
+    /// `agents` (Some) additionally fills the per-pane worker join for the
+    /// control-verb path (x-1499); `None` keeps the machine shape unchanged.
+    fn tab_layout(&self, tab: &Tab, agents: Option<&[RegistryAgent]>) -> TabLayout {
         let vp = self.tab_rect(tab.id);
         TabLayout {
             tab_id: tab.id,
@@ -3361,25 +3376,38 @@ impl Core {
             focus: tab.focus,
             root: tab.root.clone(),
             panes: tree::layout(&tab.root, vp),
+            workers: agents.map(|rows| {
+                tree::leaves(&tab.root)
+                    .into_iter()
+                    .map(|pid| TabPaneOccupant {
+                        pane_id: pid,
+                        fno_id: self.fno_id_for_pane_with_agents(pid, rows),
+                    })
+                    .collect()
+            }),
         }
     }
 
-    fn squad_layout(&self, sq: &Squad) -> SquadLayout {
+    fn squad_layout(&self, sq: &Squad, agents: Option<&[RegistryAgent]>) -> SquadLayout {
         SquadLayout {
             squad_id: sq.id,
             squad_name: sq.name.clone(),
-            tabs: sq.tabs.iter().map(|t| self.tab_layout(t)).collect(),
+            tabs: sq.tabs.iter().map(|t| self.tab_layout(t, agents)).collect(),
         }
     }
 
     /// Dump a [`LayoutScope`] for [`ControlVerb::LayoutGet`].
-    fn layout_get(&self, scope: &LayoutScope) -> Result<Vec<SquadLayout>, (u32, String)> {
+    fn layout_get(
+        &self,
+        scope: &LayoutScope,
+        agents: Option<&[RegistryAgent]>,
+    ) -> Result<Vec<SquadLayout>, (u32, String)> {
         match scope {
             LayoutScope::Session => Ok(self
                 .session
                 .squads
                 .iter()
-                .map(|s| self.squad_layout(s))
+                .map(|s| self.squad_layout(s, agents))
                 .collect()),
             LayoutScope::Squad(t) => {
                 let sid = self.resolve_squad(t)?;
@@ -3387,7 +3415,7 @@ impl Core {
                     .session
                     .squad(sid)
                     .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
-                Ok(vec![self.squad_layout(sq)])
+                Ok(vec![self.squad_layout(sq, agents)])
             }
             LayoutScope::Tab { squad, tab } => {
                 let sid = self.resolve_squad(squad)?;
@@ -3398,7 +3426,7 @@ impl Core {
                 Ok(vec![SquadLayout {
                     squad_id: sq.id,
                     squad_name: sq.name.clone(),
-                    tabs: vec![self.tab_layout(&sq.tabs[ti])],
+                    tabs: vec![self.tab_layout(&sq.tabs[ti], agents)],
                 }])
             }
         }
@@ -3429,6 +3457,7 @@ impl Core {
             };
         };
         let sq = self.session.squad(sid).expect("find_pane live");
+        let dict = sq.tab_dict(ti);
         let (tab_id, squad_name) = (sq.tabs[ti].id, sq.name.clone());
         // A passive (observer) client is read-only at the server and has no
         // viewport to move, so it is not a candidate and never inflates the
@@ -3467,6 +3496,8 @@ impl Core {
             squad_id: sid,
             squad_name,
             tab_id,
+            tab_name: dict.as_ref().and_then(|d| d.name.clone()),
+            tab_ordinal: dict.map(|d| d.ordinal),
             clients_moved,
         }
     }
@@ -3724,6 +3755,7 @@ impl Core {
         }
         let mut panes: Vec<u64> = Vec::new();
         let mut tabs: Vec<(TabId, Option<String>)> = Vec::new();
+        let mut tab_ordinals: Vec<usize> = Vec::new();
         let mut squad_id: Option<u64> = None;
         let mut squad_name: Option<String> = None;
         for a in &matched {
@@ -3741,6 +3773,7 @@ impl Core {
                 let t = &sq.tabs[ti];
                 if !tabs.iter().any(|(tid, _)| *tid == t.id) {
                     tabs.push((t.id, t.name.clone()));
+                    tab_ordinals.push(ti + 1);
                 }
             }
         }
@@ -3750,6 +3783,7 @@ impl Core {
                 squad_id,
                 squad_name,
                 tabs,
+                tab_ordinals: Some(tab_ordinals),
                 panes,
             }),
             None => Err(err_code::NOT_PANE_HOSTED),
@@ -4278,10 +4312,13 @@ impl Core {
                 .position(|s| s.name == r.slot)
                 .unwrap_or(usize::MAX)
         });
+        let dict = self.session.squad(sid).and_then(|s| s.tab_dict(ti));
         Ok(ServerMsg::LayoutGrafted {
             anchor,
             squad: sid,
             tab: tid,
+            tab_name: dict.as_ref().and_then(|d| d.name.clone()),
+            tab_ordinal: dict.map(|d| d.ordinal),
             results,
         })
     }
@@ -9735,21 +9772,24 @@ impl Core {
                         let resolved = if exact {
                             // The new pane now sits beside the anchor in the
                             // anchor's squad+tab; read its real location back.
-                            let (sid, tid) = self
+                            let (sid, tid, tab_name, tab_ordinal) = self
                                 .session
                                 .find_pane(pane_id)
                                 .and_then(|(sid, ti)| {
                                     self.session
                                         .squad(sid)
-                                        .and_then(|s| s.tabs.get(ti).map(|t| (sid, t.id)))
+                                        .and_then(|s| s.tab_dict(ti))
+                                        .map(|d| (sid, d.tab_id, d.name, Some(d.ordinal)))
                                 })
-                                .unwrap_or((0, 0));
+                                .unwrap_or((0, 0, None, None));
                             Some(ResolvedPlacement {
                                 anchor: anchor.unwrap(),
                                 direction: direction.unwrap_or(Dir::Down),
                                 fallback: PlacementFallback::Refuse,
                                 squad: sid,
                                 tab: tid,
+                                tab_name,
+                                tab_ordinal,
                             })
                         } else {
                             None
@@ -9925,8 +9965,12 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
-            CoreMsg::LayoutGet { scope, reply } => {
-                let msg = match self.layout_get(&scope) {
+            CoreMsg::LayoutGet {
+                scope,
+                agents,
+                reply,
+            } => {
+                let msg = match self.layout_get(&scope, agents.as_deref()) {
                     Ok(squads) => ServerMsg::LayoutTree { squads },
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
@@ -9954,7 +9998,16 @@ impl Core {
             }
             CoreMsg::PaneBreak { pane, name, reply } => {
                 let msg = match self.pane_break(pane, name) {
-                    Ok(tab_id) => ServerMsg::TabSpawned { tab_id },
+                    Ok(tab_id) => {
+                        let dict = self.session.find_tab(tab_id).and_then(|(sid, ti)| {
+                            self.session.squad(sid).and_then(|s| s.tab_dict(ti))
+                        });
+                        ServerMsg::TabSpawned {
+                            tab_id,
+                            tab_name: dict.as_ref().and_then(|d| d.name.clone()),
+                            tab_ordinal: dict.map(|d| d.ordinal),
+                        }
+                    }
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -11290,9 +11343,11 @@ async fn handle_control(
                 .await
         }
         ControlVerb::LayoutGet { scope } => {
+            let agents = read_guard_agents().await;
             core_tx
                 .send(CoreMsg::LayoutGet {
                     scope,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -13707,11 +13762,7 @@ mod tests {
         let mut core = two_tab_core(); // squad 1: tabs 10, 20; squad 2: tabs 30, 2
         core.session
             .add_squad(2, vec!["/b".into()], None, leaf_tab(30, 7));
-        core.session
-            .squad_mut(2)
-            .unwrap()
-            .tabs
-            .push(leaf_tab(2, 8));
+        core.session.squad_mut(2).unwrap().tabs.push(leaf_tab(2, 8));
 
         // An unqualified ordinal repeating across workspaces refuses and
         // prints every candidate with workspace, label, and tab_id.
@@ -13732,9 +13783,7 @@ mod tests {
         // AC4-ERR: a bare number that names DIFFERENT live tabs as an ordinal
         // and as a stable id refuses with both explicit forms, never a
         // first-pick by iteration order.
-        let (code, msg) = core
-            .tab_where("2", &PaneTarget::CurrentRoute)
-            .unwrap_err();
+        let (code, msg) = core.tab_where("2", &PaneTarget::CurrentRoute).unwrap_err();
         assert_eq!(code, err_code::BAD_REQUEST);
         assert!(msg.contains("ordinal:2"), "msg: {msg}");
         assert!(msg.contains("id:2"), "msg: {msg}");
@@ -13805,7 +13854,7 @@ mod tests {
     fn layout_get_carries_nested_tree_and_geometry() {
         // Locked Decision 5: structure AND rects.
         let core = two_tab_core();
-        let squads = core.layout_get(&LayoutScope::Session).unwrap();
+        let squads = core.layout_get(&LayoutScope::Session, None).unwrap();
         assert_eq!(squads.len(), 1);
         let tab10 = squads[0].tabs.iter().find(|t| t.tab_id == 10).unwrap();
         assert!(
@@ -20545,10 +20594,13 @@ mod tests {
                 squad_id,
                 squad_name,
                 tab_id,
+                tab_name,
+                tab_ordinal,
                 clients_moved,
             } => {
                 assert_eq!((pane, squad_id, tab_id), (p3, 2, t3));
                 assert_eq!(squad_name.as_deref(), Some("other"));
+                assert_eq!((tab_name.as_deref(), tab_ordinal), (None, Some(1)));
                 // The count is the anti-lie field: it must reflect a client that
                 // actually ended up looking at the pane.
                 assert_eq!(clients_moved, 1);

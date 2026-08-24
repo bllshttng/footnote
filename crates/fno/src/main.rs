@@ -74,11 +74,15 @@ enum Role {
     MuxTab(Vec<OsString>),
     /// (x-d865) `mux layout <get> ...`: dump the nested layout tree + geometry.
     MuxLayout(Vec<OsString>),
-    /// (x-d865) `mux where <fno_id>`: resolve an fno session id to its location.
+    /// (x-d865) `mux where <fno_id>`: resolve an fno session id to its
+    /// location; a selector naming no agent is retried as a tab location -
+    /// ordinal, stable id, or name (x-1499).
     MuxWhere(Vec<OsString>),
     /// (x-b80d) `mux view <selector> [--url] [--fzf] [--json]`: point the
     /// operator's view at the pane hosting an agent, selected by node id,
-    /// slug, or name. Same carry-verbatim shape; `mux_cli::view` parses.
+    /// slug, or name; a selector naming no agent focuses the tab at that
+    /// location instead (x-1499). Same carry-verbatim shape; `mux_cli::view`
+    /// parses.
     MuxView(Vec<OsString>),
     /// (x-a572) `mux workspace <verb> ...`: workspace-store maintenance
     /// (`workspace prune`). Same carry-verbatim shape as `mux pane`;
@@ -299,10 +303,13 @@ fn main() {
                  | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
                  | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
-                 | fno mux tab ls|create|rename|join ... \
+                 | fno mux tab ls|create|rename|join ... (--tab takes the visible \
+                   1-based ordinal, id:<n> for the stable id) \
                  | fno mux layout get|apply|graft ... \
-                 | fno mux where <fno_id> \
+                 | fno mux where <fno_id-or-tab> \
                  | fno mux view <selector> [--url] [--fzf] [--json] \
+                   (a tab ordinal/id/name resolves as a location; qualify \
+                   with --workspace when it repeats) \
                  | fno mux workspace prune [--dry-run] [--include-named] [--json]"
             );
             std::process::exit(2);
