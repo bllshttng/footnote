@@ -791,24 +791,23 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         posted_states = {
             check.get("context"): str(check.get("state") or "").upper()
             for check in _latest_per_name(rollup)
-            if check.get("context") in {
-                _reviews.COVERAGE_STATUS_CONTEXT,
-                _reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
-            }
+            if check.get("context") in COVERAGE_STATUS_CONTEXTS
         }
+        # The wanted states below read a KNOWN coverage word only; the
+        # known_word guard on the trigger keeps that honest.
         required_state = (
-            "PENDING"
-            if coverage.get("coverage") == "unknown"
-            else (
-                "FAILURE"
-                if any(blocker.startswith("review_coverage_") for blocker in blockers)
-                else "SUCCESS"
-            )
+            "FAILURE"
+            if any(blocker.startswith("review_coverage_") for blocker in blockers)
+            else "SUCCESS"
         )
-        unavailable_state = "PENDING" if coverage.get("coverage") == "unknown" else "SUCCESS"
+        unavailable_state = "SUCCESS"
         wanted_states = {
-            _reviews.COVERAGE_STATUS_CONTEXT: required_state,
-            _reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT: unavailable_state,
+            context: (
+                required_state
+                if context == _reviews.COVERAGE_STATUS_CONTEXT
+                else unavailable_state
+            )
+            for context in COVERAGE_STATUS_CONTEXTS
         }
         # The publisher stamps the head the coverage row pins, so when that is
         # a DIFFERENT head than this one, comparing this head's posted states
@@ -818,7 +817,13 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         covered_head = str(coverage.get("head_sha") or "")
         read_head = str(pr_json.get("headRefOid") or "")
         converges_here = not (covered_head and read_head and covered_head != read_head)
-        if converges_here and any(
+        # An unknown coverage word has no derivable wanted state: the publisher
+        # answers a missing row REFUSED (posts FAILURE) and a dead head fetch
+        # UNANSWERED (posts PENDING), and this read cannot tell which - a
+        # guessed PENDING against a posted FAILURE republishes forever. The
+        # stamp for an unknown read comes from the publisher's own arms.
+        known_word = coverage.get("coverage") != "unknown"
+        if known_word and converges_here and any(
             # Absent stays absent: the status read is deliberately not the
             # FIRST coverage-status writer (a PR no publisher has touched gets
             # its contexts from a publisher, not from a read). Only a POSTED
