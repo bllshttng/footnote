@@ -12,16 +12,26 @@ import json
 import pytest
 
 from fno.config import AutoMergeBlock
-from fno.pr import _coverage_gate, _merge
+from fno.pr import _coverage_gate, _hold, _merge
 from fno.pr._proc import Result, ToolMissing
 
 # Captured at import, before conftest's autouse hermetic stub replaces the
 # attribute: the tests that exercise the in-flight gate itself need the real one.
 _REAL_IN_FLIGHT_REFUSAL = _merge._in_flight_review_refusal
+# Same capture for the plan-hold reader: the hold-path test below restores it.
+_REAL_HOLD_FOR_PR = _hold.hold_for_pr
 
 
 class FakeRun:
-    """Dispatch canned Results by command, recording every call."""
+    """Dispatch canned Results by command, recording every call.
+
+    gh shapes are exhaustive by intent: a gh command no branch matches RAISES
+    echoing the argv, so the next gh call added to production code fails loud
+    here instead of silently passing a fabricated Result through (an unmatched
+    `gh pr view --json number,body,url,state,mergedAt,files` once fell through
+    to the view_url tail and a fail-closed reader blamed the PR body).
+    git and bash stay permissive; incidental git reads are noise, not the trap.
+    """
 
     def __init__(
         self,
@@ -29,7 +39,6 @@ class FakeRun:
         gh_merge: Result | None = None,
         merged_at: str = "null",
         view_url: str = "https://example/pr",
-        api_ok: bool = False,
         toplevel: str | None = None,
         behind_by: int = 0,
         view_fails: bool = False,
@@ -46,7 +55,6 @@ class FakeRun:
         self.view_fails = view_fails
         self.merged_at = merged_at
         self.view_url = view_url
-        self.api_ok = api_ok
         self.toplevel = toplevel
         self.behind_by = behind_by
         self.auto_merge_request = auto_merge_request
@@ -121,7 +129,38 @@ class FakeRun:
                         json.dumps({"baseRefName": "main", "headRefName": self.head_ref}) + "\n",
                         "",
                     )
-                return Result(0, self.view_url + "\n", "")
+                if cmd[-1] == ".url":
+                    # _pr_url's fetch (`--json url -q .url`), the one shape the
+                    # old permissive tail served deliberately.
+                    return Result(0, self.view_url + "\n", "")
+                if "number,body,url,state,mergedAt" in cmd[-1]:
+                    # fetch_pr_closure_context's one-shot read (hold lookup +
+                    # closure trailer binding). The field list is always the
+                    # last element. body empty => no trailer ids, so an unheld
+                    # lookup returns None and the merge proceeds.
+                    pr_no = next((a for a in cmd[3:] if a.isdigit()), "0")
+                    return Result(
+                        0,
+                        json.dumps(
+                            {
+                                "number": int(pr_no),
+                                "body": "",
+                                "url": self.view_url,
+                                "state": "OPEN",
+                                "mergedAt": (
+                                    json.loads(self.merged_at)
+                                    if self.merged_at.strip()
+                                    else None
+                                ),
+                                "files": [],
+                            }
+                        )
+                        + "\n",
+                        "",
+                    )
+                raise AssertionError(
+                    f"FakeRun: no canned response for gh pr view (add one, never a fall-through): {cmd!r}"
+                )
             if cmd[1] == "api":
                 endpoint = cmd[-1]
                 if any(a.startswith("repos/") and a.endswith("/files") for a in cmd):
@@ -215,7 +254,16 @@ class FakeRun:
                     # The post-merge branch delete (gh api against the verified
                     # base repo, never `git push origin`).
                     return Result(0, "", "")
-                return Result(0, "", "") if self.api_ok else Result(1, "", "api failed")
+                if "PUT" in cmd and any(a.endswith("/merge") for a in cmd):
+                    # The server-side REST fallback merge (worktree-held
+                    # branch); only api.ok is read, same bytes api_ok served.
+                    return Result(0, "", "")
+                raise AssertionError(
+                    f"FakeRun: no canned response for gh api (add one, never a fall-through): {cmd!r}"
+                )
+            raise AssertionError(
+                f"FakeRun: no canned response for gh (add one, never a fall-through): {cmd!r}"
+            )
         if tool == "bash":
             return Result(0, "", "")
         return Result(0, "", "")
@@ -567,7 +615,6 @@ def test_worktree_recovery_api_fallback(enabled, monkeypatch, capsys, tmp_path):
     fake = FakeRun(
         gh_merge=Result(1, "", "is already used by worktree"),
         merged_at="null",
-        api_ok=True,
         toplevel=str(tmp_path),
     )
     monkeypatch.setattr(_merge, "run", fake)
@@ -1618,8 +1665,6 @@ class _WorktreeFallbackRun(_AutoMergeRejectingRun):
         if cmd[:2] == ["gh", "api"] and any("/merge" in a for a in cmd):
             self.api_cmds.append(cmd)
             return Result(0, '{"merged":true}', "")
-        if cmd[:3] == ["gh", "pr", "view"] and "mergedAt" in " ".join(cmd):
-            return Result(0, "null\n", "")
         if cmd[:3] == ["gh", "pr", "view"] and any("statusCheckRollup" in a for a in cmd):
             return Result(0, json.dumps(self.rollup) + "\n", "")
         return FakeRun.__call__(
@@ -2346,6 +2391,70 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
     assert "--auto" not in merge_cmd, "the verb never queues (x-9d11)"
     i = merge_cmd.index("--match-head-commit")
     assert merge_cmd[i + 1] == "coveredSHA"
+
+
+def test_fake_run_raises_on_an_unmatched_gh_shape():
+    """The class fix: a gh shape no branch serves must RAISE, never fall
+    through to a fabricated Result. That fall-through is what let a fixture
+    gap masquerade as a held merge (CI job 96169117491)."""
+    fake = FakeRun()
+    with pytest.raises(AssertionError, match="gh pr view"):
+        fake(["gh", "pr", "view", "42", "--json", "title"])
+    with pytest.raises(AssertionError, match="gh api"):
+        fake(["gh", "api", "repos/o/r/some/unhandled"])
+    with pytest.raises(AssertionError, match="gh"):
+        fake(["gh", "auth", "status"])
+
+
+def test_populated_graph_closure_fetch_does_not_hold_the_merge(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """With a non-empty graph the hold pays its closure fetch over the
+    _merge.run seam, and the fake must serve that fetch a real JSON object -
+    an unmatched shape falling through to a fabricated Result is the
+    absence-as-success trap. In CI (job 96169117491) a per-worker sandbox graph
+    populated by an earlier test made exactly this call reach the fake's
+    view_url tail: `gh pr view --json number,body,url,state,mergedAt,files`
+    came back non-JSON, the closure parser failed closed, and the merge was
+    held before any merge command was recorded (the IndexError the job died
+    on). Deterministic form: restore the real reader (conftest's autouse
+    _hermetic_merge_hold_gate stubs it), one cwd-less graph entry makes it
+    fetch, an empty PR body carries no trailer ids, so nothing is held and the
+    merge lands pinned."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    monkeypatch.setattr(_hold, "hold_for_pr", _REAL_HOLD_FOR_PR)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1, "head_sha": "coveredSHA"}, ""),
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "coveredSHA")
+    # One cwd-less entry: _cwd_in_this_repo passes cwd-less entries, so by_id
+    # is non-empty and hold_for_pr pays the closure fetch instead of skipping.
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"entries": [{"id": "x-eeee", "status": "done"}]})
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", head="coveredSHA"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+    # Positive marker, pinned to the thing measured: hold_for_pr has two early
+    # None exits before the fetch (empty by_id, the cwd scan), and a green
+    # merge alone cannot tell "fetch paid and unheld" from "fetch never paid".
+    closure_calls = [
+        c
+        for c in fake.calls
+        if c[:3] == ["gh", "pr", "view"] and "number,body,url,state,mergedAt" in c[-1]
+    ]
+    assert closure_calls, "the hold reader must pay its closure fetch through the fake"
+    assert fake.merge_cmds, "the closure fetch must not hold the merge"
+    i = fake.merge_cmds[0].index("--match-head-commit")
+    assert fake.merge_cmds[0][i + 1] == "coveredSHA"
 
 
 # ── refusal reasons name the cause ───────────────────────────────────────────
