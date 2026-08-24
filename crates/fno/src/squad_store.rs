@@ -328,7 +328,10 @@ pub struct Loaded {
 }
 
 /// The store file: a sibling of the registry under `FNO_AGENTS_HOME`, else
-/// `$HOME/.fno/squads.json`. Machine-global because a squad spans repos.
+/// the mux's resolved state root (`squads.json`), so a pinned `FNO_CONFIG`
+/// isolates the squad store with the sockets and view prefs - a demo server
+/// must not read or prune the operator's real squads. Machine-global in the
+/// unpinned case because a squad spans repos.
 pub fn squads_path() -> PathBuf {
     #[cfg(test)]
     return TEST_PATH.with(|c| c.borrow().path());
@@ -337,11 +340,7 @@ pub fn squads_path() -> PathBuf {
         return PathBuf::from(v).join("squads.json");
     }
     #[cfg(not(test))]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    #[cfg(not(test))]
-    base.join(".fno").join("squads.json")
+    return crate::proto::mux_sidecar_root().join("squads.json");
 }
 
 /// A jobId is exactly 8 ascii-hex digits (the `claude attach` gate). File

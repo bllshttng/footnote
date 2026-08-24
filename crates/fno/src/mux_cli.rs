@@ -346,7 +346,7 @@ pub fn ls(json: bool) -> i32 {
     };
     // Resolution has happened by now (session_rows scanned the dir), so any
     // config warning it recorded can safely reach this non-TUI stderr.
-    if let Some(w) = proto::pending_config_warning() {
+    if let Some((w, _remedy)) = proto::pending_config_warning() {
         eprintln!("{w}");
     }
     if json {
@@ -1485,12 +1485,12 @@ fn gather_checks() -> Vec<Check> {
     #[cfg(not(test))]
     checks.push(legacy_mux_root_check());
     #[cfg(not(test))]
-    if let Some(w) = proto::pending_config_warning() {
+    if let Some((detail, remedy)) = proto::pending_config_warning() {
         checks.push(Check {
             name: "config".into(),
             verdict: Verdict::Warn,
-            detail: w.to_string(),
-            remedy: Some("point $FNO_CONFIG at a config.toml with a usable state_dir".into()),
+            detail: detail.to_string(),
+            remedy: Some(remedy.to_string()),
         });
     }
     checks.push(terminal_check(&std::env::var("TERM").unwrap_or_default()));

@@ -473,6 +473,17 @@ fn global_config_toml() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")))
 }
 
+/// The legacy settings.yaml at the same global location Python still reads as
+/// a lower-priority candidate (its `_prefer_toml` keeps both files). Exposed
+/// for the state-root resolver's divergence warning: a state_dir that lives
+/// only in this file is invisible to every TOML-only reader here.
+pub(crate) fn global_settings_yaml_sibling() -> Option<PathBuf> {
+    non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
+        .map(|p| PathBuf::from(p))
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/settings.yaml")))
+        .filter(|p| p.is_file())
+}
+
 /// The file ladder shared by the section reader: `$FNO_CONFIG` (sole candidate,
 /// read as-is) -> project roots -> global. `from_file` reads one candidate; a
 /// `None` walks on to the next. The FNO_CONFIG read is `var_os` so a

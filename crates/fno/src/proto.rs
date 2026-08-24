@@ -2562,7 +2562,10 @@ enum StateRoot {
 /// missing key.
 #[cfg(not(test))]
 fn config_state_root() -> Option<StateRoot> {
-    let raw = crate::digest_overlay::config_explicit_top_str("state_dir")?;
+    let Some(raw) = crate::digest_overlay::config_explicit_top_str("state_dir") else {
+        warn_once_legacy_yaml_state_dir();
+        return None;
+    };
     match expand_state_dir(&raw) {
         Some(root) => Some(StateRoot::Root(root)),
         None => {
@@ -2570,6 +2573,28 @@ fn config_state_root() -> Option<StateRoot> {
             Some(StateRoot::Declined)
         }
     }
+}
+
+/// A state_dir visible only to Python (legacy global yaml) while the mux
+/// resolves the default root. The divergence has no clean resolution here
+/// (this crate is TOML-only by convention), so it warns like the other
+/// decline cases instead of splitting silently.
+#[cfg(not(test))]
+fn warn_once_legacy_yaml_state_dir() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        if let Some(yaml) = legacy_global_yaml_state_dir_hint() {
+            record_config_warning(
+                format!(
+                    "fno: the global {} mentions a state_dir this mux cannot read \
+                     (TOML-only); every Python surface follows it while the mux \
+                     stays on the default root.",
+                    yaml.display()
+                ),
+                "move state_dir into the global config.toml, or unset it in the yaml".into(),
+            );
+        }
+    });
 }
 
 /// Expand a leading `~` for an otherwise-absolute value. `None` when the
@@ -2624,12 +2649,14 @@ fn warn_once_pinned_without_state_dir(path: &std::path::Path) {
         } else {
             "which carries no usable top-level state_dir"
         };
-        record_config_warning(format!(
-            "fno: $FNO_CONFIG points at {}, {why}; the mux dir lands beside that \
-             file instead of your state root. Point it at a config.toml with a \
-             state_dir key.",
-            path.display()
-        ));
+        record_config_warning(
+            format!(
+                "fno: $FNO_CONFIG points at {}, {why}; the mux dir lands beside that \
+                 file instead of your state root.",
+                path.display()
+            ),
+            "point $FNO_CONFIG at a config.toml with a usable state_dir".into(),
+        );
     });
 }
 
@@ -2641,30 +2668,57 @@ fn warn_once_pinned_without_state_dir(path: &std::path::Path) {
 fn warn_once_unexpandable_state_dir(raw: &str) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
-        record_config_warning(format!(
-            "fno: config state_dir {raw:?} is not a value the mux can follow (it \
-             must be an absolute or ~ path, free of template variables, $VAR \
-             references, and ~user forms); the mux dir falls back instead of \
-             following it."
-        ));
+        record_config_warning(
+            format!(
+                "fno: config state_dir {raw:?} is not a value the mux can follow (it \
+                 must be an absolute or ~ path, free of template variables, $VAR \
+                 references, and ~user forms); the mux dir falls back instead of \
+                 following it."
+            ),
+            "set state_dir to an absolute or ~ path".into(),
+        );
     });
 }
 
-/// The one config-resolution warning this process recorded, if any: a pinned
-/// `FNO_CONFIG` with no usable state_dir, or a state_dir value this mirror
-/// had to decline. Emitted to stderr by the non-TUI verbs (`mux ls`) and as a
-/// `mux doctor` row; the TUI client appends it to its client log instead.
-/// proto itself never writes stderr: resolution runs before the client enters
-/// the alternate screen, and any pre-TUI stderr byte lands in the PTY the
-/// harness reads (client.rs, x-0296's NEVER-stderr rule).
-static CONFIG_WARNING: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn record_config_warning(msg: String) {
-    let _ = CONFIG_WARNING.set(msg);
+/// The legacy global settings.yaml sibling, when it exists and mentions a
+/// state_dir the TOML-only reader can never see. Python keeps BOTH global
+/// files as read candidates (`_prefer_toml`: config.toml wins per key, the
+/// yaml still loads), so a state_dir that lives only in the yaml moves every
+/// Python surface while this reader - and the mux - stay on the default root.
+/// Substring detection is a heuristic that only gates a WARNING: it can fire
+/// on a comment, but it never silently swallows a real divergence.
+#[cfg(not(test))]
+pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> {
+    if non_empty_env_is_set("FNO_CONFIG") {
+        return None;
+    }
+    let yaml = crate::digest_overlay::global_settings_yaml_sibling()?;
+    let body = std::fs::read_to_string(&yaml).ok()?;
+    body.contains("state_dir").then_some(yaml)
 }
 
-pub(crate) fn pending_config_warning() -> Option<&'static str> {
-    CONFIG_WARNING.get().map(|s| s.as_str())
+#[cfg(not(test))]
+fn non_empty_env_is_set(key: &str) -> bool {
+    std::env::var_os(key).is_some_and(|v| !v.is_empty())
+}
+
+/// The one config-resolution warning this process recorded, if any: a pinned
+/// `FNO_CONFIG` with no usable state_dir, a state_dir value this mirror had
+/// to decline, or a state_dir that lives only where this reader cannot look.
+/// Carries its own remedy so `mux doctor` never names the wrong fix. Emitted
+/// to stderr by the non-TUI verbs (`mux ls`) and as a `mux doctor` row; the
+/// TUI client appends it to its client log instead. proto itself never
+/// writes stderr: resolution runs before the client enters the alternate
+/// screen, and any pre-TUI stderr byte lands in the PTY the harness reads
+/// (client.rs, x-0296's NEVER-stderr rule).
+static CONFIG_WARNING: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+fn record_config_warning(msg: String, remedy: String) {
+    let _ = CONFIG_WARNING.set((msg, remedy));
+}
+
+pub(crate) fn pending_config_warning() -> Option<(&'static str, &'static str)> {
+    CONFIG_WARNING.get().map(|(m, r)| (m.as_str(), r.as_str()))
 }
 
 /// Create `dir` (and parents) born 0700, then force 0700 on a pre-existing

@@ -368,13 +368,18 @@ impl<'de> Deserialize<'de> for AgentSort {
 
 /// The raw file, entries untyped. Missing, empty, or corrupt all read as a
 /// fresh store - never a refusal to start. A MISSING file falls back to the
-/// pre-state-root location once per read (no copy): an upgrading user's saved
-/// density/sort/width keep loading until the next save writes the new path.
+/// pre-state-root location once per read (no copy), but ONLY when no
+/// `FNO_CONFIG` is pinned: the fallback exists for an upgrading user whose
+/// prefs sit at the old spot, and a pinned demo env must inherit nothing from
+/// the operator's real root.
 fn read_raw() -> StoreFile {
     let path = view_path();
     let raw = std::fs::read_to_string(&path).or_else(|_| {
         #[cfg(not(test))]
         {
+            if std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty()) {
+                return std::io::Result::Err(std::io::ErrorKind::NotFound.into());
+            }
             std::fs::read_to_string(crate::proto::legacy_mux_root().with_file_name("mux-view.json"))
         }
         #[cfg(test)]

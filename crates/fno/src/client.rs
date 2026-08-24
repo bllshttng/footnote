@@ -324,26 +324,34 @@ fn run_inner(session: &str) -> Result<i32, String> {
         ));
     }
     let path = proto::socket_path(session)?;
-    let stream = connect_or_spawn(&path)?;
 
     // A config warning recorded during resolution rides the client log, never
     // stderr: we are still pre-alternate-screen here, and any stderr byte
     // lands in the PTY the harness (and a human) is about to read as the TUI
-    // (the x-0296 NEVER-stderr rule).
-    if let Some(w) = proto::pending_config_warning() {
-        let log = proto::mux_dir().join(format!("client-{}.log", std::process::id()));
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log)
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "{w}");
-        }
+    // (the x-0296 NEVER-stderr rule). Written BEFORE the connect attempt so a
+    // wedged server or a failed spawn cannot swallow it.
+    if let Some((w, _remedy)) = proto::pending_config_warning() {
+        client_log_append(&proto::mux_dir().join("client-warnings.log"), w);
     }
+
+    let stream = connect_or_spawn(&path)?;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
     runtime.block_on(attach_and_run(stream, &path))
+}
+
+/// Append one line to a log file under the mux dir, best-effort. The shared
+/// write behind both the e2e breadcrumbs and the config-warning log: one
+/// append mechanism, never stderr (see [`e2e_client_log`]).
+fn client_log_append(path: &Path, msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{msg}");
+    }
 }
 
 /// Connect to a live server, or spawn one and connect. AC3-ERR: a dead
