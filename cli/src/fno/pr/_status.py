@@ -52,6 +52,23 @@ _FAIL_STATES = {
 # trigger, a newer run". They stay in _FAIL_STATES because the verdict is red.
 _SETTLED_STATES = _PASS_STATES | (_FAIL_STATES - {"CANCELLED", "STALE"})
 
+_COVERAGE_STATUS_CONTEXTS = frozenset(
+    {
+        "fno/review-coverage",
+        "fno/review-coverage-unavailable",
+    }
+)
+
+
+def without_coverage_statuses(rollup: Sequence[dict]) -> list[dict]:
+    """Remove review-coverage projections before classifying generic CI."""
+    return [
+        check
+        for check in rollup
+        if check.get("context") not in _COVERAGE_STATUS_CONTEXTS
+        and check.get("name") not in _COVERAGE_STATUS_CONTEXTS
+    ]
+
 
 def _alt(*vals: Any) -> Any:
     for v in vals:
@@ -609,7 +626,8 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         return 4
 
     rollup = pr_json.get("statusCheckRollup") or []
-    verdict, code, counts = verdict_for(rollup)
+    generic_rollup = without_coverage_statuses(rollup)
+    verdict, code, counts = verdict_for(generic_rollup)
     green = verdict == "green"
 
     # x-c124 / d-bdb035b6: a red verdict must name WHICH check failed and, so
@@ -630,7 +648,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             # read as a diagnosed defect that does not exist.
             failing_rows = [
                 c
-                for c in _latest_per_name(rollup)
+                for c in _latest_per_name(generic_rollup)
                 if _classify(c) == "fail" and _has_settled_marker(c)
             ]
             failures = collect_failures(failing_rows, cwd)
@@ -765,20 +783,33 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     if not is_terminal and review_lane:
         from fno.pr import _reviews
 
-        posted_state = next(
-            (
-                check.get("state")
-                for check in _latest_per_name(rollup)
-                if check.get("context") == _reviews.COVERAGE_STATUS_CONTEXT
-            ),
-            None,
+        posted_states = {
+            check.get("context"): str(check.get("state") or "").upper()
+            for check in _latest_per_name(rollup)
+            if check.get("context") in {
+                _reviews.COVERAGE_STATUS_CONTEXT,
+                _reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+            }
+        }
+        required_state = (
+            "PENDING"
+            if coverage.get("coverage") == "unknown"
+            else (
+                "FAILURE"
+                if any(blocker.startswith("review_coverage_") for blocker in blockers)
+                else "SUCCESS"
+            )
         )
-        wanted_state = (
-            "FAILURE"
-            if any(blocker.startswith("review_coverage_") for blocker in blockers)
-            else "SUCCESS"
-        )
-        if posted_state is not None and str(posted_state).upper() != wanted_state:
+        unavailable_state = "PENDING" if coverage.get("coverage") == "unknown" else "SUCCESS"
+        wanted_states = {
+            _reviews.COVERAGE_STATUS_CONTEXT: required_state,
+            _reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT: unavailable_state,
+        }
+        if any(
+            posted_states.get(context) is not None
+            and posted_states.get(context) != wanted
+            for context, wanted in wanted_states.items()
+        ):
             posted, note = _reviews.publish_coverage_status(
                 int(pr), head=pr_json.get("headRefOid"), cwd=cwd
             )

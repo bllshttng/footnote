@@ -228,6 +228,25 @@ def _run_status_on(monkeypatch, capsys, rollup):
     return code, _json.loads(cap.out), cap.err
 
 
+def test_unknown_coverage_statuses_block_ready_without_code_red(monkeypatch, capsys):
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"context": "fno/review-coverage", "state": "PENDING"},
+        {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+    ]
+    monkeypatch.setattr(
+        "fno.pr._reviews.publish_coverage_status",
+        lambda *args, **kwargs: (True, ""),
+    )
+    code, out, _err = _run_status_on(monkeypatch, capsys, rollup)
+    assert code == 0
+    assert out["green"] is True
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["review_coverage_unknown"]
+    assert "ci_red" not in out["ready_blockers"]
+    assert "commit_status_red" not in out["ready_blockers"]
+
+
 def test_ac1_cancelled_latest_is_red_and_unsettled(monkeypatch, capsys):
     """AC1-HP: a genuinely-cancelled latest run keeps verdict red (a cancelled
     run is not a pass) but settled FALSE (it is not a conclusion either - the

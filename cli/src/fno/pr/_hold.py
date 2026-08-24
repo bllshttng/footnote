@@ -181,7 +181,10 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         # the hold check for exactly the trailer-only case round-10 added
         # this lookup to catch, just reachable via gh flakiness instead of a
         # design gap).
-        raise HoldLookupError(f"PR body is unreadable; cannot scope the hold lookup: {exc}") from exc
+        raise HoldLookupError(
+            f"hold lookup unavailable: gh call failed before PR content was read: {exc}; "
+            "retry the hold lookup; do not edit the PR body"
+        ) from exc
 
     ref_node_id: Optional[str] = None
     if stamped:
