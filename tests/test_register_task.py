@@ -210,6 +210,93 @@ def test_append_to_tasks_json_recovers_from_dict_without_list_entries():
         )
 
 
+def test_append_to_tasks_json_promotes_nonship_terminal_to_delivery():
+    for prior_reason in ("NoProgress", "DoneAwaitingMerge", ["malformed"]):
+        with tempfile.TemporaryDirectory() as td:
+            ledger = Path(td) / "ledger.json"
+            existing = {
+                "fno_id": "target-1",
+                "session_id": "target-1",
+                "termination_reason": prior_reason,
+                "completed": "2026-08-19T13:53:06",
+                "sessions": ["transcript-before", "target-1"],
+                "phases_completed": ["think", "plan"],
+                "phases_skipped": ["ship"],
+                "cost_usd": 12.34,
+                "tokens_total": 5678,
+                "pr_number": None,
+                "graph_node_id": None,
+            }
+            incoming = {
+                "fno_id": "target-1",
+                "session_id": "target-1",
+                "termination_reason": "DonePRGreen",
+                "completed": "2026-08-19T14:30:06",
+                "sessions": ["transcript-after", "target-1"],
+                "phases_completed": ["do", "review", "ship"],
+                "phases_skipped": [],
+                "cost_usd": None,
+                "tokens_total": None,
+                "pr_number": 976,
+                "graph_node_id": "ab-83ca4ad3",
+            }
+            ledger.write_text(json.dumps({"entries": [existing]}))
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                register_task.append_to_tasks_json(ledger, incoming)
+
+            entries = json.loads(ledger.read_text())["entries"]
+            assert len(entries) == 1
+            promoted = entries[0]
+            assert promoted["termination_reason"] == "DonePRGreen"
+            assert promoted["completed"] == "2026-08-19T14:30:06"
+            assert promoted["pr_number"] == 976
+            assert promoted["graph_node_id"] == "ab-83ca4ad3"
+            assert promoted["phases_completed"] == ["do", "review", "ship"]
+            assert promoted["phases_skipped"] == []
+            assert promoted["sessions"] == [
+                "transcript-before",
+                "target-1",
+                "transcript-after",
+            ]
+            assert promoted["cost_usd"] == 12.34
+            assert promoted["tokens_total"] == 5678
+            assert (
+                f"Promoted target fno_id target-1 from {prior_reason} to DonePRGreen"
+                in stderr.getvalue()
+            )
+
+
+def test_append_to_tasks_json_keeps_nonpromotable_duplicates_first():
+    cases = (
+        ("NoProgress", "Budget"),
+        ("DonePRGreen", "DonePRGreen"),
+        (["malformed"], "Budget"),
+    )
+    for existing_reason, incoming_reason in cases:
+        with tempfile.TemporaryDirectory() as td:
+            ledger = Path(td) / "ledger.json"
+            existing = {
+                "fno_id": "target-1",
+                "termination_reason": existing_reason,
+                "completed": "first",
+            }
+            ledger.write_text(json.dumps({"entries": [existing]}))
+
+            register_task.append_to_tasks_json(
+                ledger,
+                {
+                    "fno_id": "target-1",
+                    "termination_reason": incoming_reason,
+                    "completed": "second",
+                },
+            )
+
+            entries = json.loads(ledger.read_text())["entries"]
+            assert entries == [existing]
+
+
 def test_render_tasks_md_handles_bare_list_shape():
     """Regression test for ab-67063a76 (render path).
 

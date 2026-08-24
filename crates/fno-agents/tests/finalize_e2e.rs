@@ -1068,12 +1068,17 @@ fn finalize_nonship_then_ship_runs_ship_sideeffects() {
     assert!(run_finalize(&env, "Budget").status.success()); // fire 1: non-ship
     assert!(run_finalize(&env, "DonePRGreen").status.success()); // fire 2: ship
     let c = calls(&env);
-    // Ledger written ONCE (the Budget fire); the ship fire skips the redundant
-    // ledger step (register-task would dedup) but DOES run the ship side-effects.
+    // The ship fire must reach register-task again so its under-flock dedup can
+    // promote the earlier non-ship row to the delivered terminal.
     assert_eq!(
         c.matches("register-task").count(),
-        1,
-        "ledger written once: {c}"
+        2,
+        "ledger writer sees both terminal observations: {c}"
+    );
+    assert!(c.contains("register-task reason=Budget"), "first terminal: {c}");
+    assert!(
+        c.contains("register-task reason=DonePRGreen"),
+        "delivered terminal: {c}"
     );
     assert!(
         c.contains("stamp-plan stamp"),
@@ -1095,6 +1100,11 @@ fn finalize_nonship_then_ship_runs_ship_sideeffects() {
         calls(&env).matches("stamp-plan stamp").count(),
         1,
         "stamp ran exactly once across all fires"
+    );
+    assert_eq!(
+        calls(&env).matches("register-task").count(),
+        2,
+        "third fire remains idempotent"
     );
 }
 
