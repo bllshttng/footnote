@@ -41,6 +41,7 @@ One file per install. These belong at the root.
 | `git-protection.json` | `hooks/git-protection.py` | permanent |
 | `squads.json`, `.lock` | `crates/fno/src/squad_store.rs` | permanent |
 | `session-names.json`, `.lock` | `agents/discover.py` | grows per session |
+| `mux/` (`<session>.sock`, `.ver`, `.pid`, `.detach`, `.log`) | `crates/fno/src/proto.rs::mux_dir()`, following `config.state_dir` (`FNO_MUX_DIR` overrides) | server-managed; `kill-server` owns socket removal |
 | `mux-view.json`, `.lock` | `crates/fno/src/view_store.rs` | permanent |
 | `installed-rev`, `installed-rust-rev`, `source-path` | `update.py`, `doctor.py` | permanent |
 | `my-priorities.md` | the operator, by hand or with their own `~/.fno/board.py` scratch script (not a repo file, and not `cli/src/fno/king/board.py`); read via `paths.operator_lane()` | permanent |
