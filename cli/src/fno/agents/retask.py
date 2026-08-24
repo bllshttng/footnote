@@ -230,7 +230,8 @@ def execute_retask(
     ready_marker = capabilities(entry.harness)["ready_marker"]
     if screen.get("state") != "idle" or screen.get("rule") != ready_marker:
         return {**refusal, "reason": "pane_not_idle"}
-    read_frame()
+    if not read_frame().strip():
+        return {**refusal, "reason": "pane_frame_unreadable"}
     if not send("/clear", True):
         return {**refusal, "reason": "clear_not_confirmed"}
     new_session = restamp()
