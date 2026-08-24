@@ -2660,6 +2660,22 @@ def cmd_name(
     typer.echo(name)
 
 
+@agents_app.command("rename", hidden=True)
+def cmd_rename(
+    worker: str = typer.Argument(..., help="Current registry label or immutable session id."),
+    new_name: str = typer.Option(..., "--name", help="New mutable registry label."),
+) -> None:
+    """Rename a registry label without changing the worker's session identity."""
+    from fno.agents.registry import AgentResolutionError, rename_agent
+
+    try:
+        entry = rename_agent(worker, new_name)
+    except (AgentResolutionError, ValueError) as exc:
+        typer.echo(f"agents rename: {exc}", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(f"renamed {worker} -> {entry.name} (session={entry.harness_session_id or 'unknown'})")
+
+
 @agents_app.command("spawn-guard", hidden=True)
 def cmd_spawn_guard(
     node_id: str = typer.Argument(

@@ -474,6 +474,7 @@ class AgentEntry:
 # Exactly eight lowercase hex characters, used only when deciding whether a
 # Claude restamp may safely refresh a derived transport short id.
 _DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
+_REGISTRY_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _ACCEPTED_FORMS = (
     "accepted forms: name, canonical handle, transport short id, or full session id"
@@ -1671,6 +1672,47 @@ def update_registry(
         _validate_changed_identities(before, new_entries)
         write_registry(new_entries, path=target)
         return new_entries
+
+
+def rename_agent(
+    token: str,
+    new_name: str,
+    *,
+    registry_path: Optional[Path] = None,
+) -> AgentEntry:
+    """Change only a row's mutable display label, preserving all identities."""
+    new_name = new_name.strip()
+    if not _REGISTRY_NAME_RE.fullmatch(new_name):
+        raise ValueError(
+            "registry name must be 1-64 letters, numbers, underscores, or hyphens"
+        )
+    resolved = resolve_agent(token, path=registry_path)
+    source = resolved.entry
+    identity = (source.harness, source.harness_session_id, source.short_id)
+    result: list[AgentEntry] = []
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        target = next(
+            (
+                entry
+                for entry in entries
+                if (entry.harness, entry.harness_session_id, entry.short_id) == identity
+                and entry.name == source.name
+            ),
+            None,
+        )
+        if target is None:
+            raise AgentResolutionError(
+                f"agent {source.name!r} changed before rename; retry with its full session id"
+            )
+        if any(entry is not target and entry.name == new_name for entry in entries):
+            raise ValueError(f"registry label {new_name!r} already names another worker")
+        target.name = new_name
+        result.append(target)
+        return entries
+
+    update_registry(_updater, path=registry_path)
+    return result[0]
 
 
 def _identity_signature(entry: AgentEntry) -> tuple[str, str, str, str]:
