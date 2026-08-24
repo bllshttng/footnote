@@ -145,8 +145,9 @@ fn squad_store_reads_the_legacy_file_under_a_global_state_dir() {
     let scratch = Scratch::new("muxsqd");
     let demo = scratch.0.join("demo");
     std::fs::create_dir_all(demo.join("mux")).unwrap();
-    // The global tier: the config.toml SIBLING of FNO_GLOBAL_SETTINGS_PATH
-    // (which Scratch points inside the scratch).
+    // The global tier: the config.toml SIBLING of a settings.yaml pin (the
+    // exact basename Python's _prefer_toml substitutes for, so Scratch's
+    // default settings.json pin is overridden here).
     let global_cfg = scratch.0.join("iso-cfg");
     std::fs::create_dir_all(&global_cfg).unwrap();
     std::fs::write(
@@ -174,6 +175,10 @@ fn squad_store_reads_the_legacy_file_under_a_global_state_dir() {
     let mut cmd = scratch.command();
     cmd.env_remove("FNO_MUX_DIR");
     cmd.env_remove("FNO_AGENTS_HOME");
+    cmd.env(
+        "FNO_GLOBAL_SETTINGS_PATH",
+        scratch.0.join("iso-cfg").join("settings.yaml"),
+    );
     cmd.current_dir(&demo);
     let out = cmd.args(["mux", "doctor"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();

@@ -1380,7 +1380,17 @@ fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
         Ok(raw) => Some(raw),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             from_legacy = true;
-            legacy_read().ok()
+            match legacy_read() {
+                Ok(raw) => Some(raw),
+                // Absent or gated fallback: the fresh store load() also
+                // reads, so the first write starts empty.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                // UNREADABLE legacy: refuse the write. load() degrades to
+                // empty because a read destroys nothing; a mutate here would
+                // create a primary that shadows every squad in a file this
+                // process could not read.
+                Err(e) => return Err(e),
+            }
         }
         Err(e) => return Err(e),
     };

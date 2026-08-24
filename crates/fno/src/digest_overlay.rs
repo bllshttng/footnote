@@ -468,14 +468,19 @@ pub(crate) fn config_explicit_top_str(key: &str) -> Option<String> {
 /// the two can never resolve different global files.
 fn global_config_toml() -> Option<PathBuf> {
     match non_empty_env("FNO_GLOBAL_SETTINGS_PATH") {
-        // A direct .toml pin IS the toml candidate: Python's `_prefer_toml`
-        // passes non-YAML names through untouched, so rewriting the basename
-        // here would read a file no Python surface ever opens.
+        // Python's `_prefer_toml` substitutes the config.toml sibling ONLY
+        // for a pin whose basename is exactly `settings.yaml` (and the unset
+        // default below); every other non-empty pin is read AS the pinned
+        // file. A direct `.toml` pin is therefore the toml candidate itself,
+        // and a yaml-shaped pin under any other name is a file this TOML
+        // reader cannot use - no sibling exists for Python to read either,
+        // so the mirror invents none (the state-root yaml-divergence warning
+        // covers a state_dir living there).
+        Some(p) if Path::new(&p).file_name()? == "settings.yaml" => {
+            Some(PathBuf::from(p).with_file_name("config.toml"))
+        }
         Some(p) if Path::new(&p).extension().is_some_and(|e| e == "toml") => Some(PathBuf::from(p)),
-        // A settings.yaml-shaped pin (and the unset default) names the YAML
-        // location, whose config.toml sibling is the toml candidate Python
-        // reads first.
-        Some(p) => Some(PathBuf::from(p).with_file_name("config.toml")),
+        Some(_) => None,
         None => std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")),
     }
 }
