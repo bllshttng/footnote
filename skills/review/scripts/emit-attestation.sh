@@ -26,10 +26,12 @@
 # reviewer name and verdict it is PASSED. Nothing here can tell a real review
 # from a caller that typed the arguments.
 #
-# Usage: emit-attestation.sh <reviewer> [verdict]
+# Usage: emit-attestation.sh <reviewer> [verdict] [reviewer_context]
 #   <reviewer>  a built-in (sigma | peer | code-review | declare) or any name declared
 #               in config.review.reviewer_registry (a leading '/' is stripped)
 #   [verdict]   pass (default) | fail
+#   [reviewer_context]  fresh | shared | unknown (default unknown); positive
+#                       context evidence only, never inferred from the sender
 set -euo pipefail
 
 usage() {
@@ -63,6 +65,14 @@ esac
 
 reviewer="${1:?reviewer name required: a built-in (sigma|code-review|declare) or a config.review.reviewer_registry name}"
 verdict="${2:-pass}"
+reviewer_context="${3:-unknown}"
+case "$reviewer_context" in
+  fresh|shared|unknown) ;;
+  *)
+    echo "emit-attestation: reviewer_context must be fresh, shared, or unknown (got '$reviewer_context')" >&2
+    exit 2
+    ;;
+esac
 while [[ "$reviewer" == /* ]]; do reviewer="${reviewer#/}"; done # strip ALL leading slashes (parity with both parsers' lstrip / trim_start_matches)
 
 head_sha="$(git rev-parse HEAD 2>/dev/null)" || {
@@ -228,8 +238,9 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
   --arg session_id "$session_id" --arg harness "$harness" \
   --arg model "$model" --arg provider "$provider" \
   --arg attester_session_id "$attester_session_id" \
+  --arg reviewer_context "$reviewer_context" \
   --arg branch "$branch" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id,branch:$branch}')"
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id,reviewer_context:$reviewer_context,branch:$branch}')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
@@ -260,4 +271,4 @@ for _b in "${branch:-}" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   "${FNO:-fno}" do pr review-hold release --branch "$_b" >/dev/null 2>&1 || true
 done
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset}" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context" >&2

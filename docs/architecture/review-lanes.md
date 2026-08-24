@@ -167,6 +167,10 @@ It is matched with `matches!` in `crates/fno-agents/src/bin/client.rs`, delibera
 So `fno agents mail --help`, `fno agents --help`, and a grep of the Python tree all report nothing, and a "does this exist?" probe against any of them answers false.
 
 When its explicit structured or STDIN contract is the point, use the hidden binary verb. Otherwise reach for `fno agents mail send --raw` for recipient-aware routing.
+
+## The target ship loop and findings
+
+The target ship step runs `fno do target request-self-review --pr <n>` after the PR exists. That command resolves the PR head and base, refuses a local-head mismatch, and sends one explicit raw payload naming `HEAD <sha> of PR <n> against origin/<base>`. A Codex mux pane that positively shows the exact payload beside `tab to queue message` receives one Tab and must positively show the same payload with a queued marker; the receipt is `queued`, and the authoring turn ends at that boundary. A review already shown as active returns `started` without a control key. The worker's own Codex Stop hook reads the structured findings already present in its transcript, nudges the same context to act on P1/P2 findings, and requires a new-head request after fixes. It records one nudge per review turn. This act path does not use a king, daemon notification stream, or external reader.
 Do not conclude the lane is absent from an empty `--help` or an empty Python-tree search; the binary verb is there.
 
 ## Lane 3: king-mediated mail (fallback)
@@ -179,7 +183,9 @@ harness serves the verb in response, or the king can fire the verb
 into the worker's live session directly via
 `fno agents mail send <worker> '<verb>' --raw` (Lane 2).
 With no live king, fall back to advisory self-review or run the native
-verb by hand.
+verb by hand. This fallback is not the target ship act path: target uses its
+own raw self-request and the worker's own Stop hook, so a live king is never a
+dependency for the default code review.
 
 ## Why (wrapped) mail cannot carry a verb
 
@@ -418,7 +424,7 @@ The freshness half of the protocol is sound and is only half.
 
 Two consequences are recorded rather than gated.
 `self_attested_count` on the coverage event says how many of `reviewed_count` are the author attesting its own diff.
-It is recorded rather than gated because self-review is the DEFAULT path, and refusing it wedges every single-session PR.
+It is recorded rather than gated because the native final-head review is the DEFAULT path, and refusing its attestation wedges every single-session PR.
 The `model` field records what the environment CLAIMED.
 The producer refuses to record a claim it can prove false.
 A non-`claude*` model name with no non-Anthropic base URL cannot be the model that answered.
@@ -447,6 +453,15 @@ self-handoff successor or a second agent in a shared worktree is a different
 session and is still not independent.
 A match is strong evidence of self-attestation; a mismatch is weak evidence of
 anything.
+
+## Reviewer context
+
+Each local `review_attestation` may carry `reviewer_context`: `fresh` is emitted
+only when the harness records a forked code-review context, `shared` is emitted
+for a positive same-context review tool result, and `unknown` is the fail-closed
+value when no positive context marker exists, including Codex native review.
+This field measures execution-context evidence, not who invoked the verb, and
+does not affect coverage or merge policy.
 
 The origin is recorded, not gating.
 `reviewed_count` never consults it: every `reviewed` verdict counts toward
