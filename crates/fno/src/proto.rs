@@ -2543,6 +2543,28 @@ pub(crate) fn legacy_mux_root() -> PathBuf {
     legacy_state_root().join("mux")
 }
 
+/// The pre-state-root sidecar path (squads.json, mux-view.json): a SIBLING of
+/// the legacy mux dir. The view and squad stores share this spelling so their
+/// fallback locations cannot drift apart.
+#[cfg(not(test))]
+pub(crate) fn legacy_sidecar_path(file: &str) -> PathBuf {
+    legacy_mux_root().with_file_name(file)
+}
+
+/// The pre-state-root sidecar read behind the one gate (see
+/// [`legacy_fallback_allowed`]). NotFound when absent or deliberately
+/// overridden; every caller treats that as "no fallback".
+#[cfg(not(test))]
+pub(crate) fn legacy_sidecar(file: &str) -> std::io::Result<String> {
+    if !legacy_fallback_allowed() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "legacy fallback disabled",
+        ));
+    }
+    std::fs::read_to_string(legacy_sidecar_path(file))
+}
+
 /// What the explicit config tier said about `state_dir`.
 #[cfg(not(test))]
 enum StateRoot {
@@ -2697,7 +2719,6 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
     body.contains("state_dir").then_some(yaml)
 }
 
-#[cfg(not(test))]
 fn non_empty_env_is_set(key: &str) -> bool {
     std::env::var_os(key).is_some_and(|v| !v.is_empty())
 }
@@ -2711,10 +2732,7 @@ fn non_empty_env_is_set(key: &str) -> bool {
 /// three files once drifted apart (head-review round eight), and one flipped
 /// gate would leak the operator's real prefs into an isolated env.
 pub fn legacy_fallback_allowed() -> bool {
-    fn non_empty(key: &str) -> bool {
-        std::env::var_os(key).is_some_and(|v| !v.is_empty())
-    }
-    !non_empty("FNO_CONFIG") && !non_empty("FNO_AGENTS_HOME")
+    !non_empty_env_is_set("FNO_CONFIG") && !non_empty_env_is_set("FNO_AGENTS_HOME")
 }
 
 /// The one config-resolution warning this process recorded, if any: a pinned

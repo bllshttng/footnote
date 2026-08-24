@@ -378,7 +378,7 @@ pub fn load() -> Loaded {
         // same reason as view_store: an upgrading user keeps their squads, a
         // demo env inherits nothing from the operator's root.
         Err(e) if e.kind() == io::ErrorKind::NotFound => match legacy_read() {
-            Ok(s) => return loaded_from_raw(&path, s),
+            Ok(s) => return loaded_from_raw(&legacy_path(), s),
             Err(_) => return Loaded::default(),
         },
         // Unreadable is NOT missing. Collapsing the two made a permission
@@ -403,10 +403,7 @@ pub fn load() -> Loaded {
 /// overridden; every caller treats that as "no fallback".
 #[cfg(not(test))]
 fn legacy_read() -> io::Result<String> {
-    if !crate::proto::legacy_fallback_allowed() {
-        return Err(io::ErrorKind::NotFound.into());
-    }
-    std::fs::read_to_string(crate::proto::legacy_mux_root().with_file_name("squads.json"))
+    crate::proto::legacy_sidecar("squads.json")
 }
 
 #[cfg(test)]
@@ -414,8 +411,23 @@ fn legacy_read() -> io::Result<String> {
     Err(io::ErrorKind::NotFound.into())
 }
 
+/// Where the fallback's bytes came from. The corrupt-file quarantine must
+/// rename the SOURCE, never the missing primary path the fallback was
+/// reached through: loaded_from_raw's notice names whichever it gets.
+#[cfg(not(test))]
+fn legacy_path() -> std::path::PathBuf {
+    crate::proto::legacy_sidecar_path("squads.json")
+}
+
+#[cfg(test)]
+fn legacy_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/nonexistent-legacy-squads")
+}
+
 /// Parse the store body shared by the primary and legacy reads, so the
-/// fallback path degrades exactly like the primary one.
+/// fallback path degrades exactly like the primary one. `path` is the file
+/// the bytes came FROM: a corrupt body quarantines that file, so a legacy
+/// fallback must hand the legacy path, not the absent primary one.
 fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
     if raw.trim().is_empty() {
         return Loaded::default();
@@ -438,12 +450,18 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
             let can_quarantine = assert_writable().is_ok();
             #[cfg(test)]
             let can_quarantine = true;
-            if can_quarantine {
-                let _ = std::fs::rename(&path, &aside);
-            }
+            let quarantined = can_quarantine && std::fs::rename(&path, &aside).is_ok();
             return Loaded {
-                notice: Some(if can_quarantine {
+                notice: Some(if quarantined {
                     format!("quarantined corrupt squads.json to {}", aside.display())
+                } else if can_quarantine {
+                    // The rename itself failed (the source vanished, or
+                    // permissions): never claim a quarantine that did not
+                    // happen - a false claim repeats on every load.
+                    format!(
+                        "corrupt squads.json could not be quarantined to {}; treating as empty",
+                        aside.display()
+                    )
                 } else {
                     "corrupt squads.json left in place; set FNO_AGENTS_HOME to quarantine from a build-tree binary".into()
                 }),
@@ -1337,20 +1355,16 @@ fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
     // seeding from NotFound alone would collapse the store to just this one
     // mutation on the first write after the root moves, silently dropping
     // every persisted squad while prune reports the ones it just erased.
-    let seed = std::fs::read_to_string(&path).or_else(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            legacy_read()
-        } else {
-            Err(e)
+    let mut from_legacy = false;
+    let seed = match std::fs::read_to_string(&path) {
+        Ok(raw) => Some(raw),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            from_legacy = true;
+            legacy_read().ok()
         }
-    });
-    let mut file = match seed {
-        Ok(raw) if raw.trim().is_empty() => StoreFile::default(),
-        Ok(raw) => serde_json::from_str::<StoreFile>(&raw)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => StoreFile::default(),
         Err(e) => return Err(e),
     };
+    let mut file = parse_seed(seed, from_legacy)?;
     f(&mut file);
     file.version = STORE_VERSION;
 
@@ -1362,6 +1376,23 @@ fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
     // never a torn one (AC1-FR).
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// The mutate seed parse. Corruption at the PRIMARY path refuses the write
+/// (never clobber a store this process cannot read), while corruption or
+/// unreadability reached through the LEGACY fallback degrades to a fresh
+/// store, mirroring load(): the two surfaces must not disagree about
+/// whether the legacy file is fatal.
+fn parse_seed(raw: Option<String>, from_legacy: bool) -> io::Result<StoreFile> {
+    let raw = match raw {
+        Some(r) if !r.trim().is_empty() => r,
+        _ => return Ok(StoreFile::default()),
+    };
+    match serde_json::from_str::<StoreFile>(&raw) {
+        Ok(f) => Ok(f),
+        Err(e) if from_legacy => Ok(StoreFile::default()),
+        Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+    }
 }
 
 /// Holds an advisory `flock` for the life of the guard, releasing on drop.
@@ -1836,6 +1867,38 @@ mod tests {
             })
             .collect();
         assert_eq!(asides.len(), 1, "exactly one quarantine file");
+    }
+
+    #[test]
+    fn a_quarantine_that_did_not_happen_is_never_claimed() {
+        // The fallback shape from head-review round nine: bytes whose source
+        // file is gone. The rename fails, so the notice must say so instead
+        // of claiming a quarantine that repeats falsely on every load.
+        let loaded = loaded_from_raw(
+            std::path::Path::new("/nonexistent-squads-source"),
+            "{not valid json".into(),
+        );
+        let notice = loaded.notice.expect("corrupt content must notice");
+        assert!(!notice.contains("quarantined corrupt"), "{notice}");
+        assert!(notice.contains("could not be quarantined"), "{notice}");
+    }
+
+    #[test]
+    fn the_seed_degrades_legacy_corruption_and_refuses_primary_corruption() {
+        // parse_seed mirrors load(): legacy-sourced corruption starts fresh
+        // (load() quarantines-and-empties the same bytes), while corruption
+        // at the primary path refuses the write rather than clobbering.
+        let corrupt = "{not valid json".to_string();
+        assert!(parse_seed(Some(corrupt.clone()), true)
+            .unwrap()
+            .squads
+            .is_empty());
+        assert!(parse_seed(Some(corrupt), false).is_err());
+        assert!(parse_seed(None, false).unwrap().squads.is_empty());
+        assert!(parse_seed(Some("  ".into()), true)
+            .unwrap()
+            .squads
+            .is_empty());
     }
 
     #[test]

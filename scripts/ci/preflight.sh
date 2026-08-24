@@ -1234,10 +1234,13 @@ roots = [os.path.expanduser('~/.fno')]
 cfg = os.path.expanduser('~/.fno/config.toml')
 try:
     body = open(cfg).read()
-    m = re.search(r'^state_dir\s*=\s*[\"\\']([^\"\\']+)[\"\\']', body, re.M)
-    if m:
-        v = m.group(1)
-        if not v.startswith(('{', '\$')) and not v.startswith('~/'):
+    # Every state_dir occurrence, top-level AND [config]-wrapped (the mirror
+    # reads both, wrapped winning): watching an extra root is free, missing a
+    # relocated one is the vacuous green this guard exists to prevent.
+    # Template and $VAR values stay skipped: the resolver declines those
+    # too, so the store does not follow them.
+    for v in re.findall(r'^\s*state_dir\s*=\s*[\"\\']([^\"\\']+)[\"\\']', body, re.M):
+        if not v.startswith(('{', '\$')):
             roots.append(os.path.abspath(os.path.expanduser(v)))
 except OSError:
     pass
