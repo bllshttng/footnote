@@ -62,7 +62,7 @@ def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    capacity = os.cpu_count() or 1
+    capacity = doctor_footprint._cpu_capacity_cores()
     assert payload["descendant_cpu_cores"] == pytest.approx(0.8)
     assert payload["fleet_cpu_cores"] == pytest.approx(1.0)
     assert payload["descendant_process_count"] == 1
@@ -123,6 +123,56 @@ def test_ac7_edge_fleet_cpu_threshold_includes_short_lived_descendant(monkeypatc
     assert result.exit_code == 3, result.output
     assert "fleet CPU: 1.200 cores" in result.stdout
     assert "verdict: over budget" in result.stdout
+
+
+def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            """\
+            PID PPID ELAPSED %CPU RSS COMMAND
+            100 1 01:00:00 20.0 1024 fno-agents-worker --run
+            101 100 01:00:00 20.0 1024 cargo test -p fno
+            102 101 01:00:00 20.0 1024 rustc --crate-name fno
+            """,
+            [{"name": "worker-a"}],
+            [],
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint"])
+
+    assert result.exit_code == 0, result.output
+    assert "processes: 3 (threshold 2)" in result.stdout
+
+
+def test_ac9_edge_cpu_share_uses_constrained_capacity(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(doctor_footprint.os, "cpu_count", lambda: 64)
+    monkeypatch.setattr(doctor_footprint.os, "process_cpu_count", lambda: 2, raising=False)
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            """\
+            PID PPID ELAPSED %CPU RSS COMMAND
+            100 1 01:00:00 100.0 1024 fno-agents-worker --run
+            """,
+            [],
+            [],
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["cpu_capacity_cores"] == 2
+    assert payload["fleet_percent_capacity"] == pytest.approx(50.0)
 
 
 def test_ac3_hp_reports_both_thresholds_and_exits_zero(monkeypatch) -> None:

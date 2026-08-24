@@ -303,6 +303,7 @@ class TestRunGate:
             ),
         )
         monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
 
         evidence = spawn_gate._footprint_cause_evidence()
 

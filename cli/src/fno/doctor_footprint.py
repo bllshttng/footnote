@@ -20,6 +20,10 @@ DAEMON_ALLOWANCE = 1
 _PS_COLUMNS = "pid,ppid,etime,%cpu,rss,command"
 
 
+def _cpu_capacity_cores() -> int:
+    return getattr(os, "process_cpu_count", os.cpu_count)() or 1
+
+
 def _fno_binary() -> str:
     return shutil.which("fno") or shutil.which("fno-py") or "fno"
 
@@ -90,7 +94,7 @@ def _payload(
     process_threshold: int | None,
     exit_code: int,
 ) -> dict[str, Any]:
-    cpu_capacity = os.cpu_count() or 1
+    cpu_capacity = _cpu_capacity_cores()
     measured_share = (
         reading.fleet_cpu_cores / reading.measured_cpu_cores * 100
         if reading.measured_cpu_cores > 0
@@ -106,6 +110,7 @@ def _payload(
         "process_count": reading.process_count,
         "process_count_threshold": process_threshold,
         "descendant_process_count": reading.descendant_process_count,
+        "direct_process_count": reading.direct_process_count,
         "rss_gb": reading.rss_gb,
         "cpu_capacity_cores": cpu_capacity,
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
@@ -134,7 +139,10 @@ def _emit_result(
     cause_only: bool = False,
 ) -> None:
     cpu_over = reading.fleet_cpu_cores > CPU_THRESHOLD_CORES
-    process_over = process_threshold is not None and reading.process_count > process_threshold
+    process_over = (
+        process_threshold is not None
+        and reading.direct_process_count > process_threshold
+    )
     exit_code = 0 if cause_only else (3 if cpu_over or process_over else 0)
     payload = _payload(
         reading,
@@ -162,6 +170,7 @@ def _emit_result(
             f"processes: {reading.process_count} "
             f"(threshold {process_threshold if process_threshold is not None else 'n/a'})"
         )
+        typer.echo(f"direct processes: {reading.direct_process_count}")
         typer.echo(f"transient calls: {reading.transient_call_count}")
         typer.echo(f"verdict: {verdict} (exit {exit_code})")
         if reading.unparsed_lines:

@@ -34,6 +34,7 @@ def test_ac1_hp_attributes_transitive_build_descendants_and_excludes_negative_tr
     assert reading.descendant_cpu_cores == 1.4
     assert reading.fleet_cpu_cores == 1.6
     assert reading.descendant_process_count == 3
+    assert reading.direct_process_count == 1
     assert reading.process_count == 4
     assert [command for _, command in reading.top] == [
         "cargo test -p fno",

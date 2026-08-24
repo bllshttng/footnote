@@ -855,7 +855,7 @@ def _check_ram_floor(floor_gb: float) -> None:
 def _footprint_cause_evidence() -> Optional[str]:
     """Read one fail-open fleet footprint for an over-load refusal."""
     try:
-        from fno.doctor_footprint import _read_ps
+        from fno.doctor_footprint import _cpu_capacity_cores, _read_ps
         from fno.footprint import parse_footprint
 
         ps_output, error = _read_ps(timeout=5.0)
@@ -864,7 +864,7 @@ def _footprint_cause_evidence() -> Optional[str]:
         reading = parse_footprint(ps_output, excluded_root_pids={os.getpid()})
         if reading.unparsed_lines:
             return None
-        capacity = float(os.cpu_count() or 1)
+        capacity = float(_cpu_capacity_cores())
         measured_share = (
             reading.fleet_cpu_cores / reading.measured_cpu_cores * 100
             if reading.measured_cpu_cores > 0

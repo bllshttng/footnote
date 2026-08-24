@@ -27,6 +27,7 @@ class Footprint(NamedTuple):
     descendant_cpu_cores: float
     fleet_cpu_cores: float
     descendant_process_count: int
+    direct_process_count: int
     transient_call_count: int
     process_count: int
     rss_gb: float
@@ -199,6 +200,7 @@ def parse_footprint(
     descendant_cpu_percent = 0.0
     transient_call_count = 0
     descendant_process_count = 0
+    direct_process_count = 0
     process_count = 0
     rss_kb = 0
     measured_cpu_percent = 0.0
@@ -217,8 +219,10 @@ def parse_footprint(
             if process.cpu_percent:
                 sustained.append((process.cpu_percent, process.command))
         elif process.elapsed_seconds < sustained_floor_seconds:
+            direct_process_count += 1
             transient_call_count += 1
         else:
+            direct_process_count += 1
             sustained_cpu_percent += process.cpu_percent
             sustained.append((process.cpu_percent, process.command))
 
@@ -228,6 +232,7 @@ def parse_footprint(
         descendant_cpu_cores=descendant_cpu_percent / 100,
         fleet_cpu_cores=(sustained_cpu_percent + descendant_cpu_percent) / 100,
         descendant_process_count=descendant_process_count,
+        direct_process_count=direct_process_count,
         transient_call_count=transient_call_count,
         process_count=process_count,
         rss_gb=rss_kb / (1024 * 1024),
