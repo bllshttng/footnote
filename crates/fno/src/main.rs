@@ -374,6 +374,14 @@ fn run_client(session: &str) {
 }
 
 fn run_server(socket: PathBuf) {
+    // The one mux role that never returns through `exit_mux`: the daemon
+    // blocks until killed, so the config warning it recorded while resolving
+    // the socket dir would otherwise never surface. Server stderr is a log
+    // stream, not a PTY the harness scrapes, so printing here is safe (the
+    // NEVER-stderr rule governs the TUI client, x-0296).
+    if let Some((warning, _)) = proto::pending_config_warning() {
+        eprintln!("{warning}");
+    }
     std::process::exit(fno::server::run(socket));
 }
 

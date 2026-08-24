@@ -1333,10 +1333,17 @@ fn assert_writable() -> io::Result<()> {
         return Ok(());
     }
     if build_tree_target_dir(&std::env::current_exe()?).is_some() {
+        // Name the file actually at stake: the store follows the state root
+        // (a configured state_dir, or beside a pinned FNO_CONFIG), so the
+        // hardcoded HOME spelling would point a dogfooding operator at the
+        // wrong file and an FNO_AGENTS_HOME that isolates nothing.
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "refusing to write ~/.fno/squads.json from a build-tree binary; \
-             set FNO_AGENTS_HOME (tests: a temp dir; dogfooding: $HOME/.fno)",
+            format!(
+                "refusing to write {} from a build-tree binary; set FNO_AGENTS_HOME \
+                 (tests: a temp dir; dogfooding: $HOME/.fno)",
+                squads_path().display()
+            ),
         ));
     }
     Ok(())

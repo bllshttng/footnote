@@ -1528,10 +1528,21 @@ fn legacy_mux_root_check() -> Check {
         };
     }
     // The same helper the resolver's own fallback uses, so this comparison
-    // can never drift from what mux_dir actually falls back to.
+    // can never drift from what mux_dir actually falls back to. Canonical
+    // forms catch a state_dir that aliases the legacy root through a
+    // symlink or a `..` segment - lexically distinct, physically the same
+    // dir, and warning there would direct an operator to kill a fleet that
+    // never moved.
     let legacy = proto::legacy_mux_root();
     let resolved = proto::mux_dir();
-    if resolved == legacy {
+    let same_root = match (
+        std::fs::canonicalize(&resolved),
+        std::fs::canonicalize(&legacy),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => resolved == legacy,
+    };
+    if same_root {
         return Check {
             name: "legacy mux root".into(),
             verdict: Verdict::Na,

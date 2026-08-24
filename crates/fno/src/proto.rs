@@ -2740,9 +2740,23 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
     match expand_state_dir(value) {
         // Agreement with the root this resolver would use anyway.
         Some(root) => (root != legacy_state_root()).then_some(yaml),
-        // Unexpandable (relative, template): Python still follows it and
-        // this mirror cannot compare, so the divergence warning stands.
-        None => Some(yaml),
+        None => {
+            // A `$HOME`/`${HOME}` spelling is unexpandable by this mirror
+            // but Python's expandvars resolves it; compare it rather than
+            // warn when it names the same root. Any other unexpandable
+            // value (relative, template) leaves the warning standing:
+            // Python still follows it somewhere this mirror cannot look.
+            let rest = value
+                .strip_prefix("${HOME}")
+                .or_else(|| value.strip_prefix("$HOME"));
+            match (rest, std::env::var_os("HOME").map(PathBuf::from)) {
+                (Some(rest), Some(home)) => {
+                    let joined = home.join(rest.trim_start_matches('/'));
+                    (joined != legacy_state_root()).then_some(yaml)
+                }
+                _ => Some(yaml),
+            }
+        }
     }
 }
 
