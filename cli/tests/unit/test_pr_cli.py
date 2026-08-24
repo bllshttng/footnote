@@ -75,6 +75,52 @@ def test_pr_list_prints_rest_summaries(monkeypatch):
     assert json.loads(result.stdout)[0]["headRefName"] == "feature/x"
 
 
+def test_pr_list_exposes_open_node_binding_verdicts(monkeypatch, tmp_path):
+    from fno import paths
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "x-1111", "status": "ready"},
+                    {"id": "x-2222", "status": "ready", "pr_number": 931},
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+
+    from fno.pr import _rest
+
+    monkeypatch.setattr(
+        _rest,
+        "list_prs_rest",
+        lambda slug, **kwargs: (
+            [
+                {"number": 930, "state": "OPEN", "title": "missing", "headRefName": "feature/x-1111", "url": "https://github.com/o/r/pull/930"},
+                {"number": 931, "state": "OPEN", "title": "bound", "headRefName": "feature/x-2222", "url": "https://github.com/o/r/pull/931"},
+                {"number": 932, "state": "OPEN", "title": "untracked", "headRefName": "feature/no-node", "url": "https://github.com/o/r/pull/932"},
+                {"number": 933, "state": "OPEN", "title": "ambiguous", "headRefName": "feature/x-1111-x-2222", "url": "https://github.com/o/r/pull/933"},
+            ],
+            "",
+        ),
+    )
+
+    result = runner.invoke(app, ["do", "pr", "list", "--repo", "o/r"])
+
+    assert result.exit_code == 0
+    rows = {row["number"]: row for row in json.loads(result.stdout)}
+    assert rows[930]["node_id"] == "x-1111"
+    assert rows[930]["node_binding"] == "missing"
+    assert rows[931]["node_id"] == "x-2222"
+    assert rows[931]["node_binding"] == "bound"
+    assert rows[932]["node_id"] is None
+    assert rows[932]["node_binding"] == "untracked"
+    assert rows[933]["node_id"] is None
+    assert rows[933]["node_binding"] == "ambiguous"
+
+
 def test_graphql_exec_rejects_public_coverage_purpose():
     result = runner.invoke(
         app,
