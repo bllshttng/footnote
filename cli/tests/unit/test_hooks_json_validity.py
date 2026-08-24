@@ -229,6 +229,21 @@ def test_hook_configs_do_not_register_harness_ownership_guard() -> None:
         )
 
 
+def test_claude_registers_one_law_authority_gate_on_bash() -> None:
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+    registrations = [
+        registration
+        for registration in data["hooks"]["PreToolUse"]
+        if registration.get("matcher") == "Bash"
+        and any(
+            hook.get("command")
+            == "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"
+            for hook in registration.get("hooks", [])
+        )
+    ]
+    assert len(registrations) == 1
+
+
 def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> None:
     """Both harness manifests reach ONE carrier, which owns the predicate.
 
@@ -498,10 +513,17 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
         commands = [
             hook.get("command") for hook in registrations[0].get("hooks", [])
         ]
-        assert commands == [
+        expected = [
             f"python3 ${{{root_var}}}/hooks/git-protection.py",
             f"python3 ${{{root_var}}}/{guard}",
-        ], f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"
+        ]
+        if path == HOOKS_JSON:
+            expected.append(
+                "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"
+            )
+        assert commands == expected, (
+            f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"
+        )
 
 
 def test_observer_expected_lists_match_their_group_source_ids() -> None:
