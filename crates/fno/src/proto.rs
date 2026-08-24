@@ -678,8 +678,17 @@ pub enum ControlVerb {
     },
     /// Dump a layout scope's nested tree + per-pane geometry ->
     /// [`ServerMsg::LayoutTree`] (structure + rects, so templates/reconcile can
-    /// diff topology - Locked Decision 5).
-    LayoutGet { scope: LayoutScope },
+    /// diff topology - Locked Decision 5). `workers` (v51, x-1499) additionally
+    /// joins each pane's registry worker into `TabLayout.workers` for the
+    /// human rendering; `false` (the default) keeps every `--json` reply
+    /// byte-shape identical to the pre-v51 output. A `workers: true` request
+    /// against an unreadable registry is its own refusal
+    /// ([`err_code::REGISTRY_UNAVAILABLE`]), never a silent all-empty join.
+    LayoutGet {
+        scope: LayoutScope,
+        #[serde(default)]
+        workers: bool,
+    },
     /// Resolve an `fno_id` to its live location -> [`ServerMsg::PaneLocation`],
     /// or one of three DISTINCT error codes ([`err_code::REGISTRY_UNAVAILABLE`] /
     /// [`err_code::NOT_FOUND`] / [`err_code::NOT_PANE_HOSTED`]); an empty
@@ -4037,6 +4046,7 @@ mod tests {
                     squad: PaneTarget::SquadId(1),
                     tab: TabSel::Index(2),
                 },
+                workers: false,
             },
         ];
         for v in verbs {

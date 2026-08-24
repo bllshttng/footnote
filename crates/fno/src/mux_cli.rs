@@ -36,8 +36,8 @@ use std::time::{Duration, Instant};
 
 use crate::proto::{
     self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, LayoutScope,
-    PanePlacement, PaneTarget, PlacementFallback, ServerMsg, SquadLayout, TabLayout,
-    TabPaneOccupant, TabSel, WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
+    PanePlacement, PaneTarget, PlacementFallback, ServerMsg, SquadLayout, TabPaneOccupant, TabSel,
+    WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
 };
 use crate::tree::Dir;
 
@@ -2832,7 +2832,14 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
         session.as_deref(),
         env_session,
         json,
-        ControlVerb::LayoutGet { scope },
+        ControlVerb::LayoutGet {
+            scope,
+            // The per-pane worker join rides the reply only for the HUMAN
+            // rendering; `--json` stays byte-shape identical to the pre-v51
+            // output (x-1499), so a topology diffing consumer sees no new
+            // key on a healthy reply.
+            workers: !json,
+        },
     )
 }
 
@@ -3634,6 +3641,7 @@ fn location_lookup(
     session_flag: Option<&str>,
     json: bool,
     focus: bool,
+    url: bool,
 ) -> i32 {
     let session = resolve_session(session_flag, None);
     let sock = match proto::socket_path(&session) {
@@ -3677,6 +3685,12 @@ fn location_lookup(
             if code != EXIT_OK {
                 return code;
             }
+            // `--url` names the operator's ask: print the focused pane's
+            // share URL, never move the client (the same precedence the
+            // agent-matched path of `view` gives the flag).
+            if url {
+                return print_pane_url(verb, &session, pane);
+            }
             return focus_pane(verb, &session, pane, json);
         }
     }
@@ -3694,6 +3708,7 @@ fn resolve_row_or_location(
     session_flag: Option<&str>,
     json: bool,
     focus: bool,
+    url: bool,
 ) -> Result<crate::agents_view::RegistryAgent, i32> {
     let (rows, now) = registry_rows_or(verb)?;
     match resolve_selector(&rows, selector, now) {
@@ -3709,6 +3724,7 @@ fn resolve_row_or_location(
             session_flag,
             json,
             focus,
+            url,
         )),
     }
 }
@@ -3775,6 +3791,7 @@ pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
         session_flag.as_deref(),
         json,
         true,
+        url,
     ) {
         Ok(r) => r,
         Err(code) => return code,
@@ -3847,6 +3864,7 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
                 workspace.as_deref(),
                 session_flag.as_deref(),
                 json,
+                false,
                 false,
             );
         }
@@ -7164,7 +7182,7 @@ mod tests {
         let squads = vec![SquadLayout {
             squad_id: 1,
             squad_name: Some("api".into()),
-            tabs: vec![TabLayout {
+            tabs: vec![crate::proto::TabLayout {
                 tab_id: 34,
                 name: None,
                 focus: 35,

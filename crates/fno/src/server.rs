@@ -524,8 +524,12 @@ enum CoreMsg {
     },
     LayoutGet {
         scope: LayoutScope,
-        /// (x-1499) Fresh registry rows for the per-pane worker join the
-        /// human layout rendering needs; `None` keeps the machine shape.
+        /// (x-1499) Whether the reply carries the per-pane worker join the
+        /// human layout rendering needs. `false` keeps the machine JSON
+        /// byte-shape unchanged, whatever the registry read says.
+        workers: bool,
+        /// (x-1499) Fresh registry rows for that join; `None` is a read
+        /// failure and, with `workers: true`, its own refusal.
         agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
@@ -3818,7 +3822,12 @@ impl Core {
     /// `(code, one refusal message)`; the ambiguity refusals print every
     /// candidate with workspace, label, and `tab_id` so the operator can
     /// qualify and retry.
-    fn tab_where(&self, sel: &str, target: &PaneTarget) -> Result<ServerMsg, (u32, String)> {
+    fn tab_where(
+        &self,
+        sel: &str,
+        target: &PaneTarget,
+        agents: &[RegistryAgent],
+    ) -> Result<ServerMsg, (u32, String)> {
         let parsed = parse_loc_sel(sel).map_err(|e| (err_code::BAD_REQUEST, e))?;
         // Candidate workspaces: a qualified target names one; the default is
         // UNQUALIFIED and searches every squad.
@@ -3873,39 +3882,52 @@ impl Core {
                     .map(|n| resolve_form(&TabSel::Index(n)))
                     .unwrap_or_else(|_| Ok(Vec::new()))?;
                 let by_id = resolve_form(&TabSel::Id(*n))?;
-                let mut distinct: Vec<(&Squad, usize)> = ordinal.clone();
-                for h in &by_id {
-                    if !distinct
-                        .iter()
-                        .any(|(s, ti)| s.tabs[*ti].id == h.0.tabs[h.1].id)
-                    {
-                        distinct.push(*h);
+                // Only a reading that ACTUALLY hit more than one tab can make
+                // the bare number ambiguous by form; a one-sided miss falls
+                // through to the generic handling below, so the refusal the
+                // operator gets is one whose remediation works (qualify a
+                // multi-workspace ordinal, or accept a single unambiguous
+                // reading) instead of advice naming a form that matches
+                // nothing.
+                if ordinal.len() > 1 && by_id.is_empty() {
+                    ordinal
+                } else if ordinal.is_empty() && by_id.len() == 1 {
+                    by_id
+                } else {
+                    let mut distinct: Vec<(&Squad, usize)> = ordinal.clone();
+                    for h in &by_id {
+                        if !distinct
+                            .iter()
+                            .any(|(s, ti)| s.tabs[*ti].id == h.0.tabs[h.1].id)
+                        {
+                            distinct.push(*h);
+                        }
                     }
-                }
-                match distinct.len() {
-                    0 => {
-                        return Err((
-                            err_code::NOT_FOUND,
-                            format!("no tab at ordinal {n} and no tab with id {n}"),
-                        ))
-                    }
-                    1 => distinct,
-                    _ => {
-                        let ord = ordinal
-                            .first()
-                            .map(|(s, ti)| self.hit_line(s, *ti))
-                            .unwrap_or_default();
-                        let id = by_id
-                            .first()
-                            .map(|(s, ti)| self.hit_line(s, *ti))
-                            .unwrap_or_default();
-                        return Err((
-                            err_code::BAD_REQUEST,
-                            format!(
-                                "bare number {n} is ambiguous: {ord} as an ordinal, {id} as an \
-                                 id; use ordinal:{n} or id:{n}"
-                            ),
-                        ));
+                    match distinct.len() {
+                        0 => {
+                            return Err((
+                                err_code::NOT_FOUND,
+                                format!("no tab at ordinal {n} and no tab with id {n}"),
+                            ))
+                        }
+                        1 => distinct,
+                        _ => {
+                            let ord = ordinal
+                                .first()
+                                .map(|(s, ti)| self.hit_line(s, *ti))
+                                .unwrap_or_default();
+                            let id = by_id
+                                .first()
+                                .map(|(s, ti)| self.hit_line(s, *ti))
+                                .unwrap_or_default();
+                            return Err((
+                                err_code::BAD_REQUEST,
+                                format!(
+                                    "bare number {n} is ambiguous: {ord} as an ordinal, {id} as \
+                                     an id; use ordinal:{n} or id:{n}"
+                                ),
+                            ));
+                        }
                     }
                 }
             }
@@ -3935,7 +3957,7 @@ impl Core {
             .into_iter()
             .map(|pid| TabPaneOccupant {
                 pane_id: pid,
-                fno_id: self.fno_id_for_pane_with_agents(pid, &self.agents),
+                fno_id: self.fno_id_for_pane_with_agents(pid, agents),
             })
             .collect();
         Ok(ServerMsg::TabLocation {
@@ -3958,13 +3980,13 @@ impl Core {
         target: &PaneTarget,
         agents: Option<&[RegistryAgent]>,
     ) -> ServerMsg {
-        if agents.is_none() {
+        let Some(rows) = agents else {
             return ServerMsg::Err {
                 code: err_code::REGISTRY_UNAVAILABLE,
                 msg: "agent registry unavailable".into(),
             };
-        }
-        match self.tab_where(sel, target) {
+        };
+        match self.tab_where(sel, target, rows) {
             Ok(msg) => msg,
             Err((code, msg)) => ServerMsg::Err { code, msg },
         }
@@ -9967,12 +9989,25 @@ impl Core {
             }
             CoreMsg::LayoutGet {
                 scope,
+                workers,
                 agents,
                 reply,
             } => {
-                let msg = match self.layout_get(&scope, agents.as_deref()) {
-                    Ok(squads) => ServerMsg::LayoutTree { squads },
-                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                // A worker join the caller asked for cannot silently degrade
+                // to "every pane empty" when the registry read failed: that
+                // would print the same receipt as a session full of idle
+                // panes (the absence-versus-answer trap). Refuse instead.
+                let msg = if workers && agents.is_none() {
+                    ServerMsg::Err {
+                        code: err_code::REGISTRY_UNAVAILABLE,
+                        msg: "agent registry unavailable".into(),
+                    }
+                } else {
+                    let agents = if workers { agents.as_deref() } else { None };
+                    match self.layout_get(&scope, agents) {
+                        Ok(squads) => ServerMsg::LayoutTree { squads },
+                        Err((code, msg)) => ServerMsg::Err { code, msg },
+                    }
                 };
                 let _ = reply.send(msg);
                 Flow::Continue
@@ -11342,11 +11377,12 @@ async fn handle_control(
                 })
                 .await
         }
-        ControlVerb::LayoutGet { scope } => {
+        ControlVerb::LayoutGet { scope, workers } => {
             let agents = read_guard_agents().await;
             core_tx
                 .send(CoreMsg::LayoutGet {
                     scope,
+                    workers,
                     agents,
                     reply: reply_tx,
                 })
@@ -13688,7 +13724,7 @@ mod tests {
         w2.session_id = Some("W2".into());
         core.agents = vec![w1, w2];
 
-        let loc = core.tab_where("id:10", &PaneTarget::CurrentRoute);
+        let loc = core.tab_where("id:10", &PaneTarget::CurrentRoute, &core.agents);
         match loc {
             Ok(ServerMsg::TabLocation {
                 squad_id,
@@ -13712,12 +13748,12 @@ mod tests {
         }
 
         // ordinal: and name: land on the same tabs as id:.
-        let by_ord = core.tab_where("ordinal:1", &PaneTarget::CurrentRoute);
+        let by_ord = core.tab_where("ordinal:1", &PaneTarget::CurrentRoute, &core.agents);
         assert!(matches!(
             &by_ord,
             Ok(ServerMsg::TabLocation { tab_id: 10, .. })
         ));
-        let by_name = core.tab_where("name:bee", &PaneTarget::CurrentRoute);
+        let by_name = core.tab_where("name:bee", &PaneTarget::CurrentRoute, &core.agents);
         assert!(matches!(
             &by_name,
             Ok(ServerMsg::TabLocation {
@@ -13738,19 +13774,19 @@ mod tests {
 
         // AC1-ERR: 0 and beyond-count ordinals refuse with the named errors.
         assert_eq!(
-            core.tab_where("ordinal:0", &PaneTarget::CurrentRoute)
+            core.tab_where("ordinal:0", &PaneTarget::CurrentRoute, &[])
                 .unwrap_err()
                 .1,
             "tab ordinal starts at 1"
         );
         assert_eq!(
-            core.tab_where("ordinal:9", &PaneTarget::CurrentRoute)
+            core.tab_where("ordinal:9", &PaneTarget::CurrentRoute, &[])
                 .unwrap_err()
                 .1,
             "no tab at ordinal 9"
         );
         assert_eq!(
-            core.tab_where("id:99", &PaneTarget::CurrentRoute)
+            core.tab_where("id:99", &PaneTarget::CurrentRoute, &[])
                 .unwrap_err()
                 .1,
             "no tab with id 99"
@@ -13767,7 +13803,7 @@ mod tests {
         // An unqualified ordinal repeating across workspaces refuses and
         // prints every candidate with workspace, label, and tab_id.
         let (code, msg) = core
-            .tab_where("ordinal:2", &PaneTarget::CurrentRoute)
+            .tab_where("ordinal:2", &PaneTarget::CurrentRoute, &[])
             .unwrap_err();
         assert_eq!(code, err_code::BAD_REQUEST);
         assert!(msg.contains("tab=bee tab_id=20"), "msg: {msg}");
@@ -13776,21 +13812,33 @@ mod tests {
 
         // Qualification resolves it.
         assert!(matches!(
-            core.tab_where("ordinal:2", &PaneTarget::SquadId(2)),
+            core.tab_where("ordinal:2", &PaneTarget::SquadId(2), &[]),
             Ok(ServerMsg::TabLocation { tab_id: 2, .. })
         ));
 
         // AC4-ERR: a bare number that names DIFFERENT live tabs as an ordinal
         // and as a stable id refuses with both explicit forms, never a
         // first-pick by iteration order.
-        let (code, msg) = core.tab_where("2", &PaneTarget::CurrentRoute).unwrap_err();
+        let (code, msg) = core
+            .tab_where("2", &PaneTarget::CurrentRoute, &[])
+            .unwrap_err();
         assert_eq!(code, err_code::BAD_REQUEST);
         assert!(msg.contains("ordinal:2"), "msg: {msg}");
         assert!(msg.contains("id:2"), "msg: {msg}");
 
+        // A bare number whose ordinal reading alone spans workspaces gets the
+        // USABLE refusal (qualify the workspace), never bare-number advice
+        // naming an id form that matches nothing.
+        let (code, msg) = core
+            .tab_where("1", &PaneTarget::CurrentRoute, &[])
+            .unwrap_err();
+        assert_eq!(code, err_code::BAD_REQUEST);
+        assert!(msg.contains("matches 2 workspaces"), "msg: {msg}");
+        assert!(!msg.contains("as an id"), "msg: {msg}");
+
         // A bare number with only one live reading resolves that reading.
         assert!(matches!(
-            core.tab_where("1", &PaneTarget::SquadId(1)),
+            core.tab_where("1", &PaneTarget::SquadId(1), &[]),
             Ok(ServerMsg::TabLocation { tab_id: 10, .. })
         ));
     }
@@ -13863,6 +13911,30 @@ mod tests {
         );
         assert_eq!(tab10.panes.len(), 2, "both panes are tiled with rects");
         assert!(tab10.panes.iter().all(|(_, r)| r.cols > 0 && r.rows > 0));
+        // (x-1499) The worker join is OPT-IN: absent (None) unless the caller
+        // asked, so the machine JSON shape never grows a key on a healthy
+        // reply; asked for, it joins the registry rows by pane.
+        assert!(
+            squads[0].tabs.iter().all(|t| t.workers.is_none()),
+            "no workers key without the request"
+        );
+        let mut core = two_tab_core();
+        core.session_name = "sess".into();
+        let mut w = agent_in("sess", 1, None, false);
+        w.session_id = Some("W1".into());
+        core.agents = vec![w];
+        let squads = core
+            .layout_get(&LayoutScope::Session, Some(&core.agents.clone()))
+            .unwrap();
+        let tab10 = squads[0].tabs.iter().find(|t| t.tab_id == 10).unwrap();
+        assert_eq!(
+            tab10.workers.as_ref().map(|ws| ws.first().cloned()),
+            Some(Some(TabPaneOccupant {
+                pane_id: 1,
+                fno_id: Some("W1".into())
+            })),
+            "the requested join names the pane's worker"
+        );
     }
 
     #[test]
