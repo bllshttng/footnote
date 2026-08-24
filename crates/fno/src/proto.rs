@@ -257,7 +257,15 @@ fn default_true() -> bool {
 /// flat; the bump names the skew so the handshake restarts an old server
 /// instead. (Numbered one past the x-5f7f resume-gesture v49 it rebases
 /// onto.)
-pub const PROTO_VERSION: u32 = 50;
+///
+/// v51 (x-1499, tab dictionary): `ControlVerb::TabWhere` +
+/// `ServerMsg::TabLocation`/`TabPaneOccupant` - the reverse location lookup
+/// (what lives at the tab the operator is looking at). `TabSel::Index`
+/// becomes the 1-based ordinal the UI shows, where it was a 0-based vector
+/// index, so a captured `--tab <n>` selector changes meaning across the
+/// bump; the handshake is what tells an old client to restart. New variants
+/// are not additive-tolerant either.
+pub const PROTO_VERSION: u32 = 51;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -726,6 +734,18 @@ pub enum ControlVerb {
         spec: AnchoredLayoutSpec,
         #[serde(default)]
         focus: bool,
+    },
+    /// Resolve a tab LOCATION to what lives there (x-1499) ->
+    /// [`ServerMsg::TabLocation`]. `sel` is the location grammar:
+    /// `ordinal:<n>` | `id:<n>` | `name:<s>` | a bare number (ordinal or
+    /// stable id - refused when the two readings name different live tabs) |
+    /// any other bare word (a tab name). `squad` qualifies through the
+    /// existing [`PaneTarget`] grammar; an unqualified selector that
+    /// resolves in more than one workspace refuses with the candidates.
+    TabWhere {
+        #[serde(default)]
+        squad: PaneTarget,
+        sel: String,
     },
 }
 
@@ -1919,6 +1939,31 @@ pub enum ServerMsg {
         tab: TabId,
         results: Vec<GraftSlotResult>,
     },
+    /// (v51, x-1499) Answer to [`ControlVerb::TabWhere`]: what lives at a tab
+    /// location right now. `panes` is every pane in the tab in tree order,
+    /// each with its joined worker identity; an occupant with `fno_id: None`
+    /// is an EXPLICIT empty pane, never a failed lookup. A tab always holds
+    /// at least one pane, so this is never emitted empty.
+    TabLocation {
+        squad_id: u64,
+        squad_name: Option<String>,
+        tab_id: TabId,
+        name: Option<String>,
+        /// The tab's current 1-based ordinal (the UI's `·N`).
+        ordinal: usize,
+        /// The tab's focused pane - where `mux view` moves the operator.
+        focus: u64,
+        panes: Vec<TabPaneOccupant>,
+    },
+}
+
+/// One pane of a [`ServerMsg::TabLocation`] (v51, x-1499): the pane id plus
+/// the registry worker it hosts, if any. `fno_id: None` is the explicit
+/// empty marker for a pane nobody occupies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TabPaneOccupant {
+    pub pane_id: u64,
+    pub fno_id: Option<String>,
 }
 
 /// One named slot's outcome in a [`ServerMsg::LayoutGrafted`] receipt (v44,
