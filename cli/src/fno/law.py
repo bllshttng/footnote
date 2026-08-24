@@ -216,6 +216,7 @@ def arm_proposal(
     permission_mode: str,
     tool_input: str,
 ) -> dict[str, Any]:
+    _prune()
     proposal = _expire(load_proposal(proposal_id))
     if proposal.get("status") == "expired":
         raise InvalidOperatorConsentError("proposal is expired")
@@ -250,6 +251,7 @@ def consume_operator_consent(
     *,
     expected: dict[str, Any],
 ) -> dict[str, Any]:
+    _prune()
     proposal = _expire(load_proposal(str(consent.proposal_id)))
     status = proposal.get("status")
     if status != "armed":
@@ -381,6 +383,7 @@ def resume_command(proposal: str = typer.Argument(...)) -> None:
 def inspect_command() -> None:
     from fno import paths
 
+    _prune()
     rows = []
     for path in sorted(paths.law_proposals_dir().glob("lp-*.json")):
         try:
