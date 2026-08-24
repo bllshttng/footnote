@@ -1237,13 +1237,13 @@ try:
     # Every state_dir occurrence, top-level AND [config]-wrapped (the mirror
     # reads both, wrapped winning): watching an extra root is free, missing a
     # relocated one is the vacuous green this guard exists to prevent.
-    # Template and $VAR values stay skipped: the resolver declines those
-    # too, so the store does not follow them.
-    vals = re.findall(r'^\s*state_dir\s*=\s*[\"\\']([^\"']+)[\"\\']', body, re.M)
+    # Template and env-var-reference values stay skipped: the resolver
+    # declines those too, so the store does not follow them.
+    vals = re.findall(r'^\s*state_dir\s*=\s*[\"\\']([^\"\x27]+)[\"\\']', body, re.M)
     # A TOML multiline string is a legal spelling of the same key. The
     # quoted pattern cannot see it, and an unwatched relocated root is the
     # vacuous green this guard exists to prevent.
-    vals += re.findall(r'state_dir\s*=\s*[\"\\']{3}\s*\n\s*([^\"\\'\n]+)', body)
+    vals += re.findall(r'state_dir\s*=\s*[\"\\']{3}\s*\n\s*([^\"\x27\n]+)', body)
     for v in vals:
         if not v.startswith(('{', '\$')):
             roots.append(os.path.abspath(os.path.expanduser(v)))
