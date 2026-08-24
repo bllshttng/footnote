@@ -99,9 +99,6 @@ name = "Zai Primary"
 harness = "claude"
 auth = "api_key"
 route = "zai/glm-5.3[1m]"
-
-[accounts.records.env]
-ANTHROPIC_AUTH_TOKEN = "secret"
 """.strip()
         + "\n",
         encoding="utf-8",

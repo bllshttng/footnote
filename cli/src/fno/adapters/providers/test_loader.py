@@ -114,7 +114,7 @@ class TestLoadProvidersValid:
     def test_unknown_record_metadata_loads_warns_and_round_trips(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ):
-        """AC1-HP: route-shaped metadata survives provider config reads and writes."""
+        """AC1-HP: route-backed records retain unknown metadata on round trips."""
         from fno.adapters.providers.loader import load_providers, save_providers
 
         block = {
@@ -127,8 +127,8 @@ class TestLoadProvidersValid:
                             "name": "Zai Primary",
                             "harness": "claude",
                             "auth": "api_key",
-                            "env": {"ANTHROPIC_AUTH_TOKEN": "secret"},
                             "route": "zai/glm-5.3[1m]",
+                            "operator_note": "route-owned",
                         }
                     ],
                 }
@@ -142,14 +142,16 @@ class TestLoadProvidersValid:
 
         record = result.by_id["zai-primary"]
         assert record.model_dump()["route"] == "zai/glm-5.3[1m]"
+        assert record.model_dump()["operator_note"] == "route-owned"
         assert "zai-primary" in caplog.text
-        assert "route" in caplog.text
+        assert "operator_note" in caplog.text
 
         monkeypatch.setenv("PWD", str(tmp_path))
         monkeypatch.chdir(tmp_path)
         save_providers(result, scope="project")
         round_tripped = load_providers(repo_root=tmp_path).by_id["zai-primary"]
         assert round_tripped.model_dump()["route"] == "zai/glm-5.3[1m]"
+        assert round_tripped.model_dump()["operator_note"] == "route-owned"
 
     def test_unknown_metadata_does_not_relax_known_harness(self, tmp_path: Path):
         """AC1-ERR: an invalid known field still rejects a metadata-bearing record."""
