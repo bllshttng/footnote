@@ -36,6 +36,7 @@ A	accepted forms: name, canonical handle, transport short id, or full session id
 A	agent name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	agent_status_stamp_failed	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
 A	an unsupported submit contract cannot carry a nonzero delay	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# msg-twin
+A	direct needs model and effort placeholders	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	anthropic_default_haiku_model	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# protocol
 A	claim_idempotent_reacquired	py=cli/src/fno/claims/events.py|cli/src/fno/resume/receipt.py|cli/src/fno/scoreboard/fold.py;rs=crates/fno-agents/src/claims.rs	# protocol
 A	claude attach failed: {exc}	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
@@ -69,6 +70,7 @@ A	live but not currently routable	py=cli/src/fno/agents/mux_spawn.py;rs=crates/f
 A	message must be non-empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
 A	mine: failed: item text must be one non-empty line	py=cli/src/fno/outstanding/mine.py;rs=crates/fno/src/client.rs	# msg-twin
 A	needs every session lane	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# msg-twin
+A	menu_walk needs ordered model and effort targets	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	no active drive authority	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	once: {name} ({provider}/{session_or_short_id}) torn down	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/codex_ask.rs|crates/fno-agents/src/gemini_ask.rs	# msg-twin
 A	one-shot-provider-no-persistent-session	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/client_verbs.rs	# protocol
@@ -84,6 +86,7 @@ A	route_provider,route_model	py=cli/src/fno/config/__init__.py;rs=crates/fno-age
 A	run the review verb at head	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/src/loopcheck.rs	# msg-twin
 A	sandbox_mode=workspace-write	py=cli/src/fno/agents/harnesses/codex.py;rs=crates/fno-agents/src/provider.rs	# protocol
 A	send_keys_enter_delay_ms	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol
+A	status pattern needs model and effort groups	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	spawn-gate: corrupted slot claim {key} ignored	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: could not read available ram; skipping the floor check	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	spawn-gate: could not read load average; skipping the load check	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
@@ -92,6 +95,7 @@ A	spawn-gate: qos demotion of pid {pid} failed (non-fatal)	py=cli/src/fno/agents
 A	spawn-gate: worker slot claim {key} unavailable; proceeding uncounted	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	stale-verdict-fresher-event	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon.rs	# protocol
 A	stopped: {name} ({short_id})	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/bin/client.rs	# msg-twin
+A	unsupported strategy has executable data	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	the child falls back to its account's own default.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# msg-twin
 A	the child receives that route's own model instead.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# msg-twin
 A	truth-live-inject-failed	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
