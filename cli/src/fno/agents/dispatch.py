@@ -6394,11 +6394,25 @@ def _mux_pane_send(
         is another live writer mid-burst; anything else (not claim-eligible,
         dead pane) is a pane with no writer interlock at all."""
         proc = _run(["claim", pane, "--pid", str(os.getpid())])
+        if proc == _MUX_SEND_UNKNOWN:
+            # The claim may have reached the server. Release is idempotent and
+            # closes the only safe path out of an unknown claim outcome; never
+            # type after this point because the writer ownership is unknown.
+            _run(["release", pane])
+            return False, "claim result unknown"
         if proc is None:
             return False, ""
         return proc.returncode == 0, (proc.stderr or "").strip()
 
     claimed, claim_detail = _claim_writer()
+    if not claimed and claim_detail == "claim result unknown":
+        print(
+            f"mux pane {pane} send demoted to durable: writer claim outcome unknown; "
+            "refusing to type",
+            file=sys.stderr,
+        )
+        _record_failure("pre-submit")
+        return False
     if not claimed and _MUX_CLAIM_HELD_MARKER in claim_detail:
         # x-4b0b review finding: the settle window between paste and CR is a
         # single-writer window. A HELD claim means another writer is mid-burst

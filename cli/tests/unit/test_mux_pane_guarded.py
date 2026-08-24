@@ -280,6 +280,29 @@ def test_mail_delivery_timeout_after_paste_does_not_retry(monkeypatch):
     assert sum("--stdin" in call for call in calls) == 1
 
 
+def test_mail_delivery_claim_timeout_releases_and_does_not_type(monkeypatch):
+    calls: list[list[str]] = []
+
+    def _timeout(argv, **_kwargs):
+        calls.append(list(argv))
+        if argv[3] == "claim":
+            raise dispatch.subprocess.TimeoutExpired(argv, 20)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _timeout)
+    failure: list[str] = []
+
+    assert (
+        dispatch._mux_pane_send(
+            _entry(), "hi", guarded=False, raw=True, failure_out=failure
+        )
+        is False
+    )
+    assert failure == ["pre-submit"]
+    mux_verbs = [call[3] for call in calls if len(call) > 3 and call[1:3] == ["mux", "pane"]]
+    assert mux_verbs == ["claim", "release"]
+
+
 def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
     """No transcript to confirm against -> never optimistically True. A confirm
     that passes because the transcript was unreadable is the false-positive

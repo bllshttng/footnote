@@ -2559,10 +2559,27 @@ impl Core {
         }
         #[cfg(not(test))]
         {
-            let id = crate::squad_store::reserve_next_pane_id(self.next_pane_id)
-                .map_err(|e| format!("pane id reservation failed: {e}"))?;
-            self.next_pane_id = id.saturating_add(1);
-            Ok(id)
+            match crate::squad_store::reserve_next_pane_id(self.next_pane_id) {
+                Ok(id) => {
+                    self.next_pane_id = id.saturating_add(1);
+                    Ok(id)
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::PermissionDenied
+                        && e.to_string().contains("build-tree binary") =>
+                {
+                    // A cargo build-tree binary is allowed to run against an
+                    // isolated mux without being allowed to write the user's
+                    // global squad store. Keep pane run usable with a clear,
+                    // process-local fallback; installed binaries still fail
+                    // closed on real persistence errors.
+                    eprintln!("fno mux: pane id persistence unavailable for build-tree binary; using process-local pane ids (set FNO_AGENTS_HOME for persistence)");
+                    let id = self.next_pane_id;
+                    self.next_pane_id = id.saturating_add(1);
+                    Ok(id)
+                }
+                Err(e) => Err(format!("pane id reservation failed: {e}")),
+            }
         }
     }
 
