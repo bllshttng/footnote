@@ -20,6 +20,7 @@ zero.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -851,6 +852,43 @@ def _check_ram_floor(floor_gb: float) -> None:
         raise GateRefused(EXIT_RAM_REFUSED, receipt)
 
 
+def _footprint_cause_evidence() -> Optional[str]:
+    """Read one fail-open fleet footprint for an over-load refusal."""
+    try:
+        from fno.doctor_footprint import _read_ps
+        from fno.footprint import parse_footprint
+
+        ps_output, error = _read_ps()
+        if error is not None or ps_output is None:
+            return None
+        reading = parse_footprint(ps_output, excluded_root_pids={os.getpid()})
+        if reading.unparsed_lines:
+            return None
+        capacity = float(os.cpu_count() or 1)
+        measured_share = (
+            reading.fleet_cpu_cores / reading.measured_cpu_cores * 100
+            if reading.measured_cpu_cores > 0
+            else 0.0
+        )
+        capacity_share = reading.fleet_cpu_cores / capacity * 100
+        values = (
+            reading.fleet_cpu_cores,
+            capacity,
+            capacity_share,
+            measured_share,
+        )
+        if capacity <= 0 or any(not math.isfinite(value) or value < 0 for value in values):
+            return None
+        return (
+            "spawn-gate: footprint attributes "
+            f"{reading.fleet_cpu_cores:.2f}/{capacity:.2f} cores "
+            f"({capacity_share:.1f}% capacity, {measured_share:.1f}% of measured CPU) "
+            "to the fleet"
+        )
+    except Exception:
+        return None
+
+
 def _check_load_ceiling(max_load_per_cpu: float) -> None:
     """Refuse (never queue) above the CPU ceiling (x-3f84 W3).
 
@@ -880,6 +918,10 @@ def _check_load_ceiling(max_load_per_cpu: float) -> None:
             f"spawn-gate: 1-min load {load1:.1f} exceeds max_load_per_cpu "
             f"{max_load_per_cpu:g} x {cpus} cpus = {ceiling:.1f}; refusing to "
             f"spawn (--force to bypass)"
+        )
+        _warn(
+            _footprint_cause_evidence()
+            or "spawn-gate: footprint cause unavailable; load refusal unchanged"
         )
         raise GateRefused(EXIT_LOAD_REFUSED)
 

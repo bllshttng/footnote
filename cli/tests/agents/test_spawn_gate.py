@@ -286,6 +286,41 @@ def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None, max_l
 
 
 class TestRunGate:
+    def test_footprint_cause_reader_formats_fleet_share(self, monkeypatch):
+        from fno import doctor_footprint
+
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_read_ps",
+            lambda: (
+                """\
+                PID PPID ELAPSED %CPU RSS COMMAND
+                100 1 01:00:00 86.0 1024 fno-agents-worker --run
+                101 100 01:00:00 100.0 1024 cargo test -p fno
+                200 1 01:00:00 134.0 1024 unrelated-build
+                """,
+                None,
+            ),
+        )
+        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+
+        evidence = spawn_gate._footprint_cause_evidence()
+
+        assert evidence is not None
+        assert "footprint attributes 1.86/12.00 cores" in evidence
+        assert "15.5% capacity" in evidence
+
+    def test_footprint_cause_reader_fails_open_when_ps_is_unavailable(
+        self, monkeypatch
+    ):
+        from fno import doctor_footprint
+
+        monkeypatch.setattr(
+            doctor_footprint, "_read_ps", lambda: (None, "ps unavailable")
+        )
+
+        assert spawn_gate._footprint_cause_evidence() is None
+
     def test_under_cap_passes_silently(self, monkeypatch, capsys):
         """AC1-HP: nothing on stderr, no queue, guard holds the mutex."""
         _settings(monkeypatch, max_live=3)
@@ -309,6 +344,49 @@ class TestRunGate:
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
+
+    def test_over_load_reports_fleet_cause_evidence(self, monkeypatch, capsys):
+        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+        monkeypatch.setattr(
+            spawn_gate,
+            "_footprint_cause_evidence",
+            lambda: "spawn-gate: footprint attributes 1.86/12.00 cores (15.5% capacity, 58.0% of measured CPU) to the fleet",
+            raising=False,
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("w2", "bg", no_wait=True)
+
+        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
+        error = capsys.readouterr().err
+        assert "1-min load 309.0 exceeds" in error
+        assert "footprint attributes 1.86/12.00 cores" in error
+
+    def test_over_load_keeps_refusal_when_fleet_cause_is_unavailable(
+        self, monkeypatch, capsys
+    ):
+        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+        monkeypatch.setattr(
+            spawn_gate, "_footprint_cause_evidence", lambda: None, raising=False
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("w2", "bg", no_wait=True)
+
+        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
+        error = capsys.readouterr().err
+        assert "footprint cause unavailable; load refusal unchanged" in error
+        assert "1-min load 309.0 exceeds" in error
 
     def test_at_cap_no_wait_refuses(self, monkeypatch, capsys):
         _settings(monkeypatch, max_live=1)
