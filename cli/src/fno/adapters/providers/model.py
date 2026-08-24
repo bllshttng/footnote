@@ -195,6 +195,11 @@ class ProviderRecord(BaseModel):
     @model_validator(mode="after")
     def _check_auth_strategy(self) -> "ProviderRecord":
         """Validate that auth strategy is consistent with credentials fields."""
+        if self.route and self.auth != "api_key":
+            raise ValueError(
+                f"auth_strategy_mismatch: {self.id}: "
+                "route requires auth=api_key"
+            )
         if self.auth == "oauth_dir":
             if self.credentials_source is None:
                 raise ValueError(

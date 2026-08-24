@@ -317,6 +317,27 @@ class TestLoadProvidersInvalidRecord:
         assert "bad-api-key" in error_msg
         assert "auth_strategy_mismatch" in error_msg
 
+    @pytest.mark.parametrize(
+        ("auth", "extra"),
+        [
+            ("managed", {}),
+            ("oauth_dir", {"credentials_source": Path("/tmp/credentials")}),
+        ],
+    )
+    def test_route_requires_api_key_auth(self, auth: str, extra: dict[str, Path]) -> None:
+        """Route-backed records cannot use managed or oauth_dir credentials."""
+        from fno.adapters.providers.model import ProviderRecord
+
+        with pytest.raises(ValueError, match="route requires auth=api_key"):
+            ProviderRecord(
+                id="zai",
+                name="Z.AI",
+                harness="claude",
+                auth=auth,
+                route="zai/glm-5.3",
+                **extra,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Precedence: project-local overrides global
