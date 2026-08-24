@@ -636,10 +636,6 @@ def _run_tick(
     sweep_failures = 0
     set_tick_phase("sweep")
     if query_keys:
-        # The batch reader attempts every qualified key up front. Record that
-        # positive fact even when a later per-PR lock prevents rich dispatch
-        # observation for one candidate.
-        swept.update(query_keys)
         try:
             # The seam returns (states, sweep_failures): a swallowed repo
             # failure used to be indistinguishable from a clean sweep.
@@ -647,6 +643,18 @@ def _run_tick(
         except Exception as exc:  # noqa: BLE001 - receipt names the outage
             log.warning("pr-watch: tracked-state sweep failed: %s", exc)
             batch_states, sweep_failures = {}, 1
+        # Only positively observed states count as swept identities. The
+        # requested set is not evidence: an UNKNOWN response can mean the
+        # instrument never ran, so carrying it into the receipt would make a
+        # dead cache satisfy a completed-tick probe.
+        for key in query_keys:
+            if key not in batch_states:
+                failed.add(key)
+        for key, current in batch_states.items():
+            if current != "UNKNOWN":
+                swept.add(key)
+            elif key in query_keys:
+                failed.add(key)
         for key in sorted(batch_keys):
             current = batch_states.get(key, "UNKNOWN")
             entry = state[key]
@@ -742,7 +750,6 @@ def _run_tick(
                 failed.discard(key)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
-                swept.add(key)
                 failed.add(key)
                 stale = state.get(key)
                 if isinstance(stale, dict):

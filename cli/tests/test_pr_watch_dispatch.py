@@ -2667,5 +2667,40 @@ class TestQuotaPreflight:
         assert result.sweep_failures == 1
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
         assert receipt["sweep_failures"] == 1
+        assert receipt["swept_count"] == 0
+        assert receipt["swept"] == {}
+
+    def test_positive_open_observation_names_a_swept_identity(self, tmp_path):
+        """AC4-HP: a known open state produces a non-empty sweep receipt."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "UNKNOWN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "OPEN" for key in keys}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
+        )
+
+        assert result.sweep_failures == 0
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
         assert receipt["swept_count"] == 1
         assert receipt["swept"] == {"owner/repo": [7]}
