@@ -5,6 +5,31 @@ from __future__ import annotations
 from fno.footprint import parse_footprint
 
 
+def test_ac1_hp_attributes_transitive_build_descendants_and_excludes_negative_tree() -> None:
+    reading = parse_footprint(
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        100 1 01:00:00 20.0 1024 fno-agents-worker --run
+        101 100 01:00:00 0.0 1024 /bin/sh -c cargo test
+        102 101 00:00:05 80.0 1024 cargo test -p fno
+        103 101 00:00:05 60.0 1024 rustc --crate-name fno
+        200 1 01:00:00 0.0 1024 /bin/sh -c cargo test elsewhere
+        201 200 01:00:00 90.0 1024 cargo test -p unrelated
+        202 200 01:00:00 70.0 1024 rustc --crate-name unrelated
+        """,
+    )
+
+    assert reading.descendant_cpu_cores == 1.4
+    assert reading.fleet_cpu_cores == 1.6
+    assert reading.descendant_process_count == 3
+    assert reading.process_count == 4
+    assert [command for _, command in reading.top] == [
+        "cargo test -p fno",
+        "rustc --crate-name fno",
+        "fno-agents-worker --run",
+    ]
+
+
 def test_ac1_hp_counts_attributed_rows_and_sustained_cpu() -> None:
     reading = parse_footprint(
         """\
