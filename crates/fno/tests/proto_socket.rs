@@ -238,6 +238,18 @@ fn proto_startup_listener_is_not_clobbered_before_queryable() {
 }
 
 #[test]
+fn proto_partial_startup_marker_is_recoverable_when_socket_is_dead() {
+    let scratch = Scratch::new("partial-startup-marker");
+    let sock = scratch.path("s.sock");
+    std::fs::write(fno::proto::startup_sidecar_path(&sock), "partial").unwrap();
+
+    match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(_) => {}
+        BindOutcome::AlreadyRunning => panic!("dead marker must not look live"),
+    }
+}
+
+#[test]
 fn proto_bind_race_converges_on_exactly_one_server() {
     let scratch = Scratch::new("race");
     let sock = scratch.path("s.sock");

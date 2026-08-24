@@ -10189,6 +10189,8 @@ async fn serve(
     // Attached-client count for the periodic readers (x-4e30): Core owns the
     // sender; each reader holds a receiver as its work gate + 0->1 wakeup.
     let (client_count_tx, client_count_rx) = watch::channel(0usize);
+    let persisted_pane_floor = crate::squad_store::load().next_pane_id;
+    let initial_agents = read_guard_agents().await;
 
     let mut core = Core {
         session: Session::default(),
@@ -10197,7 +10199,10 @@ async fn serve(
         pane_stats: Arc::new(RwLock::new(HashMap::new())),
         pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
         clients: Vec::new(),
-        next_pane_id: crate::squad_store::load().next_pane_id.max(1),
+        next_pane_id: pane_id_floor(
+            persisted_pane_floor,
+            initial_agents.as_deref().unwrap_or(&[]),
+        ),
         next_squad_id: 1,
         tab_areas: HashMap::new(),
         session_name,
@@ -10920,6 +10925,15 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
         Ok(Err(_)) => None, // unreadable -> fail closed
         Err(_) => None,     // blocking task join error -> fail closed
     }
+}
+
+fn pane_id_floor(persisted: u64, agents: &[RegistryAgent]) -> u64 {
+    let registry_floor = agents
+        .iter()
+        .filter_map(|agent| agent.mux.as_ref().map(|(_, pane)| pane.saturating_add(1)))
+        .max()
+        .unwrap_or(1);
+    persisted.max(registry_floor).max(1)
 }
 
 /// Does registry row `a` carry `id` as a FULL `session_id` or `harness_session_id`?
@@ -12164,6 +12178,13 @@ mod tests {
             },
             harness: None,
         }
+    }
+
+    #[test]
+    fn pane_id_floor_seeds_from_legacy_registry_refs() {
+        let row = agent_in("old", 41, Some(AgentBadge::Done), true);
+
+        assert_eq!(pane_id_floor(0, &[row]), 42);
     }
 
     fn agent(pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {

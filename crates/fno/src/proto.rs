@@ -2694,23 +2694,39 @@ fn startup_guard_live(pid: i32, recorded_start: Option<u64>) -> bool {
     recorded_start.is_none_or(|start| pid_start_time(pid as u32) == Some(start))
 }
 
+fn create_startup_marker(marker: &Path) -> std::io::Result<()> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = marker
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("mux-start"));
+    let tmp = marker.with_file_name(format!(".{name}.tmp.{}.{}", std::process::id(), stamp));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)?;
+        let pid = std::process::id();
+        let contents = match pid_start_time(pid) {
+            Some(start) => format!("{pid}:{start}"),
+            None => pid.to_string(),
+        };
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        std::fs::hard_link(&tmp, marker)
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
 fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGuard> {
     let marker = startup_sidecar_path(socket);
     loop {
-        match std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&marker)
-        {
-            Ok(mut file) => {
-                let pid = std::process::id();
-                let contents = match pid_start_time(pid) {
-                    Some(start) => format!("{pid}:{start}"),
-                    None => pid.to_string(),
-                };
-                file.write_all(contents.as_bytes())?;
-                return Ok(StartupGuard::Owned);
-            }
+        match create_startup_marker(&marker) {
+            Ok(()) => return Ok(StartupGuard::Owned),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let raw = std::fs::read_to_string(&marker).map_err(|read| {
                     std::io::Error::new(
@@ -2721,12 +2737,16 @@ fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGuard> {
                         ),
                     )
                 })?;
-                let (pid, recorded_start) = parse_pid_sidecar(&raw).ok_or_else(|| {
-                    std::io::Error::new(
+                let Some((pid, recorded_start)) = parse_pid_sidecar(&raw) else {
+                    if !socket.exists() || matches!(probe_status(socket), ProbeOutcome::Dead) {
+                        std::fs::remove_file(&marker)?;
+                        continue;
+                    }
+                    return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("invalid mux startup marker {}", marker.display()),
-                    )
-                })?;
+                    ));
+                };
                 if startup_guard_live(pid, recorded_start) {
                     return Ok(StartupGuard::ExistingLive);
                 }
@@ -2774,10 +2794,11 @@ const PROBE_HOLDER_KILL_GRACE: Duration = Duration::from_secs(1);
 /// ever bites, the upgrade is an O_EXCL sidecar lock around the unlink.
 pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
     let startup = acquire_startup_guard(path)?;
-    let owns_startup = startup == StartupGuard::Owned;
+    let mut owns_startup = startup == StartupGuard::Owned;
     match UnixListener::bind(path) {
         Ok(l) => Ok(BindOutcome::Bound(l)),
         Err(e) if socket_in_use(&e) => {
+            let mut reclaimed_holder = false;
             match probe_status(path) {
                 ProbeOutcome::Alive => {
                     if owns_startup {
@@ -2792,7 +2813,8 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
                     ));
                 }
                 ProbeOutcome::Unknown if pid_sidecar_path(path).exists() => {
-                    reclaim_unresponsive_holder(path)?
+                    reclaim_unresponsive_holder(path)?;
+                    reclaimed_holder = true;
                 }
                 // A pre-sidecar server or a dead listener can leave one
                 // residual connection that has no positive marker. Preserve
@@ -2806,9 +2828,20 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
                     ));
                 }
                 ProbeOutcome::Dead if pid_sidecar_path(path).exists() => {
-                    reclaim_unresponsive_holder(path)?
+                    reclaim_unresponsive_holder(path)?;
+                    reclaimed_holder = true;
                 }
                 ProbeOutcome::Dead => {}
+            }
+            if reclaimed_holder && !owns_startup {
+                remove_startup_guard(path);
+                if acquire_startup_guard(path)? != StartupGuard::Owned {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("mux startup in progress at {}", path.display()),
+                    ));
+                }
+                owns_startup = true;
             }
             // The holder is dead or has been terminated. Session files, not
             // just the socket, so a dead holder's .pid cannot outlive the
