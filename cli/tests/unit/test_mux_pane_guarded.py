@@ -282,10 +282,15 @@ def test_mail_delivery_timeout_after_paste_does_not_retry(monkeypatch):
 
 def test_mail_delivery_claim_timeout_releases_and_does_not_type(monkeypatch):
     calls: list[list[str]] = []
+    claim_attempts = 0
 
     def _timeout(argv, **_kwargs):
+        nonlocal claim_attempts
         calls.append(list(argv))
         if argv[3] == "claim":
+            claim_attempts += 1
+            if claim_attempts > 1:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
             raise dispatch.subprocess.TimeoutExpired(argv, 20)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -300,7 +305,7 @@ def test_mail_delivery_claim_timeout_releases_and_does_not_type(monkeypatch):
     )
     assert failure == ["pre-submit"]
     mux_verbs = [call[3] for call in calls if len(call) > 3 and call[1:3] == ["mux", "pane"]]
-    assert mux_verbs == ["claim", "release"]
+    assert mux_verbs == ["claim", "claim", "release"]
 
 
 def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):

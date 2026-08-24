@@ -6395,10 +6395,16 @@ def _mux_pane_send(
         dead pane) is a pane with no writer interlock at all."""
         proc = _run(["claim", pane, "--pid", str(os.getpid())])
         if proc == _MUX_SEND_UNKNOWN:
-            # The claim may have reached the server. Release is idempotent and
-            # closes the only safe path out of an unknown claim outcome; never
-            # type after this point because the writer ownership is unknown.
-            _run(["release", pane])
+            # The claim may have reached the server, or another writer may
+            # already own it. Confirm with this PID before releasing: PaneRelease
+            # is pane-wide, so an unconditional cleanup could clear a stranger's
+            # claim and let two bursts interleave.
+            confirmed = _run(["claim", pane, "--pid", str(os.getpid())])
+            if (
+                confirmed not in (None, _MUX_SEND_UNKNOWN)
+                and confirmed.returncode == 0
+            ):
+                _run(["release", pane])
             return False, "claim result unknown"
         if proc is None:
             return False, ""
