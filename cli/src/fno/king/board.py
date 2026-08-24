@@ -624,9 +624,13 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         # every-surface-or-nowhere invariant): a pending diagnostic stamp on a
         # covered, CI-green PR must not silently drop it from the king's
         # ready list - every other surface filters both contexts.
-        deduped = without_coverage_statuses(
-            _latest_per_name(pr.get("statusCheckRollup") or [])
-        )
+        raw = _latest_per_name(pr.get("statusCheckRollup") or [])
+        deduped = without_coverage_statuses(raw)
+        if raw and not deduped:
+            # Coverage-only rollup: CI has not reported (or its rows are the
+            # coverage verdicts themselves). An empty class set is not green -
+            # the pre-filter rows kept this PR out and so does this.
+            continue
         classes = {_classify(c) for c in deduped}
         if "fail" in classes:
             continue
