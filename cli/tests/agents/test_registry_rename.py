@@ -25,6 +25,14 @@ def test_rename_changes_only_the_registry_label_and_preserves_session_identity(t
     assert renamed.name == "target-new"
     assert resolve_agent("target-new", path=registry).entry.harness_session_id == "session-1"
     assert resolve_agent("session-1", path=registry).entry.name == "target-new"
+    assert resolve_agent("bp-old", path=registry).entry.name == "target-new"
+
+    from fno.agents.registry import restamp_harness_session_id
+
+    restamped = restamp_harness_session_id(
+        name="bp-old", harness="codex", session_id="session-2", registry_path=registry
+    )
+    assert restamped is not None and restamped.name == "target-new"
 
 
 def test_rename_refuses_a_label_collision(tmp_path):

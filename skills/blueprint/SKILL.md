@@ -205,16 +205,6 @@ fi
    A nonzero exit stops Blueprint before `3a` and `3b`; never register a draft that the executor would reject.
    The `&&` is load-bearing: `--finalize` re-checks only the execution contract, so an unchained run stamps `status: ready` onto a plan the validator rejected for anything else (stub markers, malformed `kill_criteria`).
 
-   After the plan is finalized and bound to its node, close the blueprint phase before returning the completion message:
-
-   ```bash
-   fno backlog session close <node> \
-     --summary "<short plan summary>" \
-     --launch "/fno:target <node>"
-   ```
-
-   This is an identity-guarded write. An unresolved harness or session id is a hard refusal, not a skipped provenance stamp. The close receipt carries the summary and launch line the king uses for the retask handoff.
-
 3a. **Collision check + peer heads-up** (conditional). Between writing the plan and auto-intake, run the collision check (skip with `no-collision-check`) and, when a `peers` block exists, the cross-project peer heads-up. Both are gate-shaped, skip-flagged steps - full procedure (the `fno backlog collisions check` read, high-severity AskUserQuestion / beastmode auto-decision, the four options, and the peer-surface match + send) is in [references/blueprint-gates.md](references/blueprint-gates.md#collision-check-step-3a-skip-with-no-collision-check).
 
 3b. **Auto-intake to backlog** (skip if `no-adopt` modifier or `--no-adopt` flag)
@@ -244,6 +234,17 @@ fi
    message.
 
    After `$NODE_ID` is minted, run the **Model Pin / Routing** and **Blueprint Provenance Stamp** gates ([references/blueprint-gates.md](references/blueprint-gates.md#model-pin-transcription-x-571f-when-a-plan-supplies-a-model)) when their triggers fire.
+
+   After successful adoption, close the blueprint phase before returning the completion message:
+
+   ```bash
+   test -n "${NODE_ID:-}" || { echo "Blueprint close refused: intake produced no node." >&2; exit 2; }
+   fno backlog session close "$NODE_ID" \
+     --summary "<short plan summary>" \
+     --launch "/fno:target $NODE_ID"
+   ```
+
+   This is an identity-guarded write. An unresolved harness or session id is a hard refusal, not a skipped provenance stamp. Raw-prose plans with `no-adopt` stop before this close because they have no adopted node.
 
 3b-bis. **Node-bearing filename for raw-prose intake** (US5)
 

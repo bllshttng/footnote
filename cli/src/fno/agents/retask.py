@@ -20,6 +20,10 @@ from fno.agents.registry import (
 from fno.agents.spawn_defaults import inject_spawn_defaults
 
 
+class RetaskTransportError(RuntimeError):
+    """A pane read or send exceeded its bounded transport timeout."""
+
+
 @dataclass(frozen=True)
 class RetaskCoordinate:
     harness: str
@@ -113,7 +117,7 @@ def detect_retask(
     }
     target_axes = {
         "harness": target.harness,
-        "provider": target.provider,
+        "provider": target.provider if target.provider is not None else entry.provider,
         "substrate": target.substrate,
     }
     for axis in ("harness", "provider", "substrate"):
@@ -205,6 +209,7 @@ def execute_retask(
     restamp: Callable[[], Optional[str]],
     rename: Callable[[str], Optional[str]],
     project_tier: Callable[[str, str], None] = lambda _model, _effort: None,
+    ready_frame: Optional[Callable[[str], bool]] = None,
 ) -> dict:
     """Run the bounded retask transaction through injected pane seams."""
     refusal = {
@@ -215,23 +220,23 @@ def execute_retask(
         "switch_verified": False,
         "target_submit_confirmed": False,
     }
-    planned = detect_retask(entry, target, node=node)
-    if planned["outcome"] in {"spawn_required", "refused"}:
-        return {**refusal, "reason": planned.get("reason", planned["outcome"])}
     strategy = capabilities(entry.harness)["model_switch_strategy"]
     desired_model = target.model or entry.model
     desired_effort = target.effort or entry.effort
-    if (
-        strategy["kind"] == "unsupported"
-        and (entry.model, entry.effort) != (desired_model, desired_effort)
-    ):
+    if strategy["kind"] == "unsupported":
         return {**refusal, "reason": "unsupported_switch_strategy"}
+    planned = detect_retask(entry, target, node=node)
+    if planned["outcome"] in {"spawn_required", "refused"}:
+        return {**refusal, "reason": planned.get("reason", planned["outcome"])}
     screen = entry.screen_state or {}
     ready_marker = capabilities(entry.harness)["ready_marker"]
     if screen.get("state") != "idle" or screen.get("rule") != ready_marker:
         return {**refusal, "reason": "pane_not_idle"}
-    if not read_frame().strip():
+    initial_frame = read_frame()
+    if not initial_frame.strip():
         return {**refusal, "reason": "pane_frame_unreadable"}
+    if ready_frame is not None and not ready_frame(initial_frame):
+        return {**refusal, "reason": "pane_not_idle"}
     if not send("/clear", True):
         return {**refusal, "reason": "clear_not_confirmed"}
     new_session = restamp()
@@ -281,6 +286,8 @@ def execute_retask(
             "registry_name": renamed,
             "reason": "registry_projection_failed",
         }
+    desired_model = target.model or cleared_tier["model"]
+    desired_effort = target.effort or cleared_tier["effort"]
     switch_needed = (
         cleared_tier["model"] != desired_model or cleared_tier["effort"] != desired_effort
     )
@@ -418,13 +425,16 @@ def run_retask(
     restamped_session = [entry.harness_session_id]
 
     def read_frame() -> str:
-        result = subprocess.run(
-            ["fno", "mux", "pane", "read", "--session", session, pane, "--lines", "80"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["fno", "mux", "pane", "read", "--session", session, pane, "--lines", "80"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RetaskTransportError("pane_read_timeout") from exc
         return result.stdout if result.returncode == 0 else ""
 
     def send(text: str, submit: bool) -> bool:
@@ -434,7 +444,10 @@ def run_retask(
         ]
         if submit:
             command.append("--submit")
-        result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise RetaskTransportError("pane_send_timeout") from exc
         return result.returncode == 0
 
     def restamp() -> Optional[str]:
@@ -467,16 +480,42 @@ def run_retask(
             registry_path=registry_path,
         )
 
-    return execute_retask(
-        entry,
-        target,
-        node=node,
-        read_frame=read_frame,
-        send=send,
-        restamp=restamp,
-        rename=rename,
-        project_tier=project_tier,
-    )
+    def ready_frame(frame: str) -> bool:
+        from fno.agents.harness_map import capabilities
+        from fno.agents.mux_spawn import _evaluate_manifest_screen
+
+        expected = capabilities(entry.harness)["ready_marker"]
+        if expected == "unsupported":
+            return False
+        verdict = _evaluate_manifest_screen(entry.harness, frame, subprocess.run)
+        return bool(
+            verdict.get("matched")
+            and verdict.get("rule_id") == expected
+            and verdict.get("state") == "idle"
+        )
+
+    try:
+        return execute_retask(
+            entry,
+            target,
+            node=node,
+            read_frame=read_frame,
+            send=send,
+            restamp=restamp,
+            rename=rename,
+            project_tier=project_tier,
+            ready_frame=ready_frame,
+        )
+    except RetaskTransportError as exc:
+        return {
+            "status": "refused",
+            "cleared": False,
+            "session_restamped": False,
+            "switch": "not_started",
+            "switch_verified": False,
+            "target_submit_confirmed": False,
+            "reason": str(exc),
+        }
 
 
 def plan_retask(

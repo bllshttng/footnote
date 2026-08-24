@@ -59,7 +59,11 @@ def _row_exists(name: str, harness: str) -> bool:
     from fno.agents.registry import load_registry
 
     try:
-        return any(e.name == name and e.harness == harness for e in load_registry())
+        return any(
+            (e.name == name or name in (getattr(e, "aliases", None) or []))
+            and e.harness == harness
+            for e in load_registry()
+        )
     except Exception:  # noqa: BLE001 -- unreadable registry is not "row absent"
         return True
 

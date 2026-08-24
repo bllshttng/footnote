@@ -240,6 +240,7 @@ class AgentEntry:
     # store (claude full UUID, codex thread id, gemini session id). load_registry
     # back-fills both from a legacy row's ``provider`` / per-provider keys on read.
     harness: str
+    aliases: list[str] = field(default_factory=list)
     provider: Optional[str] = None
     model: Optional[str] = None
     effort: Optional[str] = None
@@ -582,6 +583,7 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
 
     categories = (
         ("name", [e for e in entries if getattr(e, "name", None) == token]),
+        ("alias", [e for e in entries if token in (getattr(e, "aliases", None) or [])]),
         ("short_id", [e for e in entries if getattr(e, "short_id", None) == token]),
         ("canonical_handle", [e for e in entries if _session_tier(e, token) == 1]),
         ("legacy_suffix", [e for e in entries if _session_tier(e, token) == 2]),
@@ -1599,7 +1601,7 @@ def restamp_harness_session_id(
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         for entry in entries:
-            if entry.name != name or entry.harness != harness:
+            if (entry.name != name and name not in entry.aliases) or entry.harness != harness:
                 continue
             if entry.harness_session_id == session_id:
                 return entries  # already current: no write, no event
@@ -1707,6 +1709,8 @@ def rename_agent(
             )
         if any(entry is not target and entry.name == new_name for entry in entries):
             raise ValueError(f"registry label {new_name!r} already names another worker")
+        if source.name != new_name and source.name not in target.aliases:
+            target.aliases.append(source.name)
         target.name = new_name
         result.append(target)
         return entries

@@ -72,6 +72,19 @@ def test_tier_mismatch_builds_mechanism_neutral_switch_pending_payload():
     assert receipt["payload"]["execution"] == {"mode": "read_only_plan"}
 
 
+def test_default_target_vendor_preserves_the_registry_vendor_axis():
+    from fno.agents.retask import detect_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="codex", model="gpt-5.6-sol", effort="high"),
+        env={},
+    )
+    receipt = detect_retask(_row(provider="openai"), target, node="x-bdb9")
+
+    assert receipt["outcome"] == "retask_ready"
+
+
 @pytest.mark.parametrize(
     ("target_override", "reason"),
     [
@@ -183,6 +196,30 @@ def test_execute_retask_same_tier_orders_clear_rename_status_then_target():
     assert tiers == [("gpt-5.6-sol", "high")]
 
 
+def test_execute_retask_refuses_when_fresh_frame_fails_readiness():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="codex", model="gpt-5.6-sol", effort="high"),
+        env={},
+    )
+    receipt = execute_retask(
+        _row(screen_state={"state": "idle", "rule": "idle_prompt"}),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: "painted but busy",
+        ready_frame=lambda _frame: False,
+        send=lambda _text, _submit: True,
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["reason"] == "pane_not_idle"
+    assert receipt["cleared"] is False
+    assert receipt["target_submit_confirmed"] is False
+
+
 def test_execute_retask_codex_menu_walk_verifies_each_target_before_submit():
     from fno.agents.retask import execute_retask, resolve_target_coordinate
 
@@ -266,6 +303,53 @@ def test_execute_retask_claude_uses_direct_strategy_commands():
     assert [text for text, _submit in sends if text.startswith("/model")] == ["/model new-model"]
 
 
+def test_execute_retask_uses_verified_tier_when_target_axes_are_omitted():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9", settings=_settings(provider="codex"), env={}
+    )
+    sends: list[tuple[str, bool]] = []
+    frames = iter([
+        "› Ask Codex to do anything\n",
+        "Model: gpt-5.6-sol (reasoning high, summaries auto)",
+    ])
+    receipt = execute_retask(
+        _row(model=None, effort=None, screen_state={"state": "idle", "rule": "idle_prompt"}),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: next(frames),
+        send=lambda text, submit: (sends.append((text, submit)) or True),
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["status"] == "retasked"
+    assert receipt["switch"] == "skipped_same_tier"
+
+
+def test_run_retask_converts_mux_timeout_to_structured_refusal(monkeypatch):
+    import fno.agents.retask as retask
+
+    row = _row(screen_state={"state": "idle", "rule": "idle_prompt"})
+    target = retask.RetaskCoordinate(
+        harness="codex", provider=None, model="gpt-5.6-sol", effort="high",
+        substrate="pane", permission_mode=None, route=None, account=None,
+    )
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+
+    def timeout(*_args, **_kwargs):
+        raise retask.subprocess.TimeoutExpired("fno mux", 10)
+
+    monkeypatch.setattr(retask.subprocess, "run", timeout)
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "pane_read_timeout"
+    assert receipt["target_submit_confirmed"] is False
+
+
 def test_execute_retask_refuses_missing_positive_menu_row_before_target():
     from fno.agents.retask import execute_retask, resolve_target_coordinate
 
@@ -293,3 +377,24 @@ def test_execute_retask_refuses_missing_positive_menu_row_before_target():
     assert receipt["status"] == "refused"
     assert receipt["reason"] == "model_row_missing"
     assert receipt["target_submit_confirmed"] is False
+
+
+def test_execute_retask_refuses_unsupported_harness_before_clear():
+    from fno.agents.retask import RetaskCoordinate, execute_retask
+
+    target = RetaskCoordinate(
+        harness="gemini", provider=None, model=None, effort=None,
+        substrate="pane", permission_mode=None, route=None, account=None,
+    )
+    receipt = execute_retask(
+        _row(harness="gemini", model=None, effort=None, screen_state={"state": "idle", "rule": "unsupported"}),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: "ready",
+        send=lambda _text, _submit: True,
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["reason"] == "unsupported_switch_strategy"
+    assert receipt["cleared"] is False
