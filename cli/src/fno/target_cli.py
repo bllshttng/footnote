@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -2517,6 +2518,8 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
         own_pid = None
     from fno.claims.hostid import is_same_machine
 
+    if info.get("pid_unavailable"):
+        return False
     same_machine = is_same_machine(info.get("host"), info.get("machine_id"))
     return bool(own_pid and info.get("pid") == own_pid and same_machine)
 
@@ -2587,46 +2590,76 @@ def _print_foreign_holder_park(node_id: str, info: dict, wt_path: Path) -> None:
     )
 
 
-_HARNESS_CLAIM_INFIX = {
-    "claude": "cl",
-    "codex": "cx",
-    "gemini": "gm",
-    "agy": "ag",
-    "hermes": "hm",
-    "opencode": "oc",
-}
+def _successor_claim_holder() -> Optional[str]:
+    """Resolve the current worker's final claim holder from owned identity.
 
-
-def _successor_claim_holder() -> str:
-    """This session's ``node:`` claim holder, mirroring init-target-state.sh's
-    ``claim_owner_id`` (TARGET_SESSION_ID > CODEX_THREAD_ID > generated
-    ``{ts}-{prov}{pid}-{6hex}``) so a re-acquired lockfile names a holder the
-    classifier and the incarnation fence later recognize as ours."""
-    for env_var in ("TARGET_SESSION_ID", "CODEX_THREAD_ID"):
-        own_id = os.environ.get(env_var)
-        if own_id:
-            return f"target-session:{own_id}"
-    # No env id: the helper's generated form; liveness rides the durable pid.
-    import secrets
-    from datetime import datetime, timezone
-
-    from fno.claims.session_pid import resolve_session_pid
-
-    try:
-        pid = resolve_session_pid(from_pid=os.getpid()) or os.getpid()
-    except Exception:
-        pid = os.getpid()
-    # OWNED, not precedence (x-20f1): this infix is baked into the claim HOLDER
-    # string, which is written to the lockfile and read back as ownership. An
-    # ambiguous resolve leaves it empty rather than minting a holder that
-    # claims a harness this process cannot prove.
+    A successor must never mint a second identity from a timestamp, PID, or
+    entropy. An unresolved identity is a refusal because the claim would not
+    answer who acquired it.
+    """
     from fno.claims.self_identity import resolve_self_identity
 
-    infix = _HARNESS_CLAIM_INFIX.get(
-        (resolve_self_identity().harness or "").lower(), ""
-    )
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"target-session:{ts}-{infix}{pid}-{secrets.token_hex(3)}"
+    identity = resolve_self_identity()
+    session_id = (identity.session_id or "").strip()
+    return f"target-session:{session_id}" if session_id else None
+
+
+def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
+    """Join meaningful worktree dirt with recent transcript activity.
+
+    A failed probe is ``unknown``. Only a clean tree or positively stale
+    transcript makes a free/stale claim available for takeover.
+    """
+    try:
+        from fno.worktree_reapable import reapable
+
+        dirt = reapable(wt_path)
+    except Exception as exc:  # noqa: BLE001 - takeover must fail closed
+        return "unknown", {"reason": "probe-failed", "detail": str(exc)}
+    if dirt.reapable:
+        return "available", None
+    if dirt.reason == "probe-failed":
+        return "unknown", {"reason": dirt.reason, "detail": dirt.detail}
+
+    try:
+        from fno.agents.registry import load_registry
+
+        rows = [
+            row
+            for row in load_registry()
+            if Path(row.cwd).resolve() == wt_path.resolve()
+        ]
+    except Exception as exc:  # noqa: BLE001 - unreadable registry is unknown
+        return "unknown", {"reason": "registry-read-failed", "detail": str(exc)}
+    if len(rows) != 1:
+        return "unknown", {
+            "reason": "worktree-row-not-unique",
+            "rows": len(rows),
+        }
+    row = rows[0]
+    session_id = (getattr(row, "harness_session_id", None) or "").strip()
+    if not session_id:
+        return "unknown", {"reason": "session-id-unavailable"}
+    try:
+        from fno.agents.watchdog import REAP_RECENT_MESSAGE_S, tail_facts
+
+        facts = tail_facts(session_id, row.cwd)
+    except Exception as exc:  # noqa: BLE001 - unreadable transcript is unknown
+        return "unknown", {"reason": "transcript-read-failed", "detail": str(exc)}
+    last_epoch = getattr(facts, "last_event_epoch", None) if facts else None
+    if last_epoch is None:
+        return "unknown", {
+            "reason": "transcript-activity-unavailable",
+            "session_id": session_id,
+        }
+    age_s = max(0.0, time.time() - last_epoch)
+    if age_s <= REAP_RECENT_MESSAGE_S:
+        return "occupied_worktree", {
+            "session_id": session_id,
+            "age_s": int(age_s),
+            "reason": dirt.reason,
+        }
+    return "available", None
 
 
 def _claim_ttl_ms() -> int:
@@ -2658,6 +2691,19 @@ def _reacquire_node_claim(
 
     key = f"node:{node_id}"
     holder = _successor_claim_holder()
+    if holder is None:
+        typer.echo(
+            f"fno do target start: holder_unattributable for {key}; the current "
+            "harness session could not be proven, so no successor claim was "
+            "written.",
+            err=True,
+        )
+        marker = wt_path / ".fno" / ".target-cancelled"
+        try:
+            marker.touch()
+        except OSError:
+            pass
+        raise typer.Exit(code=1)
     try:
         pid = resolve_session_pid(from_pid=os.getpid())
     except Exception:
@@ -2668,6 +2714,7 @@ def _reacquire_node_claim(
             holder,
             ttl_ms=_claim_ttl_ms(),
             pid=pid,
+            pid_unavailable=pid is None,
             reason="target start successor re-acquire",
             root=claims_root_for(key),
         )
@@ -2965,6 +3012,15 @@ def start(
             if no_merge:
                 _warn_no_merge_dropped()
             return
+        if _is_linked_worktree(wt_path):
+            occupancy, occupancy_info = _classify_worktree_occupancy(wt_path)
+            if occupancy != "available":
+                typer.echo(
+                    f"fno do target start: refusing takeover of {wt_path}: "
+                    f"{occupancy} {occupancy_info or {}}.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
         # verdict in {dead_predecessor, free}: a successor inheriting a
         # predecessor's worktree, or a stale-free claim. Re-acquire under this
         # session so the lockfile names a live, recognizable holder.

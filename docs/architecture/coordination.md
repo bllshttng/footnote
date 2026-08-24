@@ -48,6 +48,10 @@ Holder shape is convention, not enforced. The verb-level invariants are:
   past).
 - Otherwise raise `ClaimHeldByOther`.
 
+Final worker claims use exactly `target-session:<current harness session id>`. The session id is resolved anew for every acquire, including release-then-reacquire and successor handoff. `spawn-handover:<worker>` remains a typed launch reservation only and must be replaced before worker init. If the current harness session cannot be proven, init refuses with `holder_unattributable` and writes no final claim.
+
+`pid: null` is truthful only with `pid_unavailable: true` and a TTL expiry. TTL classification remains `suspect` until expiry without probing a process. PID-only claims require a positive PID. A shared substrate PID is never a worker identity or takeover authority.
+
 ### Liveness model
 
 Two modes, mutually exclusive per claim:
@@ -107,7 +111,7 @@ manifest fields are an init-time snapshot and graph `status: claimed` names no
 holder, so all guidance compares `fno agents claim status` against the session's own
 id, never a snapshot.
 
-**A held claim proves a holder, never a worker.** A hand `fno agents claim acquire` takes `node:<id>` with nothing launched. A `spawn-handover:` claim covers a launch window whose worker can die before it boots. So the guard reports three reasons, not two. `live-claim` means a holder AND a `fno target init` behind it. `unproven-claim` means a holder and nothing more. That is what `spawn.sh` and `dispatch-node.sh` render as "no worker has reached target init" instead of the old "live worker holds node". `suspect-claim` is unchanged. The discriminator is `_init_reached` in `cli/src/fno/agents/cli.py`. It reads two markers. The `target-session:` holder prefix is a convention, not proof, since a hand acquire writes the same string. The manifest under the dispatcher's cwd must bind `target_claim_key: node:<id>` AND name the observed holder. That holder match is the non-forgeable half. A read fault answers unproven, because an unreadable manifest must never manufacture a worker. `fno backlog next --claim H --external` needs two things to protect the node it hands out, and it had neither. It now routes through `claims_root_for`, because a `node:` lock in the cwd-default tree reads free to every dispatch surface. It also carries `EXTERNAL_SELECTION_TTL`, because selection exits as soon as it prints the node. A pid-liveness claim from a process that exits reads `stale`, and `stale` does not block a dispatch.
+**A held claim proves a holder, never a worker.** A hand `fno agents claim acquire` takes `node:<id>` with nothing launched. A `spawn-handover:` claim covers a launch window whose worker can die before it boots. So the guard reports three reasons, not two. `live-claim` means a holder AND a `fno target init` behind it. `unproven-claim` means a holder and nothing more. That is what `spawn.sh` and `dispatch-node.sh` render as "no worker has reached target init" instead of the old "live worker holds node". `suspect-claim` is unchanged. The discriminator is `_init_reached` in `cli/src/fno/agents/cli.py`. It reads two markers. The `target-session:` holder prefix is a convention, not proof, since a hand acquire writes the same string. The manifest under the dispatcher's cwd must bind `target_claim_key: node:<id>` AND name the observed holder. That holder match is the non-forgeable half. A read fault answers unproven, because an unreadable manifest must never manufacture a worker. `fno backlog next --claim H --external` needs two things to protect the node it hands out, and it had neither. It now routes through `claims_root_for`, because a `node:` lock in the cwd-default tree reads free to every dispatch surface. It also carries `EXTERNAL_SELECTION_TTL`, because selection exits as soon as it prints the node. A pid-liveness claim from a process that exits reads `stale`, and `stale` does not block a dispatch. A free/stale node claim is still not enough to take over a dirty worktree: the exact worktree must be matched to one registry row and its transcript must be positively stale. Dirty plus recent transcript is `occupied_worktree`; any unreadable or non-unique evidence is `unknown`, and both refuse takeover.
 
 **The reservation is taken after the launch is proven.** `cmd_spawn` runs its node guard below the resume-provider resolution. An exit on that stretch now strands neither `dispatch:<id>` nor the handover `node:<id>`. Below it the only exit is `run_gate`, whose `except BaseException` releases both. On the way out, the reservation is released whenever the substrate is a one-shot (`--once` or `--substrate headless`), as well as on a failed spawn. When the call returns, a one-shot's worker has already exited, so nobody is left to inherit it. `pane` and `bg` keep it, because their worker outlives the caller.
 
@@ -320,7 +324,7 @@ fno agents claim list --include-stale         # include dead holders
 ```bash
 fno agents claim status node:ab-stuck
 # state: live  holder: target-session:s-abc  pid: 12345  host: workhost
-ps -p 12345    # if "process not found", PID-liveness will reclaim on next acquire
+# pid: null  pid_unavailable: true  expires_at: <epoch-ms> means TTL-backed absence
 ```
 
 If the holder PID is alive but the work is genuinely stuck (e.g., an
