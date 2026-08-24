@@ -18,6 +18,7 @@ import json
 import re
 import secrets
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -97,6 +98,17 @@ class UnattributedAuthorityError(RuntimeError):
             "no session identity and no terminal, so operator authority "
             "cannot be established"
         )
+
+
+@dataclass(frozen=True)
+class OperatorConsent:
+    """Permission-bound proof for one exact staged law proposal."""
+
+    proposal_id: str
+    content_hash: str
+    session_id: str
+    permission_mode: str
+    tool_input: str
 
 
 def mint_decision_id() -> str:
@@ -219,6 +231,7 @@ def record_decision(
     subject: str | None = None,
     decided_by: str | None = None,
     authority_source: str | None = None,
+    consent: OperatorConsent | None = None,
     rationale: str | None = None,
     options: "list[str] | None" = None,
     supersedes: str | None = None,
@@ -243,7 +256,27 @@ def record_decision(
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
 
-    provenance = _resolve_decider(decided_by, authority_source)
+    if consent is not None and authority_source != "operator":
+        from fno.law import InvalidOperatorConsentError
+
+        raise InvalidOperatorConsentError("consent requires operator authority")
+
+    if consent is not None:
+        from fno.law import consume_operator_consent
+
+        consume_operator_consent(
+            consent,
+            expected={
+                "subject": subject,
+                "decision": decision,
+                "rationale": rationale,
+                "options": list(options or []),
+                "supersedes": supersedes,
+            },
+        )
+        provenance = Provenance("operator", "operator", "operator", None)
+    else:
+        provenance = _resolve_decider(decided_by, authority_source)
 
     if events_root is None:
         from fno.carveout.core import resolve_carveout_root
