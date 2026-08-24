@@ -38,6 +38,7 @@ from urllib.parse import urlparse
 
 from fno.adapters.providers.dispatch import _env_for_api_key
 from fno.adapters.providers.model import ProviderRecord
+from fno.agents.model_routing import _parse_target
 
 logger = logging.getLogger(__name__)
 
@@ -767,6 +768,7 @@ _PROBES: dict[
 ] = {
     "claude": _probe_claude,
     "codex": _probe_codex,
+    "zai": _probe_zai,
 }
 
 
@@ -801,15 +803,20 @@ def probe_usage_detail(
     """
     if now is None:
         now = time.time()
-    probe = _PROBES.get(record.harness)
+    route_provider = None
+    if record.route:
+        parsed_route = _parse_target(record.route)
+        route_provider = parsed_route[0] if parsed_route is not None else None
+    probe_key = route_provider or record.harness
+    probe = _PROBES.get(probe_key)
     if probe is None:
         return None, "harness-unsupported"
-    if record.auth == "api_key":
+    if record.auth == "api_key" and route_provider is None:
         # Record-scoped by construction (the key rides `env`), so attribution is
         # not the missing piece: every probe reads an OAuth bearer, and this
         # record has none. v1 leaves api_key usage unknown.
         return None, "auth-unsupported"
-    if not _attributed_credential_dir(record)[0]:
+    if route_provider is None and not _attributed_credential_dir(record)[0]:
         # A tainted slot may be a FALSE taint (the five-day outage). Ask once
         # whether identity can be proven, then re-read attribution - a proven
         # slot may well belong to a different record than this one, in which

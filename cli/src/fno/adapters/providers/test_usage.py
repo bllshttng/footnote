@@ -398,6 +398,12 @@ class TestProbeFailOpen:
 
 
 class TestZaiProbe:
+    def test_zai_probe_is_registered_by_route_provider(self) -> None:
+        """AC4-HP: the registry owns Z.AI beside Claude and Codex."""
+        import fno.adapters.providers.usage as usage_mod
+
+        assert usage_mod._PROBES.get("zai") is usage_mod._probe_zai
+
     def test_zai_parser_maps_live_shaped_five_hour_limit(self) -> None:
         """AC3-HP: Z.AI's integer quota fields become a reset-bearing 5h window."""
         import fno.adapters.providers.usage as usage_mod
@@ -547,6 +553,46 @@ class TestZaiProbe:
         if probe is None:
             pytest.fail("Z.AI probe is not implemented")
         snapshot, reason = probe(_zai_record(), now=1000.0)
+
+        assert snapshot is None
+        assert reason == "probe-failed"
+
+    def test_route_backed_api_key_selects_zai_probe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5-HP: route provider selects the existing probe pipeline."""
+        import fno.adapters.providers.usage as usage_mod
+
+        expected = UsageSnapshot(
+            provider_id="zai",
+            windows=(UsageWindow("5h", 12.0, 1783807404.0),),
+            probed_at=1000.0,
+            source="quota-endpoint",
+        )
+        monkeypatch.setitem(
+            usage_mod._PROBES,
+            "zai",
+            lambda _record, _now: (expected, None),
+        )
+
+        snapshot, reason = probe_usage_detail(_zai_record(), now=1000.0)
+
+        assert snapshot == expected
+        assert reason is None
+
+    def test_route_probe_failure_stays_advisory_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4-ERR: an unavailable route probe never blocks or becomes success."""
+        import fno.adapters.providers.usage as usage_mod
+
+        monkeypatch.setitem(
+            usage_mod._PROBES,
+            "zai",
+            lambda _record, _now: (None, "probe-failed"),
+        )
+
+        snapshot, reason = probe_usage_detail(_zai_record(), now=1000.0)
 
         assert snapshot is None
         assert reason == "probe-failed"
