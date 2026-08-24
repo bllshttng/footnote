@@ -89,7 +89,7 @@ class ProviderRecord(BaseModel):
     """
 
     model_config = ConfigDict(
-        extra="forbid", str_strip_whitespace=True, populate_by_name=True
+        extra="allow", str_strip_whitespace=True, populate_by_name=True
     )
 
     # Required fields

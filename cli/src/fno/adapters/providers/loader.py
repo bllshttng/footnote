@@ -305,7 +305,7 @@ def _parse_providers_block(
             )
         record_id = raw.get("id", "<unknown>")
         try:
-            records.append(ProviderRecord.model_validate(raw))
+            record = ProviderRecord.model_validate(raw)
         except pydantic.ValidationError as exc:
             # Surface the original Pydantic message in ProviderConfigError.
             # Always include the record id and re-include auth_strategy_mismatch
@@ -317,6 +317,15 @@ def _parse_providers_block(
                 msg_parts.append(phrase)
             msg_parts.append(pydantic_msg)
             raise ProviderConfigError(": ".join(msg_parts)) from exc
+        unknown_keys = sorted(record.model_extra or {})
+        if unknown_keys:
+            logger.warning(
+                "provider record %r contains unknown metadata keys %s; retaining "
+                "them without interpreting them",
+                record.id,
+                unknown_keys,
+            )
+        records.append(record)
 
     try:
         config_obj = ProvidersConfig(records=records, active=active, auto_switch=auto_switch)
