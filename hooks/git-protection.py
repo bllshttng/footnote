@@ -838,7 +838,11 @@ def _live_merge_switch_armed(repo_root, fm):
     auto_merge.grant fold live there (x-93ff), and a second parser here is
     how the hook drifts from every other reader. In-process first (the hook
     interpreter often carries the package); the resolver CLI as the fallback
-    when it does not. Either resolver unavailable, slow, or unreadable ->
+    when it does not, budgeted at 5s because the lineage and coverage probes
+    elsewhere in this hook can each approach 25s of the 60s PreToolUse
+    budget - a fresh independent wait here can push the hook past it, and a
+    hook killed mid-run emits NO verdict, letting the raw merge proceed.
+    Either resolver unavailable, slow, or unreadable ->
     fail closed (decline to authorize); the sanctioned verb remains available.
     """
     if (
@@ -854,7 +858,7 @@ def _live_merge_switch_armed(repo_root, fm):
                 ["fno", "config", "get", "auto_merge.enabled"],
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=5,
                 cwd=str(repo_root),
             )
         except Exception:  # noqa: BLE001 - fail closed on any resolver failure

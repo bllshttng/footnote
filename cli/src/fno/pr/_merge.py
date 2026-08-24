@@ -1725,10 +1725,11 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             "skipped",
             "auto_merge disabled (live config resolves auto_merge.enabled="
             "false); sanctioned override (operator levers): `fno config set "
-            "auto_merge.enabled true`, or spawn an attended run with "
-            "TARGET_AUTO_MERGE=1. The env grant is folded into the manifest "
-            "at init - honored on attended runs only, never a merge-time "
-            "variable, and never a synthesized config",
+            "auto_merge.enabled true`, or start an operator-origin run with "
+            "TARGET_AUTO_MERGE=1 (no agent identity, attended). The env grant "
+            "is folded into the manifest at init - agent-origin and "
+            "unattended runs scrub it, it is never a merge-time variable, "
+            "and never a synthesized config",
             "none",
             err=False,
         )

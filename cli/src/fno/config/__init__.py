@@ -2379,10 +2379,11 @@ class AutoMergeBlock(BaseModel):
     ``/target bg`` injected default into ``auto_merge_approved`` in
     ``.fno/target-state.md``, with ``auto_merge_source`` naming the decider.
     The fold withholds and it grants: a per-run refusal (``false``) outranks
-    every grant at the merge gate (``pr/_merge.py``), and an attended
+    every grant at the merge gate (``pr/_merge.py``), and an operator-origin
     ``TARGET_AUTO_MERGE=1`` grant (``env-target-auto-merge``) satisfies the
-    standing arm on its own (x-01b9) - honored on attended runs only, scrubbed
-    on unattended ones so a spawned child cannot mint what no config granted.
+    standing arm on its own (x-01b9) - honored only where no agent identity is
+    present (crown's bar) and the run is attended, scrubbed otherwise so no
+    agent session can mint what no config granted.
     The review rung of the same chain is ``config.review.required_bots`` /
     ``config.review.reviewers``, enforced at the coverage guard in
     ``_merge.py``.

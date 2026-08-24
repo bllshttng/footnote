@@ -353,18 +353,22 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
     AUTO_MERGE_ENABLED="false"
   }
 fi
-# The env grant is the OPERATOR's attended lever (x-3855): TARGET_AUTO_MERGE
-# reaches a child only by inheritance, and a worker that exports it before
-# spawning would mint merge authority no config granted - the same self-grant
-# trap TARGET_BEASTMODE is scrubbed for. An unattended run ignores it and
-# config decides; the autonomous grant is auto_merge.grant = dispatch, never
-# this variable.
+# The env grant is the OPERATOR's lever (x-3855, codex P1 on PR 1131):
+# TARGET_AUTO_MERGE reaches a child only by inheritance, and ANY agent
+# session - attended or not - can export it before init and mint merge
+# authority no config granted. The origin bar is the crown's own
+# (cli/src/fno/agents/crown.py: no FNO_AGENT_SELF = an attended human)
+# plus the unattended derivation, so neither a spawned worker nor an
+# interactive agent can stamp the grant. The autonomous grant is
+# auto_merge.grant = dispatch, never this variable. Residual, named rather
+# than solved: a process that clears its own FNO_AGENT_SELF before init
+# defeats any env test; the stamp (auto_merge_source) keeps the act audited.
 _AUTO_MERGE_ENV_GRANT="false"
 if [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
-  if [[ "$_attended" == "true" ]]; then
+  if [[ -z "${FNO_AGENT_SELF:-}" && "$_attended" == "true" ]]; then
     _AUTO_MERGE_ENV_GRANT="true"
   else
-    echo "[init-target-state] note: TARGET_AUTO_MERGE=1 ignored on an unattended run; config decides (autonomous grant: auto_merge.grant = dispatch)" >&2
+    echo "[init-target-state] note: TARGET_AUTO_MERGE=1 ignored on an agent-origin or unattended run; config decides (autonomous grant: auto_merge.grant = dispatch)" >&2
   fi
 fi
 if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then

@@ -392,19 +392,38 @@ def test_fno_absent_refuses_named_node_hold_lookup(tmp_path):
     assert not (tmp_path / ".fno" / "target-state.md").exists()
 
 
-# ---- env grant posture (x-3855/x-01b9: attended-only scrub) ----
+# ---- env grant posture (x-3855/x-01b9: operator-origin scrub) ----
 
 
-def test_env_grant_honored_on_attended_run(tmp_path):
-    """AC-HP: TARGET_AUTO_MERGE=1 on an attended run folds to the env grant.
-
-    This is the documented per-run arm the merge verb and finalize honor.
-    """
-    proc = _run_init_script(tmp_path, {"TARGET_AUTO_MERGE": "1"})
+def test_env_grant_honored_on_operator_origin_run(tmp_path):
+    """AC-HP: TARGET_AUTO_MERGE=1 on an attended, agent-free run folds to the
+    env grant. This is the documented per-run arm the merge verb and finalize
+    honor; the crown's own origin bar (no FNO_AGENT_SELF) decides who holds
+    it."""
+    proc = _run_init_script(
+        tmp_path, {"TARGET_AUTO_MERGE": "1", "FNO_AGENT_SELF": ""}
+    )
     assert proc.returncode == 0, proc.stderr[:500]
+    assert "TARGET_AUTO_MERGE=1 ignored" not in proc.stderr
     fm = _parse_target_state_frontmatter(tmp_path / ".fno" / "target-state.md")
     assert fm["auto_merge_approved"] is True
     assert fm["auto_merge_source"] == "env-target-auto-merge"
+
+
+def test_env_grant_scrubbed_on_agent_origin_run(tmp_path):
+    """codex P1 on PR 1131: an ATTENDED agent session must not mint the
+    operator grant either. `_attended` alone reads only TARGET_UNATTENDED and
+    config, so the FNO_AGENT_SELF bar is what separates an agent shell from
+    an operator's."""
+    proc = _run_init_script(
+        tmp_path,
+        {"TARGET_AUTO_MERGE": "1", "FNO_AGENT_SELF": "some-agent-session"},
+    )
+    assert proc.returncode == 0, proc.stderr[:500]
+    assert "TARGET_AUTO_MERGE=1 ignored" in proc.stderr
+    fm = _parse_target_state_frontmatter(tmp_path / ".fno" / "target-state.md")
+    assert fm["auto_merge_approved"] is False
+    assert fm["auto_merge_source"] != "env-target-auto-merge"
 
 
 def test_env_grant_scrubbed_on_unattended_run(tmp_path):
@@ -415,7 +434,8 @@ def test_env_grant_scrubbed_on_unattended_run(tmp_path):
     a spawn. The note names the real autonomous lever instead.
     """
     proc = _run_init_script(
-        tmp_path, {"TARGET_AUTO_MERGE": "1", "TARGET_UNATTENDED": "1"}
+        tmp_path,
+        {"TARGET_AUTO_MERGE": "1", "TARGET_UNATTENDED": "1", "FNO_AGENT_SELF": ""},
     )
     assert proc.returncode == 0, proc.stderr[:500]
     assert "TARGET_AUTO_MERGE=1 ignored" in proc.stderr
