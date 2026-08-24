@@ -489,6 +489,8 @@ class TestZaiProbe:
     def test_zai_probe_uses_route_bearer_and_returns_quota_snapshot(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        import urllib.request
+
         import fno.adapters.providers.usage as usage_mod
 
         class _Response:
@@ -511,7 +513,14 @@ class TestZaiProbe:
                     }]},
                 }).encode()
 
-        seen: list[object] = []
+        seen: list[tuple[urllib.request.Request, float]] = []
+
+        def fake_urlopen(
+            request: urllib.request.Request, timeout: float
+        ) -> _Response:
+            seen.append((request, timeout))
+            return _Response()
+
         monkeypatch.setattr(
             usage_mod,
             "_env_for_api_key",
@@ -524,7 +533,7 @@ class TestZaiProbe:
         monkeypatch.setattr(
             usage_mod.urllib.request,
             "urlopen",
-            lambda request, timeout: (seen.append((request, timeout)) or _Response()),
+            fake_urlopen,
         )
 
         probe = getattr(usage_mod, "_probe_zai", None)
@@ -544,6 +553,7 @@ class TestZaiProbe:
     def test_zai_probe_http_failure_is_explicit_unknown(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from email.message import Message
         import urllib.error
 
         import fno.adapters.providers.usage as usage_mod
@@ -561,7 +571,7 @@ class TestZaiProbe:
             usage_mod.urllib.request,
             "urlopen",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                urllib.error.HTTPError("https://api.z.ai", 429, "limited", {}, None)
+                urllib.error.HTTPError("https://api.z.ai", 429, "limited", Message(), None)
             ),
         )
 
