@@ -8,7 +8,10 @@ import os
 import re
 import secrets
 import tempfile
+import fcntl
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -115,6 +118,19 @@ def proposal_path(proposal_id: str) -> Path:
     from fno import paths
 
     return paths.law_proposals_dir() / f"{proposal_id}.json"
+
+
+@contextmanager
+def proposal_lock(proposal_id: str) -> Iterator[None]:
+    """Serialize validation, claim, and durable writes for one proposal."""
+    lock_path = proposal_path(proposal_id).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def write_proposal(proposal: dict[str, Any]) -> None:

@@ -19,6 +19,7 @@ import re
 import secrets
 import sys
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -109,6 +110,21 @@ class OperatorConsent:
     session_id: str
     permission_mode: str
     tool_input: str
+
+
+def _consent_locked(function: Any) -> Any:
+    """Hold the proposal lock across validation, writes, and consumption."""
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        consent = kwargs.get("consent")
+        if consent is None:
+            return function(*args, **kwargs)
+        from fno.law import proposal_lock
+
+        with proposal_lock(consent.proposal_id):
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def mint_decision_id() -> str:
@@ -225,6 +241,7 @@ def _resolve_decider(
     )
 
 
+@_consent_locked
 def record_decision(
     *,
     decision: str,
