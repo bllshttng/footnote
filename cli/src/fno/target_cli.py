@@ -2712,18 +2712,13 @@ def _reacquire_node_claim(
             "written.",
             err=True,
         )
-        # Not the user-cancel sentinel: an identity refusal is not a user
+        # Not the user-cancel sentinel (an identity refusal is not a user
         # cancel, and under worktree.policy=never the shared .fno would
-        # cancel a concurrently live in-place session for another node. The
-        # blocked-reason line is the durable trace, same as the init hook,
-        # and only a predecessor's existing manifest carries it.
-        state_file = wt_path / ".fno" / "target-state.md"
-        if state_file.exists():
-            try:
-                with state_file.open("a") as fh:
-                    fh.write("target_claim_blocked_reason: holder_unattributable\n")
-            except OSError:
-                pass
+        # cancel a concurrently live in-place session for another node), and
+        # not the predecessor's manifest either: it is write-once per session
+        # with the init hook as sole owner, and a successor's append would
+        # misattribute the refusal to that session. The stderr line above is
+        # this refusal's trace.
         raise typer.Exit(code=1)
     try:
         pid = resolve_session_pid(from_pid=os.getpid())
