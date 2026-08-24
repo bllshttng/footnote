@@ -2166,7 +2166,7 @@ done
         let (_, rec) = crate::claims::status("session:uuid-re", None);
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let rec = rec.expect("claim survives reanchor");
-        assert_eq!(rec.pid, std::process::id() as i32);
+        assert_eq!(rec.pid, Some(std::process::id() as i32));
         assert_eq!(rec.holder, "stream:sw7");
     }
 

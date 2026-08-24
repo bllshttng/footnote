@@ -12,7 +12,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 SCHEMA_VERSION = 1
@@ -64,7 +64,10 @@ class Claim(BaseModel):
         expires_at: epoch-ms UTC of TTL expiry. OMITTED from YAML for
             PID-liveness claims (the absence is meaningful; do not serialize
             as null).
-        pid: holder process PID (host-local).
+        pid: holder process PID (host-local), or null only when
+            ``pid_unavailable`` is true.
+        pid_unavailable: explicit positive marker for a TTL claim whose
+            durable PID could not be proven.
         host: socket.gethostname() at acquire time. Descriptive only - it is
             NOT a stable identity (see hostid); machine_id is what liveness
             compares. Kept so a pre-change reader still sees what it expects.
@@ -98,7 +101,8 @@ class Claim(BaseModel):
     holder: str
     acquired_at: int = Field(description="epoch milliseconds, UTC")
     expires_at: Optional[int] = Field(default=None, description="epoch ms; absent => PID-liveness")
-    pid: int
+    pid: Optional[int] = None
+    pid_unavailable: bool = False
     host: str
     machine_id: Optional[str] = None
     reason: Optional[str] = None
@@ -134,6 +138,19 @@ class Claim(BaseModel):
             )
         return value
 
+    @model_validator(mode="after")
+    def _validate_pid_contract(self) -> "Claim":
+        if self.pid_unavailable:
+            if self.pid is not None:
+                raise ValueError("pid and pid_unavailable are mutually exclusive")
+            if self.expires_at is None:
+                raise ValueError("pid_unavailable requires a TTL claim")
+        elif self.pid is None:
+            raise ValueError("claim requires a positive pid or pid_unavailable: true")
+        elif self.pid <= 0:
+            raise ValueError("claim pid must be positive")
+        return self
+
     def to_yaml_dict(self) -> dict[str, Any]:
         """Return a dict ready for yaml.safe_dump.
 
@@ -150,6 +167,8 @@ class Claim(BaseModel):
             "pid": self.pid,
             "host": self.host,
         }
+        if self.pid_unavailable:
+            out["pid_unavailable"] = True
         if self.machine_id is not None:
             out["machine_id"] = self.machine_id
         if self.expires_at is not None:

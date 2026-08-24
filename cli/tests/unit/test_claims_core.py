@@ -66,6 +66,32 @@ class TestAcquire:
         assert claim.expires_at is not None
         assert claim.expires_at > claim.acquired_at
 
+    def test_AC3_HP_ttl_pid_unavailable_is_explicit(self, tmp_path):
+        claim = acquire_claim(
+            "k", HOLDER_A, ttl_ms=60_000, pid_unavailable=True, root=tmp_path
+        )
+        assert claim.pid is None
+        assert claim.pid_unavailable is True
+        payload = claim_path("k", root=tmp_path).read_text()
+        assert "pid: null" in payload
+        assert "pid_unavailable: true" in payload
+        assert claim_status("k", root=tmp_path)["pid_unavailable"] is True
+
+    def test_AC3_ERR_pid_unavailable_requires_ttl(self, tmp_path):
+        with pytest.raises(ClaimValidationError, match="TTL"):
+            acquire_claim("k", HOLDER_A, pid_unavailable=True, root=tmp_path)
+
+    def test_AC1_HP_release_then_reacquire_mints_new_holder(self, tmp_path):
+        first = acquire_claim(
+            "node:handoff", HOLDER_A, ttl_ms=60_000, pid_unavailable=True, root=tmp_path
+        )
+        assert release_claim("node:handoff", HOLDER_A, root=tmp_path) is not None
+        second = acquire_claim(
+            "node:handoff", HOLDER_B, ttl_ms=60_000, pid_unavailable=True, root=tmp_path
+        )
+        assert first.holder != second.holder
+        assert second.holder == HOLDER_B
+
     def test_AC1_ERR_key_too_long_rejected(self, tmp_path):
         with pytest.raises(ClaimValidationError):
             acquire_claim("x" * 300, HOLDER_A, root=tmp_path)

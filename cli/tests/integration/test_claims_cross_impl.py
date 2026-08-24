@@ -100,7 +100,8 @@ def rust_json(proc: subprocess.CompletedProcess) -> dict:
 
 
 STATUS_PARITY_FIELDS = (
-    "state", "holder", "pid", "host", "machine_id", "acquired_at", "expires_at", "metadata",
+    "state", "holder", "pid", "pid_unavailable", "host", "machine_id",
+    "acquired_at", "expires_at", "metadata",
 )
 
 
@@ -210,6 +211,37 @@ def test_rust_writes_python_reads_pid_and_ttl(tmp_path: Path) -> None:
     assert py["state"] == "live"
     assert py["holder"] == "pty:rs"
     assert py["metadata"] == json.loads(meta)
+
+
+def test_pid_unavailable_ttl_round_trips_between_python_and_rust(tmp_path: Path) -> None:
+    acquire_claim(
+        "session:py-unavailable",
+        "pty:py",
+        ttl_ms=60_000,
+        pid_unavailable=True,
+        root=tmp_path,
+    )
+    py = claim_status("session:py-unavailable", root=tmp_path)
+    rs = rust_json(rust("status", "session:py-unavailable", tmp_path, tmp_path))
+    assert_status_parity("python-writes-rust-reads (pid unavailable)", py, rs)
+    assert py["pid"] is None and py["pid_unavailable"] is True
+
+    r = rust(
+        "acquire",
+        "session:rs-unavailable",
+        tmp_path,
+        tmp_path,
+        "--holder",
+        "pty:rs",
+        "--ttl-ms",
+        "60000",
+        "--pid-unavailable",
+    )
+    assert r.returncode == 0, r.stderr
+    py = claim_status("session:rs-unavailable", root=tmp_path)
+    rs = rust_json(rust("status", "session:rs-unavailable", tmp_path, tmp_path))
+    assert_status_parity("rust-writes-python-reads (pid unavailable)", py, rs)
+    assert rs["pid"] is None and rs["pid_unavailable"] is True
 
 
 # --------------------------------------------------------------------------

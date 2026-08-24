@@ -215,6 +215,18 @@ def test_classify_suspect_ttl_unexpired_dead_pid():
     assert classify(claim) == ClaimState.SUSPECT
 
 
+def test_classify_pid_unavailable_ttl_is_suspect_until_expiry():
+    claim = _live_claim(
+        pid=None,
+        pid_unavailable=True,
+        expires_at=now_ms() + 60_000,
+    )
+    assert is_live(claim) is False
+    assert classify(claim) == ClaimState.SUSPECT
+    claim = claim.model_copy(update={"expires_at": now_ms() - 1})
+    assert classify(claim) == ClaimState.STALE
+
+
 def test_classify_suspect_ttl_unexpired_remote_host():
     """Unexpired TTL on another host -> SUSPECT: same-host pid arm can't prove
     liveness, but the TTL still protects the slot (not stealable, not stale)."""
