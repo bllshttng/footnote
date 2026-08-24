@@ -1919,7 +1919,14 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
     // dead-looking pid is unverified and only the deadline may move. A LIVE
     // recorded pid is left exactly as it is, so a healthy claim keeps the anchor
     // it was acquired with and this costs nothing on the common path.
-    if is_same_machine(&existing.host, existing.machine_id.as_deref()) && !is_live(&existing) {
+    // A pid_unavailable claim never re-anchors: its TTL is the liveness
+    // authority, and `_reanchor_pid_for` in claims/core.py returns None for v2
+    // records, so a Python refresh leaves them v2/SUSPECT. Repairing one here
+    // would make the two implementations of one renewal answer differently.
+    if !existing.pid_unavailable
+        && is_same_machine(&existing.host, existing.machine_id.as_deref())
+        && !is_live(&existing)
+    {
         // The anchor must be the DURABLE session pid, never this renewer's own.
         // `fno-agents loop-check` is a stop hook that exits in about a second,
         // so anchoring to it would re-file the corpse under a fresh number and
@@ -1937,11 +1944,6 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
         });
         if let Some(anchor_pid) = anchor {
             existing.pid = Some(anchor_pid);
-            existing.pid_unavailable = false;
-            // v2 exists ONLY to mark pid_unavailable; leaving it set after the
-            // repair makes serialize_claim's own validator refuse the renewal.
-            // `_rebound_claim(new_pid_unavailable=False)` resets it in kind.
-            existing.schema_version = SCHEMA_VERSION;
             existing.host = hostname();
             let mine = machine_id();
             existing.machine_id = if mine.is_empty() { None } else { Some(mine) };
@@ -2216,38 +2218,43 @@ mod tests {
     }
 
     #[test]
-    fn renew_resets_schema_version_when_the_anchor_repairs_a_pid_unavailable_claim() {
-        // A PID-unavailable claim carries schema_version 2, and the validator
-        // rejects version 2 without the marker. Re-anchoring clears the marker,
-        // so it must also reset the version or serialize_claim refuses the
-        // renewal outright - the Python twin _rebound_claim resets both.
+    fn renew_refuses_to_reanchor_a_pid_unavailable_claim() {
+        // `_reanchor_pid_for` returns None for v2 records, so a Python refresh
+        // extends the TTL and leaves the claim v2/SUSPECT. The Rust renewal
+        // must answer the same: repairing one to v1/LIVE here would make a
+        // lockfile's schema and classification depend on which binary last
+        // renewed it. The stub proves the refusal is a refusal - a resolvable
+        // durable pid exists and is still not written.
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         o.pid_unavailable = true;
-        let _ = acquire("node:x-rebound", "target-session:me", o);
-        assert_eq!(read_claim(&td, "node:x-rebound").schema_version, 2);
+        let _ = acquire("node:x-v2renew", "target-session:me", o);
+        let before = read_claim(&td, "node:x-v2renew");
+        assert_eq!(before.schema_version, 2);
+        assert!(before.expires_at.is_some());
 
         let stub = stub_session_pid(td.path(), &std::process::id().to_string());
         std::env::set_var("FNO_BIN", &stub);
         let result = renew(
-            "node:x-rebound",
+            "node:x-v2renew",
             "target-session:me",
-            120_000,
+            240_000,
             Some(td.path()),
         );
         std::env::remove_var("FNO_BIN");
         assert_eq!(result, Ok(true));
 
-        let after = read_claim(&td, "node:x-rebound");
-        assert!(!after.pid_unavailable);
-        assert_eq!(after.pid, Some(std::process::id() as i32));
-        assert_eq!(after.schema_version, SCHEMA_VERSION);
-        assert_eq!(
+        let after = read_claim(&td, "node:x-v2renew");
+        assert!(after.pid_unavailable);
+        assert_eq!(after.pid, None);
+        assert_eq!(after.schema_version, 2);
+        assert!(after.expires_at.unwrap() > before.expires_at.unwrap());
+        assert_ne!(
             classify(&after, None),
             ClaimState::Live,
-            "a re-anchored claim must read LIVE, not SUSPECT"
+            "a v2 claim must stay SUSPECT until expiry, never LIVE"
         );
     }
 
