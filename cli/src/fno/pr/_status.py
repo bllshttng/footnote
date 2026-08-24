@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Optional, Sequence
+from typing import Any, Collection, Optional, Sequence
 
 from fno.pr._proc import ToolMissing
 from fno.pr._reviews import (
@@ -59,7 +59,7 @@ _SETTLED_STATES = _PASS_STATES | (_FAIL_STATES - {"CANCELLED", "STALE"})
 
 
 def without_coverage_statuses(
-    rollup: Sequence[dict], contexts: frozenset = COVERAGE_STATUS_CONTEXTS
+    rollup: Sequence[dict], contexts: Collection[str] = COVERAGE_STATUS_CONTEXTS
 ) -> list[dict]:
     """Remove review-coverage projections before classifying generic CI.
 
