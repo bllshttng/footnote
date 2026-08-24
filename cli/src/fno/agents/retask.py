@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
-from fno.agents.harness_map import normalize_command
+from fno.agents.harness_map import dispatch_command
 from fno.agents.registry import AgentEntry, resolve_agent
 from fno.agents.spawn_defaults import inject_spawn_defaults
 
@@ -129,7 +129,7 @@ def detect_retask(
         "mux": {"session": mux["session"], "pane_id": mux["pane_id"]},
         "node": node,
         "target": asdict(target),
-        "target_command": normalize_command(f"/fno:target {node}", target.harness),
+        "target_command": dispatch_command(target.harness).format(id=node),
         "switch": switch,
         "execution": {"mode": "read_only_plan"},
         "preconditions": [

@@ -47,7 +47,7 @@ def test_same_tier_builds_target_payload_without_executable_switch_commands():
     receipt = detect_retask(_row(), target, node="x-bdb9")
 
     assert receipt["outcome"] == "retask_ready"
-    assert receipt["payload"]["target_command"] == "$fno:target x-bdb9"
+    assert receipt["payload"]["target_command"] == "$fno:target --no-merge x-bdb9"
     assert receipt["payload"]["switch"] == {"required": False}
     assert receipt["payload"]["execution"] == {"mode": "read_only_plan"}
 
