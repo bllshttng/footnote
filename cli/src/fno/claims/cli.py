@@ -265,6 +265,20 @@ def acquire(
     if pid_unavailable and parsed_ttl is None:
         typer.echo("validation error: --pid-unavailable requires --ttl", err=True)
         raise typer.Exit(code=2)
+    # A handover MOVES a live worker's claim, so it must not land on this
+    # CLI's transient pid: compare_and_rebind would anchor the node to a
+    # process that exits seconds later and the claim reads STALE, reopening
+    # the exact pid-ambiguity gap the marker scheme closes. The plain
+    # acquire below keeps its documented os.getpid() fallback for standalone
+    # use; only the handover refuses.
+    if handover_from and key and pid is None and not pid_unavailable:
+        typer.echo(
+            "validation error: --handover-from needs a durable pid (run from "
+            "a harness session) or --pid-unavailable with --ttl; the transient "
+            "CLI pid would leave the claim STALE the moment it exits",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     # The handover runs FIRST and is strictly additive: it either moves a claim
     # whose prior holder the caller named exactly, or it declines and the
     # ordinary acquire below runs unchanged. Declining covers every case that is

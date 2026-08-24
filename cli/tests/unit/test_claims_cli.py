@@ -1003,3 +1003,19 @@ def test_a_non_node_key_is_rendered_exactly_as_before(cwd_tmp, monkeypatch):
     monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _boom)
     r = runner.invoke(cli, ["status", "dispatch:x-76d1", "--json"])
     assert json.loads(r.output) == {"key": "dispatch:x-76d1", "state": "free"}
+
+
+def test_handover_refuses_transient_cli_pid(monkeypatch, cwd_tmp):
+    """A handover moves a live worker's claim; anchoring it to the transient
+    CLI pid strands the node STALE the moment the command exits. From a plain
+    shell (no resolvable session pid) and no --ttl, the answer is exit 2 with
+    the remedy, not a silently dying claim."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_pid", lambda *a, **k: None
+    )
+    result = runner.invoke(
+        cli,
+        ["acquire", "node:ab-9", "--holder", "h2", "--handover-from", "h1"],
+    )
+    assert result.exit_code == 2
+    assert "--handover-from needs a durable pid" in result.output
