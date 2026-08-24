@@ -2094,7 +2094,7 @@ def _forced_pane_send(
     if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
         _release_budget(reservation)
         print(
-            f"error: {recipient} is bus-only by policy, so no pane paste is "
+            f"error: {recipient} is DND (bus-only by policy), so no pane paste is "
             f"allowed and --force has nothing it may do. Send without --force: "
             f"that queues durable and the recipient drains it.",
             file=sys.stderr,
@@ -2659,7 +2659,7 @@ def _name_lane_send(
 
         hold_note = _hold.bounce_reason(recipient)
     if bus_only:
-        reason = hold_note or "bus-only: recipient polls the bus at each turn boundary"
+        reason = hold_note or "DND (bus-only): recipient polls the bus at each turn boundary"
     else:
         reason = "self-send" if self_send else (live_reason or "live-miss")
     hint = ""
@@ -2875,7 +2875,7 @@ def _job_lane_send(
     # must not promise turn-boundary visibility.
     if bus_only:
         print(
-            "mail: holder is bus-only by delivery policy; queued durable "
+            "mail: holder is DND (bus-only by delivery policy); queued durable "
             "until a holder drains",
             file=sys.stderr,
         )
@@ -3343,7 +3343,7 @@ def _raw_send(
 
     if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
         _refused(
-            f"{name!r} has delivery-policy bus-only: prompt-line injection is "
+            f"{name!r} is DND (delivery-policy bus-only): prompt-line injection is "
             "forbidden for this recipient. Send wrapped mail instead - it "
             "queues durable and surfaces at their turn boundary"
         )
@@ -4420,7 +4420,7 @@ def cmd_send(
                 print(
                     f"{result.msg_id} queued (durable) for {result.recipient} "
                     f"[project {to_project}] "
-                    f"[{_note or 'bus-only: recipient polls the bus at each turn boundary'}]"
+                    f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
                     + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
                 )
             else:
@@ -4673,7 +4673,7 @@ def cmd_send(
         _note = _hold.bounce_reason(name)
         print(
             f"{result.msg_id} queued (durable) "
-            f"[{_note or 'bus-only: recipient polls the bus at each turn boundary'}]"
+            f"[{_note or 'DND (bus-only): recipient polls the bus at each turn boundary'}]"
             + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
         )
     else:

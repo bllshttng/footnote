@@ -8117,9 +8117,10 @@ impl View {
                     // after the fixed mark+glyph prefix) so a long agent name or a
                     // narrow sideline never truncates the billing badge away (codex
                     // P2). Absent for the default account.
+                    let dnd = if a.dnd { " [DND]" } else { "" };
                     let mut text = match a.account.as_deref() {
-                        Some(acct) => format!(" {mark}{glyph} @{acct} {}", a.name),
-                        None => format!(" {mark}{glyph} {}", a.name),
+                        Some(acct) => format!(" {mark}{glyph}{dnd} @{acct} {}", a.name),
+                        None => format!(" {mark}{glyph}{dnd} {}", a.name),
                     };
                     // (x-132c) Indent the row under its lineage parent: one
                     // step per depth, read from the compose-pass depth vec.
@@ -16861,6 +16862,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -16908,6 +16910,7 @@ mod tests {
             pane_id: None,
             attach_id: Some("job1".into()),
             exited: true,
+            dnd: false,
             unmeasured: false,
             tombstone: true,
             ..hosted.clone()
@@ -16987,6 +16990,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: true,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -17051,6 +17055,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: Some("job1".into()),
@@ -17315,6 +17320,7 @@ mod tests {
             badge,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -17843,6 +17849,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -19803,6 +19810,7 @@ mod tests {
             badge,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -20482,6 +20490,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -20673,6 +20682,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -20990,6 +21000,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -21048,6 +21059,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -21164,6 +21176,7 @@ mod tests {
             badge: Some(AgentBadge::Working),
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -21198,6 +21211,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: Some("c19cd2c3".into()),
@@ -21231,6 +21245,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -21308,6 +21323,7 @@ mod tests {
                 badge: Some(AgentBadge::Working),
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -21858,6 +21874,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: attach.map(Into::into),
@@ -23084,6 +23101,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -24703,6 +24721,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -25770,6 +25789,7 @@ mod tests {
                     badge: Some(AgentBadge::Blocked),
                     reason: Some("perm prompt".into()),
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -25801,6 +25821,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: true,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -25832,6 +25853,7 @@ mod tests {
                     badge: Some(AgentBadge::Working),
                     reason: None,
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -25902,6 +25924,26 @@ mod tests {
     }
 
     #[test]
+    fn client_agent_row_renders_dnd_as_presence_not_liveness() {
+        let held: AgentRow = serde_json::from_str(
+            r#"{"squad":1,"name":"dnd-worker","pane_id":10,
+                "badge":"working","reason":null,"exited":false,"dnd":true}"#,
+        )
+        .unwrap();
+        let mut view = two_pane_view();
+        view.layout.agents = vec![held];
+        let text = frame_text(&view.compose());
+        let row = text
+            .lines()
+            .find(|line| line.contains("dnd-worker"))
+            .unwrap();
+        assert!(
+            row.contains("● [DND] dnd-worker"),
+            "DND leads the truncatable identity without replacing liveness: {row:?}"
+        );
+    }
+
+    #[test]
     fn squad_header_rollup_counts_in_every_view_state() {
         // x-6851 US2 (AC2-HP): each squad header carries always-on per-state
         // rollup counts (nonzero only, severity order), folded from its live rows
@@ -25919,6 +25961,7 @@ mod tests {
                 badge,
                 reason: None,
                 exited,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -26333,6 +26376,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: true,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -26364,6 +26408,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: Some("ab12cd34".into()),
@@ -26395,6 +26440,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -26429,6 +26475,7 @@ mod tests {
                     badge: Some(AgentBadge::Blocked),
                     reason: None,
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: Some("ff99ff99".into()),
@@ -26938,6 +26985,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: attach_id.map(Into::into),
@@ -27669,6 +27717,7 @@ mod tests {
             badge: Some(AgentBadge::Blocked),
             reason: Some("waiting on a menu".into()),
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: Some(answerable(&[("1", "Yes"), ("2", "No")], 7)),
             attach_id: None,
@@ -28109,6 +28158,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: true,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: Some("deadbeef".into()),
@@ -28161,6 +28211,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -29191,6 +29242,7 @@ mod tests {
                 badge: Some(AgentBadge::Working),
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -29222,6 +29274,7 @@ mod tests {
                 badge: None,
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: Some("deadbee1".into()),
@@ -29292,6 +29345,7 @@ mod tests {
             badge,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -29366,6 +29420,7 @@ mod tests {
             badge: Some(AgentBadge::Blocked),
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -29491,6 +29546,7 @@ mod tests {
                 badge: Some(AgentBadge::Done),
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -29522,6 +29578,7 @@ mod tests {
                 badge: Some(AgentBadge::Done),
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -29746,6 +29803,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -30208,6 +30266,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -30377,6 +30436,7 @@ mod tests {
             badge: Some(AgentBadge::Blocked),
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: ans,
             attach_id: None,
@@ -30757,6 +30817,7 @@ mod tests {
                     basis: r["basis"].as_str().map(str::to_string),
                     last_activity_age_s: r["last_activity_age_s"].as_u64(),
                     exited: r["exited"].as_bool().unwrap_or(false),
+                    dnd: false,
                     unmeasured: r["unmeasured"].as_bool().unwrap_or(false),
                     ..blocked_row(r["name"].as_str().expect("row has a name"), 0, None)
                 };

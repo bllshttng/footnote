@@ -316,6 +316,17 @@ fn classify_guard_registry(raw: &str, now: u64) -> Result<Vec<RegistryAgent>, &'
     }
 }
 
+/// True only when the current session/pane join names a row that explicitly
+/// declared the bus-only delivery policy. DND is presence, never liveness.
+fn pane_is_dnd(agents: &[RegistryAgent], session: &str, pane: u64) -> bool {
+    agents.iter().any(|a| {
+        a.dnd
+            && a.mux
+                .as_ref()
+                .is_some_and(|(s, p)| s == session && *p == pane)
+    })
+}
+
 /// (x-fbb1) Whether a focused NON-viewer leaf may be taken over by `.`=here.
 /// Pure over the three inputs so the reap gate (the safety-critical bit) is
 /// unit-testable without a Core, mirroring [`rerun_allowed`]. Take-over is
@@ -9490,6 +9501,7 @@ impl Core {
                                 badge: if exited { None } else { a.badge },
                                 reason: if exited { None } else { a.reason.clone() },
                                 exited,
+                                dnd: a.dnd,
                                 unmeasured,
                                 answerable: if exited { None } else { a.answerable.clone() },
                                 // A pane-hosted row focuses its pane; the attach
@@ -9553,6 +9565,7 @@ impl Core {
                                 reason: None,
                                 exited: pane_dead
                                     || e.is_some_and(|entry| entry.refused_worker.is_some()),
+                                dnd: false,
                                 unmeasured: false,
                                 answerable: None,
                                 attach_id: None,
@@ -9629,6 +9642,7 @@ impl Core {
                         badge: None,
                         reason: None,
                         exited: true,
+                        dnd: a.dnd,
                         unmeasured: false,
                         answerable: None,
                         attach_id: None,
@@ -9676,6 +9690,7 @@ impl Core {
                         badge: if a.exited { None } else { a.badge },
                         reason: if a.exited { None } else { a.reason.clone() },
                         exited: a.exited,
+                        dnd: a.dnd,
                         unmeasured: a.exited && a.liveness == agents_view::Liveness::Unmeasured,
                         answerable: if a.exited { None } else { a.answerable.clone() },
                         attach_id: if a.exited { None } else { a.attach_id.clone() },
@@ -9738,6 +9753,7 @@ impl Core {
                     badge: None,
                     reason: None,
                     exited: true,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     // Carried so the client can DismissMember; exited: true keeps
@@ -9811,6 +9827,7 @@ impl Core {
                 badge: None,
                 reason,
                 exited,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 // Carried on an exited row so the client can send RemoveExternal;
@@ -10273,9 +10290,11 @@ impl Core {
     /// burst in the gap. `agents` is the FRESH registry snapshot read off-loop
     /// for this send (not `self.agents`, which is parked with no viewer); `Err`
     /// carries the refusal reason - the read failed, or the registry carries a
-    /// row whose pane cannot be read - so the guard fails closed. Raw
-    /// `PaneSend` (`guarded == false`) is the writer-claim holder's own channel
-    /// and stays unguarded (`agents` is unused).
+    /// row whose pane cannot be read - so the guard fails closed. A guarded
+    /// send also consults a positive DND row first; raw `PaneSend`
+    /// (`guarded == false`) is the writer-claim holder's own channel: it still
+    /// consults DND, but an unreadable registry there maps to no rows observed,
+    /// so absent a positive DND marker it remains unguarded.
     fn pane_send(
         &mut self,
         pane: u64,
@@ -10341,6 +10360,17 @@ impl Core {
                     ),
                 };
             }
+        }
+        if agents
+            .as_deref()
+            .is_some_and(|rows| pane_is_dnd(rows, &self.session_name, pane))
+        {
+            return ServerMsg::Err {
+                code: err_code::TARGET_DND,
+                msg:
+                    "target is DND; use fno agents mail send to queue durable until the hold lifts"
+                        .to_string(),
+            };
         }
         if guarded {
             let rows = match agents.as_deref() {
@@ -14798,7 +14828,10 @@ async fn handle_control(
                 // before the core loop, instead of reading as "no agent".
                 read_guard_agents_for_send().await
             } else {
-                Ok(Vec::new()) // raw send: agents unused (unguarded, unaddressed)
+                // Every script send still consults DND. A plain read suffices:
+                // an unreadable registry maps to no rows observed, and a raw
+                // send with no positive DND marker stays unguarded.
+                Ok(read_guard_agents().await.unwrap_or_default())
             };
             core_tx
                 .send(CoreMsg::PaneSend {
@@ -16077,6 +16110,7 @@ mod tests {
             name: "w".into(),
             cwd: "/w".into(),
             exited,
+            dnd: false,
             badge,
             reason: None,
             mux: Some((sess.into(), pane)),
@@ -16305,6 +16339,7 @@ mod tests {
                 name: "foreign-pane".into(),
                 cwd: "/other".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: Some(("other".into(), 5)),
@@ -16330,6 +16365,7 @@ mod tests {
                 name: "bg-worker".into(),
                 cwd: "/bg".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -16491,6 +16527,7 @@ mod tests {
                 name: "watcher".into(),
                 cwd: "/grp/backend/sub/dir".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -16570,6 +16607,7 @@ mod tests {
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -16621,6 +16659,7 @@ mod tests {
                 name: "think-x-9999".into(),
                 cwd: "/w".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -16645,6 +16684,7 @@ mod tests {
                 name: "dead-ext".into(),
                 cwd: "/w".into(),
                 exited: true,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -16703,6 +16743,7 @@ mod tests {
             name: "upgraded".into(),
             cwd: "/w".into(),
             exited: false,
+            dnd: false,
             liveness: agents_view::Liveness::Alive,
             badge: None,
             reason: None,
@@ -19418,6 +19459,7 @@ mod tests {
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
+            dnd: false,
             liveness: agents_view::Liveness::Dead,
             badge: None,
             reason: None,
@@ -20313,6 +20355,7 @@ mod tests {
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
             exited: true,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -20393,6 +20436,7 @@ mod tests {
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
             exited: true,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -20477,6 +20521,7 @@ mod tests {
             name: "live-codex".into(),
             cwd: "/tmp".into(),
             exited: false,
+            dnd: false,
             badge: None,
             reason: None,
             mux: Some(("test".into(), live)),
@@ -20601,6 +20646,7 @@ mod tests {
             name: "w".into(),
             cwd: "/w".into(),
             exited: true,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -23082,6 +23128,7 @@ mod tests {
             name: name.into(),
             cwd: cwd.into(),
             exited: false,
+            dnd: false,
             liveness: agents_view::Liveness::Alive,
             badge: None,
             reason: None,
@@ -25825,6 +25872,21 @@ mod tests {
         // And a foreign busy row must not spuriously gate our plain-shell pane.
         let foreign_only = [agent_in("other", 5, Some(AgentBadge::Working), false)];
         assert_eq!(rerun_allowed(&foreign_only, "main", 5), Ok(()));
+    }
+
+    #[test]
+    fn pane_send_refuses_a_dnd_agent_even_when_unguarded() {
+        let (mut core, _client_id, p1, _p2, _rx) = seen_test_core();
+        let raw = format!(
+            r#"{{"agents":[{{"name":"held","cwd":"/w","status":"live",
+                "delivery_policy":"bus-only",
+                "mux":{{"session":"test","pane_id":{p1}}}}}]}}"#
+        );
+        let rows = agents_view::derive_rows(&raw, 0).unwrap();
+        match core.pane_send(p1, b"must-not-land", false, Some(rows)) {
+            ServerMsg::Err { msg, .. } => assert!(msg.contains("DND"), "wording: {msg}"),
+            other => panic!("expected DND refusal, got {other:?}"),
+        }
     }
 
     // -- W4 touch telemetry (human_touch emitters) -------------------------

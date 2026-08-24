@@ -2641,6 +2641,7 @@ fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> S
 pub const EXIT_AMBIGUOUS: i32 = 21; // view/where: selector matches a family, not one agent (x-b80d)
 pub const EXIT_SUBMIT_UNCONFIRMED: i32 = 22; // text landed, but no post-submit marker appeared
 pub const EXIT_TARGET_IDENTITY_MISMATCH: i32 = 23; // send: pane occupant differs from addressee
+pub const EXIT_TARGET_DND: i32 = 25; // pane send: target declared DND; bytes did not land
 
 // Keep these aligned with fno-agents mail_inject: the same PTY paste needs the
 // same settle and retry cadence whether it arrived through mail or pane send.
@@ -5683,6 +5684,8 @@ fn render_reply(
                 EXIT_BLOCK_UNAVAILABLE
             } else if code == err_code::TARGET_NOT_IDLE {
                 EXIT_TARGET_NOT_IDLE
+            } else if code == err_code::TARGET_DND {
+                EXIT_TARGET_DND
             } else if code == err_code::NOT_FOUND {
                 EXIT_NOT_FOUND
             } else if code == err_code::NOT_PANE_HOSTED {
@@ -7127,6 +7130,7 @@ mod tests {
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
             exited: false,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -8460,6 +8464,15 @@ mod tests {
             msg: "no such pane".into(),
         };
         assert_eq!(render_reply(other, false, false, None), EXIT_ERROR);
+    }
+
+    #[test]
+    fn mux_pane_dnd_refusal_has_a_distinct_exit() {
+        let refused = ServerMsg::Err {
+            code: 14,
+            msg: "target is DND; use fno agents mail send to queue durable".into(),
+        };
+        assert_eq!(render_reply(refused, false, false, None), 23);
     }
 
     #[test]

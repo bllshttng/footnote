@@ -48,6 +48,9 @@ pub struct RegistryAgent {
     pub forked_from_session_id: Option<String>,
     /// Registry status is terminal (exited/permanent-dead).
     pub exited: bool,
+    /// Active do-not-disturb delivery policy. Presence only: it never changes
+    /// the row's liveness badge or whether the worker is alive.
+    pub dnd: bool,
     /// In-TTL inside-leg badge; `None` = liveness-only. Never a scraped guess.
     pub badge: Option<AgentBadge>,
     pub reason: Option<String>,
@@ -1794,6 +1797,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         let cwd = row.get("cwd").and_then(|v| v.as_str()).unwrap_or_default();
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let exited = matches!(status, "exited" | "permanent-dead" | "permanent_dead");
+        let dnd = row.get("delivery_policy").and_then(|v| v.as_str()) == Some("bus-only");
         let liveness = derive_liveness(
             status,
             row.get("pid").and_then(|v| v.as_u64()),
@@ -2079,6 +2083,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             predecessor_session_ids,
             forked_from_session_id,
             exited,
+            dnd,
             badge,
             reason,
             mux,
@@ -2175,6 +2180,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             name: w.name.clone(),
             cwd: w.cwd.clone(),
             exited: false,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -3364,6 +3370,27 @@ tokens = []"#,
     }
 
     #[test]
+    fn derive_rows_carries_dnd_separately_from_liveness() {
+        let raw = reg(
+            r#"{"name":"held","cwd":"/w","status":"live","harness":"claude",
+                "delivery_policy":"bus-only",
+                "inside_leg":{"state":"working","seq":1,"received_at":"2027-01-15T07:59:30Z","ttl_ms":120000}},
+               {"name":"plain","cwd":"/w","status":"live","harness":"claude"}"#,
+        );
+        let now = rfc3339_like_to_secs("2027-01-15T08:00:00Z").unwrap();
+        let rows = derive_rows(&raw, now).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        let held = format!("{:?}", get("held"));
+        let plain = format!("{:?}", get("plain"));
+        assert!(held.contains("dnd: true"), "held row: {held}");
+        assert!(
+            held.contains("badge: Some(Working)"),
+            "DND keeps liveness: {held}"
+        );
+        assert!(plain.contains("dnd: false"), "plain row: {plain}");
+    }
+
+    #[test]
     fn derive_rows_updated_at_is_max_parseable_stamp() {
         // US7: updated_at is the max of the parseable stamps; a row with none is
         // None (no changed-ago line rendered).
@@ -4077,6 +4104,7 @@ config_dir = "~/.claude-alt"
             name: name.into(),
             cwd: "/w".into(),
             exited,
+            dnd: false,
             badge,
             reason: None,
             mux: None,
