@@ -255,6 +255,22 @@ def validate(event: dict[str, Any]) -> None:
         if field not in data:
             raise ValidationError(f"event type {type_name} missing required data field: {field}")
 
+    # Claim records have two truthful PID shapes. A null PID must carry the
+    # positive marker and a TTL expiry, while an integer PID must not carry the
+    # marker. Without this cross-field check, a missing instrument and a
+    # deliberate PID-unavailable claim become indistinguishable in the audit log.
+    if type_name.startswith("claim_") and "pid" in data:
+        pid = data.get("pid")
+        unavailable = data.get("pid_unavailable") is True
+        if pid is None and (not unavailable or data.get("expires_at") is None):
+            raise ValidationError(
+                f"event type {type_name} null pid requires pid_unavailable=true and expires_at"
+            )
+        if pid is not None and unavailable:
+            raise ValidationError(
+                f"event type {type_name} pid_unavailable=true requires pid=null"
+            )
+
     # a2a status-breakpoint family (x-dbaf): the extended envelope. Routable
     # fields live at envelope level; additionalProperties:false for this family
     # ONLY (legacy types keep today's tolerance). Enforced pre-lock so a

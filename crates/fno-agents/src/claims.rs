@@ -108,8 +108,11 @@ pub struct ClaimRecord {
     pub holder: String,
     /// Epoch milliseconds, UTC.
     pub acquired_at: i64,
-    pub pid: i32,
+    pub pid: Option<i32>,
     pub host: String,
+    /// True only for TTL claims whose durable PID could not be proven.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pid_unavailable: bool,
     /// Epoch ms of TTL expiry; absent (and treated same as null on read) for
     /// PID-liveness claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,6 +142,10 @@ fn default_schema_version() -> u32 {
     SCHEMA_VERSION
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Options for [`acquire`]. `pid` defaults to the calling process — which,
 /// natively, is the long-lived daemon/worker rather than a transient CLI
 /// subprocess, so the claim is live from birth (closes the acquire-to-reanchor
@@ -146,6 +153,7 @@ fn default_schema_version() -> u32 {
 #[derive(Debug, Default, Clone)]
 pub struct AcquireOpts {
     pub pid: Option<u32>,
+    pub pid_unavailable: bool,
     pub ttl_ms: Option<i64>,
     pub reason: Option<String>,
     pub metadata: Option<Map<String, Value>>,
@@ -166,7 +174,7 @@ pub enum AcquireOutcome {
     /// A live claim is held by a different holder.
     HeldByOther {
         holder: String,
-        pid: i32,
+        pid: Option<i32>,
         host: String,
     },
     /// Validation / io / corruption error. Callers keep their fail-open
@@ -472,10 +480,13 @@ pub fn process_create_time_ms(_pid: i32) -> Option<i64> {
 /// False when: cross-machine, pid gone/uninspectable, or the current occupant
 /// of the pid slot started AFTER the claim was filed (PID reuse).
 fn is_live(rec: &ClaimRecord) -> bool {
+    if rec.pid_unavailable {
+        return false;
+    }
     if !is_same_machine(&rec.host, rec.machine_id.as_deref()) {
         return false;
     }
-    match process_create_time_ms(rec.pid) {
+    match rec.pid.and_then(process_create_time_ms) {
         Some(create_ms) => create_ms <= rec.acquired_at,
         None => false,
     }
@@ -537,7 +548,22 @@ pub(crate) enum ReadError {
 }
 
 fn serialize_claim(rec: &ClaimRecord) -> Result<String, String> {
+    validate_record(rec).map_err(|e| format!("claim YAML serialize failed: {e}"))?;
     serde_yaml_ng::to_string(rec).map_err(|e| format!("claim YAML serialize failed: {e}"))
+}
+
+fn validate_record(rec: &ClaimRecord) -> Result<(), String> {
+    if rec.key.is_empty() || rec.holder.is_empty() {
+        return Err("claim key/holder must be non-empty".into());
+    }
+    match (rec.pid, rec.pid_unavailable, rec.expires_at) {
+        (Some(pid), false, _) if pid > 0 => Ok(()),
+        (None, true, Some(_)) => Ok(()),
+        (Some(_), true, _) => Err("pid and pid_unavailable are mutually exclusive".into()),
+        (None, true, None) => Err("pid_unavailable requires a TTL claim".into()),
+        (Some(_), false, _) => Err("claim pid must be positive".into()),
+        (None, false, _) => Err("claim requires a positive pid or pid_unavailable: true".into()),
+    }
 }
 
 fn parse_claim_str(text: &str) -> Result<ClaimRecord, ReadError> {
@@ -549,11 +575,7 @@ fn parse_claim_str(text: &str) -> Result<ClaimRecord, ReadError> {
             rec.schema_version
         )));
     }
-    if rec.key.is_empty() || rec.holder.is_empty() {
-        return Err(ReadError::Corrupted(
-            "claim key/holder must be non-empty".into(),
-        ));
-    }
+    validate_record(&rec).map_err(ReadError::Corrupted)?;
     Ok(rec)
 }
 
@@ -1058,7 +1080,11 @@ fn common_event_data(rec: &ClaimRecord) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("key".into(), Value::String(rec.key.clone()));
     m.insert("holder".into(), Value::String(rec.holder.clone()));
-    m.insert("pid".into(), Value::Number(rec.pid.into()));
+    m.insert(
+        "pid".into(),
+        rec.pid.map(Value::from).unwrap_or(Value::Null),
+    );
+    m.insert("pid_unavailable".into(), Value::Bool(rec.pid_unavailable));
     m.insert("host".into(), Value::String(rec.host.clone()));
     m.insert("acquired_at".into(), Value::Number(rec.acquired_at.into()));
     m.insert(
@@ -1072,7 +1098,13 @@ fn common_event_data(rec: &ClaimRecord) -> Map<String, Value> {
 // Verbs: acquire / release / status
 // ---------------------------------------------------------------------------
 
-fn validate_inputs(key: &str, holder: &str, ttl_ms: Option<i64>) -> Result<(), String> {
+fn validate_inputs(
+    key: &str,
+    holder: &str,
+    ttl_ms: Option<i64>,
+    pid: Option<u32>,
+    pid_unavailable: bool,
+) -> Result<(), String> {
     if key.is_empty() {
         return Err("key must be non-empty".into());
     }
@@ -1092,6 +1124,12 @@ fn validate_inputs(key: &str, holder: &str, ttl_ms: Option<i64>) -> Result<(), S
     }
     if holder.is_empty() {
         return Err("holder must be non-empty".into());
+    }
+    if pid_unavailable && ttl_ms.is_none() {
+        return Err("pid_unavailable requires a TTL claim".into());
+    }
+    if pid_unavailable && pid.is_some() {
+        return Err("pid and pid_unavailable are mutually exclusive".into());
     }
     if let Some(ttl) = ttl_ms {
         if !(MIN_TTL_MS..=MAX_TTL_MS).contains(&ttl) {
@@ -1208,13 +1246,19 @@ pub fn ambient_parent_edge_from(
 
 fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
     let acquired = now_ms();
+    let pid_unavailable = opts.pid_unavailable;
     ClaimRecord {
         schema_version: SCHEMA_VERSION,
         key: key.into(),
         holder: holder.into(),
         acquired_at: acquired,
-        pid: opts.pid.unwrap_or_else(std::process::id) as i32,
+        pid: if pid_unavailable {
+            None
+        } else {
+            Some(opts.pid.unwrap_or_else(std::process::id) as i32)
+        },
         host: hostname(),
+        pid_unavailable,
         // Omitted, not backfilled with the hostname, when no stable id exists:
         // readers treat a present value as authoritative, so a substitute would
         // make two processes on one machine disagree and stale each other.
@@ -1239,7 +1283,7 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
 /// gone-away race (claim released between collision and read) retries from
 /// the top, bounded at [`ACQUIRE_MAX_ATTEMPTS`].
 pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
-    if let Err(e) = validate_inputs(key, holder, opts.ttl_ms) {
+    if let Err(e) = validate_inputs(key, holder, opts.ttl_ms, opts.pid, opts.pid_unavailable) {
         return AcquireOutcome::Error(e);
     }
     let path = match claim_path(key, opts.root.as_deref()) {
@@ -1547,7 +1591,10 @@ fn recover_stale_locked(
                 "previous_holder".into(),
                 Value::String(existing.holder.clone()),
             );
-            data.insert("previous_pid".into(), Value::Number(existing.pid.into()));
+            data.insert(
+                "previous_pid".into(),
+                existing.pid.map(Value::from).unwrap_or(Value::Null),
+            );
             emit_claim_event(events_dir, "claim_stale_reclaimed", data);
             RecoverResult::Done(AcquireOutcome::Acquired(new_claim))
         }
@@ -1842,7 +1889,8 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
             process_create_time_ms(*pid).is_some_and(|created| created <= existing.acquired_at)
         });
         if let Some(anchor_pid) = anchor {
-            existing.pid = anchor_pid;
+            existing.pid = Some(anchor_pid);
+            existing.pid_unavailable = false;
             existing.host = hostname();
             let mine = machine_id();
             existing.machine_id = if mine.is_empty() { None } else { Some(mine) };
@@ -2060,7 +2108,7 @@ mod tests {
         assert_eq!(result, Ok(true));
 
         let after = read_claim(&td, "node:x-corpse");
-        assert_eq!(after.pid, std::process::id() as i32);
+        assert_eq!(after.pid, Some(std::process::id() as i32));
         assert_eq!(
             classify(&after, None),
             ClaimState::Live,
@@ -2106,7 +2154,7 @@ mod tests {
         );
         assert_eq!(
             after.pid,
-            std::process::id() as i32,
+            Some(std::process::id() as i32),
             "the pid must still be re-anchored"
         );
         assert_eq!(
@@ -2146,7 +2194,7 @@ mod tests {
         assert_eq!(result, Ok(true));
 
         let after = read_claim(&td, "node:x-noanchor");
-        assert_eq!(after.pid, corpse as i32);
+        assert_eq!(after.pid, Some(corpse as i32));
         assert_eq!(after.acquired_at, before.acquired_at);
         assert!(after.expires_at.unwrap() > before.expires_at.unwrap());
     }
@@ -2329,6 +2377,31 @@ mod tests {
     }
 
     #[test]
+    fn ttl_claim_with_no_pid_records_explicit_unavailability() {
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(60_000);
+        o.pid_unavailable = true;
+        let rec = match acquire("session:u3", "pty:cc", o) {
+            AcquireOutcome::Acquired(r) => r,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(rec.pid, None);
+        assert!(rec.pid_unavailable);
+        let text = std::fs::read_to_string(lockfile(&td, "session:u3")).unwrap();
+        assert!(text.contains("pid: null"));
+        assert!(text.contains("pid_unavailable: true"));
+    }
+
+    #[test]
+    fn pid_unavailable_without_ttl_is_rejected() {
+        let rec = parse_claim_str(
+            "schema_version: 1\nkey: k\nholder: h\nacquired_at: 5\npid: null\npid_unavailable: true\nhost: x\n",
+        );
+        assert!(rec.is_err());
+    }
+
+    #[test]
     fn reader_treats_null_and_absent_expires_at_the_same() {
         let rec = parse_claim_str(
             "schema_version: 1\nkey: k\nholder: h\nacquired_at: 5\npid: 1\nhost: x\nexpires_at: null\n",
@@ -2372,8 +2445,9 @@ mod tests {
             key: "session:u".into(),
             holder: "h".into(),
             acquired_at: 42,
-            pid: 7,
+            pid: Some(7),
             host: "hh".into(),
+            pid_unavailable: false,
             expires_at: None,
             reason: Some("why".into()),
             harness: Some("codex".into()),
@@ -2495,8 +2569,9 @@ mod tests {
             key: "session:x".into(),
             holder: "h".into(),
             acquired_at,
-            pid,
+            pid: Some(pid),
             host: host.into(),
+            pid_unavailable: false,
             expires_at,
             reason: None,
             harness: None,
@@ -2582,7 +2657,7 @@ mod tests {
             AcquireOutcome::Acquired(r) => r,
             other => panic!("{other:?}"),
         };
-        assert_eq!(rec.pid, std::process::id() as i32);
+        assert_eq!(rec.pid, Some(std::process::id() as i32));
         assert!(lockfile(&td, "session:fresh").exists());
         let events = read_events(&td);
         assert_eq!(events.len(), 1);
@@ -2606,7 +2681,7 @@ mod tests {
             AcquireOutcome::Acquired(r) => r,
             other => panic!("{other:?}"),
         };
-        assert_eq!(second.pid, 4242);
+        assert_eq!(second.pid, Some(4242));
         assert!(second.acquired_at >= first.acquired_at);
         let events = read_events(&td);
         assert_eq!(events[1]["type"], "claim_idempotent_reacquired");
@@ -2623,7 +2698,7 @@ mod tests {
         match acquire("session:held", "pty:intruder", opts_in(&td)) {
             AcquireOutcome::HeldByOther { holder, pid, .. } => {
                 assert_eq!(holder, "pty:owner");
-                assert_eq!(pid, std::process::id() as i32);
+                assert_eq!(pid, Some(std::process::id() as i32));
             }
             other => panic!("{other:?}"),
         }

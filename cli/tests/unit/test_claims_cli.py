@@ -145,10 +145,15 @@ def test_acquire_validation_exits_2(cwd_tmp):
 
 
 def test_acquire_with_ttl(cwd_tmp):
-    result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--ttl", "1h", "--json"])
+    result = runner.invoke(
+        cli,
+        ["acquire", "k", "--holder", "h", "--ttl", "1h", "--pid-unavailable", "--json"],
+    )
     assert result.exit_code == 0
     parsed = json.loads(result.output)
     assert parsed["expires_at"] is not None
+    assert parsed["pid"] is None
+    assert parsed["pid_unavailable"] is True
 
 
 def test_acquire_omitted_pid_defaults_to_session_ancestor(cwd_tmp, monkeypatch):
@@ -164,14 +169,16 @@ def test_acquire_omitted_pid_defaults_to_session_ancestor(cwd_tmp, monkeypatch):
     assert parsed["pid"] == os.getppid() and parsed["pid"] != os.getpid()
 
 
-def test_acquire_omitted_pid_degrades_when_no_session(cwd_tmp, monkeypatch):
-    # No agent ancestor (standalone use) -> resolve returns None -> the prior
-    # os.getpid() default is preserved byte-for-byte.
+def test_acquire_omitted_pid_with_ttl_is_explicitly_unavailable(cwd_tmp, monkeypatch):
+    # No agent ancestor (standalone use) -> a TTL claim records positive PID
+    # absence instead of naming the transient CLI process.
     monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid",
                         lambda from_pid=None: None)
-    result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--json"])
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h", "--ttl", "1h", "--json"])
     assert result.exit_code == 0
-    assert json.loads(result.output)["pid"] == os.getpid()
+    parsed = json.loads(result.output)
+    assert parsed["pid"] is None
+    assert parsed["pid_unavailable"] is True
 
 
 def test_acquire_explicit_pid_overrides_session_default(cwd_tmp, monkeypatch):

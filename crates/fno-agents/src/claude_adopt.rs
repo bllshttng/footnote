@@ -389,7 +389,7 @@ mod tests {
             ClaimOutcome::Acquired
         );
         let (_, rec) = crate::claims::status("session:uuid-1", None);
-        assert_eq!(rec.unwrap().pid, me as i32);
+        assert_eq!(rec.unwrap().pid, Some(me as i32));
         // A different holder against the live claim -> HeldByOther.
         assert_eq!(
             acquire_pty_claim("uuid-1", "pty:other", me),

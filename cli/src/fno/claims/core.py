@@ -66,7 +66,7 @@ from .types import (
 class ClaimHeldByOther(Exception):
     """A live claim is held by a different holder."""
 
-    def __init__(self, holder: str, pid: int, host: str, key: str) -> None:
+    def __init__(self, holder: str, pid: Optional[int], host: str, key: str) -> None:
         self.holder = holder
         self.pid = pid
         self.host = host
@@ -168,6 +168,9 @@ def _validate_inputs(
     key: str,
     holder: str,
     ttl_ms: Optional[int],
+    *,
+    pid: Optional[int] = None,
+    pid_unavailable: bool = False,
 ) -> None:
     if not key:
         raise ClaimValidationError("key must be non-empty")
@@ -187,6 +190,12 @@ def _validate_inputs(
         )
     if not holder:
         raise ClaimValidationError("holder must be non-empty")
+    if pid_unavailable and ttl_ms is None:
+        raise ClaimValidationError("pid_unavailable requires a TTL claim")
+    if pid_unavailable and pid is not None:
+        raise ClaimValidationError("--pid and --pid-unavailable are mutually exclusive")
+    if pid is not None and pid <= 0:
+        raise ClaimValidationError("pid must be positive")
     if ttl_ms is not None and not (MIN_TTL_MS <= ttl_ms <= MAX_TTL_MS):
         raise ClaimValidationError(
             f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]"
@@ -202,6 +211,7 @@ def _make_claim(
     pid: Optional[int],
     host: Optional[str],
     harness: Optional[str] = None,
+    pid_unavailable: bool = False,
 ) -> Claim:
     acquired = now_ms()
     return Claim(
@@ -209,7 +219,8 @@ def _make_claim(
         holder=holder,
         acquired_at=acquired,
         expires_at=(acquired + ttl_ms) if ttl_ms is not None else None,
-        pid=pid if pid is not None else os.getpid(),
+        pid=None if pid_unavailable else (pid if pid is not None else os.getpid()),
+        pid_unavailable=pid_unavailable,
         host=host if host is not None else socket.gethostname(),
         # Liveness compares THIS, not host: a name that flips mid-session made a
         # live holder read cross-host, then stale, then stealable. Additive, so a
@@ -241,6 +252,7 @@ def acquire_claim(
     ttl_ms: Optional[int] = None,
     metadata: Optional[dict[str, Any]] = None,
     pid: Optional[int] = None,
+    pid_unavailable: bool = False,
     host: Optional[str] = None,
     harness: Optional[str] = None,
     root: Optional[Path] = None,
@@ -269,7 +281,9 @@ def acquire_claim(
     rather than recursing unbounded, mirroring Rust's bounded
     ``ACQUIRE_MAX_ATTEMPTS`` for-loop (crates/fno-agents/src/claims.rs).
     """
-    _validate_inputs(key, holder, ttl_ms)
+    _validate_inputs(
+        key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable
+    )
     path = claim_path(key, root=root)
     # Unconditional initial value (each branch below reassigns its own):
     # gives _release_and_retry's `nonlocal` an unambiguous prior binding
@@ -292,6 +306,7 @@ def acquire_claim(
             ttl_ms=ttl_ms,
             metadata=metadata,
             pid=pid,
+            pid_unavailable=pid_unavailable,
             host=host,
             harness=harness,
             root=root,
@@ -323,7 +338,9 @@ def acquire_claim(
     if harness is None:
         harness = resolve_self_identity().harness
 
-    new_claim = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
+    new_claim = _make_claim(
+        key, holder, ttl_ms, reason, metadata, pid, host, harness, pid_unavailable
+    )
     payload = serialize_claim(new_claim)
 
     try:
@@ -387,7 +404,10 @@ def acquire_claim(
             if fresh_existing.holder != holder:
                 return _release_and_retry()
 
-            refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
+            refreshed = _make_claim(
+                key, holder, ttl_ms, reason, metadata, pid, host, harness,
+                pid_unavailable,
+            )
             _atomic_replace(path, serialize_claim(refreshed))
             emit_claim_idempotent_reacquired(refreshed, previous=fresh_existing)
             return refreshed
@@ -438,7 +458,10 @@ def acquire_claim(
 
             if existing.holder == holder:
                 # Raced into the idempotent path while we were grabbing the lock.
-                refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
+                refreshed = _make_claim(
+                    key, holder, ttl_ms, reason, metadata, pid, host, harness,
+                    pid_unavailable,
+                )
                 _atomic_replace(path, serialize_claim(refreshed))
                 emit_claim_idempotent_reacquired(refreshed, previous=existing)
                 return refreshed
@@ -481,7 +504,7 @@ def acquire_claim(
 
 def _rebound_claim(
     existing: Claim,
-    new_pid: int,
+    new_pid: Optional[int],
     ttl_ms: Optional[int],
     *,
     new_holder: Optional[str] = None,
@@ -489,6 +512,7 @@ def _rebound_claim(
     new_harness: Optional[str] = None,
     new_metadata: Optional[dict] = None,
     keep_acquired_at: bool = False,
+    new_pid_unavailable: bool = False,
 ) -> Claim:
     """A rebound claim: identity fields preserved, process anchor + lease fresh.
 
@@ -538,7 +562,8 @@ def _rebound_claim(
         holder=new_holder or existing.holder,
         acquired_at=acquired,
         expires_at=expires_at,
-        pid=new_pid,
+        pid=None if new_pid_unavailable else new_pid,
+        pid_unavailable=new_pid_unavailable,
         host=socket.gethostname(),
         machine_id=machine_id() or None,
         reason=new_reason if new_reason is not None else existing.reason,
@@ -556,6 +581,7 @@ def compare_and_rebind(
     new_harness: Optional[str] = None,
     new_metadata: Optional[dict] = None,
     new_pid: Optional[int] = None,
+    new_pid_unavailable: bool = False,
     ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
     emit: bool = True,
@@ -611,6 +637,7 @@ def compare_and_rebind(
     _validate_inputs(key, expected_holder, ttl_ms)
     path = claim_path(key, root=root)
     npid = new_pid if new_pid is not None else os.getpid()
+    npid_unavailable = new_pid_unavailable or (new_pid is None and ttl_ms is not None)
     # Resolved BEFORE the recovery mutex below, for the same reason as
     # `acquire_claim`: the owned path walks the process tree, and everything
     # after the lock runs while other callers poll on it (x-20f1).
@@ -727,6 +754,7 @@ def compare_and_rebind(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=effective_new_reason, new_harness=effective_new_harness,
                 new_metadata=effective_new_metadata,
+                new_pid_unavailable=npid_unavailable,
             )
             _atomic_replace(path, serialize_claim(rebound))
             if emit:
@@ -744,10 +772,11 @@ def compare_and_rebind(
             if existing.pid == npid:
                 # Idempotent: already bound to this process; refresh lease only.
                 rebound = _rebound_claim(
-                existing, npid, ttl_ms, new_holder=effective_new_holder,
-                new_reason=effective_new_reason, new_harness=effective_new_harness,
-                new_metadata=effective_new_metadata,
-            )
+                    existing, npid, ttl_ms, new_holder=effective_new_holder,
+                    new_reason=effective_new_reason, new_harness=effective_new_harness,
+                    new_metadata=effective_new_metadata,
+                    new_pid_unavailable=npid_unavailable,
+                )
                 _atomic_replace(path, serialize_claim(rebound))
                 if emit:
                     emit_claim_rebound(
@@ -785,6 +814,7 @@ def compare_and_rebind(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=effective_new_reason, new_harness=effective_new_harness,
                 new_metadata=effective_new_metadata,
+                new_pid_unavailable=npid_unavailable,
             )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
@@ -983,6 +1013,8 @@ def _reanchor_pid_for(existing: Claim) -> Optional[int]:
     # was mid-flight. `renew_locked` in `crates/fno-agents/src/claims.rs`, which
     # this mirrors, has always refused there; without the same refusal here the
     # two implementations of one operation answered differently.
+    if existing.pid_unavailable:
+        return None
     if is_expired(existing):
         return None
     if is_live(existing) or not is_same_machine(existing.host, existing.machine_id):
@@ -1134,6 +1166,7 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
         "state": state.value,
         "holder": claim.holder,
         "pid": claim.pid,
+        "pid_unavailable": claim.pid_unavailable,
         "host": claim.host,
         # Callers classify ownership from this dict, so it has to carry what
         # liveness actually compares; host alone sends them down the fallback.
