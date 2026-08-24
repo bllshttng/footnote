@@ -6224,8 +6224,10 @@ def _mux_pane_send(
         expected_name = getattr(entry, "name", None)
         if not expected_name:
             return True
-        expected_fno_id = getattr(entry, "harness_session_id", None) or getattr(
-            entry, "session_id", None
+        expected_fno_id = (
+            getattr(entry, "fno_id", None)
+            or getattr(entry, "harness_session_id", None)
+            or getattr(entry, "session_id", None)
         )
         if not expected_fno_id:
             return True
@@ -6297,8 +6299,10 @@ def _mux_pane_send(
         # second time (a second pass would re-read the pane and re-decide a
         # question this one already answered).
         send_args = ["send", pane, "--stdin", "--raw"]
-        expected_fno_id = getattr(entry, "harness_session_id", None) or getattr(
-            entry, "session_id", None
+        expected_fno_id = (
+            getattr(entry, "fno_id", None)
+            or getattr(entry, "harness_session_id", None)
+            or getattr(entry, "session_id", None)
         )
         if expected_fno_id:
             send_args.extend(["--fno-id", str(expected_fno_id)])

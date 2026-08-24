@@ -108,8 +108,10 @@ def _identity_receipt_refusal(
     if entry is None:
         return None, None
     expected_name = getattr(entry, "name", None)
-    expected_fno_id = getattr(entry, "harness_session_id", None) or getattr(
-        entry, "session_id", None
+    expected_fno_id = (
+        getattr(entry, "fno_id", None)
+        or getattr(entry, "harness_session_id", None)
+        or getattr(entry, "session_id", None)
     )
     # Legacy pane rows can carry the durable worker name before a canonical
     # fno_id is recorded. Keep their existing frame gate; the identity receipt
