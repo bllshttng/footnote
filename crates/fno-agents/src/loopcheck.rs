@@ -9764,6 +9764,15 @@ fn build_block_reason(
                 hint("review")
             );
         }
+        // Unknown AFTER the specific arms but BEFORE the config complaint:
+        // the unmet gate, the unaddressed finding, and the outstanding bot
+        // are all more actionable than the read remedy, but "no reviewer is
+        // outstanding" beside an unread coverage axis is the read remedy's
+        // exact case (the pinned test: Unknown names the read remedy, never
+        // a config lecture).
+        if matches!(pr.coverage.coverage, Coverage::Unknown) {
+            return coverage_unavailable_description(&pr.head_oid);
+        }
         // Reaching here means missing_bots is empty, which `async_wait_class`
         // treats as non-idlable, so this must not teach the arm-and-tag ritual
         // either (the two must never disagree about whether a wait is valid).
@@ -9776,13 +9785,8 @@ fn build_block_reason(
         );
     }
 
-    // Unknown coverage AFTER the !reviewed block: a no_external session with
-    // an unmet reviewers gate lands in that block with a GUARANTEED Unknown
-    // (the GitHub axis was suppressed, not failed), and the retry-the-verb
-    // remedy cannot clear what the attestation arm names. The doable local
-    // work - reply to a finding, attest a reviewer - leads, exactly as the
-    // ordering comment inside the block demands; Unknown keeps its retry
-    // message whenever no more-specific arm applies.
+    // And the reviewed-but-Unknown case (a satisfied gate beside an unread
+    // axis) keeps the read remedy here, outside the block.
     if matches!(pr.coverage.coverage, Coverage::Unknown) {
         return coverage_unavailable_description(&pr.head_oid);
     }
