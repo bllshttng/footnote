@@ -1162,7 +1162,7 @@ event_types:
           type: string
         pid:
           type: [integer, "null"]
-          description: "The dead/reused pid that proved the claim was reapable."
+          description: "The new claim's pid; null when the new holder is pid_unavailable. The dead/reused pid that proved reapability rides previous_pid."
         pid_unavailable:
           type: boolean
         host:
