@@ -533,6 +533,59 @@ def test_an_unmergeable_pr_is_not_the_kings_work(monkeypatch):
     assert read.rows() == []
 
 
+def test_missing_bindings_warn_for_pending_red_and_green_prs(monkeypatch, tmp_path):
+    from fno import paths
+    from fno.king import board as board_mod
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "x-1111", "status": "ready"},
+                    {"id": "x-2222", "status": "ready"},
+                    {"id": "x-3333", "status": "ready"},
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+    listing = [
+        {
+            "number": 1,
+            "title": "pending",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"status": "IN_PROGRESS"}],
+            "headRefName": "feature/x-1111",
+            "url": "https://github.com/o/r/pull/1",
+        },
+        {
+            "number": 2,
+            "title": "red",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"conclusion": "FAILURE", "status": "COMPLETED"}],
+            "headRefName": "feature/x-2222",
+            "url": "https://github.com/o/r/pull/2",
+        },
+        {
+            "number": 3,
+            "title": "green",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+            "headRefName": "feature/x-3333",
+            "url": "https://github.com/o/r/pull/3",
+        },
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+
+    read, warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
+
+    assert read.rows() == [{"number": 3, "title": "green"}]
+    assert {"#1", "#2", "#3"} <= {
+        warning.split()[1] for warning in warnings if "pr_node_binding_missing" in warning
+    }
+
+
 def test_a_superseded_red_beside_a_fresh_green_reads_mergeable(monkeypatch):
     """The real shape, hit twice in one night on two different PRs. A force/amend push leaves the
     superseded run's FAILURE sitting beside the fresh run's SUCCESS in the

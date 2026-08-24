@@ -1203,6 +1203,208 @@ def _branch_matches_node(head_ref: str, node_id: str) -> bool:
     return re.search(rf"(^|[/-]){re.escape(node_id)}([/-]|$)", head_ref) is not None
 
 
+@dataclass
+class OpenPrBinding:
+    """One open PR row's verdict against the graph (x-d3c6).
+
+    ``node_id`` is set only when exactly one real node resolves - an
+    ``untracked`` or ``ambiguous`` row carries no candidate, because a guess
+    picked from absence or list order is the wrong-node bind this classifier
+    exists to prevent.
+    """
+
+    pr_number: int
+    pr_url: Optional[str]
+    head_ref: str
+    verdict: str  # bound | missing | untracked | ambiguous
+    node_id: Optional[str] = None
+    detail: Optional[str] = None
+
+
+def classify_open_pr_bindings(
+    open_rows: list[dict], entries: list[dict]
+) -> list[OpenPrBinding]:
+    """Classify every open-PR row against graph entries: ``bound`` (the node
+    points back at this PR), ``missing`` (a unique real node resolves but does
+    not point back), ``untracked`` (the branch names no real node), or
+    ``ambiguous`` (several real nodes, or one node named by several open PRs).
+
+    Pure (no I/O), so the reconcile heal, ``fno do pr list``, and the king
+    board all read the same verdicts. Delimiter-bounded branch matching is
+    ``branch_node_ids`` - the same producer/gate authority the merged reverse
+    map's ``_branch_matches_node`` agrees with.
+    """
+    from fno.pr.closure import branch_node_ids
+
+    real_ids = {
+        e.get("id")
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    node_by_id = {
+        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    parsed: list[tuple[int, Optional[str], str, list[str]]] = []
+    open_prs_by_node: dict[str, list[int]] = {}
+    for row in open_rows:
+        if not isinstance(row, dict):
+            continue
+        number = row.get("number")
+        head = str(row.get("headRefName") or "")
+        if not isinstance(number, int) or not head:
+            continue
+        matched = [nid for nid in branch_node_ids(head) if nid in real_ids]
+        parsed.append((number, row.get("url"), head, matched))
+        if len(matched) == 1:
+            open_prs_by_node.setdefault(matched[0], []).append(number)
+
+    verdicts: list[OpenPrBinding] = []
+    for number, url, head, matched in parsed:
+        if not matched:
+            verdicts.append(OpenPrBinding(number, url, head, "untracked"))
+            continue
+        if len(matched) > 1:
+            verdicts.append(
+                OpenPrBinding(
+                    number, url, head, "ambiguous",
+                    detail=f"branch names {len(matched)} real nodes: "
+                    f"{' '.join(matched)}",
+                )
+            )
+            continue
+        nid = matched[0]
+        siblings = sorted(open_prs_by_node[nid])
+        if len(siblings) > 1:
+            verdicts.append(
+                OpenPrBinding(
+                    number, url, head, "ambiguous", node_id=nid,
+                    detail=f"{nid} has {len(siblings)} open PRs: "
+                    f"{', '.join(f'#{n}' for n in siblings)}",
+                )
+            )
+            continue
+        refs_this_pr = any(
+            n == number for n, _url in node_pr_refs(node_by_id[nid])
+        )
+        verdicts.append(
+            OpenPrBinding(
+                number, url, head, "bound" if refs_this_pr else "missing", node_id=nid,
+            )
+        )
+    return verdicts
+
+
+def list_open_pr_branches(
+    *,
+    cwd: str,
+    limit: int = 100,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    timeout_s: float = GH_QUERY_TIMEOUT_S,
+) -> list[dict]:
+    """Open PRs (number/url/headRefName) for the open-binding heal (x-d3c6).
+
+    Same shape and contract as :func:`list_merged_pr_branches`: one bounded
+    call in ``cwd`` so gh resolves the repo from that dir's origin remote,
+    ``[]`` when gh is absent, :class:`ReconcileError` on a real gh failure so
+    the caller degrades with one advisory per repo.
+    """
+    if _gh_executable() is None:
+        return []
+    cmd = [
+        "gh", "pr", "list", "--state", "open", "--limit", str(limit + 1),
+        "--json", "number,url,headRefName",
+    ]
+    try:
+        result = runner(
+            cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ReconcileError(f"gh pr list (open) failed: {exc}") from exc
+    if result.returncode != 0:
+        raise ReconcileError(
+            f"gh pr list (open) failed (rc={result.returncode}): "
+            f"{(result.stderr or '').strip()}"
+        )
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
+    if not isinstance(rows, list):
+        raise ReconcileError("gh stdout for open PR listing was not a JSON array")
+    if len(rows) > limit:
+        raise ReconcileError(
+            f"open PR listing hit its {limit}-row limit; refusing a unique binding"
+        )
+    return rows
+
+
+def collect_open_binding_heals(
+    entries: list[dict],
+    *,
+    node_id: Optional[Union[str, Iterable[str]]] = None,
+    list_open: Optional[Callable[..., list[dict]]] = None,
+) -> "tuple[list[OpenPrBinding], list[str]]":
+    """Discover open PRs that uniquely name an open, ref-less node (x-d3c6).
+
+    One ``gh pr list --state open`` per distinct candidate cwd, under the same
+    ``REVERSE_MAP_BUDGET_S`` wall clock as the merged reverse map. Returns
+    ``(heals, advisories)``: heals are ``missing`` verdicts whose node is open
+    with no PR refs - the exact repair a human did by hand with
+    ``fno backlog update <id> --pr-number``; advisories name ambiguity and gh
+    read failures without mutating anything. Persisting the fills is the
+    CALLER's job; this function only reads.
+    """
+    if list_open is None:
+        list_open = list_open_pr_branches
+    _scope = _node_id_scope(node_id)
+
+    # Same eligibility as reverse_map_unstamped: open, ref-less, live cwd -
+    # one gh call per cwd group, not per node.
+    by_cwd: dict[str, set[str]] = {}
+    for node in entries:
+        nid = node.get("id")
+        if not isinstance(nid, str):
+            continue
+        if _scope is not None and nid not in _scope:
+            continue
+        if not node_is_open(node) or node_pr_refs(node):
+            continue
+        cwd = node.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            continue
+        cwd = _effective_reconcile_cwd(cwd, node.get("project"))
+        if not os.path.isdir(cwd):
+            continue
+        by_cwd.setdefault(cwd, set()).add(nid)
+
+    heals: list[OpenPrBinding] = []
+    advisories: list[str] = []
+    _deadline = time.monotonic() + REVERSE_MAP_BUDGET_S
+    _groups = list(by_cwd.items())
+    for _i, (cwd, nids) in enumerate(_groups):
+        if time.monotonic() >= _deadline:
+            _deferred = sorted(n for _c, ns in _groups[_i:] for n in ns)
+            advisories.append(
+                f"open-binding scan stopped at its {REVERSE_MAP_BUDGET_S:.0f}s budget "
+                f"(gh is slow or degraded); deferred {len(_deferred)} node(s) to a "
+                f"later sweep: {' '.join(_deferred)}"
+            )
+            break
+        try:
+            rows = list_open(cwd=cwd)
+        except ReconcileError as exc:
+            advisories.append(f"open-binding gh query failed ({cwd}): {exc}")
+            continue
+        for binding in classify_open_pr_bindings(rows, entries):
+            if binding.verdict == "ambiguous":
+                advisories.append(
+                    f"open PR #{binding.pr_number} binding ambiguous: {binding.detail}"
+                )
+            elif binding.verdict == "missing" and binding.node_id in nids:
+                heals.append(binding)
+    return heals, advisories
+
+
 def _effective_reconcile_cwd(cwd: str, project: Optional[str]) -> str:
     """The dir reconcile should run a node's gh query / post-close routing in.
 

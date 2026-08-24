@@ -270,27 +270,32 @@ if [[ -n "${CLOSURE_TRAILER:-}" && -n "${PR_NUMBER:-}" ]]; then
 fi
 ```
 
-### 5.5 Link the PR to the backlog node
+### 5.5 Bind the created PR to its backlog node
 
-If `.fno/target-state.md` carries a `graph_node_id`, stamp the node so the
-dispatcher's selection guard (`_has_unmerged_open_pr`) and `fno backlog
-reconcile` see the in-flight PR - otherwise the node's `pr_number` stays null
-through the whole review window and a lapsed claim lets the 5-min dispatcher
-re-spawn a finished node (x-a166). Best-effort: a stamp failure is logged, never
-fatal; re-stamping the same PR is a no-op.
+Bind the just-opened PR to its node through the one shared binder. That makes the dispatcher's selection guard (`_has_unmerged_open_pr`) and `fno backlog reconcile` see the in-flight PR. Otherwise the node's `pr_number` stays null through the whole review window. A lapsed claim then lets the 5-min dispatcher re-spawn a finished node (x-a166, x-d3c6).
 
-This is the *fast path* only: it engages `in_review` mid-session, before the next dispatch selection. `fno-agents finalize` re-runs the same link at every terminal loop decision as a deterministic backstop (crates/fno-agents/src/finalize.rs, `stamp_node_pr`), so a skipped step here still gets stamped at session end. Idempotent.
+When the manifest names a real node, the manifest node LEADS. When it does not, the branch is the fallback. That covers a PR whose manifest was never stamped. Both routes reach the same atomic writer, so the graph never sees two stamping paths. The binder stamps the ship lifecycle row itself. No second provenance stamp follows it.
 
 ```bash
-NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | tr -d "\"'")
-if [[ -n "$NODE_ID" && "$NODE_ID" != "null" && -n "$PR_NUMBER" ]]; then
-  fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" \
-    || echo "warn: node<->PR stamp failed for $NODE_ID PR #$PR_NUMBER (PR still created)" >&2
-  # Ship-phase provenance is no longer a separate stamp: the `update --pr-number`
-  # above fires it on the pr_number unset->set transition (ambient identity), so
-  # a `session add --phase ship` here would double-fire.
+if [[ -n "${PR_NUMBER:-}" ]]; then
+  NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | tr -d "\"'")
+  BIND_ARGS=(fno do pr bind-created --url "$PR_URL" --repo "$(pwd)")
+  if [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]]; then
+    BIND_ARGS+=(--node "$NODE_ID")
+  fi
+  if BIND_RECEIPT=$("${BIND_ARGS[@]}"); then
+    echo "node<->PR bound: $BIND_RECEIPT"
+  else
+    # The PR EXISTS. An unbound PR is incomplete delivery, not a failed create:
+    # name the PR and the one exact repair command (idempotent, safe to rerun
+    # as-is), then take step 6's failure contract - never the success line.
+    echo "PR #$PR_NUMBER created but UNBOUND: $PR_URL" >&2
+    echo "repair: ${BIND_ARGS[*]}" >&2
+  fi
 fi
 ```
+
+This is the *fast path* only: it engages `in_review` mid-session, before the next dispatch selection. `fno-agents finalize` re-runs the same link at every terminal loop decision as a deterministic backstop (`stamp_node_pr` in crates/fno-agents/src/finalize.rs). A skipped step here still gets stamped at session end. Idempotent.
 
 ### 6. Report the result (RESULT contract)
 
@@ -306,7 +311,7 @@ Next step: Run /pr check [NUMBER] to wait for external review
 RESULT: SUCCESS pr=#[NUMBER] url=https://github.com/[owner]/[repo]/pull/[NUMBER]
 ```
 
-If PR creation could not complete (uncommitted changes, CI validation failed, or `gh pr create` errored), do NOT print a success line. Emit the failure contract as your final line instead, so the dispatcher does not report a PR that does not exist:
+If PR creation did not complete, do NOT print a success line. The causes are uncommitted changes, CI validation failure, a `gh pr create` error, or a refused node link in step 5.5. Emit the failure contract as your final line instead, so the dispatcher does not report an undelivered or unbound PR as complete:
 
 ```
 RESULT: FAILED <one-line reason>

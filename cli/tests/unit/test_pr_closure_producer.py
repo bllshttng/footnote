@@ -229,6 +229,74 @@ def test_worker_ship_reports_incomplete_delivery_when_graph_binding_fails(tmp_pa
     )
 
 
+# ---- The canonical create instructions route through bind-created (x-d3c6) ----
+#
+# The prose lane is the third producer beside worker.ship and the hook: two
+# instruction surfaces a human or dispatch worker follows verbatim. A recipe
+# that stamps via `backlog update --pr-number` is a SECOND writer that skips
+# branch fallback and ship provenance, which is how a created PR ended up
+# unbound from its own node three times in one day.
+
+CREATE_REFERENCE = REPO / "skills" / "pr" / "references" / "create.md"
+PR_CREATOR = REPO / "skills" / "pr" / "agents" / "pr-creator.md"
+
+
+def _section_55(path: Path) -> str:
+    """Step 5.5 only, from its heading to the next heading."""
+    text = path.read_text(encoding="utf-8")
+    assert text, f"{path.name} read as empty, so any marker check is vacuous"
+    start = text.index("### 5.5 ")
+    return text[start : text.index("### 6.", start)]
+
+
+@pytest.mark.parametrize(
+    "surface", [CREATE_REFERENCE, PR_CREATOR], ids=["create-reference", "pr-creator"]
+)
+def test_pr_creator_step_55_binds_the_created_pr(surface):
+    section = _section_55(surface)
+    # The shared binder: URL, repo worktree, and the manifest node when the
+    # manifest carries one (branch fallback covers the rest).
+    assert 'fno do pr bind-created --url "$PR_URL" --repo "$(pwd)"' in section
+    assert '--node "$NODE_ID"' in section
+    # One writer: the manifest-only stamp recipe is gone from this step, or a
+    # create worker following the old line skips branch fallback and ship
+    # provenance while still reading "bound" to its dispatcher.
+    assert 'fno backlog update "$NODE_ID" --pr-number' not in section
+
+
+@pytest.mark.parametrize(
+    "surface", [CREATE_REFERENCE, PR_CREATOR], ids=["create-reference", "pr-creator"]
+)
+def test_pr_creator_refusal_names_the_pr_and_one_repair_command(surface):
+    section = _section_55(surface)
+    # The refusal receipt must name the already-created PR and the exact
+    # rerunnable binder command, never report clean delivery for an unbound PR.
+    assert "UNBOUND" in section
+    assert "repair: ${BIND_ARGS[*]}" in section
+
+
+@pytest.mark.parametrize(
+    "surface", [CREATE_REFERENCE, PR_CREATOR], ids=["create-reference", "pr-creator"]
+)
+def test_pr_creator_keeps_finalize_as_the_backstop_not_the_path(surface):
+    # The finalizer remains the idempotent backstop; the binder above is the
+    # primary path. Losing the backstop note invites skipping the fast path.
+    assert "fno-agents finalize" in _section_55(surface)
+
+
+def test_pr_creator_and_create_reference_ship_one_binder_block():
+    # The two instruction surfaces must carry the byte-identical step-5.5 bash
+    # block, or one can regain the manifest-only recipe while the other is
+    # clean - the same divergence failure the OOS contract test pins.
+    import re as _re
+
+    def _block(path: Path) -> str:
+        return _re.search(r"### 5\.5 .*?```bash\n(.*?)```", _section_55(path), _re.DOTALL).group(1)
+
+    a, b = _block(CREATE_REFERENCE), _block(PR_CREATOR)
+    assert a and a == b
+
+
 def test_a_graph_unknown_branch_candidate_is_never_claimed():
     # "cache-dead" is cache plus the hex dead, so it parses as a node id and is
     # ordinary English. Claiming it passed CI and then made bind_closure_claims
