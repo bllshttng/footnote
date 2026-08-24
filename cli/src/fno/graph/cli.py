@@ -9066,7 +9066,11 @@ def cmd_reconcile(
     open_bound: list[dict] = []
     open_binding_advisories: list[str] = []
     if _full_sweep or node is not None:
-        from fno.graph._reconcile import bind_pr_rows, collect_open_binding_heals
+        from fno.graph._reconcile import (
+            bind_pr_rows,
+            collect_open_binding_heals,
+            node_pr_refs,
+        )
 
         _open_heals, open_binding_advisories = collect_open_binding_heals(
             entries, node_id=node
@@ -9075,7 +9079,21 @@ def cmd_reconcile(
 
             def _open_fill(_entries: list[dict]) -> list[dict]:
                 _kept: list[dict] = []
+                heal_counts: dict[str, int] = {}
+                for candidate in _open_heals:
+                    if isinstance(candidate.node_id, str):
+                        heal_counts[candidate.node_id] = (
+                            heal_counts.get(candidate.node_id, 0) + 1
+                        )
                 for h in _open_heals:
+                    if not isinstance(h.node_id, str) or heal_counts.get(h.node_id) != 1:
+                        continue
+                    current = next(
+                        (entry for entry in _entries if entry.get("id") == h.node_id),
+                        None,
+                    )
+                    if current is None or not node_is_open(current) or node_pr_refs(current):
+                        continue
                     result = bind_pr_rows(
                         _entries, [h.node_id],
                         pr_number=h.pr_number, pr_url=h.pr_url,

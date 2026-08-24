@@ -2024,3 +2024,34 @@ def test_open_pr_heal_dry_run_binds_in_memory_only(cli_env, tmp_path, monkeypatc
         }
     ]
     assert graph_path.read_bytes() == before
+
+
+def test_open_pr_heal_rechecks_current_node_inside_graph_lock(cli_env, tmp_path, monkeypatch):
+    """A concurrent PR bind wins the lock race; the healer must not append."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [_node("ab-9a0b", cwd=str(tmp_path))])
+    monkeypatch.setattr(rec, "list_open_pr_branches", _open_rows({41: "feature/ab-9a0b"}))
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({99: "OPEN"}))
+    from fno.graph import store as graph_store
+
+    real_locked_mutate_graph = graph_store.locked_mutate_graph
+
+    def race_before_mutator(path, mutator):
+        def concurrent_bind(entries):
+            node = next(entry for entry in entries if entry["id"] == "ab-9a0b")
+            node["pr_number"] = 99
+            node["pr_url"] = "https://github.com/test-owner/test-repo/pull/99"
+            return mutator(entries)
+
+        return real_locked_mutate_graph(path, concurrent_bind)
+
+    monkeypatch.setattr(graph_store, "locked_mutate_graph", race_before_mutator)
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["open_pr_bound"] == []
+    node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-9a0b")
+    assert node["pr_number"] == 99
+    assert node["additional_prs"] == []

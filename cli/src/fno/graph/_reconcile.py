@@ -1311,7 +1311,7 @@ def list_open_pr_branches(
     if _gh_executable() is None:
         return []
     cmd = [
-        "gh", "pr", "list", "--state", "open", "--limit", str(limit),
+        "gh", "pr", "list", "--state", "open", "--limit", str(limit + 1),
         "--json", "number,url,headRefName",
     ]
     try:
@@ -1329,7 +1329,13 @@ def list_open_pr_branches(
         rows = json.loads(result.stdout or "[]")
     except json.JSONDecodeError as exc:
         raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
-    return rows if isinstance(rows, list) else []
+    if not isinstance(rows, list):
+        raise ReconcileError("gh stdout for open PR listing was not a JSON array")
+    if len(rows) > limit:
+        raise ReconcileError(
+            f"open PR listing hit its {limit}-row limit; refusing a unique binding"
+        )
+    return rows
 
 
 def collect_open_binding_heals(

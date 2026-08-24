@@ -4,6 +4,10 @@ Covers AC1-HP/EDGE, AC2-HP/EDGE, AC3-HP/EDGE/ERR, AC4-EDGE (idempotent rebind).
 """
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
+import pytest
 
 from fno.pr.closure import (
     bind_created_pr,
@@ -413,3 +417,30 @@ def test_open_binding_reads_only_the_branch_never_a_body():
     verdicts = _classify([_open_row(5, "feature/x-1a2b")], entries)
     assert verdicts[0].node_id == "x-1a2b"
     assert all(v.node_id != "x-prose" for v in verdicts)
+
+
+def test_open_pr_listing_refuses_a_truncated_result():
+    from fno.graph._reconcile import ReconcileError, list_open_pr_branches
+
+    calls = []
+
+    def runner(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": number,
+                        "url": f"https://github.com/o/r/pull/{number}",
+                        "headRefName": f"feature/x-{number:04x}",
+                    }
+                    for number in range(101)
+                ]
+            ),
+            stderr="",
+        )
+
+    with pytest.raises(ReconcileError, match="open PR listing hit its 100-row limit"):
+        list_open_pr_branches(cwd="/tmp", runner=runner)
+    assert calls[0][calls[0].index("--limit") + 1] == "101"

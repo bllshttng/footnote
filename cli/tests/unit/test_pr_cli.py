@@ -121,6 +121,40 @@ def test_pr_list_exposes_open_node_binding_verdicts(monkeypatch, tmp_path):
     assert rows[933]["node_binding"] == "ambiguous"
 
 
+def test_pr_list_preserves_rows_when_binding_graph_is_unreadable(monkeypatch, tmp_path):
+    from fno import paths
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text("not-json")
+    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+
+    from fno.pr import _rest
+
+    monkeypatch.setattr(
+        _rest,
+        "list_prs_rest",
+        lambda slug, **kwargs: (
+            [
+                {
+                    "number": 930,
+                    "state": "OPEN",
+                    "title": "still visible",
+                    "headRefName": "feature/x-1111",
+                    "url": "https://github.com/o/r/pull/930",
+                }
+            ],
+            "",
+        ),
+    )
+
+    result = runner.invoke(app, ["do", "pr", "list", "--repo", "o/r"])
+
+    assert result.exit_code == 0
+    row = json.loads(result.stdout)[0]
+    assert row["title"] == "still visible"
+    assert "graph binding read failed" in row["node_binding_error"]
+
+
 def test_graphql_exec_rejects_public_coverage_purpose():
     result = runner.invoke(
         app,

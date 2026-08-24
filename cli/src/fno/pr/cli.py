@@ -250,19 +250,19 @@ def list_cmd(
         try:
             bindings = classify_open_pr_bindings(open_rows, read_graph_strict(graph_json()))
         except Exception as exc:  # noqa: BLE001 - report the unreadable binding source
-            typer.echo(
-                json.dumps(
-                    {"error": f"graph binding read failed: {exc}"}, separators=(",", ":")
-                )
-            )
-            raise typer.Exit(code=4) from exc
-        by_pr = {binding.pr_number: binding for binding in bindings}
-        for row in rows:
-            binding = by_pr.get(row.get("number"))
-            if binding is None:
-                continue
-            row["node_id"] = binding.node_id
-            row["node_binding"] = binding.verdict
+            for row in open_rows:
+                row["node_binding_error"] = f"graph binding read failed: {exc}"
+        else:
+            by_pr = {binding.pr_number: binding for binding in bindings}
+            for row in rows:
+                number = row.get("number")
+                if not isinstance(number, int):
+                    continue
+                binding = by_pr.get(number)
+                if binding is None:
+                    continue
+                row["node_id"] = binding.node_id
+                row["node_binding"] = binding.verdict
     typer.echo(json.dumps(rows, separators=(",", ":")))
 
 
