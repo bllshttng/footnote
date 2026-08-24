@@ -368,7 +368,11 @@ def run_verify_merged(
     # not-green without the misleading "failing" label. Judging pending here
     # would make verify refuse what `fno do pr merge` merges.
     if _auto_merge().require_checks_pass:
-        failing = _failing_required(pr_json.get("statusCheckRollup") or [])
+        from fno.pr._status import without_coverage_statuses
+
+        failing = _failing_required(
+            without_coverage_statuses(pr_json.get("statusCheckRollup") or [])
+        )
         if failing:
             failing_csv = ",".join(failing)
             _emit_audit(
@@ -397,13 +401,17 @@ def run_verify_merged(
 
 
 def _failing_required(rollup: Sequence[dict]) -> List[str]:
-    """Failing checks (whole rollup), classified by the SAME truth table the
-    merge verb uses - a second hand-built state table is how verify ends up
-    refusing what `fno do pr merge` merges (round 12). _latest_per_name drops
-    superseded runs; _classify reads pass/fail/pending with the shared
-    semantics (a REQUESTED or empty-conclusion check is pending, not failing).
-    No isRequired filter - `gh pr view` never emits that key (see
-    _merge._checks_verdict), so with require_checks_pass every check counts."""
+    """Failing checks, classified by the SAME truth table the merge verb uses -
+    a second hand-built state table is how verify ends up refusing what
+    `fno do pr merge` merges (round 12). Callers pass the rollup through
+    `without_coverage_statuses`, so the coverage projections the merge verb's
+    covered path ignores are ignored here too; a stale coverage FAILURE beside
+    a flipped-covered row must not read as required_checks_failing.
+    _latest_per_name drops superseded runs; _classify reads pass/fail/pending
+    with the shared semantics (a REQUESTED or empty-conclusion check is
+    pending, not failing). No isRequired filter - `gh pr view` never emits
+    that key (see _merge._checks_verdict), so with require_checks_pass every
+    check counts."""
     from fno.pr._status import _classify, _latest_per_name
 
     failing: List[str] = []
