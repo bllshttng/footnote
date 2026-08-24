@@ -43,6 +43,7 @@ do state init !--allow-stub
 do target init !--provider
 do target resolve-model !--provider
 do target start !--provider
+doctor footprint !--cause-only
 mail hold-release !--poll-s
 mail send !--provider
 paths handoff !--session

@@ -18,6 +18,7 @@ from fno.footprint import Footprint, parse_footprint
 CPU_THRESHOLD_CORES = 1.0
 DAEMON_ALLOWANCE = 1
 _PS_COLUMNS = "pid,ppid,etime,%cpu,rss,command"
+PS_TIMEOUT_SECONDS = 5.0
 
 
 def _cpu_capacity_cores() -> int:
@@ -28,7 +29,7 @@ def _fno_binary() -> str:
     return shutil.which("fno") or shutil.which("fno-py") or "fno"
 
 
-def _read_ps(*, timeout: float | None = None) -> tuple[str | None, str | None]:
+def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | None]:
     path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -40,9 +41,8 @@ def _read_ps(*, timeout: float | None = None) -> tuple[str | None, str | None]:
                 "stderr": subprocess.PIPE,
                 "text": True,
                 "check": False,
+                "timeout": timeout,
             }
-            if timeout is not None:
-                run_kwargs["timeout"] = timeout
             result = subprocess.run(["ps", "-Ao", _PS_COLUMNS], **run_kwargs)
             if result.returncode != 0:
                 detail = (result.stderr or "").strip() or f"exit {result.returncode}"
@@ -51,8 +51,6 @@ def _read_ps(*, timeout: float | None = None) -> tuple[str | None, str | None]:
             output.seek(0)
             return output.read(), None
     except subprocess.TimeoutExpired:
-        if timeout is None:
-            return None, "ps unavailable: timed out"
         return None, f"ps unavailable: timed out after {timeout:.1f}s"
     except OSError as exc:
         return None, f"ps unavailable: {exc}"

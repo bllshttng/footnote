@@ -40,6 +40,42 @@ def test_ac9_edge_ps_timeout_is_unavailable(monkeypatch) -> None:
     assert error == "ps unavailable: timed out after 5.0s"
 
 
+def test_ac9_edge_default_ps_timeout_refuses_with_exit_four(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    calls: list[float | None] = []
+
+    def timed_out(argv, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    monkeypatch.setattr(doctor_footprint.subprocess, "run", timed_out)
+
+    output, error = doctor_footprint._read_ps()
+
+    assert calls == [doctor_footprint.PS_TIMEOUT_SECONDS]
+    assert output is None
+    assert error == "ps unavailable: timed out after 5.0s"
+
+
+def test_ac9_edge_ps_timeout_caller_refuses_with_exit_four(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_read_ps",
+        lambda: (None, "ps unavailable: timed out after 5.0s"),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json"])
+
+    assert result.exit_code == 4, result.output
+    assert json.loads(result.stdout) == {
+        "error": "ps unavailable: timed out after 5.0s",
+        "exit_code": 4,
+    }
+
+
 def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:
     from fno import doctor_footprint
 
