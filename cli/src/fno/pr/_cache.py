@@ -159,6 +159,12 @@ def _arm_backoff_row(p: Path, *, fresh_output: Optional[dict] = None) -> None:
     never-cached PR, nothing to protect) still needs a servable error row or
     the window it opens protects nothing.
 
+    The write always stamps `head_unverified`: this arm runs precisely
+    because the head could NOT be read, so the row's fresh green is a fact
+    about a head the PR may since have moved past, and `_serve` degrades it
+    inside the window instead of serving it verbatim (the operator's court
+    zero-checks fail-open finding).
+
     Runs under the row's own flock, re-reading inside the lock, so a
     concurrent winner's fresh success row is merged onto - fail_count climbs,
     the window widens - never clobbered by a stale resurrect. Same keep-prior
@@ -182,6 +188,7 @@ def _arm_backoff_row(p: Path, *, fresh_output: Optional[dict] = None) -> None:
                     "output": row.get("output") or fresh_output,
                     "fail_count": fails,
                     "backoff_until": now + _backoff_seconds(fails),
+                    "head_unverified": True,
                 },
             )
         finally:
@@ -253,7 +260,7 @@ def _serve(row: dict, *, stale: bool) -> int:
         # a corrupt exit code falls through to one clean live read rather
         # than a served line followed by a second, live-read line.
         return -1
-    if stale:
+    if stale or row.get("head_unverified"):
         # Fail-closed stale serve (operator's court): inside a backoff window
         # the fresh check set is UNREADABLE, so the row's green is a fact
         # about a past read, not about the head now. Degrade the served line

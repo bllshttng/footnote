@@ -42,9 +42,11 @@ _WRAPPER_NOISE = re.compile(r"^(fno config|gh proxy):", re.IGNORECASE)
 # never comes, and the fleet's backoff (armed on that same phrase, one module
 # over) never armed. `gh api rate_limit` is exempt from both limits and
 # answered DURING that refusal (core 4980/5000), so the bucket reading is the
-# one signal GitHub cannot reword. Core refuses at 0 remaining; the floor
-# only absorbs concurrent in-flight drains.
-_CORE_DRAINED_FLOOR = 20
+# one signal GitHub cannot reword. The core bucket refuses at EXACTLY 0
+# remaining; a low-but-positive reading is not proof the core quota refused
+# (a secondary refusal lands with core wherever it stood), and mislabeling
+# secondary as CORE tells the fleet to wait for a reset instead of backing
+# off - the exact harm this classifier exists to prevent. Only 0 is CORE.
 
 
 class RestReason(str):
@@ -135,7 +137,7 @@ def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] =
     The quoted evidence is the line that MATCHED the classifier, never merely
     the first stderr line, and wrapper noise never enters the explanation. A
     rate-limit refusal is classified against the live exempt bucket (see
-    `_CORE_DRAINED_FLOOR`), and the reason comes back as a `RestReason`
+    `_rest_reason` module comment), and the reason comes back as a `RestReason`
     carrying `rate_limit_class` for machine consumers.
     """
     raw = [ln.strip() for ln in (getattr(res, "stderr", "") or "").splitlines() if ln.strip()]
@@ -159,7 +161,7 @@ def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] =
     if "rate limit" in text.lower():
         base = matched(lambda ln: "rate limit" in ln.lower())
         remaining, _reset = _bucket_remaining("core", runner, cwd)
-        if remaining is not None and remaining <= _CORE_DRAINED_FLOOR:
+        if remaining == 0:
             return RestReason(
                 base + " | this is the CORE REST quota (the live exempt bucket"
                 f" reads {remaining} core remaining). Check"

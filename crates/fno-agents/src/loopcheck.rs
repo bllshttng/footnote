@@ -1888,11 +1888,6 @@ fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
     })
 }
 
-/// Core-bucket remaining at or below this reads as the primary quota
-/// refusing. Mirrors `_CORE_DRAINED_FLOOR` in `cli/src/fno/pr/_rest.py`;
-/// keep the two in sync.
-const CORE_DRAINED_FLOOR: i64 = 20;
-
 /// Whether a refusal's stderr smells like ANY rate limit. This is the wide
 /// TRIGGER only, never the verdict: GitHub controls the wording, and its
 /// measured 2026-08-24 secondary body says only "API rate limit exceeded for
@@ -1909,12 +1904,13 @@ fn stderr_smells_rate_limit(stderr: &str) -> bool {
 /// measured refusal with core 4980/5000, so the probe is the one signal
 /// GitHub cannot reword: a rate-limit refusal that no drained bucket
 /// explains IS the secondary limit. A drained bucket that does explain it
-/// (graphql at 0 on a graphql read, core at or below the floor) is the
-/// primary quota, whose own reasons live elsewhere. No probe at all still
-/// says secondary: an unreadable instrument must not send the session to
-/// wait for a primary reset that never comes, while backing off is safe
-/// under either truth. Mirrors `fno.pr._rest`'s live-bucket classifier and
-/// its fail-safe; keep the two in sync.
+/// (graphql at 0 on a graphql read, core at EXACTLY 0 - a low-but-positive
+/// core is not proof, a secondary refusal lands with core wherever it
+/// stood) is the primary quota, whose own reasons live elsewhere. No probe
+/// at all still says secondary: an unreadable instrument must not send the
+/// session to wait for a primary reset that never comes, while backing off
+/// is safe under either truth. Mirrors `fno.pr._rest`'s live-bucket
+/// classifier and its fail-safe; keep the two in sync.
 fn refusal_is_secondary(
     stderr: &str,
     probe: Option<&GraphqlQuota>,
@@ -1929,10 +1925,7 @@ fn refusal_is_secondary(
     if failed_read_was_graphql && q.remaining == 0 {
         return false;
     }
-    match q.core_remaining {
-        Some(core) => core > CORE_DRAINED_FLOOR,
-        None => true,
-    }
+    !matches!(q.core_remaining, Some(0))
 }
 
 fn internal_gh_adapter(gh_bin: &str) -> bool {
@@ -14935,12 +14928,23 @@ mod tests {
             Some(&quota_with(4446, Some(0))),
             true
         ));
-        // A graphql read with a healthy graphql bucket but a drained core:
-        // the core quota explains the refusal, not the request rate.
-        assert!(!refusal_is_secondary(
+    }
+
+    #[test]
+    fn refusal_is_secondary_low_but_positive_core_is_not_proof_of_the_quota() {
+        // A secondary refusal lands with core wherever it stood; only 0
+        // names the core quota. Mislabeling 1..=20 as the primary quota
+        // sends the session to wait for a reset instead of backing off -
+        // the exact harm this classifier exists to prevent.
+        assert!(refusal_is_secondary(
             VERBATIM_403,
             Some(&quota_with(4446, Some(3))),
             false
+        ));
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(20))),
+            true
         ));
     }
 

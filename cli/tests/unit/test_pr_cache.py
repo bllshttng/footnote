@@ -400,11 +400,15 @@ def test_head_read_refused_by_secondary_limit_arms_the_window(
     assert row["output"]["verdict"] == "green", "the last good verdict survives"
     capsys.readouterr()
     reads_after_refusal = head["reads"]
-    # Inside the window the pre-check short-circuits: the fresh row serves
-    # verbatim (x-4eac semantics) and the head read itself never fires.
-    assert _cache.cached_status("42") == 0
+    # Inside the window the pre-check short-circuits with zero network. The
+    # fresh green row serves DEGRADED, not verbatim: the arm stamped it
+    # head_unverified (the head could not be read, so the green is a fact
+    # about a head the PR may have moved past).
+    assert _cache.cached_status("42") == 3
     out = json.loads(capsys.readouterr().out)
     assert out["cached"] is True
+    assert out["verdict"] == "unknown"
+    assert out["stale_verdict"] == "green"
     assert head["reads"] == reads_after_refusal, "no head read inside the window"
     assert calls["n"] == 1, "the window must not re-read the check set"
 
@@ -452,12 +456,13 @@ def test_head_read_refusal_opens_a_sentinel_when_no_servable_row_exists(
     assert row["output"]["verdict"] == "error"
     capsys.readouterr()
     reads_after_refusal = head["reads"]
-    # Inside the window the pre-check serves the sentinel verbatim: loud
-    # error, exit 4, zero network of any kind.
-    assert _cache.cached_status("42") == 4
+    # Inside the window the pre-check serves the sentinel degraded (unknown,
+    # unsettled - head_unverified): zero network of any kind.
+    assert _cache.cached_status("42") == 3
     out = json.loads(capsys.readouterr().out)
     assert out["cached"] is True
-    assert out["verdict"] == "error"
+    assert out["verdict"] == "unknown"
+    assert out["settled"] is False
     assert head["reads"] == reads_after_refusal, "no head read inside the window"
     assert calls["n"] == 0, "no check-set read"
 

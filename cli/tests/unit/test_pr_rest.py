@@ -328,6 +328,18 @@ def test_drained_core_bucket_classifies_core_and_names_the_reading():
     assert "resources.core" in reason
 
 
+def test_low_but_positive_core_is_not_proof_of_the_core_quota():
+    """A secondary refusal lands with core wherever it stood; a low-but-
+    positive reading is not evidence the core quota refused. Only 0 is CORE
+    - mislabeling secondary as CORE sends the fleet to wait for a reset
+    instead of backing off, the exact harm this classifier exists to
+    prevent."""
+    res = Result(1, "", "gh: API rate limit exceeded (HTTP 403)")
+    reason = _rest._rest_reason(res, runner=_rate_limit_runner(core_remaining=5))
+    assert reason.rate_limit_class == "secondary"
+    assert "back off" in reason.lower()
+
+
 def test_the_phrase_does_not_classify_the_bucket_does():
     """Even stderr that DOES say `secondary rate limit` classifies by the live
     bucket: wording is GitHub's to change, so it is never the discriminator."""
