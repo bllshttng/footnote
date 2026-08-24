@@ -16005,10 +16005,10 @@ mod tests {
         // The mirror is checked against the TOML that owns the tokens, not
         // against this crate's own literals (Rust checked against Rust proves
         // nothing). Codex resumes through its own interactive form; a claude
-        // row that reaches the resume arm is dead (no daemon owns it), so the
-        // headless resume token is the honest mirror - the interactive form
-        // is `claude attach`, which is the live-row gesture that already
-        // exists. No override is installed, so the REAL argv is asserted.
+        // row that reaches the mux resume arm uses the saved interactive
+        // transcript form. The headless form is reserved for one-shot and
+        // stream-json workers, while `claude attach` is the live-row gesture.
+        // No override is installed, so the REAL argv is asserted.
         clear_resume_program();
         let toml_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../cli/src/fno/agents/harness_capabilities.toml");
@@ -16031,7 +16031,7 @@ mod tests {
                 .collect()
         };
         let codex_form = token("codex/resume_strategy/forms/interactive_resume");
-        let claude_form = token("claude/resume_strategy/forms/headless_resume");
+        let claude_form = token("claude/resume_strategy/forms/interactive_resume");
         assert_eq!(
             codex_form,
             vec![
