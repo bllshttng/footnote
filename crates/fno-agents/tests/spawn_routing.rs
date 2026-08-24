@@ -69,6 +69,54 @@ exit 0
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// Install the smallest positive Claude daemon fixture: a roster, a control
+/// socket, and one attachable worker. The client must complete the attach
+/// handshake before the fake `claude --bg` binary is allowed to run.
+fn install_fake_claude_daemon(daemon_dir: &Path) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let shard = daemon_dir.join("fixture");
+    let spare = shard.join("spare");
+    fs::create_dir_all(&spare).unwrap();
+    let control_dir = PathBuf::from(format!(
+        "/tmp/fno-cd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(control_dir.join("spare")).unwrap();
+    let control = control_dir.join("control.sock");
+    let listener = UnixListener::bind(&control).unwrap();
+    let pty = control_dir.join("spare").join("12345678.pty.sock");
+    let roster = serde_json::json!({
+        "proto": 1,
+        "supervisorPid": std::process::id(),
+        "updatedAt": 1,
+        "workers": {
+            "12345678": {
+                "sessionId": CLAUDE_SESSION_ID,
+                "pid": std::process::id(),
+                "procStart": 1,
+                "ptySock": pty,
+                "cwd": "/tmp"
+            }
+        }
+    });
+    fs::write(daemon_dir.join("roster.json"), roster.to_string()).unwrap();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let _ = reader.read_line(&mut request);
+            let mut stream = stream;
+            let _ = stream.write_all(b"{\"ok\":true,\"op\":\"attach\"}\n");
+        }
+    });
+}
+
 /// Install a fake codex binary that emits a one-shot JSONL session.
 fn install_fake_codex(bin_dir: &Path, session_id: &str, reply: &str) {
     let script = format!(
@@ -1275,6 +1323,9 @@ fn client_spawn_pane_no_provider_falls_through() {
 fn client_spawn_bg_claude_happy_path_prints_receipt() {
     let home_dir = tmpdir("cli-spawn-claude-hp-home");
     let claude_home = tmpdir("cli-spawn-claude-hp-claude");
+    let daemon_dir = claude_home.join("daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+    install_fake_claude_daemon(&daemon_dir);
     let sessions = claude_home.join(".claude").join("sessions");
     let bin_dir = tmpdir("cli-spawn-claude-hp-bin");
     let cwd = tmpdir("cli-spawn-claude-hp-cwd");
@@ -1302,6 +1353,7 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
         .env("HOME", &claude_home)
+        .env("FNO_CLAUDE_DAEMON_DIR", &daemon_dir)
         .env("FAKE_CLAUDE_SESSIONS", &sessions)
         .env("PATH", path_with(&bin_dir))
         .current_dir(&cwd)
@@ -1315,15 +1367,19 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
         Some(0),
         "claude spawn happy path must exit 0; stderr: {stderr}"
     );
-    // Receipt is exactly one compact JSON line (the contract the shell
-    // callers' `grep -F '"short_id"' | jq -r .short_id` parse relies on).
-    // harness axis under `harness`; an unrouted bg spawn carries no provider
-    // (vendor) or model key (AC5).
-    let expected = "{\"name\": \"hp-agent\", \"short_id\": \"7c5dcf5d\", \"harness\": \"claude\", \"status\": \"live\"}\n";
-    assert_eq!(
-        stdout, expected,
-        "claude spawn receipt must be the exact compact JSON line"
-    );
+    // Receipt is one compact JSON line with positive daemon ownership proof.
+    let receipt: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(receipt["name"], "hp-agent");
+    assert_eq!(receipt["short_id"], "7c5dcf5d");
+    assert_eq!(receipt["harness"], "claude");
+    assert_eq!(receipt["status"], "live");
+    assert_eq!(receipt["durability"], "daemon-owned");
+    assert!(receipt["incarnation"]
+        .as_str()
+        .is_some_and(|value| value.contains(':')));
+    assert!(receipt["endpoint"]
+        .as_str()
+        .is_some_and(|value| value.ends_with("control.sock")));
     // And the registry row landed under the temp home.
     let registry_raw = fs::read_to_string(home_dir.join("registry.json")).unwrap_or_default();
     let registry: serde_json::Value = serde_json::from_str(&registry_raw).unwrap();

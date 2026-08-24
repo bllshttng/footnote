@@ -1150,6 +1150,18 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // agents`; attach/peek/reply; NOT a grid pane). claude-only by nature.
         ("claude", "bg") => {
             let claude_home = ClaudeHome::from_env();
+            let daemon_receipt = match fno_agents::claude_ask::ensure_claude_daemon(&claude_home) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    eprintln!(
+                        "claude spawn refused: harness=claude observed=unreadable remedy=start `claude --bg` once: {error}"
+                    );
+                    if let Some(g) = gate_guard.as_mut() {
+                        g.release();
+                    }
+                    return Some(13);
+                }
+            };
             // The message-derived refusal carrier (see message_carries_no_merge
             // above) rides extra_env so a worker that drops the flag
             // post-compaction still folds the refusal at init.
@@ -1158,7 +1170,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             } else {
                 Vec::new()
             };
-            let outcome = dispatch_claude_spawn(
+            let mut outcome = dispatch_claude_spawn(
                 home,
                 &claude_home,
                 name,
@@ -1174,6 +1186,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 claude_flags,
                 surface_cwd,
             );
+            fno_agents::claude_ask::stamp_daemon_receipt(&mut outcome, &daemon_receipt);
             if !outcome.stderr.is_empty() {
                 eprint!("{}", outcome.stderr);
             }
@@ -1232,9 +1245,25 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // codex/gemini/agy headless: the client-side one-shot (codex --exec /
         // gemini -p / agy -p). x-c772: --model is forwarded to each (exact
         // passthrough to the provider CLI's own --model).
-        ("codex", "headless") => emit!(dispatch_codex_once(
-            home, name, &message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
-        )),
+        ("codex", "headless") => {
+            let daemon_receipt = match fno_agents::codex_inject::ensure_codex_daemon() {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    eprintln!(
+                        "codex spawn refused: harness=codex observed=unreadable remedy=codex app-server daemon start: {error}"
+                    );
+                    if let Some(g) = gate_guard.as_mut() {
+                        g.release();
+                    }
+                    return Some(13);
+                }
+            };
+            let mut outcome = dispatch_codex_once(
+                home, name, &message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
+            );
+            fno_agents::codex_ask::append_daemon_receipt(&mut outcome, &daemon_receipt);
+            emit!(outcome)
+        }
         ("gemini", "headless") => emit!(dispatch_gemini_once(
             home, name, &message, from_name, &cwd, yolo, timeout, model,
         )),

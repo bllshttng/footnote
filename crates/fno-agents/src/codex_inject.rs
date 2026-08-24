@@ -61,6 +61,153 @@ pub fn codex_app_server_socket_path() -> PathBuf {
         .join("app-server-control.sock")
 }
 
+/// The Codex daemon's recorded process identity. The state file is provider
+/// owned, so a pid without `processStartTime` is unreadable rather than a
+/// positive liveness signal.
+pub struct CodexDaemonAdapter {
+    state_path: PathBuf,
+    lock_path: PathBuf,
+    socket_path: PathBuf,
+}
+
+impl CodexDaemonAdapter {
+    pub fn new(state_path: PathBuf, lock_path: PathBuf, socket_path: PathBuf) -> Self {
+        Self {
+            state_path,
+            lock_path,
+            socket_path,
+        }
+    }
+
+    pub fn from_environment() -> Self {
+        let home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+            .unwrap_or_else(|| PathBuf::from(".codex"));
+        Self::new(
+            home.join("app-server-daemon").join("app-server.pid"),
+            home.join("app-server-daemon")
+                .join("app-server-startup.lock"),
+            home.join("app-server-control")
+                .join("app-server-control.sock"),
+        )
+    }
+}
+
+impl crate::harness_daemon::HarnessDaemonAdapter for CodexDaemonAdapter {
+    fn harness(&self) -> &str {
+        "codex"
+    }
+
+    fn state_path(&self) -> &Path {
+        &self.state_path
+    }
+
+    fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+
+    fn parse_state(&self, raw: &str) -> Result<crate::harness_daemon::DaemonState, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        let pid = value
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| "missing pid".to_string())? as u32;
+        let process_start_time = ["processStartTime", "process_start_time", "startTime"]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(json_u64))
+            .filter(|start| *start > 0)
+            .ok_or_else(|| "missing process start time".to_string())?;
+        crate::harness_daemon::DaemonState::new(
+            value,
+            pid,
+            process_start_time,
+            self.socket_path.to_string_lossy(),
+            format!("{pid}:{process_start_time}"),
+        )
+    }
+
+    fn is_healthy(&self, _state: &crate::harness_daemon::DaemonState) -> bool {
+        self.socket_path.exists() && probe_codex_app_server(&self.socket_path)
+    }
+
+    fn boot(&self) -> Result<crate::harness_daemon::DaemonState, String> {
+        let status = std::process::Command::new("codex")
+            .args(["app-server", "daemon", "start"])
+            .status()
+            .map_err(|error| format!("codex app-server daemon start: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "codex app-server daemon start exited {}",
+                status.code().unwrap_or(1)
+            ));
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(&self.state_path) {
+                if let Ok(state) = self.parse_state(&raw) {
+                    if self.is_healthy(&state) {
+                        return Ok(state);
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "Codex daemon did not pass initialize handshake within 15s ({})",
+                    self.socket_path.display()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+fn json_u64(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+/// Ensure the Codex app-server daemon before a client-side spawn.
+pub fn ensure_codex_daemon() -> Result<crate::harness_daemon::DaemonReceipt, String> {
+    crate::harness_daemon::ensure_harness_daemon(&CodexDaemonAdapter::from_environment())
+        .map(|result| result.receipt)
+        .map_err(|error| error.to_string())
+}
+
+/// Positive Codex app-server health: the control socket must complete the
+/// initialize handshake. Socket existence alone is deliberately insufficient.
+pub fn probe_codex_app_server(socket_path: &Path) -> bool {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => return false,
+    };
+    runtime.block_on(async { codex_initialize_handshake(socket_path).await.is_ok() })
+}
+
+async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static str> {
+    let conn = UnixStream::connect(socket_path)
+        .await
+        .map_err(|_| "connect-failed")?;
+    let ws = tokio_tungstenite::client_async("ws://localhost/rpc", conn)
+        .await
+        .map_err(|_| "handshake-failed")?;
+    let (mut sink, mut stream) = ws.0.split();
+    sink.send(Message::Text(initialize_request_json().into()))
+        .await
+        .map_err(|_| "send-failed")?;
+    read_until_id(&mut stream, &serde_json::json!("init")).await?;
+    sink.send(Message::Text(initialized_notification_json().into()))
+        .await
+        .map_err(|_| "send-failed")?;
+    Ok(())
+}
+
 /// The `initialize` request frame. Local socket needs no auth/pairing — just the
 /// handshake. `id` is the string `"init"` (matched on the response). Note the
 /// absence of a `"jsonrpc":"2.0"` field: the codex app-server carries bare
@@ -721,6 +868,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness_daemon::HarnessDaemonAdapter;
     use tokio::net::UnixListener;
     use tokio_tungstenite::{accept_async, WebSocketStream};
 
@@ -1102,5 +1250,43 @@ mod tests {
         // assert the stable suffix to avoid mutating process env in a unit test.
         let p = codex_app_server_socket_path();
         assert!(p.ends_with("app-server-control/app-server-control.sock"));
+    }
+
+    #[test]
+    fn codex_daemon_state_requires_pid_and_process_start_time() {
+        let adapter = CodexDaemonAdapter::new(
+            PathBuf::from("/tmp/codex.pid"),
+            PathBuf::from("/tmp/codex.lock"),
+            PathBuf::from("/tmp/codex.sock"),
+        );
+        assert!(adapter
+            .parse_state(r#"{"pid":123}"#)
+            .expect_err("bare pid must be unreadable")
+            .contains("process start"));
+    }
+
+    #[test]
+    fn codex_daemon_state_receipt_names_endpoint_and_incarnation() {
+        let adapter = CodexDaemonAdapter::new(
+            PathBuf::from("/tmp/codex.pid"),
+            PathBuf::from("/tmp/codex.lock"),
+            PathBuf::from("/tmp/codex.sock"),
+        );
+        let state = adapter
+            .parse_state(r#"{"pid":123,"processStartTime":456}"#)
+            .unwrap();
+        assert_eq!(state.endpoint, "/tmp/codex.sock");
+        assert_eq!(state.incarnation, "123:456");
+    }
+
+    #[test]
+    fn codex_socket_without_initialize_handshake_is_not_healthy() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("codex.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        assert!(!probe_codex_app_server(&socket));
     }
 }

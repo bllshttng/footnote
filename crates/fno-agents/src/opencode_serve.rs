@@ -50,7 +50,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::claude_ask::{emit_event, validate_spawn_inputs};
@@ -233,163 +233,183 @@ fn serve_port_from_log(text: &str) -> Option<u16> {
 /// serve running orphaned; a displaced unhealthy serve (recorded pid that no
 /// longer answers health) is SIGTERMed before the replacement boots.
 pub fn ensure_serve(home: &AgentsHome) -> Result<ServeHandle, String> {
-    if let Some(guard) = acquire_serve_lock(home) {
-        let result = ensure_serve_locked(home);
-        drop(guard);
-        result
-    } else {
-        // The lock is held but unopenable (permissions, disk): fail CLOSED -
-        // booting unsynchronized is how orphan serves happen.
-        Err("cannot lock opencode serve boot (lock file unopenable)".to_string())
+    let adapter = OpenCodeDaemonAdapter::new(home);
+    let result = crate::harness_daemon::ensure_harness_daemon(&adapter)
+        .map_err(|error| error.to_string())?;
+    let record = &result.state.raw;
+    Ok(ServeHandle {
+        base_url: record
+            .get("base_url")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        token: record
+            .get("token")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        pid: result.state.pid.unwrap_or_default(),
+        pid_start: result.state.process_start_time,
+    })
+}
+
+struct OpenCodeDaemonAdapter<'a> {
+    home: &'a AgentsHome,
+    state_path: PathBuf,
+    lock_path: PathBuf,
+}
+
+impl<'a> OpenCodeDaemonAdapter<'a> {
+    fn new(home: &'a AgentsHome) -> Self {
+        Self {
+            home,
+            state_path: serve_state_path(home),
+            lock_path: home.root().join("opencode-serve.lock"),
+        }
     }
 }
 
-/// flock EX on the serve sidecar lock; None when the file cannot be opened.
-fn acquire_serve_lock(home: &AgentsHome) -> Option<std::fs::File> {
-    use std::os::unix::io::AsRawFd;
-    let path = home.root().join("opencode-serve.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(path)
-        .ok()?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if rc == 0 {
-        Some(file)
-    } else {
-        None
+impl crate::harness_daemon::HarnessDaemonAdapter for OpenCodeDaemonAdapter<'_> {
+    fn harness(&self) -> &str {
+        "opencode"
     }
-}
 
-fn ensure_serve_locked(home: &AgentsHome) -> Result<ServeHandle, String> {
-    let mut displaced: Option<(u32, Option<u64>)> = None;
-    if let Ok(raw) = std::fs::read_to_string(serve_state_path(home)) {
-        if let Ok(recorded) = serde_json::from_str::<serde_json::Value>(&raw) {
-            let token = recorded
-                .get("token")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let pid = recorded
-                .get("pid")
-                .and_then(|v| v.as_u64())
-                .filter(|p| *p > 0)
-                .map(|p| p as u32);
-            let pid_start = recorded.get("pid_start").and_then(|v| v.as_u64());
-            if let Some(base_url) = recorded.get("base_url").and_then(|v| v.as_str()) {
-                if !token.is_empty() && serve_healthy(base_url, &token) {
-                    return Ok(ServeHandle {
-                        base_url: base_url.to_string(),
-                        token,
-                        pid: pid.unwrap_or(0),
-                        pid_start,
-                    });
+    fn state_path(&self) -> &Path {
+        &self.state_path
+    }
+
+    fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+
+    fn parse_state(&self, raw: &str) -> Result<crate::harness_daemon::DaemonState, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        let _token = value
+            .get("token")
+            .and_then(|value| value.as_str())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| "missing serve token".to_string())?;
+        let base_url = value
+            .get("base_url")
+            .and_then(|value| value.as_str())
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "missing serve base_url".to_string())?;
+        let pid = value
+            .get("pid")
+            .and_then(|value| value.as_u64())
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| "missing serve pid".to_string())? as u32;
+        let pid_start = value
+            .get("pid_start")
+            .and_then(|value| value.as_u64())
+            .filter(|start| *start > 0)
+            .ok_or_else(|| "missing serve process start time".to_string())?;
+        crate::harness_daemon::DaemonState::new(
+            value,
+            pid,
+            pid_start,
+            base_url,
+            format!("{pid}:{pid_start}"),
+        )
+    }
+
+    fn is_healthy(&self, state: &crate::harness_daemon::DaemonState) -> bool {
+        let token = state
+            .raw
+            .get("token")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        serve_healthy(&state.endpoint, token)
+    }
+
+    fn boot(&self) -> Result<crate::harness_daemon::DaemonState, String> {
+        let config = serve_config_path(self.home);
+        if let Some(parent) = config.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir for serve config: {e}"))?;
+        }
+        std::fs::write(&config, SERVE_CONFIG_JSON)
+            .map_err(|e| format!("write serve config {:?}: {e}", config))?;
+        // Fresh token per serve: Basic-auth material for every request (the serve
+        // is booted with OPENCODE_SERVER_PASSWORD), generated from /dev/urandom.
+        let token = new_serve_token()?;
+        let log_path = serve_log_path(self.home);
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // TRUNCATE, not append: the boot loop below scans this file for the
+        // serving port, and a previous boot's `listening on` line would win
+        // rfind while the new serve is still starting - recording the OLD url
+        // with the NEW pid. Truncating also bounds the file per boot.
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+            .map_err(|e| format!("open serve log {:?}: {e}", log_path))?;
+        let log_err = log
+            .try_clone()
+            .map_err(|e| format!("clone serve log handle: {e}"))?;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let mut cmd = Command::new("opencode");
+        cmd.args(["serve", "--port", "0", "--print-logs"])
+            .env("OPENCODE_CONFIG", &config)
+            .env("OPENCODE_SERVER_PASSWORD", &token)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err));
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("spawn opencode serve: {e}"))?;
+        let pid = child.id();
+        // Leak the handle on purpose: the serve must outlive this process. The
+        // detach is real (setsid + no wait); dropping the Rust handle only stops
+        // reaping, which is the point.
+        std::mem::forget(child);
+        let pid_start = crate::daemon::process_start_time(pid);
+
+        let deadline = std::time::Instant::now() + SERVE_BOOT_BUDGET;
+        loop {
+            std::thread::sleep(Duration::from_millis(250));
+            if let Ok(log_text) = std::fs::read_to_string(&log_path) {
+                if let Some(port) = serve_port_from_log(&log_text) {
+                    let base_url = format!("http://127.0.0.1:{port}");
+                    if serve_healthy(&base_url, &token) {
+                        let record = serde_json::json!({
+                            "base_url": base_url,
+                            "port": port,
+                            "pid": pid,
+                            "pid_start": pid_start,
+                            "token": token,
+                        });
+                        let pid_start = pid_start.ok_or_else(|| {
+                            "opencode serve did not expose a process start time".to_string()
+                        })?;
+                        return crate::harness_daemon::DaemonState::new(
+                            record,
+                            pid,
+                            pid_start,
+                            base_url,
+                            format!("{pid}:{pid_start}"),
+                        );
+                    }
                 }
             }
-            displaced = pid.map(|p| (p, pid_start));
-        }
-        // Unhealthy, token-less, or unreadable: fall through and boot a
-        // replacement. A stale state file must never wedge every future spawn
-        // to a dead port - and a token-less legacy record can never be
-        // authenticated against, so it is replaced too.
-    }
-    if let Some((pid, pid_start)) = displaced {
-        // Reap the displaced serve so it cannot linger as an orphan holding a
-        // port nobody records. The start-time guard means a RECYCLED pid (the
-        // recorded serve died weeks ago and the OS reused its id) is left
-        // alone instead of SIGTERMed - that pid now belongs to someone else.
-        let is_ours = match pid_start {
-            Some(start) => crate::daemon::pid_is_ours(pid, Some(start)),
-            None => false, // no recorded start time: do not trust the bare pid
-        };
-        if is_ours {
-            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-        }
-    }
-    let config = serve_config_path(home);
-    if let Some(parent) = config.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir for serve config: {e}"))?;
-    }
-    std::fs::write(&config, SERVE_CONFIG_JSON)
-        .map_err(|e| format!("write serve config {:?}: {e}", config))?;
-    // Fresh token per serve: Basic-auth material for every request (the serve
-    // is booted with OPENCODE_SERVER_PASSWORD), generated from /dev/urandom.
-    let token = new_serve_token()?;
-    let log_path = serve_log_path(home);
-    if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // TRUNCATE, not append: the boot loop below scans this file for the
-    // serving port, and a previous boot's `listening on` line would win
-    // rfind while the new serve is still starting - recording the OLD url
-    // with the NEW pid. Truncating also bounds the file per boot.
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&log_path)
-        .map_err(|e| format!("open serve log {:?}: {e}", log_path))?;
-    let log_err = log
-        .try_clone()
-        .map_err(|e| format!("clone serve log handle: {e}"))?;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new("opencode");
-    cmd.args(["serve", "--port", "0", "--print-logs"])
-        .env("OPENCODE_CONFIG", &config)
-        .env("OPENCODE_SERVER_PASSWORD", &token)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn opencode serve: {e}"))?;
-    let pid = child.id();
-    // Leak the handle on purpose: the serve must outlive this process. The
-    // detach is real (setsid + no wait); dropping the Rust handle only stops
-    // reaping, which is the point.
-    std::mem::forget(child);
-    let pid_start = crate::daemon::process_start_time(pid);
-
-    let deadline = std::time::Instant::now() + SERVE_BOOT_BUDGET;
-    loop {
-        std::thread::sleep(Duration::from_millis(250));
-        if let Ok(log_text) = std::fs::read_to_string(&log_path) {
-            if let Some(port) = serve_port_from_log(&log_text) {
-                let base_url = format!("http://127.0.0.1:{port}");
-                if serve_healthy(&base_url, &token) {
-                    let record = serde_json::json!({
-                        "base_url": base_url,
-                        "port": port,
-                        "pid": pid,
-                        "pid_start": pid_start,
-                        "token": token,
-                    });
-                    let _ = std::fs::write(
-                        serve_state_path(home),
-                        serde_json::to_string(&record).unwrap_or_default(),
-                    );
-                    return Ok(ServeHandle {
-                        base_url,
-                        token,
-                        pid,
-                        pid_start,
-                    });
-                }
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
                 "opencode serve did not report a healthy port within {}s (log: {:?}, pid {pid})",
                 SERVE_BOOT_BUDGET.as_secs(),
                 log_path
             ));
+            }
         }
     }
 }
@@ -856,7 +876,10 @@ fn dispatch_opencode_serve_inner(
             "name": name,
             "session_id": session_id,
             "short_id": session_id,
-            "serve_url": serve.base_url,
+            "serve_url": serve.base_url.clone(),
+            "durability": "daemon-owned",
+            "incarnation": format!("{}:{}", serve.pid, serve.pid_start.unwrap_or_default()),
+            "endpoint": serve.base_url,
             "log_path": log_path.to_string_lossy(),
         })
         .to_string(),
@@ -1170,6 +1193,7 @@ mod tests {
             "base_url": fake.base_url(),
             "port": fake.addr.port(),
             "pid": 4242,
+            "pid_start": 1,
             "token": "test-token",
         });
         std::fs::write(serve_state_path(&h), record.to_string()).unwrap();
@@ -1255,8 +1279,12 @@ mod tests {
 
         // A serve answering with a non-ses id refuses rather than rowing junk.
         let fake = FakeServe::start("not-an-opencode-id");
-        let record =
-            serde_json::json!({"base_url": fake.base_url(), "pid": 1, "token": "test-token"});
+        let record = serde_json::json!({
+            "base_url": fake.base_url(),
+            "pid": 1,
+            "pid_start": 1,
+            "token": "test-token"
+        });
         std::fs::write(serve_state_path(&h), record.to_string()).unwrap();
         let out = dispatch_opencode_serve_inner(
             &h,
