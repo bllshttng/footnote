@@ -1459,3 +1459,32 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     assert fields["DISPOSITION"] == "proven"
     assert fields["COLLISION"] == owner
     assert fields["COLLISION_ID"] == foreign
+
+
+def test_holder_is_ours_recognizes_own_pid_unavailable_claim(monkeypatch):
+    """The transcript-identity arm: init minted ``target-session:<sid>`` from the
+    proven harness session when no env id existed, and the pid walk failed, so
+    the v2 claim carries no pid for the pid arm to compare. A rerun in the same
+    session must still read it as ours instead of parking on its own claim."""
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda env=None: SimpleNamespace(session_id="aaaa1111-mine"),
+    )
+    info = {"pid_unavailable": True, "host": "other-box", "machine_id": "m2"}
+    assert target_cli._holder_is_ours("target-session:aaaa1111-mine", info)
+    assert not target_cli._holder_is_ours("target-session:zzz999-not-mine", info)
+
+
+def test_holder_is_ours_identity_arm_fails_closed(monkeypatch):
+    """No provable identity -> no recognition: the claim stays foreign to this
+    rerun (park / re-acquire), never assumed ours."""
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda env=None: SimpleNamespace(session_id=""),
+    )
+    info = {"pid_unavailable": True, "host": "h", "machine_id": "m"}
+    assert not target_cli._holder_is_ours("target-session:anything", info)

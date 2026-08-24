@@ -2497,11 +2497,13 @@ def _manifest_is_explicitly_unclaimed(text: str) -> bool:
 def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
     """True iff ``holder`` is THIS session's identity (any claim state).
 
-    Three arms, mirroring init-target-state.sh's ``claim_owner_id`` so a
+    Four arms, mirroring init-target-state.sh's ``claim_owner_id`` so a
     successor and the classifier agree on 'ours': TARGET_SESSION_ID (a
     driver-run claude session), CODEX_THREAD_ID (codex parity - the durable-pid
-    arm below only resolves a claude ancestor), then durable session pid +
-    machine (a bare re-run with no env id). An uncapturable own pid reads as
+    arm below only resolves a claude ancestor), the proven transcript identity
+    (what init falls to when no env id exists, and the only arm that can
+    re-recognize a pid_unavailable claim of our own), then durable session pid
+    + machine (a bare re-run with no env id). An uncapturable own pid reads as
     not-ours (park / re-acquire, never assume ownership) - the conservative
     direction. The machine check goes through ``hostid.is_same_machine``, never
     a raw gethostname() compare: the name is not stable.
@@ -2510,6 +2512,14 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
         own_id = os.environ.get(env_var)
         if own_id and holder == f"target-session:{own_id}":
             return True
+    try:
+        from fno.claims.self_identity import resolve_self_identity
+
+        own_sid = (resolve_self_identity().session_id or "").strip()
+    except Exception:
+        own_sid = ""
+    if own_sid and holder == f"target-session:{own_sid}":
+        return True
     try:
         from fno.claims.session_pid import resolve_session_pid
 
