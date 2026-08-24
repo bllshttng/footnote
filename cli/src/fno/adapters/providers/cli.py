@@ -561,6 +561,8 @@ def show_provider(provider_id: str = typer.Argument(...)) -> None:
         typer.echo(f"credentials_source:  {record.credentials_source}")
     if record.env:
         typer.echo(f"env:                 {record.env}")
+    if record.route:
+        typer.echo(f"route:               {record.route}")
     if record.account_id:
         typer.echo(f"account_id:          {record.account_id}")
     if record.tags:
@@ -587,6 +589,11 @@ def add_provider(
     auth: str = typer.Option(..., "--auth", "-a", help="oauth_dir|api_key"),
     credentials_source: Optional[Path] = typer.Option(None, "--credentials-source"),
     env: list[str] = typer.Option([], "--env", help="KEY=VALUE pairs for api_key auth"),
+    route: Optional[str] = typer.Option(
+        None,
+        "--route",
+        help="provider/model route used as the api_key credential source",
+    ),
     priority: int = typer.Option(100, "--priority", "-p"),
     name: Optional[str] = typer.Option(None, "--name"),
     account_id: Optional[str] = typer.Option(None, "--account-id"),
@@ -627,6 +634,7 @@ def add_provider(
             auth=auth,  # type: ignore[arg-type]
             credentials_source=credentials_source,
             env=env_dict,
+            route=route,
             priority=priority,
             account_id=account_id,
         )

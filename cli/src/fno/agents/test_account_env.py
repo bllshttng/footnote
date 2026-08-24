@@ -127,6 +127,63 @@ def test_non_claude_record_refused(tmp_path: Path, providers_root: Path) -> None
         resolve_account_overlay("codex-main", repo_root=repo, providers_root=providers_root)
 
 
+def test_route_backed_account_uses_explicit_route_overlay(
+    tmp_path: Path, providers_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC1-HP: account overlay and route resolver share one complete env."""
+    repo = _write_settings(
+        tmp_path,
+        [{
+            "id": "zai",
+            "name": "Z.AI",
+            "harness": "claude",
+            "auth": "api_key",
+            "route": "zai/glm-5.3[1m]",
+        }],
+    )
+    expected = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "live-token",
+        "ANTHROPIC_MODEL": "glm-5.3[1m]",
+    }
+    seen: list[tuple[str, str]] = []
+
+    def resolve(provider: str, model: str, **_kwargs: object) -> dict[str, str]:
+        seen.append((provider, model))
+        return expected
+
+    monkeypatch.setattr("fno.adapters.providers.dispatch.resolve_explicit_route", resolve)
+
+    overlay = resolve_account_overlay("zai", repo_root=repo, providers_root=providers_root)
+
+    assert overlay.lane == "api-key"
+    assert overlay.env == expected
+    assert seen == [("zai", "glm-5.3[1m]")]
+
+
+def test_route_backed_account_refuses_unresolvable_route(
+    tmp_path: Path, providers_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC1-ERR: unknown/keyless routes fail before launch without ambient auth."""
+    repo = _write_settings(
+        tmp_path,
+        [{
+            "id": "zai",
+            "name": "Z.AI",
+            "harness": "claude",
+            "auth": "api_key",
+            "route": "zai/glm-5.3",
+        }],
+    )
+    monkeypatch.setattr(
+        "fno.adapters.providers.dispatch.resolve_explicit_route",
+        lambda *_a, **_k: None,
+    )
+
+    with pytest.raises(AccountResolutionError, match="route.*unavailable"):
+        resolve_account_overlay("zai", repo_root=repo, providers_root=providers_root)
+
+
 # --- lane 3: managed active rides the shared slot ---------------------------
 
 def test_managed_active_pins_shared_slot(tmp_path: Path, providers_root: Path) -> None:

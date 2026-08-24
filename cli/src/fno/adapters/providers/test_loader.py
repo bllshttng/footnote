@@ -317,6 +317,33 @@ class TestLoadProvidersInvalidRecord:
         assert "bad-api-key" in error_msg
         assert "auth_strategy_mismatch" in error_msg
 
+    def test_managed_route_requires_api_key_auth(self) -> None:
+        """Managed records cannot carry a route override."""
+        from fno.adapters.providers.model import ProviderRecord
+
+        with pytest.raises(ValueError, match="route requires auth=api_key"):
+            ProviderRecord(
+                id="zai",
+                name="Z.AI",
+                harness="claude",
+                auth="managed",
+                route="zai/glm-5.3",
+            )
+
+    def test_oauth_route_requires_api_key_auth(self) -> None:
+        """OAuth records cannot carry a route override."""
+        from fno.adapters.providers.model import ProviderRecord
+
+        with pytest.raises(ValueError, match="route requires auth=api_key"):
+            ProviderRecord(
+                id="zai",
+                name="Z.AI",
+                harness="claude",
+                auth="oauth_dir",
+                credentials_source=Path("/tmp/credentials"),
+                route="zai/glm-5.3",
+            )
+
 
 # ---------------------------------------------------------------------------
 # Precedence: project-local overrides global
