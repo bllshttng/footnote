@@ -35,7 +35,7 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 | 2. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:execute waves`) |
 | 2. Do | `cross_project: true` (legacy only) | Migration shim — the cross-project pipeline was removed. WARN + route to spawn-into-project (see SKILL.md "CROSS-PROJECT IS RETIRED"); then run `domain_phases.execute` for this session's own project. Do NOT invoke a cross-project pipeline skill. |
 | 2.5 Clean | Only with `clean` modifier | `/simplify` on changed files |
-| 3. Review | Always (BEFORE PUSH) | `preship_review_plan` decides (see [phase-bodies.md](phase-bodies.md)): advisory self-review by default; `domain_phases.review`/`fno:review` sigma only when `config.review.reviewers` names `sigma` |
+| 3. Review | After `/fno:pr create` returns a PR number | `preship_review_plan` decides (see [phase-bodies.md](phase-bodies.md)): `fno do target request-self-review --pr <n>` is the default final-head native review; sigma runs once post-ship only when `config.review.reviewers` names `sigma` |
 | 4. Validate | Always (BEFORE PUSH) | `domain_phases.validate` (default: project-detected); CI green on the PR is verified by the loop-check verb at promise time |
 | 4.5 Docs | **Default: YES** (skip only with `--no-docs` or config) | `domain_phases.docs` (default: `fno:ship-docs`); docs MUST land BEFORE ship so they ride in the same PR |
 | 5. Browser | If `has_ui` (skip with `--no-browser`) | `fno:tdd` (browser-testing reference); advisory run-and-log, never gates completion and is not a loop-check input; run BEFORE ship so any findings ride in the same PR |

@@ -4,6 +4,8 @@
 
 Read this when the PR is up and you are deciding whether to promise. It is the operational detail behind the spine's "drain reviews FIRST" rule: what to read, in what order, and which checks gate the promise. The three-way turn-ending contract itself stays in SKILL.md ("How to end every turn").
 
+**Request the native review before draining external reviews.** Once `/fno:pr create` returns `<PR_NUMBER>`, run `fno do target request-self-review --pr "$PR_NUMBER"`. It resolves the PR's `headRefOid` and `baseRefName`, refuses unless local `HEAD` equals that head, and sends one leading-slash payload naming `HEAD <sha> of PR <n> against origin/<base>` through `--to-self --raw`. `started` waits for the native clean marker; `queued` is a positive Codex mux turn-boundary result and must be the last tool action of the turn; `unconfirmed` and `refused` stop the ship path. Never replace a missing native result with an advisory read, and never promise before the clean head-pinned `code-review` attestation exists.
+
 <IMPORTANT>
 CI green is NOT "ready to promise". A posted optional-bot review (`chatgpt-codex-connector`) is part of the review you must drain BEFORE `<promise>` even when `required_bots` is empty. Do NOT infer "done" from `gh pr checks` + `reviewDecision` alone: the codex bot posts `COMMENTED` reviews that carry real inline findings while leaving `reviewDecision` EMPTY, and a `*-bootstrap` CI check is the bot's setup job, not its review. You MUST list the posted reviews and read every one's inline comments (`gh api repos/{owner}/{repo}/pulls/<n>/comments`), not just its body. That exact shortcut (green checks + empty decision = ready) has shipped unaddressed findings; it is the failure this section exists to prevent.
 
