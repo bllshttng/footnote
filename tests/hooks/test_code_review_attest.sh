@@ -103,6 +103,38 @@ subagent_stop() {
     '{hook_event_name:"SubagentStop", cwd:$cwd, agent_name:$desc, last_assistant_message:$msg}'
 }
 
+codex_item_completed() {
+  local turn="$1" review_output="$2"
+  jq -nc --arg turn "$turn" --argjson output "$review_output" \
+    '{type:"event_msg", payload:{type:"item_completed", turn_id:$turn,
+      item:{type:"ExitedReviewMode", review_output:$output}}}'
+}
+
+codex_exited_review_mode() {
+  local turn="$1" review_output="$2"
+  jq -nc --arg turn "$turn" --argjson output "$review_output" \
+    '{type:"event_msg", payload:{type:"exited_review_mode", turn_id:$turn,
+      review_output:$output}}'
+}
+
+codex_stop() {
+  local transcript="$1" turn="$2" message="${3-}"
+  local dir="$TMP/codex"
+  rm -rf "$dir"; mkdir -p "$dir"
+  local tpath="$dir/turn.jsonl"
+  printf '%s\n' "$transcript" > "$tpath"
+  jq -nc --arg cwd "$WORK" --arg turn "$turn" --arg tp "$tpath" --arg msg "$message" \
+    '{hook_event_name:"Stop", cwd:$cwd, turn_id:$turn, transcript_path:$tp,
+      last_assistant_message:$msg}'
+}
+
+codex_stop_unreadable() {
+  local turn="$1"
+  jq -nc --arg cwd "$WORK" --arg turn "$turn" \
+    '{hook_event_name:"Stop", cwd:$cwd, turn_id:$turn,
+      transcript_path:"'$TMP'/codex/missing.jsonl", last_assistant_message:"no findings"}'
+}
+
 # The shape measured live on 2026-08-17 from a `Skill(skill="code-review")`
 # fork: agent_type is the generic "general-purpose", NO name field carries the
 # skill, and the only record of what ran is the sidecar the harness writes
@@ -183,6 +215,56 @@ expect_silent "reportfindings-absent-key"
 
 run_hook "$(post_tool_use Bash '{"command":"ls"}')"
 expect_silent "posttooluse-other-tool"
+
+echo "== Codex Stop: exact-turn structured review evidence =="
+CODEX_TURN="turn-clean"
+CODEX_CLEAN_ITEM="$(codex_item_completed "$CODEX_TURN" '{"findings":[]}')"
+run_hook "$(codex_stop "$CODEX_CLEAN_ITEM" "$CODEX_TURN" "no findings")"
+expect_attest "codex-stop-empty-findings"
+
+CODEX_DIRECT_CLEAN="$(codex_exited_review_mode "$CODEX_TURN" '{"findings":[]}')"
+run_hook "$(codex_stop "$CODEX_DIRECT_CLEAN" "$CODEX_TURN" "no findings")"
+expect_attest "codex-stop-direct-empty-findings"
+
+CODEX_DIRTY_ITEM="$(codex_item_completed "$CODEX_TURN" '{"findings":[{"file":"a.py","summary":"boom"}]}')"
+run_hook "$(codex_stop "$CODEX_DIRTY_ITEM" "$CODEX_TURN" "no findings")"
+expect_silent "codex-stop-nonempty-findings"
+
+CODEX_DIRECT_DIRTY="$(codex_exited_review_mode "$CODEX_TURN" '{"findings":[{"file":"a.py","summary":"boom"}]}')"
+run_hook "$(codex_stop "$CODEX_DIRECT_DIRTY" "$CODEX_TURN" "no findings")"
+expect_silent "codex-stop-direct-nonempty-findings"
+
+CODEX_NULL_ITEM="$(codex_item_completed "$CODEX_TURN" 'null')"
+run_hook "$(codex_stop "$CODEX_NULL_ITEM" "$CODEX_TURN" "no findings")"
+expect_silent "codex-stop-null-review-output"
+
+CODEX_MISSING_FINDINGS="$(jq -nc --arg turn "$CODEX_TURN" \
+  '{type:"event_msg",payload:{type:"item_completed",turn_id:$turn,
+    item:{type:"ExitedReviewMode",review_output:{}}}}')"
+run_hook "$(codex_stop "$CODEX_MISSING_FINDINGS" "$CODEX_TURN" "no findings")"
+expect_silent "codex-stop-missing-findings"
+
+CODEX_WRONG_TURN="$(codex_item_completed "turn-other" '{"findings":[]}')"
+run_hook "$(codex_stop "$CODEX_WRONG_TURN" "$CODEX_TURN" "no findings")"
+expect_silent "codex-stop-wrong-turn"
+
+CODEX_DUPLICATE="$CODEX_CLEAN_ITEM
+$CODEX_CLEAN_ITEM"
+run_hook "$(codex_stop "$CODEX_DUPLICATE" "$CODEX_TURN" "no findings")"
+expect_silent "codex-stop-duplicate-completion"
+
+run_hook "$(codex_stop_unreadable "$CODEX_TURN")"
+expect_silent "codex-stop-unreadable-transcript"
+
+CODEX_MALFORMED="$CODEX_CLEAN_ITEM
+not json"
+run_hook "$(codex_stop "$CODEX_MALFORMED" "$CODEX_TURN" "no findings")"
+expect_silent "codex-stop-malformed-transcript"
+
+run_hook "$(jq -nc --arg cwd "$WORK" --arg turn "$CODEX_TURN" \
+  '{hook_event_name:"Stop",cwd:$cwd,turn_id:$turn,
+    last_assistant_message:"no findings"}')"
+expect_silent "codex-stop-prose-without-structured-review"
 
 echo "== SubagentStop: shapes that must attest =="
 run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$JSON_CLEAN")"

@@ -156,10 +156,13 @@ Custom agents and target loop hooks are separate surfaces. The files under
 make `/fno:target` continue autonomously.
 
 Target continuation is driven by hook events. `hooks/codex-hooks.json` wires the
-Codex-supported subset needed for target loops: `Stop` for
-`hooks/target-stop-hook.sh` (`fno-agents loop-check` + `finalize`), `PostToolUse`
-for claim heartbeat/context monitoring, compact handoff hooks, subagent guards,
-and the PreToolUse state/git protection guards.
+Codex-supported subset needed for target loops: `Stop` first runs the synchronous
+`hooks/code-review-attest.sh` producer, which recognizes a clean `/review` from
+an exact-turn `exited_review_mode` or `item_completed`/`ExitedReviewMode`
+transcript marker, then runs
+`hooks/target-stop-hook.sh` (`fno-agents loop-check` + `finalize`). `PostToolUse`
+carries claim heartbeat/context monitoring, compact handoff hooks, subagent
+guards, and the PreToolUse state/git protection guards.
 
 Do not copy the full Claude hook manifest into Codex. Codex does not support every
 Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,

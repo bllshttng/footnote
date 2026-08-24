@@ -138,6 +138,57 @@ def _drive_code_review(repo: Path) -> None:
     assert r.returncode == 0, r.stderr
 
 
+def _drive_codex_code_review(repo: Path) -> None:
+    """Feed the Codex Stop trigger a same-turn structured clean review."""
+    turn_id = "turn-clean"
+    transcript = repo / "codex-turn.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "exited_review_mode",
+                    "turn_id": turn_id,
+                    "review_output": {"findings": []},
+                },
+            }
+        )
+        + "\n"
+    )
+    payload = json.dumps(
+        {
+            "hook_event_name": "Stop",
+            "cwd": str(repo),
+            "turn_id": turn_id,
+            "transcript_path": str(transcript),
+            "last_assistant_message": "the prose is not the verdict",
+        }
+    )
+    r = subprocess.run(
+        ["bash", str(_HOOK)],
+        input=payload,
+        cwd=repo,
+        env=_base_env(),
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_codex_stop_path_reaches_the_same_attestation_producer(tmp_path: Path) -> None:
+    repo = _temp_git_repo(tmp_path)
+    head = _head(repo)
+
+    _drive_codex_code_review(repo)
+
+    events = [e for e in _events(repo) if e.get("type") == "review_attestation"]
+    assert len(events) == 1, events
+    data = events[0]["data"]
+    assert data["reviewer"] == "code-review"
+    assert data["verdict"] == "pass"
+    assert data["head_sha"] == head
+
+
 def test_report_findings_path_also_emits(tmp_path: Path) -> None:
     """The OTHER reachable path: a foreground pass that does call
     ReportFindings directly. A guard on only one of the two paths that can
