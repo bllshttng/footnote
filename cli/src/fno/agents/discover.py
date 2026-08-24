@@ -24,6 +24,7 @@ import datetime as _dt
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -363,6 +364,182 @@ def _safe_rollout_mtime(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return 0.0
+
+
+@dataclass(frozen=True)
+class RecoverableCodexRollout:
+    """One recent Codex rollout absent from the canonical registry snapshot."""
+
+    session_id: str
+    cwd: str
+    rollout_path: Path
+    mtime: float
+
+
+@dataclass(frozen=True)
+class CodexRecoveryScan:
+    """Strict recovery candidates plus evidence that the scan covered its inputs."""
+
+    recoverable: tuple[RecoverableCodexRollout, ...]
+    complete: bool
+    scanned_count: int
+    malformed_count: int
+    unreadable_count: int
+    failures: tuple[str, ...]
+
+
+def scan_recoverable_codex_rollouts(
+    cwd: Path,
+    recency_seconds: float,
+    *,
+    sessions_dir: Optional[Path] = None,
+    registry_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> CodexRecoveryScan:
+    """Return recent exact-cwd Codex rollouts missing from one registry snapshot.
+
+    Unlike live discovery, this scanner never collapses damaged evidence into a
+    clean zero. Readable candidates remain available on an incomplete result so
+    dry output can identify them, while a writing caller can refuse the batch.
+    """
+    from fno.agents.registry import RegistryVersionError, load_registry
+
+    root = sessions_dir if sessions_dir is not None else default_codex_sessions_dir()
+    target_cwd = str(cwd)
+    cutoff = (now if now is not None else time.time()) - recency_seconds
+    failures: list[str] = []
+    malformed_count = 0
+    unreadable_count = 0
+
+    registered_ids: set[str] = set()
+    try:
+        entries = load_registry(registry_path)
+    except (OSError, RegistryVersionError) as exc:
+        registry = registry_path if registry_path is not None else paths.agents_registry_path()
+        failures.append(f"registry load failed: {registry}: {exc}")
+    else:
+        if getattr(entries, "complete", True) is not True:
+            registry = registry_path if registry_path is not None else paths.agents_registry_path()
+            failures.append(f"registry load incomplete: {registry}")
+        registered_ids = {
+            entry.harness_session_id
+            for entry in entries
+            if entry.harness == "codex"
+            and isinstance(entry.harness_session_id, str)
+            and entry.harness_session_id
+        }
+
+    try:
+        root_mode = root.stat().st_mode
+    except OSError:
+        failures.append(f"sessions root unreadable: {root}")
+        unreadable_count += 1
+        return CodexRecoveryScan(
+            recoverable=(),
+            complete=False,
+            scanned_count=0,
+            malformed_count=malformed_count,
+            unreadable_count=unreadable_count,
+            failures=tuple(failures),
+        )
+    if not stat.S_ISDIR(root_mode):
+        failures.append(f"sessions root unreadable: {root}")
+        unreadable_count += 1
+        return CodexRecoveryScan(
+            recoverable=(),
+            complete=False,
+            scanned_count=0,
+            malformed_count=malformed_count,
+            unreadable_count=unreadable_count,
+            failures=tuple(failures),
+        )
+
+    try:
+        rollout_paths = list(root.rglob("rollout-*.jsonl"))
+    except OSError as exc:
+        failures.append(f"sessions root enumeration failed: {root}: {exc}")
+        unreadable_count += 1
+        return CodexRecoveryScan(
+            recoverable=(),
+            complete=False,
+            scanned_count=0,
+            malformed_count=malformed_count,
+            unreadable_count=unreadable_count,
+            failures=tuple(failures),
+        )
+
+    dated: list[tuple[float, Path]] = []
+    for rollout_path in rollout_paths:
+        try:
+            mtime = rollout_path.stat().st_mtime
+        except OSError as exc:
+            failures.append(f"rollout stat failed: {rollout_path}: {exc}")
+            unreadable_count += 1
+            continue
+        if mtime >= cutoff:
+            dated.append((mtime, rollout_path))
+
+    recoverable: list[RecoverableCodexRollout] = []
+    seen: set[str] = set()
+    for mtime, rollout_path in sorted(dated, key=lambda item: item[0], reverse=True):
+        try:
+            with open(rollout_path, encoding="utf-8") as fh:
+                first_line = fh.readline()
+        except UnicodeDecodeError as exc:
+            failures.append(f"rollout decode failed: {rollout_path}: {exc}")
+            malformed_count += 1
+            continue
+        except OSError as exc:
+            failures.append(f"rollout read failed: {rollout_path}: {exc}")
+            unreadable_count += 1
+            continue
+        try:
+            record = json.loads(first_line)
+        except ValueError as exc:
+            failures.append(f"rollout JSON failed: {rollout_path}: {exc}")
+            malformed_count += 1
+            continue
+        if not isinstance(record, dict) or record.get("type") != "session_meta":
+            failures.append(f"rollout schema failed: {rollout_path}: missing session_meta")
+            malformed_count += 1
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            failures.append(f"rollout schema failed: {rollout_path}: payload is not an object")
+            malformed_count += 1
+            continue
+        session_id = payload.get("id")
+        rollout_cwd = payload.get("cwd")
+        if not isinstance(session_id, str) or not session_id:
+            failures.append(f"rollout schema failed: {rollout_path}: id is not a string")
+            malformed_count += 1
+            continue
+        if not isinstance(rollout_cwd, str):
+            failures.append(f"rollout schema failed: {rollout_path}: cwd is not a string")
+            malformed_count += 1
+            continue
+        if session_id in seen:
+            continue
+        seen.add(session_id)
+        if rollout_cwd != target_cwd or session_id in registered_ids:
+            continue
+        recoverable.append(
+            RecoverableCodexRollout(
+                session_id=session_id,
+                cwd=rollout_cwd,
+                rollout_path=rollout_path,
+                mtime=mtime,
+            )
+        )
+
+    return CodexRecoveryScan(
+        recoverable=tuple(recoverable),
+        complete=not failures,
+        scanned_count=len(rollout_paths),
+        malformed_count=malformed_count,
+        unreadable_count=unreadable_count,
+        failures=tuple(failures),
+    )
 
 
 def _discover_from_codex(
