@@ -516,7 +516,9 @@ def graphql_remaining(
     read as evidence.
     """
     remaining, reset_epoch = _bucket_remaining("graphql", runner, cwd, timeout)
-    if remaining is None:
+    # Both narrow together or not at all: the helper returns (None, None) on
+    # every failure path, but mypy cannot see that through the tuple.
+    if remaining is None or reset_epoch is None:
         return None, None
     reset_iso = datetime.fromtimestamp(reset_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return remaining, reset_iso
