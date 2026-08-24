@@ -108,6 +108,17 @@ enum Role {
     Forward,
 }
 
+/// Exit an `fno mux` verb, surfacing any config warning recorded while the
+/// verb resolved its socket dir. These roles are non-TUI, so stderr is safe
+/// here; the interactive client routes the same warning to its client log
+/// instead, and `mux doctor` carries it as a row.
+fn exit_mux(code: i32) -> ! {
+    if let Some((w, _remedy)) = fno::proto::pending_config_warning() {
+        eprintln!("{w}");
+    }
+    std::process::exit(code)
+}
+
 /// Split a mux verb's trailing args into positionals plus a `--json` flag (US6:
 /// every scriptable verb accepts `--json`). `--json` may appear once, anywhere;
 /// a repeated `--json`, an unknown `--flag`, or a non-UTF-8 arg is `None` (the
@@ -322,23 +333,33 @@ fn main() {
             std::process::exit(2);
         }
         Role::MuxVersion(json) => fno::version::print_version(json),
-        Role::MuxLs(json) => std::process::exit(mux_cli::ls(json)),
+        Role::MuxLs(json) => exit_mux(mux_cli::ls(json)),
         Role::MuxKill(name, json) => {
             let session = mux_cli::resolve_session(name.as_deref(), env_session.as_deref());
-            std::process::exit(mux_cli::kill_server(&session, json));
+            exit_mux(mux_cli::kill_server(&session, json));
         }
         Role::MuxShellInit(shell, json) => {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
         }
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
-        Role::MuxWeb(web_args) => std::process::exit(fno::web::serve(web_args)),
-        Role::MuxPane(rest) => std::process::exit(mux_cli::pane(&rest, env_session.as_deref())),
-        Role::MuxBlock(rest) => std::process::exit(mux_cli::block(&rest, env_session.as_deref())),
-        Role::MuxTab(rest) => std::process::exit(mux_cli::tab(&rest, env_session.as_deref())),
-        Role::MuxLayout(rest) => std::process::exit(mux_cli::layout(&rest, env_session.as_deref())),
-        Role::MuxWhere(rest) => std::process::exit(mux_cli::where_(&rest, env_session.as_deref())),
-        Role::MuxView(rest) => std::process::exit(mux_cli::view(&rest, env_session.as_deref())),
-        Role::MuxWorkspace(rest) => std::process::exit(mux_cli::workspace(&rest)),
+        Role::MuxWeb(web_args) => {
+            // The bridge serves for hours, so the warning its startup
+            // resolution recorded must surface NOW: exit_mux would print it
+            // only after the socket closes, and a signal kill never exits
+            // through it at all. The exit-time repeat is the cheap cost of
+            // the early word (run_server takes the same trade).
+            if let Some((warning, _)) = proto::pending_config_warning() {
+                eprintln!("{warning}");
+            }
+            exit_mux(fno::web::serve(web_args))
+        }
+        Role::MuxPane(rest) => exit_mux(mux_cli::pane(&rest, env_session.as_deref())),
+        Role::MuxBlock(rest) => exit_mux(mux_cli::block(&rest, env_session.as_deref())),
+        Role::MuxTab(rest) => exit_mux(mux_cli::tab(&rest, env_session.as_deref())),
+        Role::MuxLayout(rest) => exit_mux(mux_cli::layout(&rest, env_session.as_deref())),
+        Role::MuxWhere(rest) => exit_mux(mux_cli::where_(&rest, env_session.as_deref())),
+        Role::MuxView(rest) => exit_mux(mux_cli::view(&rest, env_session.as_deref())),
+        Role::MuxWorkspace(rest) => exit_mux(mux_cli::workspace(&rest)),
         Role::Client(flag) => {
             let env = env_session.as_deref().filter(|s| !s.is_empty());
             // Bare `fno` with nothing pinned: the pre-attach picker decides
@@ -370,6 +391,14 @@ fn run_client(session: &str) {
 }
 
 fn run_server(socket: PathBuf) {
+    // The one mux role that never returns through `exit_mux`: the daemon
+    // blocks until killed, so the config warning it recorded while resolving
+    // the socket dir would otherwise never surface. Server stderr is a log
+    // stream, not a PTY the harness scrapes, so printing here is safe (the
+    // NEVER-stderr rule governs the TUI client, x-0296).
+    if let Some((warning, _)) = proto::pending_config_warning() {
+        eprintln!("{warning}");
+    }
     std::process::exit(fno::server::run(socket));
 }
 

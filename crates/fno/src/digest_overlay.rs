@@ -193,11 +193,10 @@ fn mux_keys_table(cwd: &Path) -> (Vec<(String, String)>, Vec<crate::keys::Keymap
     let layers: Vec<PathBuf> = match non_empty_env("FNO_CONFIG") {
         Some(explicit) => vec![PathBuf::from(explicit)],
         None => {
-            let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
-                .map(|p| PathBuf::from(p).with_file_name("config.toml"))
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml"))
-                });
+            // The one spelling of the global config.toml location, shared
+            // with the state-root resolver, so the keymap layer and the mux
+            // root can never read different global files.
+            let global = global_config_toml();
             // Lowest precedence first: global, then canonical, then this
             // checkout on top - `config_roots` is highest-first, so it reverses.
             global
@@ -445,18 +444,82 @@ fn repo_root_from(cwd: &Path) -> PathBuf {
 /// Generalised from the mux-only reader so the open-plan helper reads
 /// `[obsidian]` from the same ladder the `[mux]` keys use.
 pub(crate) fn config_str(cwd: &Path, section: &str, key: &str) -> Option<String> {
-    if let Some(explicit) = non_empty_env("FNO_CONFIG") {
-        return read_section_file(Path::new(&explicit), section, key);
+    resolve_config_key(cwd, &|path| read_section_file(path, section, key))
+}
+
+/// A TOP-LEVEL key (no section) read from the EXPLICIT tier only: `$FNO_CONFIG`
+/// (sole candidate) else the global config. The mux resolves its state root
+/// through this, deliberately NOT through the project tier below: one
+/// machine's mux fleet is shared infrastructure invoked from many cwds
+/// (kings, watchdogs, mail inject, pane transport), and a cwd-anchored
+/// project tier would silently split those external callers off a project's
+/// sessions. Explicit isolation (`FNO_CONFIG`, inherited by every subprocess
+/// an isolated environment spawns) is the supported isolation for the mux.
+pub(crate) fn config_explicit_top_str(key: &str) -> Option<String> {
+    if let Some(explicit) = non_empty_env_os("FNO_CONFIG") {
+        return read_top_file(&PathBuf::from(explicit), key);
+    }
+    global_config_toml().and_then(|g| read_top_file(&g, key))
+}
+
+/// The per-user global config.toml: the config.toml SIBLING of
+/// `$FNO_GLOBAL_SETTINGS_PATH` when set, else `$HOME/.fno/config.toml`. One
+/// source for both the explicit tier and the section ladder's last rung, so
+/// the two can never resolve different global files.
+fn global_config_toml() -> Option<PathBuf> {
+    match non_empty_env("FNO_GLOBAL_SETTINGS_PATH") {
+        // Python's `_prefer_toml` substitutes the config.toml sibling ONLY
+        // for a pin whose basename is exactly `settings.yaml` (and the unset
+        // default below); every other non-empty pin is read AS the pinned
+        // file. A direct `.toml` pin is therefore the toml candidate itself,
+        // and a yaml-shaped pin under any other name is a file this TOML
+        // reader cannot use - no sibling exists for Python to read either,
+        // so the mirror invents none (the state-root yaml-divergence warning
+        // covers a state_dir living there).
+        Some(p) if Path::new(&p).file_name()? == "settings.yaml" => {
+            Some(PathBuf::from(p).with_file_name("config.toml"))
+        }
+        Some(p) if Path::new(&p).extension().is_some_and(|e| e == "toml") => Some(PathBuf::from(p)),
+        Some(_) => None,
+        None => std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")),
+    }
+}
+
+/// The legacy settings.yaml at the same global location Python still reads as
+/// a lower-priority candidate (its `_prefer_toml` keeps both files). Exposed
+/// for the state-root resolver's divergence warning: a state_dir that lives
+/// only in this file is invisible to every TOML-only reader here.
+pub(crate) fn global_settings_yaml_sibling() -> Option<PathBuf> {
+    non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
+        .map(|p| PathBuf::from(p))
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/settings.yaml")))
+        .filter(|p| p.is_file())
+}
+
+/// The file ladder shared by the section reader: `$FNO_CONFIG` (sole candidate,
+/// read as-is) -> project roots -> global. `from_file` reads one candidate; a
+/// `None` walks on to the next. The FNO_CONFIG read is `var_os` so a
+/// non-UTF-8 pin reaches the reader exactly as it reaches every other
+/// consumer of that variable.
+fn resolve_config_key(cwd: &Path, from_file: &dyn Fn(&Path) -> Option<String>) -> Option<String> {
+    if let Some(explicit) = non_empty_env_os("FNO_CONFIG") {
+        return from_file(&PathBuf::from(explicit));
     }
     for root in config_roots(cwd) {
-        if let Some(v) = read_section_file(&root.join(".fno/config.toml"), section, key) {
+        if let Some(v) = from_file(&root.join(".fno/config.toml")) {
             return Some(v);
         }
     }
-    let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
-        .map(|p| PathBuf::from(p).with_file_name("config.toml"))
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")));
-    global.and_then(|g| read_section_file(&g, section, key))
+    global_config_toml().and_then(|g| from_file(&g))
+}
+
+/// `std::env::var_os` but an empty value reads as unset, the OsString twin of
+/// [`non_empty_env`] for callers that build paths rather than parse text.
+pub(crate) fn non_empty_env_os(key: &str) -> Option<std::ffi::OsString> {
+    match std::env::var_os(key) {
+        Some(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
 }
 
 /// `mux.<key>` from a config body, kept as a thin wrapper over the general
@@ -469,18 +532,48 @@ fn read_section_file(path: &Path, section: &str, key: &str) -> Option<String> {
     read_value(&std::fs::read_to_string(path).ok()?, section, key)
 }
 
-/// Read `<section>.<key>` from a flat config.toml body, returning the value as a
-/// raw string each caller re-coerces (bool -> "true"/"false", int -> its digits).
-/// Widened from the mux-only `read_mux_value` so `[obsidian]` reads the same way.
-fn read_value(content: &str, section: &str, key: &str) -> Option<String> {
-    let t = content.parse::<toml::Table>().ok()?;
-    match t.get(section)?.as_table()?.get(key)? {
+fn read_top_file(path: &Path, key: &str) -> Option<String> {
+    read_top_value(&std::fs::read_to_string(path).ok()?, key)
+}
+
+/// A toml scalar as the raw string each caller re-coerces (bool ->
+/// "true"/"false", int -> its digits). One coercion for both key shapes so a
+/// padded or typed value cannot read differently at the top level than inside
+/// a section.
+fn scalar(v: &toml::Value) -> Option<String> {
+    match v {
         toml::Value::String(s) => Some(s.clone()),
         toml::Value::Boolean(b) => Some(b.to_string()),
         toml::Value::Integer(i) => Some(i.to_string()),
         toml::Value::Float(f) => Some(f.to_string()),
         _ => None,
     }
+}
+
+/// Read `<section>.<key>` from a flat config.toml body. Widened from the
+/// mux-only `read_mux_value` so `[obsidian]` reads the same way.
+fn read_value(content: &str, section: &str, key: &str) -> Option<String> {
+    let t = content.parse::<toml::Table>().ok()?;
+    scalar(t.get(section)?.as_table()?.get(key)?)
+}
+
+/// Read a top-level `<key>` (no section) from a flat config.toml body,
+/// accepting the legacy `[config]`-wrapped shape Python's loader unwraps
+/// (`SettingsModel::_unwrap`), so a pre-migration file cannot split the mux
+/// from the root every Python surface uses. Other sections never answer: the
+/// file is flat by design, so `[paths] state_dir` is not this key.
+fn read_top_value(content: &str, key: &str) -> Option<String> {
+    let t = content.parse::<toml::Table>().ok()?;
+    // Wrapped beats direct on a dual-shape file, matching Python's
+    // `_unwrap_config_dict` (`_deep_merge(rest, cfg)`: the `config:` block is
+    // canonical, a stray top-level sibling is the legacy leftover).
+    let wrapped = t
+        .get("config")
+        .and_then(|c| c.as_table())
+        .and_then(|c| c.get(key))
+        .and_then(scalar);
+    let direct = t.get(key).and_then(scalar);
+    wrapped.or(direct)
 }
 
 /// `mux.<key>` from a body; thin wrapper over [`read_value`], retained for the
@@ -619,6 +712,38 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_top_level_keys() {
+        let cfg = "schema_version = 1\nstate_dir = \"~/.fno/\"\n";
+        assert_eq!(read_top_value(cfg, "state_dir"), Some("~/.fno/".into()));
+        assert_eq!(read_top_value(cfg, "schema_version"), Some("1".into()));
+        // The legacy [config]-wrapped shape answers too (Python's loader
+        // unwraps it) and WINS a dual-shape file, matching _unwrap_config_dict;
+        // any OTHER section stays a different address.
+        assert_eq!(
+            read_top_value("[config]\nstate_dir = \"/x\"\n", "state_dir"),
+            Some("/x".into())
+        );
+        assert_eq!(
+            read_top_value(
+                "state_dir = \"/new\"\n[config]\nstate_dir = \"/old\"\n",
+                "state_dir"
+            ),
+            Some("/old".into())
+        );
+        assert_eq!(
+            read_top_value("[paths]\nstate_dir = \"/x\"\n", "state_dir"),
+            None
+        );
+        // Absent key, malformed body, non-scalar values: misses, never guesses.
+        assert_eq!(read_top_value(cfg, "plans_dir"), None);
+        assert_eq!(read_top_value("not toml {{{", "state_dir"), None);
+        assert_eq!(
+            read_top_value("state_dir = [\"a\", \"b\"]\n", "state_dir"),
+            None
+        );
+    }
 
     #[test]
     fn selector_is_worktree_basename() {

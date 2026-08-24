@@ -2558,21 +2558,392 @@ thread_local! {
 }
 
 /// The mux socket directory: `$FNO_MUX_DIR` when set (tests point this at a
-/// tempdir), else `~/.fno/mux`.
+/// tempdir), else `<state_dir>/mux` off the EXPLICIT config tier
+/// (`FNO_CONFIG` sole candidate, else the global config; the cwd-anchored
+/// project tier is deliberately absent - see `resolved_state_root`), else
+/// `~/.fno/mux`. `FNO_CONFIG` therefore isolates the mux with everything else
+/// (x-f02b): a demo config's state root gets its own socket dir, and a pinned
+/// config that cannot be parsed lands the dir beside the pinned file rather
+/// than reaching back to the real fleet's `~/.fno/mux`.
+///
+/// Resolved once per process (`MUX_DIR`): the daemon binds at startup and
+/// one-shot clients ask once.
 pub fn mux_dir() -> PathBuf {
     #[cfg(test)]
     return TEST_MUX_DIR.with(|dir| dir.0.clone());
     #[cfg(not(test))]
+    return MUX_DIR.get_or_init(mux_dir_uncached).clone();
+}
+
+#[cfg(not(test))]
+static MUX_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The uncached resolution behind [`mux_dir`].
+#[cfg(not(test))]
+fn mux_dir_uncached() -> PathBuf {
     if let Some(dir) = std::env::var_os("FNO_MUX_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(dir);
     }
-    #[cfg(not(test))]
-    let home = std::env::var_os("HOME")
+    resolved_state_root().join("mux")
+}
+
+/// The state root the mux (and its non-socket sidecars, via
+/// [`mux_sidecar_root`]) resolve under, latched once per process like
+/// [`MUX_DIR`]: `<state_dir>` off the EXPLICIT config tier (`FNO_CONFIG` sole
+/// candidate, else global; see `digest_overlay::config_explicit_top_str` for
+/// why the project tier is deliberately absent).
+///
+/// Fail closed on an explicit `FNO_CONFIG` that yielded no state_dir at all
+/// (yaml-pinned, unreadable, missing key): isolation was requested, so the
+/// root stays the pinned file's own directory - standard layouts keep the
+/// config inside the state dir. Falling back to `~/.fno` here is the exact
+/// leak x-f02b closes. Note Python's own loader defaults an absent state_dir
+/// to `~/.fno/`, so a pinned config with no key leaves the mux MORE isolated
+/// than the graph; that asymmetry is deliberate and the warning names it.
+#[cfg(not(test))]
+fn resolved_state_root() -> PathBuf {
+    static STATE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    STATE_ROOT
+        .get_or_init(|| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            match config_state_root() {
+                Some(StateRoot::Root(root)) => root,
+                // A found-but-declined value already said why, once; it lands
+                // on the same fallback as a miss without a second,
+                // contradictory message.
+                Some(StateRoot::Declined) => fallback_state_root(&cwd, false),
+                None => fallback_state_root(&cwd, true),
+            }
+        })
+        .clone()
+}
+
+/// The root for mux sidecars that are not sockets (`mux-view.json`): the same
+/// resolved state root, so a pinned `FNO_CONFIG` isolates them with the
+/// sockets. `FNO_MUX_DIR` relocates the sockets alone by design and does not
+/// move sidecars.
+#[cfg(not(test))]
+pub(crate) fn mux_sidecar_root() -> PathBuf {
+    resolved_state_root()
+}
+
+/// The fallback root: a pinned `FNO_CONFIG`'s own directory when one is set
+/// (anchored against cwd so a bare relative pin resolves to one dir per
+/// invocation site), else the pre-config-chain global root. `warn` names the
+/// pin once, for the miss case where nothing else has spoken.
+#[cfg(not(test))]
+fn fallback_state_root(cwd: &std::path::Path, warn: bool) -> PathBuf {
+    if let Some(explicit) = std::env::var_os("FNO_CONFIG").filter(|d| !d.is_empty()) {
+        let path = cwd.join(PathBuf::from(&explicit));
+        if warn {
+            warn_once_pinned_without_state_dir(&path);
+        }
+        return path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| cwd.to_path_buf());
+    }
+    legacy_state_root()
+}
+
+/// The pre-config-chain global state root, the ONE source for the resolver's
+/// final fallback, `mux doctor`'s stranding check, and the sidecar root, so
+/// they can never drift apart.
+#[cfg(not(test))]
+fn legacy_state_root() -> PathBuf {
+    std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    #[cfg(not(test))]
-    home.join(".fno").join("mux")
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".fno")
+}
+
+/// The pre-config-chain global mux dir (`<legacy_state_root>/mux`), what
+/// `mux doctor` compares against when it looks for stranded sessions.
+#[cfg(not(test))]
+pub(crate) fn legacy_mux_root() -> PathBuf {
+    legacy_state_root().join("mux")
+}
+
+/// The pre-state-root sidecar path (squads.json, mux-view.json): a SIBLING of
+/// the legacy mux dir. The view and squad stores share this spelling so their
+/// fallback locations cannot drift apart.
+#[cfg(not(test))]
+pub(crate) fn legacy_sidecar_path(file: &str) -> PathBuf {
+    legacy_mux_root().with_file_name(file)
+}
+
+/// The pre-state-root sidecar read behind the one gate (see
+/// [`legacy_fallback_allowed`]). NotFound when absent or deliberately
+/// overridden; every caller treats that as "no fallback".
+#[cfg(not(test))]
+pub(crate) fn legacy_sidecar(file: &str) -> std::io::Result<String> {
+    if !legacy_fallback_allowed() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "legacy fallback disabled",
+        ));
+    }
+    std::fs::read_to_string(legacy_sidecar_path(file))
+}
+
+/// What the explicit config tier said about `state_dir`.
+#[cfg(not(test))]
+enum StateRoot {
+    /// The state root, resolved and expanded.
+    Root(PathBuf),
+    /// A value was found but this mirror cannot use it (`{vault}` templates,
+    /// `$VAR` references, `~user` prefixes, or a RELATIVE path - see
+    /// [`expand_state_dir`] for why relative anchors are refused). Python
+    /// expands the first three and anchors the fourth; this mirror declines
+    /// rather than fork the fleet across cwds, and has already warned once.
+    Declined,
+}
+
+/// The state root from the explicit config tier. `None` means no candidate
+/// carried the key at all; [`StateRoot::Declined`] means one carried a value
+/// this mirror cannot use, and the caller must not re-report that as a
+/// missing key.
+#[cfg(not(test))]
+fn config_state_root() -> Option<StateRoot> {
+    let Some(raw) = crate::digest_overlay::config_explicit_top_str("state_dir") else {
+        warn_once_legacy_yaml_state_dir();
+        return None;
+    };
+    match expand_state_dir(&raw) {
+        Some(root) => Some(StateRoot::Root(root)),
+        None => {
+            warn_once_unexpandable_state_dir(&raw);
+            Some(StateRoot::Declined)
+        }
+    }
+}
+
+/// A state_dir visible only to Python (legacy global yaml) while the mux
+/// resolves the default root. The divergence has no clean resolution here
+/// (this crate is TOML-only by convention), so it warns like the other
+/// decline cases instead of splitting silently.
+#[cfg(not(test))]
+fn warn_once_legacy_yaml_state_dir() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        if let Some(yaml) = legacy_global_yaml_state_dir_hint() {
+            record_config_warning(
+                format!(
+                    "fno: the global {} mentions a state_dir this mux cannot read \
+                     (TOML-only); every Python surface follows it while the mux \
+                     stays on the default root.",
+                    yaml.display()
+                ),
+                "move state_dir into the global config.toml, or unset it in the yaml".into(),
+            );
+        }
+    });
+}
+
+/// Expand a leading `~` for an otherwise-absolute value. `None` when the
+/// value is empty or RELATIVE: Python's own cross-project surfaces
+/// (`paths.ledger_json`, `operator_lane`) follow `state_dir` only when it is
+/// an absolute anchor, because a cwd-anchored root would fork shared
+/// per-machine state into whichever checkout a process started in - and the
+/// mux is the most cross-project surface there is. Also `None` for
+/// `{template}` variables and `$VAR` references (Python's expandvars pass
+/// runs first there; this mirror expands neither) and `~user` forms (Python
+/// resolves them through the passwd database; `$HOME/user` would be a
+/// different root).
+fn expand_state_dir(raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('{') || raw.contains('$') {
+        return None;
+    }
+    if let Some(rest) = raw.strip_prefix('~') {
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return None;
+        }
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+        // ALL leading slashes, not one: a sloppy "~//x" must join under HOME,
+        // and PathBuf::push of a still-absolute rest would REPLACE the home
+        // buffer outright (std semantics), landing the mux on /x.
+        let rest = rest.trim_start_matches('/');
+        let mut p = PathBuf::from(home);
+        if !rest.is_empty() {
+            p.push(rest);
+        }
+        return Some(p);
+    }
+    let path = PathBuf::from(raw);
+    path.is_absolute().then_some(path)
+}
+
+/// A pinned `$FNO_CONFIG` that yielded no usable state_dir (a yaml-pinned
+/// path Python parses by suffix but this reader cannot, an unreadable file,
+/// or a valid TOML with no top-level state_dir). The socket dir has already
+/// fallen back beside the file; say so once instead of diverging in silence
+/// (same shape as `fno_agents::agents_config::warn_once_if_yaml`).
+#[cfg(not(test))]
+fn warn_once_pinned_without_state_dir(path: &std::path::Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        let yaml = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("yaml" | "yml")
+        );
+        let why = if yaml {
+            "which the mux reads as TOML and cannot parse"
+        } else {
+            "which carries no usable top-level state_dir"
+        };
+        record_config_warning(
+            format!(
+                "fno: $FNO_CONFIG points at {}, {why}; the mux dir lands beside that \
+                 file instead of your state root.",
+                path.display()
+            ),
+            "point $FNO_CONFIG at a config.toml with a usable state_dir".into(),
+        );
+    });
+}
+
+/// A configured state_dir this mirror cannot expand was DECLINED, so the mux
+/// root falls back (beside a pinned config, or to the global default) while
+/// every Python surface expands it and moves elsewhere. Say so once instead
+/// of leaving the split silent.
+#[cfg(not(test))]
+fn warn_once_unexpandable_state_dir(raw: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        record_config_warning(
+            format!(
+                "fno: config state_dir {raw:?} is not a value the mux can follow (it \
+                 must be an absolute or ~ path, free of template variables, $VAR \
+                 references, and ~user forms); the mux dir falls back instead of \
+                 following it."
+            ),
+            "set state_dir to an absolute or ~ path".into(),
+        );
+    });
+}
+
+/// The legacy global settings.yaml sibling, when it exists and names a
+/// state_dir VALUE that diverges from the root this resolver would use.
+/// Python keeps BOTH global files as read candidates (`_prefer_toml`:
+/// config.toml wins per key, the yaml still loads), so a state_dir that
+/// lives only in the yaml moves every Python surface while this reader -
+/// and the mux - stay on the default root. A yaml whose value AGREES (the
+/// explicit pre-migration spelling of the default root) is not a
+/// divergence and never warns.
+#[cfg(not(test))]
+pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> {
+    if non_empty_env_is_set("FNO_CONFIG") {
+        return None;
+    }
+    let yaml = crate::digest_overlay::global_settings_yaml_sibling()?;
+    let body = std::fs::read_to_string(&yaml).ok()?;
+    // The top-level VALUE, not a substring: a trailing `# comment` is not
+    // part of the value yaml hands Python, and a nested mapping's key is not
+    // the global one. The one nested shape that IS canonical is the legacy
+    // `config:` wrapper Python unwraps, so a state_dir directly under a
+    // top-level `config:` key counts. Any other misread would warn on every
+    // verb forever over no divergence.
+    let mut under_config = false;
+    let value = body.lines().find_map(|l| {
+        let indented = l.starts_with(|c| c == ' ' || c == '\t');
+        let (key, val) = l.split_once(':')?;
+        let key = key.trim();
+        if !indented {
+            if key.eq_ignore_ascii_case("config") {
+                // The flow spelling `config: {state_dir: /x}` carries the
+                // wrapped key inline; Python unwraps it like the block form.
+                if let Some(inner) = extract_flow_state_dir(val) {
+                    return Some(inner);
+                }
+                under_config = val.trim().is_empty();
+                return None;
+            }
+            return key.eq_ignore_ascii_case("state_dir").then_some(val);
+        }
+        (under_config && key.eq_ignore_ascii_case("state_dir")).then_some(val)
+    })?;
+    let value = value
+        .split(" #")
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"');
+    if value.is_empty() {
+        return None;
+    }
+    match expand_state_dir(value) {
+        // Agreement with the root this resolver would use anyway.
+        Some(root) => (root != legacy_state_root()).then_some(yaml),
+        None => {
+            // A `$HOME`/`${HOME}` spelling is unexpandable by this mirror
+            // but Python's expandvars resolves it; compare it rather than
+            // warn when it names the same root. Any other unexpandable
+            // value (relative, template) leaves the warning standing:
+            // Python still follows it somewhere this mirror cannot look.
+            let rest = value
+                .strip_prefix("${HOME}")
+                .or_else(|| value.strip_prefix("$HOME"));
+            match (rest, std::env::var_os("HOME").map(PathBuf::from)) {
+                (Some(rest), Some(home)) => {
+                    let joined = home.join(rest.trim_start_matches('/'));
+                    (joined != legacy_state_root()).then_some(yaml)
+                }
+                _ => Some(yaml),
+            }
+        }
+    }
+}
+
+/// The `state_dir` value inside a flow mapping value (`{state_dir: /x}`),
+/// raw and untrimmed: the caller applies the same comment-strip and quote
+/// handling as the block form. None when the braces carry no such key.
+#[cfg(not(test))]
+fn extract_flow_state_dir(flow: &str) -> Option<&str> {
+    let inner = flow.trim().strip_prefix('{')?.strip_suffix('}')?;
+    inner.split(',').find_map(|pair| {
+        let (k, v) = pair.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case("state_dir")
+            .then(|| v.trim())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+fn non_empty_env_is_set(key: &str) -> bool {
+    crate::digest_overlay::non_empty_env_os(key).is_some()
+}
+
+/// Whether a legacy-location read fallback is allowed at all: only under
+/// fully AMBIENT state resolution, where no explicit override names where
+/// state lives. A pinned `FNO_CONFIG` (isolation requested) or a set
+/// `FNO_AGENTS_HOME` (an explicit agents-state override) both mean the
+/// operator pointed state elsewhere on purpose, so no fallback may reach the
+/// real root. This is the ONE spelling of the gate - hand-rolled variants in
+/// three files once drifted apart (head-review round eight), and one flipped
+/// gate would leak the operator's real prefs into an isolated env.
+pub fn legacy_fallback_allowed() -> bool {
+    !non_empty_env_is_set("FNO_CONFIG") && !non_empty_env_is_set("FNO_AGENTS_HOME")
+}
+
+/// The one config-resolution warning this process recorded, if any: a pinned
+/// `FNO_CONFIG` with no usable state_dir, a state_dir value this mirror had
+/// to decline, or a state_dir that lives only where this reader cannot look.
+/// Carries its own remedy so `mux doctor` never names the wrong fix. Emitted
+/// to stderr by the non-TUI verbs (`mux ls`) and as a `mux doctor` row; the
+/// TUI client appends it to its client log instead. proto itself never
+/// writes stderr: resolution runs before the client enters the alternate
+/// screen, and any pre-TUI stderr byte lands in the PTY the harness reads
+/// (client.rs, x-0296's NEVER-stderr rule).
+static CONFIG_WARNING: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+fn record_config_warning(msg: String, remedy: String) {
+    let _ = CONFIG_WARNING.set((msg, remedy));
+}
+
+pub fn pending_config_warning() -> Option<(&'static str, &'static str)> {
+    CONFIG_WARNING.get().map(|(m, r)| (m.as_str(), r.as_str()))
 }
 
 /// Create `dir` (and parents) born 0700, then force 0700 on a pre-existing
@@ -4132,6 +4503,42 @@ mod tests {
         assert!(socket_path("../evil").is_err());
         assert!(socket_path("").is_err());
         assert!(socket_path("ok-name_1").is_ok());
+    }
+
+    #[test]
+    fn state_dir_values_expand_absolute_only() {
+        assert_eq!(
+            expand_state_dir("/demo/state"),
+            Some(PathBuf::from("/demo/state"))
+        );
+        assert_eq!(
+            expand_state_dir("  /demo/state  "),
+            Some(PathBuf::from("/demo/state"))
+        );
+        // `~` expands against HOME like Python's expanduser; trailing slashes
+        // and a bare `~` both land on HOME itself.
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(home) = home {
+            assert_eq!(expand_state_dir("~/.fno/"), Some(home.join(".fno")));
+            assert_eq!(expand_state_dir("~"), Some(home.clone()));
+            // A sloppy double slash joins under HOME; push() of an absolute
+            // rest would otherwise REPLACE the home buffer.
+            assert_eq!(expand_state_dir("~//fno-demo"), Some(home.join("fno-demo")));
+        }
+        // Relative values decline, matching Python's own cross-project
+        // surfaces (ledger, operator lane): a cwd-anchored root would fork
+        // the shared fleet into whichever checkout a process started in.
+        assert_eq!(expand_state_dir("rel/state"), None);
+        assert_eq!(expand_state_dir("state"), None);
+        // Template variables, $VAR references, and ~user forms decline too
+        // (Python resolves ~user through the passwd database, not
+        // $HOME/user).
+        assert_eq!(expand_state_dir("{vault}/.fno"), None);
+        assert_eq!(expand_state_dir("$HOME/demo"), None);
+        assert_eq!(expand_state_dir("${HOME}/demo"), None);
+        assert_eq!(expand_state_dir("~demo/.fno"), None);
+        assert_eq!(expand_state_dir(""), None);
+        assert_eq!(expand_state_dir("   "), None);
     }
 
     /// A peer that dribbles progress must NOT be able to extend the bound.

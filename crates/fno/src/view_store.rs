@@ -137,8 +137,12 @@ pub(crate) fn clear_test_path() {
     TEST_PATH.with(|c| *c.borrow_mut() = None);
 }
 
-/// A sibling of the squad store: under `FNO_AGENTS_HOME`, else
-/// `$HOME/.fno/mux-view.json`.
+/// A sibling of the squad store: under `FNO_AGENTS_HOME`, else the mux's
+/// resolved state root (so a pinned `FNO_CONFIG` isolates the view prefs with
+/// the sockets; `FNO_MUX_DIR` relocates sockets alone and does not move this
+/// file). The test arm keeps the plain `$HOME` fallback: a test that reaches
+/// it sets either `TEST_PATH` or `FNO_AGENTS_HOME` and never wanted config
+/// resolution in the first place.
 pub fn view_path() -> PathBuf {
     #[cfg(test)]
     if let Some(p) = TEST_PATH.with(|c| c.borrow().clone()) {
@@ -147,10 +151,15 @@ pub fn view_path() -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_AGENTS_HOME") {
         return PathBuf::from(v).join("mux-view.json");
     }
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(".fno").join("mux-view.json")
+    #[cfg(not(test))]
+    return crate::proto::mux_sidecar_root().join("mux-view.json");
+    #[cfg(test)]
+    {
+        let base = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        base.join(".fno").join("mux-view.json")
+    }
 }
 
 /// `sections` rather than a bare map so a later view preference (x-b186's
@@ -358,10 +367,29 @@ impl<'de> Deserialize<'de> for AgentSort {
 }
 
 /// The raw file, entries untyped. Missing, empty, or corrupt all read as a
-/// fresh store - never a refusal to start.
+/// fresh store - never a refusal to start. A MISSING (NotFound only) file
+/// falls back to the pre-state-root location once per read (no copy), but
+/// ONLY under fully ambient state resolution: the fallback exists for an
+/// upgrading user whose prefs sit at the old spot, and a pinned demo env
+/// must inherit nothing from the operator's real root. The gate and the
+/// location are `proto::legacy_sidecar`, the one spelling the squad store
+/// shares. Any other read error stays an error-shaped miss (defaults): an
+/// unreadable primary must never seed the next mutate with legacy content,
+/// which would overwrite the file's own prefs.
 fn read_raw() -> StoreFile {
-    std::fs::read_to_string(view_path())
-        .ok()
+    let path = view_path();
+    let raw = std::fs::read_to_string(&path).or_else(|e| {
+        #[cfg(not(test))]
+        {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return std::io::Result::Err(e);
+            }
+            crate::proto::legacy_sidecar("mux-view.json")
+        }
+        #[cfg(test)]
+        std::io::Result::Err(e)
+    });
+    raw.ok()
         .and_then(|raw| serde_json::from_str::<StoreFile>(&raw).ok())
         .unwrap_or_default()
 }

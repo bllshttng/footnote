@@ -344,6 +344,8 @@ pub fn ls(json: bool) -> i32 {
             return EXIT_ERROR;
         }
     };
+    // Any config warning recorded during resolution reaches stderr via
+    // main.rs's exit_mux wrapper, which covers every non-TUI mux verb.
     if json {
         // Stable per-row envelope: `state` is always present; live rows carry
         // the counts. An empty listing is `[]` (never the "no sessions" prose).
@@ -1477,6 +1479,19 @@ fn gather_checks() -> Vec<Check> {
             remedy: Some("fix the mux dir permissions".into()),
         }),
     }
+    #[cfg(not(test))]
+    checks.push(legacy_mux_root_check());
+    #[cfg(not(test))]
+    checks.push(legacy_squads_newer_check());
+    #[cfg(not(test))]
+    if let Some((detail, remedy)) = proto::pending_config_warning() {
+        checks.push(Check {
+            name: "config".into(),
+            verdict: Verdict::Warn,
+            detail: detail.to_string(),
+            remedy: Some(remedy.to_string()),
+        });
+    }
     checks.push(terminal_check(&std::env::var("TERM").unwrap_or_default()));
     checks.push(truecolor_check(
         &std::env::var("COLORTERM").unwrap_or_default(),
@@ -1485,6 +1500,138 @@ fn gather_checks() -> Vec<Check> {
     checks.push(squad_store_check());
     checks.push(board_scope_check());
     checks
+}
+
+/// Sessions stranded at the pre-config-chain root `~/.fno/mux` when this
+/// process resolves its socket dir elsewhere through the ambient chain
+/// (`config.state_dir`). A daemon bound before an upgrade - or started from a
+/// directory with no state_dir override while clients run inside one that has
+/// it - keeps serving a dir no current client lands on, and every reaper
+/// (`ls`-based) resolves the new root, so nothing finds it to reap. Visible
+/// ONLY here, which is why it is a `warn` with the one command that reaches
+/// the old root.
+#[cfg(not(test))]
+fn legacy_mux_root_check() -> Check {
+    // An explicit FNO_MUX_DIR relocates the sockets ON PURPOSE (the documented
+    // test seam, scratch dirs, operator partitions), and a pinned FNO_CONFIG
+    // is the same deliberate relocation from the other side: an isolated demo
+    // env running doctor. Sessions at the global root are then live for every
+    // normal client, and "restart them under the resolved root" would direct
+    // an operator to kill a healthy fleet - into a tempdir, or out of the
+    // real machine's mux. The check is about UPGRADE divergence only.
+    if std::env::var_os("FNO_MUX_DIR").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty())
+    {
+        return Check {
+            name: "legacy mux root".into(),
+            verdict: Verdict::Na,
+            detail: "FNO_MUX_DIR or a pinned FNO_CONFIG relocates the sockets on purpose".into(),
+            remedy: None,
+        };
+    }
+    // The same helper the resolver's own fallback uses, so this comparison
+    // can never drift from what mux_dir actually falls back to. Canonical
+    // forms catch a state_dir that aliases the legacy root through a
+    // symlink or a `..` segment - lexically distinct, physically the same
+    // dir, and warning there would direct an operator to kill a fleet that
+    // never moved.
+    let legacy = proto::legacy_mux_root();
+    let resolved = proto::mux_dir();
+    let same_root = match (
+        std::fs::canonicalize(&resolved),
+        std::fs::canonicalize(&legacy),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => resolved == legacy,
+    };
+    if same_root {
+        return Check {
+            name: "legacy mux root".into(),
+            verdict: Verdict::Na,
+            detail: "resolved dir is the legacy root".into(),
+            remedy: None,
+        };
+    }
+    let socks = std::fs::read_dir(&legacy)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "sock"))
+                .count()
+        })
+        .unwrap_or(0);
+    if socks == 0 {
+        return Check {
+            name: "legacy mux root".into(),
+            verdict: Verdict::Na,
+            detail: "no sessions at the legacy root".into(),
+            remedy: None,
+        };
+    }
+    Check {
+        name: "legacy mux root".into(),
+        verdict: Verdict::Warn,
+        detail: format!(
+            "{socks} session socket(s) sit at the pre-config-chain root {} this \
+             process no longer resolves",
+            legacy.display()
+        ),
+        remedy: Some(format!(
+            "FNO_MUX_DIR='{}' fno mux ls; kill-server or restart them under the \
+             resolved root",
+            legacy.display()
+        )),
+    }
+}
+
+/// The migration-overlap window: a pre-upgrade daemon still bound to the
+/// legacy root keeps writing the legacy squads.json AFTER this process
+/// seeded the state-root copy, and the read path stops seeing the legacy
+/// file the moment the primary exists (the fallback is NotFound-only).
+/// Merging the two stores is reconciliation work beyond a check, but the
+/// DIVERGENCE is visible: warn when the legacy file is newer than the copy
+/// it seeded, which is exactly the old server's signature.
+#[cfg(not(test))]
+fn legacy_squads_newer_check() -> Check {
+    if !proto::legacy_fallback_allowed() {
+        return Check {
+            name: "legacy squads store".into(),
+            verdict: Verdict::Na,
+            detail: "an explicit override isolates the store on purpose".into(),
+            remedy: None,
+        };
+    }
+    let primary = crate::squad_store::squads_path();
+    let legacy = proto::legacy_sidecar_path("squads.json");
+    let newer = match (std::fs::metadata(&primary), std::fs::metadata(&legacy)) {
+        (Ok(p), Ok(l)) => match (p.modified(), l.modified()) {
+            (Ok(pm), Ok(lm)) => lm > pm,
+            _ => false,
+        },
+        _ => false,
+    };
+    if !newer {
+        return Check {
+            name: "legacy squads store".into(),
+            verdict: Verdict::Na,
+            detail: "no legacy copy is outrunning the resolved store".into(),
+            remedy: None,
+        };
+    }
+    Check {
+        name: "legacy squads store".into(),
+        verdict: Verdict::Warn,
+        detail: format!(
+            "the legacy {} is newer than the resolved {}; a pre-upgrade \
+             server may still be writing it",
+            legacy.display(),
+            primary.display()
+        ),
+        remedy: Some(
+            "restart the old mux server under the resolved root, then run \
+             `fno mux workspace prune` once"
+                .into(),
+        ),
+    }
 }
 
 /// What the backlog board would be scoped to (x-20f1).
