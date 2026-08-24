@@ -57,6 +57,10 @@ def test_masking_holds_for_the_budget():
     assert style.word_count("```\n" + "\n".join(str(i) for i in range(200)) + "\n```") == 0
 
 
+def test_identifier_masking_preserves_snake_case():
+    assert style._mask_inline("foo_bar foo_bar_baz") == "x x"
+
+
 # --- AC2-HP: the rolling pair budget blocks a burst ------------------------
 
 def test_burst_of_three_79_word_sends_is_refused():
