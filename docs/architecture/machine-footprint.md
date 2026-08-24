@@ -1,19 +1,21 @@
 # Machine footprint
 
-`fno doctor footprint` is the read-only instrument for the fleet's own machine cost. It measures two closure numbers.
+`fno doctor footprint` is the read-only instrument for the fleet's total machine cost. It measures direct fno control-plane work plus the transitive descendants those workers launched.
 
-Sustained `fno` CPU must stay at or below one core. `fno` process count must stay at or below live roster rows plus one daemon. Resident memory is reported for context. It is not part of the closure criterion.
+The closure criterion is `fleet_cpu_cores` at or below one core and `process_count` at or below live roster rows plus one daemon. Resident memory is reported for context. It is not part of the closure criterion.
 
-The CPU number is `sustained_cpu_cores`. It comes from `ps -Ao pid,etime,%cpu,rss,command` after rows are split by elapsed time.
+The verb reads one file-backed `ps -Ao pid,ppid,etime,%cpu,rss,command` snapshot. It resolves each row's parent chain with a cycle-safe, memoized walk. A directly attributable row is a process whose executable is `fno`, `fno-py`, `fno-agents`, `fno-agents-daemon` or `fno-agents-worker`, including Python-launched `fno-py`. Every transitive descendant inherits attribution, so shells, `cargo`, `rustc`, `pytest` and future workload commands land in the fleet total. An unrelated tree with byte-identical commands remains outside the fleet.
 
-A process with `etime` below `SUSTAINED_FLOOR_SECONDS` (default 30 seconds) contributes to `transient_call_count` and `process_count`, but not sustained CPU. This prevents one-shot Python CLI startup cost from appearing as daemon load.
+The direct bucket is `sustained_cpu_cores`. A directly attributable process with `etime` below `SUSTAINED_FLOOR_SECONDS` (default 30 seconds) contributes to `transient_call_count` and `process_count`, but not direct sustained CPU. The descendant bucket is `descendant_cpu_cores` and counts descendant CPU immediately, including short-lived build and test processes. `fleet_cpu_cores` is the sum of direct sustained and descendant CPU. `descendant_process_count` identifies how much of the process count came from launched work.
 
-Rows whose command starts with the `fno`, `fno-py`, `fno-agents`, `fno-agents-daemon` or `fno-agents-worker` executable are attributable to fleet overhead. Python-launched `fno-py` rows are also attributable. `claude` worker processes are the work the fleet runs, not the fleet's own control-plane cost, so they are excluded.
+The observer process and its complete descendant subtree are excluded from CPU, process, RSS and top-consumer totals. Missing parents and ancestry cycles terminate safely without attributing a row unless the chain reaches a valid fno root. Each PID is counted at most once.
 
-The verb runs `ps` once with stdout redirected to a temporary file, then reads that file. It reads live roster rows from `fno agents list --status live --json` and adds one daemon allowance. It never uses load average and never counts through a `ps | wc` or `ps | grep` pipeline. `--json` emits the same thresholds and measurements for automation.
+`--json` emits `sustained_cpu_cores`, `descendant_cpu_cores`, `fleet_cpu_cores`, `descendant_process_count`, `process_count`, `rss_gb`, `cpu_capacity_cores`, `fleet_percent_capacity` and `fleet_percent_measured_cpu` with the thresholds and exit code. `fleet_percent_capacity` is fleet cores divided by logical CPU capacity. `fleet_percent_measured_cpu` is fleet CPU divided by total CPU in the non-observer rows of the snapshot.
 
-Exit codes are intentionally separate. `0` means both closure numbers are within threshold. `3` means at least one number is over budget. `4` means the instrument failed to read required data, including an unavailable roster or unparsed `ps` rows. A transient CLI burst does not produce exit 3 by itself.
+The hidden `--cause-only --json` mode performs only the `ps` read and emits the CPU fields without reading the live roster. It is used by spawn-gate diagnosis, not by the standard closure verdict.
 
-Load average is refused because it did not describe this machine's contention. On 2026-08-22, `uptime` reported load averages of 206.45 / 219.30 / 182.03 on a 12-core machine. A full `ps` snapshot showed 30 runnable processes out of 1280. It showed 672 percent CPU out of 1200 available, or about 56 percent utilization. The instrument measures fleet-attributable rows instead of converting that system signal into a footprint claim.
+Exit codes are intentionally separate. `0` means the standard closure numbers are within threshold, or that cause-only measurement succeeded. `3` means a standard CPU or process threshold is over budget. `4` means required input cannot be read, including an unavailable roster, malformed `ps` rows or incomplete cause evidence. A transient direct CLI burst does not produce exit 3 by itself.
+
+Load average remains the spawn admission signal. Footprint does not replace it because a point-in-time CPU snapshot cannot answer whether runnable work is queued. When load crosses the configured ceiling, both spawn gates retain exit 79. When cause evidence is available, they append bounded footprint cause evidence. The evidence distinguishes a fleet-heavy refusal from a refusal caused by other machine processes. Missing, timed-out or malformed evidence prints `spawn-gate: footprint cause unavailable; load refusal unchanged` and never changes admission.
 
 This is a human-, CI- or king-invoked reading, not a daemon or poller. A watcher adds the cost being measured.
