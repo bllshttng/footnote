@@ -2592,7 +2592,10 @@ fn expand_state_dir(raw: &str) -> Option<PathBuf> {
             return None;
         }
         let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
-        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        // ALL leading slashes, not one: a sloppy "~//x" must join under HOME,
+        // and PathBuf::push of a still-absolute rest would REPLACE the home
+        // buffer outright (std semantics), landing the mux on /x.
+        let rest = rest.trim_start_matches('/');
         let mut p = PathBuf::from(home);
         if !rest.is_empty() {
             p.push(rest);
@@ -2621,12 +2624,12 @@ fn warn_once_pinned_without_state_dir(path: &std::path::Path) {
         } else {
             "which carries no usable top-level state_dir"
         };
-        eprintln!(
+        record_config_warning(format!(
             "fno: $FNO_CONFIG points at {}, {why}; the mux dir lands beside that \
              file instead of your state root. Point it at a config.toml with a \
              state_dir key.",
             path.display()
-        );
+        ));
     });
 }
 
@@ -2638,13 +2641,30 @@ fn warn_once_pinned_without_state_dir(path: &std::path::Path) {
 fn warn_once_unexpandable_state_dir(raw: &str) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
-        eprintln!(
+        record_config_warning(format!(
             "fno: config state_dir {raw:?} is not a value the mux can follow (it \
              must be an absolute or ~ path, free of template variables, $VAR \
              references, and ~user forms); the mux dir falls back instead of \
              following it."
-        );
+        ));
     });
+}
+
+/// The one config-resolution warning this process recorded, if any: a pinned
+/// `FNO_CONFIG` with no usable state_dir, or a state_dir value this mirror
+/// had to decline. Emitted to stderr by the non-TUI verbs (`mux ls`) and as a
+/// `mux doctor` row; the TUI client appends it to its client log instead.
+/// proto itself never writes stderr: resolution runs before the client enters
+/// the alternate screen, and any pre-TUI stderr byte lands in the PTY the
+/// harness reads (client.rs, x-0296's NEVER-stderr rule).
+static CONFIG_WARNING: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn record_config_warning(msg: String) {
+    let _ = CONFIG_WARNING.set(msg);
+}
+
+pub(crate) fn pending_config_warning() -> Option<&'static str> {
+    CONFIG_WARNING.get().map(|s| s.as_str())
 }
 
 /// Create `dir` (and parents) born 0700, then force 0700 on a pre-existing
@@ -3933,7 +3953,10 @@ mod tests {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         if let Some(home) = home {
             assert_eq!(expand_state_dir("~/.fno/"), Some(home.join(".fno")));
-            assert_eq!(expand_state_dir("~"), Some(home));
+            assert_eq!(expand_state_dir("~"), Some(home.clone()));
+            // A sloppy double slash joins under HOME; push() of an absolute
+            // rest would otherwise REPLACE the home buffer.
+            assert_eq!(expand_state_dir("~//fno-demo"), Some(home.join("fno-demo")));
         }
         // Relative values decline, matching Python's own cross-project
         // surfaces (ledger, operator lane): a cwd-anchored root would fork

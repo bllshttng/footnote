@@ -326,6 +326,22 @@ fn run_inner(session: &str) -> Result<i32, String> {
     let path = proto::socket_path(session)?;
     let stream = connect_or_spawn(&path)?;
 
+    // A config warning recorded during resolution rides the client log, never
+    // stderr: we are still pre-alternate-screen here, and any stderr byte
+    // lands in the PTY the harness (and a human) is about to read as the TUI
+    // (the x-0296 NEVER-stderr rule).
+    if let Some(w) = proto::pending_config_warning() {
+        let log = proto::mux_dir().join(format!("client-{}.log", std::process::id()));
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{w}");
+        }
+    }
+
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
     runtime.block_on(attach_and_run(stream, &path))
 }

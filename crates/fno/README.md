@@ -9,7 +9,8 @@ Python CLI.
 Run `fno` bare on a TTY and you get an interactive `$SHELL` in a persistent
 session: a background server owns the PTY and its emulated screen, and the
 client you are looking at is a thin compositor attached over a Unix socket at
-`~/.fno/mux/<session>.sock` (dir `0700`). Quit the client (`Ctrl-\`), close
+`<mux dir>/<session>.sock` (`~/.fno/mux` by default; `<state_dir>/mux` when
+config resolves one - dir `0700`). Quit the client (`Ctrl-\`), close
 the terminal, or `kill -9` it - the shell keeps running, and the next `fno`
 reattaches to the exact same screen (alt-screen programs included).
 

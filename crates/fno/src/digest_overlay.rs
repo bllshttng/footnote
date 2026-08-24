@@ -460,10 +460,17 @@ pub(crate) fn config_explicit_top_str(key: &str) -> Option<String> {
     if let Some(explicit) = non_empty_env_os("FNO_CONFIG") {
         return read_top_file(&PathBuf::from(explicit), key);
     }
-    let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
+    global_config_toml().and_then(|g| read_top_file(&g, key))
+}
+
+/// The per-user global config.toml: the config.toml SIBLING of
+/// `$FNO_GLOBAL_SETTINGS_PATH` when set, else `$HOME/.fno/config.toml`. One
+/// source for both the explicit tier and the section ladder's last rung, so
+/// the two can never resolve different global files.
+fn global_config_toml() -> Option<PathBuf> {
+    non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
         .map(|p| PathBuf::from(p).with_file_name("config.toml"))
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")));
-    global.and_then(|g| read_top_file(&g, key))
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")))
 }
 
 /// The file ladder shared by the section reader: `$FNO_CONFIG` (sole candidate,
@@ -480,10 +487,7 @@ fn resolve_config_key(cwd: &Path, from_file: &dyn Fn(&Path) -> Option<String>) -
             return Some(v);
         }
     }
-    let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
-        .map(|p| PathBuf::from(p).with_file_name("config.toml"))
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")));
-    global.and_then(|g| from_file(&g))
+    global_config_toml().and_then(|g| from_file(&g))
 }
 
 /// `std::env::var_os` but an empty value reads as unset, the OsString twin of
