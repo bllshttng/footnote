@@ -5711,6 +5711,75 @@ def cmd_session_add(
         typer.echo(f"{state} {phase} {eff_harness}:{eff_session} on {node_id}")
 
 
+@session_app.command("close")
+def cmd_session_close(
+    node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
+    summary: str = typer.Option(..., "--summary", help="Completion summary for the blueprint."),
+    launch: str = typer.Option(..., "--launch", help="Exact launch command for the next phase."),
+    harness: Optional[str] = typer.Option(None, "--harness"),
+    session_id: Optional[str] = typer.Option(None, "--session-id"),
+    started_at: Optional[str] = typer.Option(None, "--started-at"),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the completion receipt as JSON."),
+) -> None:
+    """Close the blueprint phase with one identity-guarded completion receipt.
+
+    The close writes the blueprint lifecycle row with an honest end, then emits
+    the summary and exact launch line. Missing identity is a hard refusal: the
+    close cannot claim completion while leaving provenance unresolved.
+    """
+    from datetime import datetime, timezone
+
+    from fno.claims.self_identity import resolve_self_identity
+    from fno.graph.fuzzy import resolve_node
+    from fno.graph.store import append_session_record, read_graph
+
+    summary = summary.strip()
+    launch = launch.strip()
+    if not summary or not launch:
+        typer.echo("session close: summary and launch must be non-empty.", err=True)
+        raise typer.Exit(code=2)
+    ident = resolve_self_identity()
+    eff_harness = (harness or ident.harness or "").strip()
+    eff_session = (session_id or ident.session_id or "").strip()
+    if not eff_harness or not eff_session:
+        typer.echo(
+            f"session close: no ambient identity for {node}; "
+            "pass --harness/--session-id or run inside a session.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    match = resolve_node(node, read_graph(_graph_path()))
+    if match.kind != "exact":
+        typer.echo(f"session close: no exact node matches {node!r}.", err=True)
+        raise typer.Exit(code=2)
+    node_id = match.candidates[0]["id"]
+    ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    found, added = append_session_record(
+        _graph_path(), node_id, phase="blueprint", harness=eff_harness,
+        session_id=eff_session, ended_at=ended_at, started_at=started_at,
+    )
+    if not found:
+        typer.echo(f"session close: node {node_id} disappeared before close.", err=True)
+        raise typer.Exit(code=2)
+    receipt = {
+        "node_id": node_id,
+        "status": "closed",
+        "phase": "blueprint",
+        "harness": eff_harness,
+        "session_id": eff_session,
+        "summary": summary,
+        "launch": launch,
+        "ended_at": ended_at,
+        "added": added,
+    }
+    if json_out:
+        typer.echo(json.dumps(receipt))
+    else:
+        typer.echo(f"blueprint closed {node_id} ({eff_harness}:{eff_session})")
+        typer.echo(f"summary: {summary}")
+        typer.echo(f"launch: {launch}")
+
+
 @session_app.command("reap-open")
 def cmd_session_reap_open(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
@@ -12656,7 +12725,7 @@ _TRACKER_OWNED_VERBS = frozenset({
     "dispatch-lanes",
     # footnote-owned DATA with a graph-resident write path (refused until the
     # write moves to the sidecar seam)
-    "cost", "session add", "session reap-open", "decide", "decisions",
+    "cost", "session add", "session close", "session reap-open", "decide", "decisions",
     "decide-reindex",
     # sub-app mutations
     "triage apply", "capture promote",
