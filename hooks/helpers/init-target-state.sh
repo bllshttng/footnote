@@ -1381,7 +1381,9 @@ PYEOF
   fi
 
   if [[ -n "$_NODE_ID" && -z "$claim_owner_id" ]]; then
-    touch "$STATE_DIR/.target-cancelled"
+    # Not the user-cancel sentinel: an identity refusal is not a user cancel,
+    # and under worktree.policy=never the shared .fno would cancel a
+    # concurrently live in-place session for another node.
     echo "target_claim_blocked_reason: holder_unattributable" >> "$STATE_FILE"
     echo "target: REFUSED: node $_NODE_ID has no proven harness session; final worker claim was not written" >&2
   fi

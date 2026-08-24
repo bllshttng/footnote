@@ -2712,11 +2712,18 @@ def _reacquire_node_claim(
             "written.",
             err=True,
         )
-        marker = wt_path / ".fno" / ".target-cancelled"
-        try:
-            marker.touch()
-        except OSError:
-            pass
+        # Not the user-cancel sentinel: an identity refusal is not a user
+        # cancel, and under worktree.policy=never the shared .fno would
+        # cancel a concurrently live in-place session for another node. The
+        # blocked-reason line is the durable trace, same as the init hook,
+        # and only a predecessor's existing manifest carries it.
+        state_file = wt_path / ".fno" / "target-state.md"
+        if state_file.exists():
+            try:
+                with state_file.open("a") as fh:
+                    fh.write("target_claim_blocked_reason: holder_unattributable\n")
+            except OSError:
+                pass
         raise typer.Exit(code=1)
     try:
         pid = resolve_session_pid(from_pid=os.getpid())
@@ -3029,9 +3036,17 @@ def start(
         if _is_linked_worktree(wt_path):
             occupancy, occupancy_info = _classify_worktree_occupancy(wt_path)
             if occupancy != "available":
+                remedy = ""
+                if occupancy == "unknown":
+                    remedy = (
+                        " No automatic path re-marks this worktree available; "
+                        "a human must clear it (fno agents watchdog for the "
+                        "fleet sweep, fno workspace worktree cleanup for "
+                        "merged leftovers) and retry."
+                    )
                 typer.echo(
                     f"fno do target start: refusing takeover of {wt_path}: "
-                    f"{occupancy} {occupancy_info or {}}.",
+                    f"{occupancy} {occupancy_info or {}}.{remedy}",
                     err=True,
                 )
                 raise typer.Exit(code=1)
