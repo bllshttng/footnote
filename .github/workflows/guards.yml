@@ -1,6 +1,6 @@
 name: guards
 
-# Consolidates near-duplicate structural-guard workflows into two jobs, split
+# Consolidates near-duplicate structural-guard workflows into two trigger-shape groups,
 # by trigger shape rather than merged into one - a PR-only group and a push+PR
 # group - so no step
 # needs a runtime `if: event_name` guard and no PR-context env var (PR_BODY,
@@ -31,10 +31,10 @@ name: guards
 # Every guard step's name and command is verbatim from the workflow it
 # replaces (scripts/ci/check-workflow-manifest.sh's manifest names the
 # source). The one exception is Checkout/Python/uv: every folded source
-# needed some version of this same setup, so both jobs share it through
+# needed some version of this same setup, so all jobs share it through
 # `.github/actions/guards-setup` (Checkout itself stays a separate step in
 # each job - a local composite action can only be resolved after the repo
-# is already checked out) rather than the two jobs hand-copying it and
+# is already checked out) rather than the jobs hand-copying it and
 # drifting on a version, the way this file's own Checkout once did. A step
 # NOT here (stacked-base-guard.yml) was deliberately excluded from
 # consolidation despite being in the plan's candidate pool: it POSTs commit
@@ -67,6 +67,29 @@ permissions:
   contents: read
 
 jobs:
+  main-python-static:
+    name: Python static correctness (495 sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Python + uv
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/guards-setup
+
+      - name: Ruff + MyPy (repo-wide)
+        if: ${{ !cancelled() }}
+        working-directory: cli
+        run: |
+          set -euo pipefail
+          python_files="$(find src -type f -name '*.py' -print | wc -l | tr -d '[:space:]')"
+          test "$python_files" -gt 0
+          uv run ruff check --no-respect-gitignore src/
+          uv run mypy src/
+          echo "main-python-static: checked ${python_files} Python files with ruff + mypy"
+
   # PR-only: every member here originally triggered on `pull_request` alone
   # (no `push`), several because they read PR-only context (PR_BODY,
   # BASE_REF, PR_TITLE, PR_BASE_SHA/PR_HEAD_SHA) that does not exist on a push
