@@ -497,8 +497,19 @@ def _bounded_remediation(
 
     if auto_merge.require_checks_pass:
         try:
+            from fno.pr import _reviews as _reviews_mod
+            from fno.pr._status import without_coverage_statuses
+
+            # The SECOND merge path (a guard on one of N reachable paths is
+            # decorative): the do-merge path ignores the coverage projections
+            # it published itself, and the remediation merge must agree, or a
+            # pending diagnostic holds a covered PR here while bef2c16's fix
+            # lets the same PR through there. The ruleset still enforces the
+            # required context server-side.
             verdict, _counts, head_read = _merge_mod._checks_verdict(
-                int(pr_number), cwd
+                int(pr_number),
+                cwd,
+                ignore_contexts=tuple(_reviews_mod.COVERAGE_STATUS_CONTEXTS),
             )
         except ToolMissing:
             # _checks_verdict deliberately propagates it (the module contract
