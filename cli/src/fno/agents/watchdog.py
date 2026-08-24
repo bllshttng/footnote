@@ -282,12 +282,15 @@ _TAIL_RECORDS = 60
 #: as refused because the attach that followed it was chatty.
 _CONFIRM_RECORDS = 120
 
-#: The generated no-session holder form (target_cli._successor_claim_holder
-#: and init-target-state.sh's claim_owner_id): ``<UTC stamp>-<pid junk>-<hex>``.
-#: Such a holder is an operator/daemon context, not a fleet session, so it
-#: never justifies reaping a row as "held by another session". A claude UUID
-#: can never match: its first segment is 8 hex chars and this shape puts a
-#: literal ``T`` at position 9.
+#: The generated no-session holder form: ``<UTC stamp>-<pid junk>-<hex>``.
+#: LEGACY-ONLY MATCHES: the producers that used to mint it
+#: (target_cli._successor_claim_holder and init-target-state.sh's
+#: claim_owner_id) now derive a proven session id or refuse outright
+#: (holder_unattributable), so nothing new writes this shape. Rows written
+#: before that change still carry it, and such a holder is an operator/daemon
+#: context, not a fleet session, so it never justifies reaping a row as "held
+#: by another session". A claude UUID can never match: its first segment is 8
+#: hex chars and this shape puts a literal ``T`` at position 9.
 _GENERATED_HOLDER_RE = re.compile(r"^\d{8}T\d{6}Z-")
 
 #: The bare resume word (x-e21e): a bus-only row is woken with this and never
