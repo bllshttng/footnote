@@ -265,6 +265,20 @@ validate_event() {
         fi
     fi
 
+    if [[ "$type" == "failover_swapped" ]]; then
+        local failover_swapped_ok
+        failover_swapped_ok=$(jq -r '
+            (.source == "daemon")
+            and ((.data.short_id | type) == "string")
+            and ((.data.short_id | length) > 0)
+            and ((.data.redispatched | type) == "boolean")
+        ' <<<"$payload" 2>/dev/null || true)
+        if [[ "$failover_swapped_ok" != "true" ]]; then
+            _ev_warn "failover_swapped requires daemon source, non-empty short_id, and boolean redispatched"
+            return 1
+        fi
+    fi
+
     if [[ "$type" == "context_snapshot" ]]; then
         if [[ "$src" != "hook" && "$src" != "test" ]]; then
             _ev_warn "context_snapshot source must be hook or test"
