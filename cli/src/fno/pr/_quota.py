@@ -178,7 +178,7 @@ def _malformed_argv_refusal(first: str) -> str:
     failed (a king lost a merge-precondition read this way).
     """
     return (
-        f"graphql-exec passes everything after -- to gh as its full argv, "
+        "graphql-exec passes everything after -- to gh as its full argv, "
         f"command words first; an argv starting with '{first}' is flags with no "
         "command, which gh answers with its root command list. Route the "
         "refused call as: fno do pr graphql-exec --purpose discretionary -- "
