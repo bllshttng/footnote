@@ -146,6 +146,101 @@ def test_adoption_is_idempotent(_registry_home):
     assert len(load_registry()) == 1
 
 
+def test_direct_and_single_token_adoption_share_register_kwargs(
+    _registry_home, monkeypatch
+):
+    """AC3-HP: verified batch hits and token healing use one row writer."""
+    from fno.agents.registry import AgentEntry
+
+    hit = store_fallback.StoreHit("claude", CLAUDE_UUID, "/repo/one")
+    registry = _registry_home / "agents" / "registry.json"
+    calls = []
+
+    def _register(**kwargs):
+        calls.append(kwargs)
+        return AgentEntry(
+            name="c655c326",
+            cwd=kwargs["cwd"],
+            log_path="",
+            harness=kwargs["provider"],
+            harness_session_id=kwargs["session_id"],
+            short_id=kwargs["short_id"],
+            status=kwargs["status"],
+            origin=kwargs["origin"],
+            created_at="2026-08-24T00:00:00Z",
+        )
+
+    monkeypatch.setattr(
+        "fno.agents.registry.register_existing_session", _register
+    )
+    monkeypatch.setattr(
+        store_fallback, "complete_store_hits", lambda _token: [hit]
+    )
+
+    direct = store_fallback.adopt_store_hit(hit, registry_path=registry)
+    healed = store_fallback.heal_from_harness_store(
+        "c655c326", registry_path=registry
+    )
+
+    assert calls == [calls[0], calls[0]]
+    assert direct == healed
+    assert calls[0] == {
+        "provider": "claude",
+        "session_id": CLAUDE_UUID,
+        "cwd": "/repo/one",
+        "short_id": "c655c326",
+        "status": "orphaned",
+        "origin": "adopted",
+        "registry_path": registry,
+    }
+
+
+def test_batch_confinement_resolves_scope_once_and_refuses_unsafe_hits(
+    _registry_home, monkeypatch
+):
+    """AC3-ERR: batch callers cannot bypass three-valued project membership."""
+    identities = {
+        "/scope": ("footnote", "/footnote/.git"),
+        "/canonical": ("footnote", "/footnote/.git"),
+        "/worktree": ("footnote", "/footnote/.git"),
+        "/foreign": ("regready", "/regready/.git"),
+        "": (None, None),
+    }
+    calls = []
+
+    def _identity(cwd):
+        calls.append(cwd)
+        return identities[cwd]
+
+    monkeypatch.setattr(store_fallback, "_project_identity", _identity)
+    same_project = [
+        store_fallback.StoreHit("codex", "session-canonical", "/canonical"),
+        store_fallback.StoreHit("codex", "session-worktree", "/worktree"),
+    ]
+
+    confined = store_fallback.confine_store_hits(
+        "recovery", same_project, scope_cwd="/scope", cross_project=False
+    )
+
+    assert confined == same_project
+    assert calls == ["/scope", "/canonical", "/worktree"]
+
+    with pytest.raises(AgentResolutionError, match="cross-project candidate"):
+        store_fallback.confine_store_hits(
+            "recovery",
+            [store_fallback.StoreHit("codex", "session-foreign", "/foreign")],
+            scope_cwd="/scope",
+            cross_project=False,
+        )
+    with pytest.raises(AgentResolutionError, match="could not be determined"):
+        store_fallback.confine_store_hits(
+            "recovery",
+            [store_fallback.StoreHit("codex", "session-unknown", "")],
+            scope_cwd="/scope",
+            cross_project=False,
+        )
+
+
 # --- US2/US3: other harnesses ----------------------------------------------
 
 
@@ -565,6 +660,29 @@ def test_registry_write_failure_still_resolves(_registry_home, monkeypatch, caps
     entry = store_fallback.heal_from_harness_store("c655c326")
 
     assert entry.harness_session_id == CLAUDE_UUID
+    assert "could not register" in capsys.readouterr().err
+
+
+def test_direct_adoption_write_failure_returns_only_a_synthetic_row(
+    _registry_home, monkeypatch, capsys
+):
+    """AC3-ERR: batch adoption fails open without claiming a persisted row."""
+    def _boom(**_kwargs):
+        raise OSError("read-only registry")
+
+    monkeypatch.setattr(
+        "fno.agents.registry.register_existing_session", _boom
+    )
+    hit = store_fallback.StoreHit("codex", CODEX_UUID, "/repo/two")
+
+    entry = store_fallback.adopt_store_hit(hit)
+
+    assert entry.harness == "codex"
+    assert entry.harness_session_id == CODEX_UUID
+    assert entry.short_id == ""
+    assert entry.status == "orphaned"
+    assert entry.origin == "adopted"
+    assert load_registry() == []
     assert "could not register" in capsys.readouterr().err
 
 

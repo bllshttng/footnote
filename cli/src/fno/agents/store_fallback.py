@@ -27,9 +27,10 @@ Three rules keep it from guessing:
   and would refuse canonical->worktree traffic), then refuse. An out-of-project
   hit is refused with the candidate named, copying the ambiguity posture; an
   explicit ``cross_project`` flag is the only override (a spawn into a foreign
-  repo). The confinement lives here because every store-adoption path routes
-  through :func:`heal_from_harness_store`; ``resume`` does not (it matches loaded
-  registry entries via ``resolve_agent_in``), so it is uncovered by design.
+  repo). The confinement lives here and batch callers must route verified hits
+  through :func:`confine_store_hits`; ``resume`` does not adopt store hits (it
+  matches loaded registry entries via ``resolve_agent_in``), so it is uncovered
+  by design.
 """
 from __future__ import annotations
 
@@ -357,7 +358,7 @@ def _same_project(scope_cwd: Optional[str], hit_cwd: Optional[str]) -> Optional[
     return _membership(_project_identity(scope_cwd), _project_identity(hit_cwd))
 
 
-def _confine_to_project(
+def confine_store_hits(
     token: str,
     hits: list[StoreHit],
     *,
@@ -376,9 +377,8 @@ def _confine_to_project(
     if cross_project:
         return hits
     scope = scope_cwd or os.getcwd()
-    # ponytail: compute the scope identity ONCE here, not per hit. The scope is
-    # invariant across the loop, and _project_identity spawns a git subprocess;
-    # re-resolving it per hit (via _same_project) was N redundant fork+exec calls.
+    # The scope is invariant across the batch, and _project_identity spawns a
+    # git subprocess. Resolve it once instead of repeating that work per hit.
     s_ident = _project_identity(scope)
     if s_ident == (None, None):
         return hits
@@ -425,6 +425,80 @@ def _confine_to_project(
     )
 
 
+def adopt_store_hit(
+    hit: StoreHit,
+    registry_path: Optional[Path] = None,
+    *,
+    token: Optional[str] = None,
+) -> "AgentEntry":
+    """Register one verified and project-confined hit as an adopted orphan.
+
+    This function does not scan harness stores or establish project membership.
+    Batch callers must first pass their hits through :func:`confine_store_hits`.
+    Registry write failures return a synthetic row so the caller can still
+    address the real harness session.
+    """
+    from fno.agents.registry import (
+        AgentEntry,
+        AgentResolutionError,
+        register_existing_session,
+    )
+
+    # claude's transport key is the 8-hex jobId (`claude attach <jobId>`), NOT
+    # the full UUID that HARNESS_SESSION_ID_FIELDS would otherwise write there.
+    short_id = hit.short_id if hit.harness == "claude" else ""
+    try:
+        return register_existing_session(
+            provider=hit.harness,
+            session_id=hit.session_id,
+            cwd=hit.cwd,
+            short_id=short_id,
+            status="orphaned",
+            # This row is ADOPTED from the harness store, not a spawn receipt:
+            # nothing here proves footnote started the session, and it is
+            # routinely an operator's own terminal that no SessionStart hook
+            # registered. `origin` carries that because it is durable - `status`
+            # is a liveness stamp `reconcile` flips back to "live" the moment
+            # the session answers a probe, so a reader keying on it gets one
+            # pass of protection and then none. Lanes that stop a session read
+            # this field to answer "footnote-spawned?" with unknown rather than
+            # with the absence of an operator marker.
+            origin="adopted",
+            registry_path=registry_path,
+        )
+    except AgentResolutionError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reaching the session beats the roster row
+        display_token = token if token is not None else hit.session_id
+        sys.stderr.write(
+            f"WARN: resolved {display_token!r} from the {hit.harness} store but "
+            f"could not register it ({exc}); the row will appear on a later "
+            "resolution.\n"
+        )
+        # The adopting session vouches for this row, and this fallback copy
+        # reaches the caller without passing register_session's parent stamping.
+        from fno.agents.dispatch import _capture_parent_edge
+
+        _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()
+        return AgentEntry(
+            name=_fallback_name(hit.session_id),
+            cwd=hit.cwd,
+            log_path="",
+            harness=hit.harness,
+            harness_session_id=hit.session_id,
+            status="orphaned",
+            short_id=short_id,
+            spawned_by_session=_sb_session,
+            spawned_by_harness=_sb_harness,
+            spawned_by_cwd=_sb_cwd,
+            # Same fact as the registered row above, and it has to be stated
+            # here too: this one is handed straight back to the caller when
+            # registration fails, so it reaches a reader without ever passing
+            # the path that would have marked it.
+            origin="adopted",
+        )
+
+
 def heal_from_harness_store(
     token: str, *, registry_path: Optional[Path] = None,
     scope_cwd: Optional[str] = None, cross_project: bool = False,
@@ -446,14 +520,14 @@ def heal_from_harness_store(
     is still returned so the verb reaches the session anyway -- reaching it wins,
     and the row appears on the next resolution.
     """
-    from fno.agents.registry import AgentEntry, AgentResolutionError, register_existing_session
+    from fno.agents.registry import AgentResolutionError
 
     hits = complete_store_hits(token)
     if not hits:
         return None
     # Project confinement: adopt only a session in the caller's project, else
     # refuse (an out-of-project hit named, not silently healed and woken).
-    hits = _confine_to_project(
+    hits = confine_store_hits(
         token, hits, scope_cwd=scope_cwd, cross_project=cross_project
     )
     if not hits:
@@ -468,60 +542,7 @@ def heal_from_harness_store(
             ambiguous=True,
         )
 
-    hit = hits[0]
-    # claude's transport key is the 8-hex jobId (`claude attach <jobId>`), NOT
-    # the full UUID that HARNESS_SESSION_ID_FIELDS would otherwise write there.
-    short_id = hit.short_id if hit.harness == "claude" else ""
-    try:
-        return register_existing_session(
-            provider=hit.harness,
-            session_id=hit.session_id,
-            cwd=hit.cwd,
-            short_id=short_id,
-            status="orphaned",
-            # This row is ADOPTED from the claude store, not a spawn receipt:
-            # nothing here proves footnote started the session, and it is
-            # routinely an operator's own terminal that no SessionStart hook
-            # registered. `origin` carries that because it is durable - `status`
-            # is a liveness stamp `reconcile` flips back to "live" the moment
-            # the session answers a probe, so a reader keying on it gets one
-            # pass of protection and then none. Lanes that stop a session read
-            # this field to answer "footnote-spawned?" with unknown rather than
-            # with the absence of an operator marker.
-            origin="adopted",
-            registry_path=registry_path,
-        )
-    except AgentResolutionError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - reaching the session beats the roster row
-        sys.stderr.write(
-            f"WARN: resolved {token!r} from the {hit.harness} store but could not "
-            f"register it ({exc}); the row will appear on a later resolution.\n"
-        )
-        # Same parent edge the registered row above now stamps (x-132c): the
-        # adopting session vouches for this row, and this fallback copy reaches
-        # the caller without passing register_session's stamping path.
-        from fno.agents.dispatch import _capture_parent_edge
-
-        _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()
-        entry = AgentEntry(
-            name=_fallback_name(hit.session_id),
-            cwd=hit.cwd,
-            log_path="",
-            harness=hit.harness,
-            harness_session_id=hit.session_id,
-            status="orphaned",
-            short_id=short_id,
-            spawned_by_session=_sb_session,
-            spawned_by_harness=_sb_harness,
-            spawned_by_cwd=_sb_cwd,
-            # Same fact as the registered row above, and it has to be stated
-            # here too: this one is handed straight back to the caller when
-            # registration fails, so it reaches a reader without ever passing
-            # the path that would have marked it.
-            origin="adopted",
-        )
-        return entry
+    return adopt_store_hit(hits[0], registry_path, token=token)
 
 
 def _fallback_name(session_id: str) -> str:
