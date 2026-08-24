@@ -1488,3 +1488,35 @@ def test_holder_is_ours_identity_arm_fails_closed(monkeypatch):
     )
     info = {"pid_unavailable": True, "host": "h", "machine_id": "m"}
     assert not target_cli._holder_is_ours("target-session:anything", info)
+
+
+def test_worktree_occupancy_defers_to_finished_with_the_tree(monkeypatch, tmp_path):
+    """The gate must answer 'is this session done with its tree' through the
+    shared helper, not its own threshold: takeover and reap disagreed about
+    the same session when each derived it (a silent-but-engaged tail read
+    available here while reap refused to touch the tree)."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    row = SimpleNamespace(cwd=str(wt), harness_session_id="s-1", harness="claude")
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.worktree_reapable.reapable",
+        lambda p: SimpleNamespace(reapable=False, reason="dirty", detail=""),
+    )
+    facts = SimpleNamespace(last_event_epoch=1.0, last_role="assistant", last_text="x")
+    monkeypatch.setattr("fno.agents.watchdog.tail_facts", lambda *a, **k: facts)
+    calls = {}
+
+    def fake_finished(f, now_s, quiet_after_s):
+        calls["quiet"] = quiet_after_s
+        return calls.get("done", False)
+
+    monkeypatch.setattr("fno.agents.watchdog.finished_with_the_tree", fake_finished)
+    from fno.agents.watchdog import REAP_QUIET_AFTER_S
+
+    verdict, info = target_cli._classify_worktree_occupancy(wt)
+    assert verdict == "occupied_worktree"
+    assert info["session_id"] == "s-1"
+    assert calls["quiet"] == REAP_QUIET_AFTER_S
+    calls["done"] = True
+    assert target_cli._classify_worktree_occupancy(wt)[0] == "available"

@@ -2520,6 +2520,10 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
         own_sid = ""
     if own_sid and holder == f"target-session:{own_sid}":
         return True
+    # v2 claims carry no pid to compare, so the process-tree walk below is
+    # pure waste for them.
+    if info.get("pid_unavailable"):
+        return False
     try:
         from fno.claims.session_pid import resolve_session_pid
 
@@ -2527,9 +2531,6 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
     except Exception:
         own_pid = None
     from fno.claims.hostid import is_same_machine
-
-    if info.get("pid_unavailable"):
-        return False
     same_machine = is_same_machine(info.get("host"), info.get("machine_id"))
     return bool(own_pid and info.get("pid") == own_pid and same_machine)
 
@@ -2651,7 +2652,7 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
     if not session_id:
         return "unknown", {"reason": "session-id-unavailable"}
     try:
-        from fno.agents.watchdog import REAP_RECENT_MESSAGE_S, tail_facts
+        from fno.agents.watchdog import REAP_QUIET_AFTER_S, finished_with_the_tree, tail_facts
 
         facts = tail_facts(
             session_id,
@@ -2666,11 +2667,16 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
             "reason": "transcript-activity-unavailable",
             "session_id": session_id,
         }
-    age_s = max(0.0, time.time() - last_epoch)
-    if age_s <= REAP_RECENT_MESSAGE_S:
+    # One question, one answer: the reap lane decides "done with the tree"
+    # through finished_with_the_tree (quiet window + engaged-tail
+    # classification). The inline threshold here let takeover and reap
+    # disagree about the same session - a silent-but-ENGAGED tail read
+    # available to a successor while reap refused to touch it, and a dead
+    # worker occupied its tree an hour past the fleet's quiet window.
+    if not finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S):
         return "occupied_worktree", {
             "session_id": session_id,
-            "age_s": int(age_s),
+            "age_s": int(max(0.0, time.time() - last_epoch)),
             "reason": dirt.reason,
         }
     return "available", None
