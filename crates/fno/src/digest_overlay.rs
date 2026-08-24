@@ -445,18 +445,32 @@ fn repo_root_from(cwd: &Path) -> PathBuf {
 /// Generalised from the mux-only reader so the open-plan helper reads
 /// `[obsidian]` from the same ladder the `[mux]` keys use.
 pub(crate) fn config_str(cwd: &Path, section: &str, key: &str) -> Option<String> {
+    resolve_config_key(cwd, &|path| read_section_file(path, section, key))
+}
+
+/// A TOP-LEVEL key (no section) off the same ladder, e.g. `state_dir`. The
+/// flat config.toml keeps a few keys above any section; the mux socket dir's
+/// `state_dir` (x-f02b) is the one this reads.
+pub(crate) fn config_top_str(cwd: &Path, key: &str) -> Option<String> {
+    resolve_config_key(cwd, &|path| read_top_file(path, key))
+}
+
+/// The file ladder shared by both key shapes: `$FNO_CONFIG` (sole candidate,
+/// read as-is) -> project roots -> global. `from_file` reads one candidate; a
+/// `None` walks on to the next.
+fn resolve_config_key(cwd: &Path, from_file: &dyn Fn(&Path) -> Option<String>) -> Option<String> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
-        return read_section_file(Path::new(&explicit), section, key);
+        return from_file(Path::new(&explicit));
     }
     for root in config_roots(cwd) {
-        if let Some(v) = read_section_file(&root.join(".fno/config.toml"), section, key) {
+        if let Some(v) = from_file(&root.join(".fno/config.toml")) {
             return Some(v);
         }
     }
     let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
         .map(|p| PathBuf::from(p).with_file_name("config.toml"))
         .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")));
-    global.and_then(|g| read_section_file(&g, section, key))
+    global.and_then(|g| from_file(&g))
 }
 
 /// `mux.<key>` from a config body, kept as a thin wrapper over the general
@@ -469,18 +483,38 @@ fn read_section_file(path: &Path, section: &str, key: &str) -> Option<String> {
     read_value(&std::fs::read_to_string(path).ok()?, section, key)
 }
 
-/// Read `<section>.<key>` from a flat config.toml body, returning the value as a
-/// raw string each caller re-coerces (bool -> "true"/"false", int -> its digits).
-/// Widened from the mux-only `read_mux_value` so `[obsidian]` reads the same way.
-fn read_value(content: &str, section: &str, key: &str) -> Option<String> {
-    let t = content.parse::<toml::Table>().ok()?;
-    match t.get(section)?.as_table()?.get(key)? {
+fn read_top_file(path: &Path, key: &str) -> Option<String> {
+    read_top_value(&std::fs::read_to_string(path).ok()?, key)
+}
+
+/// A toml scalar as the raw string each caller re-coerces (bool ->
+/// "true"/"false", int -> its digits). One coercion for both key shapes so a
+/// padded or typed value cannot read differently at the top level than inside
+/// a section.
+fn scalar(v: &toml::Value) -> Option<String> {
+    match v {
         toml::Value::String(s) => Some(s.clone()),
         toml::Value::Boolean(b) => Some(b.to_string()),
         toml::Value::Integer(i) => Some(i.to_string()),
         toml::Value::Float(f) => Some(f.to_string()),
         _ => None,
     }
+}
+
+/// Read `<section>.<key>` from a flat config.toml body. Widened from the
+/// mux-only `read_mux_value` so `[obsidian]` reads the same way.
+fn read_value(content: &str, section: &str, key: &str) -> Option<String> {
+    let t = content.parse::<toml::Table>().ok()?;
+    scalar(t.get(section)?.as_table()?.get(key)?)
+}
+
+/// Read a top-level `<key>` (no section) from a flat config.toml body. A key
+/// of the same name inside a section does NOT answer here: the file is flat
+/// by design, so `state_dir` at the top level and `[config] state_dir` are
+/// different addresses and only the first is this crate's address.
+fn read_top_value(content: &str, key: &str) -> Option<String> {
+    let t = content.parse::<toml::Table>().ok()?;
+    scalar(t.get(key)?)
 }
 
 /// `mux.<key>` from a body; thin wrapper over [`read_value`], retained for the
@@ -619,6 +653,26 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_top_level_keys() {
+        let cfg = "schema_version = 1\nstate_dir = \"~/.fno/\"\n";
+        assert_eq!(read_top_value(cfg, "state_dir"), Some("~/.fno/".into()));
+        assert_eq!(read_top_value(cfg, "schema_version"), Some("1".into()));
+        // Absent key, and a same-named key inside a section is a different
+        // address: the file is flat by design.
+        assert_eq!(read_top_value(cfg, "plans_dir"), None);
+        assert_eq!(
+            read_top_value("[config]\nstate_dir = \"/x\"\n", "state_dir"),
+            None
+        );
+        // Malformed body and non-scalar values are misses, never guesses.
+        assert_eq!(read_top_value("not toml {{{", "state_dir"), None);
+        assert_eq!(
+            read_top_value("state_dir = [\"a\", \"b\"]\n", "state_dir"),
+            None
+        );
+    }
 
     #[test]
     fn selector_is_worktree_basename() {

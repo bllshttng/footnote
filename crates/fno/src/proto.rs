@@ -2436,21 +2436,113 @@ thread_local! {
 }
 
 /// The mux socket directory: `$FNO_MUX_DIR` when set (tests point this at a
-/// tempdir), else `~/.fno/mux`.
+/// tempdir), else `<state_dir>/mux` where `state_dir` comes off the same
+/// config ladder every other surface reads (`FNO_CONFIG` sole candidate ->
+/// project -> global; `digest_overlay::config_top_str`), else `~/.fno/mux`.
+/// `FNO_CONFIG` therefore isolates the mux with everything else (x-f02b): a
+/// demo config's state root gets its own socket dir, and a pinned config that
+/// cannot be parsed lands the dir beside the pinned file rather than reaching
+/// back to the real fleet's `~/.fno/mux`.
+///
+/// Resolved once per process (`MUX_DIR`): the daemon binds at startup and
+/// one-shot clients ask once, while the ladder itself reads config files (and
+/// the project tier may walk to the canonical checkout).
 pub fn mux_dir() -> PathBuf {
     #[cfg(test)]
     return TEST_MUX_DIR.with(|dir| dir.0.clone());
     #[cfg(not(test))]
+    return MUX_DIR.get_or_init(mux_dir_uncached).clone();
+}
+
+#[cfg(not(test))]
+static MUX_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The uncached resolution behind [`mux_dir`].
+#[cfg(not(test))]
+fn mux_dir_uncached() -> PathBuf {
     if let Some(dir) = std::env::var_os("FNO_MUX_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(dir);
     }
-    #[cfg(not(test))]
-    let home = std::env::var_os("HOME")
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(dir) = config_state_mux_dir(&cwd) {
+        return dir;
+    }
+    // Fail closed on an explicit FNO_CONFIG that yielded no usable state_dir
+    // (yaml-pinned, unreadable, missing key): isolation was requested, so the
+    // socket dir stays beside the pinned file - standard layouts keep the
+    // config inside the state dir, so its parent is the honest isolated root.
+    // Falling back to ~/.fno/mux here is the exact leak x-f02b closes.
+    if let Some(explicit) = std::env::var_os("FNO_CONFIG").filter(|d| !d.is_empty()) {
+        let path = PathBuf::from(&explicit);
+        warn_once_if_yaml(&path);
+        return path.with_file_name("mux");
+    }
+    std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    #[cfg(not(test))]
-    home.join(".fno").join("mux")
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".fno")
+        .join("mux")
+}
+
+/// `<state_dir>/mux` from the config ladder, or `None` when no candidate
+/// carries a usable value (absent, non-scalar, empty, or a template variable
+/// like `{vault}` this mirror cannot expand - Python substitutes those, we
+/// decline rather than create a literal `{vault}` directory).
+#[cfg(not(test))]
+fn config_state_mux_dir(cwd: &std::path::Path) -> Option<PathBuf> {
+    crate::digest_overlay::config_top_str(cwd, "state_dir")
+        .and_then(|raw| expand_state_dir(&raw, cwd))
+        .map(|dir| dir.join("mux"))
+}
+
+/// Expand a leading `~` and anchor a still-relative value to `cwd`, matching
+/// `fno.paths`' resolution of `state_dir` (expanduser, relative against the
+/// process cwd). `None` when the value is empty, carries a `{template}`
+/// variable, or is `~`-prefixed with no HOME to expand against.
+fn expand_state_dir(raw: &str, cwd: &std::path::Path) -> Option<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('{') {
+        return None;
+    }
+    let path = if let Some(rest) = raw.strip_prefix('~') {
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        let mut p = PathBuf::from(home);
+        if !rest.is_empty() {
+            p.push(rest);
+        }
+        p
+    } else {
+        PathBuf::from(raw)
+    };
+    Some(if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    })
+}
+
+/// The one config the ladder reads and this crate cannot parse: Python reads
+/// a yaml-pinned `$FNO_CONFIG` by suffix; this reader is TOML-only and has
+/// already fallen back beside the file. Say so once instead of diverging in
+/// silence (same shape as `fno_agents::agents_config::warn_once_if_yaml`).
+#[cfg(not(test))]
+fn warn_once_if_yaml(path: &std::path::Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("yaml" | "yml")
+    ) {
+        WARNED.call_once(|| {
+            eprintln!(
+                "fno: $FNO_CONFIG points at {}, which the mux reads as TOML and \
+                 cannot parse; the mux dir falls back beside that file instead of \
+                 your state_dir. Point it at a config.toml.",
+                path.display()
+            );
+        });
+    }
 }
 
 /// Create `dir` (and parents) born 0700, then force 0700 on a pre-existing
@@ -3722,6 +3814,35 @@ mod tests {
         assert!(socket_path("../evil").is_err());
         assert!(socket_path("").is_err());
         assert!(socket_path("ok-name_1").is_ok());
+    }
+
+    #[test]
+    fn state_dir_values_expand_and_anchor() {
+        let cwd = std::path::Path::new("/cwd");
+        assert_eq!(
+            expand_state_dir("/demo/state", cwd),
+            Some(PathBuf::from("/demo/state"))
+        );
+        assert_eq!(
+            expand_state_dir("  /demo/state  ", cwd),
+            Some(PathBuf::from("/demo/state"))
+        );
+        assert_eq!(
+            expand_state_dir("rel/state", cwd),
+            Some(PathBuf::from("/cwd/rel/state"))
+        );
+        // `~` expands against HOME like Python's expanduser; trailing slashes
+        // and a bare `~` both land on HOME itself.
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(home) = home {
+            assert_eq!(expand_state_dir("~/.fno/", cwd), Some(home.join(".fno")));
+            assert_eq!(expand_state_dir("~", cwd), Some(home));
+        }
+        // Unusable values decline rather than guess: template variables this
+        // mirror cannot expand, and emptiness.
+        assert_eq!(expand_state_dir("{vault}/.fno", cwd), None);
+        assert_eq!(expand_state_dir("", cwd), None);
+        assert_eq!(expand_state_dir("   ", cwd), None);
     }
 
     /// A peer that dribbles progress must NOT be able to extend the bound.
