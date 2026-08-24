@@ -1619,6 +1619,43 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
     ]
 
 
+def test_fresh_reviewer_verdict_supersedes_its_stale_history():
+    event = {
+        "coverage": "covered",
+        "review_state": "reviewed",
+        "reviewed_count": 1,
+        "verdicts": [
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "stale",
+                "reviewed_sha": "old-head",
+                "freshness": "stale",
+            },
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "reviewed_sha": "current-head",
+                "freshness": "fresh",
+            },
+        ],
+    }
+
+    shaped = _reviews._shape_review_coverage(event, "current-head", None)
+
+    assert shaped["coverage"] == "covered"
+    assert shaped["reviewed_count"] == 1
+    assert shaped["stale_verdicts"] == [
+        {
+            "name": "code-review",
+            "producer": "local_attestation",
+            "reviewed_sha": "old-head",
+            "freshness": "stale",
+        }
+    ]
+
+
 def test_refused_verdict_without_freshness_is_not_reported_stale(tmp_path):
     from fno.pr._reviews import read_review_coverage
 
