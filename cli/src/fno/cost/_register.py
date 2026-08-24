@@ -575,6 +575,11 @@ def _write_ledger_data(tasks_path: Path, data: dict) -> None:
         raise
 
 
+_DELIVERED_TERMINALS = frozenset(
+    {"DonePRGreen", "DoneAdvisory", "DoneDelivery", "DoneBatched"}
+)
+
+
 def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
     """Append entry to a ledger.json file atomically with flock."""
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
@@ -597,8 +602,39 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
         # considered.
         new_scalar = entry.get("fno_id") or entry.get("session_id")
         if new_scalar:
-            for existing in data.get("entries", []):
+            for index, existing in enumerate(data.get("entries", [])):
                 if (existing.get("fno_id") or existing.get("session_id")) == new_scalar:
+                    old_reason = existing.get("termination_reason")
+                    new_reason = entry.get("termination_reason")
+                    if (
+                        isinstance(new_reason, str)
+                        and new_reason in _DELIVERED_TERMINALS
+                        and not (
+                            isinstance(old_reason, str)
+                            and old_reason in _DELIVERED_TERMINALS
+                        )
+                    ):
+                        promoted = dict(existing)
+                        promoted.update(
+                            {key: value for key, value in entry.items() if value is not None}
+                        )
+                        aliases = []
+                        for values in (existing.get("sessions"), entry.get("sessions")):
+                            if not isinstance(values, list):
+                                continue
+                            for value in values:
+                                if value not in aliases:
+                                    aliases.append(value)
+                        if aliases:
+                            promoted["sessions"] = aliases
+                        data["entries"][index] = promoted
+                        _write_ledger_data(tasks_path, data)
+                        print(
+                            f"Promoted target fno_id {new_scalar} "
+                            f"from {old_reason} to {new_reason}",
+                            file=sys.stderr,
+                        )
+                        return
                     print(
                         f"Skipping duplicate entry for target fno_id: {new_scalar}",
                         file=sys.stderr,
