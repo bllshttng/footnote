@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
@@ -22,6 +24,91 @@ def _fake_runner(ps_output: str, roster: list[dict], calls: list[list[str]]):
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(roster), stderr="")
 
     return run
+
+
+def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            """\
+            PID PPID ELAPSED %CPU RSS COMMAND
+            100 1 01:00:00 20.0 1024 fno-agents-worker --run
+            101 100 00:00:05 80.0 1024 cargo test -p fno
+            200 1 01:00:00 100.0 1024 unrelated-build
+            """,
+            [{"name": "worker-a"}],
+            [],
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    capacity = os.cpu_count() or 1
+    assert payload["descendant_cpu_cores"] == pytest.approx(0.8)
+    assert payload["fleet_cpu_cores"] == pytest.approx(1.0)
+    assert payload["descendant_process_count"] == 1
+    assert payload["cpu_capacity_cores"] == capacity
+    assert payload["fleet_percent_capacity"] == pytest.approx(100 / capacity)
+    assert payload["fleet_percent_measured_cpu"] == pytest.approx(50.0)
+
+
+def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    observer_pid = os.getpid()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            f"""\
+            PID PPID ELAPSED %CPU RSS COMMAND
+            {observer_pid} 1 01:00:00 20.0 1024 fno-py doctor footprint
+            999 {observer_pid} 01:00:00 80.0 1024 ps -Ao pid,ppid
+            100 1 01:00:00 20.0 1024 fno-agents-worker --run
+            101 100 01:00:00 80.0 1024 cargo test -p fno
+            """,
+            [],
+            calls,
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["process_count"] == 2
+    assert payload["fleet_cpu_cores"] == pytest.approx(1.0)
+    assert calls == [["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"]]
+
+
+def test_ac7_edge_fleet_cpu_threshold_includes_short_lived_descendant(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            """\
+            PID PPID ELAPSED %CPU RSS COMMAND
+            100 1 01:00:00 20.0 1024 fno-agents-worker --run
+            101 100 00:00:05 100.0 1024 cargo test -p fno
+            """,
+            [{"name": "worker-a"}],
+            [],
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint"])
+
+    assert result.exit_code == 3, result.output
+    assert "fleet CPU: 1.200 cores" in result.stdout
+    assert "verdict: over budget" in result.stdout
 
 
 def test_ac3_hp_reports_both_thresholds_and_exits_zero(monkeypatch) -> None:
@@ -50,7 +137,7 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(monkeypatch) -> None:
     assert "processes: 2 (threshold 3)" in result.stdout
     assert "transient calls: 1" in result.stdout
     assert [call for call in calls if call[0] in {"ps", "/usr/local/bin/fno"}] == [
-        ["ps", "-Ao", "pid,etime,%cpu,rss,command"],
+        ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"],
         ["/usr/local/bin/fno", "agents", "list", "--status", "live", "--json"],
     ]
 

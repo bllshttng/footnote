@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -16,7 +17,7 @@ from fno.footprint import Footprint, parse_footprint
 
 CPU_THRESHOLD_CORES = 1.0
 DAEMON_ALLOWANCE = 1
-_PS_COLUMNS = "pid,etime,%cpu,rss,command"
+_PS_COLUMNS = "pid,ppid,etime,%cpu,rss,command"
 
 
 def _fno_binary() -> str:
@@ -80,16 +81,29 @@ def _roster_count() -> tuple[int | None, str | None]:
 def _payload(
     reading: Footprint,
     *,
-    process_threshold: int,
+    process_threshold: int | None,
     exit_code: int,
 ) -> dict[str, Any]:
+    cpu_capacity = os.cpu_count() or 1
+    measured_share = (
+        reading.fleet_cpu_cores / reading.measured_cpu_cores * 100
+        if reading.measured_cpu_cores > 0
+        else 0.0
+    )
     return {
         "sustained_cpu_cores": reading.sustained_cpu_cores,
+        "descendant_cpu_cores": reading.descendant_cpu_cores,
+        "fleet_cpu_cores": reading.fleet_cpu_cores,
         "sustained_cpu_threshold_cores": CPU_THRESHOLD_CORES,
+        "fleet_cpu_threshold_cores": CPU_THRESHOLD_CORES,
         "transient_call_count": reading.transient_call_count,
         "process_count": reading.process_count,
         "process_count_threshold": process_threshold,
+        "descendant_process_count": reading.descendant_process_count,
         "rss_gb": reading.rss_gb,
+        "cpu_capacity_cores": cpu_capacity,
+        "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
+        "fleet_percent_measured_cpu": measured_share,
         "top": [
             {"cpu_percent": cpu_percent, "command": command}
             for cpu_percent, command in reading.top
@@ -109,12 +123,13 @@ def _emit_failure(message: str, *, json_output: bool) -> None:
 def _emit_result(
     reading: Footprint,
     *,
-    process_threshold: int,
+    process_threshold: int | None,
     json_output: bool,
+    cause_only: bool = False,
 ) -> None:
-    cpu_over = reading.sustained_cpu_cores > CPU_THRESHOLD_CORES
-    process_over = reading.process_count > process_threshold
-    exit_code = 3 if cpu_over or process_over else 0
+    cpu_over = reading.fleet_cpu_cores > CPU_THRESHOLD_CORES
+    process_over = process_threshold is not None and reading.process_count > process_threshold
+    exit_code = 0 if cause_only else (3 if cpu_over or process_over else 0)
     payload = _payload(
         reading,
         process_threshold=process_threshold,
@@ -125,19 +140,28 @@ def _emit_result(
     else:
         verdict = "over budget" if exit_code == 3 else "within budget"
         typer.echo(
+            f"fleet CPU: {reading.fleet_cpu_cores:.3f} cores "
+            f"({payload['fleet_percent_capacity']:.1f}% capacity, "
+            f"{payload['fleet_percent_measured_cpu']:.1f}% of measured CPU)"
+        )
+        typer.echo(
             f"sustained CPU: {reading.sustained_cpu_cores:.3f} cores "
             f"(threshold {CPU_THRESHOLD_CORES:.3f})"
         )
         typer.echo(
+            f"descendant CPU: {reading.descendant_cpu_cores:.3f} cores "
+            f"({reading.descendant_process_count} processes)"
+        )
+        typer.echo(
             f"processes: {reading.process_count} "
-            f"(threshold {process_threshold})"
+            f"(threshold {process_threshold if process_threshold is not None else 'n/a'})"
         )
         typer.echo(f"transient calls: {reading.transient_call_count}")
         typer.echo(f"verdict: {verdict} (exit {exit_code})")
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
-        if exit_code == 3:
-            typer.echo("top sustained consumers:")
+        if exit_code == 3 or cause_only:
+            typer.echo("top fleet consumers:")
             for cpu_percent, command in reading.top[:5]:
                 typer.echo(f"  {command} ({cpu_percent:.1f}%)")
     raise typer.Exit(code=exit_code)
@@ -150,6 +174,12 @@ def footprint_command(
         "-J",
         help="Emit the reading as one JSON object.",
     ),
+    cause_only: bool = typer.Option(
+        False,
+        "--cause-only",
+        hidden=True,
+        help="Emit a bounded CPU-only reading for spawn-gate diagnosis.",
+    ),
 ) -> None:
     """Measure fno CPU and process cost without using load average."""
     ps_output, error = _read_ps()
@@ -157,13 +187,21 @@ def footprint_command(
         _emit_failure(error or "footprint unavailable: ps returned no output", json_output=json_output)
         raise typer.Exit(code=4)
 
-    reading = parse_footprint(ps_output)
+    reading = parse_footprint(ps_output, excluded_root_pids={os.getpid()})
     if reading.unparsed_lines:
         _emit_failure(
             f"footprint unavailable: {reading.unparsed_lines} ps line(s) could not be parsed",
             json_output=json_output,
         )
         raise typer.Exit(code=4)
+
+    if cause_only:
+        _emit_result(
+            reading,
+            process_threshold=None,
+            json_output=json_output,
+            cause_only=True,
+        )
 
     roster_count, error = _roster_count()
     if error is not None or roster_count is None:
