@@ -56,7 +56,6 @@ _SETTLED_STATES = _PASS_STATES | (_FAIL_STATES - {"CANCELLED", "STALE"})
 # The canonical collection lives in _reviews (the publisher); the parity
 # script pins its consts against the Rust twin, so this is a name, not a
 # second spelling.
-_COVERAGE_STATUS_CONTEXTS = COVERAGE_STATUS_CONTEXTS
 
 
 def without_coverage_statuses(rollup: Sequence[dict]) -> list[dict]:
@@ -64,8 +63,8 @@ def without_coverage_statuses(rollup: Sequence[dict]) -> list[dict]:
     return [
         check
         for check in rollup
-        if check.get("context") not in _COVERAGE_STATUS_CONTEXTS
-        and check.get("name") not in _COVERAGE_STATUS_CONTEXTS
+        if check.get("context") not in COVERAGE_STATUS_CONTEXTS
+        and check.get("name") not in COVERAGE_STATUS_CONTEXTS
     ]
 
 
