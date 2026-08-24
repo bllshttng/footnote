@@ -366,9 +366,10 @@ def read_tracked_pr_states(
     counts into the failure return so a degraded sweep cannot read as a
     clean one. Successful listings also return every OPEN PR, even when it
     was absent from the cache, so the swept snapshot converges to repository
-    truth. A tracked key absent from the open list gets exactly one
-    ``repos/<slug>/pulls/<n>`` read - the only way to tell CLOSED from
-    MERGED - bounded by the tracked-key count rather than by 1057 rows.
+    truth. A tracked key absent from the open list is resolved from one
+    bounded repository-level ``state=closed`` listing before any exact
+    ``repos/<slug>/pulls/<n>`` fallback. A failed closed listing leaves the
+    terminal keys UNKNOWN and increments the failure count.
 
     Returns ``(states, sweep_failures)``.
     """
@@ -406,10 +407,38 @@ def read_tracked_pr_states(
             states[key] = state
             returned.add(number)
 
-        # Distinguishing CLOSED from MERGED needs the PR itself; the open
-        # list proved only that it is not open. Every per-key failure counts
-        # toward the failure total: a sweep whose keys stay unresolved must
-        # never read as outcome ok (the AC4 swallowed-failure shape).
+        terminal_requested = requested - returned
+        if terminal_requested:
+            try:
+                closed_rows, closed_reason = list_prs_rest(
+                    repo,
+                    state="closed",
+                    requested_numbers=terminal_requested,
+                    runner=runner,
+                    timeout=timeout_s,
+                )
+            except (subprocess.TimeoutExpired, OSError, ToolMissing) as exc:
+                closed_rows, closed_reason = None, str(exc)
+            if closed_rows is None:
+                log.warning(
+                    "pr-watch: terminal-state batch failed for %s: %s",
+                    repo,
+                    closed_reason,
+                )
+                sweep_failures += 1
+                continue
+            for row in closed_rows:
+                number, state = row["number"], row["state"]
+                if number not in terminal_requested:
+                    continue
+                key = make_watermark_key(repo_slug=repo, pr_number=number)
+                states[key] = state
+                returned.add(number)
+
+        # The open and closed lists prove only what they returned. Every
+        # per-key failure counts toward the failure total: a sweep whose keys
+        # stay unresolved must never read as outcome ok (the AC4 swallowed-
+        # failure shape).
         for number in sorted(requested - returned):
             try:
                 res = runner(["gh", "api", f"repos/{repo}/pulls/{number}"], timeout=timeout_s)

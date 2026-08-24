@@ -105,6 +105,25 @@ class TestListPrsRest:
         assert len(calls) == 3
         assert len(rows) == 300
 
+    def test_requested_numbers_stop_closed_listing_after_all_are_found(self):
+        """AC3-HP: terminal batches stop once every requested number is present."""
+        from fno.pr._rest import list_prs_rest
+
+        calls: list[list] = []
+
+        def runner(cmd, **_kw):
+            calls.append(list(cmd))
+            return _page([_pr_row(9, "closed", merged=True)])
+
+        rows, reason = list_prs_rest(
+            "owner/repo", state="closed", requested_numbers={9}, runner=runner
+        )
+
+        assert reason == ""
+        assert rows == [{"number": 9, "state": "MERGED"}]
+        assert len(calls) == 1
+        assert "state=closed" in calls[0][2]
+
     def test_failure_is_loud_none_plus_reason(self):
         from fno.pr._rest import list_prs_rest
 
@@ -263,6 +282,48 @@ class TestTrackedStateSweepOnRest:
         assert failures == 0
         per_key_calls = [c for c in calls if c[2].endswith("/pulls/9")]
         assert len(per_key_calls) == 1
+
+    def test_missing_tracked_key_resolved_by_closed_batch_before_exact(self):
+        """AC3-HP: a terminal key comes from the closed repository batch."""
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        calls: list[list] = []
+
+        def runner(cmd, **_kw):
+            calls.append(list(cmd))
+            path = cmd[2]
+            if "state=open" in path:
+                return _page([])
+            if "state=closed" in path:
+                return _page([_pr_row(9, "closed", merged=True)])
+            raise AssertionError(f"exact fallback should not run: {cmd}")
+
+        states, failures = read_tracked_pr_states({"owner/repo#9"}, runner=runner)
+
+        assert states == {"owner/repo#9": "MERGED"}
+        assert failures == 0
+        assert [call[2] for call in calls] == [
+            "repos/owner/repo/pulls?state=open&per_page=100&page=1",
+            "repos/owner/repo/pulls?state=closed&per_page=100&page=1",
+        ]
+
+    def test_failed_closed_batch_keeps_terminal_keys_unknown(self):
+        """AC3-ERR: a failed terminal batch does not fabricate a state."""
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        calls: list[list] = []
+
+        def runner(cmd, **_kw):
+            calls.append(list(cmd))
+            if "state=open" in cmd[2]:
+                return _page([])
+            return Result(returncode=1, stdout="", stderr="network down")
+
+        states, failures = read_tracked_pr_states({"owner/repo#9"}, runner=runner)
+
+        assert states == {"owner/repo#9": "UNKNOWN"}
+        assert failures == 1
+        assert len(calls) == 2
 
     def test_failed_repo_listing_degrades_with_failure_count(self):
         """AC4-EDGE: keys UNKNOWN (not deleted), sweep_failures counts the repo."""
