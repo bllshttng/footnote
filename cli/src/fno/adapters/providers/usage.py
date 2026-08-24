@@ -697,11 +697,20 @@ def _parse_zai_windows(payload: Any) -> tuple[UsageWindow, ...]:
             or reset_millis <= 0
         ):
             continue
+        optional_values = {
+            name: _zai_integer(raw.get(name))
+            for name in ("usage", "currentValue", "remaining")
+        }
+        if any(
+            name in raw and raw[name] is not None and value is None
+            for name, value in optional_values.items()
+        ):
+            continue
         window_minutes = number * _ZAI_UNIT_MINUTES[unit]
         used_pct = float(percentage)
-        usage = _zai_integer(raw.get("usage"))
-        current = _zai_integer(raw.get("currentValue"))
-        remaining = _zai_integer(raw.get("remaining"))
+        usage = optional_values["usage"]
+        current = optional_values["currentValue"]
+        remaining = optional_values["remaining"]
         if usage is not None and usage > 0:
             if remaining is not None:
                 used = max(usage - remaining, current if current is not None else usage - remaining)

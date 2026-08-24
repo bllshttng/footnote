@@ -459,6 +459,22 @@ class TestZaiProbe:
                     ]
                 },
             },
+            {
+                "success": True,
+                "code": 200,
+                "data": {
+                    "limits": [
+                        {
+                            "type": "TOKENS_LIMIT",
+                            "unit": 3,
+                            "number": 5,
+                            "usage": "1000",
+                            "percentage": 20,
+                            "nextResetTime": 1783807404000,
+                        }
+                    ]
+                },
+            },
         ],
     )
     def test_zai_parser_never_emits_percentage_only_success(self, payload) -> None:
