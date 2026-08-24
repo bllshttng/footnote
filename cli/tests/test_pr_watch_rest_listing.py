@@ -24,8 +24,16 @@ def _page(rows: list[dict]) -> Result:
     return _ok(json.dumps(rows))
 
 
-def _pr_row(number: int, state: str = "open", merged: bool = False) -> dict:
-    return {"number": number, "state": state, "merged": merged}
+def _pr_row(
+    number: int,
+    state: str = "open",
+    merged: bool = False,
+    merged_at: str | None = None,
+) -> dict:
+    row = {"number": number, "state": state, "merged": merged}
+    if merged_at is not None:
+        row["merged_at"] = merged_at
+    return row
 
 
 def _has_pr_list_pair(cmd: list) -> bool:
@@ -124,6 +132,21 @@ class TestListPrsRest:
         assert rows == [{"number": 9, "state": "MERGED"}]
         assert len(calls) == 1
         assert "state=closed" in calls[0][2]
+
+    def test_closed_listing_uses_merged_at_to_map_merged(self):
+        """Closed list rows expose merge truth through ``merged_at``."""
+        from fno.pr._rest import list_prs_rest
+
+        rows, reason = list_prs_rest(
+            "owner/repo",
+            state="closed",
+            runner=lambda *_args, **_kwargs: _page(
+                [_pr_row(9, "closed", merged_at="2026-08-24T18:00:00Z")]
+            ),
+        )
+
+        assert reason == ""
+        assert rows == [{"number": 9, "state": "MERGED"}]
 
     def test_failure_is_loud_none_plus_reason(self):
         from fno.pr._rest import list_prs_rest

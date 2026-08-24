@@ -340,19 +340,20 @@ class TestProvidersConfig:
         assert cfg.active is None
         assert cfg.by_id == {}
 
-    def test_extra_fields_forbidden(self):
-        """extra='forbid' is enforced on ProviderRecord."""
+    def test_extra_fields_are_retained(self):
+        """Unknown provider metadata survives model validation for round trips."""
         from fno.adapters.providers.model import ProviderRecord
 
-        with pytest.raises(pydantic.ValidationError):
-            ProviderRecord(
-                id="claude-extra",
-                name="Extra",
-                harness="claude",
-                auth="oauth_dir",
-                credentials_source=Path("~/.claude"),
-                unknown_field="bad",
-            )
+        record = ProviderRecord(
+            id="claude-extra",
+            name="Extra",
+            harness="claude",
+            auth="oauth_dir",
+            credentials_source=Path("~/.claude"),
+            unknown_field="bad",
+        )
+
+        assert record.model_extra == {"unknown_field": "bad"}
 
 
 # ---------------------------------------------------------------------------

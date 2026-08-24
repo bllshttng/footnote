@@ -216,7 +216,9 @@ def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] =
 def _map_pr_state(data: dict) -> str:
     """REST `state` (open/closed + `merged`) -> the OPEN/CLOSED/MERGED shape
     the GraphQL read emitted, so `pr_state` in the output is unchanged."""
-    if data.get("merged"):
+    # The single-PR endpoint carries ``merged`` while list-pulls carries the
+    # same fact as a non-null ``merged_at`` timestamp.
+    if data.get("merged") or data.get("merged_at"):
         return "MERGED"
     return {"open": "OPEN", "closed": "CLOSED"}.get(str(data.get("state") or "").lower(), "UNKNOWN")
 

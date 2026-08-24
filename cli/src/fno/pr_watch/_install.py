@@ -699,6 +699,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
     if not events_path.exists():
         return marks
 
+    chunks_by_receipt: dict[str, list[dict]] = {}
     try:
         for line in events_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -711,9 +712,17 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
             except json.JSONDecodeError:
                 continue
             etype = ev.get("type")
-            if etype == "pr_watch_tick":
+            if etype == "pr_watch_sweep_chunk":
+                data = ev.get("data")
+                if isinstance(data, dict) and isinstance(data.get("receipt_id"), str):
+                    chunks_by_receipt.setdefault(data["receipt_id"], []).append(data)
+            elif etype == "pr_watch_tick":
                 marks["last_tick"] = ev.get("ts")
-                marks["completed_tick"] = _valid_completed_tick(ev.get("ts"), ev.get("data"))
+                completed = _valid_completed_tick(
+                    ev.get("ts"), ev.get("data"), chunks_by_receipt
+                )
+                if completed is not None:
+                    marks["completed_tick"] = completed
             elif etype == "pr_watch_tick_attempt":
                 marks["last_attempt"] = ev.get("ts")
             elif etype == "pr_watch_tick_end":
@@ -731,7 +740,11 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
     return marks
 
 
-def _valid_completed_tick(ts: object, data: object) -> Optional[dict[str, object]]:
+def _valid_completed_tick(
+    ts: object,
+    data: object,
+    chunks_by_receipt: Optional[dict[str, list[dict]]] = None,
+) -> Optional[dict[str, object]]:
     """Return the positive completion marker only for a coherent sweep receipt."""
     if not isinstance(ts, str) or _parse_ts(ts) is None or not isinstance(data, dict):
         return None
@@ -739,6 +752,41 @@ def _valid_completed_tick(ts: object, data: object) -> Optional[dict[str, object
     swept = data.get("swept")
     if type(swept_count) is not int or swept_count <= 0 or not isinstance(swept, dict):
         return None
+
+    if not swept:
+        receipt_id = data.get("receipt_id")
+        expected_chunks = data.get("receipt_chunks")
+        chunks = (chunks_by_receipt or {}).get(receipt_id)
+        if (
+            not isinstance(receipt_id, str)
+            or type(expected_chunks) is not int
+            or expected_chunks <= 0
+            or not chunks
+            or len(chunks) != expected_chunks
+        ):
+            return None
+        rebuilt: dict[str, list[int]] = {}
+        seen: set[tuple[str, int]] = set()
+        for chunk in sorted(chunks, key=lambda item: item.get("chunk_index", 0)):
+            items = chunk.get("items")
+            if not isinstance(items, list):
+                return None
+            for item in items:
+                if not isinstance(item, dict) or item.get("action") != "swept":
+                    continue
+                key = item.get("key")
+                if not isinstance(key, str) or "#" not in key:
+                    return None
+                repo, number_text = key.rsplit("#", 1)
+                if not repo or not number_text.isdigit() or int(number_text) <= 0:
+                    return None
+                number = int(number_text)
+                identity = (repo, number)
+                if identity in seen:
+                    return None
+                seen.add(identity)
+                rebuilt.setdefault(repo, []).append(number)
+        swept = rebuilt
 
     identities: list[tuple[str, int]] = []
     for repo, numbers in swept.items():

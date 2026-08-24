@@ -461,6 +461,7 @@ def tick() -> None:
                 graphql_min_remaining=cfg.graphql_min_remaining,
                 enabled=tick_enabled,
                 dispatch_deadline=started + deadline,
+                dispatch_budget_seconds=deadline,
             )
         except TickDeadlineExceeded:
             raise

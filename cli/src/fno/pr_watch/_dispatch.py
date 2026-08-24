@@ -241,6 +241,17 @@ _SPAWN_TIMEOUT_GRACE = 30.0
 # turn a completed sweep into the same global deadline timeout this daemon is
 # meant to avoid.
 _DISPATCH_RESERVE_S = 360.0
+_DISPATCH_RESERVE_FRACTION = 0.75
+
+
+def _dispatch_reserve_seconds(tick_budget_seconds: Optional[float]) -> float:
+    """Reserve a scaled fraction of short ticks, capped at the normal budget."""
+    if tick_budget_seconds is None:
+        return _DISPATCH_RESERVE_S
+    return min(
+        _DISPATCH_RESERVE_S,
+        max(1.0, float(tick_budget_seconds) * _DISPATCH_RESERVE_FRACTION),
+    )
 
 
 def fire_skill(
@@ -436,6 +447,7 @@ def tick(
     graphql_remaining_fn: Optional[Callable] = None,
     graphql_min_remaining: int = 200,
     dispatch_deadline: Optional[float] = None,
+    dispatch_budget_seconds: Optional[float] = None,
     # x-aaaf wave 2: config.pr_watch.enabled was declared but never actually
     # consulted here - the launchd activation coupling (x-e106: "enabled means
     # running") stops a NEWLY-toggled watcher at install time, but a config
@@ -546,6 +558,7 @@ def tick(
             graphql_remaining_fn=_graphql_remaining,
             graphql_min_remaining=graphql_min_remaining,
             dispatch_deadline=dispatch_deadline,
+            dispatch_budget_seconds=dispatch_budget_seconds,
             holder=holder,
         )
     finally:
@@ -575,6 +588,7 @@ def _run_tick(
     graphql_remaining_fn,
     graphql_min_remaining,
     dispatch_deadline,
+    dispatch_budget_seconds,
     holder,
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
@@ -723,7 +737,8 @@ def _run_tick(
         slug = cand.repo_slug
         if (
             dispatch_deadline is not None
-            and dispatch_deadline - time.monotonic() < _DISPATCH_RESERVE_S
+            and dispatch_deadline - time.monotonic()
+            < _dispatch_reserve_seconds(dispatch_budget_seconds)
         ):
             emit("pr_watch_skipped", {"pr": pr, "reason": "tick-budget"})
             skipped += 1

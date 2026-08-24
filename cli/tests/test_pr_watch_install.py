@@ -449,6 +449,89 @@ def test_status_prints_completed_tick_marker_for_valid_receipt(
     assert re.search(rf"^Completed tick: +{re.escape(now)} swept=2$", out, re.M), out
 
 
+def test_status_accepts_chunked_completed_tick_receipt(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch
+):
+    """Chunked receipts remain positive when the summary carries no inline map."""
+    import fno.pr_watch._install as m
+    from datetime import datetime, timezone
+    import re
+
+    (tmp_home / ".fno" / "config.toml").write_text("[pr_watch]\nenabled = true\n")
+    plist_path = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist_path.write_text("plist")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    events_file.write_text("\n".join([
+        json.dumps({
+            "type": "pr_watch_sweep_chunk",
+            "ts": now,
+            "data": {
+                "receipt_id": "chunked",
+                "chunk_index": 1,
+                "chunk_count": 1,
+                "item_count": 2,
+                "items": [
+                    {"action": "swept", "key": "owner/repo#41"},
+                    {"action": "swept", "key": "owner/repo#42"},
+                ],
+            },
+        }),
+        json.dumps({
+            "type": "pr_watch_tick",
+            "ts": now,
+            "data": {
+                "swept_count": 2,
+                "swept": {},
+                "receipt_id": "chunked",
+                "receipt_chunks": 1,
+            },
+        }),
+    ]) + "\n")
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+
+    assert re.search(rf"^Completed tick: +{re.escape(now)} swept=2$", out, re.M), out
+
+
+def test_status_preserves_latest_positive_marker_after_quiet_tick(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch
+):
+    """An invalid later receipt cannot erase an earlier positive marker."""
+    import fno.pr_watch._install as m
+    from datetime import datetime, timezone, timedelta
+    import re
+
+    (tmp_home / ".fno" / "config.toml").write_text("[pr_watch]\nenabled = true\n")
+    plist_path = tmp_launch_agents / "sh.fno.pr-watcher.plist"
+    plist_path.write_text("plist")
+    now = datetime.now(timezone.utc)
+    first = now - timedelta(seconds=5)
+    first_text = first.strftime("%Y-%m-%dT%H:%M:%SZ")
+    second_text = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    events_file.write_text("\n".join([
+        json.dumps({
+            "type": "pr_watch_tick",
+            "ts": first_text,
+            "data": {"swept_count": 1, "swept": {"owner/repo": [41]}},
+        }),
+        json.dumps({
+            "type": "pr_watch_tick",
+            "ts": second_text,
+            "data": {"swept_count": 0, "swept": {}},
+        }),
+    ]) + "\n")
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+
+    assert re.search(rf"^Completed tick: +{re.escape(first_text)} swept=1$", out, re.M), out
+
+
 @pytest.mark.parametrize(
     "tick_data",
     [

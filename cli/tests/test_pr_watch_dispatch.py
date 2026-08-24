@@ -2665,6 +2665,14 @@ class TestQuotaPreflight:
         receipt = next(event["data"] for event in deps["events"] if event["type"] == "pr_watch_tick")
         assert receipt["swept_count"] == 1
 
+    def test_dispatch_reserve_scales_with_tick_budget(self):
+        """Short valid tick deadlines must not disable dispatch outright."""
+        from fno.pr_watch._dispatch import _dispatch_reserve_seconds
+
+        assert _dispatch_reserve_seconds(480) == 360
+        assert _dispatch_reserve_seconds(360) == 270
+        assert _dispatch_reserve_seconds(60) == 45
+
     def test_degraded_sweep_still_completes_and_receipts(self, tmp_path):
         """AC4-EDGE at the tick boundary: a sweep WITH failures completed -
         outcome degraded, keys UNKNOWN - and a completed sweep still mints
