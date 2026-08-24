@@ -3254,8 +3254,11 @@ fn resolve_row_or_print(
 }
 
 /// Connect to one session's server and move the attached viewer to a pane
-/// (x-b80d): the shared tail of `view` and `pane focus`.
-fn focus_pane(verb: &str, session: &str, pane: u64, json: bool) -> i32 {
+/// (x-b80d): the shared tail of `view` and `pane focus`. `render: false`
+/// performs the move without printing the receipt - for a caller that has
+/// already put ONE JSON document on stdout and must not add a second
+/// unparsable one.
+fn focus_pane(verb: &str, session: &str, pane: u64, render: bool, json: bool) -> i32 {
     let sock = match proto::socket_path(session) {
         Ok(p) => p,
         Err(e) => {
@@ -3277,7 +3280,12 @@ fn focus_pane(verb: &str, session: &str, pane: u64, json: bool) -> i32 {
         CONTROL_REPLY_DEADLINE,
         session,
     ) {
-        Ok(reply) => render_reply(reply, json, false, None),
+        Ok(reply) => {
+            if !render {
+                return EXIT_OK;
+            }
+            render_reply(reply, json, false, None)
+        }
         Err(ControlError::Unanswered(e)) => {
             eprintln!("{verb}: {e}");
             EXIT_CONTROL_UNANSWERED
@@ -3306,7 +3314,7 @@ fn focus_by_selector(verb: &str, selector: &str, session_flag: Option<&str>, jso
         return EXIT_NOT_PANE_HOSTED;
     };
     let session = resolve_session(session_flag, Some(&host_session));
-    focus_pane(verb, &session, pane, json)
+    focus_pane(verb, &session, pane, true, json)
 }
 
 /// One pickable pane-hosted row for the interactive picker (x-b80d).
@@ -3523,7 +3531,7 @@ fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
             if url {
                 print_pane_url(verb, &session, pane)
             } else {
-                focus_pane(verb, &session, pane, json)
+                focus_pane(verb, &session, pane, true, json)
             }
         }
         None => EXIT_OK,
@@ -3639,11 +3647,16 @@ fn location_lookup(
     sel: &str,
     workspace: Option<&str>,
     session_flag: Option<&str>,
+    env_session: Option<&str>,
     json: bool,
     focus: bool,
     url: bool,
 ) -> i32 {
-    let session = resolve_session(session_flag, None);
+    // A location has no registry row to name its host session, so the ambient
+    // FNO_SESSION is the right default beside the explicit flag - the same
+    // precedence every session-taking verb uses. `where`'s agent path ignores
+    // the env on purpose (the row names the host); this branch cannot.
+    let session = resolve_session(session_flag, env_session);
     let sock = match proto::socket_path(&session) {
         Ok(p) => p,
         Err(e) => {
@@ -3681,17 +3694,21 @@ fn location_lookup(
     if focus {
         if let ServerMsg::TabLocation { focus: pane, .. } = &reply {
             let pane = *pane;
+            // `--url` names the operator's ask: ONLY the focused pane's share
+            // URL on stdout, never the client move - the same precedence the
+            // agent-matched path of `view` gives the flag.
+            if url {
+                return print_pane_url(verb, &session, pane);
+            }
+            // JSON stdout carries exactly ONE document: this receipt. The
+            // focus action still runs, but its own receipt is suppressed for
+            // `--json` - two adjacent documents cannot be parsed as the one
+            // documented value.
             let code = render_reply(reply, json, false, None);
             if code != EXIT_OK {
                 return code;
             }
-            // `--url` names the operator's ask: print the focused pane's
-            // share URL, never move the client (the same precedence the
-            // agent-matched path of `view` gives the flag).
-            if url {
-                return print_pane_url(verb, &session, pane);
-            }
-            return focus_pane(verb, &session, pane, json);
+            return focus_pane(verb, &session, pane, !json, json);
         }
     }
     render_reply(reply, json, false, None)
@@ -3706,6 +3723,7 @@ fn resolve_row_or_location(
     selector: &str,
     workspace: Option<&str>,
     session_flag: Option<&str>,
+    env_session: Option<&str>,
     json: bool,
     focus: bool,
     url: bool,
@@ -3722,6 +3740,7 @@ fn resolve_row_or_location(
             selector,
             workspace,
             session_flag,
+            env_session,
             json,
             focus,
             url,
@@ -3735,7 +3754,7 @@ fn resolve_row_or_location(
 /// pane index. Resolution is shared with `where` and `pane focus`; a row
 /// that hosts no pane degrades to a `peek` hint (Locked Decision 1). A
 /// selector that names no agent is retried as a tab LOCATION (x-1499).
-pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
+pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
     let verb = "fno mux view";
     let (session_flag, json, rest) = match take_common_flags(args) {
         Ok(t) => t,
@@ -3789,6 +3808,7 @@ pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
         &selector,
         workspace.as_deref(),
         session_flag.as_deref(),
+        env_session,
         json,
         true,
         url,
@@ -3807,7 +3827,7 @@ pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
         return print_pane_url(verb, &host_session, pane);
     }
     let session = resolve_session(session_flag.as_deref(), Some(&host_session));
-    focus_pane(verb, &session, pane, json)
+    focus_pane(verb, &session, pane, true, json)
 }
 
 /// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live
@@ -3815,7 +3835,7 @@ pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
 /// THAT session's socket, and rounds-trips one `PaneWhere`. The three failure
 /// modes get distinct exit codes (AC1-ERR); a registry read failure never reads
 /// as "not found".
-pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
+pub fn where_(args: &[OsString], env_session: Option<&str>) -> i32 {
     // The caller's FNO_SESSION is irrelevant here: `where` resolves the HOST
     // session from the registry, so an explicit --session is the only override.
     let (session_flag, json, rest) = match take_common_flags(args) {
@@ -3863,6 +3883,7 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
                 &fno_id,
                 workspace.as_deref(),
                 session_flag.as_deref(),
+                env_session,
                 json,
                 false,
                 false,
