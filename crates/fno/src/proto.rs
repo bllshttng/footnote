@@ -3,8 +3,8 @@
 //! Length-prefixed (u32 big-endian) JSON messages over a Unix socket at
 //! `~/.fno/mux/<session>.sock`. The socket dir is 0700 - it accepts keystrokes
 //! into your shell, so it is a security boundary. There is no lockfile: the
-//! socket bind IS the lock, liveness is a connect-probe, and a stale socket is
-//! unlinked at bind time.
+//! socket bind IS the lock, liveness is a query-probe, and an unresponsive
+//! holder is terminated before its stale socket is unlinked.
 //!
 //! Channel discipline (epic Locked Decision): client->server input/control is
 //! reliable and never dropped; only server->client render frames are
@@ -2679,12 +2679,24 @@ pub enum BindOutcome {
     AlreadyRunning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+const PROBE_HOLDER_TERM_GRACE: Duration = Duration::from_secs(3);
+const PROBE_HOLDER_KILL_GRACE: Duration = Duration::from_secs(1);
+
 /// Bind the session socket, treating the bind itself as the lock.
 ///
 /// - Fresh path: bind wins atomically.
 /// - `AddrInUse`: query-probe. A `ServerMsg::Info` response means a live server
-///   (`AlreadyRunning`). A refused, failed, or markerless probe means a stale
-///   socket from a dead or unresponsive server: unlink it and bind again.
+///   (`AlreadyRunning`). A refused connection is stale when no holder sidecar
+///   exists; when one does, it still coordinates with that holder. A
+///   markerless response is unknown: the pid sidecar must prove the old holder
+///   exited before the socket is unlinked and rebound.
 ///
 /// ponytail: unlink-then-rebind has a tiny two-racers-over-a-stale-socket
 /// window (both probe dead, both unlink+bind; the second unlink can orphan the
@@ -2696,12 +2708,17 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
     match UnixListener::bind(path) {
         Ok(l) => Ok(BindOutcome::Bound(l)),
         Err(e) if socket_in_use(&e) => {
-            if probe_alive(path) {
-                return Ok(BindOutcome::AlreadyRunning);
+            match probe_status(path) {
+                ProbeOutcome::Alive => return Ok(BindOutcome::AlreadyRunning),
+                ProbeOutcome::Unknown => reclaim_unresponsive_holder(path)?,
+                ProbeOutcome::Dead if pid_sidecar_path(path).exists() => {
+                    reclaim_unresponsive_holder(path)?
+                }
+                ProbeOutcome::Dead => {}
             }
-            // Stale socket from a dead server: take the name over. Session
-            // files, not just the socket, so a dead holder's .pid cannot
-            // outlive the rebind and name an unrelated pid.
+            // The holder is dead or has been terminated. Session files, not
+            // just the socket, so a dead holder's .pid cannot outlive the
+            // rebind and name an unrelated pid.
             remove_session_files(path)?;
             match UnixListener::bind(path) {
                 Ok(l) => Ok(BindOutcome::Bound(l)),
@@ -2871,18 +2888,31 @@ pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> std::io::Result<U
     }
 }
 
-/// True if a live server answers the frozen pre-Attach query with its positive
-/// liveness marker. A bare connect is not enough: a stale socket can still
-/// accept one residual connection after its listener dies. A timeout is also
-/// not enough: no response is not evidence of life.
-fn probe_alive(path: &Path) -> bool {
+/// Probe the frozen pre-Attach query. A bare connect is not enough: a stale
+/// socket can still accept one residual connection after its listener dies. A
+/// timeout or a connected peer without `Info` is unknown, not proof of death.
+fn probe_status(path: &Path) -> ProbeOutcome {
+    let mut uncertain = false;
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(50));
         }
-        let Ok(mut stream) = connect_unix_timeout(path, PROBE_ALIVE_CONNECT_TIMEOUT) else {
-            continue;
+        let mut stream = match connect_unix_timeout(path, PROBE_ALIVE_CONNECT_TIMEOUT) {
+            Ok(stream) => stream,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                continue
+            }
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
         };
+        uncertain = true;
         let _ = stream.set_read_timeout(Some(PROBE_ALIVE_CONNECT_TIMEOUT));
         let _ = stream.set_write_timeout(Some(PROBE_ALIVE_CONNECT_TIMEOUT));
         if write_msg_sync(&mut stream, &ClientMsg::Query).is_err() {
@@ -2892,10 +2922,105 @@ fn probe_alive(path: &Path) -> bool {
             read_msg_sync::<_, ServerMsg>(&mut stream),
             Ok(ServerMsg::Info { .. })
         ) {
-            return true;
+            return ProbeOutcome::Alive;
         }
     }
-    false
+    if uncertain {
+        ProbeOutcome::Unknown
+    } else {
+        ProbeOutcome::Dead
+    }
+}
+
+/// Stop an unresponsive holder before takeover. Without this coordination, its
+/// later `SocketGuard` can unlink the replacement server's socket and sidecars.
+/// The pid sidecar is identity-checked before each signal; an absent or reused
+/// identity refuses takeover rather than risking a signal to another process.
+fn reclaim_unresponsive_holder(path: &Path) -> std::io::Result<()> {
+    let pid_path = pid_sidecar_path(path);
+    let raw = std::fs::read_to_string(&pid_path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "cannot take over unresponsive socket: read {}: {e}",
+                pid_path.display()
+            ),
+        )
+    })?;
+    let (pid, recorded_start) = parse_pid_sidecar(&raw).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "cannot take over unresponsive socket: invalid {}",
+                pid_path.display()
+            ),
+        )
+    })?;
+    if pid <= 1 || pid as u32 == std::process::id() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("cannot signal holder pid {pid} from {}", pid_path.display()),
+        ));
+    }
+
+    let identity_matches = || match recorded_start {
+        None => true,
+        Some(recorded) => pid_start_time(pid as u32) == Some(recorded),
+    };
+    let gone = || pid_confirmed_dead(pid) || pid_is_zombie(pid);
+    if gone() {
+        return Ok(());
+    }
+    if !identity_matches() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("holder pid {pid} no longer matches {}", pid_path.display()),
+        ));
+    }
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let term_deadline = Instant::now() + PROBE_HOLDER_TERM_GRACE;
+    while Instant::now() < term_deadline {
+        if gone() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if gone() {
+        return Ok(());
+    }
+    if !identity_matches() {
+        // The recorded process exited and its pid was reused. That is safe for
+        // takeover: the old SocketGuard cannot run in the replacement process.
+        return Ok(());
+    }
+    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let kill_deadline = Instant::now() + PROBE_HOLDER_KILL_GRACE;
+    while Instant::now() < kill_deadline {
+        if gone() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if gone() {
+        Ok(())
+    } else if !identity_matches() {
+        // As above, a changed start time proves the holder we needed to stop is
+        // gone, even if the OS has already reused its pid.
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("holder pid {pid} survived takeover signals"),
+        ))
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@
 //! macOS), plus the built `fno` binary for the non-TTY gate.
 
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -132,7 +133,7 @@ fn proto_live_server_is_detected_not_clobbered() {
 }
 
 #[test]
-fn proto_connected_silent_peer_is_not_live() {
+fn proto_connected_silent_peer_without_holder_identity_refuses_takeover() {
     let scratch = Scratch::new("silent");
     let sock = scratch.path("s.sock");
     let listener = match bind_or_probe(&sock).unwrap() {
@@ -145,11 +146,57 @@ fn proto_connected_silent_peer_is_not_live() {
         std::thread::sleep(Duration::from_millis(100));
     });
 
+    let err = match bind_or_probe(&sock) {
+        Err(err) => err,
+        Ok(BindOutcome::Bound(_)) => panic!("unknown holder must not be clobbered"),
+        Ok(BindOutcome::AlreadyRunning) => panic!("silent peer has no liveness marker"),
+    };
+    assert!(
+        err.to_string().contains("pid"),
+        "refusal names the missing proof: {err}"
+    );
+    assert!(sock.exists(), "unknown holder must retain its socket");
+    silent_peer.join().unwrap();
+}
+
+#[test]
+fn proto_unmarked_holder_is_terminated_before_rebind() {
+    use std::os::unix::io::AsRawFd;
+
+    let scratch = Scratch::new("unmarked-holder");
+    let sock = scratch.path("s.sock");
+    let listener = match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(l) => l,
+        BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
+    };
+    let fd = listener.as_raw_fd();
+    let mut command = Command::new("sh");
+    command.args(["-c", "sleep 30"]);
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    drop(listener);
+    let start = fno::proto::pid_start_time(child.id());
+    let pid = child.id();
+    let sidecar = match start {
+        Some(start) => format!("{pid}:{start}"),
+        None => pid.to_string(),
+    };
+    std::fs::write(fno::proto::pid_sidecar_path(&sock), sidecar).unwrap();
+
     match bind_or_probe(&sock).unwrap() {
         BindOutcome::Bound(_) => {}
-        BindOutcome::AlreadyRunning => panic!("a connected peer without a marker is not live"),
+        BindOutcome::AlreadyRunning => panic!("unmarked holder must be reclaimed"),
     }
-    silent_peer.join().unwrap();
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "takeover must terminate the old holder");
 }
 
 #[test]
