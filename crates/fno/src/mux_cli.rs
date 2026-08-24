@@ -1477,6 +1477,8 @@ fn gather_checks() -> Vec<Check> {
             remedy: Some("fix the mux dir permissions".into()),
         }),
     }
+    #[cfg(not(test))]
+    checks.push(legacy_mux_root_check());
     checks.push(terminal_check(&std::env::var("TERM").unwrap_or_default()));
     checks.push(truecolor_check(
         &std::env::var("COLORTERM").unwrap_or_default(),
@@ -1485,6 +1487,68 @@ fn gather_checks() -> Vec<Check> {
     checks.push(squad_store_check());
     checks.push(board_scope_check());
     checks
+}
+
+/// Sessions stranded at the pre-config-chain root `~/.fno/mux` when this
+/// process resolves its socket dir elsewhere (`config.state_dir`, or a pinned
+/// `FNO_CONFIG`). A daemon bound before an upgrade - or started from a
+/// directory with no state_dir override while clients run inside one that has
+/// it - keeps serving a dir no current client lands on, and every reaper
+/// (`ls`-based) resolves the new root, so nothing finds it to reap. Visible
+/// ONLY here, which is why it is a `warn` with the one command that reaches
+/// the old root.
+#[cfg(not(test))]
+fn legacy_mux_root_check() -> Check {
+    let legacy = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".fno").join("mux"));
+    let Some(legacy) = legacy else {
+        return Check {
+            name: "legacy mux root".into(),
+            verdict: Verdict::Na,
+            detail: "no HOME to compare roots".into(),
+            remedy: None,
+        };
+    };
+    let resolved = proto::mux_dir();
+    if resolved == legacy {
+        return Check {
+            name: "legacy mux root".into(),
+            verdict: Verdict::Na,
+            detail: "resolved dir is the legacy root".into(),
+            remedy: None,
+        };
+    }
+    let socks = std::fs::read_dir(&legacy)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "sock"))
+                .count()
+        })
+        .unwrap_or(0);
+    if socks == 0 {
+        return Check {
+            name: "legacy mux root".into(),
+            verdict: Verdict::Na,
+            detail: "no sessions at the legacy root".into(),
+            remedy: None,
+        };
+    }
+    Check {
+        name: "legacy mux root".into(),
+        verdict: Verdict::Warn,
+        detail: format!(
+            "{socks} session socket(s) sit at the pre-config-chain root {} this \
+             process no longer resolves",
+            legacy.display()
+        ),
+        remedy: Some(format!(
+            "FNO_MUX_DIR={} fno mux ls; kill-server or restart them under the \
+             resolved root",
+            legacy.display()
+        )),
+    }
 }
 
 /// What the backlog board would be scoped to (x-20f1).
