@@ -1104,8 +1104,8 @@ struct PrInfo {
 /// for the merge guard. Two gates refuse the same uncovered head, so they must
 /// not teach two different remedies.
 const REVIEW_ORDER: &str = "close every finding, commit and push first, then \
-     attest at the final head (`bash skills/review/scripts/emit-attestation.sh \
-     <reviewer>`, which the claude attest hook runs for you on a clean pass)";
+     review and attest at the final head (`bash skills/review/scripts/emit-attestation.sh \
+     <reviewer>` is recovery if a confirmed clean native review hook failed)";
 
 /// The non-interactive invocation that satisfies each local reviewer, mirroring
 /// the `invocation` field of `_RESOLVABLE_REVIEWERS` in
@@ -9559,14 +9559,15 @@ fn build_block_reason(
                             } else {
                                 inv
                             };
-                            // code-review is a native harness verb that emits
-                            // no attestation on its own; the session must also
-                            // run the emit helper or the gate never clears.
+                            // code-review is a native harness verb whose clean
+                            // result normally reaches the shared attester. The
+                            // helper remains the loud recovery path if that
+                            // confirmed clean result did not produce evidence.
                             // The fno-skill reviewers (sigma, declare) attest
                             // inside their own invocation.
                             let emit_step = if r.name == "code-review" {
                                 format!(
-                                    ", then `bash skills/review/scripts/emit-attestation.sh {}`",
+                                    ", if the confirmed clean review did not emit, recover with `bash skills/review/scripts/emit-attestation.sh {}`",
                                     r.name
                                 )
                             } else {
@@ -14470,6 +14471,11 @@ mod tests {
         assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
         assert!(reason.contains("code-review"), "got: {reason}");
         assert!(reason.contains(&format!("`{expected}`")), "got: {reason}");
+        assert!(
+            reason.contains("skills/review/scripts/emit-attestation.sh code-review"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("local work to DO, not a wait"), "got: {reason}");
     }
 
     #[test]

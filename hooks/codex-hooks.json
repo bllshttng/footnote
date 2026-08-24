@@ -72,6 +72,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/code-review-attest.sh"
+          },
+          {
+            "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/target-stop-hook.sh"
           },
           {

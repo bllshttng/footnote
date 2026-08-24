@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Emit the code-review attestation when a native /code-review pass reports
-# CLEAN (x-e97b). Two independent triggers, wired in hooks.json under two
-# different hook events, because /code-review reaches a clean pass through
-# two different reachable paths and a guard on only one is decorative
-# (AGENTS.md pitfalls corpus, "a guard placed on one of N reachable paths"):
+# Emit the code-review attestation when a native review pass reports CLEAN.
+# Claude and Codex expose different structured completion surfaces, so this
+# shared producer handles all reachable paths:
 #
 #   1. PostToolUse(ReportFindings) - a pass that calls the ReportFindings
 #      tool directly, when the active code-review instructions route
@@ -17,7 +15,11 @@
 #      caught trigger 1 alone as dead on arrival for that path), so its
 #      result surfaces only in the subagent's final text.
 #
-# Trigger 2 identifies the fork from the harness's own record of what it
+#   3. Stop - Codex's native `/review` is an internal review task. Its root
+#      Stop payload carries the exact turn and transcript path; the transcript
+#      carries the structured `ExitedReviewMode` result.
+#
+# The SubagentStop trigger identifies the fork from the harness's own record of what it
 # ran (the sidecar beside `agent_transcript_path`), NOT from the shape of
 # what it printed. Keying on printed shape is what left this branch
 # decorative through six PRs: see the measurement in the branch itself.
@@ -162,6 +164,41 @@ print("[]")
       # it especially, attests nothing.
       is_clean=1
     fi
+    ;;
+  Stop)
+    turn_id="$(printf '%s' "$input" | jq -r '.turn_id // empty' 2>/dev/null || true)"
+    transcript="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
+    [[ -n "$turn_id" && -n "$transcript" ]] || exit 0
+    transcript="${transcript/#\~/$HOME}"
+    [[ -r "$transcript" ]] || exit 0
+
+    # Codex's review verdict is a structured transcript item, not the final
+    # assistant prose. Slurp the complete JSONL so a malformed later row, a
+    # duplicate completion, or a wrong-turn row cannot be normalized into a
+    # clean result by a partial grep.
+    review_outputs="$(jq -s --arg turn "$turn_id" '
+      [
+        .[]
+        | select(
+            .type == "event_msg"
+            and .payload.type == "item_completed"
+            and .payload.turn_id == $turn
+            and .payload.item.type == "ExitedReviewMode"
+          )
+        | .payload.item.review_output
+      ]
+    ' "$transcript" 2>/dev/null)" || exit 0
+
+    # Exactly one completion with a present array-valued findings key equal to
+    # [] is the positive clean marker. Every other shape stays silent.
+    jq -e '
+      length == 1
+      and (.[0] | type == "object"
+        and has("findings")
+        and (.findings | type == "array")
+        and (.findings == []))
+    ' <<<"$review_outputs" >/dev/null 2>&1 || exit 0
+    is_clean=1
     ;;
   *)
     exit 0
