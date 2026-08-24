@@ -56,6 +56,14 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 - graduates-to: a probe distinguishing user-shaped injection from an autonomous tool call, or a lint flagging a capability claim evidenced only by a mail probe.
 - added: 2026-08-05
 
+### Codex RPC
+
+`fno agents mail send <full-session-id> --raw '/review'` or `'/code-review'` fires daemon RPC. Other verbs: `fno mux pane send --raw --submit`. Read pane for silent verbs.
+
+- specimens: mail_inject.rs, mux_cli.rs
+- graduates-to: submit receipt
+- added: 2026-08-24
+
 ## Repository
 
 ```
