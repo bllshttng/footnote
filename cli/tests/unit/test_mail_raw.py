@@ -70,7 +70,7 @@ def _seed_claude(mailbox, monkeypatch):
     injected = []
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_claude",
-        lambda s, t, sender=None: injected.append((s, t, sender)) or True,
+        lambda s, t, sender=None, **_kwargs: injected.append((s, t, sender)) or True,
     )
     return injected
 
@@ -1025,7 +1025,8 @@ def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
     from fno.mail.cli import _raw_send
 
     monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude", lambda s, t, sender=None: False
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda s, t, sender=None, **_kwargs: False,
     )
     register_existing_session(
         provider="claude", session_id=SID_CLAUDE, cwd=str(mailbox), name="claudepeer"

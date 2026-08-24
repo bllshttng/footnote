@@ -3042,8 +3042,13 @@ def _raw_send(
     # 3. Resolve name -> registry row. The lane lives on the row. An UNAVAILABLE
     #    resolution (a registry this fno cannot read) is not a miss: it is the
     #    unmeasurable answer, kept apart from "resolved, and there is no path".
+    lookup_name = name
+    if self_ok:
+        from fno.agents.self_stamp import resolve_self_session_id
+
+        lookup_name = resolve_self_session_id() or name
     try:
-        entry = resolve_agent(name).entry
+        entry = resolve_agent(lookup_name).entry
     except AgentResolutionError as exc:
         if exc.unavailable:
             _unmeasurable(f"registry unreadable, so {name!r} could not be resolved")
@@ -3212,14 +3217,14 @@ def _raw_send(
                 )
             assert target is not None
             raw_msg_id, reservation, authored_words = _reserve_raw()
-            receipt = _review_start_codex(
-                session_id,
-                target,
-                audit_payload=stripped[:512],
-                audit_sender=transport_sender,
-                audit_target_cwd=getattr(entry, "cwd", None),
-                origin=origin,
-            )
+            review_kwargs = {
+                "audit_payload": stripped[:512],
+                "audit_sender": transport_sender,
+                "audit_target_cwd": getattr(entry, "cwd", None),
+            }
+            if origin is not None:
+                review_kwargs["origin"] = origin
+            receipt = _review_start_codex(session_id, target, **review_kwargs)
             if receipt.get("delivered"):
                 _record_raw(raw_msg_id, authored_words)
                 note = " (unrecognized remainder ignored)" if ignored_remainder else ""
@@ -3330,12 +3335,15 @@ def _raw_send(
     #        ambient identity it stays absent rather than guessing.
     raw_msg_id, _reservation, authored_words = _reserve_raw()
     if entry.mux:
+        raw_transport_kwargs = {"sender": transport_sender}
+        if origin is not None:
+            raw_transport_kwargs["origin"] = origin
         delivered = _mux_pane_send(
             entry,
             stripped,
             guarded=False,
             confirm=True,
-            sender=transport_sender,
+            **raw_transport_kwargs,
             origin=origin,
             # raw: this lane exists to make the REPL slash parser fire, which an
             # envelope defeats.
@@ -3351,11 +3359,13 @@ def _raw_send(
             review=review_request,
         )
     else:  # claude control.sock - the only other keystroke lane
+        raw_transport_kwargs = {"sender": transport_sender}
+        if origin is not None:
+            raw_transport_kwargs["origin"] = origin
         delivered = _mail_inject_claude(
             session_id,
             stripped,
-            sender=transport_sender,
-            origin=origin,
+            **raw_transport_kwargs,
         )
 
     # 8. Four-state receipt (never a boolean; never a durable write).
@@ -3722,14 +3732,14 @@ def cmd_send(
         if message is None:
             print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
             raise typer.Exit(code=2)
-        _raw_send(
-            name,
-            message,
-            self_ok=to_self,
-            check=check,
-            style_exception=style_exception,
-            origin=mail_origin,
-        )
+        raw_kwargs = {
+            "self_ok": to_self,
+            "check": check,
+            "style_exception": style_exception,
+        }
+        if mail_origin is not None:
+            raw_kwargs["origin"] = mail_origin
+        _raw_send(name, message, **raw_kwargs)
         return
     if check:
         # Only the --raw lane has a keystroke path to have or lack; a wrapped send

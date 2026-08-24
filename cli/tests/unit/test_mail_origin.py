@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -144,3 +145,42 @@ def test_non_operator_origin_refuses_operator_authority(monkeypatch):
     )
     with pytest.raises(RefusedAuthorityError, match="scheduler"):
         _resolve_decider(None, "operator", origin="scheduler")
+
+
+def test_raw_self_lookup_uses_full_codex_session_id(monkeypatch):
+    import typer
+
+    from fno.mail.cli import _raw_send
+    from fno.harness_identity import canonical_handle
+
+    full_id = "01a0358f-8ab0-79a1-935d-5063b7101401"
+    seen: list[str] = []
+    entry = SimpleNamespace(
+        harness="claude",
+        harness_session_id=full_id,
+        mux={},
+        delivery_policy=None,
+    )
+
+    def resolve(token):
+        seen.append(token)
+        return SimpleNamespace(entry=entry)
+
+    monkeypatch.setattr("fno.agents.registry.resolve_agent", resolve)
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_session_id",
+        lambda: full_id,
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch.mail_inject_probe",
+        lambda _session: (True, ""),
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send(
+            canonical_handle(full_id),
+            "/compact",
+            self_ok=True,
+            check=True,
+        )
+    assert exc.value.exit_code == 0
+    assert seen == [full_id]
