@@ -1725,9 +1725,9 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             "skipped",
             "auto_merge disabled (live config resolves auto_merge.enabled="
             "false); sanctioned override (operator levers): `fno config set "
-            "auto_merge.enabled true`, or start an operator-origin run with "
-            "TARGET_AUTO_MERGE=1 (no agent identity, attended). The env grant "
-            "is folded into the manifest at init - agent-origin and "
+            "auto_merge.enabled true`, or start the run with "
+            "TARGET_AUTO_MERGE=1 from the operator's shell. The env grant "
+            "is folded into the manifest at init - mesh-spawned and "
             "unattended runs scrub it, it is never a merge-time variable, "
             "and never a synthesized config",
             "none",

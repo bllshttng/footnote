@@ -419,8 +419,10 @@ pub fn auto_merge_grant(cwd: &Path) -> bool {
 /// MIRROR NOTE (posture readers): the Python coercer
 /// (`AutoMergeBlock._coerce_enabled` via `_coerce_affirmative`) also accepts
 /// string spellings ("true"/"yes"/"1"/"on"), so `enabled = "true"` arms the
-/// merge verb but not this arm. Deliberately stricter here; any change to
-/// either spelling set must move both or the gates split on that spelling.
+/// merge verb and the git-protection hook (both resolve through that
+/// tolerant reader) but not this arm. Deliberately stricter here; any change
+/// to either spelling set must move all three readers or the gates split on
+/// that spelling.
 pub fn auto_merge_enabled(cwd: &Path) -> bool {
     for path in config_candidates(cwd) {
         let content = match std::fs::read_to_string(&path) {

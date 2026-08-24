@@ -2379,11 +2379,13 @@ class AutoMergeBlock(BaseModel):
     ``/target bg`` injected default into ``auto_merge_approved`` in
     ``.fno/target-state.md``, with ``auto_merge_source`` naming the decider.
     The fold withholds and it grants: a per-run refusal (``false``) outranks
-    every grant at the merge gate (``pr/_merge.py``), and an operator-origin
+    every grant at the merge gate (``pr/_merge.py``), and a
     ``TARGET_AUTO_MERGE=1`` grant (``env-target-auto-merge``) satisfies the
-    standing arm on its own (x-01b9) - honored only where no agent identity is
-    present (crown's bar) and the run is attended, scrubbed otherwise so no
-    agent session can mint what no config granted.
+    standing arm on its own (x-01b9). Scrubbed on runs carrying a mesh
+    identity (``FNO_AGENT_SELF``) or an unattended marker; an interactive
+    session the operator launched carries neither and is the documented
+    carrier of the grant, inside the operator's trust boundary, with the
+    source stamp keeping every grant auditable.
     The review rung of the same chain is ``config.review.required_bots`` /
     ``config.review.reviewers``, enforced at the coverage guard in
     ``_merge.py``.
@@ -2395,9 +2397,10 @@ class AutoMergeBlock(BaseModel):
     # crates/fno-agents/src/agents_config.rs `auto_merge_enabled` accepts only
     # a real TOML boolean for this key - deliberately stricter at the
     # irreversible native-arm - while this coercer also accepts the string
-    # spellings. A config carrying `enabled = "true"` arms the merge verb but
-    # not the finalize arm. Any change to either spelling set must move both,
-    # or the gates split on exactly that spelling.
+    # spellings. A config carrying `enabled = "true"` arms the merge verb and
+    # the git-protection hook (both resolve through this tolerant reader) but
+    # not the finalize arm. Any change to either spelling set must move all
+    # three readers, or the gates split on exactly that spelling.
     enabled: bool = False
     # ACTOR scope (x-4be1): who may merge once `enabled` passes. Replaces
     # `dispatch.auto_merge`, which spelled the same decision in another table.

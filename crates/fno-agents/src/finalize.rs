@@ -882,8 +882,8 @@ pub fn run_finalize(args: &[String]) -> i32 {
         if !env_grant && !crate::agents_config::auto_merge_enabled(&cwd) {
             let blocked = "live config resolves auto_merge.enabled=false; sanctioned \
 override (operator levers): arm the standing switch (`fno config set \
-auto_merge.enabled true`) or start an operator-origin run with \
-TARGET_AUTO_MERGE=1 (no agent identity, attended)"
+auto_merge.enabled true`) or start the run with TARGET_AUTO_MERGE=1 from \
+the operator's shell"
                 .to_string();
             eprintln!("finalize: native auto-merge withheld: {blocked}");
             (false, Some(blocked))

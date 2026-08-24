@@ -354,15 +354,17 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
   }
 fi
 # The env grant is the OPERATOR's lever (x-3855, codex P1 on PR 1131):
-# TARGET_AUTO_MERGE reaches a child only by inheritance, and ANY agent
-# session - attended or not - can export it before init and mint merge
-# authority no config granted. The origin bar is the crown's own
-# (cli/src/fno/agents/crown.py: no FNO_AGENT_SELF = an attended human)
-# plus the unattended derivation, so neither a spawned worker nor an
-# interactive agent can stamp the grant. The autonomous grant is
-# auto_merge.grant = dispatch, never this variable. Residual, named rather
-# than solved: a process that clears its own FNO_AGENT_SELF before init
-# defeats any env test; the stamp (auto_merge_source) keeps the act audited.
+# TARGET_AUTO_MERGE reaches a child only by inheritance, and a mesh-spawned
+# worker can export it before init to mint merge authority no config
+# granted. The bar here is the crown's own (cli/src/fno/agents/crown.py:
+# no FNO_AGENT_SELF = an attended human) plus the unattended derivation,
+# so spawned and unattended runs cannot stamp the grant. The autonomous
+# grant is auto_merge.grant = dispatch, never this variable. Residual,
+# named rather than solved: an interactive session the OPERATOR launched
+# carries no mesh identity either, and sits inside the operator's trust
+# boundary - the documented carrier of this grant, with the stamp
+# (auto_merge_source) keeping every use auditable. Provenance an env test
+# cannot establish is the x-f3d0 class.
 _AUTO_MERGE_ENV_GRANT="false"
 if [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
   if [[ -z "${FNO_AGENT_SELF:-}" && "$_attended" == "true" ]]; then

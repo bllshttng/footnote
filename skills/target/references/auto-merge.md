@@ -42,7 +42,7 @@ Pass the positional `no-merge` modifier at invocation time to revoke merge autho
 /megawalk once no-merge
 ```
 
-Enabling per-run is deliberately NOT symmetric. A positional `auto-merge` grants nothing on its own. To allow merging, set `auto_merge.enabled` in config. Or start the run with `TARGET_AUTO_MERGE=1` from an operator shell. The env grant is folded into the manifest at init. It is honored on operator-origin runs only. An operator-origin run has no agent identity and is attended. Agent-origin and unattended runs scrub it, so no agent session can mint a grant no config gave. Exporting it on a merge command line grants nothing.
+Enabling per-run is deliberately NOT symmetric. A positional `auto-merge` grants nothing on its own. To allow merging, set `auto_merge.enabled` in config. Or start the run with `TARGET_AUTO_MERGE=1` from an operator shell. The env grant is folded into the manifest at init. Runs carrying a mesh identity (`FNO_AGENT_SELF`) or an unattended marker scrub it. An interactive session the operator launched does not carry either marker. That session sits inside the operator's trust boundary and remains the documented way the per-run grant reaches a run. The stamp (`auto_merge_source: env-target-auto-merge`) keeps every such grant auditable. A worker still never exports the variable itself. Exporting it on a merge command line grants nothing.
 
 ## Resolution Order (First Match Wins)
 
