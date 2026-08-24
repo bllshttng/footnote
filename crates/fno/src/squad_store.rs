@@ -295,6 +295,11 @@ pub struct ExternalLifecycle {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 struct StoreFile {
     version: u32,
+    /// The next pane id reserved across mux-server restarts. Pane ids are
+    /// globally monotonic so a registry mux ref cannot silently retarget after
+    /// a server restart.
+    #[serde(default)]
+    next_pane_id: u64,
     #[serde(default)]
     squads: Vec<StoredSquad>,
     /// (x-7561) Machine-global external-row lifecycle tombstones. A defaulted
@@ -320,6 +325,8 @@ pub enum LifecycleCas {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Loaded {
     pub squads: Vec<StoredSquad>,
+    /// The persisted pane-id floor; zero means no pane has been reserved yet.
+    pub next_pane_id: u64,
     /// (x-7561) The tracked external-row lifecycle tombstones, `attach_id`
     /// validated exactly like squad members (a malformed id never reaches an
     /// argv). Empty when the store has none.
@@ -518,9 +525,21 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
     };
     Loaded {
         squads,
+        next_pane_id: file.next_pane_id,
         external_lifecycle,
         notice,
     }
+}
+
+/// Reserve one globally monotonic pane id under the store lock. `floor` is the
+/// server's in-memory next id and lets a restored server advance past any ids it
+/// already observed before the first reservation.
+pub fn reserve_next_pane_id(floor: u64) -> io::Result<u64> {
+    mutate_file(|sf| {
+        let id = sf.next_pane_id.max(floor).max(1);
+        sf.next_pane_id = id.saturating_add(1);
+        id
+    })
 }
 
 /// Match a stored squad by identity: a NAMED squad (`name` non-empty) is keyed
@@ -1355,7 +1374,7 @@ fn assert_writable() -> io::Result<()> {
 /// apply `f` to both collections at once, pin the version, and atomically
 /// rename a tmp over the target. `mutate` / `mutate_lifecycle` are thin views
 /// onto it, so every mutation preserves both collections.
-fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
+fn mutate_file<T>(f: impl FnOnce(&mut StoreFile) -> T) -> io::Result<T> {
     #[cfg(not(test))]
     assert_writable()?;
     let path = squads_path();
@@ -1395,7 +1414,7 @@ fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
         Err(e) => return Err(e),
     };
     let mut file = parse_seed(seed, from_legacy)?;
-    f(&mut file);
+    let result = f(&mut file);
     file.version = STORE_VERSION;
 
     let bytes = serde_json::to_vec_pretty(&file)
@@ -1405,7 +1424,7 @@ fn mutate_file(f: impl FnOnce(&mut StoreFile)) -> io::Result<()> {
     // Atomic rename: a concurrent reader sees either the old or the new file,
     // never a torn one (AC1-FR).
     std::fs::rename(&tmp, &path)?;
-    Ok(())
+    Ok(result)
 }
 
 /// The mutate seed parse. Corruption at the PRIMARY path refuses the write
@@ -1558,6 +1577,16 @@ mod tests {
             "an unscoped unit test must not persist mux squads under HOME: {}",
             path.display()
         );
+    }
+
+    #[test]
+    fn pane_id_reservation_survives_restart_and_advances_past_floor() {
+        let _s = Scratch::new("pane-counter");
+
+        assert_eq!(reserve_next_pane_id(1).unwrap(), 1);
+        assert_eq!(reserve_next_pane_id(1).unwrap(), 2);
+        assert_eq!(reserve_next_pane_id(9).unwrap(), 9);
+        assert_eq!(load().next_pane_id, 10);
     }
 
     #[test]
@@ -2166,6 +2195,7 @@ mod tests {
         );
         let file = StoreFile {
             version: STORE_VERSION,
+            next_pane_id: 0,
             squads: vec![
                 StoredSquad {
                     name: "f[no]".into(),
@@ -2220,6 +2250,7 @@ mod tests {
         let key = origin_key(&["/repo".into()]);
         let file = StoreFile {
             version: STORE_VERSION,
+            next_pane_id: 0,
             squads: vec![
                 StoredSquad {
                     name: "one".into(),

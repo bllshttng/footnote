@@ -835,7 +835,19 @@ def _shape_review_coverage(
     )
     reviewed = [v for v in verdicts if v.get("verdict") == "reviewed"]
     valid = [v for v in reviewed if v.get("freshness") in _COUNTED_FRESHNESS]
-    explicit_stale = any(v.get("verdict") == "stale" for v in verdicts)
+    fresh_reviewers = {
+        (v.get("name"), v.get("producer"))
+        for v in valid
+    }
+    # Keep stale verdicts visible, but let a current verdict from the same
+    # reviewer and producer supersede that reviewer's history. A stale verdict
+    # from another reviewer still blocks, so one fresh reviewer cannot mask an
+    # unreviewed or outdated required reviewer.
+    explicit_stale = any(
+        v.get("verdict") == "stale"
+        and (v.get("name"), v.get("producer")) not in fresh_reviewers
+        for v in verdicts
+    )
     if malformed or explicit_stale or not reviewed or len(valid) != len(reviewed):
         shaped["coverage"] = "uncovered"
         shaped["reviewed_count"] = len(valid)

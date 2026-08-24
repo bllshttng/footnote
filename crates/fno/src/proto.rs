@@ -2,9 +2,10 @@
 //!
 //! Length-prefixed (u32 big-endian) JSON messages over a Unix socket at
 //! `~/.fno/mux/<session>.sock`. The socket dir is 0700 - it accepts keystrokes
-//! into your shell, so it is a security boundary. There is no lockfile: the
-//! socket bind IS the lock, liveness is a connect-probe, and a stale socket is
-//! unlinked at bind time.
+//! into your shell, so it is a security boundary. The socket bind claims the
+//! name, and a short-lived startup marker protects the gap before the server
+//! can answer its liveness query. An unresponsive established holder is
+//! terminated before its stale socket is unlinked.
 //!
 //! Channel discipline (epic Locked Decision): client->server input/control is
 //! reliable and never dropped; only server->client render frames are
@@ -258,6 +259,11 @@ fn default_true() -> bool {
 /// instead. (Numbered one past the x-5f7f resume-gesture v49 it rebases
 /// onto.)
 ///
+/// v52 (x-588a): pane reads and sends carry the pane's captured identity and
+/// the registry identity used to address it. Additive fields remain defaulted,
+/// but the send identity is a safety contract, so the handshake must reject an
+/// older peer rather than let it type into an unverified pane.
+///
 /// v51 (x-1499, tab dictionary): `ControlVerb::TabWhere` +
 /// `ServerMsg::TabLocation`/`TabPaneOccupant` - the reverse location lookup
 /// (what lives at the tab the operator is looking at). `TabSel::Index`
@@ -265,7 +271,7 @@ fn default_true() -> bool {
 /// index, so a captured `--tab <n>` selector changes meaning across the
 /// bump; the handshake is what tells an old client to restart. New variants
 /// are not additive-tolerant either.
-pub const PROTO_VERSION: u32 = 51;
+pub const PROTO_VERSION: u32 = 52;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -614,6 +620,11 @@ pub enum ControlVerb {
         bytes: Vec<u8>,
         #[serde(default)]
         guarded: bool,
+        /// (v51, x-588a) The addressed pane identity. When present, the server
+        /// refuses before typing unless the pane's captured name and registry
+        /// row agree with this value.
+        #[serde(default)]
+        expected_identity: Option<String>,
     },
     /// Block until the pane's output settles (`quiet_ms` with no new output),
     /// matches `pattern` (regex over the visible grid), the child exits, or
@@ -1850,6 +1861,13 @@ pub enum ServerMsg {
         text: String,
         #[serde(default)]
         block: Option<BlockMeta>,
+        /// (v51, x-588a) Identity captured from the pane's spawn argv.
+        #[serde(default)]
+        pane_name: Option<String>,
+        /// (v51, x-588a) The registry identity joined to this pane ref, not a
+        /// fact owned by the pane itself.
+        #[serde(default)]
+        registry_fno_id: Option<String>,
     },
     /// Answer to [`ControlVerb::PaneRun`]: the fresh pane's id, machine-read
     /// by the CLI so scripts compose. `placement` (v44, x-6928) carries the
@@ -2086,6 +2104,9 @@ pub struct PaneInfo {
     /// direction of `where` (Locked Decision 6).
     #[serde(default)]
     pub fno_id: Option<String>,
+    /// (v51, x-588a) The pane's spawn-captured `FNO_AGENT_SELF` identity.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Why a [`ControlVerb::PaneWait`] returned. The CLI maps each to a distinct
@@ -2173,6 +2194,9 @@ pub mod err_code {
     /// pane is gone" and "nobody is watching" are different problems, and
     /// collapsing them leaves the operator unable to tell which one they have.
     pub const NO_CLIENT: u32 = 13;
+    /// (v51, x-588a) The addressed identity disagrees with the pane's captured
+    /// identity or its unique registry occupant; no bytes were typed.
+    pub const TARGET_IDENTITY_MISMATCH: u32 = 14;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -3115,6 +3139,93 @@ pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Marker held from socket bind until the server exits. It protects a freshly
+/// bound listener that cannot answer the query probe yet, so a concurrent
+/// starter cannot mistake that startup window for a stale socket.
+pub fn startup_sidecar_path(socket: &Path) -> PathBuf {
+    socket.with_extension("start")
+}
+
+pub fn remove_startup_guard(socket: &Path) {
+    let _ = std::fs::remove_file(startup_sidecar_path(socket));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupGuard {
+    Owned,
+    ExistingLive,
+}
+
+fn startup_guard_live(pid: i32, recorded_start: Option<u64>) -> bool {
+    if pid <= 1 || pid_confirmed_dead(pid) || pid_is_zombie(pid) {
+        return false;
+    }
+    recorded_start.is_none_or(|start| pid_start_time(pid as u32) == Some(start))
+}
+
+fn create_startup_marker(marker: &Path) -> std::io::Result<()> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = marker
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("mux-start"));
+    let tmp = marker.with_file_name(format!(".{name}.tmp.{}.{}", std::process::id(), stamp));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)?;
+        let pid = std::process::id();
+        let contents = match pid_start_time(pid) {
+            Some(start) => format!("{pid}:{start}"),
+            None => pid.to_string(),
+        };
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        std::fs::hard_link(&tmp, marker)
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGuard> {
+    let marker = startup_sidecar_path(socket);
+    loop {
+        match create_startup_marker(&marker) {
+            Ok(()) => return Ok(StartupGuard::Owned),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let raw = std::fs::read_to_string(&marker).map_err(|read| {
+                    std::io::Error::new(
+                        read.kind(),
+                        format!(
+                            "cannot read mux startup marker {}: {read}",
+                            marker.display()
+                        ),
+                    )
+                })?;
+                let Some((pid, recorded_start)) = parse_pid_sidecar(&raw) else {
+                    if !socket.exists() || matches!(probe_status(socket), ProbeOutcome::Dead) {
+                        std::fs::remove_file(&marker)?;
+                        continue;
+                    }
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid mux startup marker {}", marker.display()),
+                    ));
+                };
+                if startup_guard_live(pid, recorded_start) {
+                    return Ok(StartupGuard::ExistingLive);
+                }
+                std::fs::remove_file(&marker)?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 pub const DEFAULT_SESSION: &str = "main";
 
 /// Outcome of [`bind_or_probe`].
@@ -3125,13 +3236,24 @@ pub enum BindOutcome {
     AlreadyRunning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+const PROBE_HOLDER_TERM_GRACE: Duration = Duration::from_secs(3);
+const PROBE_HOLDER_KILL_GRACE: Duration = Duration::from_secs(1);
+
 /// Bind the session socket, treating the bind itself as the lock.
 ///
 /// - Fresh path: bind wins atomically.
-/// - `AddrInUse`: connect-probe. A successful connect means a live server
-///   (`AlreadyRunning`). Refused/failed connects (retried briefly, so a server
-///   between its bind and listen syscalls is not misread as dead) mean a stale
-///   socket from a dead server: unlink it and bind again.
+/// - `AddrInUse`: query-probe. A `ServerMsg::Info` response means a live server
+///   (`AlreadyRunning`). A refused connection is stale when no holder sidecar
+///   exists; when one does, it still coordinates with that holder. A
+///   markerless response is unknown: the pid sidecar must prove the old holder
+///   exited before the socket is unlinked and rebound.
 ///
 /// ponytail: unlink-then-rebind has a tiny two-racers-over-a-stale-socket
 /// window (both probe dead, both unlink+bind; the second unlink can orphan the
@@ -3140,26 +3262,83 @@ pub enum BindOutcome {
 /// stale+simultaneous case needs a dead server AND a photo-finish start. If it
 /// ever bites, the upgrade is an O_EXCL sidecar lock around the unlink.
 pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
+    let startup = acquire_startup_guard(path)?;
+    let mut owns_startup = startup == StartupGuard::Owned;
     match UnixListener::bind(path) {
         Ok(l) => Ok(BindOutcome::Bound(l)),
         Err(e) if socket_in_use(&e) => {
-            if probe_alive(path) {
-                return Ok(BindOutcome::AlreadyRunning);
+            let mut reclaimed_holder = false;
+            match probe_status(path) {
+                ProbeOutcome::Alive => {
+                    if owns_startup {
+                        remove_startup_guard(path);
+                    }
+                    return Ok(BindOutcome::AlreadyRunning);
+                }
+                ProbeOutcome::Unknown if !owns_startup => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("mux startup in progress at {}", path.display()),
+                    ));
+                }
+                ProbeOutcome::Unknown if pid_sidecar_path(path).exists() => {
+                    reclaim_unresponsive_holder(path)?;
+                    reclaimed_holder = true;
+                }
+                // A pre-sidecar server or a dead listener can leave one
+                // residual connection that has no positive marker. Preserve
+                // the legacy stale-socket recovery when there is no holder
+                // identity to coordinate with; current servers write `.pid`.
+                ProbeOutcome::Unknown => {}
+                ProbeOutcome::Dead if !owns_startup => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("mux startup owner still holds {}", path.display()),
+                    ));
+                }
+                ProbeOutcome::Dead if pid_sidecar_path(path).exists() => {
+                    reclaim_unresponsive_holder(path)?;
+                    reclaimed_holder = true;
+                }
+                ProbeOutcome::Dead => {}
             }
-            // Stale socket from a dead server: take the name over. Session
-            // files, not just the socket, so a dead holder's .pid cannot
-            // outlive the rebind and name an unrelated pid.
+            if reclaimed_holder && !owns_startup {
+                remove_startup_guard(path);
+                if acquire_startup_guard(path)? != StartupGuard::Owned {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("mux startup in progress at {}", path.display()),
+                    ));
+                }
+                owns_startup = true;
+            }
+            // The holder is dead or has been terminated. Session files, not
+            // just the socket, so a dead holder's .pid cannot outlive the
+            // rebind and name an unrelated pid.
             remove_session_files(path)?;
             match UnixListener::bind(path) {
                 Ok(l) => Ok(BindOutcome::Bound(l)),
                 Err(e) if socket_in_use(&e) => {
                     // Someone else won the rebind race; they are the server.
+                    if owns_startup {
+                        remove_startup_guard(path);
+                    }
                     Ok(BindOutcome::AlreadyRunning)
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    if owns_startup {
+                        remove_startup_guard(path);
+                    }
+                    Err(e)
+                }
             }
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            if owns_startup {
+                remove_startup_guard(path);
+            }
+            Err(e)
+        }
     }
 }
 
@@ -3173,10 +3352,8 @@ fn socket_in_use(e: &std::io::Error) -> bool {
     )
 }
 
-/// Connect bound for liveness probes at bind time. Generous next to a socket
-/// round-trip; a wedged predecessor times out in ~1s and reads as alive on the
-/// first attempt (the refused-connect retry loop below only re-tries a dead
-/// socket), so server startup never hangs forever on it.
+/// Query timeout for liveness probes at bind time. Generous next to a socket
+/// round-trip, but bounded so a markerless predecessor never blocks startup.
 const PROBE_ALIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Connect to an AF_UNIX SOCK_STREAM path with a bounded timeout. std's
@@ -3320,23 +3497,146 @@ pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> std::io::Result<U
     }
 }
 
-/// True if something accepts connections at `path`. Retries a few times so a
-/// server that has bound but not yet reached `listen` is not declared dead.
-/// A connect TIMEOUT counts as alive: only a refused connect proves the
-/// server is dead, and unlinking a wedged-but-live server's socket would
-/// orphan it (still running, unreachable by name, invisible to ls).
-fn probe_alive(path: &Path) -> bool {
+/// Probe the frozen pre-Attach query. A bare connect is not enough: a stale
+/// socket can still accept one residual connection after its listener dies. A
+/// timeout or a connected peer without `Info` is unknown, not proof of death.
+fn probe_status(path: &Path) -> ProbeOutcome {
+    let mut uncertain = false;
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(50));
         }
-        match connect_unix_timeout(path, PROBE_ALIVE_CONNECT_TIMEOUT) {
-            Ok(_) => return true,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return true,
-            Err(_) => {}
+        let mut stream = match connect_unix_timeout(path, PROBE_ALIVE_CONNECT_TIMEOUT) {
+            Ok(stream) => stream,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                continue
+            }
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+        uncertain = true;
+        let _ = stream.set_read_timeout(Some(PROBE_ALIVE_CONNECT_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(PROBE_ALIVE_CONNECT_TIMEOUT));
+        if write_msg_sync(&mut stream, &ClientMsg::Query).is_err() {
+            continue;
+        }
+        if matches!(
+            read_msg_sync::<_, ServerMsg>(&mut stream),
+            Ok(ServerMsg::Info { .. })
+        ) {
+            return ProbeOutcome::Alive;
         }
     }
-    false
+    if uncertain {
+        ProbeOutcome::Unknown
+    } else {
+        ProbeOutcome::Dead
+    }
+}
+
+/// Stop an unresponsive holder before takeover. Without this coordination, its
+/// later `SocketGuard` can unlink the replacement server's socket and sidecars.
+/// The pid sidecar is identity-checked before each signal. An unreadable
+/// identity refuses takeover, while a positive start-time mismatch proves the
+/// recorded holder exited and its pid was reused, so takeover is safe.
+fn reclaim_unresponsive_holder(path: &Path) -> std::io::Result<()> {
+    let pid_path = pid_sidecar_path(path);
+    let raw = std::fs::read_to_string(&pid_path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "cannot take over unresponsive socket: read {}: {e}",
+                pid_path.display()
+            ),
+        )
+    })?;
+    let (pid, recorded_start) = parse_pid_sidecar(&raw).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "cannot take over unresponsive socket: invalid {}",
+                pid_path.display()
+            ),
+        )
+    })?;
+    if pid <= 1 || pid as u32 == std::process::id() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("cannot signal holder pid {pid} from {}", pid_path.display()),
+        ));
+    }
+
+    let identity_matches = || -> std::io::Result<bool> {
+        match recorded_start {
+            None => Ok(true),
+            Some(recorded) => pid_start_time(pid as u32)
+                .map(|observed| observed == recorded)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("cannot verify holder pid {pid} from {}", pid_path.display()),
+                    )
+                }),
+        }
+    };
+    let gone = || pid_confirmed_dead(pid) || pid_is_zombie(pid);
+    if gone() {
+        return Ok(());
+    }
+    if !identity_matches()? {
+        return Ok(());
+    }
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let term_deadline = Instant::now() + PROBE_HOLDER_TERM_GRACE;
+    while Instant::now() < term_deadline {
+        if gone() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if gone() {
+        return Ok(());
+    }
+    if !identity_matches()? {
+        // The recorded process exited and its pid was reused. That is safe for
+        // takeover: the old SocketGuard cannot run in the replacement process.
+        return Ok(());
+    }
+    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let kill_deadline = Instant::now() + PROBE_HOLDER_KILL_GRACE;
+    while Instant::now() < kill_deadline {
+        if gone() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if gone() {
+        Ok(())
+    } else if !identity_matches()? {
+        // As above, a changed start time proves the holder we needed to stop is
+        // gone, even if the OS has already reused its pid.
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("holder pid {pid} survived takeover signals"),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -3522,8 +3822,9 @@ mod tests {
         // clickable links (x-a2d0) bumped it 44 -> 45; pane focus (x-3e17) 45 ->
         // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47; the
         // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
-        // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50; the
-        // tab dictionary (x-1499) 50 -> 51.
+        // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
+        // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
+        // receipts (x-588a) bumped it 51 -> 52.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3532,7 +3833,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 51);
+        assert_eq!(PROTO_VERSION, 52);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -3968,6 +4269,7 @@ mod tests {
                 pane: 5,
                 bytes: b"hello\r".to_vec(),
                 guarded: true,
+                expected_identity: None,
             },
             ControlVerb::PaneWait {
                 pane: 5,
@@ -4041,12 +4343,15 @@ mod tests {
                     tab_name: None,
                     tab_ordinal: Some(1),
                     fno_id: None,
+                    name: None,
                 }],
             },
             ServerMsg::PaneText {
                 pane_id: 4,
                 text: "marker-42\n$ ".into(),
                 block: None,
+                pane_name: None,
+                registry_fno_id: None,
             },
             ServerMsg::PaneText {
                 pane_id: 4,
@@ -4058,6 +4363,8 @@ mod tests {
                     truncated: false,
                     implicit: false,
                 }),
+                pane_name: None,
+                registry_fno_id: None,
             },
             ServerMsg::PaneSpawned {
                 pane_id: 9,

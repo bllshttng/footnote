@@ -2021,6 +2021,7 @@ pub const EXIT_NO_CLIENT: i32 = 19; // pane focus: no attached viewer to move (x
 pub const EXIT_CONTROL_UNANSWERED: i32 = 20; // verb sent, no reply; outcome unknown
 pub const EXIT_AMBIGUOUS: i32 = 21; // view/where: selector matches a family, not one agent (x-b80d)
 pub const EXIT_SUBMIT_UNCONFIRMED: i32 = 22; // text landed, but no post-submit marker appeared
+pub const EXIT_TARGET_IDENTITY_MISMATCH: i32 = 23; // send: pane occupant differs from addressee
 
 // Keep these aligned with fno-agents mail_inject: the same PTY paste needs the
 // same settle and retry cadence whether it arrived through mail or pane send.
@@ -2205,6 +2206,8 @@ pub enum PaneCmd {
         /// answering a prompt, a bare control key, a shell command, clearing a
         /// modal. An envelope around the character `1` is nonsense.
         raw: bool,
+        /// (v51, x-588a) The pane-captured identity the caller addressed.
+        expected_identity: Option<String>,
     },
     Wait {
         pane: u64,
@@ -2621,6 +2624,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 guarded,
                 submit,
                 raw,
+                expected_identity: fno_id,
             }
         }
         "wait" => PaneCmd::Wait {
@@ -2733,6 +2737,10 @@ fn run_on_existing_server(
         }
         Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux: {e}");
+            EXIT_ERROR
+        }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux: {msg}");
             EXIT_ERROR
         }
     }
@@ -3254,6 +3262,33 @@ fn candidate_key(a: &crate::agents_view::RegistryAgent) -> &str {
     a.effective_identity().unwrap_or(a.name.as_str())
 }
 
+fn ambiguity_candidates(
+    tier: &[&crate::agents_view::RegistryAgent],
+    now: u64,
+    distinguish_panes: bool,
+) -> Vec<Candidate> {
+    let mut seen: Vec<(String, Option<(String, u64)>)> = Vec::new();
+    let mut candidates = Vec::new();
+    for a in tier {
+        let key = candidate_key(a).to_string();
+        let pane = a.mux.clone();
+        let dedup = (
+            key.clone(),
+            distinguish_panes.then(|| pane.clone()).flatten(),
+        );
+        if seen.contains(&dedup) {
+            continue;
+        }
+        seen.push(dedup);
+        candidates.push(Candidate {
+            name: a.name.clone(),
+            pane,
+            age_s: a.updated_at.map(|t| now.saturating_sub(t)),
+        });
+    }
+    candidates
+}
+
 /// The one selector resolver shared by `view`, `pane focus` and `where`
 /// (x-b80d, Locked Decision 2: a resolver wired into one door is the
 /// decorative-guard pitfall). Tiers, first non-empty tier wins; ambiguity
@@ -3307,21 +3342,30 @@ fn resolve_selector(
         // One line per DISTINCT candidate - dedup by the same identity key the
         // ambiguity count used, never by name: two identities can share a
         // name, and printing "matches 1 agents" while refusing is a lie.
-        let mut seen: Vec<&str> = Vec::new();
-        let mut candidates: Vec<Candidate> = Vec::new();
-        for a in &tier {
-            let key = candidate_key(a);
-            if seen.contains(&key) {
-                continue;
-            }
-            seen.push(key);
-            candidates.push(Candidate {
-                name: a.name.clone(),
-                pane: a.mux.clone(),
-                age_s: a.updated_at.map(|t| now.saturating_sub(t)),
-            });
-        }
-        return Resolution::Ambiguous(candidates);
+        return Resolution::Ambiguous(ambiguity_candidates(&tier, now, false));
+    }
+    let live_pane_refs: Vec<(String, u64)> = tier
+        .iter()
+        .filter(|a| !a.exited)
+        .filter_map(|a| a.mux.clone())
+        .collect();
+    let mut distinct_live_pane_refs = live_pane_refs.clone();
+    distinct_live_pane_refs.sort_unstable();
+    distinct_live_pane_refs.dedup();
+    let has_paneless_live_row = tier.iter().any(|a| !a.exited && a.mux.is_none());
+    let has_any_pane_ref = tier.iter().any(|a| a.mux.is_some());
+    let stale_pane_refs_disagree = tier
+        .iter()
+        .filter(|a| a.exited)
+        .filter_map(|a| a.mux.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        > 1;
+    if distinct_live_pane_refs.len() > 1
+        || (distinct_live_pane_refs.is_empty() && has_paneless_live_row && has_any_pane_ref)
+        || stale_pane_refs_disagree
+    {
+        return Resolution::Ambiguous(ambiguity_candidates(&tier, now, true));
     }
     // One identity, possibly several rows. No writer clears `mux` on exit, so
     // an exited spelling can carry a stale pane ref: prefer a LIVE pane-hosted
@@ -3439,6 +3483,10 @@ fn focus_pane(verb: &str, session: &str, pane: u64, render: bool, json: bool) ->
         }
         Err(ControlError::Fatal(e)) => {
             eprintln!("{verb}: {e}");
+            EXIT_ERROR
+        }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("{verb}: {msg}");
             EXIT_ERROR
         }
     }
@@ -3837,6 +3885,10 @@ fn location_lookup(
             eprintln!("{verb}: {e}");
             return EXIT_ERROR;
         }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("{verb}: {msg}");
+            return EXIT_ERROR;
+        }
     };
     if focus {
         if let ServerMsg::TabLocation { focus: pane, .. } = &reply {
@@ -4084,6 +4136,10 @@ pub fn where_(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux where: {e}");
             EXIT_ERROR
         }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux where: {msg}");
+            EXIT_ERROR
+        }
     }
 }
 
@@ -4154,6 +4210,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             guarded,
             submit,
             raw,
+            expected_identity,
         } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
@@ -4185,13 +4242,22 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                 }
             };
             if submit {
-                return submit_pane(sock, session, pane, bytes, guarded, json);
+                return submit_pane(
+                    sock,
+                    session,
+                    pane,
+                    bytes,
+                    guarded,
+                    expected_identity.as_deref(),
+                    json,
+                );
             }
             (
                 ControlVerb::PaneSend {
                     pane,
                     bytes,
                     guarded,
+                    expected_identity,
                 },
                 CONTROL_TIMEOUT,
             )
@@ -4291,6 +4357,10 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             eprintln!("fno mux pane: {e}");
             EXIT_ERROR
         }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux pane: {msg}");
+            EXIT_ERROR
+        }
     }
 }
 
@@ -4299,6 +4369,8 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
 enum ControlError {
     /// The exchange failed and nothing is running because of it.
     Fatal(String),
+    /// The server refused with an actionable protocol error code.
+    FatalCode { code: u32, msg: String },
     /// The verb reached the server and no reply came back inside the deadline.
     /// The server's side of the exchange is UNKNOWN, not failed.
     Unanswered(String),
@@ -4308,6 +4380,7 @@ impl std::fmt::Display for ControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ControlError::Fatal(s) | ControlError::Unanswered(s) => write!(f, "{s}"),
+            ControlError::FatalCode { msg, .. } => write!(f, "{msg}"),
         }
     }
 }
@@ -4466,10 +4539,11 @@ fn render_reply(
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| "-".into());
                     let fno = p.fno_id.as_deref().unwrap_or("-");
+                    let name = p.name.as_deref().unwrap_or("-");
                     let tab = tab_label(p.tab_name.as_deref(), p.tab_ordinal);
                     println!(
-                        "{} squad={} tab={} tab_id={} pid={} fno_id={} cwd={}",
-                        p.pane_id, p.squad_id, tab, p.tab_id, pid, fno, p.cwd
+                        "{} squad={} tab={} tab_id={} pid={} fno_id={} name={} cwd={}",
+                        p.pane_id, p.squad_id, tab, p.tab_id, pid, fno, name, p.cwd
                     );
                 }
             }
@@ -4528,11 +4602,18 @@ fn render_reply(
             pane_id,
             text,
             block,
+            pane_name,
+            registry_fno_id,
         } => {
             if json {
                 // A block read carries its metadata (seq/exit/complete/truncated/
                 // implicit); a plain read omits `block`. Degradations are visible.
-                let mut obj = serde_json::json!({ "pane_id": pane_id, "text": text });
+                let mut obj = serde_json::json!({
+                    "pane_id": pane_id,
+                    "text": text,
+                    "pane_name": pane_name,
+                    "registry_fno_id": registry_fno_id,
+                });
                 if let Some(m) = block {
                     obj["block"] = serde_json::json!({
                         "seq": m.seq,
@@ -4758,6 +4839,8 @@ fn render_reply(
                 // dead-pane EXIT_ERROR so a caller can tell "your pane is gone"
                 // from "your mux is running but unattended" and re-notify later.
                 EXIT_NO_CLIENT
+            } else if code == err_code::TARGET_IDENTITY_MISMATCH {
+                EXIT_TARGET_IDENTITY_MISMATCH
             } else {
                 EXIT_ERROR
             }
@@ -5124,6 +5207,7 @@ fn send_pane_bytes(
     pane: u64,
     bytes: Vec<u8>,
     guarded: bool,
+    expected_identity: Option<&str>,
 ) -> Result<(), ControlError> {
     match control_roundtrip(
         sock,
@@ -5132,9 +5216,13 @@ fn send_pane_bytes(
             pane,
             bytes,
             guarded,
+            expected_identity: expected_identity.map(str::to_string),
         },
     )? {
         ServerMsg::Ok => Ok(()),
+        ServerMsg::Err { code, msg } if code == err_code::TARGET_IDENTITY_MISMATCH => {
+            Err(ControlError::FatalCode { code, msg })
+        }
         ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
         other => Err(ControlError::Fatal(format!(
             "unexpected pane send reply while submitting: {other:?}"
@@ -5148,19 +5236,29 @@ fn submit_pane(
     pane: u64,
     bytes: Vec<u8>,
     guarded: bool,
+    expected_identity: Option<&str>,
     json: bool,
 ) -> i32 {
-    if let Err(e) = send_pane_bytes(sock, session, pane, bytes, guarded) {
+    if let Err(e) = send_pane_bytes(sock, session, pane, bytes, guarded, expected_identity) {
         eprintln!("fno mux pane: {e}");
         return match e {
             ControlError::Unanswered(_) => EXIT_CONTROL_UNANSWERED,
             ControlError::Fatal(_) => EXIT_ERROR,
+            ControlError::FatalCode { code, .. } if code == err_code::TARGET_IDENTITY_MISMATCH => {
+                EXIT_TARGET_IDENTITY_MISMATCH
+            }
+            ControlError::FatalCode { .. } => EXIT_ERROR,
         };
     }
     std::thread::sleep(Duration::from_millis(CR_SETTLE_MS));
     let baseline = pane_text(sock, session, pane).ok();
-    if let Err(e) = send_pane_bytes(sock, session, pane, vec![b'\r'], false) {
+    if let Err(e) = send_pane_bytes(sock, session, pane, vec![b'\r'], false, expected_identity) {
         eprintln!("fno mux pane: text delivered, submission unconfirmed: {e}");
+        if let ControlError::FatalCode { code, .. } = e {
+            if code == err_code::TARGET_IDENTITY_MISMATCH {
+                return EXIT_TARGET_IDENTITY_MISMATCH;
+            }
+        }
         return EXIT_SUBMIT_UNCONFIRMED;
     }
     for attempt in 0..SUBMIT_CONFIRM_ATTEMPTS {
@@ -5171,7 +5269,7 @@ fn submit_pane(
         }
         std::thread::sleep(Duration::from_millis(SUBMIT_CONFIRM_INTERVAL_MS));
         if (attempt + 1) % CR_RESUBMIT_EVERY == 0 {
-            let _ = send_pane_bytes(sock, session, pane, vec![b'\r'], false);
+            let _ = send_pane_bytes(sock, session, pane, vec![b'\r'], false, expected_identity);
         }
     }
     eprintln!("fno mux pane: text delivered, submission unconfirmed");
@@ -5232,6 +5330,10 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux block: {e}");
             return EXIT_ERROR;
         }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux block: {msg}");
+            return EXIT_ERROR;
+        }
     };
     // 1b. Only a completed, typed, untruncated block pipes: open, truncated,
     //     and markerless-implicit blocks all refuse here (partial or unbounded
@@ -5259,6 +5361,7 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
             pane: parsed.to,
             bytes,
             guarded: !parsed.force,
+            expected_identity: None,
         },
     ) {
         Ok(ServerMsg::Ok) => {}
@@ -5280,6 +5383,10 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
         }
         Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
+            return EXIT_ERROR;
+        }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux block: {msg}");
             return EXIT_ERROR;
         }
     }
@@ -5424,6 +5531,10 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
         }
         Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
+            return EXIT_ERROR;
+        }
+        Err(ControlError::FatalCode { msg, .. }) => {
+            eprintln!("fno mux block: {msg}");
             return EXIT_ERROR;
         }
     };
@@ -5708,7 +5819,8 @@ mod tests {
                 source: SendSource::Text("hi".into()),
                 guarded: false,
                 submit: false,
-                raw: false
+                raw: false,
+                expected_identity: None,
             }
         );
     }
@@ -5829,6 +5941,21 @@ mod tests {
                 assert_eq!(r.mux, Some(("work".to_string(), 13)));
             }
             other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_selector_refuses_a_paneless_live_row_over_a_stale_pane_ref() {
+        // A live paneless row and an exited row disagree about the mux ref.
+        // The stale ref is not a safe fallback: selecting it can address a
+        // different worker after the pane id was reused.
+        let paneless = reg_row("t-x919-finish", Some("aaaa1111"));
+        let mut stale = reg_row("t-x919-finish", Some("aaaa1111"));
+        stale.exited = true;
+        stale.mux = Some(("work".into(), 12));
+        match resolve_selector(&[paneless, stale], "finish", 0) {
+            Resolution::Ambiguous(candidates) => assert_eq!(candidates.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
         }
     }
 
@@ -6630,6 +6757,7 @@ mod tests {
                 guarded: false,
                 submit: false,
                 raw: false,
+                expected_identity: None,
             }
         );
         assert_eq!(
@@ -6640,6 +6768,7 @@ mod tests {
                 guarded: false,
                 submit: false,
                 raw: false,
+                expected_identity: None,
             }
         );
         // --guarded opts the send into the server-side turn-taken interlock.
@@ -6653,6 +6782,7 @@ mod tests {
                 guarded: true,
                 submit: false,
                 raw: false,
+                expected_identity: None,
             }
         );
         assert_eq!(
@@ -6665,6 +6795,7 @@ mod tests {
                 guarded: false,
                 submit: true,
                 raw: false,
+                expected_identity: None,
             }
         );
         // --raw opts OUT of the envelope (node x-3a64). Default false is the
@@ -6680,6 +6811,22 @@ mod tests {
                 guarded: false,
                 submit: true,
                 raw: true,
+                expected_identity: None,
+            }
+        );
+        assert_eq!(
+            parse_pane_args(&os(
+                &["send", "2", "--text", "hi", "--fno-id", "addressed",]
+            ))
+            .unwrap()
+            .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Text("hi".into()),
+                guarded: false,
+                submit: false,
+                raw: false,
+                expected_identity: Some("addressed".into()),
             }
         );
         // Neither / both are usage errors.
@@ -7270,6 +7417,7 @@ mod tests {
         let exit = match result {
             Err(ControlError::Unanswered(_)) => EXIT_CONTROL_UNANSWERED,
             Err(ControlError::Fatal(_)) => EXIT_ERROR,
+            Err(ControlError::FatalCode { .. }) => EXIT_ERROR,
             Ok(_) => EXIT_OK,
         };
         assert_eq!(exit, EXIT_CONTROL_UNANSWERED);
