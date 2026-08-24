@@ -1139,6 +1139,11 @@ def publish_coverage_status(
             if verdict == _coverage_gate.UNANSWERED
             else f"coverage read healthy at {head[:8]}"
         )
+        # Attempt BOTH posts even when the first fails: a failed
+        # required-context POST must not strand a stale diagnostic (an
+        # earlier unknown-read stamp reading "instrument down") on a
+        # gate-covered PR until some other writer happens to run.
+        failures = []
         for context, state, description in (
             (COVERAGE_STATUS_CONTEXT, required_state, required_description),
             (
@@ -1151,7 +1156,9 @@ def publish_coverage_status(
                 runner, gh_dir, head, context, state, description
             )
             if not posted:
-                return False, f"{context}: {why}"
+                failures.append(f"{context}: {why}")
+        if failures:
+            return False, "; ".join(failures)
         return True, ""
     except Exception as exc:  # noqa: BLE001 - a publisher must never raise
         return False, f"publish failed: {exc}"

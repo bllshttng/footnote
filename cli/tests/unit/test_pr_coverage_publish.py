@@ -163,6 +163,31 @@ def test_a_refusal_posts_the_gate_refusal_text_truncated(hermetic):
     assert len(fields["description"]) <= _reviews._GH_DESCRIPTION_LIMIT
 
 
+def test_a_failed_required_post_still_posts_the_diagnostic(hermetic, monkeypatch):
+    """A failed required-context POST must not strand a stale diagnostic: the
+    publisher attempts BOTH contexts and reports the failure, so a gate-covered
+    PR does not keep wearing an "instrument down" stamp from an earlier
+    unknown-read publish until some other writer happens to run."""
+    _base_runner, verdict_box = hermetic
+    verdict_box["return"] = (_coverage_gate.COVERED, "", ROW_HEAD, "")
+
+    class FailRequiredRunner(RecordingRunner):
+        def __call__(self, cmd, *, cwd=None, timeout=None):
+            fields = _fields(cmd) if cmd[:4] == ["gh", "api", "--method", "POST"] else {}
+            if fields.get("context") == _reviews.COVERAGE_STATUS_CONTEXT:
+                self.calls.append(list(cmd))
+                return Result(1, "", "boom")
+            return super().__call__(cmd, cwd=cwd, timeout=timeout)
+
+    runner = FailRequiredRunner()
+    monkeypatch.setattr(_reviews, "run", runner)
+    posted, note = _reviews.publish_coverage_status(42)
+    assert posted is False
+    assert _reviews.COVERAGE_STATUS_CONTEXT in note
+    unavailable = _fields_by_context(runner)[_reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT]
+    assert unavailable["state"] == "success"
+
+
 def test_an_unanswered_probe_posts_pending_required_and_unavailable(hermetic):
     runner, verdict_box = hermetic
     verdict_box["return"] = (_coverage_gate.UNANSWERED, "", "", "pr head fetch failed")
