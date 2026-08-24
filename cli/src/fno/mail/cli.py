@@ -241,7 +241,7 @@ def _record_mail_origin(
 ) -> None:
     """Best-effort positive measurement of the classified send origin."""
     try:
-        from fno import events
+        from fno.agents import events
         from fno.events import append_event, mail_origin_classified
 
         append_event(
@@ -937,9 +937,11 @@ def cmd_reply(
     _refuse_forged_envelope(body_text)
     _enforce_body_cap(body_text)
     _enforce_style(body_text, allow_reason=style_exception)
-    mail_origin = classify_origin()
-    _record_mail_origin(origin=mail_origin, lane="reply", sender=from_project)
-    mail_origin = None if mail_origin == "unknown" else mail_origin
+    classified_origin = classify_origin()
+    _record_mail_origin(origin=classified_origin, lane="reply", sender=from_project)
+    mail_origin: str | None = (
+        None if classified_origin == "unknown" else classified_origin
+    )
 
     # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
     # and answer name/session/node mail back to its original sender. Anything else
@@ -3336,15 +3338,12 @@ def _raw_send(
     #        ambient identity it stays absent rather than guessing.
     raw_msg_id, _reservation, authored_words = _reserve_raw()
     if entry.mux:
-        raw_transport_kwargs = {"sender": transport_sender}
-        if origin is not None:
-            raw_transport_kwargs["origin"] = origin
         delivered = _mux_pane_send(
             entry,
             stripped,
             guarded=False,
             confirm=True,
-            **raw_transport_kwargs,
+            sender=transport_sender,
             origin=origin,
             # raw: this lane exists to make the REPL slash parser fire, which an
             # envelope defeats.
@@ -3360,14 +3359,19 @@ def _raw_send(
             review=review_request,
         )
     else:  # claude control.sock - the only other keystroke lane
-        raw_transport_kwargs = {"sender": transport_sender}
-        if origin is not None:
-            raw_transport_kwargs["origin"] = origin
-        delivered = _mail_inject_claude(
-            session_id,
-            stripped,
-            **raw_transport_kwargs,
-        )
+        if origin is None:
+            delivered = _mail_inject_claude(
+                session_id,
+                stripped,
+                sender=transport_sender,
+            )
+        else:
+            delivered = _mail_inject_claude(
+                session_id,
+                stripped,
+                sender=transport_sender,
+                origin=origin,
+            )
 
     # 8. Four-state receipt (never a boolean; never a durable write).
     # The note used to read as a refusal: it named a defect in the argument and
@@ -3617,12 +3621,12 @@ def cmd_send(
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
 
     try:
-        mail_origin = classify_origin(origin)
+        classified_origin = classify_origin(origin)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise typer.Exit(code=2) from exc
     _record_mail_origin(
-        origin=mail_origin,
+        origin=classified_origin,
         lane="raw" if raw else "inbox" if kind is not None else "project" if to_project else "peer",
         sender=from_name,
         target_session=name if raw else None,
@@ -3630,7 +3634,9 @@ def cmd_send(
     # Unknown is an explicit audit result, not a wire authority. Legacy
     # carriers omit the attribute so a law gate cannot mistake silence for an
     # operator origin.
-    mail_origin = None if mail_origin == "unknown" else mail_origin
+    mail_origin: str | None = (
+        None if classified_origin == "unknown" else classified_origin
+    )
 
     # --to-self: the recipient is THIS session, derived from ambient identity, so
     # the positional parks the payload (positional #1) exactly as under
@@ -3733,14 +3739,23 @@ def cmd_send(
         if message is None:
             print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
             raise typer.Exit(code=2)
-        raw_kwargs = {
-            "self_ok": to_self,
-            "check": check,
-            "style_exception": style_exception,
-        }
-        if mail_origin is not None:
-            raw_kwargs["origin"] = mail_origin
-        _raw_send(name, message, **raw_kwargs)
+        if mail_origin is None:
+            _raw_send(
+                name,
+                message,
+                self_ok=to_self,
+                check=check,
+                style_exception=style_exception,
+            )
+        else:
+            _raw_send(
+                name,
+                message,
+                self_ok=to_self,
+                check=check,
+                style_exception=style_exception,
+                origin=mail_origin,
+            )
         return
     if check:
         # Only the --raw lane has a keystroke path to have or lack; a wrapped send

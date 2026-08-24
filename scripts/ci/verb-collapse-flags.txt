@@ -8,6 +8,7 @@ agents heal-token !--all-sources
 agents list !--provider
 agents mail hold-release !--poll-s
 agents mail send !--provider
+agents mail send !--origin
 agents spawn !--output-format
 agents spawn !--squad
 agents worker external !--pr
@@ -20,6 +21,7 @@ backlog advance !--continuation
 backlog cost !--session
 backlog decide !--decision
 backlog decide !--subject
+backlog decide !--origin
 backlog decisions !--subject
 backlog idea !--tag
 backlog intake !--batch
@@ -45,6 +47,7 @@ do target resolve-model !--provider
 do target start !--provider
 mail hold-release !--poll-s
 mail send !--provider
+mail send !--origin
 paths handoff !--session
 resume receipt validate !--session
 resume receipt write !--session

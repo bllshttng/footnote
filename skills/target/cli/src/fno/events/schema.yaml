@@ -2360,6 +2360,9 @@ event_types:
         relayed_by:
           type: string
           description: "Optional. A name an agent SUPPLIED for someone else, kept apart from decided_by so a claimed decider and a stamped one never share a column. Present only when it differs from the stamped handle."
+        origin:
+          type: string
+          description: "Optional. Mail-channel provenance carried into this ruling. It is evidence, not attended-terminal attestation."
         authority_source:
           type: string
           description: "Optional. How the decider was entitled to decide: operator law, agent coordination from a resolvable session, or a beastmode grant."
@@ -2402,6 +2405,33 @@ event_types:
         confirmed:
           type: boolean
           description: "Optional. The transport's own answer, recorded after the send so the record never asserts an injection a stalled pane or an absent daemon never performed. False covers both a clean refusal (nothing sent) and a payload that landed past the confirm budget - the transport returns one bool for both."
+        origin:
+          type: string
+          description: "Optional. The classified mail origin carried by the sender before the raw transport removed the envelope."
+    consumers: [operator]
+
+  - name: mail_origin_classified
+    retention: durable
+    description: "Positive measurement of the origin classified at the mail send chokepoint, emitted before delivery or enforcement narrows the path."
+    sources: [daemon]
+    data:
+      required: [origin, lane, presumed_human]
+      properties:
+        origin:
+          type: string
+          description: "Closed mail origin: operator, peer, scheduler, or recovery; unknown records an unresolved classifier and is never stamped on the authority wire."
+        lane:
+          type: string
+          description: "Mail surface classified before delivery: raw, durable, project, or peer."
+        presumed_human:
+          type: boolean
+          description: "Positive marker for an origin still presumed operator-authored."
+        sender:
+          type: string
+          description: "Optional sender handle or project label."
+        target_session:
+          type: string
+          description: "Optional recipient session for directed or raw delivery."
     consumers: [operator]
 
   - name: loop_check_gh_error
