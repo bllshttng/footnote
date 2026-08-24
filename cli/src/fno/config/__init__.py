@@ -3623,7 +3623,6 @@ class AccountsBlock(BaseModel):
     combos: dict[str, ComboBlock] = Field(default_factory=dict)
     quota: QuotaBlock = Field(default_factory=QuotaBlock)
     failover: Optional[FailoverBlock] = None
-    agents: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("quota", mode="before")
     @classmethod

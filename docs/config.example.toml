@@ -523,7 +523,6 @@ auto_switch = false
 records = []
 combos = {}
 # failover = <unset>   # optional; no default
-agents = {}
 
 [accounts.quota]
 defer_dispatch = false

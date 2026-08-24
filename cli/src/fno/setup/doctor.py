@@ -362,7 +362,7 @@ def check_agent_profiles(settings: object) -> list[str]:
 
 
 _KNOWN_ACCOUNTS_KEYS = frozenset(
-    {"active", "auto_switch", "active_combo", "records", "combos", "quota", "failover", "agents"}
+    {"active", "auto_switch", "active_combo", "records", "combos", "quota", "failover"}
 )
 _KNOWN_QUOTA_KEYS = frozenset(
     {"defer_dispatch", "defer_threshold_pct", "probe_ttl_seconds", "defer_horizon_minutes", "pick_on_launch"}

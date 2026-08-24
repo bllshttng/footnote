@@ -433,66 +433,96 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
     # loaded only by code that already has the loader available.
     from fno.adapters.providers.rotation import Combo
 
+def _provider_candidates(repo_root: Path | None = None) -> list[Path]:
+    """Candidate config file paths for provider loading (FNO_CONFIG or [local, global])."""
+    env_cfg = os.environ.get("FNO_CONFIG")
+    if env_cfg:
+        return [Path(env_cfg)]
     if repo_root is None:
         repo_root = Path(os.environ.get("PWD", os.getcwd()))
-
-    candidates = [
+    return [
         repo_root / ".fno" / "config.toml",
-        # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference).
-        # Honors $FNO_GLOBAL_SETTINGS_PATH so unit tests pinning repo_root=tmp_path
-        # do not leak the developer's real ~/.fno/settings.yaml.
         _global_settings_path(),
     ]
 
-    for path in candidates:
+
+def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
+    """Read config.providers.combos from project-local and global settings.
+
+    Project-local combos overlay global combos. Returns an empty dict when no
+    combos block exists anywhere. Cross-validates every combo's providers list
+    against the declared record IDs in config.providers.records and raises
+    ProviderConfigError on any unknown reference.
+
+    Raises:
+        ProviderConfigError: combos block is not a mapping, an entry
+            references an unknown provider id, or a Combo construction
+            fails (empty providers, invalid strategy).
+    """
+    from fno.adapters.providers.rotation import Combo
+
+    candidates = _provider_candidates(repo_root)
+
+    merged_combos: dict[str, Any] = {}
+    merged_records: list[Any] = []
+    found_any = False
+
+    for path in reversed(candidates):
         data = _read_parsed(path)
         block = _extract_accounts_block(data)
         if block is None:
             continue
         combos_raw = block.get("combos")
-        if combos_raw is None:
-            return {}
-        if not isinstance(combos_raw, dict):
-            raise ProviderConfigError(
-                "config.providers.combos must be a mapping of name -> spec, "
-                f"got {type(combos_raw).__name__}"
-            )
-        # Cross-validation needs the set of declared provider IDs.
-        known_ids = {
-            r["id"] for r in (block.get("records") or [])
-            if isinstance(r, dict) and isinstance(r.get("id"), str)
-        }
-        result: dict[str, Combo] = {}
-        for name, spec in combos_raw.items():
-            if not isinstance(spec, dict):
+        if combos_raw is not None:
+            if not isinstance(combos_raw, dict):
                 raise ProviderConfigError(
-                    f"combo {name!r} spec must be a mapping, got "
-                    f"{type(spec).__name__}"
+                    "config.providers.combos must be a mapping of name -> spec, "
+                    f"got {type(combos_raw).__name__}"
                 )
-            providers_raw = spec.get("providers", [])
-            if not isinstance(providers_raw, list):
-                raise ProviderConfigError(
-                    f"combo {name!r} providers must be a list, got "
-                    f"{type(providers_raw).__name__}"
-                )
-            for pid in providers_raw:
-                if pid not in known_ids:
-                    raise ProviderConfigError(
-                        f"combo {name!r} references unknown provider id "
-                        f"{pid!r} (not in config.providers.records)"
-                    )
-            try:
-                result[name] = Combo(
-                    name=name,
-                    strategy=spec.get("strategy", "fallback"),
-                    sticky_limit=int(spec.get("sticky_limit", 1)),
-                    providers=tuple(providers_raw),
-                )
-            except ValueError as exc:
-                raise ProviderConfigError(str(exc)) from exc
-        return result
+            found_any = True
+            merged_combos.update(combos_raw)
+        records_raw = block.get("records")
+        if isinstance(records_raw, list) and records_raw:
+            merged_records = records_raw
 
-    return {}
+    if not found_any or not merged_combos:
+        return {}
+
+    # Cross-validation needs the set of declared provider IDs.
+    known_ids = {
+        r["id"] for r in merged_records
+        if isinstance(r, dict) and isinstance(r.get("id"), str)
+    }
+
+    result: dict[str, Combo] = {}
+    for name, spec in merged_combos.items():
+        if not isinstance(spec, dict):
+            raise ProviderConfigError(
+                f"combo {name!r} spec must be a mapping, got "
+                f"{type(spec).__name__}"
+            )
+        providers_raw = spec.get("providers", [])
+        if not isinstance(providers_raw, list):
+            raise ProviderConfigError(
+                f"combo {name!r} providers must be a list, got "
+                f"{type(providers_raw).__name__}"
+            )
+        for pid in providers_raw:
+            if pid not in known_ids:
+                raise ProviderConfigError(
+                    f"combo {name!r} references unknown provider id "
+                    f"{pid!r} (not in config.providers.records)"
+                )
+        try:
+            result[name] = Combo(
+                name=name,
+                strategy=spec.get("strategy", "fallback"),
+                sticky_limit=int(spec.get("sticky_limit", 1)),
+                providers=tuple(providers_raw),
+            )
+        except ValueError as exc:
+            raise ProviderConfigError(str(exc)) from exc
+    return result
 
 
 def load_active_combo(repo_root: Path | None = None) -> str | None:
@@ -502,10 +532,8 @@ def load_active_combo(repo_root: Path | None = None) -> str | None:
     here matches what combos_use/combos_remove write. Returns None when no
     active_combo is set anywhere.
     """
-    if repo_root is None:
-        repo_root = Path(os.environ.get("PWD", os.getcwd()))
-
-    for path in (repo_root / ".fno" / "config.toml", _global_settings_path()):
+    candidates = _provider_candidates(repo_root)
+    for path in candidates:
         block = _extract_accounts_block(_read_parsed(path))
         if block is None:
             continue
@@ -516,7 +544,7 @@ def load_active_combo(repo_root: Path | None = None) -> str | None:
 
 
 def load_quota_config(repo_root: Path | None = None) -> QuotaConfig:
-    """Read config.providers.quota from project-local or global settings.
+    """Read config.providers.quota from project-local and global settings.
 
     Same precedence as load_combos (project-local wins over global). Returns
     all-defaults when no quota block exists. Fail-safe like the autonomous
@@ -524,71 +552,74 @@ def load_quota_config(repo_root: Path | None = None) -> QuotaConfig:
     rather than raising out of a dispatch decision - the dangerous direction
     for an opt-in autonomous feature is silently-enabled, and defaults are off.
     """
-    if repo_root is None:
-        repo_root = Path(os.environ.get("PWD", os.getcwd()))
-
-    candidates = [
-        repo_root / ".fno" / "config.toml",
-        _global_settings_path(),
-    ]
-    for path in candidates:
+    candidates = _provider_candidates(repo_root)
+    merged_quota: dict[str, Any] = {}
+    for path in reversed(candidates):
         data = _read_parsed(path)
         block = _extract_accounts_block(data)
         if block is None:
             continue
         quota_raw = block.get("quota")
-        if quota_raw is None:
-            return QuotaConfig()
-        if not isinstance(quota_raw, dict):
-            return QuotaConfig()
-        try:
-            return QuotaConfig.model_validate(quota_raw)
-        except pydantic.ValidationError as exc:
-            logger.warning(
-                "config.providers.quota malformed (%s); using defaults", exc
-            )
-            return QuotaConfig()
-    return QuotaConfig()
+        if isinstance(quota_raw, dict):
+            merged_quota.update(quota_raw)
+    if not merged_quota:
+        return QuotaConfig()
+    try:
+        return QuotaConfig.model_validate(merged_quota)
+    except pydantic.ValidationError as exc:
+        logger.warning(
+            "config.providers.quota malformed (%s); using defaults", exc
+        )
+        return QuotaConfig()
 
 
 def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
-    """Read config.providers from project-local or global settings.yaml.
+    """Read config.providers from project-local and global settings.
+
+    Merges project-local over global settings so that a local leaf write
+    (like `[accounts.quota] defer_dispatch = true`) does not shadow and drop
+    globally defined account records.
 
     Precedence (project-local wins, mirrors _load_v2_config_flag):
-        1. {repo_root}/.fno/settings.yaml
-        2. ~/.fno/settings.yaml
+        1. {repo_root}/.fno/config.toml
+        2. ~/.fno/config.toml
 
     Returns an empty ProvidersConfig (records=[], active=None) when:
     - Neither file exists
-    - config.providers is absent
+    - config.providers / config.accounts is absent
     - records list is empty
 
     Raises ProviderConfigError on any validation failure, naming the
     offending record id and including discriminating phrase(s).
     """
-    if repo_root is None:
-        repo_root = Path(os.environ.get("PWD", os.getcwd()))
+    candidates = _provider_candidates(repo_root)
 
-    candidates = [
-        repo_root / ".fno" / "config.toml",
-        # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference).
-        # Honors $FNO_GLOBAL_SETTINGS_PATH so unit tests pinning repo_root=tmp_path
-        # do not leak the developer's real ~/.fno/settings.yaml.
-        _global_settings_path(),
-    ]
+    merged_block: dict[str, Any] = {}
+    merged_agents: dict[str, Any] = {}
+    found_any = False
 
-    for path in candidates:
+    for path in reversed(candidates):
         data = _read_parsed(path)
         block = _extract_accounts_block(data)
-        if block is None:
-            continue
-        # Found a providers block; also read the sibling agents block from the
-        # same file so project-local-over-global precedence applies uniformly.
-        agents_block = _extract_agents_block(data)
-        return _parse_providers_block(block, agents_block=agents_block)
+        if block is not None:
+            found_any = True
+            for k, v in block.items():
+                if k == "quota" and isinstance(v, dict):
+                    merged_quota = dict(merged_block.get("quota") or {})
+                    merged_quota.update(v)
+                    merged_block["quota"] = merged_quota
+                elif k == "records" and isinstance(v, list) and v:
+                    merged_block["records"] = v
+                else:
+                    merged_block[k] = v
+        agents = _extract_agents_block(data)
+        if agents is not None:
+            merged_agents.update(agents)
 
-    # Neither file had a providers block.
-    return ProvidersConfig(records=[], active=None)
+    if not found_any or not merged_block:
+        return ProvidersConfig(records=[], active=None)
+
+    return _parse_providers_block(merged_block, agents_block=merged_agents or None)
 
 
 # ---------------------------------------------------------------------------

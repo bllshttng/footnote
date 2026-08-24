@@ -216,5 +216,4 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `accounts.quota.defer_horizon_minutes` | int | `60` | never |  |
 | `accounts.quota.pick_on_launch` | bool | `false` | never |  |
 | `accounts.failover` | FailoverBlock (optional) | _(none)_ | never |  |
-| `accounts.agents` | dict[str, Any] | `{}` | never |  |
 | `schema_version` | int | `1` | never | Settings schema version; managed by fno, not hand-set. |
