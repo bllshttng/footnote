@@ -10,7 +10,6 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 
@@ -43,7 +42,7 @@ def _parse_command(command: Any) -> tuple[str, str] | None:
         return None
     if len(tokens) != 7:
         return None
-    if tokens[0:5] != ["fno", "law", "enact", "--proposal", tokens[4]]:
+    if tokens[0:4] != ["fno", "law", "enact", "--proposal"]:
         return None
     if tokens[5] != "--hash":
         return None
@@ -104,8 +103,9 @@ def evaluate(
     arm: Callable[..., dict[str, Any]] = _arm_with_cli,
 ) -> dict[str, Any] | None:
     """Return a permission decision only for the canonical enact command."""
-    if payload.get("tool_name") not in {None, "Bash"}:
-        return None
+    tool_name = payload.get("tool_name")
+    if tool_name != "Bash":
+        return _deny("tool name is missing") if tool_name is None else None
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         return _deny("tool input is unreadable")

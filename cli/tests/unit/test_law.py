@@ -74,6 +74,36 @@ def test_prepare_rejects_coordination_wording(
         )
 
 
+def test_armed_proposal_cannot_be_rebound_to_another_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno import law
+
+    proposal = law.prepare_proposal(
+        subject="x-12ba",
+        decision="Merges belong to the operator",
+        rationale="Durable policy needs human approval.",
+    )
+    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    law.arm_proposal(
+        proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="human-session-1",
+        permission_mode="default",
+        tool_input=tool_input,
+    )
+
+    with pytest.raises(law.InvalidOperatorConsentError, match="already armed"):
+        law.arm_proposal(
+            proposal["proposal_id"],
+            content_hash=proposal["content_hash"],
+            session_id="other-session",
+            permission_mode="default",
+            tool_input=tool_input,
+        )
+
+
 def test_valid_consent_records_once_and_replay_refuses_before_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

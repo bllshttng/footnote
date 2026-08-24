@@ -222,6 +222,16 @@ def arm_proposal(
         raise InvalidOperatorConsentError("proposal is expired")
     if proposal.get("status") == "consumed":
         raise InvalidOperatorConsentError("proposal is consumed")
+    if proposal.get("status") == "armed":
+        same_arm = (
+            content_hash == proposal.get("content_hash")
+            and session_id == proposal.get("armed_session_id")
+            and permission_mode == proposal.get("armed_permission_mode")
+            and tool_input == proposal.get("armed_tool_input")
+        )
+        if same_arm:
+            return proposal
+        raise InvalidOperatorConsentError("proposal is already armed")
     if content_hash != proposal.get("content_hash"):
         raise InvalidOperatorConsentError("content hash mismatch")
     if not session_id:

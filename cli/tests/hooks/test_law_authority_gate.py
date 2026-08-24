@@ -92,6 +92,12 @@ def test_malformed_or_wrapped_commands_deny() -> None:
         result = gate.evaluate(_payload(command), arm=lambda **kwargs: {})
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
+    missing_tool = gate.evaluate(
+        _payload(tool_name=None),
+        arm=lambda **kwargs: {},
+    )
+    assert missing_tool["hookSpecificOutput"]["permissionDecision"] == "deny"
+
 
 def test_missing_session_and_arm_failure_deny() -> None:
     gate = _gate()
