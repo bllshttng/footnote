@@ -344,11 +344,8 @@ pub fn ls(json: bool) -> i32 {
             return EXIT_ERROR;
         }
     };
-    // Resolution has happened by now (session_rows scanned the dir), so any
-    // config warning it recorded can safely reach this non-TUI stderr.
-    if let Some((w, _remedy)) = proto::pending_config_warning() {
-        eprintln!("{w}");
-    }
+    // Any config warning recorded during resolution reaches stderr via
+    // main.rs's exit_mux wrapper, which covers every non-TUI mux verb.
     if json {
         // Stable per-row envelope: `state` is always present; live rows carry
         // the counts. An empty listing is `[]` (never the "no sessions" prose).

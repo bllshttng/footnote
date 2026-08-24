@@ -373,7 +373,22 @@ pub fn load() -> Loaded {
     let path = squads_path();
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Loaded::default(),
+        // A missing file at the state-root location falls back to the
+        // pre-state-root one (no copy), gated on no pinned FNO_CONFIG for the
+        // same reason as view_store: an upgrading user keeps their squads, a
+        // demo env inherits nothing from the operator's root.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            #[cfg(not(test))]
+            {
+                if std::env::var_os("FNO_CONFIG").is_none_or(|v| v.is_empty()) {
+                    let legacy = crate::proto::legacy_mux_root().with_file_name("squads.json");
+                    if let Ok(s) = std::fs::read_to_string(&legacy) {
+                        return loaded_from_raw(&legacy, s);
+                    }
+                }
+            }
+            return Loaded::default();
+        }
         // Unreadable is NOT missing. Collapsing the two made a permission
         // error or non-UTF-8 content render as an empty store, so prune
         // reported nothing to do and restore brought back zero workspaces,
@@ -387,6 +402,12 @@ pub fn load() -> Loaded {
             }
         }
     };
+    loaded_from_raw(&path, raw)
+}
+
+/// Parse the store body shared by the primary and legacy reads, so the
+/// fallback path degrades exactly like the primary one.
+fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
     if raw.trim().is_empty() {
         return Loaded::default();
     }

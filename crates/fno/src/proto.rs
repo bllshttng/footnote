@@ -2717,7 +2717,7 @@ fn record_config_warning(msg: String, remedy: String) {
     let _ = CONFIG_WARNING.set((msg, remedy));
 }
 
-pub(crate) fn pending_config_warning() -> Option<(&'static str, &'static str)> {
+pub fn pending_config_warning() -> Option<(&'static str, &'static str)> {
     CONFIG_WARNING.get().map(|(m, r)| (m.as_str(), r.as_str()))
 }
 

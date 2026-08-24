@@ -329,8 +329,12 @@ fn run_inner(session: &str) -> Result<i32, String> {
     // stderr: we are still pre-alternate-screen here, and any stderr byte
     // lands in the PTY the harness (and a human) is about to read as the TUI
     // (the x-0296 NEVER-stderr rule). Written BEFORE the connect attempt so a
-    // wedged server or a failed spawn cannot swallow it.
+    // wedged server or a failed spawn cannot swallow it, and after ensuring
+    // the mux dir exists - on a fresh state root nothing creates it until
+    // connect_or_spawn, and an append to a missing parent silently drops the
+    // warning this exists to deliver.
     if let Some((w, _remedy)) = proto::pending_config_warning() {
+        let _ = proto::ensure_mux_dir();
         client_log_append(&proto::mux_dir().join("client-warnings.log"), w);
     }
 
@@ -342,7 +346,7 @@ fn run_inner(session: &str) -> Result<i32, String> {
 
 /// Append one line to a log file under the mux dir, best-effort. The shared
 /// write behind both the e2e breadcrumbs and the config-warning log: one
-/// append mechanism, never stderr (see [`e2e_client_log`]).
+/// append mechanism, never stderr (see [`e2e_client_log`] for the rule).
 fn client_log_append(path: &Path, msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -421,19 +425,15 @@ fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
     if std::env::var_os("FNO_E2E").is_none() {
         return;
     }
-    let path = proto::mux_dir().join(format!("client-{}.log", std::process::id()));
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        use std::io::Write as _;
-        let _ = writeln!(f, "[{ms} pid {}] {msg}", std::process::id());
-    }
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!("[{ms} pid {}] {msg}", std::process::id());
+    client_log_append(
+        &proto::mux_dir().join(format!("client-{}.log", std::process::id())),
+        &line,
+    );
 }
 
 /// Spawn `fno --server <socket>` detached: its own session (setsid) so the
