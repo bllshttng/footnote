@@ -2938,6 +2938,61 @@ fn no_external_on_active_gate_serializes_unknown_coverage_not_uncovered() {
     );
 }
 
+/// The other skip cause: no_external on a repo with an INACTIVE login gate.
+/// Nothing was configured to read, so the axis is a known zero and the event
+/// serializes uncovered. The retry remedy belongs to suppressed reads of an
+/// ACTIVE gate, not to a session that opted out of a gate that does not
+/// exist - else every no_external fire on an ungated repo reads
+/// review_coverage_unknown with no writer that can ever clear it.
+#[test]
+fn no_external_on_inactive_gate_serializes_the_known_zero() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(
+        &settings_path,
+        "[review]\nrequired_bots = []\nself_review_required = false\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let manifest = "---\nsession_id: sess-noext3\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_external: true\n---\n";
+    fs::write(&manifest_path, manifest).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = green_reviews_unreachable();
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(
+        d.decision, "allow",
+        "an ungated repo must not block: {}",
+        d.message
+    );
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"coverage\":\"uncovered\""),
+        "nothing configured to read is a known zero, never an unknown: {events}"
+    );
+}
+
 // ── x-e703: config.review.reviewers local-attestation gate ──────────────────
 
 /// The green() git+gh mock's HEAD (== headRefOid, so head_shipped passes). An
@@ -3113,6 +3168,14 @@ fn no_external_still_honors_reviewers_gate() {
     assert_eq!(
         d.decision, "block",
         "no_external must NOT bypass the local reviewers gate: {}",
+        d.message
+    );
+    // The remedy must name the unmet gate, not the instrument: this session
+    // lands with a known-zero GitHub axis, and a generic "coverage read
+    // unavailable; retry" cannot clear an unattested reviewer.
+    assert!(
+        d.message.contains("reviewers gate unmet"),
+        "block must name the unmet reviewer gate, not the instrument retry: {}",
         d.message
     );
     assert!(d.termination_reason.is_none());

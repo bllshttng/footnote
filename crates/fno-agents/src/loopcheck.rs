@@ -2580,19 +2580,20 @@ fn read_pr_info(
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
         // The GitHub axis was intentionally not queried. That is a known
-        // zero ONLY when the skip is the inactive gate (nothing configured to
-        // read). A `no_external` session on a repo with an ACTIVE login gate
-        // suppressed reads that the config demanded, so the honest answer for
-        // that axis is Unknown with its retry remedy - reporting a healthy
-        // read of zero bots fabricated "uncovered" and an instrument-health
-        // receipt for reviews that were never queried. A fresh local pass
-        // still rescues it inside classify_coverage (positive evidence).
+        // zero ONLY when nothing was configured to read: the skip is the
+        // inactive gate, with or without no_external. A `no_external` session
+        // on a repo with an ACTIVE login gate suppressed reads the config
+        // demanded, so the honest answer for that axis is Unknown with its
+        // retry remedy - reporting a healthy read of zero bots fabricated
+        // "uncovered" and an instrument-health receipt for reviews that were
+        // never queried. A fresh local pass still rescues it inside
+        // classify_coverage (positive evidence).
         let coverage = classify_coverage(
             &[],
             &[],
             &events_text,
             &[],
-            !no_external,
+            !(no_external && login_gate_active),
             author_session,
             &freshness,
             &head_branch,
@@ -9451,10 +9452,6 @@ fn build_block_reason(
         );
     }
 
-    if matches!(pr.coverage.coverage, Coverage::Unknown) {
-        return coverage_unavailable_description(&pr.head_oid);
-    }
-
     if !pr.reviewed {
         // Order: work you can do now, cheapest-to-invalidate first, then the
         // async wait. An unaddressed finding leads because addressing it MOVES
@@ -9777,6 +9774,17 @@ fn build_block_reason(
              Nothing here will arrive on its own.",
             pr.number
         );
+    }
+
+    // Unknown coverage AFTER the !reviewed block: a no_external session with
+    // an unmet reviewers gate lands in that block with a GUARANTEED Unknown
+    // (the GitHub axis was suppressed, not failed), and the retry-the-verb
+    // remedy cannot clear what the attestation arm names. The doable local
+    // work - reply to a finding, attest a reviewer - leads, exactly as the
+    // ordering comment inside the block demands; Unknown keeps its retry
+    // message whenever no more-specific arm applies.
+    if matches!(pr.coverage.coverage, Coverage::Unknown) {
+        return coverage_unavailable_description(&pr.head_oid);
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
