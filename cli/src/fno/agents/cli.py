@@ -1422,9 +1422,11 @@ def cmd_spawn(
         None,
         "--tab",
         help=(
-            "Place a pane in a mux tab selector. A bare name is a pane group: "
-            "reuse the first numbered group tab with room, or create the next. "
-            "--substrate pane only."
+            "Place a pane in a mux tab selector. A bare number is the visible "
+            "1-based ordinal the tab bar shows; id:<n> is the stable tab id "
+            "for scripts; name:<s>/ordinal:<n>/active/new are explicit forms. "
+            "A bare name is a pane group: reuse the first numbered group tab "
+            "with room, or create the next. --substrate pane only."
         ),
     ),
     crown: list[str] = typer.Option(
