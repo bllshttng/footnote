@@ -1032,7 +1032,9 @@ EOF
     # claim to another live worker's session id is the harm this run avoids.
     claim_owner_id="$_HARNESS_SESSION"
   else
-    claim_owner_id="$local_session_id"
+    # A generated manifest session id is not an acquiring worker identity.
+    # Refuse the final claim rather than writing a timestamp/PID surrogate.
+    claim_owner_id=""
   fi
   # AC3 observability: when the owned-identity verb refused a candidate id a
   # live registry row already owns, say so. The refusal itself already happened
@@ -1278,6 +1280,7 @@ PYEOF
   # further down).
   _wt_meta=$(printf '%s' "$PWD" | tr -d '"\\\000-\037\177')
   _CLAIM_METADATA=$(printf '{"worktree":"%s"}' "$_wt_meta")
+  _NODE_OWNED=0
   if [[ "$_GUARD_AMBIGUOUS" -eq 1 && -z "$_NODE_ID" && -n "$claim_owner_id" ]] \
      && command -v fno >/dev/null 2>&1; then
     _MULTI_HOLDER="target-session:${claim_owner_id}"
@@ -1295,7 +1298,11 @@ PYEOF
     _MULTI_TTL="${TARGET_CLAIM_MULTI_TTL:-30m}"
     _MULTI_PID="$(fno agents claim session-pid --from-pid "$$" 2>/dev/null || true)"
     _MULTI_PID_FLAGS=""
-    [[ "$_MULTI_PID" =~ ^[0-9]+$ ]] && _MULTI_PID_FLAGS="--pid $_MULTI_PID"
+    if [[ "$_MULTI_PID" =~ ^[0-9]+$ ]]; then
+      _MULTI_PID_FLAGS="--pid $_MULTI_PID"
+    else
+      _MULTI_PID_FLAGS="--pid-unavailable"
+    fi
     _MULTI_HANDOVER_FLAGS=""
     [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]] && \
       _MULTI_HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
@@ -1373,6 +1380,12 @@ PYEOF
     fi
   fi
 
+  if [[ -n "$_NODE_ID" && -z "$claim_owner_id" ]]; then
+    touch "$STATE_DIR/.target-cancelled"
+    echo "target_claim_blocked_reason: holder_unattributable" >> "$STATE_FILE"
+    echo "target: REFUSED: node $_NODE_ID has no proven harness session; final worker claim was not written" >&2
+  fi
+
   if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then
     # Does THIS session own the node? Set by `fno agents claim` below, the sole liveness
     # authority (x-4af4). The TTL claim runs FIRST and the graph lock is stamped
@@ -1388,9 +1401,14 @@ PYEOF
       # Durable session pid for the hybrid liveness pid-arm (ab-cc5553f2): the
       # nearest `claude` ancestor outlives the transient init subprocess, so an
       # alive-but-suspended session keeps its node claim past the TTL. Empty =>
-      # omit --pid and degrade to TTL-only liveness, byte-for-byte as before.
+      # pass the explicit PID-unavailable marker so the TTL is the liveness
+      # authority, never the transient init PID.
       _SESSION_PID="$(fno agents claim session-pid --from-pid "$$" 2>/dev/null || true)"
-      _PID_FLAGS=""; [[ "$_SESSION_PID" =~ ^[0-9]+$ ]] && _PID_FLAGS="--pid $_SESSION_PID"
+      if [[ "$_SESSION_PID" =~ ^[0-9]+$ ]]; then
+        _PID_FLAGS="--pid $_SESSION_PID"
+      else
+        _PID_FLAGS="--pid-unavailable"
+      fi
       # Inherit the claim `fno agents spawn --node` took for this worker, rather
       # than colliding with it. The spawner claims the node before the worker
       # exists so the node never reads free mid-launch; without this the
