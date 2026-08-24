@@ -430,6 +430,62 @@ def test_head_read_refused_without_the_verdict_arms_nothing(
     assert head["reads"] == reads_before + 1
 
 
+def test_head_read_refusal_opens_a_sentinel_when_no_servable_row_exists(
+    cache_env, monkeypatch, capsys
+):
+    """A never-cached PR still gets a window. Without a sentinel row the
+    fallback live read re-attempts the refused head read every tick and the
+    structured verdict is printed but never persisted - the fleet polls at
+    full interval through the whole window."""
+    cache_dir, head = cache_env
+    head["fail"] = True
+    head["fail_reason"] = _secondary_reason()
+    fetch, calls = _fetch_spy([])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 3
+    rows = list(cache_dir.glob("owner--repo-42-*.json"))
+    assert len(rows) == 1, f"exactly the sentinel row, got: {[p.name for p in rows]}"
+    row = json.loads(rows[0].read_text())
+    assert row["backoff_until"] > time.time()
+    assert row["exit"] == 4
+    assert row["output"]["rate_limit_class"] == "secondary"
+    assert row["output"]["verdict"] == "error"
+    capsys.readouterr()
+    reads_after_refusal = head["reads"]
+    # Inside the window the pre-check serves the sentinel verbatim: loud
+    # error, exit 4, zero network of any kind.
+    assert _cache.cached_status("42") == 4
+    out = json.loads(capsys.readouterr().out)
+    assert out["cached"] is True
+    assert out["verdict"] == "error"
+    assert head["reads"] == reads_after_refusal, "no head read inside the window"
+    assert calls["n"] == 0, "no check-set read"
+
+
+def test_head_read_refusal_skips_arming_an_unservable_foreign_row(
+    cache_env, monkeypatch, capsys
+):
+    """A window on a row the pre-check cannot serve (foreign schema, no
+    output) short-circuits nothing: the arm must skip it and open a sentinel
+    instead, or fail_count climbs every tick to no effect."""
+    cache_dir, head = cache_env
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    foreign = cache_dir / "owner--repo-42-foreignbad01.json"
+    foreign.write_text(json.dumps({"ts": time.time(), "exit": "bad-schema", "xyz": 1}))
+    head["fail"] = True
+    head["fail_reason"] = _secondary_reason()
+    fetch, calls = _fetch_spy([])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 3
+    # The foreign row is untouched: no backoff fields written onto it.
+    foreign_row = json.loads(foreign.read_text())
+    assert "backoff_until" not in foreign_row
+    # A sentinel exists and holds the window instead.
+    sentinel = cache_dir / "owner--repo-42-refused.json"
+    assert sentinel.exists()
+    assert json.loads(sentinel.read_text())["backoff_until"] > time.time()
+
+
 def test_backoff_is_exponential_and_capped(cache_env, monkeypatch, capsys):
     cache_dir, head = cache_env
     monkeypatch.setattr(_cache, "_backoff_cap", lambda: 900)

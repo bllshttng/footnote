@@ -138,11 +138,15 @@ def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] =
     `_CORE_DRAINED_FLOOR`), and the reason comes back as a `RestReason`
     carrying `rate_limit_class` for machine consumers.
     """
-    lines = [
-        ln.strip()
-        for ln in (getattr(res, "stderr", "") or "").splitlines()
-        if ln.strip() and not _WRAPPER_NOISE.match(ln.strip())
-    ]
+    raw = [ln.strip() for ln in (getattr(res, "stderr", "") or "").splitlines() if ln.strip()]
+    lines = [ln for ln in raw if not _WRAPPER_NOISE.match(ln)]
+    if not lines and raw:
+        # Wrapper noise with no gh output behind it IS the message: the shim
+        # died before gh ran ("gh proxy: real gh executable not found").
+        # Collapsing that to a generic no-message string hid the one line an
+        # operator needs, and classifying it (as a 404, say) mis-bins a
+        # failure gh never reported. Quote it raw and stop.
+        return raw[0]
     text = " ".join(lines)
     fallback = lines[0] if lines else "gh api failed with no message"
 

@@ -127,7 +127,26 @@ def _backoff_seconds(fails: int) -> int:
     return min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
 
 
-def _arm_backoff_row(p: Path) -> None:
+def _row_can_serve(row: Optional[dict]) -> bool:
+    """Mirror of `_serve`'s servability guard (output present, exit parses).
+
+    A backoff window written on a row the pre-check cannot serve exists on
+    disk but short-circuits nothing: every tick breaks out of the pre-check,
+    re-fires the head read, and re-arms to no effect. The head arm arms only
+    rows this guard passes."""
+    if not row or not row.get("output"):
+        return False
+    exit_raw = row.get("exit")
+    if exit_raw is None:
+        return True
+    try:
+        int(exit_raw)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _arm_backoff_row(p: Path, *, fresh_output: Optional[dict] = None) -> None:
     """Open/extend the secondary-limit backoff window on the row at `p`.
 
     The head read is the first network call every waiter makes, so a
@@ -135,6 +154,10 @@ def _arm_backoff_row(p: Path) -> None:
     this writer, every waiter re-attempts the head read on each tick at full
     rate (the fixed-interval retry that sustains the refusal) while the
     zero-network pre-check reads a `backoff_until` nothing ever wrote.
+
+    `fresh_output` builds a row where none exists: the sentinel case (a
+    never-cached PR, nothing to protect) still needs a servable error row or
+    the window it opens protects nothing.
 
     Runs under the row's own flock, re-reading inside the lock, so a
     concurrent winner's fresh success row is merged onto - fail_count climbs,
@@ -156,7 +179,7 @@ def _arm_backoff_row(p: Path) -> None:
                 {
                     "ts": row.get("ts") if had_prior else now,
                     "exit": row.get("exit") if had_prior else 4,
-                    "output": row.get("output"),
+                    "output": row.get("output") or fresh_output,
                     "fail_count": fails,
                     "backoff_until": now + _backoff_seconds(fails),
                 },
@@ -348,9 +371,29 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
         # short-circuits instead of re-attempting this very read. The verdict
         # comes from the reason's structured field, never its prose.
         if getattr(_head_reason, "rate_limit_class", "") == "secondary":
-            paths = _row_paths_newest(slug_key, pr)
-            if paths:
-                _arm_backoff_row(paths[0])
+            armed = False
+            for candidate in _row_paths_newest(slug_key, pr):
+                if _row_can_serve(read_row(candidate.stem)):
+                    _arm_backoff_row(candidate)
+                    armed = True
+                    break
+            if not armed:
+                # Nothing servable exists (a never-cached PR, or only foreign
+                # schema): open a sentinel row keyed without a head, carrying
+                # the refusal itself as the error payload. Without it the
+                # fallback live read re-attempts the head read every tick and
+                # the verdict is printed but never persisted.
+                _arm_backoff_row(
+                    cache_dir() / f"{slug_key}-{pr}-refused.json",
+                    fresh_output={
+                        "pr": int(pr),
+                        "verdict": "error",
+                        "settled": False,
+                        "green": False,
+                        "reason": str(_head_reason),
+                        "rate_limit_class": "secondary",
+                    },
+                )
         # Head unreadable (secondary window, network): fail CLOSED. Serve the
         # PR's newest existing row degraded (unknown, unsettled - keeps the
         # zero-network collapse without ever answering green off data nobody

@@ -380,6 +380,19 @@ def test_matched_line_is_quoted_not_the_first_line():
     assert "something unrelated" not in reason
 
 
+def test_shim_only_stderr_keeps_the_shims_own_diagnostic_raw():
+    """Wrapper noise is excluded from the EVIDENCE only while real gh output
+    exists. When the shim's own fatal diagnostic is the whole message, it IS
+    the message: quoted verbatim, with no classification (the read died
+    before gh ran; binning it as a 404 mislabels a failure gh never
+    reported)."""
+    reason = _rest._rest_reason(
+        Result(1, "", "gh proxy: real gh executable not found")
+    )
+    assert reason == "gh proxy: real gh executable not found"
+    assert not hasattr(reason, "rate_limit_class") or not reason.rate_limit_class
+
+
 def test_rest_merged_state_maps():
     r = _runner(
         pulls={
