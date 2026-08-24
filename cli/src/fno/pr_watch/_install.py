@@ -756,14 +756,14 @@ def _valid_completed_tick(
     if not swept:
         receipt_id = data.get("receipt_id")
         expected_chunks = data.get("receipt_chunks")
-        chunks = (chunks_by_receipt or {}).get(receipt_id)
         if (
             not isinstance(receipt_id, str)
             or type(expected_chunks) is not int
             or expected_chunks <= 0
-            or not chunks
-            or len(chunks) != expected_chunks
         ):
+            return None
+        chunks = (chunks_by_receipt or {}).get(receipt_id)
+        if not chunks or len(chunks) != expected_chunks:
             return None
         rebuilt: dict[str, list[int]] = {}
         seen: set[tuple[str, int]] = set()
