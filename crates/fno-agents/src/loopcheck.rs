@@ -2518,30 +2518,10 @@ fn read_pr_info(
 
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
             .map_err(|_| (checks_parse.to_string(), String::new()))?;
-        // One dedup feeds every reader of this payload, so the conclusion, the
-        // failing-name set, and the pending flag can never answer off different
-        // rollups (a superseded run read as the current one is the exact lie
-        // this dedup exists to remove).
-        let deduped = latest_per_name(&checks);
-        // Did the unfiltered rollup carry rows the filter then removed? With
-        // the filtered array empty (the only case conclusion is None), that
-        // means "CI has not reported yet" (the refresher stamps both contexts
-        // within seconds of a push), never "no CI configured" - the Python
-        // twin answers unknown for the same state, and the declared-none
-        // lecture would send the session to edit settings for a repo whose
-        // CI simply has not started.
-        let had_rows = deduped.as_array().map(|a| !a.is_empty()).unwrap_or(false);
-        let checks = without_coverage_statuses(&deduped);
-
-        let failing = failing_check_names(&checks);
-        let has_pending = ci_has_pending_checks(&checks);
-        let conclusion = compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?;
-        let conclusion = if had_rows && matches!(conclusion, CiConclusion::None) {
-            CiConclusion::Pending
-        } else {
-            conclusion
-        };
-        (conclusion, failing, has_pending)
+        // One truth table for the payload (classify_checks_payload): the
+        // conclusion, the failing-name set, and the pending flag can never
+        // answer off different rollups.
+        classify_checks_payload(&checks).map_err(|e| (e, String::new()))?
     };
 
     // Reads 3+4: reviews + inline findings. Skipped when the session declares
@@ -2959,6 +2939,26 @@ fn without_coverage_statuses(checks: &Value) -> Value {
             .cloned()
             .collect(),
     )
+}
+
+/// One truth table for a `gh pr checks --json` payload: dedup to the latest
+/// run per name, drop the coverage projections, then derive the conclusion,
+/// the failing names, and the pending flag. A rollup the filter EMPTIED
+/// (only the two coverage contexts existed) reads Pending - "CI has not
+/// reported yet", never the declared-none None, matching the Python twin's
+/// unknown - and its pending flag is set too, so the wait stays watchable
+/// instead of a non-idlable re-invoke loop.
+fn classify_checks_payload(checks: &Value) -> Result<(CiConclusion, Vec<String>, bool), String> {
+    let deduped = latest_per_name(checks);
+    let had_rows = deduped.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    let filtered = without_coverage_statuses(&deduped);
+    let mut conclusion = compute_ci_conclusion(&filtered)?;
+    let emptied = had_rows && matches!(conclusion, CiConclusion::None);
+    if emptied {
+        conclusion = CiConclusion::Pending;
+    }
+    let pending = emptied || ci_has_pending_checks(&filtered);
+    Ok((conclusion, failing_check_names(&filtered), pending))
 }
 
 fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
@@ -3446,15 +3446,17 @@ fn publish_coverage_status(
                 "success",
                 "coverage-override label applied on the PR",
             );
-            let (diagnostic_state, diagnostic_description) =
-                coverage_instrument_status(&coverage.coverage, pr_head_oid);
+            // The diagnostic mirrors the Python override arm, not the
+            // possibly-Unknown computed read: a waived review must not wear
+            // "retry the review verb" beside its override success, and the
+            // two writers of one context must post the same state.
             post_coverage_status(
                 gh_bin,
                 cwd,
                 pr_head_oid,
                 COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
-                diagnostic_state,
-                &diagnostic_description,
+                "success",
+                &format!("coverage read healthy at {}", short_sha(pr_head_oid)),
             );
             return;
         }
@@ -7160,10 +7162,14 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             {
                 Ok(co) if co.status.success() => {
                     let cv: Value = serde_json::from_slice(&co.stdout).unwrap_or(Value::Null);
-                    // Same dedup as the main CI read: the fingerprint's CI arm
-                    // must describe the latest run per name, not a superseded
-                    // one a newer push already replaced.
-                    compute_ci_conclusion(&without_coverage_statuses(&latest_per_name(&cv)))
+                    // The same truth table as the main CI read (one helper,
+                    // not a second spelling of dedup-plus-filter): the
+                    // fingerprint's CI arm must describe the latest run per
+                    // name, not a superseded one a newer push replaced, and
+                    // must agree with the main read about a coverage-only
+                    // rollup.
+                    classify_checks_payload(&cv)
+                        .map(|(c, _, _)| c)
                         .unwrap_or(CiConclusion::None)
                 }
                 _ => CiConclusion::None,
