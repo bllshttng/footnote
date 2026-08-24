@@ -14,7 +14,7 @@ fno mux serve --web --port 9000          # a different port
 
 The command prints the URL and a token once at bind. The token is in the query string. It is the only guard on the port. Anyone who has the URL can watch the session, so keep the URL secret.
 
-The bridge also writes these values to `~/.fno/mux/web-<session>.json` at mode 0600. You can get the URL again from this file. The bridge removes the file on exit.
+The bridge also writes these values to `<mux dir>/web-<session>.json` at mode 0600. You can get the URL again from this file. The bridge removes the file on exit.
 
 `--session` names the mux SERVER, not an agent. It selects which socket the bridge attaches to. To reach one agent, see the next section.
 

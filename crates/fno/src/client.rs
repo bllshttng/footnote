@@ -311,6 +311,19 @@ pub fn run(session: &str) -> i32 {
 }
 
 fn run_inner(session: &str) -> Result<i32, String> {
+    // Resolve + record the config warning BEFORE any early exit below (the
+    // nested-session guard, an invalid session name): a pinned config whose
+    // dir diverged must say so on every path, not only the happy attach. The
+    // write rides the client log, never stderr - we are pre-alternate-screen,
+    // and any stderr byte lands in the PTY the harness is about to read as
+    // the TUI (the x-0296 NEVER-stderr rule). The mux dir is ensured first:
+    // on a fresh state root nothing creates it until connect_or_spawn, and an
+    // append to a missing parent silently drops the warning.
+    let _ = proto::mux_dir();
+    if let Some((w, _remedy)) = proto::pending_config_warning() {
+        let _ = proto::ensure_mux_dir();
+        client_log_append(&proto::mux_dir().join("client-warnings.log"), w);
+    }
     // Nested same-session guard (AC3-UI/EDGE): BEFORE any socket, spawn, or
     // terminal mode change. `FNO_SESSION` is set in every pane the server
     // spawns, so target == env means "attaching to the session I am already
@@ -324,10 +337,25 @@ fn run_inner(session: &str) -> Result<i32, String> {
         ));
     }
     let path = proto::socket_path(session)?;
+
     let stream = connect_or_spawn(&path)?;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
     runtime.block_on(attach_and_run(stream, &path))
+}
+
+/// Append one line to a log file under the mux dir, best-effort. The shared
+/// write behind both the e2e breadcrumbs and the config-warning log: one
+/// append mechanism, never stderr (see [`e2e_client_log`] for the rule).
+fn client_log_append(path: &Path, msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{msg}");
+    }
 }
 
 /// Connect to a live server, or spawn one and connect. AC3-ERR: a dead
@@ -397,19 +425,15 @@ fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
     if std::env::var_os("FNO_E2E").is_none() {
         return;
     }
-    let path = proto::mux_dir().join(format!("client-{}.log", std::process::id()));
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        use std::io::Write as _;
-        let _ = writeln!(f, "[{ms} pid {}] {msg}", std::process::id());
-    }
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!("[{ms} pid {}] {msg}", std::process::id());
+    client_log_append(
+        &proto::mux_dir().join(format!("client-{}.log", std::process::id())),
+        &line,
+    );
 }
 
 /// Spawn `fno --server <socket>` detached: its own session (setsid) so the
