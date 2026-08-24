@@ -5844,6 +5844,10 @@ _MUX_EXIT_TARGET_NOT_IDLE = 15
 # delay + CR, low single-digit seconds at the 800 ms table value.
 _MUX_CLAIM_HELD_MARKER = "held by pid"
 _MUX_PANE_CLAIM_WAIT_S = 4.0
+# `_run` returns this sentinel when the mux subprocess timed out after the
+# request may already have reached the server. It is not a pre-submit refusal:
+# retrying the same payload could duplicate a paste whose outcome is unknown.
+_MUX_SEND_UNKNOWN = -2
 
 # Wake spawns key on the target session uuid, not on a fresh agent name: spawn
 # dedup scopes NAME, so two senders waking one session must derive the same name
@@ -6201,7 +6205,10 @@ def _mux_pane_send(
                 text=True,
                 timeout=_MAIL_INJECT_TIMEOUT_S,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            print(f"fno mux pane {args[0]} failed: {exc}", file=sys.stderr)
+            return _MUX_SEND_UNKNOWN
+        except OSError as exc:
             print(f"fno mux pane {args[0]} failed: {exc}", file=sys.stderr)
             return None
         if proc.returncode != 0:
@@ -6300,6 +6307,8 @@ def _mux_pane_send(
         pasted = _run(send_args, stdin_text=text)
         rc = pasted.returncode if pasted is not None else -1
         if rc != 0:
+            if rc == _MUX_SEND_UNKNOWN:
+                last_attempt_phase = "unconfirmed"
             if rc == _MUX_EXIT_TARGET_NOT_IDLE:
                 # Turn not taken: the recipient is mid-turn, so the paste never
                 # landed. Name the stall; the caller demotes to the durable floor.
@@ -6313,24 +6322,23 @@ def _mux_pane_send(
         # guarding the submit could strand a pasted-but-unsent prompt.
         time.sleep(enter_delay_s)
         # A submit key is a control byte, never a message: always --raw.
-        return all(
-            (proc := _run(
+        for key in submit_text:
+            proc = _run(
                 [
                     "send",
                     pane,
                     "--text",
                     key,
                     "--raw",
-                    *(
-                        ["--fno-id", str(expected_fno_id)]
-                        if expected_fno_id
-                        else []
-                    ),
+                    *(["--fno-id", str(expected_fno_id)] if expected_fno_id else []),
                 ]
-            )) is not None
-            and proc.returncode == 0
-            for key in submit_text
-        )
+            )
+            if proc == _MUX_SEND_UNKNOWN:
+                last_attempt_phase = "unconfirmed"
+                return False
+            if proc is None or proc.returncode != 0:
+                return False
+        return True
 
     if guarded:
         sent = _paste_then_submit()

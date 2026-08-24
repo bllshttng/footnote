@@ -258,6 +258,28 @@ def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
     assert failure == ["unconfirmed"]
 
 
+def test_mail_delivery_timeout_after_paste_does_not_retry(monkeypatch):
+    calls = _install_fake_run(monkeypatch, [])
+
+    def _timeout(argv, **_kwargs):
+        calls.append(list(argv))
+        if "--stdin" in argv:
+            raise dispatch.subprocess.TimeoutExpired(argv, 20)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _timeout)
+    failure: list[str] = []
+
+    assert (
+        dispatch._mux_pane_send(
+            _entry(), "hi", guarded=False, raw=True, failure_out=failure
+        )
+        is False
+    )
+    assert failure == ["unconfirmed"]
+    assert sum("--stdin" in call for call in calls) == 1
+
+
 def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
     """No transcript to confirm against -> never optimistically True. A confirm
     that passes because the transcript was unreadable is the false-positive

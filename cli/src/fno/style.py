@@ -129,9 +129,9 @@ _QUOTE_RE = re.compile(r'"[^"]*"')
 _CODE_DOUBLE_RE = re.compile(r"``([^`]+)``")
 _CODE_SINGLE_RE = re.compile(r"`([^`]+)`")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
-# The atomic prefix keeps a long single-token body without an underscore from
-# backtracking once per character during the word-count mask.
-_IDENT_RE = re.compile(r"\b(?>[A-Za-z]\w*)_\w+")
+# The lookahead proves an underscore exists; the atomic consuming branch then
+# takes the whole token without backtracking through a long plain word.
+_IDENT_RE = re.compile(r"\b(?=[A-Za-z]\w*_\w+)(?>[A-Za-z]\w*)")
 _COMMENT_SPAN_RE = re.compile(r"<!--.*?-->")
 
 
