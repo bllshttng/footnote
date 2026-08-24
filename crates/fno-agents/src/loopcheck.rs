@@ -14475,7 +14475,10 @@ mod tests {
             reason.contains("skills/review/scripts/emit-attestation.sh code-review"),
             "got: {reason}"
         );
-        assert!(reason.contains("local work to DO, not a wait"), "got: {reason}");
+        assert!(
+            reason.contains("local work to DO, not a wait"),
+            "got: {reason}"
+        );
     }
 
     #[test]
