@@ -193,11 +193,10 @@ fn mux_keys_table(cwd: &Path) -> (Vec<(String, String)>, Vec<crate::keys::Keymap
     let layers: Vec<PathBuf> = match non_empty_env("FNO_CONFIG") {
         Some(explicit) => vec![PathBuf::from(explicit)],
         None => {
-            let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
-                .map(|p| PathBuf::from(p).with_file_name("config.toml"))
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml"))
-                });
+            // The one spelling of the global config.toml location, shared
+            // with the state-root resolver, so the keymap layer and the mux
+            // root can never read different global files.
+            let global = global_config_toml();
             // Lowest precedence first: global, then canonical, then this
             // checkout on top - `config_roots` is highest-first, so it reverses.
             global

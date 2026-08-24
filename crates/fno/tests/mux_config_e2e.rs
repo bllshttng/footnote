@@ -182,3 +182,48 @@ fn squad_store_reads_the_legacy_file_under_a_global_state_dir() {
         "both legacy squads must load through the fallback; got: {stdout}"
     );
 }
+
+#[test]
+fn a_global_yaml_state_dir_warns_only_when_it_diverges() {
+    // The yaml hint compares VALUES, not substrings: a yaml naming the
+    // default root is agreement (the explicit pre-migration spelling), and
+    // warning there would fire on every verb forever. A yaml naming a
+    // different root IS the divergence the warning exists for - the
+    // positive marker that keeps this test from passing vacuously.
+    let agree = Scratch::new("muxymla");
+    std::fs::create_dir_all(agree.0.join("home").join(".fno")).unwrap();
+    std::fs::write(
+        agree.0.join("home").join(".fno").join("settings.yaml"),
+        format!(
+            "state_dir: {}\n",
+            agree.0.join("home").join(".fno").display()
+        ),
+    )
+    .unwrap();
+    let mut cmd = agree.command();
+    cmd.env_remove("FNO_MUX_DIR");
+    cmd.env_remove("FNO_GLOBAL_SETTINGS_PATH");
+    let out = cmd.args(["mux", "ls"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("cannot read"),
+        "a yaml agreeing with the default root must not warn: {stderr}"
+    );
+
+    let diverge = Scratch::new("muxymld");
+    std::fs::create_dir_all(diverge.0.join("home").join(".fno")).unwrap();
+    std::fs::write(
+        diverge.0.join("home").join(".fno").join("settings.yaml"),
+        format!("state_dir: {}\n", diverge.0.join("elsewhere").display()),
+    )
+    .unwrap();
+    let mut cmd = diverge.command();
+    cmd.env_remove("FNO_MUX_DIR");
+    cmd.env_remove("FNO_GLOBAL_SETTINGS_PATH");
+    let out = cmd.args(["mux", "ls"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("state_dir this mux cannot read"),
+        "a diverging yaml must warn: {stderr}"
+    );
+}

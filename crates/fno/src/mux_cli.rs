@@ -1501,8 +1501,8 @@ fn gather_checks() -> Vec<Check> {
 }
 
 /// Sessions stranded at the pre-config-chain root `~/.fno/mux` when this
-/// process resolves its socket dir elsewhere (`config.state_dir`, or a pinned
-/// `FNO_CONFIG`). A daemon bound before an upgrade - or started from a
+/// process resolves its socket dir elsewhere through the ambient chain
+/// (`config.state_dir`). A daemon bound before an upgrade - or started from a
 /// directory with no state_dir override while clients run inside one that has
 /// it - keeps serving a dir no current client lands on, and every reaper
 /// (`ls`-based) resolves the new root, so nothing finds it to reap. Visible
@@ -1511,15 +1511,19 @@ fn gather_checks() -> Vec<Check> {
 #[cfg(not(test))]
 fn legacy_mux_root_check() -> Check {
     // An explicit FNO_MUX_DIR relocates the sockets ON PURPOSE (the documented
-    // test seam, scratch dirs, operator partitions). Sessions at the global
-    // root are then live for every normal client, and "restart them under the
-    // resolved root" would direct an operator to kill a healthy fleet into a
-    // tempdir. The check is about CONFIG-CHAIN divergence only.
-    if std::env::var_os("FNO_MUX_DIR").is_some_and(|v| !v.is_empty()) {
+    // test seam, scratch dirs, operator partitions), and a pinned FNO_CONFIG
+    // is the same deliberate relocation from the other side: an isolated demo
+    // env running doctor. Sessions at the global root are then live for every
+    // normal client, and "restart them under the resolved root" would direct
+    // an operator to kill a healthy fleet - into a tempdir, or out of the
+    // real machine's mux. The check is about UPGRADE divergence only.
+    if std::env::var_os("FNO_MUX_DIR").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty())
+    {
         return Check {
             name: "legacy mux root".into(),
             verdict: Verdict::Na,
-            detail: "FNO_MUX_DIR relocates the sockets on purpose".into(),
+            detail: "FNO_MUX_DIR or a pinned FNO_CONFIG relocates the sockets on purpose".into(),
             remedy: None,
         };
     }

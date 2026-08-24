@@ -1388,11 +1388,29 @@ fn parse_seed(raw: Option<String>, from_legacy: bool) -> io::Result<StoreFile> {
         Some(r) if !r.trim().is_empty() => r,
         _ => return Ok(StoreFile::default()),
     };
-    match serde_json::from_str::<StoreFile>(&raw) {
-        Ok(f) => Ok(f),
-        Err(e) if from_legacy => Ok(StoreFile::default()),
-        Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+    let parsed = match serde_json::from_str::<StoreFile>(&raw) {
+        Ok(f) => f,
+        Err(e) if from_legacy => return Ok(StoreFile::default()),
+        Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+    };
+    // load() quarantines a version this build does not understand rather
+    // than read it. The seed must not clobber what the read path treats as
+    // untouchable by silently rewriting it at STORE_VERSION, so an unknown
+    // version takes the same arms as corruption: refuse at the primary,
+    // degrade from the legacy fallback.
+    if parsed.version == STORE_VERSION {
+        return Ok(parsed);
     }
+    if from_legacy {
+        return Ok(StoreFile::default());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "squads.json version {} is not this build's {}",
+            parsed.version, STORE_VERSION
+        ),
+    ))
 }
 
 /// Holds an advisory `flock` for the life of the guard, releasing on drop.
@@ -1899,6 +1917,12 @@ mod tests {
             .unwrap()
             .squads
             .is_empty());
+        // An unknown version takes the same arms: refuse at the primary (the
+        // read path quarantines it), degrade from the legacy fallback. The
+        // rewrite at STORE_VERSION must never downgrade a future store.
+        let future = r#"{"version":99,"squads":[]}"#.to_string();
+        assert!(parse_seed(Some(future.clone()), false).is_err());
+        assert!(parse_seed(Some(future), true).unwrap().squads.is_empty());
     }
 
     #[test]

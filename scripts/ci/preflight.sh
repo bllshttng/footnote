@@ -1239,7 +1239,7 @@ try:
     # relocated one is the vacuous green this guard exists to prevent.
     # Template and $VAR values stay skipped: the resolver declines those
     # too, so the store does not follow them.
-    for v in re.findall(r'^\s*state_dir\s*=\s*[\"\\']([^\"\\']+)[\"\\']', body, re.M):
+    for v in re.findall(r'^\s*state_dir\s*=\s*[\"\\']([^\"']+)[\"\\']', body, re.M):
         if not v.startswith(('{', '\$')):
             roots.append(os.path.abspath(os.path.expanduser(v)))
 except OSError:

@@ -2716,7 +2716,26 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
     }
     let yaml = crate::digest_overlay::global_settings_yaml_sibling()?;
     let body = std::fs::read_to_string(&yaml).ok()?;
-    body.contains("state_dir").then_some(yaml)
+    // The VALUE, not a substring: a yaml whose state_dir names the default
+    // root (the explicit pre-migration spelling) agrees with this resolver,
+    // and a comment or nested mention is not a key at all. Warning in either
+    // case would fire on every verb forever over no divergence.
+    let value = body.lines().find_map(|l| {
+        let (key, val) = l.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case("state_dir")
+            .then(|| val.trim().trim_matches(|c| c == '\'' || c == '"'))
+    })?;
+    if value.is_empty() {
+        return None;
+    }
+    match expand_state_dir(value) {
+        // Agreement with the root this resolver would use anyway.
+        Some(root) => (root != legacy_state_root()).then_some(yaml),
+        // Unexpandable (relative, template): Python still follows it and
+        // this mirror cannot compare, so the divergence warning stands.
+        None => Some(yaml),
+    }
 }
 
 fn non_empty_env_is_set(key: &str) -> bool {
