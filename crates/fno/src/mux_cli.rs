@@ -36,8 +36,8 @@ use std::time::{Duration, Instant};
 
 use crate::proto::{
     self, err_code, read_msg_sync, write_msg_sync, BlockSel, ClientMsg, ControlVerb, LayoutScope,
-    PanePlacement, PaneTarget, PlacementFallback, ServerMsg, TabSel, WaitOutcome, BUILD_VERSION,
-    DEFAULT_SESSION, PROTO_VERSION,
+    PanePlacement, PaneTarget, PlacementFallback, ServerMsg, SquadLayout, TabPaneOccupant, TabSel,
+    WaitOutcome, BUILD_VERSION, DEFAULT_SESSION, PROTO_VERSION,
 };
 use crate::tree::Dir;
 
@@ -2114,13 +2114,20 @@ fn parse_dir(s: &str, flag: &str) -> Result<Dir, String> {
     }
 }
 
-/// A `--tab <spec>` selector (x-d865). Grammar: `active` | `new` | `id:<n>` (the
-/// STABLE tab id, preferred in scripts) | `name:<s>` | a bare integer (an
-/// ordinal Index, convenience only - ordinals renumber) | any other bare word
-/// (a tab Name).
+/// A `--tab <spec>` selector (x-d865, ordinals x-1499). Grammar: `active` |
+/// `new` | `id:<n>` (the STABLE tab id, preferred in scripts) | `ordinal:<n>`
+/// (explicit form of a bare integer) | `name:<s>` | a bare integer (the
+/// 1-based ordinal the UI shows as `·N`; convenience only - ordinals renumber
+/// when tabs close) | any other bare word (a tab Name).
 fn parse_tab_sel(s: &str) -> Result<TabSel, String> {
     if let Some(n) = s.strip_prefix("id:") {
         return parse_u64(n, "--tab id:").map(TabSel::Id);
+    }
+    if let Some(n) = s.strip_prefix("ordinal:") {
+        return match n.parse::<usize>() {
+            Ok(i) => Ok(TabSel::Index(i)),
+            Err(_) => Err(format!("--tab ordinal: needs a number, got {n:?}")),
+        };
     }
     if let Some(name) = s.strip_prefix("name:") {
         return Ok(TabSel::Name(name.to_string()));
@@ -2825,7 +2832,14 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
         session.as_deref(),
         env_session,
         json,
-        ControlVerb::LayoutGet { scope },
+        ControlVerb::LayoutGet {
+            scope,
+            // The per-pane worker join rides the reply only for the HUMAN
+            // rendering; `--json` stays byte-shape identical to the pre-v51
+            // output (x-1499), so a topology diffing consumer sees no new
+            // key on a healthy reply.
+            workers: !json,
+        },
     )
 }
 
@@ -3240,8 +3254,11 @@ fn resolve_row_or_print(
 }
 
 /// Connect to one session's server and move the attached viewer to a pane
-/// (x-b80d): the shared tail of `view` and `pane focus`.
-fn focus_pane(verb: &str, session: &str, pane: u64, json: bool) -> i32 {
+/// (x-b80d): the shared tail of `view` and `pane focus`. `render: false`
+/// performs the move without printing the receipt - for a caller that has
+/// already put ONE JSON document on stdout and must not add a second
+/// unparsable one.
+fn focus_pane(verb: &str, session: &str, pane: u64, render: bool, json: bool) -> i32 {
     let sock = match proto::socket_path(session) {
         Ok(p) => p,
         Err(e) => {
@@ -3263,7 +3280,12 @@ fn focus_pane(verb: &str, session: &str, pane: u64, json: bool) -> i32 {
         CONTROL_REPLY_DEADLINE,
         session,
     ) {
-        Ok(reply) => render_reply(reply, json, false, None),
+        Ok(reply) => {
+            if !render {
+                return EXIT_OK;
+            }
+            render_reply(reply, json, false, None)
+        }
         Err(ControlError::Unanswered(e)) => {
             eprintln!("{verb}: {e}");
             EXIT_CONTROL_UNANSWERED
@@ -3292,7 +3314,7 @@ fn focus_by_selector(verb: &str, selector: &str, session_flag: Option<&str>, jso
         return EXIT_NOT_PANE_HOSTED;
     };
     let session = resolve_session(session_flag, Some(&host_session));
-    focus_pane(verb, &session, pane, json)
+    focus_pane(verb, &session, pane, true, json)
 }
 
 /// One pickable pane-hosted row for the interactive picker (x-b80d).
@@ -3509,7 +3531,7 @@ fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
             if url {
                 print_pane_url(verb, &session, pane)
             } else {
-                focus_pane(verb, &session, pane, json)
+                focus_pane(verb, &session, pane, true, json)
             }
         }
         None => EXIT_OK,
@@ -3586,12 +3608,153 @@ fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
     EXIT_OK
 }
 
+/// Split a `--workspace <name>` (alias `--squad`/`-s`) pair out of an
+/// already-parsed `rest` (x-1499), returning the value and the remaining
+/// tokens. Used by the selector verbs whose workspace qualification is a
+/// location concern, so their selector loop never sees the flag.
+fn take_workspace_flag(
+    verb: &str,
+    rest: Vec<String>,
+) -> Result<(Option<String>, Vec<String>), i32> {
+    let mut workspace = None;
+    let mut out = Vec::new();
+    let mut it = rest.into_iter();
+    while let Some(tok) = it.next() {
+        if matches!(tok.as_str(), "--workspace" | "--squad" | "-s") {
+            match it.next() {
+                Some(v) => workspace = Some(v),
+                None => {
+                    eprintln!("{verb}: {tok} needs a value");
+                    return Err(EXIT_USAGE);
+                }
+            }
+        } else {
+            out.push(tok);
+        }
+    }
+    Ok((workspace, out))
+}
+
+/// The tab-location branch shared by `view` and `where` (x-1499): the agent
+/// resolver found nothing, so treat the selector as a LOCATION - a tab
+/// ordinal, stable id, or name - and answer with what lives there. `focus`
+/// then moves the operator to the tab's focused pane (`view`); `where` only
+/// reports. Every refusal (unknown location, cross-workspace ambiguity, a
+/// bare number whose ordinal and id readings disagree) prints and exits
+/// nonzero through `render_reply`.
+fn location_lookup(
+    verb: &str,
+    sel: &str,
+    workspace: Option<&str>,
+    session_flag: Option<&str>,
+    env_session: Option<&str>,
+    json: bool,
+    focus: bool,
+    url: bool,
+) -> i32 {
+    // A location has no registry row to name its host session, so the ambient
+    // FNO_SESSION is the right default beside the explicit flag - the same
+    // precedence every session-taking verb uses. `where`'s agent path ignores
+    // the env on purpose (the row names the host); this branch cannot.
+    let session = resolve_session(session_flag, env_session);
+    let sock = match proto::socket_path(&session) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{verb}: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let stream = match proto::connect_unix_timeout(&sock, PROBE_TIMEOUT) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{verb}: cannot reach session {session:?} for a location lookup: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    let reply = match send_control(
+        stream,
+        ControlVerb::TabWhere {
+            squad: squad_target(workspace.map(str::to_string)),
+            sel: sel.to_string(),
+        },
+        CONTROL_TIMEOUT,
+        CONTROL_REPLY_DEADLINE,
+        &session,
+    ) {
+        Ok(r) => r,
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("{verb}: {e}");
+            return EXIT_CONTROL_UNANSWERED;
+        }
+        Err(ControlError::Fatal(e)) => {
+            eprintln!("{verb}: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    if focus {
+        if let ServerMsg::TabLocation { focus: pane, .. } = &reply {
+            let pane = *pane;
+            // `--url` names the operator's ask: ONLY the focused pane's share
+            // URL on stdout, never the client move - the same precedence the
+            // agent-matched path of `view` gives the flag.
+            if url {
+                return print_pane_url(verb, &session, pane);
+            }
+            // JSON stdout carries exactly ONE document: this receipt. The
+            // focus action still runs, but its own receipt is suppressed for
+            // `--json` - two adjacent documents cannot be parsed as the one
+            // documented value.
+            let code = render_reply(reply, json, false, None);
+            if code != EXIT_OK {
+                return code;
+            }
+            return focus_pane(verb, &session, pane, !json, json);
+        }
+    }
+    render_reply(reply, json, false, None)
+}
+
+/// Resolve a selector to an agent row, falling through to the tab-location
+/// branch when the agent resolver returns NotFound (x-1499): the shared head
+/// of `view` and `where`. Ambiguity keeps its own refusal; registry failures
+/// keep their own exit class.
+fn resolve_row_or_location(
+    verb: &str,
+    selector: &str,
+    workspace: Option<&str>,
+    session_flag: Option<&str>,
+    env_session: Option<&str>,
+    json: bool,
+    focus: bool,
+    url: bool,
+) -> Result<crate::agents_view::RegistryAgent, i32> {
+    let (rows, now) = registry_rows_or(verb)?;
+    match resolve_selector(&rows, selector, now) {
+        Resolution::Found(row) => Ok(*row),
+        Resolution::Ambiguous(candidates) => {
+            print_candidates(verb, selector, &candidates);
+            Err(EXIT_AMBIGUOUS)
+        }
+        Resolution::NotFound => Err(location_lookup(
+            verb,
+            selector,
+            workspace,
+            session_flag,
+            env_session,
+            json,
+            focus,
+            url,
+        )),
+    }
+}
+
 /// `fno mux view <selector> [--url] [--fzf] [--json]` (x-b80d): point the
 /// operator's view at the pane hosting an agent, selected by what a person
 /// remembers - the node id or slug inside the minted name - rather than a
 /// pane index. Resolution is shared with `where` and `pane focus`; a row
-/// that hosts no pane degrades to a `peek` hint (Locked Decision 1).
-pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
+/// that hosts no pane degrades to a `peek` hint (Locked Decision 1). A
+/// selector that names no agent is retried as a tab LOCATION (x-1499).
+pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
     let verb = "fno mux view";
     let (session_flag, json, rest) = match take_common_flags(args) {
         Ok(t) => t,
@@ -3599,6 +3762,10 @@ pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
             eprintln!("{verb}: {e}");
             return EXIT_USAGE;
         }
+    };
+    let (workspace, rest) = match take_workspace_flag(verb, rest) {
+        Ok(t) => t,
+        Err(code) => return code,
     };
     let mut url = false;
     let mut fzf = false;
@@ -3633,10 +3800,19 @@ pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
         return view_picker(verb, json, url);
     }
     let Some(selector) = selector else {
-        eprintln!("{verb}: needs a selector (a node id, slug, or name), or --fzf");
+        eprintln!("{verb}: needs a selector (a node id, slug, name, or tab ordinal/id), or --fzf");
         return EXIT_USAGE;
     };
-    let row = match resolve_row_or_print(verb, &selector) {
+    let row = match resolve_row_or_location(
+        verb,
+        &selector,
+        workspace.as_deref(),
+        session_flag.as_deref(),
+        env_session,
+        json,
+        true,
+        url,
+    ) {
         Ok(r) => r,
         Err(code) => return code,
     };
@@ -3651,7 +3827,7 @@ pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
         return print_pane_url(verb, &host_session, pane);
     }
     let session = resolve_session(session_flag.as_deref(), Some(&host_session));
-    focus_pane(verb, &session, pane, json)
+    focus_pane(verb, &session, pane, true, json)
 }
 
 /// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live
@@ -3659,7 +3835,7 @@ pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
 /// THAT session's socket, and rounds-trips one `PaneWhere`. The three failure
 /// modes get distinct exit codes (AC1-ERR); a registry read failure never reads
 /// as "not found".
-pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
+pub fn where_(args: &[OsString], env_session: Option<&str>) -> i32 {
     // The caller's FNO_SESSION is irrelevant here: `where` resolves the HOST
     // session from the registry, so an explicit --session is the only override.
     let (session_flag, json, rest) = match take_common_flags(args) {
@@ -3668,6 +3844,10 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
             eprintln!("fno mux where: {e}");
             return EXIT_USAGE;
         }
+    };
+    let (workspace, rest) = match take_workspace_flag("fno mux where", rest) {
+        Ok(t) => t,
+        Err(code) => return code,
     };
     let Some(fno_id) = rest
         .first()
@@ -3694,9 +3874,20 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
             print_candidates("fno mux where", &fno_id, &candidates);
             return EXIT_AMBIGUOUS;
         }
+        // No agent matches: the selector may be a tab LOCATION (x-1499) - an
+        // ordinal, id, or name the operator read off the screen. `where`
+        // reports the occupants without moving any client.
         Resolution::NotFound => {
-            eprintln!("fno mux where: no session matches {fno_id:?}");
-            return EXIT_NOT_FOUND;
+            return location_lookup(
+                "fno mux where",
+                &fno_id,
+                workspace.as_deref(),
+                session_flag.as_deref(),
+                env_session,
+                json,
+                false,
+                false,
+            );
         }
     };
     // The probe the server matches on. The server's matcher knows session-id
@@ -4035,6 +4226,75 @@ fn send_control(
 /// Turn one server reply into stdout + an exit code. `command_done_requested`
 /// lets a `wait` note the markerless degradation (asked --command-done, got a
 /// quiet/timeout settle because the pane emitted no OSC 133 `D`).
+/// The human tab label (x-1499): the name when present, else the visible
+/// `·N` ordinal - the identifier the operator's eye already has. Renderers
+/// print it FIRST and the stable `tab_id` second; the stable id alone names
+/// something the operator cannot find on their own screen.
+fn tab_label(name: Option<&str>, ordinal: Option<usize>) -> String {
+    match (name, ordinal) {
+        (Some(n), _) if !n.is_empty() => n.to_string(),
+        (_, Some(n)) => format!("·{n}"),
+        _ => "-".into(),
+    }
+}
+
+/// The one-line legend naming the layout geometry's units (x-1499): printed
+/// exactly once per human layout rendering, verbatim.
+const LAYOUT_UNITS_LEGEND: &str =
+    "x/y are the top-left corner in character cells; rows/cols are the size in character cells.";
+
+/// The human layout rows (x-1499): one per pane, worker-joined, carrying
+/// both tab identifier forms and the pane's geometry. Pure so the row shape
+/// is unit-testable without a socket; the caller prints the rows and then
+/// [`LAYOUT_UNITS_LEGEND`] exactly once.
+fn layout_rows(squads: &[SquadLayout]) -> Vec<String> {
+    let mut out = Vec::new();
+    for sq in squads {
+        let workspace = sq.squad_name.as_deref().unwrap_or("-");
+        for (ti, tab) in sq.tabs.iter().enumerate() {
+            let label = tab_label(tab.name.as_deref(), Some(ti + 1));
+            for (i, (pid, r)) in tab.panes.iter().enumerate() {
+                let worker = tab
+                    .workers
+                    .as_ref()
+                    .and_then(|ws| ws.get(i))
+                    .and_then(|o| o.fno_id.as_deref())
+                    .unwrap_or("empty");
+                out.push(format!(
+                    "workspace={workspace} tab={label} tab_id={} pane={pid} worker={worker} x={} y={} rows={} cols={}",
+                    tab.tab_id, r.x, r.y, r.rows, r.cols
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The human [`ServerMsg::TabLocation`] receipt lines (x-1499): the summary
+/// line (workspace, both tab identifier forms, the focused pane) plus one
+/// line per pane naming its worker or the explicit `empty` marker. Pure so
+/// the receipt shape is unit-testable.
+fn tab_location_lines(
+    squad_id: u64,
+    squad_name: Option<&str>,
+    tab_id: u64,
+    name: Option<&str>,
+    ordinal: usize,
+    focus: u64,
+    panes: &[TabPaneOccupant],
+) -> Vec<String> {
+    let sq = squad_name.unwrap_or("-");
+    let tab = tab_label(name, Some(ordinal));
+    let mut out = vec![format!(
+        "squad={squad_id} ({sq}) tab={tab} tab_id={tab_id} ordinal={ordinal} focus={focus}"
+    )];
+    for o in panes {
+        let worker = o.fno_id.as_deref().unwrap_or("empty");
+        out.push(format!("  pane {} worker={worker}", o.pane_id));
+    }
+    out
+}
+
 fn render_reply(
     reply: ServerMsg,
     json: bool,
@@ -4059,9 +4319,10 @@ fn render_reply(
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| "-".into());
                     let fno = p.fno_id.as_deref().unwrap_or("-");
+                    let tab = tab_label(p.tab_name.as_deref(), p.tab_ordinal);
                     println!(
-                        "{} squad={} tab={} pid={} fno_id={} cwd={}",
-                        p.pane_id, p.squad_id, p.tab_id, pid, fno, p.cwd
+                        "{} squad={} tab={} tab_id={} pid={} fno_id={} cwd={}",
+                        p.pane_id, p.squad_id, tab, p.tab_id, pid, fno, p.cwd
                     );
                 }
             }
@@ -4072,12 +4333,15 @@ fn render_reply(
             squad_id,
             squad_name,
             tab_id,
+            tab_name,
+            tab_ordinal,
             clients_moved,
         } => {
             // The receipt names the RESOLVED location and how many viewers
             // actually ended up there. `clients_moved` is printed even when it
             // is the obvious 1, because the number is the whole point: a bare
-            // "ok" would prove only that the command was accepted.
+            // "ok" would prove only that the command was accepted. The tab is
+            // named by its visible label AND its stable id (x-1499).
             if json {
                 println!(
                     "{}",
@@ -4091,18 +4355,25 @@ fn render_reply(
                 );
             } else {
                 let sq = squad_name.as_deref().unwrap_or("-");
+                let tab = tab_label(tab_name.as_deref(), tab_ordinal);
                 println!(
-                    "{pane} squad={squad_id} ({sq}) tab={tab_id} clients_moved={clients_moved}"
+                    "{pane} squad={squad_id} ({sq}) tab={tab} tab_id={tab_id} clients_moved={clients_moved}"
                 );
             }
             EXIT_OK
         }
-        ServerMsg::TabSpawned { tab_id } => {
-            // pane break receipt: EXACTLY the machine-readable new tab id.
+        ServerMsg::TabSpawned {
+            tab_id,
+            tab_name,
+            tab_ordinal,
+        } => {
+            // pane break receipt: `--json` is EXACTLY the machine-readable new
+            // tab id; the human line names both identifier forms (x-1499).
             if json {
                 println!("{}", serde_json::json!({ "tab_id": tab_id }));
             } else {
-                println!("{tab_id}");
+                let tab = tab_label(tab_name.as_deref(), tab_ordinal);
+                println!("tab={tab} tab_id={tab_id}");
             }
             EXIT_OK
         }
@@ -4149,9 +4420,10 @@ fn render_reply(
             } else {
                 println!("{pane_id}");
                 if let Some(p) = placement {
+                    let tab = tab_label(p.tab_name.as_deref(), p.tab_ordinal);
                     eprintln!(
-                        "anchor={} direction={:?} fallback={:?} squad={} tab={}",
-                        p.anchor, p.direction, p.fallback, p.squad, p.tab
+                        "anchor={} direction={:?} fallback={:?} squad={} tab={} tab_id={}",
+                        p.anchor, p.direction, p.fallback, p.squad, tab, p.tab
                     );
                 }
             }
@@ -4197,27 +4469,42 @@ fn render_reply(
                     serde_json::to_string(&tabs).unwrap_or_else(|_| "[]".into())
                 );
             } else {
-                for t in &tabs {
+                // One row per tab: the visible label first, the stable id
+                // second (x-1499). The ordinal is the row's position - the
+                // tabs arrive in display order.
+                for (i, t) in tabs.iter().enumerate() {
                     let mark = if t.active { "*" } else { " " };
-                    let name = t.name.as_deref().unwrap_or("-");
+                    let tab = tab_label(t.name.as_deref(), Some(i + 1));
                     let panes = t
                         .pane_ids
                         .iter()
                         .map(|p| p.to_string())
                         .collect::<Vec<_>>()
                         .join(",");
-                    println!("{mark} {} name={} panes={}", t.tab_id, name, panes);
+                    println!("{mark} {tab} tab_id={} panes={}", t.tab_id, panes);
                 }
             }
             EXIT_OK
         }
         ServerMsg::LayoutTree { squads } => {
-            // Machine-first: the nested tree + geometry is only meaningful as
-            // JSON (a consumer diffs topology), so emit JSON regardless of flag.
-            println!(
-                "{}",
-                serde_json::to_string(&squads).unwrap_or_else(|_| "[]".into())
-            );
+            if json {
+                // Machine-first: the nested tree + geometry a consumer diffs.
+                println!(
+                    "{}",
+                    serde_json::to_string(&squads).unwrap_or_else(|_| "[]".into())
+                );
+            } else {
+                // The operator-readable rendering (x-1499): one row per pane,
+                // joined to its worker, with both tab identifier forms and
+                // the geometry's units named once below the rows.
+                let rows = layout_rows(&squads);
+                for row in &rows {
+                    println!("{row}");
+                }
+                if !rows.is_empty() {
+                    println!("{LAYOUT_UNITS_LEGEND}");
+                }
+            }
             EXIT_OK
         }
         ServerMsg::PaneLocation {
@@ -4225,6 +4512,7 @@ fn render_reply(
             squad_id,
             squad_name,
             tabs,
+            tab_ordinals,
             panes,
         } => {
             if json {
@@ -4240,9 +4528,15 @@ fn render_reply(
                 );
             } else {
                 let sq = squad_name.as_deref().unwrap_or("-");
-                let tab_ids = tabs
+                // Each hosting tab prints label/slot then id, never a bare id
+                // (x-1499): `tabs=bee/27,·2/34`.
+                let tabs = tabs
                     .iter()
-                    .map(|(id, _)| id.to_string())
+                    .enumerate()
+                    .map(|(i, (id, name))| {
+                        let ord = tab_ordinals.as_ref().and_then(|o| o.get(i)).copied();
+                        format!("{}/{}", tab_label(name.as_deref(), ord), id)
+                    })
                     .collect::<Vec<_>>()
                     .join(",");
                 let pane_ids = panes
@@ -4250,7 +4544,48 @@ fn render_reply(
                     .map(|p| p.to_string())
                     .collect::<Vec<_>>()
                     .join(",");
-                println!("{fno_id} squad={squad_id} ({sq}) tabs={tab_ids} panes={pane_ids}");
+                println!("{fno_id} squad={squad_id} ({sq}) tabs={tabs} panes={pane_ids}");
+            }
+            EXIT_OK
+        }
+        ServerMsg::TabLocation {
+            squad_id,
+            squad_name,
+            tab_id,
+            name,
+            ordinal,
+            focus,
+            panes,
+        } => {
+            // The reverse-location receipt (x-1499): both identifier forms,
+            // every pane, and every occupant. `worker=empty` is the POSITIVE
+            // marker for an unoccupied pane - absence of output proves
+            // nothing.
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "squad_id": squad_id,
+                        "squad_name": squad_name,
+                        "tab_id": tab_id,
+                        "name": name,
+                        "ordinal": ordinal,
+                        "focus": focus,
+                        "panes": panes,
+                    })
+                );
+            } else {
+                for line in tab_location_lines(
+                    squad_id,
+                    squad_name.as_deref(),
+                    tab_id,
+                    name.as_deref(),
+                    ordinal,
+                    focus,
+                    &panes,
+                ) {
+                    println!("{line}");
+                }
             }
             EXIT_OK
         }
@@ -4304,6 +4639,8 @@ fn render_reply(
             anchor,
             squad,
             tab,
+            tab_name,
+            tab_ordinal,
             results,
         } => {
             // The graft receipt: anchor/squad/tab + one pane per named slot.
@@ -4317,7 +4654,8 @@ fn render_reply(
                 let _ = &mut obj;
                 println!("{obj}");
             } else {
-                println!("grafted anchor={anchor} squad={squad} tab={tab}");
+                let label = tab_label(tab_name.as_deref(), tab_ordinal);
+                println!("grafted anchor={anchor} squad={squad} tab={label} tab_id={tab}");
                 for r in &results {
                     println!("  slot {} pane={} {:?}", r.slot, r.pane_id, r.outcome);
                 }
@@ -6822,5 +7160,163 @@ mod tests {
             matches!(result, Err(ControlError::Unanswered(_))),
             "expected Unanswered, got {result:?}"
         );
+    }
+    // -- x-1499 ordinal translation + human rendering ---------------------
+
+    #[test]
+    fn parse_tab_sel_reads_ordinals_and_explicit_forms() {
+        // A bare integer is the 1-based ordinal the UI shows; `ordinal:` is
+        // its explicit spelling; `id:` stays the stable id.
+        assert_eq!(parse_tab_sel("3").unwrap(), TabSel::Index(3));
+        assert_eq!(parse_tab_sel("ordinal:4").unwrap(), TabSel::Index(4));
+        assert_eq!(
+            parse_tab_sel("ordinal:x").unwrap_err(),
+            "--tab ordinal: needs a number, got \"x\""
+        );
+        assert_eq!(parse_tab_sel("id:27").unwrap(), TabSel::Id(27));
+        assert_eq!(
+            parse_tab_sel("name:targets").unwrap(),
+            TabSel::Name("targets".into())
+        );
+        assert_eq!(
+            parse_tab_sel("targets").unwrap(),
+            TabSel::Name("targets".into())
+        );
+    }
+
+    #[test]
+    fn human_tab_render_label_prefers_name_then_ordinal() {
+        // AC5-HP: the name appears first; an unnamed tab shows the visible
+        // `·N`; a pre-v51 reply without either degrades to a dash, still
+        // never a bare tab_id.
+        assert_eq!(tab_label(Some("targets"), Some(3)), "targets");
+        assert_eq!(tab_label(None, Some(6)), "·6");
+        assert_eq!(tab_label(Some(""), Some(2)), "·2");
+        assert_eq!(tab_label(None, None), "-");
+    }
+
+    #[test]
+    fn layout_units_rows_carry_geometry_workers_and_both_ids() {
+        // AC6-HP: each row carries x/y/rows/cols and both tab identifier
+        // forms; an unoccupied pane prints the POSITIVE `worker=empty`
+        // marker; the legend names the units exactly once, below the rows.
+        let squads = vec![SquadLayout {
+            squad_id: 1,
+            squad_name: Some("api".into()),
+            tabs: vec![crate::proto::TabLayout {
+                tab_id: 34,
+                name: None,
+                focus: 35,
+                root: crate::tree::Node::Leaf(35),
+                panes: vec![
+                    (
+                        35,
+                        crate::tree::Rect {
+                            x: 0,
+                            y: 0,
+                            rows: 28,
+                            cols: 87,
+                        },
+                    ),
+                    (
+                        36,
+                        crate::tree::Rect {
+                            x: 0,
+                            y: 29,
+                            rows: 28,
+                            cols: 87,
+                        },
+                    ),
+                ],
+                workers: Some(vec![
+                    TabPaneOccupant {
+                        pane_id: 35,
+                        fno_id: Some("t-x5557-ciflake".into()),
+                    },
+                    TabPaneOccupant {
+                        pane_id: 36,
+                        fno_id: None,
+                    },
+                ]),
+            }],
+        }];
+        let rows = layout_rows(&squads);
+        assert_eq!(rows.len(), 2, "one row per pane");
+        assert!(
+            rows[0].contains("workspace=api tab=·1 tab_id=34 pane=35"),
+            "{}",
+            rows[0]
+        );
+        assert!(rows[0].contains("worker=t-x5557-ciflake"), "{}", rows[0]);
+        assert!(rows[0].contains("x=0 y=0 rows=28 cols=87"), "{}", rows[0]);
+        assert!(rows[1].contains("worker=empty"), "{}", rows[1]);
+        assert!(rows[1].contains("x=0 y=29 rows=28 cols=87"), "{}", rows[1]);
+        assert_eq!(
+            LAYOUT_UNITS_LEGEND,
+            "x/y are the top-left corner in character cells; rows/cols are the size in character cells."
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("character cells")),
+            "the legend is printed once below the rows, never per row"
+        );
+    }
+
+    #[test]
+    fn human_tab_render_location_receipt_names_workspace_and_occupants() {
+        // AC3-HP: workspace, tab=<name-or-ordinal>, tab_id, every pane, and
+        // every worker; AC3-ERR: `worker=empty` is the positive marker.
+        let lines = tab_location_lines(
+            1,
+            Some("api"),
+            27,
+            None,
+            6,
+            52,
+            &[
+                TabPaneOccupant {
+                    pane_id: 52,
+                    fno_id: Some("bp-stopgate-hangs".into()),
+                },
+                TabPaneOccupant {
+                    pane_id: 53,
+                    fno_id: None,
+                },
+            ],
+        );
+        assert_eq!(
+            lines[0],
+            "squad=1 (api) tab=·6 tab_id=27 ordinal=6 focus=52"
+        );
+        assert_eq!(lines[1], "  pane 52 worker=bp-stopgate-hangs");
+        assert_eq!(lines[2], "  pane 53 worker=empty");
+        let named = tab_location_lines(
+            2,
+            None,
+            53,
+            Some("targets"),
+            15,
+            61,
+            &[TabPaneOccupant {
+                pane_id: 61,
+                fno_id: None,
+            }],
+        );
+        assert!(named[0].contains("tab=targets tab_id=53"), "{}", named[0]);
+    }
+
+    #[test]
+    fn take_workspace_flag_qualifies_a_location_selector() {
+        let (ws, rest) =
+            take_workspace_flag("v", vec!["--workspace".into(), "api".into(), "6".into()]).unwrap();
+        assert_eq!(ws.as_deref(), Some("api"));
+        assert_eq!(rest, vec!["6".to_string()]);
+        assert_eq!(
+            take_workspace_flag("v", vec!["-s".into(), "api".into()])
+                .unwrap()
+                .0,
+            Some("api".to_string())
+        );
+        assert!(take_workspace_flag("v", vec!["--squad".into()]).is_err());
+        assert_eq!(take_workspace_flag("v", vec!["6".into()]).unwrap().0, None);
     }
 }
