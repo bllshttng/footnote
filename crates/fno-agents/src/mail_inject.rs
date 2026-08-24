@@ -47,14 +47,28 @@ pub const DEFAULT_INTERVAL_MS: u64 = 250;
 
 const MAX_ENTER_DELAY_MS: u64 = 60_000;
 
-pub fn default_enter_delay_ms() -> u64 {
+/// The settle delay for one recipient harness row of a contract. Split out so
+/// the per-provider divergence is testable against a stub contract (the
+/// packaged rows can read equal, which would certify nothing).
+fn contract_enter_delay_ms(
+    contract: &crate::harness_capabilities::HarnessContract,
+    provider: MailInjectProvider,
+) -> u64 {
+    contract
+        .capabilities(provider.harness_name())
+        .expect("submit-delay capability for a known harness")
+        .send_keys_enter_delay_ms as u64
+}
+
+/// The settle delay belongs to the pane RECEIVING the paste, not to a fixed
+/// harness (x-4b0b): a claude constant sent to a codex recipient fires the CR
+/// while the codex TUI is still ingesting the paste, so the envelope sits
+/// unsent in its composer. Callers resolve the recipient first; `claude_ask`
+/// passes `Claude` because its lane is claude-only.
+pub fn default_enter_delay_ms(provider: MailInjectProvider) -> u64 {
     crate::harness_capabilities::HarnessContract::packaged()
-        .and_then(|contract| {
-            contract
-                .capabilities("claude")
-                .map(|caps| caps.send_keys_enter_delay_ms as u64)
-        })
-        .expect("embedded claude submit-delay capability")
+        .map(|contract| contract_enter_delay_ms(&contract, provider))
+        .expect("embedded submit-delay capability")
 }
 
 /// Interval multiple at which the confirm loop re-sends the wire-level CR. The
@@ -70,6 +84,16 @@ const CR_RESUBMIT_EVERY: u32 = 8;
 pub enum MailInjectProvider {
     Claude,
     Codex,
+}
+
+impl MailInjectProvider {
+    /// The capability-table row name for this recipient harness.
+    pub fn harness_name(self) -> &'static str {
+        match self {
+            MailInjectProvider::Claude => "claude",
+            MailInjectProvider::Codex => "codex",
+        }
+    }
 }
 
 /// Axis-rename tombstone (x-bab1): the harness axis was `--provider`, now
@@ -132,7 +156,9 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut provider = MailInjectProvider::Claude;
     let mut attempts = DEFAULT_ATTEMPTS;
     let mut interval_ms = DEFAULT_INTERVAL_MS;
-    let mut enter_delay_ms = default_enter_delay_ms();
+    // Resolved AFTER the parse loop: the default belongs to the RECIPIENT's
+    // harness row (x-4b0b), and `--harness` may appear after other flags.
+    let mut enter_delay_ms: Option<u64> = None;
     let mut sender: Option<String> = None;
     let mut probe = false;
     let mut it = rest.iter();
@@ -179,17 +205,24 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 ))?;
             }
             "--enter-delay-ms" => {
-                enter_delay_ms = it.next().and_then(|v| v.parse().ok()).ok_or((
+                // 0 is legal on purpose: the capability table permits a 0
+                // settle on a submit-capable row (harness_map's converse
+                // check was removed for exactly that), and Python forwards
+                // the row verbatim - rejecting it here would exile every
+                // 0-valued row from the live lane with a misleading
+                // unreadable receipt (x-4b0b review finding).
+                let value = it.next().and_then(|v| v.parse().ok()).ok_or((
                     2,
-                    "mail-inject: --enter-delay-ms needs an integer from 1 to 60000".to_string(),
+                    "mail-inject: --enter-delay-ms needs an integer from 0 to 60000".to_string(),
                 ))?;
-                if !(1..=MAX_ENTER_DELAY_MS).contains(&enter_delay_ms) {
+                if !(0..=MAX_ENTER_DELAY_MS).contains(&value) {
                     return Err((
                         2,
-                        "mail-inject: --enter-delay-ms needs an integer from 1 to 60000"
+                        "mail-inject: --enter-delay-ms needs an integer from 0 to 60000"
                             .to_string(),
                     ));
                 }
+                enter_delay_ms = Some(value);
             }
             other => {
                 return Err((2, format!("mail-inject: unknown flag: {other}")));
@@ -197,6 +230,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         }
     }
     let session = session.ok_or((2, "mail-inject: --session is required".to_string()))?;
+    let enter_delay_ms = enter_delay_ms.unwrap_or_else(|| default_enter_delay_ms(provider));
     Ok(MailInjectArgs {
         session,
         provider,
@@ -1419,12 +1453,67 @@ mod tests {
         assert_eq!(d.provider, MailInjectProvider::Claude);
         let c = parse_args(&argv(&["--session", "x", "--harness", "codex"])).unwrap();
         assert_eq!(c.provider, MailInjectProvider::Codex);
+        // x-4b0b: the default settle delay follows the RECIPIENT's harness
+        // row. This pins the codex row's VALUE through the parse path; the
+        // per-provider MECHANISM is certified by the divergent-stub test
+        // below (with both packaged rows equal, this assertion alone could
+        // not tell a codex-row read from the old claude constant).
+        assert_eq!(c.enter_delay_ms, 800);
         // -H is the harness short flag.
         let h = parse_args(&argv(&["--session", "x", "-H", "codex"])).unwrap();
         assert_eq!(h.provider, MailInjectProvider::Codex);
         // Unknown harness is a usage error.
         assert_eq!(
             parse_args(&argv(&["--session", "x", "--harness", "gemini"]))
+                .unwrap_err()
+                .0,
+            2
+        );
+    }
+
+    #[test]
+    fn enter_delay_resolves_per_provider_on_a_divergent_contract() {
+        // x-4b0b: certify the MECHANISM, not a value. With both packaged rows
+        // reading 800, a `parse` assertion cannot tell a codex-row read from
+        // the old claude constant, so diverge the stub: claude 100, codex 222
+        // (first two `= 800` rows in the packaged text; agy stays untouched).
+        let stub = crate::harness_capabilities::CAPABILITY_TOML
+            .replacen(
+                "send_keys_enter_delay_ms = 800",
+                "send_keys_enter_delay_ms = 100",
+                1,
+            )
+            .replacen(
+                "send_keys_enter_delay_ms = 800",
+                "send_keys_enter_delay_ms = 222",
+                1,
+            );
+        let contract = crate::harness_capabilities::HarnessContract::parse(&stub).unwrap();
+        assert_eq!(
+            contract_enter_delay_ms(&contract, MailInjectProvider::Claude),
+            100
+        );
+        assert_eq!(
+            contract_enter_delay_ms(&contract, MailInjectProvider::Codex),
+            222
+        );
+        // The packaged contract keeps its real rows.
+        let packaged = crate::harness_capabilities::HarnessContract::packaged().unwrap();
+        assert_eq!(
+            contract_enter_delay_ms(&packaged, MailInjectProvider::Codex),
+            800
+        );
+    }
+
+    #[test]
+    fn parse_args_accepts_a_zero_enter_delay() {
+        // 0 is a legal table value (a submit-capable row may settle for 0),
+        // so the explicit flag must carry it, not exit 2 and strand the row's
+        // live lane with an unreadable receipt (x-4b0b review finding).
+        let a = parse_args(&argv(&["--session", "x", "--enter-delay-ms", "0"])).unwrap();
+        assert_eq!(a.enter_delay_ms, 0);
+        assert_eq!(
+            parse_args(&argv(&["--session", "x", "--enter-delay-ms", "60001"]))
                 .unwrap_err()
                 .0,
             2
@@ -1454,7 +1543,10 @@ mod tests {
                 .0,
             2
         );
-        for value in ["0", "-1", "notnum", "60001"] {
+        // "0" is NOT in this set: a submit-capable table row may legally read
+        // 0 and Python forwards the row verbatim (accepted by
+        // parse_args_accepts_a_zero_enter_delay).
+        for value in ["-1", "notnum", "60001"] {
             let err =
                 parse_args(&argv(&["--session", "x", "--enter-delay-ms", value])).unwrap_err();
             assert_eq!(err.0, 2);

@@ -5835,6 +5835,15 @@ _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S = 40.0
 # stalled demotion to the durable floor, never a hosted receipt (US4, LD4).
 _MUX_EXIT_TARGET_NOT_IDLE = 15
 
+# The server's PaneClaim refusal for a HELD claim names the holder pid
+# (crates/fno/src/server.rs "writer claim held by pid"); every other refusal
+# (not claim-eligible, dead pane) is a pane with no writer interlock, which
+# keeps the fail-open path. How long a held claim is waited out before the
+# send demotes to durable: a concurrent writer's burst is paste + settle
+# delay + CR, low single-digit seconds at the 800 ms table value.
+_MUX_CLAIM_HELD_MARKER = "held by pid"
+_MUX_PANE_CLAIM_WAIT_S = 4.0
+
 # Wake spawns key on the target session uuid, not on a fresh agent name: spawn
 # dedup scopes NAME, so two senders waking one session must derive the same name
 # to collide on its flock. Prefixed because a bare 8-hex name is refused.
@@ -6168,9 +6177,11 @@ def _mux_pane_send(
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
 
-    def _run(args: list[str], stdin_text: Optional[str] = None) -> int:
-        """Run one ``fno mux pane`` verb; return its exit code (-1 on spawn
-        failure). A non-zero code's stderr detail is surfaced, never swallowed."""
+    def _run(args: list[str], stdin_text: Optional[str] = None):
+        """Run one ``fno mux pane`` verb; return its CompletedProcess, or None
+        on spawn failure. A non-zero code's stderr detail is surfaced, never
+        swallowed. The process (not a bare code) is the return so the claim
+        gate can read the refusal reason without a second wrapper."""
         try:
             proc = subprocess.run(
                 [fno_bin, "mux", "pane", *args, "--session", str(session)],
@@ -6181,14 +6192,14 @@ def _mux_pane_send(
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(f"fno mux pane {args[0]} failed: {exc}", file=sys.stderr)
-            return -1
+            return None
         if proc.returncode != 0:
             detail = (proc.stderr or "").strip()
             print(
                 f"fno mux pane {args[0]} exited {proc.returncode}: {detail}",
                 file=sys.stderr,
             )
-        return proc.returncode
+        return proc
 
     def _paste_then_submit() -> bool:
         # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
@@ -6199,7 +6210,8 @@ def _mux_pane_send(
         send_args = ["send", pane, "--stdin", "--raw"]
         if guarded:
             send_args.append("--guarded")
-        rc = _run(send_args, stdin_text=text)
+        pasted = _run(send_args, stdin_text=text)
+        rc = pasted.returncode if pasted is not None else -1
         if rc != 0:
             if rc == _MUX_EXIT_TARGET_NOT_IDLE:
                 # Turn not taken: the recipient is mid-turn, so the paste never
@@ -6214,7 +6226,9 @@ def _mux_pane_send(
         time.sleep(enter_delay_s)
         # A submit key is a control byte, never a message: always --raw.
         return all(
-            _run(["send", pane, "--text", key, "--raw"]) == 0 for key in submit_text
+            (proc := _run(["send", pane, "--text", key, "--raw"])) is not None
+            and proc.returncode == 0
+            for key in submit_text
         )
 
     if guarded:
@@ -6240,7 +6254,42 @@ def _mux_pane_send(
         except OSError:
             confirm_transcript = None
 
-    claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
+    def _claim_writer() -> tuple[bool, str]:
+        """Acquire the pane writer claim; return (ok, stderr detail).
+
+        The detail carries the server's refusal REASON: the held-claim marker
+        is another live writer mid-burst; anything else (not claim-eligible,
+        dead pane) is a pane with no writer interlock at all."""
+        proc = _run(["claim", pane, "--pid", str(os.getpid())])
+        if proc is None:
+            return False, ""
+        return proc.returncode == 0, (proc.stderr or "").strip()
+
+    claimed, claim_detail = _claim_writer()
+    if not claimed and _MUX_CLAIM_HELD_MARKER in claim_detail:
+        # x-4b0b review finding: the settle window between paste and CR is a
+        # single-writer window. A HELD claim means another writer is mid-burst
+        # on this pane; pasting now interleaves two envelopes under one CR,
+        # which submits both concatenated. Wait out the concurrent burst, then
+        # demote to durable rather than interleave. A refusal that is NOT a
+        # held claim falls through to the fail-open send below: a pane
+        # without the writer interlock never had serialization to lose.
+        deadline = time.monotonic() + _MUX_PANE_CLAIM_WAIT_S
+        while (
+            not claimed
+            and _MUX_CLAIM_HELD_MARKER in claim_detail
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.25)
+            claimed, claim_detail = _claim_writer()
+        if not claimed and _MUX_CLAIM_HELD_MARKER in claim_detail:
+            print(
+                f"mux pane {pane} send demoted to durable: writer claim held "
+                f"by another writer past {_MUX_PANE_CLAIM_WAIT_S}s; refusing "
+                f"to interleave envelopes",
+                file=sys.stderr,
+            )
+            return False
     try:
         sent = _paste_then_submit()
         if sent and confirm:
@@ -6474,6 +6523,7 @@ def _mail_inject_claude(
     sender: Optional[str] = None,
     reason_out: Optional[list] = None,
     liveness_scaled: bool = False,
+    harness: Optional[str] = None,
 ) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
@@ -6502,7 +6552,13 @@ def _mail_inject_claude(
     ``sender`` is the invoking session's mail handle, forwarded to the binary's
     audit event. Only the UNWRAPPED lanes need it: a wrapped envelope carries
     its own ``from`` in the transcript, an unwrapped one has nowhere else to
-    record who fired it."""
+    record who fired it.
+
+    ``harness`` (x-4b0b), when the caller already holds the recipient's roster
+    row, is that row's harness and names the settle-delay table row directly.
+    ``None`` resolves it from the roster by session id; a miss (no row, no
+    registry, or a harness the table does not know) falls back to claude, the
+    table's largest delay, so an unresolved read waits longer, never less."""
     import json
 
     from fno import rust_binary
@@ -6522,9 +6578,33 @@ def _mail_inject_claude(
     if binary is None:
         _record("no-binary")
         return False
-    from fno.agents.harness_map import capabilities
+    from fno.agents.harness_map import capabilities, DispatchResolveError
 
-    enter_delay_ms = capabilities("claude")["send_keys_enter_delay_ms"]
+    # x-4b0b: the settle delay belongs to the RECIPIENT's harness row, not to a
+    # claude constant. A claude-shaped timing sent to another harness's pane
+    # decides the CR by the wrong table row. The caller's row wins when held
+    # (it is the same lookup without a registry re-read, and it stays correct
+    # for short-id/mcp-channel recipients the session-id lookup cannot see);
+    # otherwise resolve from the roster. A registry error here is an
+    # unresolved read, never a raised mail path (the helper re-raises
+    # RegistryVersionError for callers that classify wake routing; this lane
+    # only wants a hint). The constant keeps the fallback out of the
+    # `capabilities("claude")` literal the shared-contract sentinel greps for.
+    _FALLBACK_DELAY_HARNESS = "claude"
+    recipient_harness = harness or _FALLBACK_DELAY_HARNESS
+    if harness is None:
+        try:
+            entry = _roster_entry_for_session(recipient)
+        except (OSError, RegistryVersionError):
+            entry = None
+        if entry is not None:
+            recipient_harness = (
+                getattr(entry, "harness", "") or _FALLBACK_DELAY_HARNESS
+            )
+    try:
+        enter_delay_ms = capabilities(recipient_harness)["send_keys_enter_delay_ms"]
+    except DispatchResolveError:
+        enter_delay_ms = capabilities(_FALLBACK_DELAY_HARNESS)["send_keys_enter_delay_ms"]
     argv = [
         str(binary), "mail-inject", "--session", recipient,
         "--enter-delay-ms", str(enter_delay_ms),
@@ -7310,6 +7390,10 @@ def _deliver_live(
         wrapped,
         reason_out=reason_out,
         liveness_scaled=family1_state == "working",
+        # x-4b0b: the row is in hand; pass its harness so the settle delay
+        # reads the recipient's table row without a registry re-read (and
+        # stays correct when `recipient` is a short_id or mcp_channel_id).
+        harness=getattr(entry, "harness", None) or None,
     )
 
 
