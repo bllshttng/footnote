@@ -172,6 +172,22 @@ def test_read_receipt_without_text_refuses_before_typing(monkeypatch, capsys):
     assert "text" in capsys.readouterr().err
 
 
+def test_pane_entry_deduplicates_equivalent_registry_rows(monkeypatch):
+    from fno.mail import pane_transport
+
+    entry = SimpleNamespace(
+        name="worker",
+        fno_id="worker-session",
+        harness_session_id="worker-session",
+        mux={"session": "main", "pane_id": 7},
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [entry, SimpleNamespace(**entry.__dict__)]
+    )
+
+    assert pane_transport._pane_entry("main", 7) is entry
+
+
 def test_raw_send_is_byte_identical_and_still_audits(monkeypatch):
     """`raw=True` types exactly the caller's bytes and keeps the audit row.
 

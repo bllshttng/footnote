@@ -145,6 +145,7 @@ fn proto_connected_silent_peer_without_holder_sidecar_is_rebound() {
         let (_stream, _) = responder.accept().unwrap();
         std::thread::sleep(Duration::from_millis(100));
     });
+    fno::proto::remove_startup_guard(&sock);
 
     match bind_or_probe(&sock) {
         Ok(BindOutcome::Bound(rebound)) => drop(rebound),
@@ -178,6 +179,7 @@ fn proto_unmarked_holder_is_terminated_before_rebind() {
     }
     let mut child = command.spawn().unwrap();
     drop(listener);
+    fno::proto::remove_startup_guard(&sock);
     let start = fno::proto::pid_start_time(child.id());
     let pid = child.id();
     let sidecar = match start {
@@ -204,11 +206,35 @@ fn proto_stale_socket_is_unlinked_and_rebound() {
         BindOutcome::Bound(l) => drop(l),
         BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
     }
+    fno::proto::remove_startup_guard(&sock);
     assert!(sock.exists(), "dropping a listener must leave the file");
     match bind_or_probe(&sock).unwrap() {
         BindOutcome::Bound(_) => {}
         BindOutcome::AlreadyRunning => panic!("stale socket must be rebindable"),
     }
+}
+
+#[test]
+fn proto_startup_listener_is_not_clobbered_before_queryable() {
+    let scratch = Scratch::new("startup-window");
+    let sock = scratch.path("s.sock");
+    let listener = match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(l) => l,
+        BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
+    };
+
+    match bind_or_probe(&sock) {
+        Err(err) => assert!(err.to_string().contains("startup"), "got: {err}"),
+        Ok(BindOutcome::Bound(_)) => panic!("startup listener was clobbered"),
+        Ok(BindOutcome::AlreadyRunning) => {
+            panic!("unqueryable startup listener was treated as ready")
+        }
+    }
+    assert!(
+        sock.exists(),
+        "startup listener socket must survive the probe"
+    );
+    drop(listener);
 }
 
 #[test]
@@ -231,6 +257,7 @@ fn proto_bind_race_converges_on_exactly_one_server() {
                     1
                 }
                 Ok(BindOutcome::AlreadyRunning) => 0,
+                Err(err) if err.to_string().contains("startup") => 0,
                 Err(e) => panic!("bind_or_probe errored in race: {e}"),
             }
         }));

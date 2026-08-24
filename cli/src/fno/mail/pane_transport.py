@@ -56,10 +56,19 @@ def _pane_entry(session: str, pane_id: int):
     except Exception:  # noqa: BLE001 - an unreadable registry is "unknown", not fatal
         return None
     matches = []
+    seen = set()
     for entry in entries:
         mux = getattr(entry, "mux", None) or {}
         if str(mux.get("session")) == str(session) and str(mux.get("pane_id")) == str(pane_id):
-            matches.append(entry)
+            identity = (
+                getattr(entry, "fno_id", None)
+                or getattr(entry, "harness_session_id", None)
+                or getattr(entry, "session_id", None)
+            )
+            key = (getattr(entry, "name", None), identity)
+            if key not in seen:
+                seen.add(key)
+                matches.append(entry)
     return matches[0] if len(matches) == 1 else None
 
 

@@ -1199,6 +1199,7 @@ struct SocketGuard(PathBuf);
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         let _ = crate::proto::remove_session_files(&self.0);
+        crate::proto::remove_startup_guard(&self.0);
     }
 }
 
@@ -1254,6 +1255,7 @@ pub fn run(socket: PathBuf) -> i32 {
             return 1;
         }
     };
+    let _guard = SocketGuard(socket.clone());
     match crate::pty::raise_fd_limit() {
         Ok(Some((before, after))) => {
             eprintln!("fno mux: open-file limit raised from {before} to {after}");
@@ -1265,8 +1267,6 @@ pub fn run(socket: PathBuf) -> i32 {
             );
         }
     }
-    let _guard = SocketGuard(socket.clone());
-
     // Stamp this server's wire version next to its socket (x-1a85) so `fno mux
     // ls` can flag a stale-wire server after a binary upgrade. Best-effort: a
     // write failure only means `ls` reads no version and treats the server as

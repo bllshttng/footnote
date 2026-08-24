@@ -2,9 +2,10 @@
 //!
 //! Length-prefixed (u32 big-endian) JSON messages over a Unix socket at
 //! `~/.fno/mux/<session>.sock`. The socket dir is 0700 - it accepts keystrokes
-//! into your shell, so it is a security boundary. There is no lockfile: the
-//! socket bind IS the lock, liveness is a query-probe, and an unresponsive
-//! holder is terminated before its stale socket is unlinked.
+//! into your shell, so it is a security boundary. The socket bind claims the
+//! name, and a short-lived startup marker protects the gap before the server
+//! can answer its liveness query. An unresponsive established holder is
+//! terminated before its stale socket is unlinked.
 //!
 //! Channel discipline (epic Locked Decision): client->server input/control is
 //! reliable and never dropped; only server->client render frames are
@@ -2669,6 +2670,73 @@ pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Marker held from socket bind until the server exits. It protects a freshly
+/// bound listener that cannot answer the query probe yet, so a concurrent
+/// starter cannot mistake that startup window for a stale socket.
+pub fn startup_sidecar_path(socket: &Path) -> PathBuf {
+    socket.with_extension("start")
+}
+
+pub fn remove_startup_guard(socket: &Path) {
+    let _ = std::fs::remove_file(startup_sidecar_path(socket));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupGuard {
+    Owned,
+    ExistingLive,
+}
+
+fn startup_guard_live(pid: i32, recorded_start: Option<u64>) -> bool {
+    if pid <= 1 || pid_confirmed_dead(pid) || pid_is_zombie(pid) {
+        return false;
+    }
+    recorded_start.is_none_or(|start| pid_start_time(pid as u32) == Some(start))
+}
+
+fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGuard> {
+    let marker = startup_sidecar_path(socket);
+    loop {
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&marker)
+        {
+            Ok(mut file) => {
+                let pid = std::process::id();
+                let contents = match pid_start_time(pid) {
+                    Some(start) => format!("{pid}:{start}"),
+                    None => pid.to_string(),
+                };
+                file.write_all(contents.as_bytes())?;
+                return Ok(StartupGuard::Owned);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let raw = std::fs::read_to_string(&marker).map_err(|read| {
+                    std::io::Error::new(
+                        read.kind(),
+                        format!(
+                            "cannot read mux startup marker {}: {read}",
+                            marker.display()
+                        ),
+                    )
+                })?;
+                let (pid, recorded_start) = parse_pid_sidecar(&raw).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid mux startup marker {}", marker.display()),
+                    )
+                })?;
+                if startup_guard_live(pid, recorded_start) {
+                    return Ok(StartupGuard::ExistingLive);
+                }
+                std::fs::remove_file(&marker)?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 pub const DEFAULT_SESSION: &str = "main";
 
 /// Outcome of [`bind_or_probe`].
@@ -2705,11 +2773,24 @@ const PROBE_HOLDER_KILL_GRACE: Duration = Duration::from_secs(1);
 /// stale+simultaneous case needs a dead server AND a photo-finish start. If it
 /// ever bites, the upgrade is an O_EXCL sidecar lock around the unlink.
 pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
+    let startup = acquire_startup_guard(path)?;
+    let owns_startup = startup == StartupGuard::Owned;
     match UnixListener::bind(path) {
         Ok(l) => Ok(BindOutcome::Bound(l)),
         Err(e) if socket_in_use(&e) => {
             match probe_status(path) {
-                ProbeOutcome::Alive => return Ok(BindOutcome::AlreadyRunning),
+                ProbeOutcome::Alive => {
+                    if owns_startup {
+                        remove_startup_guard(path);
+                    }
+                    return Ok(BindOutcome::AlreadyRunning);
+                }
+                ProbeOutcome::Unknown if !owns_startup => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("mux startup in progress at {}", path.display()),
+                    ));
+                }
                 ProbeOutcome::Unknown if pid_sidecar_path(path).exists() => {
                     reclaim_unresponsive_holder(path)?
                 }
@@ -2718,6 +2799,12 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
                 // the legacy stale-socket recovery when there is no holder
                 // identity to coordinate with; current servers write `.pid`.
                 ProbeOutcome::Unknown => {}
+                ProbeOutcome::Dead if !owns_startup => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("mux startup owner still holds {}", path.display()),
+                    ));
+                }
                 ProbeOutcome::Dead if pid_sidecar_path(path).exists() => {
                     reclaim_unresponsive_holder(path)?
                 }
@@ -2731,12 +2818,25 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
                 Ok(l) => Ok(BindOutcome::Bound(l)),
                 Err(e) if socket_in_use(&e) => {
                     // Someone else won the rebind race; they are the server.
+                    if owns_startup {
+                        remove_startup_guard(path);
+                    }
                     Ok(BindOutcome::AlreadyRunning)
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    if owns_startup {
+                        remove_startup_guard(path);
+                    }
+                    Err(e)
+                }
             }
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            if owns_startup {
+                remove_startup_guard(path);
+            }
+            Err(e)
+        }
     }
 }
 
