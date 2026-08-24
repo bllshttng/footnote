@@ -6718,7 +6718,8 @@ fn floor_stands_down_on_a_recent_secondary_refusal_even_with_healthy_quota() {
                 "data": {
                     "session_id": "sess-2ndary",
                     "read": "pulls_comments",
-                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
+                    "rate_limit_class": "secondary"
                 }
             })
         ),
@@ -6797,7 +6798,8 @@ fn floor_stands_down_on_another_sessions_secondary_refusal() {
                 "data": {
                     "session_id": "sess-loud",
                     "read": "pulls_comments",
-                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
+                    "rate_limit_class": "secondary"
                 }
             })
         ),
