@@ -133,7 +133,7 @@ fn proto_live_server_is_detected_not_clobbered() {
 }
 
 #[test]
-fn proto_connected_silent_peer_without_holder_identity_refuses_takeover() {
+fn proto_connected_silent_peer_without_holder_sidecar_is_rebound() {
     let scratch = Scratch::new("silent");
     let sock = scratch.path("s.sock");
     let listener = match bind_or_probe(&sock).unwrap() {
@@ -146,16 +146,11 @@ fn proto_connected_silent_peer_without_holder_identity_refuses_takeover() {
         std::thread::sleep(Duration::from_millis(100));
     });
 
-    let err = match bind_or_probe(&sock) {
-        Err(err) => err,
-        Ok(BindOutcome::Bound(_)) => panic!("unknown holder must not be clobbered"),
+    match bind_or_probe(&sock) {
+        Ok(BindOutcome::Bound(rebound)) => drop(rebound),
         Ok(BindOutcome::AlreadyRunning) => panic!("silent peer has no liveness marker"),
-    };
-    assert!(
-        err.to_string().contains("pid"),
-        "refusal names the missing proof: {err}"
-    );
-    assert!(sock.exists(), "unknown holder must retain its socket");
+        Err(err) => panic!("legacy stale socket should be rebindable: {err}"),
+    }
     silent_peer.join().unwrap();
 }
 

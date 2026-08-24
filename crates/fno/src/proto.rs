@@ -2710,7 +2710,14 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
         Err(e) if socket_in_use(&e) => {
             match probe_status(path) {
                 ProbeOutcome::Alive => return Ok(BindOutcome::AlreadyRunning),
-                ProbeOutcome::Unknown => reclaim_unresponsive_holder(path)?,
+                ProbeOutcome::Unknown if pid_sidecar_path(path).exists() => {
+                    reclaim_unresponsive_holder(path)?
+                }
+                // A pre-sidecar server or a dead listener can leave one
+                // residual connection that has no positive marker. Preserve
+                // the legacy stale-socket recovery when there is no holder
+                // identity to coordinate with; current servers write `.pid`.
+                ProbeOutcome::Unknown => {}
                 ProbeOutcome::Dead if pid_sidecar_path(path).exists() => {
                     reclaim_unresponsive_holder(path)?
                 }
