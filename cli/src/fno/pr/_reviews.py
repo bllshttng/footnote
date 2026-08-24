@@ -910,6 +910,13 @@ def read_review_coverage(
 # twice is a context that splits in two the first time one copy is edited.
 COVERAGE_STATUS_CONTEXT = "fno/review-coverage"
 COVERAGE_UNAVAILABLE_STATUS_CONTEXT = "fno/review-coverage-unavailable"
+# Both contexts as one collection: every surface that excludes the coverage
+# projections from generic CI (the status read, the covered merge) filters
+# through THIS, so a context added later lands everywhere or nowhere, never
+# half the surfaces.
+COVERAGE_STATUS_CONTEXTS = frozenset(
+    {COVERAGE_STATUS_CONTEXT, COVERAGE_UNAVAILABLE_STATUS_CONTEXT}
+)
 
 # The label that makes an uncovered PR mergeable on purpose: the 3am release
 # valve. Named here so the publisher, the refresher, and the docs agree on it.

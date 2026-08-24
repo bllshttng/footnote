@@ -2055,11 +2055,9 @@ def _do_merge(
                     # "retry the review verb", not "wait"). Ignoring only the
                     # required one let a pending diagnostic hold a covered,
                     # CI-green merge, and the clearing publish runs after this
-                    # verdict, so a bare retry held again.
-                    ignore_contexts = (
-                        _reviews.COVERAGE_STATUS_CONTEXT,
-                        _reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
-                    )
+                    # verdict, so a bare retry held again. One shared
+                    # collection, not a third spelling of the filter.
+                    ignore_contexts = tuple(_reviews.COVERAGE_STATUS_CONTEXTS)
             verdict, counts, head_read = _checks_verdict(
                 pr_number, repo, ignore_contexts=ignore_contexts
             )
