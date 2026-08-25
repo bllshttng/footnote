@@ -643,6 +643,23 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
         # target. opencode stays bare for the same reason: its flag grammar is
         # unverified against its docs, and an appended guess is the codex trap
         # in a new coat. agy has no native verb, so it takes the fno do review.
+        #
+        # `--comment` is kept though a measured run ignored it, and the
+        # measurement names where the loss lives so nobody re-derives it
+        # (2026-08-20, PR 994, re-verified 2026-08-25 from the fork's
+        # transcript): the flag survives every transport - the rendered string
+        # carries it, the Skill tool_use input carries
+        # args="high --comment --fix" verbatim, and the forked skill's own
+        # opening prompt contains the expanded sections "The `--comment` flag
+        # was passed" and "The `--fix` flag was passed". What failed is inside
+        # the harness skill's execution: the fork closed with "No `--comment`
+        # or `--fix` flag was indicated" - contradicting its own prompt - and
+        # behaved per the wrong belief (no comments posted). No fno-side layer
+        # drops the flag, so no fno code can fix this; the invocation keeps
+        # asking for it because the flag works whenever the harness honors its
+        # own expansion, and the operator-typed path is unaffected. The
+        # one-line symptom to watch for in a worker's report is the fork
+        # quoting the flag as not indicated.
         invocations={
             "claude": "/code-review <level> --comment",
             "codex": "/review",
