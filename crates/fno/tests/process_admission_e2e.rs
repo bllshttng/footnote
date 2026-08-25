@@ -16,6 +16,38 @@ fn ac1_hp_allows_complete_snapshot_below_fleet_ceiling() {
 }
 
 #[test]
+fn ac1_hp_sync_output_preserves_implicit_capture() {
+    let _env_lock = ADMISSION_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = std::env::var_os("FNO_MUX_MAX_LIVE");
+    std::env::set_var("FNO_MUX_MAX_LIVE", "512");
+    let mut command = fno::process_admission::std_command("printf");
+    command.arg("sync-capture");
+    let output = fno::process_admission::std_output(&mut command).unwrap();
+    restore_max_live(previous);
+    assert_eq!(output.stdout, b"sync-capture");
+}
+
+#[tokio::test]
+async fn ac1_hp_async_output_preserves_implicit_capture() {
+    let _env_lock = ADMISSION_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = std::env::var_os("FNO_MUX_MAX_LIVE");
+    std::env::set_var("FNO_MUX_MAX_LIVE", "512");
+    let mut command = fno::process_admission::tokio_command("printf");
+    command.arg("async-capture");
+    let output = fno::process_admission::tokio_output(&mut command)
+        .await
+        .unwrap();
+    restore_max_live(previous);
+    assert_eq!(output.stdout, b"async-capture");
+}
+
+#[test]
 fn ac2_err_refuses_at_fleet_ceiling_with_positive_marker() {
     let decision = decide(&census(2), AdmissionLimits::fleet(2));
 
@@ -54,7 +86,7 @@ fn ac2_err_creation_path_emits_positive_refusal_marker() {
     let _env_lock = ADMISSION_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let previous = std::env::var_os("FNO_MUX_MAX_LIVE");
     std::env::set_var("FNO_MUX_MAX_LIVE", "2");
 
@@ -94,7 +126,7 @@ fn ac3_edge_concurrent_launchers_remeasure_after_the_first_spawn() {
     let _env_lock = ADMISSION_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let previous = std::env::var_os("FNO_MUX_MAX_LIVE");
     std::env::set_var("FNO_MUX_MAX_LIVE", "1");
 

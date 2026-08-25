@@ -74,7 +74,8 @@ impl Scratch {
                 "FNO_GLOBAL_SETTINGS_PATH",
                 self.0.join("iso-cfg").join("settings.json"),
             )
-            .env("FNO_E2E", "1");
+            .env("FNO_E2E", "1")
+            .env("FNO_MUX_MAX_LIVE", "512");
     }
 
     fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
@@ -96,6 +97,7 @@ impl Scratch {
             self.0.join("iso-cfg").join("settings.json"),
         );
         cmd.env("FNO_E2E", "1");
+        cmd.env("FNO_MUX_MAX_LIVE", "512");
     }
 
     /// The session socket the client will use under `FNO_MUX_DIR`.
@@ -542,6 +544,7 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     // panic=abort, cargo-test timeout) — x-4e30. A test that needs a specific
     // grace (or none) overrides via `envs`, which is applied after.
     cmd.env("FNO_E2E", "1");
+    cmd.env("FNO_MUX_MAX_LIVE", "512");
     // Hermetic sideline: point the agent registry and the claude-daemon roster
     // at empty scratch subdirs so the server enumerates only THIS test's panes,
     // never the developer's live agents. Without this the server reads the real

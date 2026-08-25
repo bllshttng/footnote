@@ -414,6 +414,9 @@ pub fn std_spawn(command: &mut std::process::Command) -> io::Result<std::process
 }
 
 pub fn std_output(command: &mut std::process::Command) -> io::Result<std::process::Output> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let child = std_spawn(command)?;
     child.wait_with_output()
 }
@@ -450,6 +453,9 @@ pub fn tokio_spawn(command: &mut tokio::process::Command) -> io::Result<tokio::p
 pub async fn tokio_output(
     command: &mut tokio::process::Command,
 ) -> io::Result<std::process::Output> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let child = tokio_spawn(command)?;
     child.wait_with_output().await
 }
