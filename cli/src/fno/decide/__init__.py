@@ -966,7 +966,7 @@ def list_decisions(
     subject: str | None = None,
     limit: int | None = None,
     lane: str | None = None,
-    state: str | None = "live",
+    state: str | None = None,
 ) -> "tuple[str, list[dict], int]":
     """Decision history from the index, newest first. Never raises LookupError.
 

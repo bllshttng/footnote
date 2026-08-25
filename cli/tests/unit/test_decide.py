@@ -754,7 +754,7 @@ def test_reindex_counts_decision_and_retraction_keys_once(
     assert counts["already"] == 2
 
 
-def test_default_decision_consumers_receive_only_live_rows(
+def test_default_decision_read_retains_history_for_replay(
     root: Path, tmp_graph: Path, index: Path
 ):
     from fno.events import decision_retracted
@@ -805,7 +805,12 @@ def test_default_decision_consumers_receive_only_live_rows(
         handle.write(json.dumps(event) + "\n")
 
     _, rows, _ = list_decisions()
-    assert [row["decision_id"] for row in rows] == ["d-live0001"]
+    assert {row["decision_id"] for row in rows} == {
+        "d-expired01",
+        "d-live0001",
+        "d-retract1",
+        "d-unscoped1",
+    }
 
 
 def test_missing_supersession_target_refuses_before_recording(

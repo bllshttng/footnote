@@ -1035,7 +1035,7 @@ if isinstance(node_id, str) and node_id.strip():
     try:
         from fno.decide import list_decisions
 
-        _subj, rows, damaged = list_decisions(node_id.strip(), limit=None)
+        _subj, rows, damaged = list_decisions(node_id.strip(), limit=None, state="live")
     except Exception as exc:  # noqa: BLE001 - reported as W below, never a bare crash
         sys.stdout.write("W\t" + " ".join(str(exc).split())[:160] + "\n")
     else:
