@@ -1644,6 +1644,18 @@ def _pane_group_max() -> int:
         return 4
 
 
+def _mux_max_live() -> int:
+    try:
+        explicit = os.environ.get("FNO_MUX_MAX_LIVE")
+        if explicit is not None:
+            return max(1, int(explicit))
+        from fno.config import load_settings
+
+        return max(1, int(load_settings().agents.max_live))
+    except Exception:
+        return 3
+
+
 def _resolve_group_tab(requested: str) -> tuple[Optional[str], Optional[str]]:
     """Split a ``--tab`` value into a placement selector and a pane-group name.
 
@@ -3390,7 +3402,7 @@ def dispatch_spawn_pane(
         # Placement directives ride the OUTER pane-run transport, before the `--`
         # that fences the provider argv (x-3e38). build_pane_argv stays
         # placement-blind so provider-native commands are never contaminated.
-        placement_args: list[str] = []
+        placement_args: list[str] = ["--max-panes", str(_pane_group_max())]
         if squad:
             placement_args += ["squad", squad]
         if split:
@@ -3404,7 +3416,6 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
-            placement_args += ["--max-panes", str(_pane_group_max())]
         # Same reasoning as the spawn-clock stamp below, snapshotted first: a
         # sibling pane starting during the lock-wait or argv-build above would
         # otherwise widen the daemon oracle's candidate set. Gated to codex
@@ -3464,6 +3475,8 @@ def dispatch_spawn_pane(
             k: v for k, v in os.environ.items() if k != WORKER_ADD_DIRS_ENV
         }
         pane_env["FNO_MUX_SHELL_INTEGRATION"] = _shell_integration()
+        pane_env["FNO_MUX_MAX_LIVE"] = str(_mux_max_live())
+        pane_env["FNO_MUX_PANE_GROUP_MAX"] = str(_pane_group_max())
         proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None
         recovered = False

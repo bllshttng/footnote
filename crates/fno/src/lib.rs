@@ -24,6 +24,7 @@ pub mod mouse;
 pub mod mux_cli;
 pub mod needs_overlay;
 pub mod popup;
+pub mod process_admission;
 pub mod proto;
 pub mod pty;
 pub mod server;

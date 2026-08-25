@@ -36,11 +36,22 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
+
+fn admitted_command(program: impl AsRef<OsStr>) -> Command {
+    crate::process_admission::std_command(program)
+}
+
+fn admitted_output(command: &mut Command) -> std::io::Result<std::process::Output> {
+    crate::process_admission::std_output(command)
+}
+
+fn admitted_status(command: &mut Command) -> std::io::Result<std::process::ExitStatus> {
+    crate::process_admission::std_status(command)
+}
 
 /// A bootstrap failure: a human-facing message plus the exit code to use.
 /// Every failure path produces one of these so the shim never panics on an
@@ -387,11 +398,12 @@ fn locate_failure_message(
 /// Astral's installer uses. Returns the command to invoke (`uv` when on PATH,
 /// otherwise an absolute path).
 fn find_uv() -> Option<PathBuf> {
-    if Command::new("uv")
+    let mut command = admitted_command("uv");
+    command
         .arg("--version")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::null());
+    if admitted_status(&mut command)
         .map(|s| s.success())
         .unwrap_or(false)
     {
@@ -419,10 +431,11 @@ fn ensure_uv() -> BootResult<PathBuf> {
     }
     eprintln!("fno: uv not found - installing the standalone uv (one time)...");
     // Astral's published installer; a single static binary, no Python needed.
-    let status = Command::new("sh")
+    let mut command = admitted_command("sh");
+    command
         .arg("-c")
-        .arg("curl -LsSf https://astral.sh/uv/install.sh | sh")
-        .status();
+        .arg("curl -LsSf https://astral.sh/uv/install.sh | sh");
+    let status = admitted_status(&mut command);
     match status {
         Ok(s) if s.success() => {}
         _ => {
@@ -467,12 +480,12 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
     // accepted only after a positive marker (entrypoint + shipped bytecode),
     // never on the exit code alone.
     for attempt in 1..=INSTALL_ATTEMPTS {
-        let out = match Command::new(uv)
+        let mut command = admitted_command(uv);
+        command
             .args(["tool", "install", "--force", "--compile-bytecode", source])
             .env("NO_COLOR", "1")
-            .env("UV_NO_COLOR", "1")
-            .output()
-        {
+            .env("UV_NO_COLOR", "1");
+        let out = match admitted_output(&mut command) {
             Ok(o) => o,
             Err(e) => {
                 // ETXTBSY (os error 26): a writer still holds the uv binary
@@ -829,12 +842,12 @@ fn count_pyc(dir: &Path) -> std::io::Result<usize> {
 /// `uv tool dir` as a PathBuf, or None when uv is absent/fails. Shared by the
 /// entrypoint resolution and the post-install marker check.
 fn uv_tool_dir(uv: &Path) -> Option<PathBuf> {
-    let out = Command::new(uv)
+    let mut command = admitted_command(uv);
+    command
         .args(["tool", "dir"])
         .env("NO_COLOR", "1")
-        .env("UV_NO_COLOR", "1")
-        .output()
-        .ok()?;
+        .env("UV_NO_COLOR", "1");
+    let out = admitted_output(&mut command).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -991,12 +1004,12 @@ fn resolve_via_uv_tool_dir() -> Option<PathBuf> {
 /// to the generic locate error.
 fn diagnose_locate_failure() -> Option<String> {
     let uv = find_uv()?;
-    let out = Command::new(&uv)
+    let mut command = admitted_command(&uv);
+    command
         .args(["tool", "dir"])
         .env("NO_COLOR", "1")
-        .env("UV_NO_COLOR", "1")
-        .output()
-        .ok()?;
+        .env("UV_NO_COLOR", "1");
+    let out = admitted_output(&mut command).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1018,13 +1031,12 @@ fn read_installed_version(bin: &Path) -> Option<String> {
     if !is_executable(&python) {
         return None;
     }
-    let out = Command::new(&python)
-        .args([
-            "-c",
-            "import importlib.metadata as m; print(m.version('fno'))",
-        ])
-        .output()
-        .ok()?;
+    let mut command = admitted_command(&python);
+    command.args([
+        "-c",
+        "import importlib.metadata as m; print(m.version('fno'))",
+    ]);
+    let out = admitted_output(&mut command).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1108,9 +1120,9 @@ fn verify_ours(real: &Path) -> BootResult<()> {
                  print('name=' + (md.get('Name') or ''))\n\
                  print('author=' + (md.get('Author') or md.get('Author-email') or ''))\n\
                  print('version=' + (md.get('Version') or ''))\n";
-    let out = Command::new(&venv_python)
-        .args(["-c", probe])
-        .output()
+    let mut command = admitted_command(&venv_python);
+    command.args(["-c", probe]);
+    let out = admitted_output(&mut command)
         .map_err(|e| BootErr::new(1, format!("could not run the identity probe: {e}")))?;
     if !out.status.success() {
         return Err(BootErr::new(
@@ -1243,7 +1255,9 @@ fn decide_identity(name: &str, author: &str) -> Result<(), String> {
 /// returns (signals + exit code pass through unchanged); it only returns when
 /// the exec itself fails, which we surface as a BootErr.
 fn exec_real(real: &Path, args: &[OsString]) -> BootErr {
-    let err = Command::new(real).args(args).exec();
+    let mut command = admitted_command(real);
+    command.args(args);
+    let err = crate::process_admission::std_exec(&mut command);
     BootErr::new(
         126,
         format!(

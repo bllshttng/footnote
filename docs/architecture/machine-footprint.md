@@ -19,3 +19,9 @@ Exit codes are intentionally separate. `0` means the standard closure numbers ar
 Load average remains the spawn admission signal. Footprint does not replace it because a point-in-time CPU snapshot cannot answer whether runnable work is queued. When load crosses the configured ceiling, both spawn gates retain exit 79. When cause evidence is available, they append bounded footprint cause evidence. The evidence distinguishes a fleet-heavy refusal from a refusal caused by other machine processes. Missing, timed-out or malformed evidence prints `spawn-gate: footprint cause unavailable; load refusal unchanged` and never changes admission.
 
 This is a human-, CI- or king-invoked reading, not a daemon or poller. A watcher adds the cost being measured.
+
+Mux admission is a separate native pre-spawn instrument. Every Rust child launch acquires a per-user machine-global lock. It takes a process snapshot without starting an observer. The permit remains alive through the child-creation syscall. The census attributes descendants of active `fno` binaries or the current cargo-test binary. It includes live and zombie rows. An ancestry cycle or unreadable required row returns unavailable. The mux root process is not a worker slot.
+
+The Python pane launcher carries the resolved limits as `FNO_MUX_MAX_LIVE` and `FNO_MUX_PANE_GROUP_MAX`. Every `PanePlacement` carries `max_panes`. A legacy client that omits the wire field receives the conservative configured/default pane cap. Fleet and tab ceilings remain separate. They add no new operator setting.
+
+Every refusal is a positive, parseable marker: `process admission refused: count=<n> ceiling=<n> scope=<fleet|tab> reason=<over-limit|measurement-unavailable|lock-unavailable>`. Unknown measurement never becomes count zero or headroom. Recovery starts by reconciling or reducing live rows. Then rerun `fno doctor footprint`. There is no force bypass.

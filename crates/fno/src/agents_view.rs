@@ -731,10 +731,9 @@ fn process_create_time_ms(_pid: i32) -> Option<i64> {
 /// macOS IOPlatformUUID (mirror of `claims.rs::platform_machine_id`).
 #[cfg(target_os = "macos")]
 fn platform_machine_id() -> String {
-    let out = match std::process::Command::new("/usr/sbin/ioreg")
-        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-        .output()
-    {
+    let mut command = crate::process_admission::std_command("/usr/sbin/ioreg");
+    command.args(["-rd1", "-c", "IOPlatformExpertDevice"]);
+    let out = match crate::process_admission::std_output(&mut command) {
         Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
         Err(_) => return String::new(),
     };

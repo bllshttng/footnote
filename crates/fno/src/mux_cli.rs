@@ -5146,7 +5146,7 @@ fn prepare_pane_bytes(
         None => std::env::current_exe()
             .map_err(|e| format!("cannot locate the fno binary to render the envelope: {e}"))?,
     };
-    let mut command = std::process::Command::new(&exe);
+    let mut command = crate::process_admission::std_command(&exe);
     command.args([
         "mail",
         "pane-prepare",
@@ -5169,15 +5169,14 @@ fn prepare_pane_bytes(
         .env("FNO_BIN", &exe)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "envelope renderer ({}) could not start: {e}. Refusing to type an \
+        .stderr(std::process::Stdio::piped());
+    let mut child = crate::process_admission::std_spawn(&mut child).map_err(|e| {
+        format!(
+            "envelope renderer ({}) could not start: {e}. Refusing to type an \
                  unattributed payload; pass --raw for a genuine keystroke.",
-                exe.display()
-            )
-        })?;
+            exe.display()
+        )
+    })?;
     // The write runs on its own thread, so it cannot deadlock against a child
     // that starts answering before it has read everything. Dropping the handle
     // at the end of the closure closes the pipe, which is the renderer's EOF.
@@ -5681,7 +5680,7 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     //    lives in one place. The
     //    excerpt rides stdin (`--block-excerpt-file -`), never a temp file.
     let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
-    let mut cmd = std::process::Command::new(&fno);
+    let mut cmd = crate::process_admission::std_command(&fno);
     cmd.args([
         OsString::from("backlog"),
         OsString::from("annotate"),
@@ -5697,7 +5696,7 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     if let Some(cwd) = pane_cwd {
         cmd.current_dir(cwd);
     }
-    let mut child = match cmd.spawn() {
+    let mut child = match crate::process_admission::std_spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");

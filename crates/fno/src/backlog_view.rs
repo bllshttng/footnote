@@ -66,10 +66,9 @@ pub fn read_snapshot() -> Option<String> {
     // fno_bin (FNO_BIN override, else the running binary) - the same resolver
     // every other fno-subprocess site in the crate uses, so the snapshot is
     // read from the binary version that owns this document's schema.
-    let out = std::process::Command::new(crate::server::fno_bin())
-        .args(["backlog", "status", "--snapshot"])
-        .output()
-        .ok()?;
+    let mut command = crate::process_admission::std_command(crate::server::fno_bin());
+    command.args(["backlog", "status", "--snapshot"]);
+    let out = crate::process_admission::std_output(&mut command).ok()?;
     if !out.status.success() {
         return None;
     }

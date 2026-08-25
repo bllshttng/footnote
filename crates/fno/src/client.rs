@@ -452,7 +452,7 @@ fn spawn_server(path: &Path) -> Result<(), String> {
         .append(true)
         .open(log_path(path))
         .map_err(|e| format!("cannot open server log: {e}"))?;
-    let mut cmd = std::process::Command::new(exe);
+    let mut cmd = crate::process_admission::std_command(exe);
     cmd.arg("--server")
         .arg(path)
         .stdin(std::process::Stdio::null())
@@ -490,7 +490,7 @@ fn spawn_server(path: &Path) -> Result<(), String> {
             Ok(())
         });
     }
-    cmd.spawn()
+    crate::process_admission::std_spawn(&mut cmd)
         .map(|_| ())
         .map_err(|e| format!("cannot spawn the mux server: {e}"))
 }
@@ -2121,12 +2121,13 @@ const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(30_000);
 /// not add `--json` after `--check` here, it makes the CLI exit 2 and every
 /// probe degrade (P1, codex on PR #881).
 async fn probe_update_readiness() -> UpdateOutcome {
-    let fut = tokio::process::Command::new(crate::server::fno_bin())
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    command
         .args(["doctor", "update", "--check"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = match tokio::time::timeout(UPDATE_PROBE_TIMEOUT, fut).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => return UpdateOutcome::Degraded(format!("update --check: {e}")),
@@ -13268,13 +13269,14 @@ async fn spawn_set_theme(name: &str) -> Result<(), String> {
     // but tokio leaves a spawned child running by default, so the config write
     // could land after we already told the user the save failed. needs_overlay,
     // digest_overlay, and connections_view set it for the same shell-out shape.
-    let mut child = tokio::process::Command::new(crate::server::fno_bin())
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    command
         .args(["config", "set", "mux.theme", name])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    let mut child = crate::process_admission::tokio_spawn(&mut command)
         .map_err(|e| format!("fno config set spawn failed: {e}"))?;
     match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
         Ok(Ok(es)) if es.success() => Ok(()),

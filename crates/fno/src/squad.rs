@@ -446,14 +446,14 @@ fn canonical_root(git: &str, cwd: &str, timeout: Duration) -> Option<String> {
     if !std::path::Path::new(cwd).is_dir() {
         return None; // Command::current_dir on a missing dir errors anyway
     }
-    let mut child = std::process::Command::new(git)
+    let mut command = crate::process_admission::std_command(git);
+    command
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    let mut child = crate::process_admission::std_spawn(&mut command).ok()?;
 
     let deadline = Instant::now() + timeout;
     let status = loop {
