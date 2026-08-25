@@ -4,12 +4,12 @@
 # Covers:
 #  1. AC1-HP  happy path - ordering, manifest archived, sentinel, exit 0, delegated line
 #  2. AC1-ERR spawn failure - unwind order, manifest restored, handoff_failed, exit 10
-#  3. verify timeout - ask ok but list never shows live; same unwind as spawn failure
+#  3. target execution timeout - seed delivered but child claim/manifest never appear
 #  4. AC1-EDGE missing plan_path - parked, zero claim mutations
 #  5. double handoff - sentinel pre-exists, idempotent parked
-#  6. generation cap - 3 delegated events pre-seeded -> parked chain-exhausted
-#  7. no-pressure park - --boundary wave, probe reports used_pct 30 -> parked
-#  8. probe unreadable - probe exits 3 -> handoff_probe_unreadable emitted + parked
+#  6. one capability escalation already spent -> parked chain-exhausted
+#  7. context percentage does not trigger or block explicit escalation
+#  8. transcript-probe readability does not trigger or block escalation
 #  9. restore_failed - verify fails, archive restore impossible -> exit 12
 #
 # Poll timeouts are made tiny via env overrides:
@@ -249,8 +249,6 @@ enabled = true
 
 [target.handoff]
 enabled = true
-generation_cap = 4
-used_pct_trigger = 50
 CONFIGEOF
 
   CALL_LOG="$sbx/call-log"
