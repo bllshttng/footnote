@@ -2946,3 +2946,112 @@ def test_repository_catalog_rejects_ambiguous_or_cyclic_law(
     assert str(path) in str(exc.value)
     assert marker in str(exc.value)
 
+
+def test_repository_catalog_is_live_law_on_a_fresh_clone(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.decide import list_decisions
+
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-cab50789
+    subject: target-self-handoff
+    aliases: [handoff, target self-handoff]
+    decision: Context pressure is not a handoff trigger.
+    rationale: Compaction preserves the claim and worktree.
+""",
+    )
+
+    label, rows, damaged = list_decisions("handoff", lane="law", state="live")
+
+    assert label == "handoff"
+    assert damaged == 0
+    assert [row["decision_id"] for row in rows] == ["d-cab50789"]
+    assert rows[0]["subject"] == "target-self-handoff"
+    assert rows[0]["lane"] == "law"
+    assert rows[0]["lifecycle"] == "live"
+
+
+def test_repository_metadata_promotes_the_same_local_id_without_promoting_its_lane(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.decide import list_decisions
+
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-cab50789
+    subject: target-self-handoff
+    aliases: [handoff, target self-handoff]
+    decision: Shipped repository law.
+    rationale: Code review promotes this exact row.
+""",
+    )
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-cab50789",
+            "subject": "target self-handoff",
+            "decision": "machine-local wording",
+            "rationale": "machine-local rationale",
+            "authority_source": "agent",
+            "decided_by": "king-session",
+            "ts": "2026-08-25T17:00:00Z",
+        },
+    )
+
+    _, rows, _ = list_decisions("handoff", lane="law", state="live")
+
+    assert [row["decision_id"] for row in rows] == ["d-cab50789"]
+    assert rows[0]["decision"] == "Shipped repository law."
+    assert rows[0]["decided_by"] == "king-session"
+    assert rows[0]["_source"] == "repository"
+
+
+def test_catalog_supersession_and_local_override_share_one_projection(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.decide import _decision_row_by_id, list_decisions
+
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-880626b7
+    subject: process-admission
+    aliases: []
+    decision: Never compare agent and process counts.
+    rationale: They are different units.
+  - decision_id: d-94b2df45
+    subject: process-admission
+    aliases: [process admission]
+    decision: Give the process ceiling its own plumbing.
+    rationale: Shared plumbing recreates the invalid comparison.
+    supersedes: d-880626b7
+""",
+    )
+
+    assert _decision_row_by_id("d-94b2df45")["_source"] == "repository"
+    _, history, _ = list_decisions("process admission", state="all")
+    by_id = {row["decision_id"]: row for row in history}
+    assert by_id["d-880626b7"]["lifecycle"] == "superseded"
+    assert by_id["d-880626b7"]["superseded_by"] == "d-94b2df45"
+    assert by_id["d-94b2df45"]["supersedes"] == "d-880626b7"
+
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-fedcba98",
+            "subject": "process admission",
+            "decision": "Project policy overrides the repository default.",
+            "rationale": "This project needs a stricter ceiling.",
+            "authority_source": "operator",
+            "supersedes": "d-94b2df45",
+            "ts": "2026-08-26T00:00:00Z",
+        },
+    )
+    _, live, _ = list_decisions("process-admission", lane="law", state="live")
+    assert [row["decision_id"] for row in live] == ["d-fedcba98"]
