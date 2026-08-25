@@ -15,6 +15,22 @@ from fno.cli import app
 runner = CliRunner()
 
 
+@pytest.fixture
+def no_worker_roots(monkeypatch):
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_root_pids",
+        lambda **_kwargs: (set(), None),
+    )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_shared_serve_root_pids",
+        lambda **_kwargs: (set(), None),
+    )
+
+
 def _fake_runner(ps_output: str, roster: list[dict], calls: list[list[str]]):
     def run(argv, **kwargs):
         calls.append(list(argv))
@@ -372,7 +388,9 @@ def test_ac5_edge_capacity_honors_cpu_quota(monkeypatch) -> None:
     assert doctor_footprint._cpu_capacity_cores() == 2
 
 
-def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:
+def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(
@@ -403,7 +421,9 @@ def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:
     assert payload["fleet_percent_measured_cpu"] == pytest.approx(50.0)
 
 
-def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(monkeypatch) -> None:
+def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     observer_pid = os.getpid()
@@ -438,7 +458,9 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(monkeypa
     assert calls == [["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"]]
 
 
-def test_ac6_edge_cause_only_seeds_live_detached_registry_root(monkeypatch) -> None:
+def test_ac6_edge_cause_only_seeds_live_detached_registry_root(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(
@@ -469,7 +491,9 @@ def test_ac6_edge_cause_only_seeds_live_detached_registry_root(monkeypatch) -> N
     assert payload["fleet_cpu_cores"] == pytest.approx(1.0)
 
 
-def test_ac6_edge_cause_only_refuses_root_missing_from_snapshot(monkeypatch) -> None:
+def test_ac6_edge_cause_only_refuses_root_missing_from_snapshot(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(
@@ -496,7 +520,9 @@ def test_ac6_edge_cause_only_refuses_root_missing_from_snapshot(monkeypatch) -> 
     assert "missing from ps snapshot" in result.stdout
 
 
-def test_ac7_edge_fleet_cpu_threshold_includes_short_lived_descendant(monkeypatch) -> None:
+def test_ac7_edge_fleet_cpu_threshold_includes_short_lived_descendant(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(
@@ -520,7 +546,9 @@ def test_ac7_edge_fleet_cpu_threshold_includes_short_lived_descendant(monkeypatc
     assert "verdict: over budget" in result.stdout
 
 
-def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(monkeypatch) -> None:
+def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(
@@ -545,7 +573,9 @@ def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(monkeypatc
     assert "direct processes: 1 (threshold 2)" in result.stdout
 
 
-def test_ac9_edge_cpu_share_uses_constrained_capacity(monkeypatch) -> None:
+def test_ac9_edge_cpu_share_uses_constrained_capacity(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(doctor_footprint.os, "cpu_count", lambda: 64)
@@ -571,7 +601,9 @@ def test_ac9_edge_cpu_share_uses_constrained_capacity(monkeypatch) -> None:
     assert payload["fleet_percent_capacity"] == pytest.approx(50.0)
 
 
-def test_ac3_hp_reports_both_thresholds_and_exits_zero(monkeypatch) -> None:
+def test_ac3_hp_reports_both_thresholds_and_exits_zero(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     calls: list[list[str]] = []
@@ -603,7 +635,9 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(monkeypatch) -> None:
     ]
 
 
-def test_ac4_edge_sustained_cpu_exits_three_and_names_top_consumers(monkeypatch) -> None:
+def test_ac4_edge_sustained_cpu_exits_three_and_names_top_consumers(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(
@@ -629,7 +663,9 @@ def test_ac4_edge_sustained_cpu_exits_three_and_names_top_consumers(monkeypatch)
     assert "fno-agents-daemon --serve (40.0%)" in result.stdout
 
 
-def test_ac4_edge_process_count_also_exits_three(monkeypatch) -> None:
+def test_ac4_edge_process_count_also_exits_three(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(
@@ -655,7 +691,9 @@ def test_ac4_edge_process_count_also_exits_three(monkeypatch) -> None:
     assert "direct processes: 2 (threshold 1)" in result.stdout
 
 
-def test_ac5_edge_roster_failure_exits_four_without_a_default_threshold(monkeypatch) -> None:
+def test_ac5_edge_roster_failure_exits_four_without_a_default_threshold(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     calls: list[list[str]] = []
@@ -687,7 +725,9 @@ def test_ac5_edge_roster_failure_exits_four_without_a_default_threshold(monkeypa
     ]
 
 
-def test_ac7_edge_json_contains_thresholds_and_exit_meaning(monkeypatch) -> None:
+def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
+    monkeypatch, no_worker_roots
+) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(
