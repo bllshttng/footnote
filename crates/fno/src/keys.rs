@@ -915,6 +915,55 @@ fn disp_for(action_id: &str, bindings: &[KeyBinding]) -> Option<String> {
         .map(|kb| kb.disp.clone())
 }
 
+/// One in-menu accelerator: the byte that selects an entry while a context
+/// menu is OPEN, under the same stable action-id vocabulary the prefix table
+/// uses. A SEPARATE scope, not a rebind: prefix chords read a byte only after
+/// the prefix, menu keys read it bare inside a popup, so the two layers never
+/// consult each other's tables (ruling d-a5e7569d - `x` stays kill-pane after
+/// a prefix and becomes the destructive verb inside a menu).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuKeyBinding {
+    pub action: &'static str,
+    pub key: u8,
+}
+
+/// The shipped in-menu accelerator table: app vocabulary inside the open menu
+/// (`r` renames, `x` is the destructive verb). One byte MAY serve two action
+/// ids here (`close-tab` and `remove-row` never share a popup), so collision
+/// rules live with the caller, which knows which menu is open.
+pub fn menu_bindings() -> Vec<MenuKeyBinding> {
+    let mb = |key: u8, action: &'static str| MenuKeyBinding { action, key };
+    vec![
+        mb(b'r', "rename-tab"),
+        mb(b'r', "rename-workspace"),
+        mb(b'x', "close-tab"),
+        mb(b'x', "remove-row"),
+    ]
+}
+
+/// The display glyph for `action_id` in menu scope: what the popup draws
+/// beside the entry, i.e. the byte that RUNS it in-menu. Unlike [`key_for`]
+/// (the prefix chord) this describes the input path the reader is actually
+/// on. `None` when the menu scope does not bind the action - a prefix-only
+/// action renders no menu key rather than advertising a chord the open menu
+/// would dismiss on (the LD9 lie this node closes).
+pub fn menu_key_for(action_id: &str) -> Option<String> {
+    menu_bindings()
+        .into_iter()
+        .find(|mb| mb.action == action_id)
+        .map(|mb| key_disp(mb.key))
+}
+
+/// The dispatch half of [`menu_key_for`]: the byte that executes `action_id`
+/// in-menu, for the popup key handler to match a typed byte against the
+/// actions the OPEN menu actually offers.
+pub fn menu_byte_for(action_id: &str) -> Option<u8> {
+    menu_bindings()
+        .into_iter()
+        .find(|mb| mb.action == action_id)
+        .map(|mb| mb.key)
+}
+
 /// The one-line teaser shown while a prefix is pending, built from the LIVE
 /// bindings.
 ///
@@ -1715,6 +1764,47 @@ mod tests {
                 kb.key as char
             );
         }
+    }
+
+    #[test]
+    fn menu_accelerators_round_trip_and_stay_out_of_the_prefix_scope() {
+        // x-91a1 AC1: every menu binding resolves to a glyph and back to the
+        // same byte/action pair, the prefix table keeps its own meanings
+        // untouched (menu `x` did not rebind prefix+x), and a prefix-only
+        // action has no menu key to advertise.
+        for mb in menu_bindings() {
+            assert_eq!(
+                menu_key_for(mb.action),
+                Some(key_disp(mb.key)),
+                "{}",
+                mb.action
+            );
+            assert_eq!(menu_byte_for(mb.action), Some(mb.key), "{}", mb.action);
+        }
+        assert!(
+            menu_key_for("new-tab").is_none(),
+            "prefix-only: no menu key"
+        );
+        assert!(
+            menu_key_for("move-tab-left").is_none(),
+            "prefix-only: no menu key"
+        );
+        let rows = key_bindings();
+        let byte_of = |action: &str| {
+            rows.iter()
+                .find(|kb| kb.action == action)
+                .map(|kb| kb.key)
+                .unwrap_or_else(|| panic!("prefix table lost {action}"))
+        };
+        assert_eq!(byte_of("close-pane"), b'x', "prefix+x still kills a pane");
+        assert_eq!(byte_of("rename-tab"), b',');
+        assert_eq!(byte_of("close-tab"), b'&');
+        assert_eq!(byte_of("move-tab-left"), b'<');
+        assert_eq!(byte_of("move-tab-right"), b'>');
+        // The two scopes reuse `x` on purpose: menu close/remove can never
+        // co-occur with the prefix layer, which reads a byte only after the
+        // prefix byte.
+        assert!(menu_bindings().iter().any(|mb| mb.key == b'x'));
     }
 
     #[test]

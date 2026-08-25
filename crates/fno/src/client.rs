@@ -1595,6 +1595,24 @@ enum MenuAction {
     Mail,
 }
 
+impl MenuAction {
+    /// (x-91a1) The stable id this action's in-menu accelerator is registered
+    /// under in `keys::menu_bindings`, when it has one. The drawn hint and the
+    /// dispatched byte both resolve through this id, so the key the menu
+    /// advertises and the key it answers cannot drift. Only actions the
+    /// d-a5e7569d ruling settled carry one; everything else is Enter/click
+    /// only and renders no key.
+    fn accelerator_id(&self) -> Option<&'static str> {
+        match self {
+            MenuAction::TabRename => Some("rename-tab"),
+            MenuAction::Rename => Some("rename-workspace"),
+            MenuAction::TabClose => Some("close-tab"),
+            MenuAction::Remove => Some("remove-row"),
+            _ => None,
+        }
+    }
+}
+
 /// What the numbered move picker is relocating: a whole tab (selector `m`) or a
 /// single pane-hosted row's live pane (the row menu's Move-to-workspace entry).
 /// Both list destination workspaces and resolve the same way; only the command
@@ -1605,14 +1623,16 @@ enum MoveSrc {
     Pane(u64),
 }
 
-/// (x-92d3 6.2) An entry whose action has a prefix binding: the hint is the
-/// LIVE glyph from `key_for`, never a literal chord. An unbound or unknown
-/// id resolves to nothing, which is the honest hint (LD9 / AC8).
-fn entry_kb(glyph: &str, label: &str, id: &str) -> PopupRow {
+/// (x-91a1) An entry whose action has an IN-MENU accelerator: the hint is the
+/// live glyph from the menu scope (`keys::menu_key_for`), never a prefix chord
+/// - the open menu does not run prefix chords, so advertising one describes an
+/// input path the reader is not on. An unscoped id resolves to nothing, which
+/// is the honest hint (LD9 / AC8).
+fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
     PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
-        hint: crate::keys::key_for(id).unwrap_or_default(),
+        hint: crate::keys::menu_key_for(id).unwrap_or_default(),
         enabled: true,
     }
 }
@@ -1655,7 +1675,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     add(PopupRow::Header(agent.name.clone()), &[]);
     add(PopupRow::Rule, &[]);
     if agent.exited {
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
+        add(
+            entry_acc("✕", "Remove", "remove-row"),
+            &[MenuAction::Remove],
+        );
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
         // Resume above the rule (AC7): the menu twin of peek `r`, on the row
         // state `r` accepts - an exited row.
@@ -1731,8 +1754,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     // Diff is common to every row state: it reads the row's worktree,
     // which an exited or paneless row has just as much as a live pane-hosted
     // one - and a finished worker's diff is the one you most want to read.
+    // No hint: its prefix chord is not a menu key, and the menu scope leaves
+    // it unbound (x-91a1).
     add(PopupRow::Rule, &[]);
-    add(entry_kb("±", "Diff", "diff-pane"), &[MenuAction::Diff]);
+    add(entry("±", "Diff"), &[MenuAction::Diff]);
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Agent(AgentIdent::of(agent)),
@@ -1875,7 +1900,7 @@ fn build_section_menu(
             hint: String::new(),
             enabled: true,
         };
-        rows.push(entry("✎", "Rename"));
+        rows.push(entry_acc("✎", "Rename", "rename-workspace"));
         actions.push(MenuAction::Rename);
         rows.push(entry("▲", "Move up"));
         actions.push(MenuAction::MoveSquad(-1));
@@ -1924,6 +1949,12 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
         glyph: glyph.into(),
         label: label.into(),
     };
+    let entry = |glyph: &str, label: &str| PopupRow::Entry {
+        glyph: glyph.into(),
+        label: label.into(),
+        hint: String::new(),
+        enabled: true,
+    };
     // Join mirrors the row menu's split grid: the picked cell IS the side of
     // the focused pane the joined tab lands on. No hint: no prefix binding
     // names a join (the gesture path is the tab drag), and LD9 forbids a
@@ -1936,19 +1967,17 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
         &[],
     );
     add(PopupRow::Rule, &[]);
-    add(entry_kb("▭", "New tab", "new-tab"), &[MenuAction::TabNew]);
+    // (x-91a1) New tab and the reorder pair show no key: their prefix chords
+    // are tmux window vocabulary that the open menu does not answer, and the
+    // ruling reserves menu keys for the settled verbs until an app-native
+    // binding is chosen for them.
+    add(entry("▭", "New tab"), &[MenuAction::TabNew]);
     add(
-        entry_kb("✎", "Rename", "rename-tab"),
+        entry_acc("✎", "Rename", "rename-tab"),
         &[MenuAction::TabRename],
     );
-    add(
-        entry_kb("◧", "Move left", "move-tab-left"),
-        &[MenuAction::TabReorder(-1)],
-    );
-    add(
-        entry_kb("◨", "Move right", "move-tab-right"),
-        &[MenuAction::TabReorder(1)],
-    );
+    add(entry("◧", "Move left"), &[MenuAction::TabReorder(-1)]);
+    add(entry("◨", "Move right"), &[MenuAction::TabReorder(1)]);
     add(
         PopupRow::Grid(vec![cell("◧", "Join Left"), cell("◨", "Join Right")]),
         &[
@@ -1962,9 +1991,12 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
     );
     add(PopupRow::Rule, &[]);
     // `✕ Close`, not `✕ Close tab`: one shape with the row menu's `✕ Remove`,
-    // so the two destructive affordances read as one vocabulary. The action id
-    // and its `&` chord are untouched.
-    add(entry_kb("✕", "Close", "close-tab"), &[MenuAction::TabClose]);
+    // so the two destructive affordances read as one vocabulary. The prefix
+    // `&` chord is untouched; in-menu the entry answers the scoped `x`.
+    add(
+        entry_acc("✕", "Close", "close-tab"),
+        &[MenuAction::TabClose],
+    );
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Tab(tab.id),
@@ -13067,8 +13099,32 @@ async fn row_menu_keys(
                 }
             }
             ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
-            // Any other (unbound) key dismisses, per the shared popup contract.
-            ModalKey::Byte(_) => view.row_menu = None,
+            // (x-91a1) A printable byte first resolves against the accelerators
+            // of the actions THIS menu offers: a hit moves the selection to
+            // that entry and runs it through the SAME execute path Enter and a
+            // click use, so keyboard and mouse execution cannot drift. A byte
+            // no selectable entry answers keeps the shared popup contract and
+            // dismisses. Disabled rows contribute no action, so an inert entry
+            // is never accelerated.
+            ModalKey::Byte(b) => {
+                let hit = view.row_menu.as_ref().and_then(|m| {
+                    m.actions.iter().position(|a| {
+                        a.accelerator_id()
+                            .and_then(crate::keys::menu_byte_for)
+                            .is_some_and(|kb| kb == b)
+                    })
+                });
+                match hit {
+                    Some(i) => {
+                        if let Some(m) = view.row_menu.as_mut() {
+                            m.popup.select(i);
+                            m.popup.follow_sel(trows);
+                        }
+                        row_menu_execute_selected(view, sock_w).await?;
+                    }
+                    None => view.row_menu = None,
+                }
+            }
         }
     }
     Ok(StdinFlow::Continue)
@@ -21778,13 +21834,30 @@ mod tests {
     #[tokio::test]
     async fn row_menu_unbound_key_dismisses() {
         // codex P2: the shared popup contract says an unbound key dismisses; the
-        // row menu must not just ring BEL and stay open.
+        // row menu must not just ring BEL and stay open. (x-91a1) The byte is
+        // chosen against the OPEN menu's accelerator set, so this fixture keeps
+        // testing dismissal even after more actions gain menu keys.
         let mut v = unified_rows_view();
         let idx = agent_row_at(&v, |a| a.name == "bg-claude");
         v.open_row_menu(idx, Anchor::Center);
+        let bound: Vec<u8> = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .filter_map(|a| a.accelerator_id())
+            .filter_map(crate::keys::menu_byte_for)
+            .collect();
+        let unbound = (b'a'..=b'z')
+            .find(|b| !bound.contains(b))
+            .expect("the menu scope leaves some letter unbound");
         let mut buf: Vec<u8> = Vec::new();
-        row_menu_keys(&mut v, b"z", &mut buf).await.unwrap();
-        assert!(v.row_menu.is_none(), "an unbound key dismisses the menu");
+        row_menu_keys(&mut v, &[unbound], &mut buf).await.unwrap();
+        assert!(
+            v.row_menu.is_none(),
+            "a byte no entry of this menu answers still dismisses it"
+        );
     }
 
     #[tokio::test]
@@ -21987,6 +22060,131 @@ mod tests {
             .iter()
             .position(|a| *a == action)
             .unwrap_or_else(|| panic!("menu should offer {action:?}"));
+    }
+
+    // ---- (x-91a1) menu-scoped accelerators -----------------------------------
+
+    #[tokio::test]
+    async fn menu_accelerator_rename_opens_the_tab_rename_overlay() {
+        // AC2-HP: the byte drawn beside Rename - read from the menu registry,
+        // never a literal - opens the rename overlay for the menu's stable tab.
+        // The OVERLAY is the marker: asserting the menu closed would pass even
+        // if the advertised key merely dismissed it, which is the exact defect
+        // this node closes.
+        let mut v = view_with_agents(vec![]);
+        let want = squad_tabs(&v, 1)[0].id;
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+        let key = crate::keys::menu_byte_for("rename-tab").expect("rename-tab registered");
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
+        assert_eq!(
+            v.rename.as_ref().map(|(t, _)| t.clone()),
+            Some(super::RenameTarget::Tab(want)),
+            "the advertised key opened the rename overlay for this tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn menu_accelerator_close_arms_the_confirm_and_closes() {
+        // AC2-EDGE: the registry byte for Close arms the SAME confirm the click
+        // arms, and committing it selects then closes the captured tab.
+        let mut v = view_with_agents(vec![]);
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+        let key = crate::keys::menu_byte_for("close-tab").expect("close-tab registered");
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "arming sends nothing");
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(super::ConfirmKind::CloseTab { tab: 0 }) => {}
+            _ => panic!("expected CloseTab{{tab:0}} confirm"),
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::SelectTab(0), Command::CloseTab],
+            "the captured tab is selected then closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn menu_accelerator_remove_arms_the_dead_row_confirm() {
+        // AC2-EDGE: the scoped `x` on an EXITED row's menu arms the removal
+        // confirm for that exact row, the same confirm Enter on Remove arms.
+        let exited = {
+            let mut r = pane_hosted_row("dead", 0);
+            r.pane_id = None;
+            r.exited = true;
+            r
+        };
+        let mut v = view_with_agents(vec![exited]);
+        // A lone exited row makes the squad majority-exited -> LiveOnly, which
+        // hides the row under test; pin Expanded so it renders (same pin as
+        // the resume test).
+        v.section_view.insert(
+            SectionKey::Squad("/code/footnote".into()),
+            SectionView::Expanded,
+        );
+        let idx = agent_row_at(&v, |a| a.name == "dead");
+        v.open_row_menu(idx, Anchor::Center);
+        let key = crate::keys::menu_byte_for("remove-row").expect("remove-row registered");
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(super::ConfirmKind::RemoveAgent { name }) => assert_eq!(name, "dead"),
+            _ => panic!("expected RemoveAgent{{dead}} confirm"),
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::RemoveAgent {
+                name: "dead".into()
+            }],
+            "the confirm the key armed removes exactly this row"
+        );
+    }
+
+    #[test]
+    fn menu_accelerators_never_collide_within_one_menu() {
+        // Dispatch picks the FIRST action a byte answers, so a second entry in
+        // the SAME menu sharing that byte would be unreachable. Cross-menu
+        // reuse (tab close vs dead-row remove) is legal - the actions never
+        // share a popup - so uniqueness is asserted per built menu.
+        let exited = {
+            let mut r = pane_hosted_row("dead", 0);
+            r.pane_id = None;
+            r.exited = true;
+            r
+        };
+        let live = pane_hosted_row("p", 9);
+        let tabs = squad_tabs(&view_with_agents(vec![]), 1);
+        let menus: &[(&str, RowMenu)] = &[
+            ("exited row", super::build_row_menu(&exited, Anchor::Center)),
+            (
+                "live pane row",
+                super::build_row_menu(&live, Anchor::Center),
+            ),
+            ("tab", super::build_tab_menu(0, &tabs[0], Anchor::Center)),
+        ];
+        for (name, menu) in menus {
+            let mut seen: Vec<u8> = Vec::new();
+            for a in &menu.actions {
+                if let Some(id) = a.accelerator_id() {
+                    let b = crate::keys::menu_byte_for(id)
+                        .unwrap_or_else(|| panic!("{name}: {id} left the menu scope"));
+                    assert!(
+                        !seen.contains(&b),
+                        "{name}: two entries answer {} ({})",
+                        b as char,
+                        id
+                    );
+                    seen.push(b);
+                }
+            }
+        }
     }
 
     // ---- (x-7683) wave 1: right-click coverage on pane cells -----------------
@@ -23102,9 +23300,11 @@ mod tests {
 
     #[test]
     fn menu_hints_resolve_the_live_keymap_and_never_invent_one() {
-        // AC8-EDGE: bound actions show the LIVE glyph (diff-pane, the tab
-        // verbs); actions with no prefix binding - peek, mail, resume, stop,
-        // remove, focus - show NO hint, and no builder carries a literal chord.
+        // AC8-EDGE, x-91a1: hints resolve from the LIVE menu-scope registry
+        // (`menu_key_for`), never a literal and never a prefix-only chord - the
+        // open menu does not run prefix chords, so advertising one is the LD9
+        // lie. Prefix-only actions (Diff, New tab, the reorder pair) and
+        // scope-less actions (peek, resume) render NO key.
         let exited = {
             let mut r = pane_hosted_row("dead", 0);
             r.pane_id = None;
@@ -23122,29 +23322,31 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("no entry labelled {label}"))
         };
-        // Diff is the one row-menu action a prefix chord names.
         assert_eq!(
-            hint_of(&row, "Diff"),
-            crate::keys::key_for("diff-pane").unwrap_or_default()
+            hint_of(&row, "Remove"),
+            crate::keys::menu_key_for("remove-row").unwrap_or_default(),
+            "Remove mirrors the menu-scope glyph for remove-row"
         );
-        for label in ["Remove", "Peek", "Resume"] {
-            assert_eq!(hint_of(&row, label), "", "{label} has no prefix binding");
+        for label in ["Diff", "Peek", "Resume"] {
+            assert_eq!(hint_of(&row, label), "", "{label} has no menu key");
         }
-        // Tab menu: every bound verb resolves live; the join grid carries no
-        // hint slot at all, so nothing can hardcode a chord there either.
+        // Tab menu: the settled verbs mirror their scoped glyphs; the rest show
+        // nothing; the join grid carries no hint slot at all, so nothing can
+        // hardcode a chord there either.
         let tabs = squad_tabs(&view_with_agents(vec![]), 1);
         let tab = super::build_tab_menu(0, &tabs[0], Anchor::Center);
-        for (label, id) in [
-            ("New tab", "new-tab"),
-            ("Rename", "rename-tab"),
-            ("Move left", "move-tab-left"),
-            ("Move right", "move-tab-right"),
-            ("Close", "close-tab"),
-        ] {
+        for (label, id) in [("Rename", "rename-tab"), ("Close", "close-tab")] {
             assert_eq!(
                 hint_of(&tab, label),
-                crate::keys::key_for(id).unwrap_or_default(),
-                "{label} mirrors key_for({id})"
+                crate::keys::menu_key_for(id).unwrap_or_default(),
+                "{label} mirrors menu_key_for({id})"
+            );
+        }
+        for label in ["New tab", "Move left", "Move right"] {
+            assert_eq!(
+                hint_of(&tab, label),
+                "",
+                "{label} is prefix-only: no menu key"
             );
         }
         for r in tab.popup.rows.iter().chain(row.popup.rows.iter()) {
