@@ -428,10 +428,7 @@ async fn run(args: Vec<String>) -> i32 {
                     return 12;
                 }
             };
-            if registry
-                .find_name_or_full_session_id(&agent_name)
-                .is_none()
-            {
+            if registry.find_name_or_full_session_id(&agent_name).is_none() {
                 // Event parity: Python's dispatch_ask emits agent_ask_failed
                 // stage="unknown-name" before raising; this pre-check is the
                 // only emitter on the Rust CLI path (the lib None-arms are
