@@ -320,6 +320,7 @@ def test_release_delivers_the_digest_and_consumes_every_held_id(monkeypatch):
             "mail_hold_released",
             {
                 "handle": HANDLE,
+                "clock": "no expiry",
                 "held_count": 3,
                 "deduped_count": 2,
                 "held_for_s": 300,

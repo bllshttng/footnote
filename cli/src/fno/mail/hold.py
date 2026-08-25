@@ -553,6 +553,8 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     from fno.agents import events
     from fno.bus.cursor import advance_cursor, scan_unread
 
+    clock_text = clock_description(read_any(handle))
+
     # Clear the FLAG first, and drop the clock only once that write succeeded.
     # The old order discarded set_policy's result and cleared the clock either
     # way, which turned a partial failure into a worse state than the failure:
@@ -616,6 +618,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     events.emit(
         "mail_hold_released",
         handle=handle,
+        clock=clock_text,
         held_count=held_count,
         deduped_count=deduped_count,
         held_for_s=held_for_s,
@@ -625,6 +628,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     )
     return {
         "handle": handle,
+        "clock": clock_text,
         "held_count": held_count,
         "deduped_count": deduped_count,
         "held_for_s": held_for_s,
