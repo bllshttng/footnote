@@ -3246,6 +3246,12 @@ def cmd_heal_token(
         hidden=True,
         help="Resolve against the registry and stores as one namespace.",
     ),
+    cross_project: bool = typer.Option(
+        False,
+        "--cross-project",
+        hidden=True,
+        help="Authorize machine-wide store selection after uniqueness checks.",
+    ),
 ) -> None:
     """Internal: adopt the session TOKEN names from its harness store, as JSON.
 
@@ -3274,9 +3280,13 @@ def cmd_heal_token(
         from fno.agents.registry import resolve_agent
 
         try:
-            resolved_entry = resolve_agent(
-                token, path=Path(registry) if registry else None
-            ).entry
+            resolved = resolve_agent(
+                token,
+                path=Path(registry) if registry else None,
+                scope_cwd=os.getcwd(),
+                cross_project=cross_project,
+            )
+            resolved_entry = resolved.entry
         except AgentResolutionError as exc:
             if exc.ambiguous:
                 sys.stderr.write(f"{exc}\n")
@@ -3285,19 +3295,26 @@ def cmd_heal_token(
                 sys.stderr.write(f"{exc}\n")
                 raise typer.Exit(code=HEAL_TOKEN_UNAVAILABLE_EXIT)
             raise typer.Exit(code=HEAL_TOKEN_MISS_EXIT)
+        if cross_project and resolved.matched_by == "harness_store":
+            sys.stderr.write("scope=cross-project\n")
         sys.stdout.write(_json.dumps(asdict(resolved_entry)))
         sys.stdout.write("\n")
         return
 
     try:
         entry = resolve_from_harness_store(
-            token, registry_path=Path(registry) if registry else None
+            token,
+            registry_path=Path(registry) if registry else None,
+            scope_cwd=os.getcwd(),
+            cross_project=cross_project,
         )
     except AgentResolutionError as exc:
         sys.stderr.write(f"{exc}\n")
         raise typer.Exit(code=HEAL_TOKEN_AMBIGUOUS_EXIT)
     if entry is None:
         raise typer.Exit(code=HEAL_TOKEN_MISS_EXIT)
+    if cross_project:
+        sys.stderr.write("scope=cross-project\n")
     sys.stdout.write(_json.dumps(asdict(entry)))
     sys.stdout.write("\n")
 

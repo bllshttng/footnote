@@ -5,6 +5,7 @@ agents gate !--notes
 agents gate !--probe
 agents gate !--record
 agents heal-token !--all-sources
+agents heal-token !--cross-project
 agents list !--provider
 agents mail hold-release !--poll-s
 agents mail send !--provider

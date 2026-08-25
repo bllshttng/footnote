@@ -229,6 +229,81 @@ def test_resume_cwd_override_wins_over_the_registrys_recorded_cwd() -> None:
     assert seen_cwd == ["/resolved/worktree/cwd"]
 
 
+def test_store_resume_threads_cross_project_and_replacement_cwd(tmp_path, monkeypatch):
+    """A pruned store session must resolve and launch in the explicit checkout."""
+    from types import SimpleNamespace
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="adopted",
+        harness="codex",
+        cwd="/deleted/worktree",
+        harness_session_id="ab12cdef-0000-0000-0000-000000000004",
+    )
+    seen: dict[str, object] = {}
+
+    def resolve(_entries, token, **kwargs):
+        seen.update(token=token, **kwargs)
+        return SimpleNamespace(entry=entry)
+
+    monkeypatch.setattr("fno.agents.registry.resolve_agent_across_sources", resolve)
+    replacement = str(tmp_path)
+    res = resume_logic(
+        name=entry.harness_session_id,
+        cross_project=True,
+        cwd_override=replacement,
+        print_command=True,
+        registry_loader=lambda: [],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda cwd: cwd == replacement,
+        execvp=_no_exec,
+    )
+
+    assert res.exit_code == 0
+    assert res.exec_cwd == replacement
+    assert seen == {
+        "token": entry.harness_session_id,
+        "scope_cwd": replacement,
+        "cross_project": True,
+    }
+
+
+def test_store_resume_missing_replacement_cwd_fails_before_claim_or_launch(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="adopted",
+        harness="codex",
+        cwd="/deleted/worktree",
+        harness_session_id="ab12cdef-0000-0000-0000-000000000005",
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.resolve_agent_across_sources",
+        lambda *_args, **_kwargs: SimpleNamespace(entry=entry),
+    )
+    calls: list[str] = []
+
+    res = resume_logic(
+        name=entry.harness_session_id,
+        cross_project=True,
+        cwd_override=str(tmp_path / "missing-checkout"),
+        registry_loader=lambda: [],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _cwd: False,
+        claim_fn=lambda _sid: calls.append("claim"),
+        execvp=lambda *_args: calls.append("exec"),
+    )
+
+    assert res.exit_code == 13
+    assert "no longer reachable" in res.stderr
+    assert calls == []
+
+
 def test_default_acquire_resume_attach_claim_refuses_a_second_writer(tmp_path) -> None:
     """code-review finding: the claim guard on the Rust delegation had no
     counterpart on this module's own standalone entrypoint

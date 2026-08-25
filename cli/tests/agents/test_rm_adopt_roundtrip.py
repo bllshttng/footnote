@@ -171,13 +171,27 @@ def test_rm_notice_labels_short_only_recovery_as_evidence_dependent():
     notice = rm_notice.resume_handle_notice("b", "claude", SHORT_ID)
     assert "best-effort" in notice
     assert "durable" in notice
-    assert "fno agents adopt 0a6e775f" in notice
+    assert "fno agents adopt 0a6e775f --cross-project" in notice
 
 
 def test_rm_notice_calls_the_full_uuid_the_recovery_handle():
     notice = rm_notice.resume_handle_notice("a", "claude", SESSION_ID)
     assert "full harness session UUID" in notice
-    assert f"fno agents adopt {SESSION_ID}" in notice
+    assert f"fno agents adopt {SESSION_ID} --cross-project" in notice
+
+
+def test_pruned_worktree_guidance_uses_full_id_and_existing_checkout():
+    guide = (
+        Path(__file__).resolve().parents[3]
+        / "docs"
+        / "guides"
+        / "fno-agents-stop-rm-reconcile.md"
+    ).read_text(encoding="utf-8")
+    assert (
+        "fno agents resume <full-harness-session-id> --cross-project "
+        "--cwd <existing-checkout>" in guide
+    )
+    assert "fno agents adopt <full-harness-session-id> --cross-project" in guide
 
 
 # --------------------------------------------------------------------------

@@ -420,7 +420,7 @@ def confine_store_hits(
     raise AgentResolutionError(
         f"token {token!r} matches no session in this project; "
         f"{reason}: {cands}. "
-        f"Disambiguate with the full session id in scope, or pass cross-project.",
+        f"Disambiguate with the full session id in scope, or pass --cross-project.",
         ambiguous=True,
     )
 
