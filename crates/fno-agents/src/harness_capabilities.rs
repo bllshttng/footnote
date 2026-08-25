@@ -787,8 +787,12 @@ mod tests {
                 "model_switch_strategy",
             ),
             (
-                "kind = \"unsupported\"\ntokens = []",
-                "kind = \"unsupported\"\ntokens = [\"/model {model}\"]",
+                // Header-anchored: bare `kind = "unsupported"\ntokens = []`
+                // also occurs in codex's resume_strategy forms (interactive_attach),
+                // and a first-occurrence replacen would error naming
+                // resume_strategy instead of the field under test.
+                "[harness.gemini.model_switch_strategy]\nkind = \"unsupported\"\ntokens = []",
+                "[harness.gemini.model_switch_strategy]\nkind = \"unsupported\"\ntokens = [\"/model {model}\"]",
                 "model_switch_strategy",
             ),
             (
