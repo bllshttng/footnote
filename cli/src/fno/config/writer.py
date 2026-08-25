@@ -582,6 +582,14 @@ def unset_config_value(
 
     default = _model_default(parts)
     store_parts = _storage_parts(parts)
+    # A key that resolves through the providers->accounts rename may still be
+    # stored under the pre-rename [providers] block; unset removes both
+    # spellings so the legacy copy cannot keep the value alive.
+    legacy_parts = (
+        ["providers"] + store_parts[1:]
+        if store_parts and store_parts[0] == "accounts"
+        else None
+    )
     target = _target_path(scope, repo_root)
     real_target = Path(os.path.realpath(target)) if target.is_symlink() else target
 
@@ -596,6 +604,11 @@ def unset_config_value(
 
     def _mutate(existing: dict[str, Any]) -> dict[str, Any]:
         new, was, present = _deep_unset(existing, store_parts)
+        if legacy_parts is not None:
+            new, legacy_was, legacy_present = _deep_unset(new, legacy_parts)
+            if legacy_present:
+                present = True
+                was = was if was is not None else legacy_was
         captured["was"] = was
         captured["present"] = present
         return new
@@ -650,4 +663,12 @@ def read_scope_value(
         ) from exc
     if not isinstance(data, dict):
         return None
-    return _get_nested(data, _storage_parts(key.split(".")))
+    stored = _storage_parts(key.split("."))
+    value = _get_nested(data, stored)
+    if value is not None:
+        return value
+    # Same rename fallback as unset: a value may still live under the
+    # pre-rename [providers] block.
+    if stored and stored[0] == "accounts":
+        return _get_nested(data, ["providers"] + stored[1:])
+    return None

@@ -876,6 +876,24 @@ def set_cmd(
             k, _, v = tok.partition("=")
             items.append((k, v))
 
+    # A dangling accounts.active bricks every loader call (and every accounts
+    # verb loads first), so the pointer is validated against declared record
+    # ids here rather than repaired after the fact.
+    for k, v in items:
+        normalized = k[len("config."):] if k.startswith("config.") else k
+        if normalized in ("accounts.active", "providers.active"):
+            from fno.adapters.providers.loader import known_account_ids
+
+            ids = known_account_ids()
+            if v not in ids:
+                known = ", ".join(sorted(ids)) if ids else "(no records configured)"
+                typer.echo(
+                    f"error: account {v!r} is not a configured record id "
+                    f"(known: {known}); add the record first",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=1)
+
     try:
         results = set_config_values(items, scope=scope)
     except ConfigSetError as exc:

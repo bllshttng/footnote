@@ -440,11 +440,18 @@ def _overlay_records(accum: list[Any], incoming: list[Any]) -> list[Any]:
     Combos and agent pins merge across files, so records must too - a local
     records list that REPLACES the global one breaks every global combo and
     pin referencing a global record id the moment a project adds its own.
+    Duplicate ids WITHIN one file are preserved: the downstream
+    duplicate_record_ids validation must still see them.
     """
     out = list(accum)
+    seen: set[str] = set()
     for record in incoming:
         rid = record.get("id") if isinstance(record, dict) else None
         if isinstance(rid, str):
+            if rid in seen:
+                out.append(record)
+                continue
+            seen.add(rid)
             out = [
                 r
                 for r in out
@@ -452,6 +459,22 @@ def _overlay_records(accum: list[Any], incoming: list[Any]) -> list[Any]:
             ]
         out.append(record)
     return out
+
+
+def known_account_ids(repo_root: Path | None = None) -> set[str]:
+    """Every record id declared across the config layers (best effort).
+
+    For cross-record validation at write time (``config set accounts.active
+    <id>``): a pointer that names no record bricks every loader call, so the
+    set path refuses it up front instead.
+    """
+    ids: set[str] = set()
+    for path in _provider_candidates(repo_root):
+        block = _extract_accounts_block(_read_parsed(path)) or {}
+        for record in block.get("records") or []:
+            if isinstance(record, dict) and isinstance(record.get("id"), str):
+                ids.add(record["id"])
+    return ids
 
 
 def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
@@ -613,7 +636,8 @@ def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
             found_any = True
             for k, v in block.items():
                 if k == "quota" and isinstance(v, dict):
-                    merged_quota = dict(merged_block.get("quota") or {})
+                    prior = merged_block.get("quota")
+                    merged_quota = dict(prior) if isinstance(prior, dict) else {}
                     merged_quota.update(v)
                     merged_block["quota"] = merged_quota
                 elif k == "records" and isinstance(v, list):
