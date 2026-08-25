@@ -289,6 +289,15 @@ def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | 
                 pass
 
 
+def _snapshot_pids(ps_output: str) -> set[int]:
+    pids: set[int] = set()
+    for line in ps_output.splitlines():
+        fields = line.split(None, 1)
+        if fields and fields[0].isdigit():
+            pids.add(int(fields[0]))
+    return pids
+
+
 def _roster_count() -> tuple[int | None, str | None]:
     result = subprocess.run(
         [_fno_binary(), "agents", "list", "--status", "live", "--json"],
@@ -450,6 +459,12 @@ def footprint_command(
     if shared_serve_error is not None:
         _emit_failure(
             f"footprint unavailable: {shared_serve_error}",
+            json_output=json_output,
+        )
+        raise typer.Exit(code=4)
+    if (root_pids | shared_serve_pids) - _snapshot_pids(ps_output):
+        _emit_failure(
+            "footprint unavailable: discovered worker root missing from ps snapshot",
             json_output=json_output,
         )
         raise typer.Exit(code=4)

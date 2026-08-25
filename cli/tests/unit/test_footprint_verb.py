@@ -392,6 +392,33 @@ def test_ac6_edge_cause_only_seeds_live_detached_registry_root(monkeypatch) -> N
     assert payload["fleet_cpu_cores"] == pytest.approx(1.0)
 
 
+def test_ac6_edge_cause_only_refuses_root_missing_from_snapshot(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_root_pids",
+        lambda **_kwargs: ({999}, None),
+    )
+    monkeypatch.setattr(
+        doctor_footprint.subprocess,
+        "run",
+        _fake_runner(
+            """\
+            PID PPID ELAPSED %CPU RSS COMMAND
+            100 1 01:00:00 20.0 1024 fno-agents-worker --run
+            """,
+            [],
+            [],
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+
+    assert result.exit_code == 4
+    assert "missing from ps snapshot" in result.stdout
+
+
 def test_ac7_edge_fleet_cpu_threshold_includes_short_lived_descendant(monkeypatch) -> None:
     from fno import doctor_footprint
 

@@ -860,6 +860,7 @@ def _footprint_cause_evidence() -> Optional[str]:
             _live_root_pids,
             _live_shared_serve_root_pids,
             _read_ps,
+            _snapshot_pids,
         )
         from fno.footprint import parse_footprint
 
@@ -872,6 +873,8 @@ def _footprint_cause_evidence() -> Optional[str]:
             return None
         shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids()
         if shared_serve_error is not None:
+            return None
+        if (root_pids | shared_serve_pids) - _snapshot_pids(ps_output):
             return None
         reading = parse_footprint(
             ps_output,
