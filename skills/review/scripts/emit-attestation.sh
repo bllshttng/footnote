@@ -142,6 +142,35 @@ if [[ "$upstream" == */* && "${upstream#*/}" != "$base" && "$ahead" == "0" ]]; t
   branch="${upstream#*/}"
 fi
 
+# The diff under review, recorded with the event: its merge-base, its head, and
+# the added+deleted line count across it. Without these a clean review and a
+# review of NOTHING are byte-identical downstream: a session resolving its
+# target from a checkout sitting on the base branch reads a zero-line diff,
+# reports clean, and mints a pass no reader can distinguish from a real one.
+# The base is the resolved base BRANCH above, not the upstream - a reviewer
+# worktree tracks the PR branch itself, and diffing against that would read
+# zero lines for every legitimate reviewer at the PR tip.
+reviewed_base_sha="$(git merge-base HEAD "origin/${base}" 2>/dev/null || git merge-base HEAD "${base}" 2>/dev/null || true)"
+if [[ -z "$reviewed_base_sha" ]]; then
+  echo "emit-attestation: cannot resolve the base branch '${base}' to a merge-base; the diff under review is unmeasurable, so no event emitted" >&2
+  exit 1
+fi
+reviewed_head_sha="$head_sha"
+# Files, not lines, decide whether there is anything to read: numstat prints
+# "-" for binary files and 0 for pure renames and empty files, so a LINES-only
+# count reads a real binary-only diff as empty and refuses the one review that
+# exists. The line count stays in the record (0 is an honest measurement of a
+# binary diff); the refusal fires only when the diff changed no file at all.
+reviewed_file_count="$(git diff --name-only "${reviewed_base_sha}..HEAD" 2>/dev/null | command grep -c . || true)"
+reviewed_line_count="$(git diff --numstat "${reviewed_base_sha}..HEAD" 2>/dev/null | awk '{ add += $1; del += $2 } END { print add + del + 0 }')"
+if (( reviewed_file_count == 0 )); then
+  echo "emit-attestation: the diff under review is empty (no changed files, base ${reviewed_base_sha} .. HEAD ${reviewed_head_sha} on branch ${branch})." >&2
+  echo "A review with nothing to read is not a pass; no event emitted." >&2
+  echo "If you are reviewing a worktree from the canonical checkout, hand the review its" >&2
+  echo "target explicitly: run from the worktree path, or pass the PR number to the review verb." >&2
+  exit 1
+fi
+
 # Record the attesting ACTOR alongside what was certified (x-27c5): without a
 # session, an author attesting its own diff is indistinguishable from an
 # independent reviewer, which clears config.review.reviewers with no trace.
@@ -192,15 +221,25 @@ fi
 # assert-a-positive-marker trap this script exists to keep out of the record, one
 # level down. The refusal is a finding, so it is written as one.
 #
-# Host match is exact-or-subdomain so notanthropic.com stays foreign. This
-# predicate is duplicated from the hook because a skill script may not source
-# outside its own directory; tests/hooks/test_attest_model.sh drives both over
-# one env matrix and fails when they disagree.
+# Host match is exact-or-subdomain so notanthropic.com stays foreign. The RULE
+# is hooks/attest-model.sh's and this copy may not extend it: a skill script
+# cannot source outside its own directory, so the rule lives in two bodies held
+# equal by tests/hooks/test_attest_model.sh, which drives both over one env
+# matrix (aliases, case, padding, userinfo hosts included) and fails when they
+# disagree. Change the rule there first, then mirror it here, or the matrix
+# goes red.
 drift_host="${ANTHROPIC_BASE_URL:-}"
 drift_host="${drift_host#*://}"; drift_host="${drift_host%%/*}"
 drift_host="${drift_host##*@}"; drift_host="${drift_host%%:*}"
-case "$model" in
-  ""|claude*) ;;
+drift_host="$(printf '%s' "$drift_host" | tr '[:upper:]' '[:lower:]')"
+# Judge a trimmed, case-folded copy like the hook does (Python's
+# is_anthropic_model lowercases, and "Claude-Haiku-4-5" is coherent); store the
+# original verbatim when the claim stands.
+claim="${model#"${model%%[![:space:]]*}"}"
+claim="${claim%"${claim##*[![:space:]]}"}"
+claim="$(printf '%s' "$claim" | tr '[:upper:]' '[:lower:]')"
+case "$claim" in
+  ""|claude-*|opus|sonnet|haiku|fable) ;;
   *)
     if [[ -z "$drift_host" || "$drift_host" == "anthropic.com" || "$drift_host" == *.anthropic.com ]]; then
       model="unobserved"
@@ -208,28 +247,16 @@ case "$model" in
     ;;
 esac
 
-# Record the harness session of the EMITTING PROCESS. This is the only field
-# that can tell an author-attested review from an independent one: session_id
-# (above) is grepped from the worktree manifest, so it equals manifest.session_id
-# for every emitter in this worktree - including a reviewer who is genuinely not
-# the author - and a join on it returns 'self' 100% of the time by construction.
-# The live process env is what makes this field vary with who emitted.
-#
-# Read on the HARNESS_SESSION_MARKERS precedence (cli/src/fno/harness_identity.py)
-# - the same list the owned-identity resolver stamps as manifest.harness_session_id
-# on the common path - so attester and author stay in one namespace. NEVER fall
-# back to the manifest: a fallback would restore the tautology under a new name.
-# Empty when no marker is set, never guessed. Narrow caveat: init's bash fail-open
-# prefers TARGET_TRANSCRIPT_ID for a claude driver session, which this loop does
-# not mirror; on a stale fno where owned-identity did not run, such a session's
-# self-attestation can read as other_session rather than self_attested.
-attester_session_id=""
-for _marker in CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID; do
-  if [[ "${!_marker:-}" == *[![:space:]]* ]]; then
-    attester_session_id="${!_marker}"
-    break
-  fi
-done
+# The harness session of the EMITTING PROCESS (attester_session_id) is NOT read
+# here. A script-side read of its own env is one `VAR=<other-session>` assignment
+# away from writing the attestation under any session id, refreshing that
+# session's stale verdict onto a head it never saw. `fno doctor event emit`
+# stamps the attester itself from resolve_attester_identity(), which corroborates
+# the env value against the process ancestry and refuses the override shape, and
+# it stamps attester_witness (process | env_only) saying whether the ancestry
+# corroborated. This script therefore passes no attester of its own; a supplied
+# one that disagrees with the resolved identity is refused by the emit
+# chokepoint, never silently dropped.
 
 # Build the data object with jq so a reviewer/verdict value can never break the
 # JSON (codex peer review P2). fno doctor event emit then validates envelope + required
@@ -237,10 +264,13 @@ done
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
   --arg session_id "$session_id" --arg harness "$harness" \
   --arg model "$model" --arg provider "$provider" \
-  --arg attester_session_id "$attester_session_id" \
   --arg reviewer_context "$reviewer_context" \
   --arg branch "$branch" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id,reviewer_context:$reviewer_context,branch:$branch}')"
+  --arg reviewed_base_sha "$reviewed_base_sha" \
+  --arg reviewed_head_sha "$reviewed_head_sha" \
+  --argjson reviewed_line_count "$reviewed_line_count" \
+  --argjson reviewed_file_count "$reviewed_file_count" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count}')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
@@ -271,4 +301,4 @@ for _b in "${branch:-}" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   "${FNO:-fno}" do pr review-hold release --branch "$_b" >/dev/null 2>&1 || true
 done
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count files=$reviewed_file_count" >&2

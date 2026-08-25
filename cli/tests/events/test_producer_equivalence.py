@@ -55,14 +55,33 @@ def _producer_names() -> list[str]:
 def _temp_git_repo(tmp_path: Path) -> Path:
     sub = tmp_path / "repo"
     sub.mkdir()
+    # The producer measures the diff under review and refuses an EMPTY one (a
+    # review of nothing is not a pass), so the fixture carries a base commit
+    # on origin/main plus a feature commit with a real change - without the
+    # second commit every emit below hits the empty-diff refusal.
     for args in (
         ["git", "init", "-q"],
         ["git", "config", "user.email", "t@t.t"],
         ["git", "config", "user.name", "t"],
-        ["git", "commit", "-q", "--allow-empty", "-m", "init"],
     ):
         subprocess.run(args, cwd=sub, check=True)
+    (sub / "a.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=sub, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=sub, check=True)
+    base = _head_of(sub)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", base], cwd=sub, check=True
+    )
+    (sub / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=sub, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature"], cwd=sub, check=True)
     return sub
+
+
+def _head_of(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
 
 
 def _head(repo: Path) -> str:

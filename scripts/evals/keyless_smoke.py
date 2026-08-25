@@ -110,6 +110,7 @@ case "$*" in
   *headRefName*) printf '{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"%s"}\\n' "$KEYLESS_HEAD_SHA" ;;
   *checks*) echo '[{"name":"keyless-smoke","state":"SUCCESS","bucket":"pass"}]' ;;
   *reviews*) echo '{"reviews":[],"comments":[]}' ;;
+  *pulls*comments*) echo '[]' ;;
   *) printf '%s\\n' "$KEYLESS_HEAD_SHA" ;;
 esac
 """,

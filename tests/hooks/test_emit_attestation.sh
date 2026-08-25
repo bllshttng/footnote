@@ -35,10 +35,24 @@ printf '#!/usr/bin/env bash\nif [[ "$1" == "doctor" && "$2" == "event" && "$3" =
   "$TMP" > "$TMP/fno-stub"
 chmod +x "$TMP/fno-stub"
 
-# A scratch repo: the emitter refuses to run outside git (it head-pins).
+# A scratch repo: the emitter refuses to run outside git (it head-pins). The
+# fixture carries a REAL code diff (base commit A on origin/main, feature
+# commit B on the branch) because the emitter measures the diff under review
+# and refuses a zero-line one - an empty-commit fixture would trip that
+# refusal on every emit below.
 REPO="$TMP/repo"
 git init -q -b feature/x-e601 "$REPO"
-git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+git -C "$REPO" config user.email t@t.t
+git -C "$REPO" config user.name t
+echo one > "$REPO/a.txt"
+git -C "$REPO" add a.txt
+git -C "$REPO" commit -qm "base"
+BASE_SHA="$(git -C "$REPO" rev-parse HEAD)"
+git -C "$REPO" update-ref refs/remotes/origin/main "$BASE_SHA"
+echo two >> "$REPO/a.txt"
+echo body > "$REPO/b.txt"
+git -C "$REPO" add a.txt b.txt
+git -C "$REPO" commit -qm "feature"
 HEAD_SHA="$(git -C "$REPO" rev-parse HEAD)"
 
 emit() { # runs the emitter inside the scratch repo; prints nothing
@@ -119,7 +133,7 @@ got="$(stored '.branch')"
 #    upstream names the BASE. The LOCAL name is the PR branch and must win,
 #    or every pre-push emit mis-scopes to main and loses the carry.
 git -C "$REPO" checkout -q feature/x-e601
-git -C "$REPO" update-ref refs/remotes/origin/main "$HEAD_SHA"
+git -C "$REPO" update-ref refs/remotes/origin/main "$BASE_SHA"
 git -C "$REPO" branch --set-upstream-to=origin/main feature/x-e601 >/dev/null 2>&1
 rm -f "$TMP/last-emit.txt"
 emit
@@ -133,7 +147,7 @@ got="$(stored '.branch')"
 #    `main` comparison recorded branch=develop here - scoping the author's
 #    feature-branch attestation to a base branch no PR ever carries. The base
 #    must resolve through refs/remotes/origin/HEAD, and the local name wins.
-git -C "$REPO" update-ref refs/remotes/origin/develop "$HEAD_SHA"
+git -C "$REPO" update-ref refs/remotes/origin/develop "$BASE_SHA"
 git -C "$REPO" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/develop
 git -C "$REPO" branch --set-upstream-to=origin/develop feature/x-e601 >/dev/null 2>&1
 rm -f "$TMP/last-emit.txt"
@@ -210,6 +224,90 @@ grep -q "do pr review-hold release --branch feature/x-e601" "$ALL_CALLS" \
 grep -q -- "--holder" "$ALL_CALLS" \
   && fail "the release passed a holder it cannot reconstruct" \
   || pass "the release names no holder"
+
+# 11. The payload records the diff under review: base (merge-base), head, and
+#     a line count greater than 0. This is the positive control for the
+#     refusal below - a refusal alone cannot separate "zero lines measured"
+#     from "the emitter never ran".
+git -C "$REPO" checkout -q feature/x-e601
+rm -f "$TMP/last-emit.txt"
+emit
+LIVE_SHA="$(git -C "$REPO" rev-parse HEAD)"
+got="$(stored '.reviewed_base_sha')"
+[[ "$got" == "$BASE_SHA" ]] && pass "payload records reviewed_base_sha" \
+  || fail "reviewed_base_sha: want ${BASE_SHA:0:8}, got '${got:0:8}'"
+got="$(stored '.reviewed_head_sha')"
+[[ "$got" == "$LIVE_SHA" ]] && pass "payload records reviewed_head_sha" \
+  || fail "reviewed_head_sha: want ${LIVE_SHA:0:8}, got '${got:0:8}'"
+got="$(stored '.reviewed_line_count')"
+[[ "$got" =~ ^[0-9]+$ && "$got" -gt 0 ]] && pass "payload records a positive reviewed_line_count ($got)" \
+  || fail "reviewed_line_count: want a positive integer, got '$got'"
+got="$(stored '.reviewed_file_count')"
+[[ "$got" =~ ^[0-9]+$ && "$got" -gt 0 ]] && pass "payload records the changed-file count ($got)" \
+  || fail "reviewed_file_count: want a positive integer, got '$got'"
+
+# 12. An EMPTY diff refuses: a checkout sitting AT the base (HEAD equals the
+#     merge-base, no changed files) has read nothing, and a clean review of
+#     nothing must not become a pass. The refusal names base and head, and no
+#     event is written. Lines never decide this - case 12b shows why.
+git -C "$REPO" checkout -q -b zero/at-base origin/main
+rm -f "$TMP/last-emit.txt"
+RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-stub" bash "$EMITTER" code-review pass 2>&1 >/dev/null)"
+RECEIPT_RC=$?
+[[ $RECEIPT_RC -ne 0 ]] && pass "empty diff refuses to emit" \
+  || fail "empty diff emitted anyway (exit $RECEIPT_RC)"
+[[ ! -f "$TMP/last-emit.txt" ]] && pass "empty diff writes no event" \
+  || fail "empty diff wrote an event"
+case "$RECEIPT" in
+  *"the diff under review is empty (no changed files"*)
+    pass "refusal names the empty shape" ;;
+  *) fail "refusal lacks the reason: $RECEIPT" ;;
+esac
+case "$RECEIPT" in
+  *"$BASE_SHA"*|*"${BASE_SHA:0:8}"*)
+    pass "refusal names the base sha" ;;
+  *) fail "refusal lacks the base sha: $RECEIPT" ;;
+esac
+
+# 12b. A binary-only diff is a real review: numstat prints "-" for binary
+#      files, so the LINE count is an honest 0 while a file genuinely changed.
+#      The emit must attest with lines=0 files=1 - a lines-only refusal would
+#      close the sanctioned producer path for every images/fonts PR.
+git -C "$REPO" checkout -q -b binary/only origin/main
+printf 'PNG\x00\x89binary-bytes-no-text\x00' > "$REPO/asset.bin"
+git -C "$REPO" add asset.bin
+git -C "$REPO" commit -qm "binary asset"
+rm -f "$TMP/last-emit.txt"
+emit_rc=0
+(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-stub" bash "$EMITTER" code-review pass) >/dev/null 2>&1 || emit_rc=$?
+[[ $emit_rc -eq 0 ]] && pass "binary-only diff attests" \
+  || fail "binary-only diff refused (the producer path closed)"
+[[ -f "$TMP/last-emit.txt" ]] && pass "binary-only diff writes the event" \
+  || fail "binary-only diff wrote no event"
+if [[ -f "$TMP/last-emit.txt" ]]; then
+  got_lines="$(stored '.reviewed_line_count')"
+  got_files="$(stored '.reviewed_file_count')"
+  [[ "$got_lines" == "0" ]] && pass "binary-only records lines=0 honestly" \
+    || fail "binary-only lines: want 0, got '$got_lines'"
+  [[ "$got_files" == "1" ]] && pass "binary-only records files=1" \
+    || fail "binary-only files: want 1, got '$got_files'"
+fi
+
+# 13. An unmeasurable diff also refuses: with no origin/<base> and no local
+#     <base> to merge against, the event cannot say what was read, and an
+#     attestation that cannot name its diff must not be minted.
+git -C "$REPO" checkout -q feature/x-e601
+git -C "$REPO" update-ref -d refs/remotes/origin/main
+rm -f "$TMP/last-emit.txt"
+RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-stub" bash "$EMITTER" code-review pass 2>&1 >/dev/null)"
+RECEIPT_RC=$?
+[[ $RECEIPT_RC -ne 0 ]] && pass "unresolvable base refuses to emit" \
+  || fail "unresolvable base emitted anyway (exit $RECEIPT_RC)"
+[[ ! -f "$TMP/last-emit.txt" ]] && pass "unresolvable base writes no event" \
+  || fail "unresolvable base wrote an event"
 
 echo ""
 echo "emit-attestation: $PASS passed, $FAIL failed"

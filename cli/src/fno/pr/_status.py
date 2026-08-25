@@ -493,6 +493,7 @@ def _ready_blockers(
     code_review_required: bool = False,
     mergeable: Optional[str] = None,
     counts: Optional[dict] = None,
+    repo: str = "",
 ) -> list[str]:
     """Which conjuncts of ``ready`` fail, in a stable order.
 
@@ -581,10 +582,20 @@ def _ready_blockers(
         if cov_word == "unknown":
             blockers.append("review_coverage_unknown")
         else:
-            from fno.pr._coverage_gate import covered_conjuncts
+            from fno.pr._coverage_gate import _corroboration_refusal, covered_conjuncts
 
             ok, failed = covered_conjuncts(coverage, head, code_review_required)
-            if not ok:
+            # The corroboration policy is the merge gate's own refusal, read
+            # through the same helper - one copy, never a restatement - so
+            # `ready` cannot pass a row `fno do pr merge` refuses on the
+            # authorship conjunct either. On the policy-rewritten shape
+            # (0 counted, self-attestation preserved) it is the truer
+            # blocker, exactly as the merge verb ranks it, because re-running
+            # your own review can never satisfy the policy.
+            corroboration = _corroboration_refusal(coverage, repo) if repo else None
+            if corroboration and (ok or failed == "uncovered"):
+                blockers.append("review_coverage_corroboration")
+            elif not ok:
                 blockers.append(f"review_coverage_{failed}")
     return blockers
 
@@ -813,6 +824,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # above - a merged/closed PR's mergeable field is stale and must not
         # hold a report that changes nothing.
         mergeable=None if is_terminal else pr_json.get("mergeable"),
+        repo=cwd or os.getcwd(),
         counts=counts,
     )
     if hold_reason:

@@ -1784,12 +1784,37 @@ pub fn bg_create(
     let incoherent = crate::model_env_scrub::incoherent_model_env(&|k| std::env::var(k).ok());
     // An overlay re-supplying a model var is a route: like Python's
     // route_settings_path_for branch, the route owns the settings slot, so
-    // this unrouted floor stands down rather than fight it.
-    let overlay_routes = extra_env
-        .iter()
-        .any(|(k, _)| crate::model_env_scrub::MODEL_ENV_KEYS.contains(k));
-    if !incoherent.is_empty() && !overlay_routes {
-        match crate::model_env_scrub::write_scrub_settings(&incoherent) {
+    // this unrouted floor stands down rather than fight it. The floor covers
+    // COHERENT inherited claims too (Python's bg_create does the same): the
+    // daemon fork keeps the launching shell's env, and an unrouted child on a
+    // model the shell happened to export is the same unselected-model defect.
+    // Python's rule, mirrored: the settings slot is owned when the overlay
+    // carries ROUTE PROVENANCE (a model var, the endpoint, or a credential -
+    // what route_settings_path_for writes a file for), so the unrouted floor
+    // stands down under it. Not "any overlay": the bg lane's only extra_env
+    // is the TARGET_NO_MERGE bookkeeping carrier, and standing down under it
+    // left the /target bg default lane unfloored (round 3 regression).
+    let overlay_routes = crate::model_env_scrub::overlay_is_route(extra_env);
+    // The floor stands down ENTIRELY under a route overlay, matching the gate
+    // it replaced: the route owns the settings slot, and flooring keys the
+    // route sets would fight it (the wrong-model defect in the other
+    // direction).
+    let mut floor = if overlay_routes {
+        Vec::new()
+    } else {
+        incoherent.clone()
+    };
+    if !overlay_routes {
+        for key in crate::model_env_scrub::unrouted_model_keys(&|k| std::env::var(k).ok()) {
+            if !floor.iter().any(|(fk, _)| *fk == key) {
+                if let Ok(value) = std::env::var(&key) {
+                    floor.push((key, value));
+                }
+            }
+        }
+    }
+    if !floor.is_empty() {
+        match crate::model_env_scrub::write_scrub_settings(&floor) {
             Ok(path) => {
                 let p = path.display().to_string();
                 argv.splice(4..4, ["--settings".to_string(), p]);

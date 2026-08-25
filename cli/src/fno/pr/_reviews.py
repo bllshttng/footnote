@@ -34,11 +34,6 @@ _KNOWN_REVIEW_VERDICTS = {"reviewed", "stale", "refused", "errored", "absent"}
 _KNOWN_COVERAGE_PRODUCERS = {"github_app", "local_attestation"}
 _KNOWN_REVIEW_STATES = {"reviewed", "unreviewed", "reviewer_refused"}
 
-# The optional-reviewer bots the x-d996 drain paragraph names. config.review.peers
-# (resolved below) extends this; config.review.required_bots is the separate GATE
-# (read by loop-check) and is out of scope here.
-_OPTIONAL_BOTS = ("gemini-code-assist", "chatgpt-codex-connector")
-
 # Emitted on any review-read failure. A distinct sentinel from an empty list `[]`
 # so "read failed" never reads as "nothing posted" (US4).
 _UNKNOWN = {
@@ -68,22 +63,26 @@ def _strip_bot(login: str) -> str:
 def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
     """The reviewer names that mark a review author as *optional*.
 
-    The single source of truth for the optional set: the hardcoded bots plus
-    `config.review.optional_apps` and every `config.review.peers` posting
-    identity (and the shared `peer_identity`). A config that can't be read
-    degrades to just the bots - the optional signal is advisory, so a missing
-    config never hard-fails.
+    The single source of truth for the optional set: the resolved
+    `config.review.optional_apps` (which DEFAULTS to the built-in two logins -
+    the same default the Rust gate's `resolved_optional_bots` falls back to, so
+    `fno do pr status` and the loop gate measure the same lanes on one PR) plus
+    every `config.review.peers` posting identity (and the shared
+    `peer_identity`). A config that can't be read degrades to that same default
+    - the optional signal is advisory, so a missing config never hard-fails.
     """
-    names = list(_OPTIONAL_BOTS)
+    from fno.config import DEFAULT_OPTIONAL_APPS
+
+    names: list[str] = []
     try:
         from pathlib import Path
 
-        from fno.config import load_settings_for_repo
+        from fno.config import load_settings_for_repo, resolved_optional_apps
 
         review = load_settings_for_repo(Path(cwd) if cwd else Path.cwd()).review
-        # optional_apps is the config's own honored-if-present optional-bot list;
-        # excluding it would hide a configured optional app's findings.
-        names.extend(review.optional_apps or [])
+        # optional_apps is the config's own honored-if-present optional-bot list
+        # (unset -> the built-in default; [] -> an explicit opt-out that wins).
+        names.extend(resolved_optional_apps(review))
         if review.peer_identity:
             names.append(review.peer_identity)
         for entry in review.peers or []:
@@ -92,8 +91,8 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
                 # authors. Only the explicit legacy posting carrier belongs in
                 # this login-matching set.
                 names.append(entry.get("identity") or "")
-    except Exception:  # unreadable/invalid config -> just the hardcoded bots
-        pass
+    except Exception:  # unreadable/invalid config -> the built-in default
+        names = list(DEFAULT_OPTIONAL_APPS)
     return [n for n in names if n]
 
 

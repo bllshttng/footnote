@@ -30,11 +30,14 @@ _PROTOCOL_DATA_STR_CAP = 500
 # already dual-writes for exactly this reason, and because x-3a3f moves a reader
 # to the global log and will need it. Named intent, not dead code.
 #
-# Small on purpose. Membership is earned by a cross-checkout reader, current or
-# named-and-coming. `review_coverage` needs no entry: loopcheck.rs emits it to
-# both logs itself, and a second writer here would double every row the merge
-# gate counts.
-GLOBAL_MIRROR_TYPES = frozenset({"review_attestation"})
+# `review_coverage` earns its entry for the HAND emit alone: loopcheck.rs
+# dual-writes its own rows natively and never passes through this mirror (so
+# nothing doubles), but a `fno doctor event emit -t review_coverage` from a
+# worktree whose journal is not linked to canonical previously reached one log
+# only, and a canonical merge reading the other never saw it. The mirror's
+# identity guard (skip when the project log IS the global log) keeps a
+# same-file emit from doubling.
+GLOBAL_MIRROR_TYPES = frozenset({"review_attestation", "review_coverage"})
 
 
 @cli.callback()
@@ -284,6 +287,48 @@ def push_parent(
     raise typer.Exit(code=0)
 
 
+def mirror_to_global_log(event: dict, resolved_events: Path, repo_root: Optional[Path]) -> None:
+    """Best-effort copy of a global-log event type to the machine-global journal.
+
+    One implementation for every producer of ``GLOBAL_MIRROR_TYPES`` rows: the
+    emit chokepoint and ``fno do pr attestation retract`` both append to a
+    project log, and a pass mirrored on emit but a retraction mirrored nowhere
+    leaves the revoked pass live for every global-log reader. The project log
+    is written wherever the producer runs (a worktree, for a review); the
+    global log is the one file every checkout stands in. Best-effort by
+    contract: the durable project append already succeeded, so a failure here
+    warns and never fails the producer.
+    """
+    try:
+        from fno.events import append_event
+        from fno.paths import global_events_json, repo_identity
+
+        global_events = global_events_json()
+        if global_events.resolve() != Path(resolved_events).resolve():
+            # Scope the row the way loopcheck scopes every coverage row it
+            # writes here (x-f43c). The global log is cross-project and this
+            # payload carries no repo of its own, so without it a reader can
+            # only match on `head_sha` - and a fork shares those. Stamped on
+            # the MIRRORED copy alone: the project log needs no scoping, and
+            # the row already appended must not change under it. Omitted,
+            # never null, when no remote resolves.
+            mirrored = dict(event)
+            # `resolve_repo_root()`-shaped root passed by the caller, not
+            # `Path.cwd()`. It honours FNO_REPO_ROOT, and an `--events`
+            # pointing into another checkout would otherwise stamp the row
+            # with the CWD's identity: a silently mis-scoped row, which is
+            # the one failure the scoping exists to prevent.
+            slug = repo_identity(repo_root) if repo_root else None
+            if slug:
+                mirrored["data"] = {**event.get("data", {}), "repo": slug}
+            append_event(mirrored, events_path=global_events)
+    except Exception as exc:  # noqa: BLE001 - never lose the project append
+        typer.echo(
+            f"warning: {event.get('type')} not mirrored to the global log: {exc}",
+            err=True,
+        )
+
+
 @cli.command()
 def emit(
     ctx: typer.Context,
@@ -393,6 +438,37 @@ def emit(
         typer.echo("error: --data must be a JSON object", err=True)
         raise typer.Exit(code=1)
 
+    if type_ == "review_attestation":
+        # THE ATTESTER IS STAMPED HERE, FROM THE EMITTING PROCESS. The caller
+        # gets no vote: a producer reading its own env is one `VAR=value`
+        # assignment away from writing the attestation under any session id,
+        # which refreshes that session's stale verdict onto code it never saw.
+        # resolve_attester_identity corroborates the env value against the
+        # process ancestry and raises on the override shape; a supplied --data
+        # value that disagrees with the resolved one is refused too, never
+        # silently dropped.
+        from fno.harness_identity import AttesterIdentityConflict, resolve_attester_identity
+
+        supplied = str(data_dict.get("attester_session_id") or "").strip()
+        try:
+            resolved_id, witness = resolve_attester_identity()
+        except AttesterIdentityConflict as exc:
+            typer.echo(
+                f"error: {exc}. No event emitted under an identity the caller overrode.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if supplied and supplied != resolved_id:
+            typer.echo(
+                f"error: attester_session_id supplied as '{supplied}' but this process "
+                f"resolves to '{resolved_id}'. Drop the field; the emitter stamps it. "
+                "No event emitted.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        data_dict["attester_session_id"] = resolved_id
+        data_dict["attester_witness"] = witness
+
     # Anchor default state + events paths to the repo root so `fno doctor event emit`
     # produces consistent results regardless of which subdirectory the user
     # invokes from. Gemini review on PR #270 caught the previous relative-path
@@ -476,33 +552,7 @@ def emit(
     # Best-effort: the durable project append above already succeeded, so a
     # failure here must not fail the emit and lose that record.
     if type_ in GLOBAL_MIRROR_TYPES:
-        try:
-            from fno.paths import global_events_json, repo_identity
-
-            global_events = global_events_json()
-            if global_events.resolve() != Path(resolved_events).resolve():
-                # Scope the row the way loopcheck scopes every coverage row it
-                # writes here (x-f43c). The global log is cross-project and this
-                # payload carries no repo of its own, so without it a reader can
-                # only match on `head_sha` - and a fork shares those. Stamped on
-                # the MIRRORED copy alone: the project log needs no scoping, and
-                # the row already appended above must not change under it.
-                # Omitted, never null, when no remote resolves.
-                mirrored = dict(event)
-                # `resolve_repo_root()`, the same root this emit already resolved
-                # above - not `Path.cwd()`. It honours FNO_REPO_ROOT, and a
-                # `--events` pointing into another checkout would otherwise stamp
-                # the row with the CWD's identity: a silently mis-scoped row,
-                # which is the one failure the scoping exists to prevent.
-                slug = repo_identity(repo_root) if repo_root else None
-                if slug:
-                    mirrored["data"] = {**event.get("data", {}), "repo": slug}
-                append_event(mirrored, events_path=global_events)
-        except Exception as exc:  # noqa: BLE001 - never lose the project append
-            typer.echo(
-                f"warning: {type_} not mirrored to the global log: {exc}",
-                err=True,
-            )
+        mirror_to_global_log(event, resolved_events, repo_root)
 
     # Push leg (x-dbaf): blocked + run_summary notify the parent when spawn
     # lineage exists. Fired AFTER the durable append so the events.jsonl record

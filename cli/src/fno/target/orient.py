@@ -432,8 +432,14 @@ def _required_bots(review: Any) -> List[str]:
 
 
 def _optional_bots(review: Any) -> List[str]:
-    """Honored-if-present reviewer logins (config.review.optional_apps)."""
-    return list(review.optional_apps)
+    """Honored-if-present reviewer logins (config.review.optional_apps).
+
+    The field is None until a config sets it, so ``resolved_optional_apps``
+    (which folds in the shared default) is the only safe read; ``list(None)``
+    crashes into the orienter's except branch on every stock install."""
+    from fno.config import resolved_optional_apps
+
+    return list(resolved_optional_apps(review))
 
 
 # The peers-derived requirement is synthesized by loop-check

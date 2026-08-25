@@ -643,6 +643,23 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
         # target. opencode stays bare for the same reason: its flag grammar is
         # unverified against its docs, and an appended guess is the codex trap
         # in a new coat. agy has no native verb, so it takes the fno do review.
+        #
+        # `--comment` is kept though a measured run ignored it, and the
+        # measurement names where the loss lives so nobody re-derives it
+        # (2026-08-20, PR 994, re-verified 2026-08-25 from the fork's
+        # transcript): the flag survives every transport - the rendered string
+        # carries it, the Skill tool_use input carries
+        # args="high --comment --fix" verbatim, and the forked skill's own
+        # opening prompt contains the expanded sections "The `--comment` flag
+        # was passed" and "The `--fix` flag was passed". What failed is inside
+        # the harness skill's execution: the fork closed with "No `--comment`
+        # or `--fix` flag was indicated" - contradicting its own prompt - and
+        # behaved per the wrong belief (no comments posted). No fno-side layer
+        # drops the flag, so no fno code can fix this; the invocation keeps
+        # asking for it because the flag works whenever the harness honors its
+        # own expansion, and the operator-typed path is unaffected. The
+        # one-line symptom to watch for in a worker's report is the fork
+        # quoting the flag as not indicated.
         invocations={
             "claude": "/code-review <level> --comment",
             "codex": "/review",
@@ -801,6 +818,33 @@ class ApprovalsBlock(BaseModel):
     authorized_principals: dict[str, list[str]] = Field(default_factory=dict)
 
 
+#: The optional-reviewer logins an UNSET `review.optional_apps` resolves to.
+#: One default, read by both sides that measure optional lanes - Python
+#: (`fno.pr._reviews.optional_reviewer_names`) and the Rust gate
+#: (`resolved_optional_bots`) - so `fno do pr status` and the loop gate cannot
+#: measure different lanes on one PR, which is what a remedy printed by one and
+#: refused by the other looked like. Parity is pinned against the shared golden
+#: file cli/tests/config/optional_apps_default.json.
+DEFAULT_OPTIONAL_APPS: tuple[str, ...] = ("gemini-code-assist", "chatgpt-codex-connector")
+
+
+def resolved_optional_apps(review: "ReviewBlock") -> list[str]:
+    """The effective optional-login list: unset resolves to the built-in
+    default, an explicit ``[]`` is a real opt-out, and a non-empty list
+    EXTENDS the default (a partial list named extra honored logins since
+    before the default existed; dropping a built-in from it would silently
+    stop counting that login's blocking findings)."""
+    if review.optional_apps is None:
+        return list(DEFAULT_OPTIONAL_APPS)
+    if not review.optional_apps:
+        return []
+    resolved = list(DEFAULT_OPTIONAL_APPS)
+    for login in review.optional_apps:
+        if login not in resolved:
+            resolved.append(login)
+    return resolved
+
+
 class ReviewBlock(BaseModel):
     """External-review gate settings (nested under 'config.review').
 
@@ -849,7 +893,12 @@ class ReviewBlock(BaseModel):
     # Reviewer logins honored-if-present but NOT required (x-4baa): the gate
     # never waits for them (their absence never blocks - kills the App-bot
     # usage-limit wedge), but a blocking finding from one still holds the gate.
-    optional_apps: list[str] = Field(default_factory=list)
+    # None (unset) resolves to DEFAULT_OPTIONAL_APPS via resolved_optional_apps;
+    # an explicit [] is a real opt-out and wins over the default; a non-empty
+    # list EXTENDS the default rather than replacing it. The RAW field
+    # stays None-vs-list because truthiness of it doubles as the "is a review
+    # lane configured" probe in the merge path, which the default must not flip.
+    optional_apps: Optional[list[str]] = None
     # Per-login bot-review nudge overrides, as `[review.nudge.<login>]` tables
     # ({review_handle, wait_minutes, ceiling, enabled}). Consumed by the Rust
     # stop gate (loop-check), which resolves it against its built-in bot
@@ -882,6 +931,12 @@ class ReviewBlock(BaseModel):
     # documented escape hatch. Read by the stop gate (loopcheck.rs) and mirrored
     # into the merge primitive so the two agree.
     self_review_required: bool = True
+    # When true, a PR whose only coverage is the author's own (self_attested)
+    # local attestation reads as uncovered; a second session's attestation or a
+    # GitHub App review satisfies it. DEFAULT FALSE so no existing install
+    # changes behavior - flip it only with the doctor's self-attestation report
+    # in hand.
+    require_corroboration: bool = False
     # How long a registered review hold (`review:branch:<branch>`, taken where a
     # review is DISPATCHED) protects a PR from a merge before it ages out. A
     # review is unbounded, so this is a wedge bound rather than an estimate:
@@ -946,10 +1001,11 @@ class ReviewBlock(BaseModel):
         A bare string (`optional_apps: chatgpt-codex-connector`) coerces to a
         one-item list. Unlike the required gate, degrading a malformed optional
         list to [] is safe: it only drops honored-if-present reviewers, never
-        weakens a REQUIRED gate.
+        weakens a REQUIRED gate. `None` stays None: it means the key was never
+        set, which resolves to the built-in default rather than to empty.
         """
         if v is None:
-            return []
+            return None
         if isinstance(v, list):
             return v
         # A scalar login coerces to a one-item list (parity with the Rust text

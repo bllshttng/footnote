@@ -167,7 +167,13 @@ def test_the_mirrored_copy_is_repo_scoped_and_the_project_copy_is_not(
 
 def test_the_mirror_set_is_small_and_named():
     # Membership is earned by having a cross-checkout reader. review_coverage
-    # is absent on purpose: loopcheck.rs emits it to both logs itself, and a
-    # second writer here would double every row the merge gate counts.
+    # earned its place (the coverage reader answers from whichever log holds
+    # the row, so a row emitted through the Python chokepoint must reach the
+    # global journal like the Rust loopcheck's own dual-write); no other type
+    # has a cross-checkout reader, and an unnamed member doubles rows nobody
+    # reads twice.
     assert "review_attestation" in GLOBAL_MIRROR_TYPES
-    assert "review_coverage" not in GLOBAL_MIRROR_TYPES
+    assert "review_coverage" in GLOBAL_MIRROR_TYPES
+    assert GLOBAL_MIRROR_TYPES == frozenset(
+        {"review_attestation", "review_coverage"}
+    )

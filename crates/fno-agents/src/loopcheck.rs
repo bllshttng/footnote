@@ -295,6 +295,12 @@ pub(crate) struct Settings {
     /// absent, normalized to true (the obligation defaults ON); `false` is the
     /// documented escape hatch.
     self_review_required: Option<bool>,
+    /// config.review.require_corroboration (default false): when true, a PR
+    /// whose only coverage is the author's own (self_attested) local
+    /// attestation reads as uncovered. Recorded policy, not a proof upgrade:
+    /// an other_session attestation is still not "independent", but it is a
+    /// SECOND session, which is what this key demands.
+    require_corroboration: Option<bool>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -723,6 +729,34 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         }
         if let Some(v) = review.get("reviewers") {
             s.reviewers = value_as_reviewers(v);
+        }
+        if let Some(v) = review.get("require_corroboration") {
+            // String spellings parse the way pydantic's lax bool coerces them
+            // ("true"/"false"/"yes"/"no"/"on"/"off"/"1"/"0"), so the two gates
+            // cannot disagree on a config that loads at all. Anything else
+            // stays None -> false here; the Python config loader rejects it,
+            // so no config can load green on one side and parse false on the
+            // other.
+            s.require_corroboration = v
+                .as_bool()
+                .or_else(|| {
+                    v.as_integer().and_then(|i| match i {
+                        1 => Some(true),
+                        0 => Some(false),
+                        _ => None,
+                    })
+                })
+                .or_else(|| {
+                    v.as_str()
+                        // pydantic's lax bool spellings in full, so one config
+                        // cannot load true on the Python side and parse false
+                        // here (round 2: "t"/"y" and the bare integers).
+                        .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                            "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
+                            "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
+                            _ => None,
+                        })
+                });
         }
         if let Some(v) = review.get("self_review_required") {
             // A malformed value stays None -> normalized to true (obligation on,
@@ -2244,6 +2278,12 @@ pub fn unattested_reviewers_scan(
         if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
             continue;
         }
+        // The SAME zero-evidence predicate the coverage axis uses: a review
+        // of nothing must not satisfy the config.review.reviewers gate either,
+        // which is the surface that floors the self-review obligation.
+        if zero_evidence_attestation(&val) {
+            continue;
+        }
         // The SAME predicate the coverage axis uses, not a second head-equality
         // rule beside it. Leaving this one a bare equality would have made the
         // softening decorative: this is the scan that satisfies
@@ -2400,6 +2440,7 @@ fn read_pr_info(
     no_external: bool,
     required_bots: &[String],
     optional_bots: &[String],
+    optional_lane_configured: bool,
     external_reviewers: &[String],
     reviewers: &[String],
     nudge_configs: &[NudgeConfig],
@@ -2410,6 +2451,7 @@ fn read_pr_info(
     author_session: Option<&str>,
     pr_selector: Option<&str>,
     prefetched_pr_json: Option<Value>,
+    require_corroboration: bool,
 ) -> Result<PrInfo, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
@@ -2589,7 +2631,7 @@ fn read_pr_info(
     // (fixes a fail-open the sigma review caught). `reviewers` is empty for
     // every pre-x-e703 config, so `reviewers_all_attested` is vacuously true
     // there and this changes nothing for them.
-    let login_gate_active = !required_bots.is_empty() || !optional_bots.is_empty();
+    let login_gate_active = !required_bots.is_empty() || optional_lane_configured;
     let login_skipped = no_external || !login_gate_active;
     // One scan feeds both the gate and its explanation, so the two cannot
     // disagree the way the decision and the message did on PR #618.
@@ -2626,7 +2668,7 @@ fn read_pr_info(
         // "uncovered" and an instrument-health receipt for reviews that were
         // never queried. A fresh local pass still rescues it inside
         // classify_coverage (positive evidence).
-        let coverage = classify_coverage(
+        let mut coverage = classify_coverage(
             &[],
             &[],
             &events_text,
@@ -2637,9 +2679,18 @@ fn read_pr_info(
             &head_branch,
             head_sha,
         );
+        // Same capture-then-apply order as the external-read arm below: the
+        // predicate reads the pre-downgrade report, and the `reviewed` verdict
+        // needs the same corroboration term or the loop finishes DonePRGreen
+        // on a self-attested-only row the merge verb refuses (round 3: the
+        // solo lane - reviewers configured, no bots, no optional lane - takes
+        // this arm every time).
+        let self_attested_alone = coverage.rests_on_self_attestation_alone();
+        coverage.apply_corroboration_policy(require_corroboration);
         (
             "none".to_string(),
-            reviewers_ok,
+            reviewers_ok
+                && CoverageReport::corroboration_term(require_corroboration, self_attested_alone),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -2670,8 +2721,11 @@ fn read_pr_info(
             .map_err(|_| GhReadError::parse_failed("pr_reviews_parse"))?;
 
         // PRESENCE is required-only: an optional login's absence must never
-        // create a missing_bot (never wait for it). FINDINGS honor the union:
-        // an optional login's blocking P1 still holds the gate ("honor if
+        // create a missing_bot (never wait for it), and its STALENESS must
+        // never reach stale_bots either - an optional bot reading an older
+        // commit is not a property any reviewer owes, so it may neither block
+        // nor disqualify local-review recovery. FINDINGS honor the union: an
+        // optional login's blocking P1 still holds the gate ("honor if
         // present"). A dedup keeps a login that is in both lists counted once.
         let info = compute_review_info(&reviews_json, required_bots, &freshness);
         // Per-outstanding-bot nudge classification (x-b167), computed AFTER the
@@ -2847,7 +2901,7 @@ fn read_pr_info(
             }
         }
         // github_read_ok is true here: a failed gh read returned Err above.
-        let coverage = classify_coverage(
+        let mut coverage = classify_coverage(
             reviews_arr,
             comments_arr,
             &events_text,
@@ -2858,14 +2912,23 @@ fn read_pr_info(
             &head_branch,
             head_sha,
         );
-        let local_recovery = !info.reviewer_refused.is_empty()
-            && info.missing_bots.is_empty()
-            && info.stale_bots.is_empty()
-            && coverage.verdicts.iter().any(|verdict| {
-                verdict.producer == CoverageProducer::LocalAttestation
-                    && verdict.verdict == CoverageVerdict::Reviewed
-            });
+        // The predicate reads the pre-downgrade report (the policy below only
+        // flips the covered state, preserving verdicts), so capture it first.
+        let self_attested_alone = coverage.rests_on_self_attestation_alone();
+        coverage.apply_corroboration_policy(require_corroboration);
+        let local_recovery = local_recovery_from_refusal(
+            &info.reviewer_refused,
+            &info.missing_bots,
+            &info.stale_bots,
+            &coverage,
+        );
+        // The corroboration policy must reach the `reviewed` verdict itself,
+        // not only the coverage axis: the DonePRGreen conjunct below reads
+        // this field and never consults coverage, so without this line the
+        // loop can finish a PR the merge gate refuses on the same row - the
+        // two surfaces this repo keeps unified would split under the flag.
         let reviewed = (info.all_required_passed() || local_recovery)
+            && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
             && unaddressed.is_empty()
             && reviewers_ok;
         (
@@ -3061,6 +3124,34 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
         return Ok(CiConclusion::Pending);
     }
     Ok(CiConclusion::Success)
+}
+
+/// The local-review recovery from refusal: a REQUIRED bot explicitly refused
+/// (not merely absent - that is a wait), nothing else required is missing or
+/// stale, and a fresh local attestation at HEAD exists.
+///
+/// Optional staleness deliberately plays no part: an optional bot reading an
+/// older commit is not a property any reviewer owes, and letting it disqualify
+/// recovery wedges exactly the lanes the recovery exists to unwedge (PR 1151:
+/// attestation minted, reviewed_count 1, gate still uncovered until the bot
+/// was re-triggered and waited out). The three bot inputs are REQUIRED-only by
+/// construction (`compute_review_info` walks `required_bots` alone), and that
+/// is the invariant this split exists to state. Required staleness still
+/// disqualifies: a stale REQUIRED verdict is one re-read from counting, and
+/// recovery must not skip past it.
+fn local_recovery_from_refusal(
+    reviewer_refused: &[String],
+    missing_bots: &[String],
+    stale_bots: &[(String, String)],
+    coverage: &CoverageReport,
+) -> bool {
+    !reviewer_refused.is_empty()
+        && missing_bots.is_empty()
+        && stale_bots.is_empty()
+        && coverage.verdicts.iter().any(|verdict| {
+            verdict.producer == CoverageProducer::LocalAttestation
+                && verdict.verdict == CoverageVerdict::Reviewed
+        })
 }
 
 /// True when explicit reviewer refusal is the only remaining review obstacle.
@@ -3513,7 +3604,8 @@ fn publish_coverage_status(
     event_head: &str,
     coverage: &CoverageReport,
     required_bots: &[String],
-    optional_bots: &[String],
+    _optional_bots: &[String],
+    optional_lane_configured: bool,
     reviewers: &[String],
 ) {
     // A status target that is not a real 40-hex sha (an unresolved local
@@ -3531,7 +3623,7 @@ fn publish_coverage_status(
     // gate axis). Counting it made this writer post failure on configs the
     // Python merge gate answers "no lane" to - two writers of one context
     // posting opposite states.
-    let lane = !(required_bots.is_empty() && optional_bots.is_empty() && reviewers.is_empty());
+    let lane = !(required_bots.is_empty() && !optional_lane_configured && reviewers.is_empty());
     if !lane {
         eprintln!(
             "review-coverage publisher: not posting for {pr_head_oid}: no review lane configured"
@@ -4218,11 +4310,45 @@ fn apply_same_model_guard(
     }
 }
 
+/// The built-in optional logins an UNSET `review.optional_apps` resolves to -
+/// the same default the Python side resolves (`DEFAULT_OPTIONAL_APPS` in
+/// fno.config, pinned with it against the shared golden file
+/// cli/tests/config/optional_apps_default.json). Without a shared default, this
+/// side resolved empty while `fno do pr status` matched two hardcoded logins,
+/// so a worker following the remedy one printed was refused by the other.
+const DEFAULT_OPTIONAL_APPS: [&str; 2] = ["gemini-code-assist", "chatgpt-codex-connector"];
+
 /// The OPTIONAL reviewer logins (config.review.optional_apps): honored-if-
 /// present but never required. Their blocking findings hold the gate, but their
-/// absence never does (x-4baa "honor if present"). Empty when unset.
+/// absence never does (x-4baa "honor if present"). Unset resolves to the
+/// built-in default; an explicit `[]` is a real opt-out and wins over it.
 fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
-    settings.optional_apps.clone().unwrap_or_default()
+    match settings.optional_apps.clone() {
+        // Unset: the built-in honored-if-present logins.
+        None => DEFAULT_OPTIONAL_APPS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        // Explicit [] is the real opt-out (the one behavior this default
+        // changes on purpose, documented in the registry Meta).
+        Some(configured) if configured.is_empty() => Vec::new(),
+        // A non-empty list EXTENDS the built-ins: it named extra honored
+        // logins since before the default existed, and silently dropping a
+        // built-in from a partial list would stop counting that login's
+        // blocking findings on configs that never asked for it.
+        Some(configured) => {
+            let mut all = DEFAULT_OPTIONAL_APPS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            for login in configured {
+                if !all.contains(&login) {
+                    all.push(login);
+                }
+            }
+            all
+        }
+    }
 }
 
 /// Case-insensitive substring match so a configured short name ("codex") or a
@@ -4960,6 +5086,46 @@ impl CoverageReport {
             .count()
     }
 
+    /// The corroboration term of the `reviewed` verdict, shared by BOTH read
+    /// arms (external reads and login_skipped): DonePRGreen reads the field
+    /// and never consults coverage, so each arm must splice this term or the
+    /// loop can finish a PR the merge verb refuses on the same row.
+    fn corroboration_term(require_corroboration: bool, self_attested_alone: bool) -> bool {
+        !(require_corroboration && self_attested_alone)
+    }
+
+    /// Whether every counted review verdict rests on the author's own
+    /// (self_attested) local attestation: no GitHub App review, no second
+    /// session. Unmeasured origins (Unknown) are NOT self-attestation, so an
+    /// unmeasured row fails open - it is not proof of corroboration, but it is
+    /// not proof of its absence either.
+    pub fn rests_on_self_attestation_alone(&self) -> bool {
+        let mut counted = 0usize;
+        let mut self_attested = 0usize;
+        for v in &self.verdicts {
+            if v.verdict != CoverageVerdict::Reviewed || v.human_approval {
+                continue;
+            }
+            counted += 1;
+            if v.producer == CoverageProducer::LocalAttestation
+                && v.attestation_origin == AttestationOrigin::SelfAttested
+            {
+                self_attested += 1;
+            }
+        }
+        counted > 0 && counted == self_attested
+    }
+
+    /// Apply `config.review.require_corroboration`: a covered report whose
+    /// whole count is the author's own attestation reads as uncovered. The
+    /// verdicts stay on the event, so the evidence trail is reconstructable;
+    /// the VERDICT is what the merge gate reads.
+    pub fn apply_corroboration_policy(&mut self, on: bool) {
+        if on && self.rests_on_self_attestation_alone() {
+            self.coverage = Coverage::Covered(0);
+        }
+    }
+
     pub fn coverage_count(&self) -> Option<usize> {
         match &self.coverage {
             Coverage::Unknown => None,
@@ -5066,6 +5232,33 @@ struct LocalPass {
 /// out-of-scope line is skipped ENTIRELY (never a verdict, never a stale
 /// entry), which is also what keeps the pair key honest - one session
 /// attesting PR B after PR A no longer overwrites A's pass with B's head.
+/// A pass over a diff that changed NO FILE is a review of nothing, not a
+/// review: a session resolving its target from a checkout sitting on the base
+/// branch reads an empty diff and reports clean, and without this guard that
+/// pass is byte-identical to a real one. The producer refuses to emit with
+/// zero files, so a line carrying `reviewed_file_count: 0` is either
+/// pre-guard or hand-crafted - skipped either way. Lines alone never decide
+/// this: binary, pure-rename and empty-file diffs are real reviews whose
+/// `reviewed_line_count` is an honest 0, so a 0-line row WITH files counts,
+/// and a 0-line row from before the field existed (file count absent) is
+/// still skipped - absence must not be read as "had files".
+fn zero_evidence_attestation(val: &Value) -> bool {
+    if val
+        .pointer("/data/reviewed_line_count")
+        .and_then(|v| v.as_i64())
+        != Some(0)
+    {
+        return false;
+    }
+    match val
+        .pointer("/data/reviewed_file_count")
+        .and_then(|v| v.as_i64())
+    {
+        Some(files) => files <= 0,
+        None => true,
+    }
+}
+
 fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<LocalPass> {
     // (reviewer, attester_session_id) -> (head it attested, branch it named,
     // was it a pass). The attester lives in the key so cross-session
@@ -5095,6 +5288,9 @@ fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> 
         if line_head.is_empty() {
             continue;
         }
+        if zero_evidence_attestation(&val) {
+            continue;
+        }
         // The branch this attestation named; empty on every event predating
         // the field, which attestation_in_scope then admits only on exact
         // head equality. Once the head moves, a pre-field line emits NO
@@ -5122,15 +5318,42 @@ fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> 
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
+        // A RETRACTION names the pair it revokes in retracts_attester: an
+        // operator session revoking a forged pass must not have to emit under
+        // the victim's identity (which the attester binding now refuses). Key
+        // the retraction on the NAMED pair so it lands on the pass being
+        // revoked, while the retracting session's own entry stays untouched.
+        let key_attester = val
+            .pointer("/data/retracts_attester")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .or(attester);
         // Under the pair key a peer's `fail` revokes only the peer's own pass;
         // the author's `pass` still counts toward coverage. Coverage counts
         // reviews performed, not approvals granted - the hold on a bad review
         // lives on `open_review_findings` and on `unattested_reviewers_scan`,
         // which keeps its name key (the config.review.reviewers gate).
-        latest.insert(
-            (r.trim_start_matches('/').to_string(), attester),
-            (line_head.to_string(), line_branch, is_pass),
-        );
+        // A retraction names ONE pass, by head. When the pair's entry already
+        // describes a different (newer) head, the named pass is superseded and
+        // the retraction must not touch it: the verb emits the retraction after
+        // any newer pass, so an unconditional insert would revoke a live pass
+        // nobody asked to revoke. Same-head (and first-entry) inserts keep
+        // today's semantics.
+        let pair_key = (r.trim_start_matches('/').to_string(), key_attester);
+        let is_retraction = val
+            .pointer("/data/retracts_attester")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if is_retraction {
+            if let Some((existing_head, _, _)) = latest.get(&pair_key) {
+                if existing_head != line_head {
+                    continue;
+                }
+            }
+        }
+        latest.insert(pair_key, (line_head.to_string(), line_branch, is_pass));
     }
     let mut out: Vec<LocalPass> = latest
         .into_iter()
@@ -6506,6 +6729,12 @@ pub(crate) struct ReviewInputs {
     pub(crate) required_bots: Vec<String>,
     pub(crate) required_reviewers: Vec<String>,
     pub(crate) optional_bots: Vec<String>,
+    /// Lane CONFIGURATION is explicit config only (a non-empty
+    /// `review.optional_apps`), never the built-in default that fills unset
+    /// configs: the default logins are honored-if-present where a lane
+    /// exists, but must not light the login gate, the publisher's lane
+    /// predicate, or the self-review floor on a stock install.
+    pub(crate) optional_lane_configured: bool,
     pub(crate) nudge_configs: Vec<NudgeConfig>,
 }
 
@@ -6625,6 +6854,13 @@ pub(crate) fn resolve_review_inputs(
                 // a global Some(true). Same overlay rule as required_bots.
                 merged.self_review_required = local.self_review_required;
             }
+            if local.require_corroboration.is_some() {
+                // Same presence rule: a project-local policy flip is honored by
+                // load_settings_for_repo on the Python merge/status/doctor
+                // side, so omitting it here made the loop gate read the global
+                // file only and the two surfaces split on one config (round 3).
+                merged.require_corroboration = local.require_corroboration;
+            }
             if !local.nudge_overrides.is_empty() {
                 // Without this line a project-local `[review.nudge]` (including
                 // `enabled = false`) is read from the GLOBAL file only and the
@@ -6674,6 +6910,10 @@ pub(crate) fn resolve_review_inputs(
         }
     }
     let optional_bots = resolved_optional_bots(&settings);
+    let optional_lane_configured = settings
+        .optional_apps
+        .as_ref()
+        .is_some_and(|v| !v.is_empty());
     let nudge_configs = resolved_nudge_configs(&settings);
 
     ReviewInputs {
@@ -6686,6 +6926,13 @@ pub(crate) fn resolve_review_inputs(
         required_bots,
         required_reviewers,
         optional_bots,
+        // Lane CONFIGURATION is explicit config, never the built-in default:
+        // the default logins are honored-if-present where a lane exists, but
+        // they must not light up the login gate, the coverage publisher's
+        // lane predicate, or the self-review floor on a stock install - that
+        // flip skips the floor and forces gh review reads for installs that
+        // configured nothing (review round 2).
+        optional_lane_configured,
         nudge_configs,
     }
 }
@@ -6839,8 +7086,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // rather than waving the obligation away. The floor is additive: an
     // already-configured lane (reviewers, bots, peers) keeps meaning exactly
     // what it meant today, and a lane that already names code-review is a no-op.
-    let lane_configured =
-        !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
+    let lane_configured = !required_bots.is_empty()
+        || inputs.optional_lane_configured
+        || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
     // The floor applies where a session can satisfy it: a harness with a
     // self-review verb (claude /code-review, codex /review, opencode
@@ -7786,6 +8034,10 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             manifest.no_external,
             &required_bots,
             &optional_bots,
+            settings
+                .optional_apps
+                .as_ref()
+                .is_some_and(|v| !v.is_empty()),
             &settings.external_reviewers,
             &required_reviewers,
             &nudge_configs,
@@ -7794,6 +8046,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             &global_events,
             &repo_slug,
             manifest.harness_session_id.as_deref(),
+            settings.require_corroboration.unwrap_or(false),
         );
 
         match done_result {
@@ -8638,6 +8891,7 @@ fn run_done(
     no_external: bool,
     required_bots: &[String],
     optional_bots: &[String],
+    optional_lane_configured: bool,
     external_reviewers: &[String],
     reviewers: &[String],
     nudge_configs: &[NudgeConfig],
@@ -8646,6 +8900,7 @@ fn run_done(
     global_events_path: &Path,
     repo_slug: &str,
     author_session: Option<&str>,
+    require_corroboration: bool,
 ) -> Result<PrInfo, GhReadError> {
     let info = read_pr_info(
         gh_bin,
@@ -8655,6 +8910,7 @@ fn run_done(
         no_external,
         required_bots,
         optional_bots,
+        optional_lane_configured,
         external_reviewers,
         reviewers,
         nudge_configs,
@@ -8665,6 +8921,7 @@ fn run_done(
         author_session,
         None,
         None,
+        require_corroboration,
     )?;
     // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
@@ -8683,6 +8940,7 @@ fn run_done(
             &info.coverage,
             required_bots,
             optional_bots,
+            optional_lane_configured,
             reviewers,
         );
     }
@@ -11272,7 +11530,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     // disagreed with the stop hook's floored row for the same PR.
     let mut required_reviewers = inputs.required_reviewers;
     let lane_configured = !(inputs.required_bots.is_empty()
-        && inputs.optional_bots.is_empty()
+        && !inputs.optional_lane_configured
         && required_reviewers.is_empty());
     if !lane_configured
         && inputs.settings.self_review_required.unwrap_or(true)
@@ -11297,6 +11555,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         false,
         &inputs.required_bots,
         &inputs.optional_bots,
+        inputs.optional_lane_configured,
         &inputs.settings.external_reviewers,
         &required_reviewers,
         &inputs.nudge_configs,
@@ -11307,6 +11566,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_session.as_deref(),
         pr.as_deref(),
         prefetched_pr_json,
+        inputs.settings.require_corroboration.unwrap_or(false),
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {
@@ -11330,6 +11590,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &pr_info.coverage,
                     &inputs.required_bots,
                     &inputs.optional_bots,
+                    inputs.optional_lane_configured,
                     &required_reviewers,
                 );
             }
@@ -11402,6 +11663,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         },
                         &inputs.required_bots,
                         &inputs.optional_bots,
+                        inputs.optional_lane_configured,
                         &required_reviewers,
                     );
                 }
@@ -12696,6 +12958,505 @@ mod tests {
         );
         let measured = coverage_event_data(826, &measured_rep, "h", "", Some("sess-author"));
         assert_eq!(measured["self_attested_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn a_zero_line_attestation_is_not_review_evidence() {
+        // A pass over a zero-line diff is a review of nothing: a session
+        // resolving its target from a checkout sitting on the base branch
+        // reads an empty diff, reports clean, and before this guard that
+        // pass counted exactly like a real one. The producer refuses to emit
+        // at 0, so a line carrying the field as 0 is either pre-guard or
+        // hand-crafted; skipped either way. The control pins that the field
+        // ABSENT (the pre-landed backlog) still counts - absence must never
+        // be read as zero.
+        let zero = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author", "reviewed_line_count": 0}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &zero,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert!(
+            rep.verdicts.is_empty(),
+            "a zero-line pass must yield no verdict"
+        );
+        assert_eq!(rep.coverage, Coverage::Unknown);
+
+        let control = attestation_line("code-review", "h", "pass");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &control,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+    }
+
+    #[test]
+    fn a_zero_file_attestation_is_not_review_evidence_either() {
+        // The forged row of the future spells the file count explicitly: 0
+        // lines AND 0 files is the empty-diff shape the producer refuses, so
+        // the gate must refuse it too, whatever else the line claims.
+        let zero = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author",
+                     "reviewed_line_count": 0, "reviewed_file_count": 0}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &zero,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert!(
+            rep.verdicts.is_empty(),
+            "a zero-file pass must yield no verdict"
+        );
+    }
+
+    #[test]
+    fn a_zero_line_pass_with_files_is_a_real_review() {
+        // Binary, pure-rename and empty-file diffs change files without
+        // changing text lines: reviewed_line_count 0 WITH reviewed_file_count
+        // above zero is an honest measurement of a real review, and skipping
+        // it would strand exactly those PRs (images, fonts, renames) with no
+        // satisfiable producer path.
+        let binary = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author",
+                     "reviewed_line_count": 0, "reviewed_file_count": 1}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &binary,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+    }
+
+    #[test]
+    fn a_zero_file_pass_does_not_satisfy_the_reviewers_gate() {
+        // The reviewers gate (config.review.reviewers, the self-review floor)
+        // reads a separate scan; a review of nothing must not satisfy it
+        // there either, only on the coverage axis.
+        let zero = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author",
+                     "reviewed_line_count": 0, "reviewed_file_count": 0}
+        })
+        .to_string();
+        let dir = std::env::temp_dir().join(format!(
+            "fno-zero-file-scan-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = dir.join("events.jsonl");
+        std::fs::write(&events, zero).unwrap();
+        let reviewers = vec!["code-review".to_string()];
+        let (unattested, _malformed) =
+            unattested_reviewers_scan(&events, &reviewers, &|_| Freshness::Fresh, "", "h");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            !unattested.is_empty(),
+            "a zero-file pass must leave the reviewer unattested"
+        );
+        assert_eq!(unattested[0].name, "code-review");
+    }
+
+    #[test]
+    fn a_zero_file_retraction_for_an_old_head_spares_the_newer_pass() {
+        // The verb emits the retraction after any newer pass, so the events
+        // order is pass@head2 then retract@head1: the named (old) pass is
+        // already superseded, and revoking it must not also revoke the live
+        // head-2 pass nobody asked about.
+        let mut text = String::new();
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head2", "verdict": "pass",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "reviewed_line_count": 5, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        text.push('\n');
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head1", "verdict": "fail",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "retracts_attester": "sess-a",
+                         "reviewed_line_count": 3, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        // local_latest_passes returns PASSES only (fails are folded away),
+        // so "the head-2 pass survives" is exactly "a pass at head2 exists".
+        let passes = local_latest_passes(&text, "b", "head2");
+        assert!(
+            passes.iter().any(|p| p.head == "head2"),
+            "the newer head-2 pass must survive a retraction naming head-1: {passes:?}"
+        );
+    }
+
+    #[test]
+    fn retraction_for_the_current_head_still_revokes() {
+        // Same guard, the case it must not break: the retraction names the
+        // head the pair entry already holds, so it lands and revokes.
+        let mut text = String::new();
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "reviewed_line_count": 5, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        text.push('\n');
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "fail",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "retracts_attester": "sess-a",
+                         "reviewed_line_count": 5, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        let passes = local_latest_passes(&text, "b", "h");
+        assert!(
+            !passes.iter().any(|p| p.head == "h"),
+            "a same-head retraction must revoke the pass"
+        );
+    }
+
+    #[test]
+    fn require_corroboration_parses_the_string_spellings_pydantic_accepts() {
+        // The two gates must read one config one way: pydantic coerces
+        // require_corroboration = "true" to true, so the string spellings
+        // parse here too instead of silently reading false.
+        let mut s = Settings::default();
+        let review: serde_json::Value =
+            serde_json::from_str(r#"{"require_corroboration": "true"}"#).unwrap();
+        if let Some(v) = review.get("require_corroboration") {
+            s.require_corroboration = v.as_bool().or_else(|| {
+                v.as_str()
+                    .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                        "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
+                        "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
+                        _ => None,
+                    })
+            });
+        }
+        assert_eq!(s.require_corroboration, Some(true));
+    }
+
+    #[test]
+    fn a_retraction_revokes_the_named_pair_not_the_retractor() {
+        // The retraction verb addresses the EVENT, not the identity: an
+        // operator session emits a fail carrying retracts_attester naming the
+        // pair that passed. The pair-keyed scan must revoke THAT pair while
+        // the retracting session's own entry stays untouched - undoing an
+        // impersonation must not require performing it a second time.
+        let pass = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-A", "branch": "feature/x"}
+        })
+        .to_string();
+        let control = classify_coverage(
+            &[],
+            &[],
+            &pass,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(control.coverage, Coverage::Covered(1));
+
+        let retraction = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "fail",
+                     "attester_session_id": "sess-operator",
+                     "retracts_attester": "sess-A", "branch": "feature/x"}
+        })
+        .to_string();
+        let revoked = classify_coverage(
+            &[],
+            &[],
+            &format!("{}\n{}", pass, retraction),
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert!(
+            revoked.verdicts.is_empty(),
+            "the named pair must yield no verdict"
+        );
+        assert_eq!(revoked.coverage, Coverage::Unknown);
+    }
+
+    #[test]
+    fn one_attesters_emit_never_moves_another_pairs_head() {
+        // The staleness defence of the pair key, pinned: session B emitting at
+        // a new head inserts B's own entry and leaves A's pass pinned to the
+        // head A actually reviewed. A same-key overwrite would have refreshed
+        // A's stale verdict onto code A never saw.
+        let events = format!(
+            "{}\n{}",
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head-1", "verdict": "pass",
+                         "attester_session_id": "sess-A", "branch": "feature/x"}
+            }),
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head-2", "verdict": "pass",
+                         "attester_session_id": "sess-B", "branch": "feature/x"}
+            })
+        );
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "head-2",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(2));
+        let shas: Vec<&str> = rep
+            .verdicts
+            .iter()
+            .map(|v| v.reviewed_sha.as_str())
+            .collect();
+        assert!(
+            shas.contains(&"head-1") && shas.contains(&"head-2"),
+            "{:?}",
+            shas
+        );
+    }
+
+    #[test]
+    fn project_local_require_corroboration_overlays_the_global_file() {
+        // The per-field overlay merge listed every review field except
+        // require_corroboration, so a project-local flip was read from the
+        // GLOBAL file only and the loop gate finished DonePRGreen on a row
+        // the Python merge/status/doctor surfaces refused (round 3).
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.toml");
+        std::fs::write(&global, "[review]\nrequired_bots = []\n").unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".fno")).unwrap();
+        std::fs::write(
+            repo.join(".fno").join("config.toml"),
+            "[review]\nrequire_corroboration = true\n",
+        )
+        .unwrap();
+        let inputs = resolve_review_inputs(&repo, None, None, None, Some(&global), None);
+        assert_eq!(inputs.settings.require_corroboration, Some(true));
+    }
+
+    #[test]
+    fn the_corroboration_term_blocks_exactly_the_policy_held_row() {
+        // Both read arms splice CoverageReport::corroboration_term into the
+        // `reviewed` verdict; the term blocks one shape: policy on AND the
+        // whole count self-attested.
+        assert!(!CoverageReport::corroboration_term(true, true));
+        assert!(CoverageReport::corroboration_term(true, false));
+        assert!(CoverageReport::corroboration_term(false, true));
+        assert!(CoverageReport::corroboration_term(false, false));
+    }
+
+    #[test]
+    fn corroboration_policy_holds_self_attested_only_and_passes_corroborated() {
+        // config.review.require_corroboration, default false (first pin: the
+        // policy OFF leaves a self-attested-only report covered). ON, a report
+        // whose whole count is the author's own attestation reads as uncovered
+        // (Covered(0) serializes "uncovered"), and a corroborated report - one
+        // other_session attestation - stays covered.
+        let self_only = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let mut off = classify_coverage(
+            &[],
+            &[],
+            &self_only,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(off.coverage, Coverage::Covered(1));
+        off.apply_corroboration_policy(false);
+        assert_eq!(off.coverage, Coverage::Covered(1));
+
+        let mut on = classify_coverage(
+            &[],
+            &[],
+            &self_only,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert!(on.rests_on_self_attestation_alone());
+        on.apply_corroboration_policy(true);
+        assert_eq!(on.coverage, Coverage::Covered(0));
+
+        let corroborated = format!(
+            "{}\n{}",
+            self_only,
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                         "attester_session_id": "sess-peer", "branch": "feature/x"}
+            })
+        );
+        let mut corr = classify_coverage(
+            &[],
+            &[],
+            &corroborated,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(corr.coverage, Coverage::Covered(2));
+        assert!(!corr.rests_on_self_attestation_alone());
+        corr.apply_corroboration_policy(true);
+        assert_eq!(corr.coverage, Coverage::Covered(2));
+    }
+
+    #[test]
+    fn optional_staleness_never_disqualifies_local_recovery() {
+        // The PR-1151 shape: a REQUIRED bot refused, a fresh local attestation
+        // at HEAD, and an OPTIONAL bot whose verdict read an older commit.
+        // Recovery must hold - an optional bot going stale is not a property
+        // any reviewer owes. The stale optional verdict rides in COVERAGE (the
+        // union axis), never in the required-only bot sets.
+        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+        let refused = vec!["some-required-bot".to_string()];
+        assert!(local_recovery_from_refusal(&refused, &[], &[], &rep));
+    }
+
+    #[test]
+    fn required_staleness_still_blocks_local_recovery() {
+        // Unchanged, pinned: a stale REQUIRED verdict is one re-read from
+        // counting, so recovery must not skip past it.
+        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        let refused = vec!["some-required-bot".to_string()];
+        let stale = vec![("some-required-bot".to_string(), "oldsha".to_string())];
+        assert!(!local_recovery_from_refusal(&refused, &[], &stale, &rep));
+        // And no refusal means no recovery at all: absence is a wait.
+        assert!(!local_recovery_from_refusal(&[], &[], &[], &rep));
+    }
+
+    #[test]
+    fn resolved_optional_bots_default_matches_the_shared_python_default() {
+        // One oracle, two readers: this resolver and fno.config's
+        // DEFAULT_OPTIONAL_APPS both answer these rows, so a drift on either
+        // side fails its own test against the SAME file.
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/tests/config/optional_apps_default.json");
+        let text = std::fs::read_to_string(&golden)
+            .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let unset = v["unset"].as_array().unwrap();
+        let unset: Vec<String> = unset
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        // Unset (None) -> the built-in default.
+        let settings = Settings::default();
+        assert_eq!(resolved_optional_bots(&settings), unset);
+        // An explicit [] is a real opt-out and wins over the default.
+        let empty = Settings {
+            optional_apps: Some(Vec::new()),
+            ..Settings::default()
+        };
+        assert!(resolved_optional_bots(&empty).is_empty());
+        // A partial list EXTENDS the built-ins (round-2 ruling): it never
+        // silently drops a honored-if-present login.
+        let partial = v["partial_union"].as_array().unwrap();
+        let partial: Vec<String> = partial
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        let mine = Settings {
+            optional_apps: Some(vec!["my-app".to_string()]),
+            ..Settings::default()
+        };
+        assert_eq!(resolved_optional_bots(&mine), partial);
     }
 
     #[test]
@@ -17348,9 +18109,14 @@ git_bounded();";
             resolved_required_bots(&s).is_empty(),
             "optional must not be required"
         );
+        // A non-empty configured list EXTENDS the built-ins, so this config
+        // (built-in named explicitly) resolves to both built-ins.
         assert_eq!(
             resolved_optional_bots(&s),
-            vec!["chatgpt-codex-connector".to_string()]
+            vec![
+                "gemini-code-assist".to_string(),
+                "chatgpt-codex-connector".to_string()
+            ]
         );
     }
 

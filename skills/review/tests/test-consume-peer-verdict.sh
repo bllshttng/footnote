@@ -15,6 +15,14 @@ git -C "$REPO" config user.name Test
 touch "$REPO/tracked"
 git -C "$REPO" add tracked
 git -C "$REPO" commit -qm init
+# The emit under a clean verdict measures the diff under review and refuses
+# a zero-file one (a review of nothing is not a pass), so the fixture carries
+# a real change on top of the base the emit resolves: without the second
+# commit the base falls back to HEAD and every clean case trips the refusal.
+git -C "$REPO" update-ref refs/remotes/origin/main "$(git -C "$REPO" rev-parse HEAD)"
+printf 'body\n' > "$REPO/tracked"
+git -C "$REPO" add tracked
+git -C "$REPO" commit -qm feature
 
 cat > "$BIN/fno" <<'SH'
 #!/usr/bin/env bash

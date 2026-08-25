@@ -1001,6 +1001,97 @@ def _post_merge_sync_health() -> dict[str, Any]:
         return {"state": "unknown", "stale": False, "behind": None, "detail": ""}
 
 
+def _self_attested_coverage_report() -> dict[str, Any]:
+    """Per merged PR in the recent window: did coverage rest on the author's
+    own attestation alone?
+
+    The number the operator needs before ever flipping
+    ``config.review.require_corroboration`` to true - each row is one merged PR
+    that policy would have held. Advisory only, never changes status/exit; a
+    probe that cannot run reports unknown rather than zero.
+    """
+    try:
+        # project_events_json, not a hand-joined resolve_repo_root: the domain
+        # helper honors the test sandbox pin (FNO_EVENTS_PATH), and a bare
+        # resolver call here arms the shellout-drift guard's module-level
+        # predicate, which then flags doctor.py's two pre-existing
+        # privately-rooted report shell-outs the guard was never taught about.
+        from fno.paths import project_events_json
+
+        events = project_events_json()
+        newest: dict[int, dict[str, Any]] = {}
+        try:
+            for line in events.read_text(encoding="utf-8").splitlines():
+                try:
+                    val = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if val.get("type") != "review_coverage":
+                    continue
+                data = val.get("data") or {}
+                pr = data.get("pr")
+                if isinstance(pr, int):
+                    newest[pr] = data
+        except OSError:
+            newest = {}
+
+        merged: list[dict[str, Any]] = []
+        proc = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--state",
+                "merged",
+                "--limit",
+                "10",
+                "--json",
+                "number",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if proc.returncode == 0:
+            for row in json.loads(proc.stdout or "[]"):
+                number = row.get("number")
+                if not isinstance(number, int):
+                    continue
+                cov = newest.get(number)
+                if cov is None:
+                    continue
+                reviewed = cov.get("reviewed_count")
+                self_attested_n = cov.get("self_attested_count")
+                # The corroboration policy rewrites held rows to
+                # reviewed_count 0 while preserving self_attested_count, so a
+                # count-only filter hides exactly the PRs the policy holds -
+                # the population this report exists to measure.
+                if (
+                    not isinstance(reviewed, int)
+                    or reviewed <= 0
+                ) and not (isinstance(self_attested_n, int) and self_attested_n > 0):
+                    continue
+                # The SAME predicate the merge gate's corroboration policy
+                # applies, so the report and the gate cannot disagree about a
+                # row.
+                from fno.pr._coverage_gate import rests_on_self_attestation_alone
+
+                merged.append(
+                    {
+                        "pr": number,
+                        "reviewed_count": reviewed,
+                        "self_attested_count": cov.get("self_attested_count"),
+                        "self_attested_only": rests_on_self_attestation_alone(cov),
+                    }
+                )
+        return {
+            "prs": merged,
+            "self_attested_only_count": sum(1 for row in merged if row["self_attested_only"]),
+        }
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        return {"prs": [], "self_attested_only_count": 0, "error": "probe failed"}
+
+
 def _launch_agent_failures() -> dict[str, Any]:
     """Every ``sh.fno.*`` LaunchAgent whose LAST EXIT was nonzero.
 
@@ -3481,6 +3572,12 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()
     result["launch_agents"] = _launch_agent_failures()
+
+    # Advisory self-attestation share (x-7f7b): per merged PR in the recent
+    # window, whether coverage rested on the author's own attestation alone -
+    # the number to read before flipping review.require_corroboration. Never
+    # changes status/exit.
+    result["self_attested_coverage"] = _self_attested_coverage_report()
 
     # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
     # silently producing inaction + default-on/armed switches silently merging.
