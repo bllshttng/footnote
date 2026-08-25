@@ -39,7 +39,7 @@ message text
 </fno_mail>
 ```
 
-`from` is the sender's short 8-hex sessionId. `harness_for_provider` maps the provider to the reply vocabulary. Claude becomes `claude-code`, while Codex and Gemini keep their names. `node` and `to` are optional.
+`from` is the sender's short 8-hex sessionId. `harness_for_provider` maps the provider to the reply vocabulary. Claude becomes `claude-code`, while Codex and Gemini keep their names. A missing or blank sender harness renders as the explicit `unknown` marker, never a vendor name. Render-time code never infers a harness from the model or any other axis. The model is a separate axis and stays independently honest. `node` and `to` are optional.
 
 The delivered turn records itself in the recipient transcript. The hosted audit row adds provider-neutral sender history without creating pending mail.
 
