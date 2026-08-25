@@ -53,11 +53,11 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 | `fno backlog carveout add` | Last resort: work too big for this PR. Else fix it here. |
 | `fno outstanding` / `fno backlog` | Awaiting a human: carve-outs + questions; `ask`/`clear`. `clear --answer` delivers the answer to the asker over mail, or states why it cannot. `backlog decide` records a ruling; `backlog decisions` recovers it (no subject = recent). |
 
-**Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno agents mail reply --to X "..."`: it threads the reply and resolves the sender itself, whether the message arrived live or was drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
+**Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno agents mail reply --to X "..."`: it threads the reply and resolves the sender itself, live or drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
 
 **Read send evidence literally.** `delivered (hosted)` is confirmed. `queued (durable)` can sit undrained - no receipt is no coordination. Before re-sending, `peek` (a busy recipient can still get it), then `resume`/`attach`. One exception: a `[bus-only]` queue drains by design. The recipient's turn-boundary `notify-self` surfaces it. A bus-only receipt IS coordination, never a stranded message.
 
-**Pane drives carry an envelope; `typed` is not `delivered`.** `fno mux pane send` wraps in `<fno_mail>` by default and refuses a pane showing an option prompt. `--raw` types bytes verbatim; without `--submit` a send only types and prints nothing, while a confirmed `--submit` prints `submitted`. On a `live-miss` that reads busy rather than dead, `fno mail send --force` types the wrapped body, keeping the msg-id, reply handle and outbox row. `typed (pane <id>)` is not delivery. [Details](docs/architecture/pane-transport.md).
+**Pane drives carry an envelope; `typed` is not `delivered`.** `fno mux pane send` wraps in `<fno_mail>` by default and refuses a pane showing an option prompt. `--raw` types bytes verbatim; without `--submit` a send only types, and a confirmed submit prints `submitted`. On a `live-miss` that reads busy, not dead, `fno mail send --force` types the wrapped body, keeping the msg-id, reply handle and outbox row. `typed (pane <id>)` is not delivery. [Details](docs/architecture/pane-transport.md).
 
 **Codex: full session_id or pane, never head-8.** A codex UUIDv7 head-8 is a ~65.5s clock bucket, so siblings from one minute collide and `mail send` refuses that shape. A claude UUIDv4 head-8 is safe. On an old ambiguous one, `mail reply --sender-session <full-id>` keeps the thread.
 

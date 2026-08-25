@@ -2030,6 +2030,13 @@ const CR_RESUBMIT_EVERY: u32 = 8;
 const SUBMIT_CONFIRM_ATTEMPTS: u32 = 40;
 const SUBMIT_CONFIRM_INTERVAL_MS: u64 = 250;
 
+/// `pane send --raw` byte cap. Raw is the keystroke lane, exempt from the
+/// prose gates by design, but exempt is not unbounded: `--raw --stdin` had no
+/// limit at all, an ungated prose channel past every gate. The cap sits above
+/// the mail body refuse cap plus envelope overhead, because the mail lane
+/// pastes its own already-gated wrapped bodies through `--stdin --raw`.
+const RAW_PANE_SEND_CAP_BYTES: usize = 8192;
+
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
 const DEFAULT_WAIT_TIMEOUT_S: u64 = 30;
@@ -4277,6 +4284,16 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             // A bare-paste fallback would rebuild that exact defect, and would
             // do it precisely when something is already wrong.
             let bytes = if raw {
+                if bytes.len() > RAW_PANE_SEND_CAP_BYTES {
+                    eprintln!(
+                        "fno mux pane send: raw payload is {} bytes (cap {}); it is typed \
+                         verbatim with no envelope and no gates. Put the prose in a node or \
+                         doc and send a short enveloped pointer.",
+                        bytes.len(),
+                        RAW_PANE_SEND_CAP_BYTES
+                    );
+                    return EXIT_ERROR;
+                }
                 bytes
             } else {
                 match prepare_pane_bytes(session, pane, &bytes, style_exception.as_deref()) {
@@ -7066,6 +7083,72 @@ mod tests {
             Some(ControlVerb::PaneSend { bytes, .. }) => assert_eq!(
                 bytes, payload,
                 "raw must deliver the byte-identical payload"
+            ),
+            other => panic!("expected PaneSend at the socket, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_send_raw_over_cap_refuses_before_reaching_the_socket() {
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        use std::sync::Mutex;
+
+        // Exempt from the prose gates is not unbounded: `--raw --stdin` had no
+        // size limit at all, an ungated prose channel. The cap refuses
+        // in-process, before any control connection, while a small raw payload
+        // in the same run still delivers.
+        let sock = control_test_sock("raw-cap");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let connections = std::sync::Arc::new(AtomicU32::new(0));
+        let connections_srv = connections.clone();
+        let received: std::sync::Arc<Mutex<Option<ControlVerb>>> =
+            std::sync::Arc::new(Mutex::new(None));
+        let received_srv = received.clone();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            connections_srv.fetch_add(1, AtomicOrdering::SeqCst);
+            let msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            if let ClientMsg::Control { verb, .. } = msg {
+                *received_srv.lock().unwrap() = Some(verb);
+            }
+            write_msg_sync(&mut s, &ServerMsg::Ok).unwrap();
+        });
+
+        let big = "x".repeat(RAW_PANE_SEND_CAP_BYTES + 1);
+        let small = b"1".to_vec();
+        let send_cmd = |text: String| PaneCmd::Send {
+            pane: 7,
+            source: SendSource::Text(text),
+            guarded: false,
+            submit: false,
+            raw: true,
+            expected_identity: None,
+            style_exception: None,
+        };
+
+        let over = dispatch("t", &sock, false, send_cmd(big));
+        let ok = dispatch(
+            "t",
+            &sock,
+            false,
+            send_cmd(String::from_utf8(small.clone()).unwrap()),
+        );
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+
+        assert_eq!(over, EXIT_ERROR, "an over-cap raw payload must refuse");
+        assert_eq!(ok, EXIT_OK, "a small raw payload must still deliver");
+        assert_eq!(
+            connections.load(AtomicOrdering::SeqCst),
+            1,
+            "only the small raw send may open a control connection"
+        );
+        let arrived = received.lock().unwrap().take();
+        match arrived {
+            Some(ControlVerb::PaneSend { bytes, .. }) => assert_eq!(
+                bytes, small,
+                "the delivered raw payload is the small one, byte for byte"
             ),
             other => panic!("expected PaneSend at the socket, got {other:?}"),
         }
