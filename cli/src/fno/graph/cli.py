@@ -1363,10 +1363,21 @@ def cmd_add(
     epilog="Paired verb: `fno backlog remove <id>` deletes it (hidden; run its own --help).",
 )
 def cmd_idea(
+    ctx: typer.Context,
     title: str = typer.Argument(..., help="Idea title - what is this?"),
     domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
     difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
+    wave_of: Optional[str] = typer.Option(
+        None,
+        "--wave-of",
+        help="Append this finding to an existing live node without minting a new id.",
+    ),
+    separate: bool = typer.Option(
+        False,
+        "--separate",
+        help="Force a separate node when a pre-mint fold offer is shown.",
+    ),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
     type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
@@ -1415,6 +1426,7 @@ def cmd_idea(
             "comma-separate. Refuses an id that does not resolve."
         ),
     ),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
@@ -1425,6 +1437,90 @@ def cmd_idea(
     ``fno backlog update``). Shares ``add``'s full option set so a fresh idea
     can carry parent/size/domain without a follow-up ``fno backlog update``.
     """
+    if wave_of:
+        if separate:
+            typer.echo("Error: --wave-of and --separate are mutually exclusive", err=True)
+            raise typer.Exit(code=2)
+        topology_flags = []
+        if blocked_by:
+            topology_flags.append("--blocked-by")
+        if parent:
+            topology_flags.append("--parent")
+        if roadmap_id:
+            topology_flags.append("--roadmap-id")
+        if vision_path:
+            topology_flags.append("--vision-path")
+        if project:
+            topology_flags.append("--project")
+        if cwd:
+            topology_flags.append("--cwd")
+        if size:
+            topology_flags.append("--size")
+        if batch:
+            topology_flags.append("--batch")
+        if related:
+            topology_flags.append("--related")
+        if type_ != "feature":
+            topology_flags.append("--type")
+        if priority != "p2":
+            topology_flags.append("--priority")
+        if topology_flags:
+            typer.echo(
+                "Error: wave filing cannot use node-only topology flags: "
+                + ", ".join(topology_flags),
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        from fno.graph._constants import normalize_difficulty
+        if difficulty is None:
+            if not sys.stdin.isatty():
+                typer.echo(
+                    "Error: non-interactive wave filing requires --difficulty "
+                    "(low, medium, high)",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            difficulty = typer.prompt("Difficulty (low|medium|high)")
+        try:
+            difficulty = normalize_difficulty(difficulty)
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2)
+
+        from fno.graph.store import append_wave_note, read_graph
+
+        entries = read_graph(_graph_path())
+        try:
+            target_id = _resolve_asserted_id(wave_of, entries, flag="--wave-of")
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2)
+        note = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": "wave",
+            "title": title,
+            "details": details if details is not None else description,
+            "difficulty": difficulty,
+            "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
+            "text": (details if details is not None else description) or title,
+        }
+        found, error = append_wave_note(_graph_path(), target_id, note)
+        if not found:
+            typer.echo(f"Error: {error or 'wave append refused'}", err=True)
+            raise typer.Exit(code=2)
+        receipt = {
+            "outcome": "wave",
+            "node_id": target_id,
+            "note": note,
+            "minted_id": None,
+        }
+        if json_output or (ctx.obj and ctx.obj.get("json")):
+            typer.echo(json.dumps(receipt, indent=2))
+        else:
+            typer.echo(f"folded as wave into {target_id}; minted_id: null")
+        return
+
     _create_node_impl(
         title=title,
         type_=type_,

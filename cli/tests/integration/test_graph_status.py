@@ -670,6 +670,47 @@ def test_backlog_idea_records_filed_difficulty(tmp_graph):
     assert node["difficulty_history"][-1]["value"] == "high"
 
 
+def test_backlog_idea_wave_appends_without_minting(tmp_graph):
+    """AC5-HP: a wave appends one structured note and mints no node."""
+    target = _invoke("--json", "backlog", "add", "Existing work")
+    target_id = json.loads(target.stdout)["id"]
+    r = _invoke(
+        "--json", "backlog", "idea", "New finding",
+        "--wave-of", target_id,
+        "--difficulty", "high",
+        "--details", "append this finding",
+    )
+    assert r.exit_code == 0, r.output
+    receipt = json.loads(r.stdout)
+    assert receipt["outcome"] == "wave"
+    assert receipt["node_id"] == target_id
+    assert receipt["minted_id"] is None
+    entries = _read_entries(tmp_graph)
+    assert len(entries) == 1
+    note = entries[0]["progress_notes"][-1]
+    assert note["kind"] == "wave"
+    assert note["title"] == "New finding"
+    assert note["details"] == "append this finding"
+    assert note["difficulty"] == "high"
+
+
+def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph):
+    """AC6-ERR: invalid wave targets fail before any note or node mutation."""
+    target = _invoke("--json", "backlog", "add", "Done work")
+    target_id = json.loads(target.stdout)["id"]
+    _invoke("backlog", "update", target_id, "--locked-by", "null")
+    _invoke("backlog", "done", target_id)
+    r = _invoke(
+        "--json", "backlog", "idea", "Late finding",
+        "--wave-of", target_id,
+        "--difficulty", "low",
+        "--parent", target_id,
+    )
+    assert r.exit_code != 0
+    assert "topology" in r.output or "terminal" in r.output
+    assert len(_read_entries(tmp_graph)) == 1
+
+
 def test_backlog_idea_accepts_description(tmp_graph):
     """`backlog idea "X" --description "Y"` stores Y in details."""
     r = _invoke(
