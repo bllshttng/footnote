@@ -761,6 +761,15 @@ def get_cmd(
     is_leaf = not isinstance(node, (BaseModel, dict))
     if is_leaf:
         source = resolve_source(key)
+        if source is None and (
+            key.startswith("providers.")
+            or key.startswith("config.providers.")
+            or key == "providers"
+            or key == "config.providers"
+        ):
+            # The value resolved through the rename; provenance must too, or a
+            # file that DOES set the key reports "source: default".
+            source = resolve_source(key.replace("providers", "accounts", 1))
         if source is not None:
             decider, overridden = source
         else:

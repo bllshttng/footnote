@@ -415,16 +415,43 @@ def _parse_providers_block(
 
 
 def _provider_candidates(repo_root: Path | None = None) -> list[Path]:
-    """Candidate config file paths for provider loading (FNO_CONFIG or [local, global])."""
+    """Candidate config file paths for provider loading (FNO_CONFIG or [local, global]).
+
+    Anchors on ``resolve_repo_root`` (same resolver the config writer uses) so a
+    command run from a subdirectory still finds the repo-root .fno/config.toml
+    that ``fno config set --local`` wrote.
+    """
     env_cfg = os.environ.get("FNO_CONFIG")
     if env_cfg:
         return [Path(env_cfg)]
     if repo_root is None:
-        repo_root = Path(os.environ.get("PWD", os.getcwd()))
+        from fno.paths import resolve_repo_root
+
+        repo_root = resolve_repo_root()
     return [
         repo_root / ".fno" / "config.toml",
         _global_settings_path(),
     ]
+
+
+def _overlay_records(accum: list[Any], incoming: list[Any]) -> list[Any]:
+    """Overlay account records by id: ``incoming`` wins per id, new ids append.
+
+    Combos and agent pins merge across files, so records must too - a local
+    records list that REPLACES the global one breaks every global combo and
+    pin referencing a global record id the moment a project adds its own.
+    """
+    out = list(accum)
+    for record in incoming:
+        rid = record.get("id") if isinstance(record, dict) else None
+        if isinstance(rid, str):
+            out = [
+                r
+                for r in out
+                if not (isinstance(r, dict) and r.get("id") == rid)
+            ]
+        out.append(record)
+    return out
 
 
 def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
@@ -464,7 +491,7 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
             merged_combos.update(combos_raw)
         records_raw = block.get("records")
         if isinstance(records_raw, list) and records_raw:
-            merged_records = records_raw
+            merged_records = _overlay_records(merged_records, records_raw)
 
     if not found_any or not merged_combos:
         return {}
@@ -589,8 +616,14 @@ def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
                     merged_quota = dict(merged_block.get("quota") or {})
                     merged_quota.update(v)
                     merged_block["quota"] = merged_quota
-                elif k == "records" and isinstance(v, list) and v:
-                    merged_block["records"] = v
+                elif k == "records" and isinstance(v, list):
+                    # An empty local list is "nothing declared here", not
+                    # "erase the global records" (the generated example config
+                    # ships records = [] verbatim).
+                    if v:
+                        merged_block["records"] = _overlay_records(
+                            merged_block.get("records") or [], v
+                        )
                 else:
                     merged_block[k] = v
         agents = _extract_agents_block(data)

@@ -370,18 +370,34 @@ _KNOWN_QUOTA_KEYS = frozenset(
 )
 _KNOWN_FAILOVER_KEYS = frozenset({"max_swaps_per_phase"})
 _KNOWN_COMBO_KEYS = frozenset({"strategy", "sticky_limit", "providers"})
-_KNOWN_RECORD_KEYS = frozenset(
-    {
-        "id", "name", "harness", "auth", "credentials_source", "priority",
-        "model", "limits", "cost_per_session", "status", "last_used_at",
-        "notes", "cooldown_until", "rate_limited_until", "provider",
-        "model_tier", "disabled", "disabled_reason", "tier",
-    }
-)
+
+
+def _known_record_keys() -> frozenset[str]:
+    """Real config keys of an account record, derived from the model.
+
+    A hand-copied list flags real ProviderRecord fields (env, route,
+    config_dir, pricing, ...) as unknown the moment the model grows; the
+    model is the one source of truth for what a record accepts. Validation
+    aliases (harness is storable as `cli`) count as known too.
+    """
+    from pydantic import AliasChoices
+
+    from fno.adapters.providers.model import ProviderRecord
+
+    keys = set(ProviderRecord.model_fields)
+    for field in ProviderRecord.model_fields.values():
+        if isinstance(field.validation_alias, AliasChoices):
+            keys.update(
+                choice
+                for choice in field.validation_alias.choices
+                if isinstance(choice, str)
+            )
+    return frozenset(keys)
 
 
 def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list[str]:
     problems: list[str] = []
+    known_record_keys = _known_record_keys()
     raw_config = raw_data.get("config")
     config = raw_config if isinstance(raw_config, dict) else {}
     for block_key in ("accounts", "providers"):
@@ -401,6 +417,11 @@ def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list
                         problems.append(
                             f"{source_label}: {prefix}.quota has unknown key {k!r}; it will be ignored"
                         )
+            elif quota is not None:
+                problems.append(
+                    f"{source_label}: {prefix}.quota is not a table "
+                    f"(got {type(quota).__name__}); it will be coerced to defaults"
+                )
             failover = block.get("failover")
             if isinstance(failover, dict):
                 for k in failover:
@@ -408,6 +429,11 @@ def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list
                         problems.append(
                             f"{source_label}: {prefix}.failover has unknown key {k!r}; it will be ignored"
                         )
+            elif failover is not None:
+                problems.append(
+                    f"{source_label}: {prefix}.failover is not a table "
+                    f"(got {type(failover).__name__}); it will be ignored"
+                )
             combos = block.get("combos")
             if isinstance(combos, dict):
                 for combo_name, combo_val in combos.items():
@@ -423,7 +449,7 @@ def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list
                     if isinstance(record, dict):
                         rec_id = record.get("id") or f"records[{idx}]"
                         for k in record:
-                            if k not in _KNOWN_RECORD_KEYS:
+                            if k not in known_record_keys:
                                 problems.append(
                                     f"{source_label}: {prefix}.records[{rec_id!r}] has unknown key {k!r}; it will be ignored"
                                 )

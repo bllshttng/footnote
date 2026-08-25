@@ -549,6 +549,9 @@ def _model_default(parts: list[str]) -> Any:
     if parts and parts[0] == "config":
         # Flat model: a legacy `config.` prefix resolves against the top level.
         parts = parts[1:]
+    if parts and parts[0] == "providers":
+        # Pre-rename spelling: the default lives under `accounts`.
+        parts = ["accounts"] + parts[1:]
     node: Any = SettingsModel()
     for part in parts:
         if isinstance(node, BaseModel) and part in type(node).model_fields:
