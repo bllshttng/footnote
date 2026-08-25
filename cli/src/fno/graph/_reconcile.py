@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Optional, Union
+
+log = logging.getLogger(__name__)
 
 # `gh pr view` default timeout; covers network hangs and stuck auth prompts.
 GH_QUERY_TIMEOUT_S = 30.0
@@ -206,6 +209,8 @@ class ReconcileError(Exception):
     @staticmethod
     def _classify(message: str) -> str:
         text = message.lower()
+        if "not found on path" in text or "toolmissing" in text:
+            return "availability"
         if (
             "unconditional" in text
             or "routed, never rationed" in text
@@ -215,7 +220,12 @@ class ReconcileError(Exception):
             return "routing_refusal"
         if any(token in text for token in ("auth", "bad credentials", "401", "not logged in")):
             return "authentication"
-        if "not found" in text or "404" in text:
+        if (
+            "not found" in text
+            or "404" in text
+            or "could not resolve to a repository" in text
+            or "could not resolve to a pullrequest" in text
+        ):
             return "not_found"
         if any(
             token in text
@@ -662,7 +672,7 @@ def resolve_merge_evidence(
             if exc.retryable:
                 outage_error = str(exc)
                 outage_remedy = exc.remedy_for(pr_number=pr_number, repo=pr_repo)
-            elif refusal_reason is None:
+            elif refusal_kind is None:
                 refusal_reason = str(exc)
                 refusal_kind = exc.kind
                 refusal_remedy = exc.remedy_for(pr_number=pr_number, repo=pr_repo)
@@ -675,7 +685,8 @@ def resolve_merge_evidence(
             if open_pr_number is None:
                 open_pr_number = pr_number
         else:
-            refusal_reason = f"PR #{pr_number} state={pr_state.state} (not merged)"
+            if refusal_reason is None and refusal_kind is None:
+                refusal_reason = f"PR #{pr_number} state={pr_state.state} (not merged)"
 
     if open_pr_number is not None:
         # Carry any outage alongside: a ref we could not reach stays invisible
@@ -1148,16 +1159,17 @@ def query_pr_merge_state(
     from fno.pr import _rest
     from fno.pr._proc import Result
 
-    def rest_runner(cmd, *, cwd=None):
+    def rest_runner(cmd, *, cwd=None, timeout=None):
+        effective_timeout = timeout if timeout is not None else timeout_s
         if runner is None:
-            return _rest.run(cmd, cwd=cwd, timeout=timeout_s)
+            return _rest.run(cmd, cwd=cwd, timeout=effective_timeout)
         try:
             result = runner(
                 cmd,
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=timeout_s,
+                timeout=effective_timeout,
                 cwd=cwd,
             )
         except subprocess.TimeoutExpired:
@@ -1186,7 +1198,9 @@ def query_pr_merge_state(
     except ReconcileError:
         raise
     except Exception as exc:  # noqa: BLE001 - reader failures become typed read errors
-        raise ReconcileError(str(exc)) from exc
+        log.exception("REST PR info reader failed for #%s repo=%s", pr_number, repo)
+        kind = "availability" if type(exc).__name__ == "ToolMissing" else None
+        raise ReconcileError(str(exc), kind=kind) from exc
     if info is None:
         failure = ReconcileError(str(reason or "REST PR info read failed"))
         failure.remedy = failure.remedy_for(pr_number=pr_number, repo=repo)
@@ -1211,7 +1225,9 @@ def query_pr_merge_state(
         except ReconcileError:
             raise
         except Exception as exc:  # noqa: BLE001 - reader failures become typed read errors
-            raise ReconcileError(str(exc)) from exc
+            log.exception("REST PR files reader failed for #%s repo=%s", pr_number, repo)
+            kind = "availability" if type(exc).__name__ == "ToolMissing" else None
+            raise ReconcileError(str(exc), kind=kind) from exc
         if file_paths is None:
             failure = ReconcileError(str(reason or "REST PR files read failed"))
             failure.remedy = failure.remedy_for(pr_number=pr_number, repo=repo)

@@ -304,7 +304,10 @@ def fetch_pr_file_paths_rest(
         return None, "could not resolve owner/repo from `git remote get-url origin`"
 
     paths: list[str] = []
-    for page in range(1, 101):
+    # GitHub exposes at most 3,000 files for this endpoint. A full final page
+    # at that cap has no positive tail marker, so fail closed rather than call
+    # an incomplete list complete.
+    for page in range(1, 31):
         files = runner(
             [
                 "gh",
@@ -330,7 +333,7 @@ def fetch_pr_file_paths_rest(
         if len(payload) < 100:
             return paths, ""
 
-    return None, "gh api pull files exceeded the 100-page safety limit"
+    return None, "gh api pull files reached GitHub's 3,000-file cap without a short page"
 
 
 def resolve_current_pr_number_rest(

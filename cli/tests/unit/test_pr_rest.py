@@ -166,6 +166,16 @@ def test_pr_file_paths_rest_rejects_a_failed_second_page():
     assert "timeout" in reason
 
 
+def test_pr_file_paths_rest_fails_closed_at_github_cap():
+    def runner(cmd, cwd=None):
+        return Result(0, json.dumps([{"filename": "full.py"} for _ in range(100)]), "")
+
+    paths, reason = _rest.fetch_pr_file_paths_rest("42", repo="Owner/Repo", runner=runner)
+
+    assert paths is None
+    assert "3,000-file cap" in reason
+
+
 def test_pr_info_rejects_malformed_head_shape():
     info, reason = _rest.fetch_pr_info_rest(
         "42",

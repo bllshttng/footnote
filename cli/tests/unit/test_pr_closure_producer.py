@@ -909,6 +909,41 @@ def test_query_rest_timeout_is_retryable_availability_failure():
     assert "retry" in raised.value.remedy_for(pr_number=5, repo="o/r").lower()
 
 
+def test_query_missing_gh_is_retryable_availability_failure():
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+    from fno.pr._proc import ToolMissing
+
+    def runner(cmd, **kwargs):
+        raise ToolMissing("gh")
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(5, repo="o/r", runner=runner)
+
+    assert raised.value.kind == "availability"
+    assert raised.value.retryable is True
+
+
+def test_query_rate_limit_reader_forwards_timeout_to_bucket_probe():
+    import json
+
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+    from fno.pr._proc import Result
+
+    probe_timeouts: list[float | None] = []
+
+    def runner(cmd, **kwargs):
+        if cmd[-1] == "rate_limit":
+            probe_timeouts.append(kwargs.get("timeout"))
+            return Result(0, json.dumps({"resources": {"core": {"remaining": 0, "reset": 1}}}), "")
+        return Result(1, "", "API rate limit exceeded")
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(5, repo="o/r", runner=runner)
+
+    assert raised.value.kind == "availability"
+    assert probe_timeouts == [30.0]
+
+
 def test_manifest_node_id_beats_a_stale_branch():
     """A reused worktree's branch still names the PREVIOUS node; the manifest wins."""
     from fno.pr.closure import bind_created_pr
