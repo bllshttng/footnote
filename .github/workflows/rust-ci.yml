@@ -337,8 +337,14 @@ jobs:
             ~/.cargo/git
             crates/fno-agents/target
             crates/fno/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          # A key of its OWN, deliberately. This job builds three test binaries
+          # where the `test` job builds forty-six, and it finishes about seven
+          # minutes earlier, so sharing a key means this small tree wins the
+          # save race and the big job restores a cache missing most of its
+          # artifacts. It still WARMS from the shared prefix via restore-keys.
+          key: ${{ runner.os }}-cargo-stress-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-stress-
             ${{ runner.os }}-cargo-
 
       - name: Stress the process-backed e2e binaries

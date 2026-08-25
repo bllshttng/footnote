@@ -1281,8 +1281,8 @@ else:
     print('absent')
 " 2>/dev/null
 }
-# The leak guard snapshots the real store around the crates/fno real-process
-# integration leg, so the pair runs together: selecting either scope runs both.
+# The leak guard snapshots the real store around BOTH crates/fno test legs, so
+# the trio runs together: selecting either scope runs both legs.
 RUN_FNO_UNIT=0
 RUN_FNO_E2E=0
 RUN_FNO_SQUADS=0
@@ -1290,6 +1290,19 @@ retry_run_leg cargo-test:fno-unit && RUN_FNO_UNIT=1
 retry_run_leg cargo-test:fno-e2e && RUN_FNO_E2E=1
 retry_run_leg squads-leak-guard:fno && RUN_FNO_SQUADS=1
 [[ $RUN_FNO_SQUADS -eq 1 ]] && RUN_FNO_E2E=1
+
+# Sampled BEFORE the unit leg, not between the two. The guard asserts a class
+# ("no crates/fno test writes the real squads.json"), and the leg split put
+# `cargo test --lib --bins` ahead of it: a lib test that bypasses the HOME
+# redirect ran outside the mtime window entirely and the guard still recorded a
+# pass. The window has to open before the first test in the pair runs.
+if [[ $RUN_FNO_SQUADS -eq 1 ]]; then
+    _squads_before="$(_real_squads_state || printf '%s' unavailable)"
+    case "$_squads_before" in
+        absent|unavailable|present:*) ;;
+        *) _squads_before=unavailable ;;
+    esac
+fi
 
 if [[ $RUN_FNO_UNIT -eq 1 ]]; then
     run_rust_leg cargo-test:fno-unit "cargo test --lib --bins (fno)" "crates/fno" "cargo test --lib --bins"
@@ -1299,13 +1312,6 @@ else
 fi
 
 if [[ $RUN_FNO_E2E -eq 1 ]]; then
-    if [[ $RUN_FNO_SQUADS -eq 1 ]]; then
-        _squads_before="$(_real_squads_state || printf '%s' unavailable)"
-        case "$_squads_before" in
-            absent|unavailable|present:*) ;;
-            *) _squads_before=unavailable ;;
-        esac
-    fi
     run_rust_leg cargo-test:fno-e2e "cargo test explicit integration targets --test-threads=1 (fno)" "crates/fno" "cargo test $FNO_INTEGRATION_TARGETS -- --test-threads=1"
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
     if [[ $RUN_FNO_SQUADS -eq 1 ]]; then

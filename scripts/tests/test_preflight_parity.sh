@@ -89,11 +89,26 @@ for crate, pf_var in (("fno-agents", "FNO_AGENTS_INTEGRATION_TARGETS"),
 
 print("")
 print("== the preflight receipt scope reads the same in all three files ==")
-m = re.search(r"REQUIRED_SCOPE_NAMES=\(([^)]*)\)", preflight)
-if not m:
+# EVERY copy, not the first one a search happens to land on. preflight.sh
+# carries the array twice - the void path and the verdict-bearing path - and
+# reading only the first left a rename in the second one invisible while every
+# receipt it produced went untrusted. That is the exact bug this guard exists
+# to catch, so the guard must not contain it.
+copies = re.findall(r"REQUIRED_SCOPE_NAMES=\(([^)]*)\)", preflight)
+if not copies:
     die("REQUIRED_SCOPE_NAMES not found in scripts/ci/preflight.sh")
     sys.exit(fail)
-declared = set(m.group(1).split())
+sets = [set(c.split()) for c in copies]
+declared = sets[0]
+copies_agree = True
+for i, other in enumerate(sets[1:], 2):
+    if other != declared:
+        die(f"preflight.sh REQUIRED_SCOPE_NAMES copy {i} disagrees with copy 1: "
+            f"missing {sorted(declared - other) or 'nothing'}, "
+            f"extra {sorted(other - declared) or 'nothing'}")
+        copies_agree = False
+if copies_agree:
+    print(f"  ok: {len(copies)} REQUIRED_SCOPE_NAMES copies in preflight.sh, identical")
 
 py = open("cli/src/fno/pr/_preflight.py").read()
 m = re.search(r"_PREFLIGHT_BASE_SCOPE = frozenset\(\s*\{(.*?)\}", py, re.S)

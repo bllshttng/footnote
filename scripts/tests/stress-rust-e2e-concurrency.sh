@@ -118,6 +118,11 @@ for ((trial = 1; trial <= trials; trial++)); do
 
     trial_dir="$log_root/trial-$(printf '%02d' "$trial")"
     mkdir -p "$trial_dir"
+    # Re-sampled per trial. Nothing here reaps a leaked daemon, so one leak
+    # measured against a run-wide baseline would mark every LATER trial failed
+    # too and inflate the failure count this job is judged on. Each trial is
+    # asked only what it added.
+    trial_daemon_baseline="$(count_daemons)"
     run_binary() {
         local key="$1"
         local bin
@@ -147,7 +152,7 @@ for ((trial = 1; trial <= trials; trial++)); do
     [[ "$persistence_rc" == 0 ]] || persistence_verdict=fail
     [[ "$workspace_rc" == 0 ]] && grep -Eq 'old_server_reaped_before_rebind old_pid=' "$trial_dir/workspace_persistence_e2e.log" || workspace_verdict=fail
 
-    daemons_left=$(($(count_daemons) - daemon_baseline))
+    daemons_left=$(($(count_daemons) - trial_daemon_baseline))
     ((daemons_left < 0)) && daemons_left=0
     leak_verdict=pass
     ((daemons_left > 0)) && leak_verdict=fail

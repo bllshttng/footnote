@@ -69,7 +69,7 @@ The workflow guard permits a sharded smoke job, but requires an aggregating job 
 
 ### `scripts/ci/preflight.sh` - the hermetic runner
 
-One command runs before pushing on an opted-in project (`preflight.required = true`) or for a worker that chose the rehearsal. It validates the invoking checkout's **committed HEAD** inside a persistent, hermetic preflight worktree. It then runs the changed packet, `fno-py doctor test smoke --keep-going`, and the rust-ci legs. Those legs are pinned `cargo +1.94.1 fmt --check`, `cargo test --all-targets` for both crates, and advisory `cargo audit`.
+One command runs before pushing on an opted-in project (`preflight.required = true`) or for a worker that chose the rehearsal. It validates the invoking checkout's **committed HEAD** inside a persistent, hermetic preflight worktree. It then runs the changed packet, `fno-py doctor test smoke --keep-going`, and the rust-ci legs. Those legs are pinned `cargo +1.94.1 fmt --check`, then `cargo test --lib --bins` and an explicit `--test` list run with `--test-threads=1` for both crates, and advisory `cargo audit`.
 
 The changed packet goes first and stops the whole run on its own failure, so a
 broken nearest-neighbour test costs seconds rather than a full suite. It is

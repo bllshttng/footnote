@@ -51,6 +51,13 @@ fn old_server_reaped_before_rebind_probe() {
     let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
     let scratch = Scratch::new("reap-probe");
     let incumbent = spawn_server(&scratch.main_sock(), &[]);
+    // Wait for the incumbent to be ACCEPTING before signalling it. spawn_server
+    // returns as soon as the child is forked, and a SIGTERM that lands before
+    // the handler is installed takes the default action: the process dies, the
+    // 3s grace never elapses, `forced` still reads false, and the probe reports
+    // a graceful stop that never happened. Every other test in this file waits
+    // here first.
+    let _up = connect_with_retry(&scratch.main_sock());
     let termination = incumbent.terminate_and_wait();
 
     let mut replacement = spawn_server(&scratch.main_sock(), &[]);

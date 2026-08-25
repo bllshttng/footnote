@@ -52,7 +52,7 @@ Both are read-only, side-effect-free, and idempotent.
 
 ## CI
 
-- `.github/workflows/rust-ci.yml` (new): on `crates/**` / schema / parity-script changes, installs the stable toolchain and runs `cargo test --all-targets` for `crates/fno-agents` - this is what finally makes `tests/flock_interop.rs` (the Python-`fcntl`-vs-Rust-`fs2` interop kill criterion) gate every commit. It then runs the parity check.
+- `.github/workflows/rust-ci.yml` (new): it fires on `crates/**`, schema, and parity-script changes. It installs the stable toolchain. For `crates/fno-agents` it runs `cargo test --lib --bins`. It then runs the explicit integration-target list at `--test-threads=1`. That list is what makes `tests/flock_interop.rs` gate every commit. That test is the Python-`fcntl`-against-Rust-`fs2` interop kill criterion. It then runs the parity check.
 - `cli-ci.yml`: runs the parity check and the self-test on Python changes, so a Python-side schema break is caught even without a `crates/**` change.
 
 ## How to add a new cross-language event
