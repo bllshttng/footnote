@@ -192,7 +192,7 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 A target driver asks whether its one deliverable shipped. A king has no PR, so pointing the target driver at one can never reach a clean terminal state. `done_probes` are additive only. A plan can add conjuncts and can never silence the PR, CI, and review conjuncts underneath. The run burns to `NoProgress` or `Budget` while looking like it is working. The king driver asks the king's question instead, which is whether the board is clean.
 
-`fno inbox board --json` reads seven queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted. The `undispatched` queue is intentionally independent: `fno backlog undispatched --json` scans graph entries and the complete node-claim snapshot instead of reusing the ranked dispatch selector, so a selector omission is nameable and cannot masquerade as an empty queue.
+`fno inbox board --json` reads seven queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted. The `undispatched` queue has an independent source. `fno backlog undispatched --json` scans graph entries and the complete node-claim snapshot. It does not reuse the ranked dispatch selector, so a selector omission is nameable rather than an empty queue.
 
 | Queue | Read | King can shrink it |
 |---|---|---|
