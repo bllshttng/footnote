@@ -108,6 +108,12 @@ count_daemons() {
 }
 daemon_baseline="$(count_daemons)"
 
+# The two marker greps below are vacuity guards: a binary can exit 0 because
+# the probe that carries the proof never ran. They also mean this harness
+# CANNOT be pointed at an older revision to produce a baseline, because both
+# markers come from probe tests that do not exist there - every trial reads
+# `fail` for a binary whose own output says `test result: ok`. Read the trial
+# tails, not the verdicts, when comparing across revisions.
 echo "stress_setup=ready sha=$head_sha parallel_binaries=3 per_binary_threads=1 trials=$trials daemon_baseline=$daemon_baseline logs=$log_root"
 failures=0
 for ((trial = 1; trial <= trials; trial++)); do

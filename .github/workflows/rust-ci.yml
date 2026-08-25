@@ -304,23 +304,32 @@ jobs:
     # binaries across two jobs; do not raise it.
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    # REPORTS, does not yet gate. Graduate by deleting this line, and only when
-    # the number below is zero.
+    # REPORTS, does not gate. Graduate by deleting this line, and only once the
+    # comparison below says something.
     #
-    # Measured 2026-08-25 on this runner, two runs of 20 trials each: 1 failure
-    # per run, a different victim each time (`persistence` in one,
-    # daemon_e2e's `registry_list_refuses_over_a_broken_registered_lane` in the
-    # other). A different victim per run is the flake signature this suite's
-    # own triage uses to tell a flake from a break. The same 20 trials pass
-    # clean twice on a developer machine, so the residual is contention on a
-    # 4-vCPU runner.
+    # WHAT THIS HARNESS HAS AND HAS NOT SHOWN, measured 2026-08-25 on this
+    # runner. Read this before citing a trial count as evidence of anything.
     #
-    # This harness deliberately runs the three binaries in PARALLEL, which is
-    # harsher than any real job here: the serialized legs run one binary at a
-    # time and are green. So a red here means "the contention profile still
-    # has about 5% left in it", not "the change did not work" - and gating on
-    # a check that fails 1 run in 1 would block every later PR on a number
-    # nobody is measuring yet. Reporting it is what makes the number visible.
+    # Baseline, origin/main plus this harness and nothing else, 20 trials: ZERO
+    # real test failures. Branch, 40 trials across two runs: two. One
+    # `persistence`, one daemon_e2e `registry_list_refuses_over_a_broken_
+    # registered_lane`, both genuine non-zero exits rather than a missing
+    # marker. Two events against twenty trials of baseline separates nothing -
+    # a zero in twenty is consistent with rates well above five percent - so
+    # the honest reading is that this harness has NOT demonstrated the
+    # serialization reduced flakiness. It has not shown the reverse either.
+    #
+    # The reason it cannot, yet: this harness runs three binaries in parallel
+    # with `--test-threads=1` inside each, and the failures that motivated the
+    # work came from `cargo test --all-targets`, which is far more parallel
+    # than that. So the profile reproduced here is not the profile that broke.
+    # Closing the question means reproducing THAT one.
+    #
+    # One thing it did settle cleanly. Its `daemons_left` counter reads
+    # 2, 4, 6 ... 40 across the baseline's twenty trials, exactly two leaked
+    # daemons per trial, and 0 on every trial of the branch. That reproduces
+    # the ~40 orphans the original killed job cleaned up, and it is what the
+    # reap fix closed.
     continue-on-error: true
     steps:
       - name: Checkout
