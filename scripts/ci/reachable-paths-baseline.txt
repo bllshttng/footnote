@@ -36,12 +36,10 @@ A	accepted forms: name, canonical handle, transport short id, or full session id
 A	agent name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	agent_status_stamp_failed	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
 A	an unsupported submit contract cannot carry a nonzero delay	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# msg-twin
-A	direct needs model and effort placeholders	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
-A	anthropic_default_haiku_model	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# protocol
 A	cargo-test:fno-agents-e2e	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# protocol: the preflight receipt scope both trust lists compare against; scripts/tests/test_preflight_parity.sh fails when the two lists or preflight.sh disagree
 A	cargo-test:fno-agents-unit	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# protocol: the preflight receipt scope both trust lists compare against; scripts/tests/test_preflight_parity.sh fails when the two lists or preflight.sh disagree
-A	claim pid must be positive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must reject non-positive anchors identically
-A	claim requires a positive pid or pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must share the explicit absence contract
+A	direct needs model and effort placeholders	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
+A	anthropic_default_haiku_model	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# protocol
 A	claim_idempotent_reacquired	py=cli/src/fno/claims/events.py|cli/src/fno/resume/receipt.py|cli/src/fno/scoreboard/fold.py;rs=crates/fno-agents/src/claims.rs	# protocol
 A	claude attach failed: {exc}	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	claude logs: claude binary not found on path; install claude or check $path	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
@@ -61,6 +59,12 @@ A	fno_spawn_gate=0 operator bypass	py=cli/src/fno/agents/spawn_gate.py;rs=crates
 A	from-name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
 A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# data
 A	holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# msg-twin
+A	claim pid must be positive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must reject non-positive anchors identically
+A	claim requires a positive pid or pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must share the explicit absence contract
+A	pid and pid_unavailable are mutually exclusive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers reject ambiguous PID shapes identically
+A	pid_unavailable requires a ttl claim	py=cli/src/fno/claims/core.py|cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: TTL is the only authority allowed to carry an unavailable PID
+A	pid_unavailable claims require schema_version=2	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: nullable-PID claims are versioned in both readers
+A	schema_version=2 requires pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: version two is reserved for the nullable-PID shape
 A	https://api.z.ai/api/anthropic	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs|crates/fno/src/connections_view.rs	# data
 A	interactive resume single-writer	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	key and holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# msg-twin
@@ -73,9 +77,6 @@ A	no active drive authority	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/sr
 A	once: {name} ({provider}/{session_or_short_id}) torn down	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/codex_ask.rs|crates/fno-agents/src/gemini_ask.rs	# msg-twin
 A	one-shot-provider-no-persistent-session	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/client_verbs.rs	# protocol
 A	operator_question_closed	py=cli/src/fno/events/__init__.py|cli/src/fno/outstanding/core.py;rs=crates/fno-agents/src/loopcheck.rs|crates/fno-agents/src/needs.rs	# protocol
-A	pid and pid_unavailable are mutually exclusive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers reject ambiguous PID shapes identically
-A	pid_unavailable claims require schema_version=2	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: nullable-PID claims are versioned in both readers
-A	pid_unavailable requires a ttl claim	py=cli/src/fno/claims/core.py|cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: TTL is the only authority allowed to carry an unavailable PID
 A	postmortem_corrections_log	py=cli/src/fno/hermetic.py;rs=crates/fno-agents/src/finalize.rs	# protocol
 A	preassigned-or-session-start	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol
 A	refused-newer-than-transcript	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon.rs	# protocol
@@ -86,7 +87,6 @@ A	roster-live-inject-failed	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents
 A	route_provider,route_model	py=cli/src/fno/config/__init__.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
 A	run the review verb at head	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/src/loopcheck.rs	# msg-twin
 A	sandbox_mode=workspace-write	py=cli/src/fno/agents/harnesses/codex.py;rs=crates/fno-agents/src/provider.rs	# protocol
-A	schema_version=2 requires pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: version two is reserved for the nullable-PID shape
 A	send_keys_enter_delay_ms	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol
 A	status pattern needs model and effort groups	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	spawn-gate: corrupted slot claim {key} ignored	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
@@ -102,7 +102,6 @@ A	the child falls back to its account's own default.	py=cli/src/fno/agents/model
 A	the child receives that route's own model instead.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# msg-twin
 A	truth-live-inject-failed	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
 A	{brevity_marker}{brevity_instruction}{brevity_end_marker}	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# protocol: schemas/spawn-brevity.json plus Python and Rust parity tests pin both runtime carriers
-A	{fno_mail_trailer}</fno_mail>	py=cli/src/fno/mail/cli.py;rs=crates/fno-agents/src/mail_inject.rs	# protocol
 A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 R	provider-resolution:cli/src/fno/agents/spawn_gate.py::provider_live_count	# both raw row.provider reads live here; no resolver exists yet
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# the epic surface reads stored status; the overlay routing lands with its fix
