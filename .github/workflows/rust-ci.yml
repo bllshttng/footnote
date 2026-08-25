@@ -1,7 +1,7 @@
 name: rust-ci
 
 # W7: Run Rust tests + schema parity check. This is the job that finally
-# makes flock_interop.rs (the Phase 6 kill criterion) gate on every commit.
+# makes flock_interop.rs (the Phase 6 kill criterion) gate on every main head.
 #
 # Also runs scripts/check-event-schema-parity.sh with the built binary so
 # Rust-side schema drift is caught when crates/** or schema files change.
@@ -16,30 +16,6 @@ concurrency:
 on:
   push:
     branches: [main]
-    paths:
-      - crates/**
-      - schemas/**
-      - cli/src/fno/events/schema.yaml
-      - scripts/check-event-schema-parity.sh
-      - scripts/ci/check-registry-schema-parity.sh
-      - scripts/ci/check-provider-vocabulary-parity.sh
-      - tests/ci/test_provider_vocabulary_parity.sh
-      - scripts/ci/check-session-identity-parity.sh
-      - tests/ci/test_session_identity_parity.sh
-      - scripts/ci/check-spawn-lineage-parity.sh
-      - tests/ci/test_spawn_lineage_parity.sh
-      - scripts/ci/check-proto-version-bump.sh
-      - scripts/ci/check-reviewer-descriptor-parity.sh
-      - scripts/ci/check-review-app-parity.sh
-      - cli/src/fno/config/__init__.py
-      - cli/src/fno/pr/_reviews.py
-      - cli/src/fno/review_capability.py
-      - cli/src/fno/agents/spawn_defaults.py
-      - cli/src/fno/agents/spawn_gate.py
-      - cli/src/fno/agents/registry.py
-      - cli/src/fno/agents/store_fallback.py
-      - cli/src/fno/agents/mux_spawn.py
-      - .github/workflows/rust-ci.yml
   pull_request:
     paths:
       - crates/**
@@ -69,6 +45,7 @@ on:
 jobs:
   fmt:
     name: cargo fmt --check (pinned)
+    if: github.event_name == 'pull_request'
     # Pinned-toolchain rustfmt gate (ab-abff720d). The crate had package-wide
     # rustfmt drift with no gate to catch it, so plain `cargo fmt` polluted
     # every contributor's diff. The version is PINNED (not @stable) so a future
