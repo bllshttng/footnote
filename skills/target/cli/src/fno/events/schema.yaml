@@ -1534,6 +1534,13 @@ event_types:
         version:
           type: string
           description: "Binary version string."
+        recovery_mode:
+          type: string
+          enum: [preserve, destructive]
+          description: "Whether startup recovery preserved or destructively archived/reaped records."
+        interrupted_write_temps:
+          type: integer
+          description: "Interrupted atomic-write temps detected during startup."
 
   - name: daemon_exited
     description: "fno-agents daemon process exited (clean shutdown or crash)."
@@ -2222,6 +2229,19 @@ event_types:
         unaddressed_blocking:
           type: integer
           description: "Optional (done-path fires). Count of blocking inline findings (codex P1 / gemini critical|high) whose thread lacks a qualifying ack."
+    consumers: [operator]
+
+  - name: daemon_recovery_interrupted_temp
+    description: "Startup recovery detected an interrupted atomic-write temp and moved it out of the live store path when possible."
+    sources: [daemon]
+    data:
+      required: [name, outcome]
+      properties:
+        name: { type: string }
+        outcome:
+          type: string
+          enum: [quarantined, detected]
+        quarantined_to: { type: string }
     consumers: [operator]
 
   - name: termination

@@ -152,6 +152,8 @@ pub struct RecoveryReport {
     pub archived_orphans: Vec<String>,
     pub reaped_pids: Vec<u32>,
     pub recovered_drives: Vec<String>,
+    pub recovery_mode: String,
+    pub interrupted_write_temps: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -172,8 +174,25 @@ pub fn recover(
     home: &AgentsHome,
     emitter: &EventEmitter,
 ) -> Result<RecoveryReport, state::StateError> {
-    let mut report = RecoveryReport::default();
+    recover_with_policy(home, emitter, true)
+}
+
+fn recover_with_policy(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    destructive: bool,
+) -> Result<RecoveryReport, state::StateError> {
+    let mut report = RecoveryReport {
+        recovery_mode: if destructive {
+            "destructive"
+        } else {
+            "preserve"
+        }
+        .into(),
+        ..RecoveryReport::default()
+    };
     let registry = load_registry_asserted(&home.registry_json())?;
+    report.interrupted_write_temps = quarantine_interrupted_write_temps(home, emitter);
 
     let registered: std::collections::BTreeSet<String> = registry
         .entries
@@ -247,35 +266,37 @@ pub fn recover(
     }
 
     // Step 2 (other half): state.json dir without a registry entry -> archive.
-    if let Ok(read) = std::fs::read_dir(home.root()) {
-        for entry in read.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let name = match entry.file_name().into_string() {
-                Ok(n) if !n.starts_with('.') => n,
-                _ => continue,
-            };
-            if registered.contains(&name) {
-                continue;
-            }
-            // Orphan dir (has a state.json but no registry row): archive it.
-            if home.state_json(&name).exists() {
-                let ts = now_compact();
-                let dest = home.orphan_archive_dest(&name, &ts);
-                let _ = std::fs::create_dir_all(home.orphaned_dir());
-                if std::fs::rename(home.agent_dir(&name), &dest).is_ok() {
-                    let _ = emitter.emit_fields(
-                        "agent_orphan_state_archived",
-                        json_obj(&[
-                            ("short_id", Value::String(name.clone())),
-                            (
-                                "archived_to",
-                                Value::String(dest.to_string_lossy().into_owned()),
-                            ),
-                        ]),
-                    );
-                    report.archived_orphans.push(name);
+    if destructive {
+        if let Ok(read) = std::fs::read_dir(home.root()) {
+            for entry in read.flatten() {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = match entry.file_name().into_string() {
+                    Ok(n) if !n.starts_with('.') => n,
+                    _ => continue,
+                };
+                if registered.contains(&name) {
+                    continue;
+                }
+                // Orphan dir (has a state.json but no registry row): archive it.
+                if home.state_json(&name).exists() {
+                    let ts = now_compact();
+                    let dest = home.orphan_archive_dest(&name, &ts);
+                    let _ = std::fs::create_dir_all(home.orphaned_dir());
+                    if std::fs::rename(home.agent_dir(&name), &dest).is_ok() {
+                        let _ = emitter.emit_fields(
+                            "agent_orphan_state_archived",
+                            json_obj(&[
+                                ("short_id", Value::String(name.clone())),
+                                (
+                                    "archived_to",
+                                    Value::String(dest.to_string_lossy().into_owned()),
+                                ),
+                            ]),
+                        );
+                        report.archived_orphans.push(name);
+                    }
                 }
             }
         }
@@ -290,6 +311,9 @@ pub fn recover(
     let live_workers = home.scan_worker_sockets();
     let mut to_reap: Vec<(String, u32)> = Vec::new();
     for entry in &registry.entries {
+        if !destructive {
+            break;
+        }
         if live_workers.contains(&entry.short_id) {
             continue; // worker still alive; not an orphan
         }
@@ -351,6 +375,42 @@ pub fn recover(
     }
 
     Ok(report)
+}
+
+fn quarantine_interrupted_write_temps(home: &AgentsHome, emitter: &EventEmitter) -> Vec<String> {
+    let mut found = Vec::new();
+    let state_root = home.root().parent().unwrap_or(home.root());
+    let quarantine = state_root.join(".interrupted-writes");
+    for dir in [home.root(), state_root] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if !kind.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !(name.starts_with('.') && (name.contains(".tmp.") || name.ends_with(".part"))) {
+                continue;
+            }
+            let _ = std::fs::create_dir_all(&quarantine);
+            let dest = quarantine.join(format!("{}-{}", now_compact(), name));
+            let outcome = if std::fs::rename(entry.path(), &dest).is_ok() {
+                "quarantined"
+            } else {
+                "detected"
+            };
+            let _ = emitter.emit(
+                "daemon_recovery_interrupted_temp",
+                &json!({"name": name, "outcome": outcome, "quarantined_to": dest}),
+            );
+            found.push(name);
+        }
+    }
+    found
 }
 
 /// A live process's start time, used to distinguish "our worker" from a recycled
@@ -2497,7 +2557,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
 
     // State: recovering. Recovery must complete before we accept a request.
     emit_state(&emitter, DaemonState::Recovering);
-    let report = recover(&home, &emitter)?;
+    let destructive = crate::agents_config::startup_destructive_recovery_enabled(
+        &std::env::current_dir().unwrap_or_else(|_| home.root().to_path_buf()),
+    );
+    let report = recover_with_policy(&home, &emitter, destructive)?;
 
     // Architecture B (plan ab-70faa65b): ONE bounded reconcile sweep on startup,
     // as part of recovery, CONCURRENTLY with the accept loop (x-ef7f), so a
@@ -2599,6 +2662,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
             "pid": std::process::id(),
             "version": env!("CARGO_PKG_VERSION"),
             "recovered_drives": report.recovered_drives.len(),
+            "recovery_mode": report.recovery_mode,
+            "interrupted_write_temps": report.interrupted_write_temps.len(),
         }),
     );
     emit_state(&emitter, DaemonState::Serving);
@@ -11001,6 +11066,42 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         assert_eq!(report.archived_orphans, vec!["loner".to_string()]);
         assert!(!home.agent_dir("loner").exists(), "orphan dir moved aside");
         assert!(home.orphaned_dir().exists());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_preserve_mode_keeps_orphan_state_dir() {
+        let home = tmp_home("recover-preserve-orphan");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let mut st = AgentState::new_pty("loner");
+        st.status = AgentStatus::Live;
+        state::write_state_atomic(&home.state_json("loner"), &st).unwrap();
+
+        let report = recover_with_policy(&home, &emitter, false).expect("preserve recovery");
+        assert_eq!(report.recovery_mode, "preserve");
+        assert!(report.archived_orphans.is_empty());
+        assert!(
+            home.agent_dir("loner").is_dir(),
+            "preserve mode keeps the index"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_quarantines_and_reports_interrupted_write_temp() {
+        let home = tmp_home("recover-interrupted-temp");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |_| {}).unwrap();
+        let temp = home.root().join(".registry.json.tmp.75348");
+        std::fs::write(&temp, b"partial").unwrap();
+
+        let report = recover_with_policy(&home, &emitter, false).expect("temp recovery");
+        assert_eq!(report.interrupted_write_temps.len(), 1);
+        assert!(!temp.exists(), "the interrupted temp is not left in place");
+        assert!(read_events(&home).iter().any(|e| {
+            e["type"] == "daemon_recovery_interrupted_temp"
+                && e["data"]["name"] == ".registry.json.tmp.75348"
+        }));
         std::fs::remove_dir_all(home.root()).ok();
     }
 

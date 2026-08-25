@@ -221,6 +221,10 @@ fn table_mux_bool(t: &toml::Table, key: &str) -> Option<bool> {
     t.get("mux")?.as_table()?.get(key)?.as_bool()
 }
 
+fn table_recovery_bool(t: &toml::Table, key: &str) -> Option<bool> {
+    t.get("recovery")?.as_table()?.get(key)?.as_bool()
+}
+
 /// Normalize one configured GitHub login without changing its case. This
 /// mirrors loop-check's TOML coercion: scalar strings/numbers/bools are legal
 /// login spellings, while structured values are not.
@@ -507,6 +511,12 @@ pub fn notify_on_blocked_enabled(cwd: &Path) -> bool {
 /// inside-leg hook).
 pub fn notify_on_done_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "notify_on_done", false)
+}
+
+/// Startup reconciliation is non-destructive by default. Operators may opt in
+/// to the legacy orphan archive and dead-PID status rewrite explicitly.
+pub fn startup_destructive_recovery_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| table_recovery_bool(t, "startup_destructive")).unwrap_or(false)
 }
 
 /// Resolve a `mux.<key>` boolean, degrading to `default` when no candidate
@@ -831,6 +841,19 @@ mod tests {
     fn mux_bool_reads_true() {
         let cfg = "[mux]\nnotify_on_done = true\n";
         assert_eq!(read_mux_bool(cfg, "notify_on_done"), Some(true));
+    }
+
+    #[test]
+    fn startup_destructive_recovery_defaults_off_and_reads_opt_in() {
+        let cwd = tempfile::tempdir().unwrap();
+        assert!(!startup_destructive_recovery_enabled(cwd.path()));
+        std::fs::create_dir_all(cwd.path().join(".fno")).unwrap();
+        std::fs::write(
+            cwd.path().join(".fno/config.toml"),
+            "[recovery]\nstartup_destructive = true\n",
+        )
+        .unwrap();
+        assert!(startup_destructive_recovery_enabled(cwd.path()));
     }
 
     #[test]

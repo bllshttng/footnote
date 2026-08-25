@@ -2710,6 +2710,7 @@ class RecoveryBlock(BaseModel):
     watchdog: Literal["off", "report", "wake"] = "off"
     watchdog_mail_to: str = ""
     watchdog_reap: bool = False
+    startup_destructive: bool = False
     retire_grace_s: int = Field(default=900, ge=0)
 
 
