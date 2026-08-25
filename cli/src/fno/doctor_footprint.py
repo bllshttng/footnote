@@ -34,24 +34,26 @@ def _live_root_pids() -> set[int]:
     roots: set[int] = set()
     try:
         from fno.agents.registry import load_registry
+        from fno.agents.session_procs import bg_socket_pid_map
         from fno.agents.spawn_gate import LIVE_STATUSES, _pid_alive
 
-        for row in load_registry():
+        rows = load_registry()
+        for row in rows:
             if row.status not in LIVE_STATUSES or row.pid is None:
                 continue
             if _pid_alive(row.pid, row.pid_start_time) is True:
                 roots.add(row.pid)
-    except Exception:
-        pass
-    try:
-        from fno.agents.spawn_gate import _pid_alive, census
-
-        for worker in census().workers:
-            if worker.source != "fno" and worker.spawned_by is None:
-                continue
-            pid = worker.session_pid or worker.pid
-            if pid is not None and _pid_alive(pid, None) is True:
-                roots.add(pid)
+        socket_pids = bg_socket_pid_map()
+        for row in rows:
+            if (
+                row.status in LIVE_STATUSES
+                and row.pid is None
+                and row.harness == "claude"
+                and row.short_id
+            ):
+                pid = socket_pids.get(row.short_id)
+                if pid is not None and _pid_alive(pid, None) is True:
+                    roots.add(pid)
     except Exception:
         pass
     return roots

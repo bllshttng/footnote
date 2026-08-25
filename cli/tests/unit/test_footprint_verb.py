@@ -78,14 +78,15 @@ def test_ac9_edge_ps_timeout_caller_refuses_with_exit_four(monkeypatch) -> None:
 
 def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_path) -> None:
     from fno import doctor_footprint
-    from fno.agents import spawn_gate
 
     (tmp_path / "opencode-serve.json").write_text(
         json.dumps({"pid": 900, "pid_start": 123}), encoding="utf-8"
     )
     monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
-    monkeypatch.setattr(spawn_gate, "census", lambda: spawn_gate.LiveCensus())
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map", lambda: {}
+    )
     monkeypatch.setattr(
         "fno.agents.spawn_gate._pid_alive",
         lambda pid, _start: True if pid == 900 else None,
@@ -102,25 +103,23 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
 
 def test_live_root_pids_includes_roster_resolved_claude_bg_worker(monkeypatch) -> None:
     from fno import doctor_footprint
-    from fno.agents import spawn_gate
+    from types import SimpleNamespace
 
-    worker = spawn_gate.LiveWorker(
-        source="claude",
-        name="cl-bg",
-        harness="claude",
-        substrate="bg",
-        pid=None,
+    row = SimpleNamespace(
         status="live",
-        spawned_by="target-session:king",
-        session_pid=902,
+        pid=None,
+        harness="claude",
+        short_id="cl-bg",
     )
-    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
     monkeypatch.setattr(
-        spawn_gate,
-        "census",
-        lambda: spawn_gate.LiveCensus(workers=[worker]),
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda: {"cl-bg": 902},
     )
-    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, _start: pid == 902)
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 902,
+    )
 
     assert doctor_footprint._live_root_pids() == {902}
 
