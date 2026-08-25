@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 
 import pytest
 from typer.testing import CliRunner
@@ -161,6 +162,12 @@ def test_named_send_ruling_uses_explicit_cwd_graph(
         + "\n",
         encoding="utf-8",
     )
+    subprocess.run(
+        ["git", "init", "-q", str(foreign_repo)],
+        check=True,
+    )
+    nested_workdir = foreign_repo / "nested" / "worker"
+    nested_workdir.mkdir(parents=True)
     marker = "Foreign ruling sentinel must land only in the requested cwd."
     _hosted_dispatch(
         monkeypatch,
@@ -172,7 +179,7 @@ def test_named_send_ruling_uses_explicit_cwd_graph(
         app,
         [
             "agents", "mail", "send", "worker-one", marker,
-            "--from-name", "king", "--cwd", str(foreign_repo),
+            "--from-name", "king", "--cwd", str(nested_workdir),
             "--ruling", "x-511a",
         ],
     )

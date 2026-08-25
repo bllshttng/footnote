@@ -44,6 +44,7 @@ import dataclasses
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -685,11 +686,24 @@ def _ruling_graph_path(workdir: Path) -> Path:
     """Resolve the graph configured by an explicit mail ``--cwd``."""
     from fno.config import load_settings_for_repo
 
-    settings = load_settings_for_repo(workdir)
+    repo_root = workdir
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workdir), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            repo_root = Path(result.stdout.strip()).resolve()
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass
+    settings = load_settings_for_repo(repo_root)
     override = settings.paths.graph_json
     raw = override if override is not None else settings.state_dir
     resolved = paths.resolve_configured_path(
-        raw, project_root=workdir, settings=settings
+        raw, project_root=repo_root, settings=settings
     )
     return resolved if override is not None else resolved / "graph.json"
 
