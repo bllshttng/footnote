@@ -324,6 +324,20 @@ def test_intake_claim_records_blueprint_difficulty(fixture_graph, tmp_path, caps
     assert target["difficulty_history"][-1]["source"] == "blueprint"
 
 
+def test_intake_claim_carries_p0_acknowledgment(fixture_graph, tmp_path, capsys):
+    """Claimed intake preserves the plan's validated p0 acknowledgment."""
+    plan = tmp_path / "p0-claim.md"
+    plan.write_text(
+        "---\nclaims: ab-1dea1234\npriority: p0\nblocks_everything: true\n---\n"
+        "# Broken service\n"
+    )
+    _intake_impl(plan_paths=[str(plan)])
+    capsys.readouterr()
+    target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
+    assert target["priority"] == "p0"
+    assert target["blocks_everything"] is True
+
+
 def test_intake_with_cli_claim_wins_over_frontmatter(fixture_graph, tmp_path, capsys):
     plan = _write_quick_plan(
         tmp_path,

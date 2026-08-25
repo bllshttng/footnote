@@ -2948,6 +2948,8 @@ def _intake_impl(
                 # Only override priority if the plan supplied a non-default one.
                 if spec.get("priority") and spec["priority"] != "p2":
                     entry["priority"] = spec["priority"]
+                if spec.get("priority") == "p0" and spec.get("blocks_everything"):
+                    entry["blocks_everything"] = True
                 if spec.get("points") is not None:
                     entry["points"] = spec["points"]
                 # Backfill project/cwd when the node was created via
