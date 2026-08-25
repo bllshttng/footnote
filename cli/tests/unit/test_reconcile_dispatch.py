@@ -44,7 +44,8 @@ def _patch_deps(monkeypatch, deps):
 
 def _patch_spawn(monkeypatch):
     calls = []
-    def fake(node_id, node_cwd, node_slug=None, *, reconcile_manifest=None, model=None, provider=None):
+    def fake(node_id, node_cwd, node_slug=None, *, reconcile_manifest=None, model=None,
+             provider=None, node=None):
         calls.append({"node": node_id, "cwd": node_cwd, "manifest": reconcile_manifest,
                       "model": model, "provider": provider})
         return "short123"
