@@ -1949,8 +1949,8 @@ def test_v9_conflicting_legacy_pair_keeps_short_id_and_warns(
 
 
 #: `claude` is a HARNESS, and `register_existing_session`'s parameter is named
-#: `provider`, so binding the literal there is what `check-axis-vocabulary`
-#: refuses. Name the axis once - the idiom `test_mail_escalation.py` uses.
+#: `provider`. Name the axis once rather than bind the literal at each call
+#: site - the idiom `test_mail_escalation.py` uses.
 CLAUDE_HARNESS = "claude"
 
 

@@ -359,10 +359,9 @@ def test_mail_demote_reason_codex_daemon_present_no_hint(mailbox, monkeypatch, c
 
 
 #: The five axes are never inferred from a value: `claude` is a HARNESS, and
-#: `register_existing_session`'s parameter is named `provider`. Binding the
-#: literal there directly is what `check-axis-vocabulary` refuses, so the
-#: axis is named once here - the same idiom as `CODEX_HARNESS` in
-#: `cli/tests/agents/test_spawn_pane.py`.
+#: `register_existing_session`'s parameter is named `provider`. Name the axis
+#: once here rather than bind the literal at each call site - the same idiom
+#: as `CODEX_HARNESS` in `cli/tests/agents/test_spawn_pane.py`.
 CLAUDE_HARNESS = "claude"
 
 
