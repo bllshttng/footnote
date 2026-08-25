@@ -133,6 +133,29 @@ def test_stage_profile_suppresses_difficulty_grid(monkeypatch):
         model="default-model",
     )
     assert "profile-model" in result
+
+
+def test_pinned_lane_flags_suppress_difficulty_grid(monkeypatch):
+    """An explicit --substrate or --permission-mode names a lane the grid may
+    not legally rehome (bg is claude+opencode; a mapped permission-mode is
+    claude-only off pane), so the grid stands down rather than build an argv
+    the spawn gate exit-2 refuses."""
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda: {"claude": "exhausted", "codex": "ok"},
+    )
+    for argv in (
+        ["spawn", "--name", "w", "--node", "x-grid1", "--substrate", "bg", "hi"],
+        ["spawn", "--name", "w", "--node", "x-grid1", "--permission-mode", "bypassPermissions", "hi"],
+    ):
+        result = _inject(argv, model="default-model")
+        assert "--harness" not in result
+        assert "codex" not in result
+        assert "default-model" in result
     assert "gpt-5.5" not in result
 
 

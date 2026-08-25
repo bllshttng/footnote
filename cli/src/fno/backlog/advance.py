@@ -1139,6 +1139,7 @@ def _spawn_worker(
     brief: Optional[str] = None,
     extra_env: Optional[dict] = None,
     permission_mode: Optional[str] = None,
+    node: Optional[dict] = None,
 ) -> str:
     """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
@@ -1172,6 +1173,32 @@ def _spawn_worker(
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
     # from `harness` (the record's cli, which drives the resolver's substrate).
     prov = (provider or "").strip() or "claude"
+
+    # Capacity-grid deferral receiving end: the automatic dispatch callers pass
+    # resolve_difficulty=False to node_model precisely so difficulty picks the
+    # lane HERE, at the seam that can read live capacity - the spawned argv
+    # always carries an explicit --harness, so the spawn-CLI grid can never fire
+    # on this path. Only a fully unpinned spawn defers (explicit model or
+    # provider stays operator authority); unknown capacity falls back to the
+    # defaults above (Locked 10: routing degrades, never blocks a spawn).
+    if model is None and not (provider or "").strip() and node is not None:
+        try:
+            from fno import route_resolve
+
+            candidate, _grid_chain = route_resolve.resolve_grid(
+                node.get("difficulty") or node.get("model_tier"),
+                node.get("priority"),
+                route_resolve.runtime_capacity(),
+            )
+        except Exception:  # noqa: BLE001 - unknown capacity spawns on defaults
+            candidate = None
+        if candidate is not None:
+            prov = candidate["harness"]
+            model = candidate["model"]
+            if harness is None:
+                # The resolver must see the grid's harness or it resolves a
+                # claude substrate/command for a codex spawn (bg is claude-only).
+                harness = candidate["harness"]
 
     # x-4391/x-4be1: merge posture from config.auto_merge.grant, read with the
     # node_cwd precedence so a cross-project dispatch reads the DEPENDENT node's
@@ -1643,6 +1670,7 @@ def dispatch_lanes(
                 provider=eff_provider,
                 verb=node.get("dispatch_verb"),
                 brief=_brief,
+                node=node,
             )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
             # Release BOTH the boot-window reservation and the dispatch-time lane
@@ -2046,6 +2074,7 @@ def advance(
             provider=eff_provider,
             harness=failover_harness,
             extra_env=failover_env,
+            node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,
         )
@@ -2352,6 +2381,7 @@ def _converge_one(
             provider=eff_provider,
             verb=node_meta.get("dispatch_verb"),
             brief=_brief,
+            node=node_meta,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)

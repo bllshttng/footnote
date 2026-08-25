@@ -232,6 +232,7 @@ def _dispatch_reconcile(
                 dep, provider=dep.get("provider"), resolve_difficulty=False
             ),
             provider=dep.get("provider"),
+            node=dep,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)

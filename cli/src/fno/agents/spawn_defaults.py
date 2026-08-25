@@ -1184,6 +1184,13 @@ def inject_spawn_defaults(
     explicit_vendor = _flag_value(out[1:], "--provider", "-P")
     explicit_vendor_present = explicit_vendor is not None
     explicit_route = _flag_present(out[1:], "--route")
+    # A pinned substrate or permission-mode constrains which harness the argv
+    # can legally carry (bg is claude+opencode; a mapped --permission-mode is
+    # claude-only off pane), so a grid pair picked on capacity alone can build
+    # an argv the spawn gate exit-2 refuses. The operator named the lane, so
+    # the grid stands down and the ordinary defaults apply.
+    explicit_substrate_present = _flag_present(out[1:], "--substrate")
+    explicit_permission_present = _flag_present(out[1:], "--permission-mode")
     profile_routing_pinned = bool(
         profile is not None
         and (
@@ -1201,6 +1208,8 @@ def inject_spawn_defaults(
         and not has_provider
         and not explicit_vendor_present
         and not explicit_route
+        and not explicit_substrate_present
+        and not explicit_permission_present
         and not profile_routing_pinned
     ):
         try:

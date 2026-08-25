@@ -441,6 +441,57 @@ def test_advance_defers_canonical_difficulty_to_spawn_grid(iso, monkeypatch):
     assert captured["model"] is None
 
 
+def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
+    """The deferral has a receiving end: an unpinned difficulty node picks its
+    harness/model at the spawn seam via the capacity grid, because the spawned
+    argv's explicit --harness can never trigger the spawn-CLI grid."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "sid-grid1"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda: {"claude": "exhausted", "codex": "ok"},
+    )
+    sid = adv._spawn_worker(
+        "x-grid1", None, "grid-slug", node={"difficulty": "high", "priority": "p1"}
+    )
+    # codex has no bg lane: the resolver sends it headless, whose clean exit IS
+    # the launch proof (no short_id receipt to parse).
+    assert sid == "headless"
+    cmd = captured["cmd"]
+    i = cmd.index("--harness")
+    assert cmd[i + 1] == "codex"
+    assert "gpt-5.5" in cmd
+
+
+def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
+    """An explicit provider (or model) stays operator authority: the grid is a
+    default route only."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "sid-pin1"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda: {"claude": "exhausted", "codex": "ok"},
+    )
+    adv._spawn_worker(
+        "x-pin1", None, "pin-slug", provider="claude",
+        node={"difficulty": "high", "priority": "p1"},
+    )
+    cmd = captured["cmd"]
+    i = cmd.index("--harness")
+    assert cmd[i + 1] == "claude"
+    assert "gpt-5.5" not in cmd
+
+
 def test_advance_cli_pin_overrides_node(iso, monkeypatch):
     """Locked Decision 1: a dispatch-time model/provider outranks node annotations."""
     captured = {}
