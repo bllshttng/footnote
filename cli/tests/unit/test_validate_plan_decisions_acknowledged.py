@@ -18,8 +18,11 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VALIDATOR = REPO_ROOT / "scripts" / "validate-plan.sh"
+_EXPIRY_REF_UNSET = object()
 
 
 def _run(plan: Path, state_dir: Path) -> subprocess.CompletedProcess[str]:
@@ -55,7 +58,7 @@ def _seed_decision(
     decision_id: str,
     subject: str,
     supersedes: str | None = None,
-    expiry_ref: dict[str, object] | None = None,
+    expiry_ref: object = _EXPIRY_REF_UNSET,
     authority_source: str = "beastmode",
 ) -> None:
     """Append one decision-index row directly, bypassing record_decision.
@@ -75,7 +78,7 @@ def _seed_decision(
     }
     if supersedes:
         data["supersedes"] = supersedes
-    if expiry_ref is not None:
+    if expiry_ref is not _EXPIRY_REF_UNSET:
         data["expiry_ref"] = expiry_ref
     row = {"ts": "2026-08-01T00:00:00.000000Z", "type": "operator_decision", "source": "target", "data": data}
     with index.open("a", encoding="utf-8") as fh:
@@ -193,6 +196,30 @@ def test_scoped_coord_without_graph_evidence_fails_closed(tmp_path):
     result = _run(plan, state_dir)
     assert result.returncode == 1, result.stdout
     assert "explicit expiry_ref but no positive closure evidence" in result.stdout
+    assert "0/0 decision(s) acknowledged" not in result.stdout
+
+
+@pytest.mark.parametrize("expiry_ref", [None, "bad"])
+def test_coord_with_invalid_expiry_ref_shape_fails_closed(tmp_path, expiry_ref):
+    state_dir = tmp_path / "fno-home"
+    _seed_decision(
+        state_dir,
+        decision_id="d-badref12",
+        subject="x-c0ffee12",
+        expiry_ref=expiry_ref,
+        authority_source="agent",
+    )
+
+    plan = tmp_path / "invalid-ref.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\nclaims: x-c0ffee12\ncreated: 2026-08-23\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  proceed_alone_against: []\n"
+    ))
+    result = _run(plan, state_dir)
+    assert result.returncode == 1, result.stdout
+    assert "invalid expiry_ref shape" in result.stdout
     assert "0/0 decision(s) acknowledged" not in result.stdout
 
 

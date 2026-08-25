@@ -1050,13 +1050,36 @@ if isinstance(node_id, str) and node_id.strip():
                 "`fno backlog decide-reindex` and re-validate\n" % damaged
             )
         else:
+            def valid_expiry_ref_shape(ref):
+                if not isinstance(ref, dict):
+                    return False
+                kind = ref.get("kind")
+                if kind == "node":
+                    return isinstance(ref.get("node_id"), str) and bool(
+                        ref["node_id"].strip()
+                    )
+                if kind == "pr":
+                    number = ref.get("number")
+                    return (
+                        isinstance(ref.get("repository"), str)
+                        and bool(ref["repository"].strip())
+                        and isinstance(number, int)
+                        and not isinstance(number, bool)
+                        and number > 0
+                    )
+                return False
+
             for row in rows:
-                if (
-                    row.get("lane") == "coord"
-                    and isinstance(row.get("expiry_ref"), dict)
-                    and row.get("lifecycle") == "unscoped"
-                ):
-                    did = str(row.get("decision_id") or "<missing>")
+                if row.get("lane") != "coord" or "expiry_ref" not in row:
+                    continue
+                did = str(row.get("decision_id") or "<missing>")
+                if not valid_expiry_ref_shape(row.get("expiry_ref")):
+                    sys.stdout.write(
+                        "E\tcoord decision %s has invalid expiry_ref shape; "
+                        "use a node ref with node_id or a PR ref with repository "
+                        "and positive number\n" % did
+                    )
+                elif row.get("lifecycle") == "unscoped":
                     sys.stdout.write(
                         "E\tcoord decision %s has explicit expiry_ref but no "
                         "positive closure evidence; repair the graph evidence "
