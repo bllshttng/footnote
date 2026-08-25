@@ -521,9 +521,12 @@ def run_retask(
         )
 
     def ready_frame(frame: str) -> Mapping[str, object]:
-        from fno.agents.mux_spawn import _evaluate_manifest_screen
+        from fno.agents.mux_spawn import _evaluate_manifest_screen, _pane_osc_title
 
-        return _evaluate_manifest_screen(entry.harness, frame, subprocess.run)
+        osc_title = _pane_osc_title(session, int(pane), subprocess.run)
+        return _evaluate_manifest_screen(
+            entry.harness, frame, subprocess.run, osc_title=osc_title
+        )
 
     try:
         return execute_retask(

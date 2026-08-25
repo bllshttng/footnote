@@ -456,6 +456,44 @@ def test_run_retask_converts_mux_timeout_to_structured_refusal(monkeypatch):
     assert receipt["target_submit_confirmed"] is False
 
 
+def test_run_retask_passes_live_osc_title_to_manifest_evaluator(monkeypatch):
+    import fno.agents.retask as retask
+
+    row = _row(screen_state=None)
+    target = retask.RetaskCoordinate(
+        harness="codex", provider=None, model="gpt-5.6-sol", effort="high",
+        substrate="pane", permission_mode=None, route=None, account=None,
+    )
+    sends: list[str] = []
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._pane_osc_title",
+        lambda *_args, **_kwargs: "⠋ Working",
+    )
+
+    def evaluate(_harness, _frame, _runner, *, osc_title=None, **_kwargs):
+        observed["osc_title"] = osc_title
+        if osc_title:
+            return {"matched": True, "rule_id": "busy", "state": "working"}
+        return {"matched": True, "rule_id": "idle_prompt", "state": "idle"}
+
+    monkeypatch.setattr("fno.agents.mux_spawn._evaluate_manifest_screen", evaluate)
+
+    def run(command, **_kwargs):
+        if "send" in command:
+            sends.append(command[command.index("--text") + 1])
+        return SimpleNamespace(returncode=0, stdout="live frame", stderr="")
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["reason"] == "pane_not_idle"
+    assert observed == {"osc_title": "⠋ Working"}
+    assert sends == []
+
+
 def test_run_retask_timeout_mid_transaction_reports_the_true_pane_state(monkeypatch):
     """A transport death after /clear + restamp + rename must not claim the
     pane is untouched: the receipt names the cleared, renamed pane."""
@@ -484,6 +522,7 @@ def test_run_retask_timeout_mid_transaction_reports_the_true_pane_state(monkeypa
         "fno.agents.mux_spawn._evaluate_manifest_screen",
         lambda *_args, **_kwargs: {"matched": True, "rule_id": "idle_prompt", "state": "idle"},
     )
+    monkeypatch.setattr("fno.agents.mux_spawn._pane_osc_title", lambda *_args: None)
 
     calls = {"n": 0}
 

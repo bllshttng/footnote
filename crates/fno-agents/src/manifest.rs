@@ -2103,6 +2103,22 @@ mod tests {
     }
 
     #[test]
+    fn codex_idle_prompt_survives_a_status_bar_below_it() {
+        let screen = "model reply\n\n› Ask Codex to do anything\n\n  gpt-5.6-luna xhigh";
+        let idle = evaluate_screen_json("codex", screen).unwrap();
+        assert_eq!(idle["rule_id"], "idle_prompt");
+        assert_eq!(idle["state"], "idle");
+
+        let busy = evaluate_screen_json(
+            "codex",
+            "› Ask Codex to do anything\nWorking · esc to interrupt\nstatus",
+        )
+        .unwrap();
+        assert_eq!(busy["rule_id"], "busy");
+        assert_eq!(busy["state"], "working");
+    }
+
+    #[test]
     fn manifest_eval_keeps_working_osc_title_above_idle_composer() {
         let result = evaluate_screen_json_with_osc(
             "claude",

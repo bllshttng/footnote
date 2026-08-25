@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -13,31 +12,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from fno.agents.retask import execute_retask, resolve_target_coordinate
+from fno.agents.mux_spawn import dispatch_spawn_pane
+from fno.agents.retask import run_retask
 from fno.agents.registry import load_registry
 
 
 pytestmark = [
     pytest.mark.smoke,
     pytest.mark.skipif(
-        os.environ.get("RETASK_SMOKE", "0") != "1" or shutil.which("claude") is None,
-        reason="set RETASK_SMOKE=1 and ensure claude is on PATH",
+        os.environ.get("RETASK_SMOKE", "0") != "1" or shutil.which("codex") is None,
+        reason="set RETASK_SMOKE=1 and ensure codex is on PATH",
     ),
 ]
-
-
-def _receipt(proc: subprocess.CompletedProcess[str]) -> dict:
-    for line in reversed(proc.stdout.splitlines()):
-        try:
-            value = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(value, dict):
-            return value
-    pytest.fail(
-        f"command emitted no JSON receipt: rc={proc.returncode} "
-        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    )
 
 
 def _settings(*, model: str, effort: str) -> SimpleNamespace:
@@ -53,7 +39,7 @@ def _settings(*, model: str, effort: str) -> SimpleNamespace:
         lanes=[],
     )
     profile = SimpleNamespace(
-        **{**vars(defaults), "provider": "claude", "model": model, "effort": effort}
+        **{**vars(defaults), "provider": "codex", "model": model, "effort": effort}
     )
     return SimpleNamespace(
         agents=SimpleNamespace(defaults=defaults, profiles={"target": profile}, max_lanes={}),
@@ -61,7 +47,7 @@ def _settings(*, model: str, effort: str) -> SimpleNamespace:
     )
 
 
-def test_real_spawned_idle_pane_retasks_with_live_readiness() -> None:
+def test_real_spawned_idle_pane_retasks_with_live_readiness(monkeypatch) -> None:
     real_home = os.environ.get("RETASK_SMOKE_HOME")
     if not real_home:
         pytest.skip("set RETASK_SMOKE_HOME to the real authenticated home directory")
@@ -88,7 +74,6 @@ def test_real_spawned_idle_pane_retasks_with_live_readiness() -> None:
     effort = os.environ.get("RETASK_SMOKE_EFFORT")
     if not model or not effort:
         pytest.skip("set RETASK_SMOKE_MODEL and RETASK_SMOKE_EFFORT")
-    account = os.environ.get("RETASK_SMOKE_ACCOUNT")
     cleanup_names = [worker, f"target-{target}"]
     last_receipt: dict = {"worker": worker, "stage": "not_started"}
     session = ""
@@ -105,47 +90,65 @@ def test_real_spawned_idle_pane_retasks_with_live_readiness() -> None:
             check=False,
         )
 
+    def real_runner(command, *args, **kwargs):
+        kwargs.setdefault("cwd", repo)
+        kwargs.setdefault("env", env)
+        return subprocess.run(command, *args, **kwargs)
+
     try:
-        spawn_args = [
-            *cli,
-            "agents",
-            "spawn",
-            "--force",
-            "--name",
-            worker,
-            "--harness",
-            "claude",
-            "--substrate",
-            "pane",
-            "--cwd",
-            str(repo),
-        ]
-        if account:
-            spawn_args.extend(["--account", account])
-        spawn_args.extend(
-            [
-                "--model",
-                model,
-                "--effort",
-                effort,
-                "--timeout",
-                "180",
-                "Reply only RETASK_SMOKE_IDLE. Do not call tools.",
-            ]
+        from fno import rust_binary
+        from fno.agents import mux_spawn
+
+        monkeypatch.setenv("HOME", real_home)
+        monkeypatch.setenv("CODEX_HOME", str(Path(real_home) / ".codex"))
+        monkeypatch.setenv("FNO_HOME", str(Path(real_home) / ".fno"))
+        monkeypatch.setenv(
+            "FNO_AGENTS_HOME", str(Path(real_home) / ".fno" / "agents")
         )
-        spawned = run(spawn_args, timeout=210)
-        assert spawned.returncode == 0, spawned.stderr
-        last_receipt = _receipt(spawned)
-        assert last_receipt.get("name") == worker, last_receipt
-        session = str(last_receipt.get("mux_session") or "")
-        pane = str(last_receipt.get("pane_id") or "")
-        assert session and pane, last_receipt
+        monkeypatch.delenv("FNO_CONFIG_SEARCH_ROOT", raising=False)
+        monkeypatch.delenv("FNO_CODEX_SESSIONS_DIR", raising=False)
+        dev_binary = repo / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
+        assert dev_binary.is_file(), f"build the smoke binary first: {dev_binary}"
+        monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: dev_binary)
+        monkeypatch.setattr(
+            mux_spawn,
+            "_make_codex_bind_probe",
+            lambda **_kwargs: (lambda: "smoke-old-session"),
+        )
+        spawned = dispatch_spawn_pane(
+            worker,
+            "Reply only RETASK_SMOKE_IDLE. Do not call tools.",
+            "codex",
+            repo,
+            yolo=True,
+            model=model,
+            effort=effort,
+            runner=real_runner,
+            codex_sessions_dir=Path(real_home) / ".codex" / "sessions",
+        )
+        last_receipt = {
+            "name": spawned.name,
+            "session": spawned.session,
+            "pane_id": spawned.pane_id,
+            "bound": spawned.bound,
+        }
+        assert spawned.name == worker, last_receipt
+        assert spawned.bound is True, last_receipt
+        session = spawned.session
+        pane = str(spawned.pane_id)
 
         registry = Path(real_home) / ".fno" / "agents" / "registry.json"
         row = next(entry for entry in load_registry(registry) if entry.name == worker)
         assert row.mux == {"session": session, "pane_id": int(pane)}, row
         spawned_screen_state = row.screen_state
         assert spawned_screen_state is None, row
+
+        from fno.agents.mux_spawn import _evaluate_manifest_screen, _pane_osc_title
+
+        def live_runner(command, *args, **kwargs):
+            kwargs.setdefault("cwd", repo)
+            kwargs.setdefault("env", env)
+            return subprocess.run(command, *args, **kwargs)
 
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
@@ -163,26 +166,27 @@ def test_real_spawned_idle_pane_retasks_with_live_readiness() -> None:
                 ],
                 timeout=15,
             )
-            idle = (
-                frame.returncode == 0
-                and "❯" in frame.stdout
-                and "Login expired" not in frame.stdout
-                and "Not logged in" not in frame.stdout
+            osc_title = _pane_osc_title(session, int(pane), live_runner)
+            verdict = (
+                _evaluate_manifest_screen(
+                    "codex",
+                    frame.stdout,
+                    live_runner,
+                    osc_title=osc_title,
+                )
+                if frame.returncode == 0
+                else {"matched": False}
             )
-            verdict = {
-                "matched": idle,
-                "rule_id": "live_prompt_box" if idle else None,
-                "state": "idle" if idle else None,
-            }
             last_receipt = {
                 "worker": worker,
                 "stage": "wait_idle",
                 "spawned_screen_state": spawned_screen_state,
+                "osc_title": osc_title,
                 "verdict": verdict,
             }
             if (
                 verdict.get("matched")
-                and verdict.get("rule_id") == "live_prompt_box"
+                and verdict.get("rule_id") == "idle_prompt"
                 and verdict.get("state") == "idle"
             ):
                 break
@@ -190,81 +194,73 @@ def test_real_spawned_idle_pane_retasks_with_live_readiness() -> None:
         else:
             pytest.fail(f"worker did not reach idle: {last_receipt}")
 
-        sends: list[tuple[str, bool]] = []
-        frames = iter(
-            [
-                frame.stdout,
-                f"Model: {model} (reasoning {effort}, summaries auto)",
-            ]
+        from fno.agents import registry as registry_module
+        from fno.agents import retask as retask_module
+
+        real_run = subprocess.run
+        sends: list[str] = []
+        status_pending = False
+
+        def runtime_run(command, *args, **kwargs):
+            nonlocal status_pending
+            tokens = [str(token) for token in command]
+            if "send" in tokens and "--text" in tokens:
+                text = tokens[tokens.index("--text") + 1]
+                result = real_run(command, *args, **kwargs)
+                sends.append(text)
+                if text == "/status" and result.returncode == 0:
+                    status_pending = True
+                return result
+            if status_pending and "read" in tokens:
+                status_pending = False
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=f"Model: {model} (reasoning {effort}, summaries auto)",
+                    stderr="",
+                )
+            return real_run(command, *args, **kwargs)
+
+        monkeypatch.setenv("HOME", real_home)
+        monkeypatch.setenv("FNO_HOME", str(Path(real_home) / ".fno"))
+        monkeypatch.setenv(
+            "FNO_AGENTS_HOME", str(Path(real_home) / ".fno" / "agents")
         )
-
-        def send(text: str, submit: bool) -> bool:
-            command = [
-                "fno",
-                "mux",
-                "pane",
-                "send",
-                "--session",
-                session,
-                pane,
-                "--text",
-                text,
-                "--raw",
-            ]
-            if submit:
-                command.append("--submit")
-            sent = run(command, timeout=30)
-            sends.append((text, submit))
-            return sent.returncode == 0
-
-        def settle() -> None:
-            run(
-                [
-                    "fno",
-                    "mux",
-                    "pane",
-                    "wait",
-                    "--session",
-                    session,
-                    pane,
-                    "--quiet-ms",
-                    "400",
-                    "--timeout",
-                    "8",
-                ],
-                timeout=15,
-            )
-
-        target_coordinate = resolve_target_coordinate(
-            target,
+        monkeypatch.delenv("FNO_CONFIG_SEARCH_ROOT", raising=False)
+        monkeypatch.setattr(retask_module.subprocess, "run", runtime_run)
+        monkeypatch.setattr(
+            retask_module,
+            "load_registry",
+            lambda **_kwargs: [
+                SimpleNamespace(name=worker, harness_session_id="smoke-new-session")
+            ],
+        )
+        monkeypatch.setattr(
+            retask_module,
+            "rename_agent",
+            lambda *_args, **_kwargs: SimpleNamespace(name=f"target-{target}"),
+        )
+        monkeypatch.setattr(
+            registry_module,
+            "project_verified_tier",
+            lambda *_args, **_kwargs: None,
+        )
+        last_receipt = run_retask(
+            worker,
+            node=target,
             settings=_settings(model=model, effort=effort),
             model=model,
             effort=effort,
             env={},
-        )
-        last_receipt = execute_retask(
-            row,
-            target_coordinate,
-            node=target,
-            read_frame=lambda: next(frames),
-            ready_frame=lambda frame_text: {
-                "matched": "❯" in frame_text,
-                "rule_id": "live_prompt_box",
-                "state": "idle",
-            },
-            send=send,
-            restamp=lambda: "smoke-new-session",
-            rename=lambda _name: f"target-{target}",
-            project_tier=lambda _model, _effort: None,
-            settle=settle,
+            registry_path=registry,
         )
         assert last_receipt.get("status") == "retasked", last_receipt
         assert last_receipt.get("switch") == "skipped_same_tier", last_receipt
         assert last_receipt.get("switch_verified") is True, last_receipt
         assert last_receipt.get("target_submit_confirmed") is True, last_receipt
-        assert sends[0] == ("/clear", True)
-        assert sends[1] == ("/status", True)
-        assert sends[-1][0].endswith(target)
+        assert sends[0] == "/clear"
+        assert sends[1] == "/status"
+        assert sends[-1].endswith(target)
     finally:
         cleanup_receipts = []
         for name in cleanup_names:

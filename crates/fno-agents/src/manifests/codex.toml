@@ -16,8 +16,9 @@
 # The bottom_non_empty_lines(3) region IS the old STATUS_REGION_LINES = 3: it
 # scopes the wall/busy match to the composer + status bar so a model reply that
 # merely mentions "Working" up in scrollback does not pin the agent not-ready
-# (the original Codex review P1 fix). idle_prompt reads only the last line,
-# matching `last.trim_end().ends_with(glyph)`.
+# (the original Codex review P1 fix). idle_prompt uses the same three-line
+# window because current Codex renders its prompt above a model/status bar;
+# busy/auth rules still win by priority when either marker is present.
 #
 # ponytail: glyphs/markers mirror readiness.rs (PROMPT_GLYPHS, BUSY_MARKERS,
 # WALL_MARKERS); pin them against a live codex TUI via
@@ -48,14 +49,14 @@ gate = { any = [
   { contains = "Thinking" },
 ] }
 
-# Last non-blank line ends with a prompt glyph (❯ › ▌), optional trailing space.
+# One of the last three non-blank lines starts with a prompt glyph (❯ › ▌).
 # Literal (single-quoted) TOML string so the backslash reaches the regex engine.
 [[rule]]
 id = "idle_prompt"
 state = "idle"
 priority = 100
-region = "bottom_non_empty_lines(1)"
-gate = { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' }
+region = "bottom_non_empty_lines(3)"
+gate = { line_regex = '^\s*[\x{276f}\x{203a}\x{2595}]' }
 
 # Answerable command/edit approvals (x-f498). Codex 0.144.1 renders a borderless
 # numbered menu and commits the choice on a bare digit. The menu/footer stay in
