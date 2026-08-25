@@ -757,7 +757,19 @@ def test_x_a1d5_exclude_adopted_session_by_full_id(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def _write_codex_rollout(codex_dir, *, session_id, cwd, mtime_age=5.0, meta=True):
+def _recovery_session_id(index: int) -> str:
+    return f"01a039aa-0000-7000-8000-{index:012x}"
+
+
+def _write_codex_rollout(
+    codex_dir,
+    *,
+    session_id,
+    cwd,
+    mtime_age=5.0,
+    meta=True,
+    readable_turn=True,
+):
     """Write a rollout jsonl whose first line is a session_meta record."""
     day = codex_dir / "2026" / "07" / "09"
     day.mkdir(parents=True, exist_ok=True)
@@ -766,7 +778,24 @@ def _write_codex_rollout(codex_dir, *, session_id, cwd, mtime_age=5.0, meta=True
         line = {"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}}
     else:
         line = {"type": "turn_context", "payload": {"nope": 1}}
-    f.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    lines = [json.dumps(line)]
+    if readable_turn:
+        lines.append(
+            json.dumps(
+                {
+                    "timestamp": "2026-08-25T15:00:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": f"resume {session_id}"}
+                        ],
+                    },
+                }
+            )
+        )
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
     mt = time.time() - mtime_age
     os.utime(f, (mt, mt))
     return f
@@ -798,7 +827,7 @@ def test_recovery_scan_complete_zero_is_positive_evidence(tmp_path):
 
 def test_recovery_scan_bounds_by_recency_exact_cwd_and_newest_full_id(tmp_path):
     codex = tmp_path / "codex"
-    duplicate_id = "019f48e1-duplicate-full-thread-id"
+    duplicate_id = _recovery_session_id(1)
     older = _write_codex_rollout(
         codex, session_id=duplicate_id, cwd="/repo", mtime_age=20.0
     )
@@ -814,10 +843,10 @@ def test_recovery_scan_bounds_by_recency_exact_cwd_and_newest_full_id(tmp_path):
     newest_mtime = time.time() - 1.0
     os.utime(newer, (newest_mtime, newest_mtime))
     _write_codex_rollout(
-        codex, session_id="019f48e1-stale", cwd="/repo", mtime_age=120.0
+        codex, session_id=_recovery_session_id(2), cwd="/repo", mtime_age=120.0
     )
     _write_codex_rollout(
-        codex, session_id="019f48e1-foreign", cwd="/repo/.", mtime_age=2.0
+        codex, session_id=_recovery_session_id(3), cwd="/repo/.", mtime_age=2.0
     )
 
     scan = _scan_recoverable(codex, tmp_path / "missing-registry.json")
@@ -837,8 +866,8 @@ def test_recovery_scan_subtracts_only_canonical_codex_registry_ids(tmp_path):
     from fno.agents.registry import AgentEntry, write_registry
 
     codex = tmp_path / "codex"
-    registered = "019f48e1-registered-codex"
-    same_id_on_claude = "019f48e1-same-id-on-claude"
+    registered = _recovery_session_id(4)
+    same_id_on_claude = _recovery_session_id(5)
     _write_codex_rollout(codex, session_id=registered, cwd="/repo")
     _write_codex_rollout(codex, session_id=same_id_on_claude, cwd="/repo")
     registry = tmp_path / "registry.json"
@@ -871,11 +900,11 @@ def test_recovery_scan_subtracts_only_canonical_codex_registry_ids(tmp_path):
 def test_recovery_scan_marks_malformed_and_non_string_cwd_incomplete(tmp_path):
     codex = tmp_path / "codex"
     malformed = _write_codex_rollout(
-        codex, session_id="019f48e1-malformed", cwd="/repo"
+        codex, session_id=_recovery_session_id(6), cwd="/repo"
     )
     malformed.write_text("not-json\n", encoding="utf-8")
     non_string = _write_codex_rollout(
-        codex, session_id="019f48e1-non-string-cwd", cwd=["/repo"]
+        codex, session_id=_recovery_session_id(7), cwd=["/repo"]
     )
 
     scan = _scan_recoverable(codex, tmp_path / "missing-registry.json")
@@ -902,7 +931,9 @@ def test_recovery_scan_marks_missing_root_incomplete(tmp_path):
 
 def test_recovery_scan_marks_rollout_stat_failure_incomplete(tmp_path, monkeypatch):
     codex = tmp_path / "codex"
-    rollout = _write_codex_rollout(codex, session_id="019f48e1-stat", cwd="/repo")
+    rollout = _write_codex_rollout(
+        codex, session_id=_recovery_session_id(8), cwd="/repo"
+    )
     original_stat = Path.stat
 
     def fail_rollout_stat(path, *args, **kwargs):
@@ -922,7 +953,9 @@ def test_recovery_scan_marks_rollout_stat_failure_incomplete(tmp_path, monkeypat
 
 def test_recovery_scan_marks_rollout_read_failure_incomplete(tmp_path, monkeypatch):
     codex = tmp_path / "codex"
-    rollout = _write_codex_rollout(codex, session_id="019f48e1-read", cwd="/repo")
+    rollout = _write_codex_rollout(
+        codex, session_id=_recovery_session_id(9), cwd="/repo"
+    )
     original_open = builtins.open
 
     def fail_rollout_open(path, *args, **kwargs):
@@ -942,15 +975,72 @@ def test_recovery_scan_marks_rollout_read_failure_incomplete(tmp_path, monkeypat
 
 def test_recovery_scan_marks_registry_schema_failure_incomplete(tmp_path):
     codex = tmp_path / "codex"
-    _write_codex_rollout(codex, session_id="019f48e1-candidate", cwd="/repo")
+    candidate_id = _recovery_session_id(10)
+    _write_codex_rollout(codex, session_id=candidate_id, cwd="/repo")
     registry = tmp_path / "registry.json"
     registry.write_text('{"schema_version":"wrong","agents":[]}', encoding="utf-8")
 
     scan = _scan_recoverable(codex, registry)
 
     assert scan.complete is False
-    assert [row.session_id for row in scan.recoverable] == ["019f48e1-candidate"]
+    assert [row.session_id for row in scan.recoverable] == [candidate_id]
     assert any(str(registry) in failure and "registry" in failure for failure in scan.failures)
+
+
+def test_recovery_scan_keeps_shared_prefix_full_ids_distinct_and_usable(tmp_path):
+    codex = tmp_path / "codex"
+    session_ids = [_recovery_session_id(index) for index in (11, 12, 13)]
+    for session_id in session_ids:
+        _write_codex_rollout(codex, session_id=session_id, cwd="/repo")
+
+    scan = _scan_recoverable(codex, tmp_path / "missing-registry.json")
+
+    assert scan.complete is True
+    assert [row.session_id for row in scan.recoverable] == session_ids[::-1]
+    assert [row.session_id for row in scan.usable_recoverable] == session_ids[::-1]
+    assert scan.usable_recoverable_count == 3
+    assert all(row.transcript_usable is True for row in scan.recoverable)
+    assert all(row.last_event_at for row in scan.recoverable)
+    assert all(row.last_turn_marker.startswith("resume ") for row in scan.recoverable)
+
+
+def test_recovery_scan_names_header_only_candidate_as_unusable(tmp_path):
+    codex = tmp_path / "codex"
+    session_id = _recovery_session_id(14)
+    _write_codex_rollout(
+        codex,
+        session_id=session_id,
+        cwd="/repo",
+        readable_turn=False,
+    )
+
+    scan = _scan_recoverable(codex, tmp_path / "missing-registry.json")
+
+    assert scan.complete is True
+    assert [row.session_id for row in scan.recoverable] == [session_id]
+    assert scan.usable_recoverable == ()
+    assert scan.usable_recoverable_count == 0
+    candidate = scan.recoverable[0]
+    assert candidate.transcript_usable is False
+    assert candidate.unusable_reason == "no_readable_transcript_turn"
+    assert candidate.last_event_at is None
+    assert candidate.last_turn_marker is None
+
+
+def test_recovery_scan_rejects_short_session_identity(tmp_path):
+    codex = tmp_path / "codex"
+    rollout = _write_codex_rollout(
+        codex,
+        session_id="01a039aa",
+        cwd="/repo",
+    )
+
+    scan = _scan_recoverable(codex, tmp_path / "missing-registry.json")
+
+    assert scan.complete is False
+    assert scan.recoverable == ()
+    assert scan.usable_recoverable == ()
+    assert any(str(rollout) in failure and "full UUID" in failure for failure in scan.failures)
 
 
 def _run_codex(tmp_path, codex_dir, **kw):
