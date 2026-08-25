@@ -1011,9 +1011,14 @@ def _self_attested_coverage_report() -> dict[str, Any]:
     probe that cannot run reports unknown rather than zero.
     """
     try:
-        from fno.paths import resolve_repo_root
+        # project_events_json, not a hand-joined resolve_repo_root: the domain
+        # helper honors the test sandbox pin (FNO_EVENTS_PATH), and a bare
+        # resolver call here arms the shellout-drift guard's module-level
+        # predicate, which then flags doctor.py's two pre-existing
+        # privately-rooted report shell-outs the guard was never taught about.
+        from fno.paths import project_events_json
 
-        events = resolve_repo_root() / ".fno" / "events.jsonl"
+        events = project_events_json()
         newest: dict[int, dict[str, Any]] = {}
         try:
             for line in events.read_text(encoding="utf-8").splitlines():

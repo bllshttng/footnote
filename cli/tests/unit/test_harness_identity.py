@@ -896,16 +896,18 @@ def test_resolve_attester_identity_refuses_the_command_line_override():
     # The parent must be a FAMILY carrier (a process whose argv0 names the
     # marker's harness), because the nearest family carrier is what decides:
     # `exec -a codex` renames the intermediate bash, so its argv0 carries the
-    # family token while its env still holds the harness's own id. The `; :`
-    # tail is load-bearing: a lone command gets tail-exec'd (the leaf REPLACES
-    # the renamed bash and inherits its pid), leaving the walk no family
-    # carrier at all - the pre-tail shape passed only via full-argv matching,
-    # the exact artifact the argv0 rule removed.
+    # family token while its env still holds the harness's own id. The `rc=$?
+    # ... exit $rc` tail is load-bearing: a lone command gets tail-exec'd
+    # (the leaf REPLACES the renamed bash and inherits its pid), leaving the
+    # walk no family carrier at all - the pre-tail shape passed only via
+    # full-argv matching, the exact artifact the argv0 rule removed. The tail
+    # also re-exits with the leaf's status; a bare `; :` would swallow it.
     import shlex
 
     leaf = (
         f"CODEX_THREAD_ID=foreign-sess {sys.executable} -c "
-        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'; :"
+        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'; "
+        "rc=$?; :; exit \"$rc\""
     )
     wrapped = "exec -a codex bash -c " + shlex.quote(leaf)
     r = subprocess.run(
@@ -953,15 +955,16 @@ def test_resolve_attester_identity_corroborates_the_own_id():
 
     src_dir = str(Path(_fno.__file__).resolve().parents[1])
     # Same family-carrier parent as the override test (exec -a codex renames
-    # the intermediate bash; the `; :` tail keeps it alive under the leaf):
-    # the carrier agrees with the env. linux reads it and answers process;
-    # darwin cannot read a fresh child's environment, so the same chain
-    # honestly degrades to env_only there.
+    # the intermediate bash; the rc-capturing tail keeps it alive under the
+    # leaf): the carrier agrees with the env. linux reads it and answers
+    # process; darwin cannot read a fresh child's environment, so the same
+    # chain honestly degrades to env_only there.
     import shlex
 
     leaf = (
         f"{sys.executable} -c "
-        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'; :"
+        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'; "
+        "rc=$?; :; exit \"$rc\""
     )
     wrapped = "exec -a codex bash -c " + shlex.quote(leaf)
     r = subprocess.run(
