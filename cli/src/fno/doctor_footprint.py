@@ -152,7 +152,7 @@ def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
 
 
 def _live_root_pids(
-    *, deadline: float | None = None
+    *, deadline: float | None = None, snapshot_pids: set[int] | None = None
 ) -> tuple[set[int], str | None]:
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
@@ -174,6 +174,8 @@ def _live_root_pids(
                 return roots, "worker root liveness unavailable"
             if root_live:
                 roots.add(row.pid)
+            elif snapshot_pids is not None and row.pid in snapshot_pids:
+                return roots, "worker root liveness unavailable"
         unresolved_rows = [
             row
             for row in rows
@@ -222,7 +224,9 @@ def _live_root_pids(
     return roots, None
 
 
-def _live_shared_serve_root_pids() -> tuple[set[int], str | None]:
+def _live_shared_serve_root_pids(
+    *, snapshot_pids: set[int] | None = None
+) -> tuple[set[int], str | None]:
     """Return the confirmed PID of the detached shared opencode serve."""
     roots: set[int] = set()
     try:
@@ -249,6 +253,8 @@ def _live_shared_serve_root_pids() -> tuple[set[int], str | None]:
             return roots, "shared serve root liveness unavailable"
         if root_live:
             roots.add(pid)
+        elif snapshot_pids is not None and pid in snapshot_pids:
+            return roots, "shared serve root liveness unavailable"
     except FileNotFoundError:
         return roots, None
     except Exception:
@@ -463,18 +469,21 @@ def footprint_command(
         _emit_failure(error or "footprint unavailable: ps returned no output", json_output=json_output)
         raise typer.Exit(code=4)
 
-    root_pids, root_error = _live_root_pids()
+    snapshot_pids = _snapshot_pids(ps_output)
+    root_pids, root_error = _live_root_pids(snapshot_pids=snapshot_pids)
     if root_error is not None:
         _emit_failure(f"footprint unavailable: {root_error}", json_output=json_output)
         raise typer.Exit(code=4)
-    shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids()
+    shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
+        snapshot_pids=snapshot_pids
+    )
     if shared_serve_error is not None:
         _emit_failure(
             f"footprint unavailable: {shared_serve_error}",
             json_output=json_output,
         )
         raise typer.Exit(code=4)
-    if (root_pids | shared_serve_pids) - _snapshot_pids(ps_output):
+    if (root_pids | shared_serve_pids) - snapshot_pids:
         _emit_failure(
             "footprint unavailable: discovered worker root missing from ps snapshot",
             json_output=json_output,

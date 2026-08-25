@@ -154,6 +154,29 @@ def test_live_root_pids_refuses_unknown_registry_liveness(monkeypatch) -> None:
     )
 
 
+def test_live_root_pids_refuses_registered_root_that_dies_after_snapshot(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=902,
+        pid_start_time=123,
+        harness="opencode",
+        short_id="oc",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda _pid, _start: False,
+    )
+
+    assert doctor_footprint._live_root_pids(snapshot_pids={902}) == (
+        set(),
+        "worker root liveness unavailable",
+    )
+
+
 def test_live_root_pids_refuses_incomplete_registry(monkeypatch) -> None:
     from fno import doctor_footprint
     from fno.agents.registry import LoadedRegistry
@@ -190,6 +213,24 @@ def test_live_root_pids_includes_roster_resolved_claude_bg_worker(monkeypatch) -
     )
 
     assert doctor_footprint._live_root_pids() == ({902}, None)
+
+
+def test_shared_serve_root_refuses_root_that_dies_after_snapshot(monkeypatch, tmp_path) -> None:
+    from fno import doctor_footprint
+
+    (tmp_path / "opencode-serve.json").write_text(
+        json.dumps({"pid": 900, "pid_start": 123}), encoding="utf-8"
+    )
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda _pid, _start: False,
+    )
+
+    assert doctor_footprint._live_shared_serve_root_pids(snapshot_pids={900}) == (
+        set(),
+        "shared serve root liveness unavailable",
+    )
 
 
 def test_live_root_pids_refuses_unavailable_pidless_worker_discovery(monkeypatch) -> None:
@@ -347,7 +388,7 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(monkeypa
     monkeypatch.setattr(
         doctor_footprint,
         "_live_root_pids",
-        lambda: (set(), None),
+        lambda **_kwargs: (set(), None),
     )
     monkeypatch.setattr(
         doctor_footprint.subprocess,
@@ -380,7 +421,7 @@ def test_ac6_edge_cause_only_seeds_live_detached_registry_root(monkeypatch) -> N
     monkeypatch.setattr(
         doctor_footprint,
         "_live_root_pids",
-        lambda: ({100}, None),
+        lambda **_kwargs: ({100}, None),
     )
     monkeypatch.setattr(
         doctor_footprint.subprocess,

@@ -868,13 +868,18 @@ def _footprint_cause_evidence() -> Optional[str]:
         ps_output, error = _read_ps(timeout=5.0)
         if error is not None or ps_output is None:
             return None
-        root_pids, root_error = _live_root_pids(deadline=probe_deadline)
+        snapshot_pids = _snapshot_pids(ps_output)
+        root_pids, root_error = _live_root_pids(
+            deadline=probe_deadline, snapshot_pids=snapshot_pids
+        )
         if root_error is not None:
             return None
-        shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids()
+        shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
+            snapshot_pids=snapshot_pids
+        )
         if shared_serve_error is not None:
             return None
-        if (root_pids | shared_serve_pids) - _snapshot_pids(ps_output):
+        if (root_pids | shared_serve_pids) - snapshot_pids:
             return None
         reading = parse_footprint(
             ps_output,
