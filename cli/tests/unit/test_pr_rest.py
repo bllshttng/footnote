@@ -95,6 +95,7 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
         "base_ref": "main",
         "mergeable": "MERGEABLE",
         "merged_at": None,
+        "merge_sha": None,
     }
     assert calls == [["gh", "api", "repos/Owner/Repo/pulls/42"]]
 
@@ -113,6 +114,56 @@ def test_pr_info_preserves_unknown_mergeability():
     )
     assert reason == ""
     assert info["mergeable"] == "UNKNOWN"
+
+
+def test_pr_info_carries_merge_commit_sha():
+    pulls = dict(_PULLS, state="closed", merged=True, merged_at="2026-08-25T12:00:00Z", merge_commit_sha="merge123")
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls)
+    )
+    assert reason == ""
+    assert info is not None
+    assert info["merge_sha"] == "merge123"
+
+
+def test_pr_file_paths_rest_paginates_until_short_page():
+    calls: list[list[str]] = []
+
+    def runner(cmd, cwd=None):
+        calls.append(list(cmd))
+        if cmd[-1].endswith("page=1"):
+            return Result(0, json.dumps([{"filename": f"f{i}.py"} for i in range(100)]), "")
+        if cmd[-1].endswith("page=2"):
+            return Result(0, json.dumps([{"filename": "tail.py"}]), "")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    paths, reason = _rest.fetch_pr_file_paths_rest("42", repo="Owner/Repo", runner=runner)
+
+    assert reason == ""
+    assert paths == [f"f{i}.py" for i in range(100)] + ["tail.py"]
+    assert [call[-1].endswith("page=1") for call in calls] == [True, False]
+
+
+def test_pr_file_paths_rest_rejects_malformed_page_rows():
+    def runner(cmd, cwd=None):
+        return Result(0, json.dumps([{"filename": "ok.py"}, {"filename": 7}]), "")
+
+    paths, reason = _rest.fetch_pr_file_paths_rest("42", repo="Owner/Repo", runner=runner)
+
+    assert paths is None
+    assert "malformed" in reason
+
+
+def test_pr_file_paths_rest_rejects_a_failed_second_page():
+    def runner(cmd, cwd=None):
+        if cmd[-1].endswith("page=1"):
+            return Result(0, json.dumps([{"filename": f"f{i}.py"} for i in range(100)]), "")
+        return Result(1, "", "i/o timeout")
+
+    paths, reason = _rest.fetch_pr_file_paths_rest("42", repo="Owner/Repo", runner=runner)
+
+    assert paths is None
+    assert "timeout" in reason
 
 
 def test_pr_info_rejects_malformed_head_shape():

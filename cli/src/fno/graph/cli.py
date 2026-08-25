@@ -7776,7 +7776,10 @@ def _done_gate_pipeline(
     gates. Returns the evidencing PR url (None when no evidence).
     """
     from fno.graph._reconcile import (
-        repo_slug_from_url, resolve_merge_evidence, resolve_promise_evidence,
+        render_merge_evidence_failure,
+        repo_slug_from_url,
+        resolve_merge_evidence,
+        resolve_promise_evidence,
     )
 
     # Usage guard lives in the shared terminal so every front door and every
@@ -7815,20 +7818,19 @@ def _done_gate_pipeline(
                 raise typer.Exit(code=evidence.exit_code)
 
             if evidence.outcome == "outage":
-                typer.echo(
-                    f"Error: gh cross-check failed for {task_id}: {evidence.error}\n"
-                    f"The check is retryable once gh is available again. Node stays open.",
-                    err=True,
-                )
+                typer.echo(render_merge_evidence_failure(task_id, evidence, stays="open"), err=True)
                 raise typer.Exit(code=evidence.exit_code)
 
             # Pure policy refusal - CLOSED-unmerged / UNKNOWN only.
             msg = evidence.reason or f"PR #{first_pr_number}: no merged evidence"
-            typer.echo(
-                f"Refused: {task_id} cross-check failed: {msg}\n"
-                f"Use --force --reason TEXT to bypass.",
-                err=True,
-            )
+            if evidence.remedy:
+                typer.echo(render_merge_evidence_failure(task_id, evidence, stays="open"), err=True)
+            else:
+                typer.echo(
+                    f"Refused: {task_id} cross-check failed: {msg}\n"
+                    f"Use --force --reason TEXT to bypass.",
+                    err=True,
+                )
             # Emit refusal event (best-effort)
             try:
                 from fno import events as _evts
@@ -8456,7 +8458,11 @@ def cmd_reopen(
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import _find_node
-    from fno.graph._reconcile import node_pr_refs, resolve_merge_evidence
+    from fno.graph._reconcile import (
+        node_pr_refs,
+        render_merge_evidence_failure,
+        resolve_merge_evidence,
+    )
 
     if not has_node_id_prefix(task_id):
         typer.echo(
@@ -8528,11 +8534,7 @@ def cmd_reopen(
         # what merged - the receipt pointing at the wrong PR.
         pr_number = _evidence_pr_number(evidence, refs)
         if evidence.outcome == "outage" and not force:
-            typer.echo(
-                f"Error: gh cross-check failed for {task_id}: {evidence.error}\n"
-                f"The check is retryable once gh is available again. Node stays done.",
-                err=True,
-            )
+            typer.echo(render_merge_evidence_failure(task_id, evidence, stays="done"), err=True)
             raise typer.Exit(code=4)
         if evidence.outcome == "merged":
             pr_state = "MERGED"
@@ -8559,6 +8561,9 @@ def cmd_reopen(
             )
         elif evidence.outcome == "awaiting_merge":
             pr_state = "OPEN"
+        elif evidence.failure_kind:
+            typer.echo(render_merge_evidence_failure(task_id, evidence, stays="done"), err=True)
+            raise typer.Exit(code=evidence.exit_code)
         else:
             pr_state = "UNKNOWN"
 
@@ -10068,7 +10073,13 @@ def cmd_reconcile(
             "sync_catchup": sync_catchup,
             "claim_reap": claim_reap,
             "failures": [
-                {"node_id": r.node_id, "pr_number": r.pr_number, "error": r.error}
+                {
+                    "node_id": r.node_id,
+                    "pr_number": r.pr_number,
+                    "error": r.error,
+                    "kind": r.error_kind,
+                    "remedy": r.remedy,
+                }
                 for r in failures
             ],
             # Closeable records held open by the promise gate (x-5d34): a merged
@@ -10172,6 +10183,8 @@ def cmd_reconcile(
         typer.echo(f"{len(failures)} node(s) could not be resolved:", err=True)
         for r in failures:
             typer.echo(f"  {r.node_id}  PR #{r.pr_number}: {r.error}", err=True)
+            if r.remedy:
+                typer.echo(f"    {r.remedy}", err=True)
         # Partial reconcile: non-zero exit so callers can detect it.
         raise typer.Exit(code=4)
 

@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Optional
-from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
@@ -186,6 +185,129 @@ def test_merged_pr_closes_successfully(tmp_graph, monkeypatch):
     node = _read(tmp_graph)[0]
     assert node.get("status") == "done"
     assert node["completed_at"] is not None
+
+
+def test_unconditional_routing_refusal_is_actionable_not_retryable(tmp_graph, monkeypatch):
+    from fno.graph._reconcile import ReconcileError
+
+    _seed(
+        tmp_graph,
+        [_node("ab-route001", pr_number=1140, pr_url="https://github.com/o/r/pull/1140")],
+    )
+
+    def refused_query(pr_number, **kwargs):
+        raise ReconcileError(
+            "[fno GraphQL reserve] use `fno do pr info 1140` for state/head/mergeability. "
+            "This refusal is unconditional: the read is ROUTED, never rationed."
+        )
+
+    _patch_query(monkeypatch, refused_query)
+    result = _invoke_done("ab-route001")
+
+    assert result.exit_code == 3
+    combined = result.output + (result.stderr or "")
+    assert "fno do pr info 1140 --repo o/r" in combined
+    assert "retryable once gh is available again" not in combined
+
+
+def test_authentication_failure_is_typed_and_names_login(tmp_graph, monkeypatch):
+    from fno.graph._reconcile import ReconcileError
+
+    _seed(
+        tmp_graph,
+        [_node("ab-auth001", pr_number=1140, pr_url="https://github.com/o/r/pull/1140")],
+    )
+    _patch_query(monkeypatch, lambda n, **kw: (_ for _ in ()).throw(
+        ReconcileError("gh: authentication required; run gh auth login")
+    ))
+
+    result = _invoke_done("ab-auth001")
+
+    assert result.exit_code == 3
+    combined = result.output + (result.stderr or "")
+    assert "gh auth login" in combined
+    assert "retryable once gh is available again" not in combined
+
+
+def test_wrong_stored_repository_refuses_without_ambient_fallback(tmp_graph, monkeypatch):
+    from fno.graph._reconcile import query_pr_merge_state
+
+    _seed(
+        tmp_graph,
+        [_node(
+            "ab-wrong001",
+            pr_number=1140,
+            pr_url="https://github.com/jasonnoahchoi/.claude/pull/1140",
+        )],
+    )
+    seen: list[str | None] = []
+
+    def info_reader(number, *, repo=None, cwd=None):
+        seen.append(repo)
+        return None, "gh: HTTP 404 Not Found"
+
+    def query(number, **kwargs):
+        return query_pr_merge_state(
+            number,
+            repo=kwargs.get("repo"),
+            cwd=kwargs.get("cwd"),
+            info_reader=info_reader,
+            files_reader=lambda *args, **kw: ([], ""),
+        )
+
+    _patch_query(monkeypatch, query)
+    result = _invoke_done("ab-wrong001")
+
+    assert result.exit_code == 3
+    assert seen == ["jasonnoahchoi/.claude"]
+    combined = result.output + (result.stderr or "")
+    assert "Stored PR reference jasonnoahchoi/.claude#1140" in combined
+    assert "fno backlog update <node> --pr-url <correct-url>" in combined
+    assert "retryable once gh is available again" not in combined
+
+
+def test_backlog_done_closes_from_routed_rest_merge_evidence(tmp_graph, monkeypatch):
+    from fno.graph._reconcile import query_pr_merge_state
+
+    _seed(
+        tmp_graph,
+        [_node(
+            "ab-restdone",
+            pr_number=1140,
+            pr_url="https://github.com/bllshttng/footnote/pull/1140",
+        )],
+    )
+    calls: list[tuple[str, int, str | None]] = []
+
+    def info_reader(number, *, repo=None, cwd=None):
+        calls.append(("info", int(number), repo))
+        return ({
+            "pr": int(number),
+            "state": "MERGED",
+            "url": "https://github.com/bllshttng/footnote/pull/1140",
+            "merged_at": "2026-08-24T17:04:17Z",
+            "merge_sha": "merge1140",
+        }, "")
+
+    def files_reader(number, *, repo=None, cwd=None):
+        calls.append(("files", int(number), repo))
+        return ["cli/a.py"], ""
+
+    def query(number, **kwargs):
+        return query_pr_merge_state(
+            number,
+            repo=kwargs.get("repo"),
+            cwd=kwargs.get("cwd"),
+            info_reader=info_reader,
+            files_reader=files_reader,
+        )
+
+    _patch_query(monkeypatch, query)
+    result = _invoke_done("ab-restdone")
+
+    assert result.exit_code == 0, result.output
+    assert _read(tmp_graph)[0]["status"] == "done"
+    assert calls == [("info", 1140, "bllshttng/footnote"), ("files", 1140, "bllshttng/footnote")]
 
 
 # ---------------------------------------------------------------------------
@@ -476,8 +598,6 @@ def test_refusal_emits_event(tmp_graph, monkeypatch):
 
     import fno.events as evts
 
-    original_append = evts.append_event
-
     def capture_append(event, *args, **kwargs):
         emitted.append(event)
 
@@ -512,8 +632,6 @@ def test_forced_close_emits_event_with_reason(tmp_graph, monkeypatch):
     emitted: list[dict] = []
 
     import fno.events as evts
-
-    original_append = evts.append_event
 
     def capture_append(event, *args, **kwargs):
         emitted.append(event)

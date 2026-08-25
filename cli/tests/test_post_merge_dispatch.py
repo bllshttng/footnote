@@ -556,19 +556,21 @@ def test_marker_under_provided_canonical_not_cwd(tmp_path):
 
 
 def test_query_parses_merge_sha():
-    class _Res:
-        returncode = 0
-        stdout = (
-            '{"number": 7, "state": "MERGED", "url": "u", '
-            '"mergedAt": "t", "mergeCommit": {"oid": "cafef00d"}}'
-        )
-        stderr = ""
+    def info_reader(number, *, repo=None, cwd=None):
+        return ({
+            "pr": 7,
+            "state": "MERGED",
+            "url": "u",
+            "merged_at": "t",
+            "merge_sha": "cafef00d",
+        }, "")
 
-    def runner(cmd, **kw):
-        assert "mergeCommit" in cmd[cmd.index("--json") + 1]
-        return _Res()
-
-    state = query_pr_merge_state(7, repo="o/r", runner=runner)
+    state = query_pr_merge_state(
+        7,
+        repo="o/r",
+        info_reader=info_reader,
+        files_reader=lambda number, *, repo=None, cwd=None: ([], ""),
+    )
     assert state.merge_sha == "cafef00d"
 
 

@@ -268,6 +268,9 @@ def fetch_pr_info_rest(
     merged_at = pr_data.get("merged_at")
     if merged_at is not None and not isinstance(merged_at, str):
         return None, "gh api pulls/<n> carried malformed merged_at"
+    merge_sha = pr_data.get("merge_commit_sha")
+    if merge_sha is not None and (not isinstance(merge_sha, str) or not merge_sha):
+        return None, "gh api pulls/<n> carried malformed merge_commit_sha"
     url = pr_data.get("html_url")
     if url is not None and (not isinstance(url, str) or not url):
         return None, "gh api pulls/<n> carried malformed HTML URL"
@@ -281,9 +284,53 @@ def fetch_pr_info_rest(
             "base_ref": base_ref,
             "mergeable": _map_mergeable(pr_data.get("mergeable")),
             "merged_at": merged_at,
+            "merge_sha": merge_sha,
         },
         "",
     )
+
+
+def fetch_pr_file_paths_rest(
+    pr: str,
+    cwd: Optional[str] = None,
+    runner: Callable = run,
+    repo: Optional[str] = None,
+) -> "tuple[Optional[list[str]], str]":
+    """Fetch every changed-file path from the paginated REST files endpoint."""
+    if not str(pr).strip().isdigit():
+        return None, f"REST file reader needs a numeric PR number, got {pr!r}"
+    slug = repo or _repo_slug(cwd, runner)
+    if not slug:
+        return None, "could not resolve owner/repo from `git remote get-url origin`"
+
+    paths: list[str] = []
+    for page in range(1, 101):
+        files = runner(
+            [
+                "gh",
+                "api",
+                f"repos/{slug}/pulls/{pr}/files?per_page=100&page={page}",
+            ],
+            cwd=cwd,
+        )
+        if not files.ok:
+            return None, _rest_reason(files, runner=runner, cwd=cwd)
+        try:
+            payload = json.loads(files.stdout)
+        except json.JSONDecodeError:
+            return None, f"gh api pull files page {page} returned output that is not JSON"
+        if not isinstance(payload, list):
+            return None, f"gh api pull files page {page} returned a value that is not an array"
+        page_paths: list[str] = []
+        for index, row in enumerate(payload):
+            if not isinstance(row, dict) or not isinstance(row.get("filename"), str) or not row["filename"]:
+                return None, f"gh api pull files page {page} carried malformed row {index}"
+            page_paths.append(row["filename"])
+        paths.extend(page_paths)
+        if len(payload) < 100:
+            return paths, ""
+
+    return None, "gh api pull files exceeded the 100-page safety limit"
 
 
 def resolve_current_pr_number_rest(
