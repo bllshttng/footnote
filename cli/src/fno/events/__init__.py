@@ -29,6 +29,7 @@ import hashlib as _hashlib
 import json as _json
 import math as _math
 import re as _re
+import secrets as _secrets
 import sys as _sys
 from pathlib import Path
 from typing import Any, TypeGuard
@@ -1011,6 +1012,7 @@ def operator_decision(
 
 def decision_retracted(
     *,
+    retraction_id: str | None = None,
     target_decision_id: str,
     subject: str,
     reason: str,
@@ -1023,6 +1025,7 @@ def decision_retracted(
 ) -> dict[str, Any]:
     """Build an append-only event that retracts one decision."""
     data: dict[str, Any] = {
+        "retraction_id": retraction_id or f"r-{_secrets.token_hex(4)}",
         "target_decision_id": target_decision_id,
         "subject": subject,
         "reason": reason[:QUESTION_CAP],

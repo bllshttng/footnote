@@ -382,6 +382,15 @@ def record_decision(
     else:
         provenance = _resolve_decider(decided_by, authority_source, origin=origin)
 
+    if supersedes:
+        superseded_row = _decision_row_by_id(supersedes)
+        if (
+            superseded_row is not None
+            and _decision_lane(superseded_row) == "law"
+            and provenance.authority_source != "operator"
+        ):
+            raise RefusedAuthorityError(provenance.decided_by, origin)
+
     if _decision_lane({"authority_source": provenance.authority_source}) == "coord":
         expiry_ref = _derive_coord_expiry_ref(subject, expiry_ref)
 
@@ -1082,6 +1091,11 @@ def review_list() -> dict[str, Any]:
     """Report unresolved multi-ruling subjects without mutating the index."""
     _, rows, damaged = list_decisions(limit=None, state="all")
     grouped: dict[str, list[dict[str, Any]]] = {}
+    display_subjects: dict[str, str] = {}
+    try:
+        graph_entries = _graph_entries(required=True)
+    except Exception:
+        graph_entries = []
     subjectless = 0
     invalid_authority = 0
     for row in rows:
@@ -1093,7 +1107,10 @@ def review_list() -> dict[str, Any]:
             invalid_authority += 1
         if row.get("lifecycle") != "live" or not subject:
             continue
-        grouped.setdefault(subject, []).append(
+        node_id = _resolved_node(subject, graph_entries)
+        group_key = f"node:{node_id}" if node_id else f"text:{subject.casefold()}"
+        display_subjects.setdefault(group_key, subject)
+        grouped.setdefault(group_key, []).append(
             {
                 key: row.get(key)
                 for key in (
@@ -1109,8 +1126,8 @@ def review_list() -> dict[str, Any]:
         )
 
     groups = [
-        {"subject": subject, "decisions": decisions}
-        for subject, decisions in sorted(grouped.items())
+        {"subject": display_subjects[group_key], "decisions": decisions}
+        for group_key, decisions in sorted(grouped.items())
         if len(decisions) > 1
     ]
     return {
@@ -1238,7 +1255,9 @@ def _journal_events(paths: "list[Path]") -> "list[dict]":
                     continue
                 data = rec.get("data")
                 if isinstance(data, dict) and (
-                    data.get("decision_id") or data.get("target_decision_id")
+                    data.get("decision_id")
+                    or data.get("retraction_id")
+                    or data.get("target_decision_id")
                 ):
                     events.append(rec)
     return events
@@ -1263,7 +1282,12 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
     known = {
         (
             row.get("_event_type") or DECISION_EVENT,
-            str(row.get("decision_id") or row.get("target_decision_id") or ""),
+            str(
+                row.get("decision_id")
+                or row.get("retraction_id")
+                or row.get("target_decision_id")
+                or ""
+            ),
         )
         for row in _read_index(index, warn=False)[0]
     }
@@ -1283,6 +1307,7 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
         event_type = str(event.get("type") or "")
         did = str(
             event["data"].get("decision_id")
+            or event["data"].get("retraction_id")
             or event["data"].get("target_decision_id")
             or ""
         )
@@ -1392,5 +1417,9 @@ def _is_index_line(line: str) -> bool:
         isinstance(rec, dict)
         and rec.get("type") in DECISION_EVENT_TYPES
         and isinstance(data, dict)
-        and bool(data.get("decision_id") or data.get("target_decision_id"))
+        and bool(
+            data.get("decision_id")
+            or data.get("retraction_id")
+            or data.get("target_decision_id")
+        )
     )

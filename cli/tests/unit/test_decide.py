@@ -625,6 +625,93 @@ def test_agent_cannot_retract_law(root: Path, tmp_graph: Path, index: Path):
     assert index.read_bytes() == before
 
 
+def test_agent_cannot_supersede_law(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-law-sup01",
+            "decision": "standing law",
+            "subject": "law-topic",
+            "authority_source": "operator",
+            "ts": "2026-08-22T00:00:00Z",
+        }
+    )
+    result = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "law-topic",
+            "--decision",
+            "coordination cannot replace law",
+            "--authority",
+            "agent",
+            "--supersedes",
+            "d-law-sup01",
+        ],
+    )
+    assert result.exit_code == 3, result.output
+    listed = runner.invoke(decide_app, ["list", "--subject", "law-topic", "--json"])
+    rows = json.loads(listed.stdout)["decisions"]
+    assert rows[0]["decision_id"] == "d-law-sup01"
+    assert rows[0]["lifecycle"] == "live"
+
+
+def test_reindex_preserves_distinct_retractions_for_one_target(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.decide import reindex
+    from fno.graph.cli import cli as backlog_app
+
+    recorded = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "temporary", "--authority", "crown"],
+    )
+    decision_id = recorded.stdout.strip().splitlines()[-1]
+    for reason in ("first reason", "second reason"):
+        result = runner.invoke(
+            backlog_app,
+            ["decide-retract", decision_id, "--reason", reason, "--authority", "agent"],
+        )
+        assert result.exit_code == 0, result.output
+    index.unlink()
+    assert reindex(sources=[root / ".fno" / "events.jsonl"])["added"] == 3
+    listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
+    row = json.loads(listed.stdout)["decisions"][0]
+    assert row["lifecycle_reason"] == "second reason"
+
+
+def test_review_list_canonicalizes_node_ids_and_slugs(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-canon001",
+            "decision": "first law",
+            "subject": "x-7d94",
+            "authority_source": "operator",
+            "ts": "2026-08-21T00:00:00Z",
+        },
+        {
+            "decision_id": "d-canon002",
+            "decision": "second law",
+            "subject": "fold-the-inbox",
+            "authority_source": "operator",
+            "ts": "2026-08-22T00:00:00Z",
+        },
+    )
+    result = runner.invoke(decide_app, ["list", "--review-list", "--json"])
+    assert result.exit_code == 0, result.output
+    groups = json.loads(result.stdout)["groups"]
+    assert len(groups) == 1
+    assert {row["decision_id"] for row in groups[0]["decisions"]} == {
+        "d-canon001",
+        "d-canon002",
+    }
+
+
 def test_retraction_survives_reindex(root: Path, tmp_graph: Path, index: Path):
     from fno.decide import reindex
     from fno.graph.cli import cli as backlog_app

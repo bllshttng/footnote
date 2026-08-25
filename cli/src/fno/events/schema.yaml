@@ -2382,8 +2382,11 @@ event_types:
     description: "An append-only retraction of one decision. The original operator_decision remains unchanged and readers fold the newest valid event into its lifecycle."
     sources: [target, hook, subagent, test]
     data:
-      required: [target_decision_id, subject, reason]
+      required: [retraction_id, target_decision_id, subject, reason]
       properties:
+        retraction_id:
+          type: string
+          description: "Unique id for this retraction event. Distinct retractions of one target remain independently recoverable."
         target_decision_id:
           type: string
           description: "The decision_id being retracted."
