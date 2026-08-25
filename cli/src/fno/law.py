@@ -495,7 +495,52 @@ def _json(value: Any) -> None:
     typer.echo(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
-law_app = typer.Typer(help="Compose and enact human-approved project law.")
+law_app = typer.Typer(
+    help="Record operator law directly or enact a staged agent draft.",
+)
+
+
+@law_app.command("set")
+def record_command(
+    subject: str = typer.Argument(..., help="Subject governed by the law."),
+    decision: str = typer.Argument(..., help="Operator workaround or policy."),
+    rationale: str | None = typer.Option(None, "--rationale"),
+    option: list[str] = typer.Option([], "--option"),
+    supersedes: str | None = typer.Option(None, "--supersedes"),
+) -> None:
+    """Record law in one call when the operator is the author."""
+    from fno.decide import (
+        IndexWriteError,
+        RefusedAuthorityError,
+        UnattributedAuthorityError,
+        record_decision,
+    )
+
+    try:
+        result = record_decision(
+            subject=subject,
+            decision=decision,
+            rationale=rationale,
+            options=list(option) or None,
+            supersedes=supersedes,
+            authority_source="operator",
+        )
+    except (RefusedAuthorityError, UnattributedAuthorityError) as exc:
+        typer.echo(
+            f"fno law: refused: {exc}. Append agent findings with "
+            "`fno backlog note <node> <text>`.",
+            err=True,
+        )
+        raise typer.Exit(3) from exc
+    except IndexWriteError as exc:
+        typer.echo(
+            f"fno law: recorded {exc.decision_id} to the project journal, but "
+            "the recall index write failed. Run `fno backlog decide-reindex`; "
+            "do not re-run the law command.",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    typer.echo(result["decision_id"])
 
 
 @law_app.command("prepare")
