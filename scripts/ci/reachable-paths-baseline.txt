@@ -55,6 +55,7 @@ A	fno mux ls --json failed	py=cli/src/fno/update.py;rs=crates/fno/src/client.rs	
 A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: check-coverage-context-parity.sh pins the py consts against every surface, loopcheck.rs included
 A	fno_global_settings_path	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config_io.py|cli/src/fno/conftest.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/agents_config.rs|crates/fno/src/agents_view.rs|crates/fno/src/digest_overlay.rs	# protocol
 A	fno_mux_shell_integration	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/client.rs|crates/fno/src/pty.rs	# protocol
+A	fno_process_admission_max	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/process_admission.rs	# protocol: Python resolves process_admission.max_processes and Rust enforces the same process-unit env wire
 A	fno_spawn_gate=0 operator bypass	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	from-name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
 A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# data
