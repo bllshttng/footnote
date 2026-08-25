@@ -124,6 +124,7 @@ pub struct AdmissionPermit {
     scope: Scope,
     count: usize,
     ceiling: usize,
+    #[cfg(test)]
     track_children: bool,
 }
 
@@ -290,6 +291,7 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
             scope: Scope::Fleet,
             count: census.count().expect("admitted census has a count"),
             ceiling,
+            #[cfg(test)]
             track_children: true,
         }),
         decision => Err(AdmissionFailure {
@@ -328,6 +330,7 @@ pub fn admit_tab(
             scope: Scope::Tab,
             count: pane_count,
             ceiling,
+            #[cfg(test)]
             track_children: true,
         }),
         decision => Err(AdmissionFailure {
@@ -396,6 +399,7 @@ pub fn admit_pane(
         scope: Scope::Fleet,
         count: fleet.count().expect("admitted census has a count"),
         ceiling: fleet_ceiling,
+        #[cfg(test)]
         track_children: true,
     })
 }
@@ -408,6 +412,7 @@ fn test_permit(scope: Scope, count: usize, ceiling: usize) -> AdmissionPermit {
         scope,
         count,
         ceiling,
+        #[cfg(test)]
         track_children: false,
     }
 }
@@ -433,7 +438,6 @@ pub fn std_spawn(command: &mut std::process::Command) -> io::Result<std::process
 
 pub fn std_output(command: &mut std::process::Command) -> io::Result<std::process::Output> {
     command
-        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let child = std_spawn(command)?;
@@ -447,10 +451,7 @@ pub fn std_status(command: &mut std::process::Command) -> io::Result<std::proces
 
 #[cfg(unix)]
 pub fn std_exec(command: &mut std::process::Command) -> io::Error {
-    match admit_fleet() {
-        Ok(_permit) => command.exec(),
-        Err(error) => admission_io_error(error),
-    }
+    command.exec()
 }
 
 pub fn tokio_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
@@ -473,7 +474,6 @@ pub async fn tokio_output(
     command: &mut tokio::process::Command,
 ) -> io::Result<std::process::Output> {
     command
-        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let child = tokio_spawn(command)?;
