@@ -12471,11 +12471,11 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
     from fno.graph._intake import (
         _prepare_intake, _build_intake_node, _validate_cli_deps,
     )
-    from fno.graph.depends import _derive_title
 
     cli_deps: list[str] = (
         [d.strip() for d in args.deps.split(",") if d.strip()] if args.deps else []
     )
+    cli_project = getattr(args, "project", None)
     _refuse_create_on_external_backend()
     _validate_cli_deps(cli_deps, read_graph(_graph_path()))
 
@@ -12511,19 +12511,40 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
 
     if dry_run:
         typer.echo(f"Multi-intake preview (dry-run, no changes): {len(all_paths)} paths:")
+        would = 0
         for r in resolved:
             if r["status"] == "missing":
                 typer.echo(f"  warning: not found, skipped: {r['path']}")
                 continue
             for f in r["files"]:
-                t = _derive_title(Path(f), args.title) if os.path.isfile(f) else os.path.basename(f.rstrip(os.sep))
-                typer.echo(f'  would intake: "{t}"  (plan: {f})')
-        typer.echo(f"{len(concrete_files)} plans would be intaked. Run without --dry-run to apply.")
+                # Validate-then-preview, mirroring the single-plan dry run: a
+                # plan the real run would refuse (bad priority, a cross-roadmap
+                # owner conflict) or skip as already-intaked must preview as
+                # exactly that, never as would-intake.
+                try:
+                    prep = _prepare_intake(
+                        f, preview_entries,
+                        roadmap_id=roadmap_id, cli_title=args.title,
+                        cli_priority=args.priority, cli_deps=cli_deps,
+                        cli_points=args.points,
+                        cli_project=cli_project,
+                    )
+                except ValueError as exc:
+                    typer.echo(f"  error: would skip {f}: {exc}", err=True)
+                    continue
+                if prep["status"] == "already":
+                    typer.echo(
+                        f'  already intaked {prep["id"]}: "{prep["title"]}"  ({f})'
+                    )
+                    continue
+                spec = prep["node_spec"]
+                typer.echo(f'  would intake: "{spec["title"]}"  (plan: {f})')
+                would += 1
+        typer.echo(f"{would} plans would be intaked. Run without --dry-run to apply.")
         return
 
     typer.echo(f"Multi-intake {len(concrete_files)} plans:")
     tallies = {"intaked": 0, "already": 0, "invalid": 0}
-    cli_project = getattr(args, "project", None)
     landed_projects: set[str] = set()
     new_ids: list[str] = []
 

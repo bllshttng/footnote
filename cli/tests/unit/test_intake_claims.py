@@ -984,6 +984,56 @@ def test_multi_intake_skips_refused_plan_cleanly(fixture_graph, tmp_path, capsys
     assert len(_read_entries(fixture_graph)) == 4  # 3 seeded + the 1 good plan
 
 
+def test_multi_intake_dry_run_previews_refusals_not_would_intake(
+    fixture_graph, tmp_path, capsys
+):
+    """The multi dry-run previews validate-then, mirroring the single-plan dry
+    run: a plan the real run would refuse (bad priority) or skip as
+    already-intaked previews as exactly that - never as would-intake."""
+    from types import SimpleNamespace
+
+    def _plan(path: Path, title: str, priority: str | None = None) -> Path:
+        fm = ["---"]
+        if priority:
+            fm.append(f"priority: {priority}")
+        fm += ["created: 2026-05-05T04:35", "---"]
+        path.write_text(
+            "\n".join(fm + ["", f"# {title}", "", "Body.", ""]) + "\n"
+        )
+        return path
+
+    good = _plan(tmp_path / "good.md", "Batch intake good plan gamma")
+    bad = _plan(tmp_path / "bad.md", "Batch intake bad plan delta", priority="urgent")
+    already = _plan(tmp_path / "already.md", "Batch intake already plan epsilon")
+    # A graph node already owns `already`'s plan_path: the real run reports
+    # "already intaked ab-alr0001" and intakes nothing for it.
+    entries = _read_entries(fixture_graph)
+    entries.append(_node("ab-alr0001", title="Owner of the already plan", plan_path=str(already)))
+    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    args = SimpleNamespace(
+        # priority None so the PLAN frontmatter supplies it (a cli priority
+        # would outrank the frontmatter and the bad value would never be read).
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(
+        args, [str(good), str(bad), str(already)], roadmap_id=None, dry_run=True
+    )
+    captured = capsys.readouterr()
+
+    # The preview ran and resolved the files: the good plan previews as intake.
+    would_lines = [ln for ln in captured.out.splitlines() if "would intake" in ln]
+    assert any("good plan gamma" in ln for ln in would_lines)
+    # The refusable and the already-intaked plans never preview as would-intake.
+    assert not any("bad plan delta" in ln for ln in would_lines)
+    assert not any("already plan epsilon" in ln for ln in would_lines)
+    # They preview as the outcome the real run would produce instead.
+    assert "would skip" in captured.err and "invalid priority" in captured.err
+    assert "already intaked ab-alr0001" in captured.out
+    # The count names the plans that would actually land: one, not three.
+    assert "1 plans would be intaked" in captured.out
+
+
 def test_old_idea_title_warning_function_is_gone():
     # AC6-FR: the difflib idea-state-only net cannot survive as a second path.
     import fno.graph._intake as _intake
