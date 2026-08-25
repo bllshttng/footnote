@@ -2348,6 +2348,9 @@ event_types:
         subject:
           type: string
           description: "Optional. The node, file, or area the decision governs. The recovery key: `fno backlog decisions <subject>` and the graph projection read it."
+        expiry_ref:
+          type: object
+          description: "Optional exact coordination closure reference. Node refs name node_id. PR refs name repository and number, with an optional URL."
         options:
           type: array
           description: "Optional. What was on the table, so a later reader sees what was rejected."
@@ -2372,6 +2375,42 @@ event_types:
         supersedes:
           type: string
           description: "Optional. The decision_id this overturns, when it overturns one."
+    consumers: [operator, fno backlog decisions]
+
+  - name: decision_retracted
+    retention: durable
+    description: "An append-only retraction of one decision. The original operator_decision remains unchanged and readers fold the newest valid event into its lifecycle."
+    sources: [target, hook, subagent, test]
+    data:
+      required: [retraction_id, target_decision_id, subject, reason]
+      properties:
+        retraction_id:
+          type: string
+          description: "Unique id for this retraction event. Distinct retractions of one target remain independently recoverable."
+        target_decision_id:
+          type: string
+          description: "The decision_id being retracted."
+        subject:
+          type: string
+          description: "The target decision subject, copied into the audit event for safe recovery."
+        reason:
+          type: string
+          description: "Why this decision must stop counting."
+        retracted_by:
+          type: string
+          description: "Stamped caller identity when available."
+        attested_by:
+          type: string
+          description: "Optional attended-terminal attestation."
+        relayed_by:
+          type: string
+          description: "Optional caller-supplied name kept separate from the stamp."
+        origin:
+          type: string
+          description: "Optional mail-channel provenance."
+        authority_source:
+          type: string
+          description: "Optional authority lane used for the retraction."
     consumers: [operator, fno backlog decisions]
 
   - name: agent_raw_inject
