@@ -750,6 +750,12 @@ struct PaneEntry {
     /// for a mux-spawned pane; a durable pane fact (survives reattach), never
     /// the registry schema (Locked Decision 5).
     account: Option<String>,
+    /// (x-d401) When this pane last produced PTY output, stamped on the drain
+    /// path itself so a pane with no `pane wait` watcher still records activity
+    /// (`note_pane_output` returns early with zero subscribers, which is why
+    /// bare-pane rows used to read `last_activity_age_s: None`). Initialized at
+    /// registration so a never-spoken pane has an honest birth time.
+    last_output: Instant,
     /// This pane's monotonic counters. Same `Arc` as the registry row, so the
     /// core loop increments without touching the registry lock.
     stats: Arc<PaneCounters>,
@@ -2816,6 +2822,7 @@ impl Core {
                 cwd,
                 cmd,
                 account,
+                last_output: Instant::now(),
                 stats: Arc::clone(&stats),
             },
         );
@@ -11131,6 +11138,7 @@ fn drain_pty_output(
             if let Some(entry) = core.panes.get_mut(&pid) {
                 let t0 = Instant::now();
                 entry.vt.feed(&bytes);
+                entry.last_output = t0;
                 entry
                     .stats
                     .bytes_in
@@ -21518,6 +21526,34 @@ mod tests {
         assert!(
             c.cpu_ns.load(Ordering::Relaxed) > 0,
             "feeding one burst must attribute nonzero handling time"
+        );
+    }
+
+    #[test]
+    fn watcherless_pane_stamps_last_output_on_every_burst() {
+        // (x-d401) `note_pane_output` returns early with no `pane wait`
+        // subscriber, which is why `last_activity_age_s` read None for panes
+        // running real workloads. The stamp lives on the drain path itself:
+        // every fed burst advances it whether or not anyone watches. The
+        // marker is the stamp's recency against a pre-feed Instant - only the
+        // drain path can produce it.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let pid = core.spawn_pane(2, 4, "/tmp").expect("pane");
+        let registered = core.panes[&pid].last_output;
+        let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+        let mut first_out = HashSet::new();
+        tx.try_send((pid, b"burst".to_vec())).unwrap();
+        drop(tx);
+        let before = Instant::now();
+        drain_pty_output(&mut core, &mut rx, None, &mut first_out);
+        assert!(
+            core.panes[&pid].last_output >= before,
+            "the drain path must stamp last_output with no watcher attached"
+        );
+        assert!(
+            core.panes[&pid].last_output > registered,
+            "a second burst must advance the registration stamp"
         );
     }
 
