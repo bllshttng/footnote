@@ -1651,8 +1651,19 @@ def test_recoverable_apply_refuses_transcript_loss_after_adoption(tmp_path):
     from fno.agents.discover import CodexRecoveryScan
 
     candidate = _recovery_candidate(tmp_path, 4)
+    registry_rows = []
 
     def adopt(_hit, **_kwargs):
+        registry_rows.append(
+            SimpleNamespace(
+                harness="codex",
+                harness_session_id=candidate.session_id,
+                cwd=candidate.cwd,
+                origin="adopted",
+                name="01a039bb",
+                log_path="/tmp/recovery-output.jsonl",
+            )
+        )
         candidate.rollout_path.write_text(
             json.dumps(
                 {
@@ -1667,25 +1678,24 @@ def test_recoverable_apply_refuses_transcript_loss_after_adoption(tmp_path):
             encoding="utf-8",
         )
 
+    def update_registry(updater, **_kwargs):
+        registry_rows[:] = updater(list(registry_rows))
+        return list(registry_rows)
+
     results = watchdog.apply_recoverable(
         CodexRecoveryScan((candidate,), True, 1, 0, 0, ()),
         scope_cwd=tmp_path,
         adopt_fn=adopt,
         confine_fn=lambda token, hits, **kwargs: hits,
-        load_registry_fn=lambda path: [
-            SimpleNamespace(
-                harness="codex",
-                harness_session_id=candidate.session_id,
-                cwd=candidate.cwd,
-                origin="adopted",
-                name="01a039bb",
-            )
-        ],
+        load_registry_fn=lambda path: list(registry_rows),
+        update_registry_fn=update_registry,
     )
 
+    assert registry_rows == []
     assert results[0]["outcome"] == "refused"
     assert results[0]["reason"] == "transcript_changed"
     assert results[0]["transcript_usable"] is False
+    assert results[0]["registry_rollback"] == "removed"
     assert "applied" not in results[0]["detail"]
 
 

@@ -262,6 +262,7 @@ def apply_recoverable(
     adopt_fn: Optional[Callable] = None,
     confine_fn: Optional[Callable] = None,
     load_registry_fn: Optional[Callable] = None,
+    update_registry_fn: Optional[Callable] = None,
     should_apply: Optional[Callable[[], bool]] = None,
 ) -> list[dict]:
     """Adopt a complete scan through the shared store-hit writer only."""
@@ -274,11 +275,12 @@ def apply_recoverable(
         }]
 
     from fno.agents import store_fallback
-    from fno.agents.registry import load_registry
+    from fno.agents.registry import load_registry, update_registry
 
     adopt = adopt_fn or store_fallback.adopt_store_hit
     confine = confine_fn or store_fallback.confine_store_hits
     load = load_registry_fn or load_registry
+    update = update_registry_fn or update_registry
     results: list[dict] = []
     for index, candidate in enumerate(scan.recoverable):
         session_id = candidate.session_id
@@ -327,8 +329,6 @@ def apply_recoverable(
                 )
             if getattr(exact[0], "log_path", None) == "":
                 from fno import paths
-                from fno.agents.registry import update_registry
-
                 recovery_log_path = (
                     paths.state_dir()
                     / "agents"
@@ -347,7 +347,7 @@ def apply_recoverable(
                             entry.log_path = str(recovery_log_path)
                     return entries
 
-                update_registry(fill_recovery_log_path, path=registry_path)
+                update(fill_recovery_log_path, path=registry_path)
                 entries = load(registry_path)
                 exact = [
                     entry for entry in entries
@@ -365,12 +365,35 @@ def apply_recoverable(
                 candidate
             )
             if post_reason is not None:
+                removed = 0
+
+                def rollback_adopted_row(entries):
+                    nonlocal removed
+                    kept = []
+                    for entry in entries:
+                        if (
+                            getattr(entry, "harness", None) == "codex"
+                            and getattr(entry, "harness_session_id", None) == session_id
+                            and getattr(entry, "cwd", None) == candidate.cwd
+                            and getattr(entry, "origin", None) == "adopted"
+                        ):
+                            removed += 1
+                            continue
+                        kept.append(entry)
+                    return kept
+
+                update(rollback_adopted_row, path=registry_path)
+                if removed != 1:
+                    raise ValueError(
+                        "registry rollback did not remove exactly one adopted Codex row"
+                    )
                 results.append(
                     {
                         "session_id": session_id,
                         "outcome": "refused",
                         "reason": post_reason,
                         "transcript_usable": False,
+                        "registry_rollback": "removed",
                         "detail": post_detail,
                     }
                 )
