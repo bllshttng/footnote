@@ -639,6 +639,7 @@ def resume_logic(
     print_command: bool = False,
     message: str = _DEFAULT_WAKE_MESSAGE,
     cwd_override: Optional[str] = None,
+    cross_project: bool = False,
     registry_loader: Optional[Any] = None,
     path_checker: Optional[Any] = None,
     cwd_checker: Optional[Any] = None,
@@ -661,6 +662,8 @@ def resume_logic(
             transcript dir before delegating here (`resolve_resume_cwd`);
             without this override this fallback would silently re-derive
             the stale pre-EnterWorktree cwd from the registry instead.
+        cross_project: Explicitly authorize store selection outside the caller's
+            project. It never bypasses ambiguity, route, liveness, or cwd checks.
         registry_loader: Optional callable returning the registry list
             (defaults to ``fno.agents.registry.load_registry``).
         path_checker: Optional callable ``(bin) -> bool`` for PATH check
@@ -710,7 +713,12 @@ def resume_logic(
     )
 
     try:
-        entry = resolve_agent_across_sources(entries, name).entry
+        entry = resolve_agent_across_sources(
+            entries,
+            name,
+            scope_cwd=cwd_override or os.getcwd(),
+            cross_project=cross_project,
+        ).entry
     except AgentResolutionError as exc:
         return ResumeResult(
             exit_code=13,
@@ -931,9 +939,16 @@ def cmd_resume(
     cwd: Optional[str] = typer.Option(
         None, "--cwd",
         help=(
-            "Use this cwd instead of the registry's recorded one. Internal: "
-            "the Rust binary passes this when delegating a claude row whose "
-            "transcript moved under EnterWorktree."
+            "Use this existing checkout instead of the recorded cwd when "
+            "recovering a pruned worktree."
+        ),
+    ),
+    cross_project: bool = typer.Option(
+        False,
+        "--cross-project",
+        help=(
+            "Authorize machine-wide store selection for an orphaned session; "
+            "does not bypass ambiguity or cwd validation."
         ),
     ),
 ) -> None:
@@ -945,7 +960,11 @@ def cmd_resume(
     resume CLI in the recorded cwd, handing over the terminal.
     """
     result = resume_logic(
-        name=name, print_command=print_command, message=message, cwd_override=cwd
+        name=name,
+        print_command=print_command,
+        message=message,
+        cwd_override=cwd,
+        cross_project=cross_project,
     )
     if result.stderr:
         sys.stderr.write(result.stderr)
