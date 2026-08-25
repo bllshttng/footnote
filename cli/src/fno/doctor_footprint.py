@@ -48,28 +48,83 @@ def _cpu_capacity_cores() -> int:
 
 
 def _cpu_quota_cores() -> float | None:
-    """Read a Linux cgroup CPU quota when the host exposes one."""
-    for quota_path, period_path in (
-        (Path("/sys/fs/cgroup/cpu.max"), None),
-        (
-            Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
-            Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
-        ),
-    ):
-        try:
-            fields = quota_path.read_text(encoding="utf-8").split()
-            if period_path is None:
+    """Read the effective CPU quota for this process's cgroup hierarchy."""
+    quotas: list[float] = []
+    for mount, relative in _cgroup_mount_paths("cgroup2"):
+        for path in _cgroup_ancestors(mount / relative.lstrip("/"), mount):
+            try:
+                fields = (path / "cpu.max").read_text(encoding="utf-8").split()
                 if not fields or fields[0] == "max":
                     continue
                 quota, period = int(fields[0]), int(fields[1])
-            else:
-                quota = int(fields[0])
-                period = int(period_path.read_text(encoding="utf-8").strip())
-            if quota > 0 and period > 0:
-                return quota / period
-        except (OSError, IndexError, TypeError, ValueError):
-            continue
-    return None
+                if quota > 0 and period > 0:
+                    quotas.append(quota / period)
+            except (OSError, IndexError, TypeError, ValueError):
+                continue
+    for mount, relative in _cgroup_mount_paths("cgroup"):
+        for path in _cgroup_ancestors(mount / relative.lstrip("/"), mount):
+            try:
+                quota = int(
+                    (path / "cpu.cfs_quota_us").read_text(encoding="utf-8").strip()
+                )
+                period = int(
+                    (path / "cpu.cfs_period_us").read_text(encoding="utf-8").strip()
+                )
+                if quota > 0 and period > 0:
+                    quotas.append(quota / period)
+            except (OSError, TypeError, ValueError):
+                continue
+    return min(quotas) if quotas else None
+
+
+def _cgroup_mount_paths(fs_type: str) -> list[tuple[Path, str]]:
+    """Return cgroup mounts paired with this process's relative cgroup path."""
+    try:
+        groups = Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines()
+        relative = None
+        for line in groups:
+            parts = line.split(":", 2)
+            if len(parts) != 3:
+                continue
+            hierarchy, controllers, path = parts
+            if fs_type == "cgroup2" and hierarchy == "0":
+                relative = path
+            elif fs_type == "cgroup" and "cpu" in controllers.split(","):
+                relative = path
+        if relative is None:
+            return []
+        mounts: list[Path] = []
+        for line in Path("/proc/self/mountinfo").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            before, separator, after = line.partition(" - ")
+            if not separator or not after.startswith(f"{fs_type} "):
+                continue
+            fields = before.split()
+            if len(fields) > 4:
+                mount = fields[4].replace("\\040", " ").replace("\\011", "\t")
+                if fs_type == "cgroup2" or "cpu" in after.split()[2].split(","):
+                    mounts.append(Path(mount))
+        if not mounts:
+            mounts.append(Path("/sys/fs/cgroup"))
+        return [(mount, relative) for mount in mounts]
+    except (OSError, ValueError):
+        return []
+
+
+def _cgroup_ancestors(path: Path, mount: Path) -> list[Path]:
+    """Return a cgroup directory and its parents up to the mount root."""
+    ancestors: list[Path] = []
+    current = path
+    try:
+        current.relative_to(mount)
+    except ValueError:
+        return ancestors
+    while True:
+        ancestors.append(current)
+        if current == mount or current.parent == current:
+            return ancestors
+        current = current.parent
 
 
 def _fno_binary() -> str:
