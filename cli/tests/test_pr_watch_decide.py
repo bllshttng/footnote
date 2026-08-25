@@ -11,7 +11,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -351,17 +351,35 @@ def _stub_runner_ok_merge_state(*args, **kwargs) -> subprocess.CompletedProcess:
     """Stub runner returning a valid OPEN pr state for the merge-state call."""
     payload = json.dumps({
         "number": 42,
-        "state": "OPEN",
-        "url": "https://github.com/owner/repo/pull/42",
-        "mergedAt": None,
+        "state": "open",
+        "merged": False,
+        "html_url": "https://github.com/owner/repo/pull/42",
+        "created_at": "2026-06-01T00:00:00Z",
+        "merged_at": None,
+        "merge_commit_sha": None,
+        "head": {"sha": "head-sha", "ref": "feature/test"},
+        "base": {"ref": "main"},
     })
     return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=payload, stderr="")
 
 
 def _stub_runner_ok_with_reviews(*args, **kwargs) -> subprocess.CompletedProcess:
-    """Stub runner that handles both the pr-view (merge-state) and reviews calls."""
+    """Stub runner that handles the REST merge-state and reviews calls."""
     cmd = args[0] if args else kwargs.get("args", [])
-    # If this is the review/comments call (gh pr view with reviews JSON or gh api)
+    if isinstance(cmd, list) and "api" in cmd:
+        payload = json.dumps({
+            "number": 42,
+            "state": "open",
+            "merged": False,
+            "html_url": "https://github.com/owner/repo/pull/42",
+            "created_at": "2026-06-01T00:00:00Z",
+            "merged_at": None,
+            "merge_commit_sha": None,
+            "head": {"sha": "head-sha", "ref": "feature/test"},
+            "base": {"ref": "main"},
+        })
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
+    # The review/comments call remains on the legacy `gh pr view --json` seam.
     if isinstance(cmd, list) and "reviews" in " ".join(cmd):
         payload = json.dumps({
             "number": 42,
@@ -409,23 +427,45 @@ def test_ac1_err_passing_candidate_returns_observation():
 # [bot] matching: reviewer substring match, case-insensitive, strip [bot]
 # ---------------------------------------------------------------------------
 
-def _stub_runner_with_bot_review(login: str, ts: str) -> subprocess.CompletedProcess:
-    """Return a runner stub that yields a review authored by `login` at `ts`."""
-    payload = json.dumps({
-        "number": 42,
-        "state": "OPEN",
-        "url": "https://github.com/owner/repo/pull/42",
-        "mergedAt": None,
-        "createdAt": "2026-06-01T00:00:00Z",
-        "reviews": [
-            {
-                "author": {"login": login},
-                "submittedAt": ts,
-                "state": "COMMENTED",
-            }
-        ],
-    })
-    return subprocess.CompletedProcess(args=[], returncode=0, stdout=payload, stderr="")
+def _stub_runner_with_bot_review(
+    login: str, ts: str
+) -> Callable[..., subprocess.CompletedProcess]:
+    """Return a runner stub for REST merge state plus a review by `login`."""
+    def runner(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, list) and "api" in cmd:
+            payload = json.dumps({
+                "number": 42,
+                "state": "open",
+                "merged": False,
+                "html_url": "https://github.com/owner/repo/pull/42",
+                "created_at": "2026-06-01T00:00:00Z",
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "head": {"sha": "head-sha", "ref": "feature/test"},
+                "base": {"ref": "main"},
+            })
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=payload, stderr="")
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout=json.dumps({
+                "number": 42,
+                "state": "OPEN",
+                "url": "https://github.com/owner/repo/pull/42",
+                "mergedAt": None,
+                "createdAt": "2026-06-01T00:00:00Z",
+                "reviews": [
+                    {
+                        "author": {"login": login},
+                        "submittedAt": ts,
+                        "state": "COMMENTED",
+                    }
+                ],
+            }),
+            stderr="",
+        )
+    return runner
 
 
 def test_bot_login_matched_by_substring(monkeypatch):
@@ -435,7 +475,7 @@ def test_bot_login_matched_by_substring(monkeypatch):
     cand = _make_candidate()
 
     def stubbed_runner(*args, **kwargs):
-        return _stub_runner_with_bot_review("chatgpt-codex-connector[bot]", "2026-06-14T09:00:00Z")
+        return _stub_runner_with_bot_review("chatgpt-codex-connector[bot]", "2026-06-14T09:00:00Z")(*args, **kwargs)
 
     obs = read_pr_state(cand, reviewers=["codex"], runner=stubbed_runner)
     assert obs.latest_review_ts == "2026-06-14T09:00:00Z"
@@ -446,7 +486,7 @@ def test_non_reviewer_login_does_not_advance_latest_review_ts(monkeypatch):
     cand = _make_candidate()
 
     def stubbed_runner(*args, **kwargs):
-        return _stub_runner_with_bot_review("random-user", "2026-06-14T09:00:00Z")
+        return _stub_runner_with_bot_review("random-user", "2026-06-14T09:00:00Z")(*args, **kwargs)
 
     obs = read_pr_state(cand, reviewers=["codex"], runner=stubbed_runner)
     assert obs.latest_review_ts is None
@@ -457,7 +497,7 @@ def test_bot_matching_is_case_insensitive(monkeypatch):
     cand = _make_candidate()
 
     def stubbed_runner(*args, **kwargs):
-        return _stub_runner_with_bot_review("CODEX-BOT[bot]", "2026-06-14T11:00:00Z")
+        return _stub_runner_with_bot_review("CODEX-BOT[bot]", "2026-06-14T11:00:00Z")(*args, **kwargs)
 
     obs = read_pr_state(cand, reviewers=["codex"], runner=stubbed_runner)
     assert obs.latest_review_ts == "2026-06-14T11:00:00Z"

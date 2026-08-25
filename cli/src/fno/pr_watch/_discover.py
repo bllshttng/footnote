@@ -297,6 +297,7 @@ def read_pr_state(
         cwd=cwd_str,
         runner=runner,
         timeout_s=timeout_s,
+        include_files=False,
     )
 
     # Step 2: Get reviews + comments + PR metadata for latest_review_ts and opened_at.

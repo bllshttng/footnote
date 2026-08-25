@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Optional, Union
+
+log = logging.getLogger(__name__)
 
 # `gh pr view` default timeout; covers network hangs and stuck auth prompts.
 GH_QUERY_TIMEOUT_S = 30.0
@@ -190,7 +193,111 @@ PrStateLiteral = Literal["OPEN", "CLOSED", "MERGED", "UNKNOWN"]
 
 
 class ReconcileError(Exception):
-    """Raised on gh failure or other I/O errors during a PR-state query."""
+    """A PR-state read failure with a machine-readable operator remedy."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: Optional[str] = None,
+        remedy: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind or self._classify(message)
+        self.remedy = remedy
+
+    @staticmethod
+    def _classify(message: str) -> str:
+        text = message.lower()
+        if "not found on path" in text or "toolmissing" in text:
+            return "availability"
+        if (
+            "unconditional" in text
+            or "routed, never rationed" in text
+            or "graphql reserve" in text
+            or "use `fno do pr info" in text
+        ):
+            return "routing_refusal"
+        if (
+            re.search(r"\b(?:auth|authentication|authenticated|credentials)\b", text)
+            or "bad credentials" in text
+            or "not logged in" in text
+            or re.search(r"\b(?:http|status)\s*401\b", text)
+        ):
+            return "authentication"
+        if "could not resolve owner/repo" in text or "no repo context" in text:
+            return "repository_context"
+        if (
+            "not found" in text
+            or "404" in text
+            or "could not resolve to a repository" in text
+            or "could not resolve to a pullrequest" in text
+        ):
+            return "not_found"
+        if "3,000-file cap" in text:
+            return "evidence_incomplete"
+        if "rate limit" in text or "quota" in text:
+            return "availability"
+        if (
+            re.search(r"\b(?:http|status)\s*5\d{2}\b", text)
+            or "bad gateway" in text
+            or "internal server error" in text
+        ):
+            return "availability"
+        if any(
+            token in text
+            for token in ("not json", "malformed", "parse", "json value", "no output")
+        ):
+            return "malformed"
+        if any(
+            token in text
+            for token in ("timeout", "timed out", "network", "transport", "connection", "unavailable")
+        ):
+            return "availability"
+        return "reader_error"
+
+    @property
+    def retryable(self) -> bool:
+        return self.kind == "availability"
+
+    def remedy_for(self, *, pr_number: int, repo: Optional[str]) -> str:
+        if self.remedy:
+            return self.remedy
+        if self.kind == "routing_refusal":
+            scope = f" --repo {repo}" if repo else ""
+            return (
+                f"Use `fno do pr info {pr_number}{scope}` as the route. "
+                "This refusal is unconditional and is not retryable."
+            )
+        if self.kind == "authentication":
+            return "Run `gh auth login`; authentication failures are not retryable."
+        if self.kind == "not_found":
+            stored = f"{repo}#{pr_number}" if repo else f"PR #{pr_number}"
+            return (
+                f"Stored PR reference {stored} was not found. Repair it with "
+                "`fno backlog update <node> --pr-url <correct-url>`; do not "
+                "retry against the ambient repository."
+            )
+        if self.kind == "malformed":
+            return "Inspect the malformed GitHub response and fix the reader; this is not retryable."
+        if self.kind == "evidence_incomplete":
+            return (
+                "GitHub's REST files endpoint reached its 3,000-file cap without "
+                "a complete tail; review the full PR evidence before using "
+                "`fno backlog done <node> --force --reason TEXT`."
+            )
+        if self.kind == "reader_error":
+            return "The REST reader raised an unexpected error; inspect the reader before retrying."
+        if self.kind == "repository_context":
+            return (
+                "Supply `--repo <owner/repo>` or repair the checkout's origin remote; "
+                "repository context is required and this is not retryable."
+            )
+        if self.kind == "availability":
+            if "rate limit" in str(self).lower() or "quota" in str(self).lower():
+                return "Back off GitHub API requests and retry after the rate limit clears."
+            return "Retry the GitHub read when availability returns; the node stays open."
+        return "The PR read failed for an unclassified reason; inspect it before retrying."
 
 
 @dataclass
@@ -237,13 +344,12 @@ class MergeDriftRecord:
     merge_sha: Optional[str] = None
     changed_files: list[str] = field(default_factory=list)
     files_truncated: bool = False
+    error_kind: Optional[str] = None
+    remedy: Optional[str] = None
 
     @property
     def closeable(self) -> bool:
         return self.error is None and self.pr_state == "MERGED"
-
-
-_GH_FILES_PAGE_SIZE = 100
 
 
 def _normalize_surface(path: object) -> str:
@@ -557,6 +663,8 @@ class MergeEvidence:
     open_pr_number: Optional[int] = None
     error: Optional[str] = None
     reason: Optional[str] = None
+    failure_kind: Optional[str] = None
+    remedy: Optional[str] = None
 
     @property
     def exit_code(self) -> int:
@@ -583,7 +691,10 @@ def resolve_merge_evidence(
     if not refs:
         return MergeEvidence(outcome="refused", reason="no PR ref to evidence")
     refusal_reason: Optional[str] = None
+    refusal_kind: Optional[str] = None
+    refusal_remedy: Optional[str] = None
     outage_error: Optional[str] = None
+    outage_remedy: Optional[str] = None
     open_pr_number: Optional[int] = None
     first_pr_number, first_pr_url = refs[0]
     repo = repo_slug_from_url(first_pr_url)
@@ -595,7 +706,20 @@ def resolve_merge_evidence(
         try:
             pr_state = query(pr_number, repo=pr_repo, cwd=pr_cwd)
         except ReconcileError as exc:
-            outage_error = str(exc)
+            log.warning(
+                "merge evidence read failed for #%s repo=%s kind=%s: %s",
+                pr_number,
+                pr_repo,
+                exc.kind,
+                exc,
+            )
+            if exc.retryable:
+                outage_error = str(exc)
+                outage_remedy = exc.remedy_for(pr_number=pr_number, repo=pr_repo)
+            elif refusal_kind is None:
+                refusal_reason = str(exc)
+                refusal_kind = exc.kind
+                refusal_remedy = exc.remedy_for(pr_number=pr_number, repo=pr_repo)
             continue
 
         if pr_state.state == "MERGED":
@@ -605,8 +729,16 @@ def resolve_merge_evidence(
             if open_pr_number is None:
                 open_pr_number = pr_number
         else:
-            refusal_reason = f"PR #{pr_number} state={pr_state.state} (not merged)"
+            if refusal_reason is None and refusal_kind is None:
+                refusal_reason = f"PR #{pr_number} state={pr_state.state} (not merged)"
 
+    if refusal_kind is not None:
+        return MergeEvidence(
+            outcome="refused",
+            reason=refusal_reason,
+            failure_kind=refusal_kind,
+            remedy=refusal_remedy,
+        )
     if open_pr_number is not None:
         # Carry any outage alongside: a ref we could not reach stays invisible
         # across every retry otherwise, since OPEN outranks it.
@@ -614,13 +746,37 @@ def resolve_merge_evidence(
             outcome="awaiting_merge",
             open_pr_number=open_pr_number,
             error=outage_error,
+            remedy=outage_remedy,
         )
     if outage_error:
-        return MergeEvidence(outcome="outage", error=outage_error)
+        return MergeEvidence(
+            outcome="outage", error=outage_error, remedy=outage_remedy,
+        )
     return MergeEvidence(
         outcome="refused",
         reason=refusal_reason or f"PR #{first_pr_number}: no merged evidence",
+        failure_kind=refusal_kind,
+        remedy=refusal_remedy,
     )
+
+
+def render_merge_evidence_failure(
+    task_id: str,
+    evidence: MergeEvidence,
+    *,
+    stays: Literal["open", "done"],
+) -> str:
+    """Render the shared actionable outcome for every close front door."""
+    if evidence.outcome == "outage":
+        action = evidence.remedy or "Retry the GitHub read when availability returns."
+        return (
+            f"Error: gh cross-check failed for {task_id}: {evidence.error}\n"
+            f"{action} Node stays {stays}."
+        )
+    message = evidence.reason or "no merged evidence"
+    if evidence.remedy:
+        return f"Refused: {task_id} cross-check failed: {message}\n{evidence.remedy}"
+    return f"Refused: {task_id} cross-check failed: {message}"
 
 
 # The promise-gate refusal code. 3/4/5 are taken and load-bearing
@@ -875,7 +1031,7 @@ def resolve_promise_evidence(
                 if isinstance(num, int) and num not in seen:
                     refs.append((num, url))
                     seen.add(num)
-        merged, outage = _count_merged_refs(
+        merged, failure = _count_merged_refs(
             refs, ceiling=expected, cwd=cwd, query=query
         )
         if merged < expected:
@@ -883,12 +1039,20 @@ def resolve_promise_evidence(
             # would tell the operator the plan under-shipped when gh was simply
             # down, and the merge gate already treats an outage as retryable
             # (exit 4) rather than a policy refusal.
-            if outage:
+            if failure and failure.retryable:
                 return PromiseVerdict(
                     outcome="ok",
                     warning=(
                         f"promise gate could not confirm {expected} ships for "
-                        f"{node_id}: {outage}; ship-count check skipped"
+                        f"{node_id}: {failure}; ship-count check skipped"
+                    ),
+                )
+            if failure:
+                return PromiseVerdict(
+                    outcome="promise_unmet",
+                    reason=(
+                        f"Refused: {node_id} could not verify promised ships: "
+                        f"{failure}\n  {failure.remedy_for(pr_number=0, repo=None)}"
                     ),
                 )
             return PromiseVerdict(
@@ -905,8 +1069,8 @@ def _count_merged_refs(
     ceiling: int,
     cwd: Optional[str] = None,
     query: Optional[Callable[..., PrMergeState]] = None,
-) -> tuple[int, Optional[str]]:
-    """Count MERGED refs; return ``(merged, first_outage)``.
+) -> tuple[int, Optional[ReconcileError]]:
+    """Count MERGED refs; return ``(merged, first typed failure)``.
 
     Mirrors :func:`resolve_merge_evidence`'s per-ref resolution so the two agree
     on what counts as merged. Stops early at ``ceiling``: once enough ships are
@@ -917,7 +1081,7 @@ def _count_merged_refs(
     """
     query = query or query_pr_merge_state
     merged = 0
-    outage: Optional[str] = None
+    failure: Optional[ReconcileError] = None
     repo: Optional[str] = None
     for pr_number, pr_url in refs:
         pr_repo = repo_slug_from_url(pr_url) or repo
@@ -927,14 +1091,23 @@ def _count_merged_refs(
         try:
             state = query(pr_number, repo=pr_repo, cwd=pr_cwd)
         except ReconcileError as exc:
-            if outage is None:
-                outage = f"PR #{pr_number}: {exc}"
+            if failure is None or (failure.retryable and not exc.retryable):
+                failure = ReconcileError(
+                    f"PR #{pr_number}: {exc}",
+                    kind=exc.kind,
+                    remedy=exc.remedy_for(pr_number=pr_number, repo=pr_repo),
+                )
             continue
         if state.state == "MERGED":
             merged += 1
             if merged >= ceiling:
                 return merged, None
-    return merged, outage
+        elif state.state == "UNKNOWN":
+            failure = ReconcileError(
+                f"PR #{pr_number}: REST reader returned UNKNOWN state",
+                kind="malformed",
+            )
+    return merged, failure
 
 
 def _promise_refusal_b(node_id: str, plan_display: str, detail: str) -> str:
@@ -1039,70 +1212,134 @@ def query_pr_merge_state(
     *,
     repo: Optional[str] = None,
     cwd: Optional[str] = None,
-    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
     timeout_s: float = GH_QUERY_TIMEOUT_S,
+    info_reader: Optional[Callable[..., tuple[Optional[dict], str]]] = None,
+    files_reader: Optional[Callable[..., tuple[Optional[list[str]], str]]] = None,
+    include_files: bool = False,
 ) -> PrMergeState:
-    """Shell out to ``gh pr view <n> --json ...`` and parse the result.
+    """Read merge state and complete changed-file evidence through REST.
 
-    ``repo`` (``owner/repo``) scopes the lookup explicitly via ``--repo`` and
-    is the authoritative way to avoid resolving a PR number against the wrong
-    repository. ``cwd`` is a weaker fallback (gh infers owner/repo from the
-    working directory's origin remote). Raises :class:`ReconcileError` on any
-    gh failure (missing binary, auth, network, parse error, timeout).
+    ``info_reader`` and ``files_reader`` are the production seams. ``runner``
+    remains a compatibility seam for callers that inject ``subprocess.run``;
+    it is adapted to the same in-process REST readers and never emits
+    the old GraphQL PR-state argv.
     """
-    if _gh_executable() is None:
-        raise ReconcileError("gh CLI not found on PATH")
+    from fno.pr import _rest
+    from fno.pr._proc import Result
 
-    cmd = ["gh", "pr", "view", str(pr_number)]
-    if repo:
-        cmd += ["--repo", repo]
-    cmd += ["--json", "number,state,url,mergedAt,mergeCommit,files"]
-    try:
-        result = runner(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout_s,
-            cwd=cwd,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ReconcileError(
-            f"gh pr view #{pr_number} timed out after {timeout_s}s"
-        ) from exc
-    except OSError as exc:
-        raise ReconcileError(f"gh subprocess failed to launch: {exc}") from exc
-
-    if result.returncode != 0:
-        raise ReconcileError(
-            f"gh pr view #{pr_number} failed (rc={result.returncode}): "
-            f"{(result.stderr or '').strip()}"
+    def rest_runner(cmd, *, cwd=None, timeout=None):
+        effective_timeout = timeout if timeout is not None else timeout_s
+        try:
+            if runner is None:
+                return _rest.run(cmd, cwd=cwd, timeout=effective_timeout)
+            result = runner(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=effective_timeout,
+                cwd=cwd,
+            )
+        except subprocess.TimeoutExpired:
+            return Result(124, "", f"gh REST request timed out after {timeout_s}s")
+        except OSError as exc:
+            return Result(127, "", f"gh subprocess failed to launch: {exc}")
+        return Result(
+            int(getattr(result, "returncode", 1)),
+            getattr(result, "stdout", "") or "",
+            getattr(result, "stderr", "") or "",
         )
 
-    try:
-        row = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError as exc:
-        raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
-
-    raw_files = row.get("files") or []
-    changed_files = [
-        item.get("path") if isinstance(item, dict) else item
-        for item in raw_files
-        if isinstance(item, str) or isinstance(item, dict)
-    ]
-    return PrMergeState(
-        number=row.get("number", pr_number),
-        state=row.get("state", "UNKNOWN"),
-        url=row.get("url"),
-        merged_at=row.get("mergedAt"),
-        merge_sha=(row.get("mergeCommit") or {}).get("oid"),
-        changed_files=[path for path in changed_files if isinstance(path, str) and path],
-        # `gh pr view --json files` returns the first page only and does not
-        # paginate, so a list at the cap is evidence of more, not of exactly
-        # this many. Treat it as short and let the caller refuse to read an
-        # absence out of it.
-        files_truncated=len(raw_files) >= _GH_FILES_PAGE_SIZE,
+    info_reader = info_reader or (
+        lambda number, *, repo=None, cwd=None: _rest.fetch_pr_info_rest(
+            str(number), cwd=cwd, runner=rest_runner, repo=repo
+        )
     )
+    files_reader = files_reader or (
+        lambda number, *, repo=None, cwd=None: _rest.fetch_pr_file_paths_rest(
+            str(number), cwd=cwd, runner=rest_runner, repo=repo
+        )
+    )
+
+    try:
+        info, reason = info_reader(pr_number, repo=repo, cwd=cwd)
+    except ReconcileError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reader failures become typed read errors
+        log.exception("REST PR info reader failed for #%s repo=%s", pr_number, repo)
+        kind = "availability" if type(exc).__name__ == "ToolMissing" else "reader_error"
+        raise ReconcileError(str(exc), kind=kind) from exc
+    if info is None:
+        log.warning("REST PR info read failed for #%s repo=%s: %s", pr_number, repo, reason)
+        failure = ReconcileError(str(reason or "REST PR info read failed"))
+        failure.remedy = failure.remedy_for(pr_number=pr_number, repo=repo)
+        raise failure
+    if not isinstance(info, dict):
+        raise ReconcileError(
+            "REST PR info reader returned a value that is not an object",
+            kind="malformed",
+        )
+
+    if "pr" not in info or "state" not in info:
+        raise ReconcileError(
+            "REST PR info reader omitted required PR number or state",
+            kind="malformed",
+        )
+    state = info["state"]
+    if state not in {"OPEN", "CLOSED", "MERGED"}:
+        raise ReconcileError(
+            f"REST PR info reader returned malformed state {state!r}",
+            kind="malformed",
+        )
+
+    changed_files: list[str] = []
+    if state == "MERGED" and include_files:
+        try:
+            file_paths, reason = files_reader(pr_number, repo=repo, cwd=cwd)
+        except ReconcileError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - reader failures become typed read errors
+            log.exception("REST PR files reader failed for #%s repo=%s", pr_number, repo)
+            kind = "availability" if type(exc).__name__ == "ToolMissing" else "reader_error"
+            raise ReconcileError(str(exc), kind=kind) from exc
+        if file_paths is None:
+            log.warning("REST PR files read failed for #%s repo=%s: %s", pr_number, repo, reason)
+            failure = ReconcileError(str(reason or "REST PR files read failed"))
+            failure.remedy = failure.remedy_for(pr_number=pr_number, repo=repo)
+            raise failure
+        if not isinstance(file_paths, list) or not all(
+            isinstance(path, str) and path for path in file_paths
+        ):
+            raise ReconcileError(
+                "REST PR files reader returned malformed file paths",
+                kind="malformed",
+            )
+        changed_files = list(file_paths)
+
+    try:
+        number = int(info.get("pr", pr_number))
+    except (TypeError, ValueError) as exc:
+        raise ReconcileError(
+            "REST PR info reader returned a malformed PR number",
+            kind="malformed",
+        ) from exc
+
+    return PrMergeState(
+        number=number,
+        state=state,
+        url=info.get("url"),
+        merged_at=info.get("merged_at"),
+        merge_sha=info.get("merge_sha"),
+        changed_files=changed_files,
+        files_truncated=False,
+    )
+
+
+# Keep the production-reader identity stable when tests replace the module
+# symbol. Reconciliation opts into file evidence only for this reader, while
+# injected merge-state stubs keep their historical narrow signature.
+_DEFAULT_QUERY_PR_MERGE_STATE = query_pr_merge_state
 
 
 # W4 causal links: best-effort revert detection. A GitHub revert PR titles
@@ -1681,6 +1918,8 @@ def scan_merge_drift(
             cwd = None
         merged: Optional[PrMergeState] = None
         first_error: Optional[str] = None
+        first_error_kind: Optional[str] = None
+        first_remedy: Optional[str] = None
 
         for number, url in refs:
             # Prefer an explicit repo parsed from the PR URL so we never
@@ -1697,10 +1936,28 @@ def scan_merge_drift(
                     )
                 continue
             try:
-                state = query(number, repo=repo, cwd=cwd)
+                if query is _DEFAULT_QUERY_PR_MERGE_STATE:
+                    state = query(
+                        number,
+                        repo=repo,
+                        cwd=cwd,
+                        include_files=True,
+                    )
+                else:
+                    state = query(number, repo=repo, cwd=cwd)
             except ReconcileError as exc:
+                log.warning(
+                    "reconcile scan read failed for node=%s PR #%s repo=%s kind=%s: %s",
+                    nid,
+                    number,
+                    repo,
+                    exc.kind,
+                    exc,
+                )
                 if first_error is None:
                     first_error = str(exc)
+                    first_error_kind = exc.kind
+                    first_remedy = exc.remedy_for(pr_number=number, repo=repo)
                 continue
             if state.state == "MERGED":
                 merged = state
@@ -1737,6 +1994,8 @@ def scan_merge_drift(
                     error=first_error,
                     session_id=node.get("session_id"),
                     cwd=cwd,
+                    error_kind=first_error_kind,
+                    remedy=first_remedy,
                 )
             )
 
