@@ -4273,10 +4273,12 @@ const DEFAULT_OPTIONAL_APPS: [&str; 2] = ["gemini-code-assist", "chatgpt-codex-c
 /// absence never does (x-4baa "honor if present"). Unset resolves to the
 /// built-in default; an explicit `[]` is a real opt-out and wins over it.
 fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
-    settings
-        .optional_apps
-        .clone()
-        .unwrap_or_else(|| DEFAULT_OPTIONAL_APPS.iter().map(|s| s.to_string()).collect())
+    settings.optional_apps.clone().unwrap_or_else(|| {
+        DEFAULT_OPTIONAL_APPS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    })
 }
 
 /// Case-insensitive substring match so a configured short name ("codex") or a
@@ -11394,10 +11396,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_session.as_deref(),
         pr.as_deref(),
         prefetched_pr_json,
-        inputs
-            .settings
-            .require_corroboration
-            .unwrap_or(false),
+        inputs.settings.require_corroboration.unwrap_or(false),
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {
@@ -12815,7 +12814,10 @@ mod tests {
             "",
             "h",
         );
-        assert!(rep.verdicts.is_empty(), "a zero-line pass must yield no verdict");
+        assert!(
+            rep.verdicts.is_empty(),
+            "a zero-line pass must yield no verdict"
+        );
         assert_eq!(rep.coverage, Coverage::Unknown);
 
         let control = attestation_line("code-review", "h", "pass");
@@ -12877,7 +12879,10 @@ mod tests {
             "feature/x",
             "h",
         );
-        assert!(revoked.verdicts.is_empty(), "the named pair must yield no verdict");
+        assert!(
+            revoked.verdicts.is_empty(),
+            "the named pair must yield no verdict"
+        );
         assert_eq!(revoked.coverage, Coverage::Unknown);
     }
 
@@ -12917,7 +12922,11 @@ mod tests {
             .iter()
             .map(|v| v.reviewed_sha.as_str())
             .collect();
-        assert!(shas.contains(&"head-1") && shas.contains(&"head-2"), "{:?}", shas);
+        assert!(
+            shas.contains(&"head-1") && shas.contains(&"head-2"),
+            "{:?}",
+            shas
+        );
     }
 
     #[test]
@@ -13005,12 +13014,7 @@ mod tests {
         );
         assert_eq!(rep.coverage, Coverage::Covered(1));
         let refused = vec!["some-required-bot".to_string()];
-        assert!(local_recovery_from_refusal(
-            &refused,
-            &[],
-            &[],
-            &rep
-        ));
+        assert!(local_recovery_from_refusal(&refused, &[], &[], &rep));
     }
 
     #[test]
@@ -13031,12 +13035,7 @@ mod tests {
         );
         let refused = vec!["some-required-bot".to_string()];
         let stale = vec![("some-required-bot".to_string(), "oldsha".to_string())];
-        assert!(!local_recovery_from_refusal(
-            &refused,
-            &[],
-            &stale,
-            &rep
-        ));
+        assert!(!local_recovery_from_refusal(&refused, &[], &stale, &rep));
         // And no refusal means no recovery at all: absence is a wait.
         assert!(!local_recovery_from_refusal(&[], &[], &[], &rep));
     }

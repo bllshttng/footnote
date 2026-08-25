@@ -1793,9 +1793,7 @@ pub fn bg_create(
         .any(|(k, _)| crate::model_env_scrub::MODEL_ENV_KEYS.contains(k));
     let mut floor = incoherent.clone();
     if !overlay_routes {
-        for key in crate::model_env_scrub::unrouted_model_keys(&|k| {
-            std::env::var(k).ok()
-        }) {
+        for key in crate::model_env_scrub::unrouted_model_keys(&|k| std::env::var(k).ok()) {
             if !floor.iter().any(|(fk, _)| *fk == key) {
                 if let Ok(value) = std::env::var(&key) {
                     floor.push((key, value));

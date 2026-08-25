@@ -410,10 +410,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         std::env::set_var("ANTHROPIC_MODEL", "glm-5.3[1m]");
         let mut cmd = std::process::Command::new("claude");
-        scrub_onto(
-            &mut cmd,
-            &[("ANTHROPIC_MODEL", "glm-5.3[1m]")],
-        );
+        scrub_onto(&mut cmd, &[("ANTHROPIC_MODEL", "glm-5.3[1m]")]);
         let removed: Vec<_> = cmd
             .get_envs()
             .filter(|(_, v)| v.is_none())
