@@ -447,6 +447,23 @@ pub(crate) fn config_str(cwd: &Path, section: &str, key: &str) -> Option<String>
     resolve_config_key(cwd, &|path| read_section_file(path, section, key))
 }
 
+pub(crate) fn config_nested_str(
+    cwd: &Path,
+    section: &str,
+    subsection: &str,
+    key: &str,
+) -> Option<String> {
+    resolve_config_key(cwd, &|path| {
+        read_nested_file(path, section, subsection, key)
+    })
+}
+
+pub(crate) fn mux_restore_hold_workers(cwd: &Path) -> bool {
+    config_nested_str(cwd, "mux", "restore", "hold_workers")
+        .and_then(|value| parse_bool(&value))
+        .unwrap_or(true)
+}
+
 /// A TOP-LEVEL key (no section) read from the EXPLICIT tier only: `$FNO_CONFIG`
 /// (sole candidate) else the global config. The mux resolves its state root
 /// through this, deliberately NOT through the project tier below: one
@@ -532,6 +549,15 @@ fn read_section_file(path: &Path, section: &str, key: &str) -> Option<String> {
     read_value(&std::fs::read_to_string(path).ok()?, section, key)
 }
 
+fn read_nested_file(path: &Path, section: &str, subsection: &str, key: &str) -> Option<String> {
+    read_nested_value(
+        &std::fs::read_to_string(path).ok()?,
+        section,
+        subsection,
+        key,
+    )
+}
+
 fn read_top_file(path: &Path, key: &str) -> Option<String> {
     read_top_value(&std::fs::read_to_string(path).ok()?, key)
 }
@@ -555,6 +581,17 @@ fn scalar(v: &toml::Value) -> Option<String> {
 fn read_value(content: &str, section: &str, key: &str) -> Option<String> {
     let t = content.parse::<toml::Table>().ok()?;
     scalar(t.get(section)?.as_table()?.get(key)?)
+}
+
+fn read_nested_value(content: &str, section: &str, subsection: &str, key: &str) -> Option<String> {
+    let t = content.parse::<toml::Table>().ok()?;
+    scalar(
+        t.get(section)?
+            .as_table()?
+            .get(subsection)?
+            .as_table()?
+            .get(key)?,
+    )
 }
 
 /// Read a top-level `<key>` (no section) from a flat config.toml body,
@@ -713,6 +750,15 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_mux_restore_hold_workers_is_readable() {
+        let body = "[mux.restore]\nhold_workers = false\n";
+        assert_eq!(
+            read_nested_value(body, "mux", "restore", "hold_workers"),
+            Some("false".into())
+        );
+    }
 
     #[test]
     fn reads_top_level_keys() {

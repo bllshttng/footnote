@@ -3384,6 +3384,14 @@ class BranchBlock(BaseModel):
         return v
 
 
+class MuxRestoreBlock(BaseModel):
+    """Mux server-restart restoration settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    hold_workers: bool = True
+
+
 class MuxBlock(BaseModel):
     """fno mux (terminal multiplexer) settings (nested under 'config.mux').
 
@@ -3425,6 +3433,7 @@ class MuxBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     shell_integration: str = "mux-panes"
+    restore: MuxRestoreBlock = Field(default_factory=MuxRestoreBlock)
     # Which projects the backlog board renders (x-20f1). The graph is ONE store
     # tagged by project, so an unscoped board shows every project's work to
     # someone sitting in one checkout. `repo` (the default) scopes to this
