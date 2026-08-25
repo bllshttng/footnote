@@ -7455,6 +7455,9 @@ impl Core {
                                 last_activity_age_s: self.truth_age(&a.name),
                                 resumable: false,
                                 no_pane_reason: None,
+                                // A registry-hosted pane speaks through its
+                                // badge; the vt reading is the bare-pane signal.
+                                pane_activity: None,
                             }
                         }
                         None => {
@@ -7487,8 +7490,15 @@ impl Core {
                                 subline: self
                                     .compose_subline(e.map(|e| e.cwd.as_str()).unwrap_or("")),
                                 account: e.and_then(|e| e.account.clone()),
-                                // A bare shell pane is not a registry worker: no
-                                // activity stamp, no claim, no pr, no transcript.
+                                // A bare pane is not a registry worker: no
+                                // claim, no pr, no transcript. But not-in-
+                                // registry is not is-a-shell - it can be a
+                                // full agent with a live workload, so the row
+                                // carries the pane's OWN vt reading and the
+                                // drain-path activity stamp (x-d401).
+                                pane_activity: e.map(|e| e.vt.shell_activity()),
+                                last_activity_age_s: e
+                                    .map(|e| e.last_output.elapsed().as_secs()),
                                 updated_at: None,
                                 pr: None,
                                 tail: None,
@@ -7497,7 +7507,6 @@ impl Core {
                                 crown_level: None,
                                 crown_scope: None,
                                 basis: None,
-                                last_activity_age_s: None,
                                 resumable: false,
                                 no_pane_reason: None,
                             }
@@ -7578,6 +7587,8 @@ impl Core {
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable,
                         no_pane_reason: Self::row_no_pane_reason(a),
+                        // Dangling dead: the pane is gone, so no vt reading.
+                        pane_activity: None,
                     })
                 }
                 None => {
@@ -7629,6 +7640,8 @@ impl Core {
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable: Self::row_resumable(a),
                         no_pane_reason: Self::row_no_pane_reason(a),
+                        // Watch-only paneless: no PTY, no vt reading.
+                        pane_activity: None,
                     })
                 }
             }
@@ -7680,6 +7693,8 @@ impl Core {
                     last_activity_age_s: None,
                     resumable: false,
                     no_pane_reason: None,
+                    // A synthesized dead member owns no PTY.
+                    pane_activity: None,
                 })
             }
         }
@@ -7760,6 +7775,8 @@ impl Core {
                 last_activity_age_s: None,
                 resumable: false,
                 no_pane_reason: None,
+                // An external-daemon row owns no PTY of this server.
+                pane_activity: None,
             })
         }
         out
@@ -13503,6 +13520,50 @@ mod tests {
             live.no_pane_reason,
             Some(AgentNoPaneReason::LivePaneless),
             "registry truth projects the typed live-paneless reason"
+        );
+    }
+
+    #[test]
+    fn bare_pane_row_carries_its_own_activity_and_age() {
+        // (x-d401, x-9d03) A bare pane with no registry row can still be a
+        // full agent running a real workload - not-in-registry is not
+        // is-a-shell. The row must carry the pane's own OSC 133 reading and a
+        // real last_activity_age_s from the drain-path stamp, never the
+        // badge-None-means-idle fold that rendered four working panes and one
+        // idle shell as the same circle.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        core.shells = vec!["/bin/cat".into()];
+        let pid = core.spawn_pane(2, 4, "/w").expect("pane");
+        core.session.add_squad(
+            1,
+            vec!["/w".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(pid),
+                focus: pid,
+            },
+        );
+        core.agents = vec![];
+        // Feed an open command block (OSC 133 A then C, no D): Running.
+        let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+        tx.try_send((pid, b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()))
+            .unwrap();
+        drop(tx);
+        let mut first_out = HashSet::new();
+        drain_pty_output(&mut core, &mut rx, None, &mut first_out);
+        let rows = core.agent_rows();
+        let bare = rows.iter().find(|r| r.pane_id == Some(pid)).unwrap();
+        assert_eq!(
+            bare.pane_activity,
+            Some(vt::ShellActivity::Running),
+            "a bare pane running a command must report Running, not a blind idle"
+        );
+        assert!(
+            bare.last_activity_age_s.is_some(),
+            "a bare pane must report a real activity age from the drain stamp"
         );
     }
 

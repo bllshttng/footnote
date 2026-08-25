@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::tree::{Axis, Dir, Node, PaneId, Rect, TabId};
+use crate::vt::ShellActivity;
 
 /// `#[serde(default = ...)]` helper for a field whose omitted default is `true`
 /// rather than serde's `bool` default of `false` (x-d865, `PaneSplit.no_focus`).
@@ -1155,6 +1156,16 @@ pub struct AgentRow {
     /// additive field wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_pane_reason: Option<AgentNoPaneReason>,
+    /// (v55, x-d401) What this pane's own OSC 133 evidence says about its
+    /// shell activity, read server-side from the pane's vt. Carried by BARE
+    /// panes (a pane with no registry row can still be a full agent running a
+    /// real workload - not-in-registry is not is-a-shell); `None` on rows that
+    /// are not a live pane of this session (registry-hosted rows speak through
+    /// their badge, tombstones and daemon rows own no PTY). `#[serde(default)]`
+    /// keeps a v54 reader wire-tolerant (a missing field reads as
+    /// no-reading, never as idle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_activity: Option<ShellActivity>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -4228,6 +4239,7 @@ mod tests {
                         last_activity_age_s: None,
                         resumable: false,
                         no_pane_reason: None,
+                        pane_activity: None,
                     },
                     AgentRow {
                         spawned_by_session: None,
@@ -4257,6 +4269,7 @@ mod tests {
                         last_activity_age_s: None,
                         resumable: false,
                         no_pane_reason: None,
+                        pane_activity: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
