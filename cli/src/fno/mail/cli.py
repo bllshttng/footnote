@@ -44,6 +44,7 @@ import dataclasses
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -679,6 +680,70 @@ def _is_job_name(name: Optional[str]) -> bool:
     from fno.mail.job_address import is_job_token
 
     return bool(is_job_token(name))
+
+
+def _ruling_graph_path(workdir: Path) -> Path:
+    """Resolve the graph configured by an explicit mail ``--cwd``."""
+    from fno.config import load_settings_for_repo
+
+    repo_root = workdir
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workdir), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            repo_root = Path(result.stdout.strip()).resolve()
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass
+    settings = load_settings_for_repo(repo_root)
+    override = settings.paths.graph_json
+    raw = override if override is not None else settings.state_dir
+    resolved = paths.resolve_configured_path(
+        raw, project_root=repo_root, settings=settings
+    )
+    return resolved if override is not None else resolved / "graph.json"
+
+
+def _append_ruling_to_node(subject: str, body: str, *, graph_path: Path) -> str:
+    """Append one dated ruling block to an exact working-graph node."""
+    from fno.graph import store as graph_store
+    from fno.graph.fuzzy import resolve_node
+
+    block = f"### Ruling ({datetime.now(timezone.utc).date().isoformat()})\n\n{body}"
+    node_id: str | None = None
+
+    def mutator(current: list[dict]) -> list[dict]:
+        nonlocal node_id
+        match = resolve_node(subject, current)
+        if match.kind != "exact" or not match.id:
+            raise ValueError(f"ruling node not found: {subject!r}")
+        node_id = match.id
+        for entry in current:
+            if not isinstance(entry, dict) or entry.get("id") != node_id:
+                continue
+            details = entry.get("details")
+            existing = details.rstrip() if isinstance(details, str) else ""
+            entry["details"] = f"{existing}\n\n{block}" if existing else block
+            break
+        return current
+
+    try:
+        graph_store.locked_mutate_graph(graph_path, mutator)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=2) from exc
+    assert node_id is not None
+    print(
+        f"ruling appended to {node_id} before transport; if transport fails, "
+        "retry the mail without --ruling",
+        file=sys.stderr,
+    )
+    return node_id
 
 
 def _refuse_unsafe_short_address(
@@ -3468,6 +3533,14 @@ def cmd_send(
         hidden=True,
         help="Stamped machine mail origin: operator, peer, scheduler, or recovery.",
     ),
+    ruling: str | None = typer.Option(
+        None,
+        "--ruling",
+        help=(
+            "Append this authored message to the governed node's details as a "
+            "dated ruling block before named-worker transport."
+        ),
+    ),
     from_self: bool = typer.Option(
         False, "--from-self",
         help=(
@@ -3622,6 +3695,21 @@ def cmd_send(
     from fno._flag_aliases import refuse_retired_provider
 
     refuse_retired_provider(_provider_tombstone)
+
+    if ruling is not None:
+        if raw or kind is not None or to_project is not None or to_self:
+            print(
+                "error: --ruling supports only send <worker> <message>; drop "
+                "--raw, --kind, --to-project, or --to-self",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if not name or message is None or _is_job_name(name):
+            print(
+                "error: --ruling supports only send <worker> <message>",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
 
@@ -4128,6 +4216,10 @@ def cmd_send(
     _refuse_forged_envelope(message)
     _enforce_body_cap(message)
     _enforce_style(message, allow_reason=style_exception)
+
+    if ruling is not None:
+        ruling_graph = _ruling_graph_path(workdir) if cwd else paths.graph_json()
+        _append_ruling_to_node(ruling, message, graph_path=ruling_graph)
 
     # --force routes into the shared name-lane choke point with the ladder
     # skipped. Intercepted here rather than threaded through `dispatch_send`
