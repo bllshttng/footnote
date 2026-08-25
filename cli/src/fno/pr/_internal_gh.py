@@ -21,6 +21,7 @@ _METADATA_FIELDS = {
     "headRefOid",
     "mergeable",
     "baseRefName",
+    "author",
 }
 _COVERAGE_FIELDS = {"reviews", "comments", "headRefOid", "baseRefName"}
 
@@ -86,6 +87,9 @@ def _metadata(
         "headRefOid": info["head_sha"],
         "mergeable": info["mergeable"],
         "baseRefName": info["base_ref"],
+        # The gh CLI shape for `--json author`; None only when REST carried
+        # no login, which the Rust reader treats as unreadable (fail-closed).
+        "author": {"login": info.get("author") or ""},
     }
     return Result(0, json.dumps(payload) + "\n", "")
 

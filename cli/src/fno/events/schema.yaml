@@ -360,6 +360,9 @@ event_types:
                 description: "Whether reviewed_sha still describes the code at HEAD. `fresh` = the reviewer read this exact commit. `carried_base_sync` = the PR's own code delta is byte-identical and any tree difference came from the base moving (a rebase). `carried_docs_only` = only documentation paths changed since. `carried_subset` = the code delta only shrank: every raw diff line still shipping is byte-identical to one the reviewer read, and the vanished lines are paths the base absorbed on the rebase (a strict subset of the reviewed diff). `stale` = everything else, including every failure path. A carry requires a positive match between two successfully computed code-diff identities; two absences never match. Omitted on a verdict with no review behind it (absent, refused)."
               human_approval:
                 type: boolean
+              author_approval:
+                type: boolean
+                description: "Only meaningful alongside human_approval: whether the approving login is the PR author's (or the PR author could not be read, which asserts the same thing fail-closed). A false here is what lets a human approval count when config.review.github_approval_satisfies is on. GitHub refuses an author's own approval server-side; the gate asserts the property it depends on rather than inferring it."
               scope:
                 type: string
                 enum: [attested_branch, legacy_head_match]

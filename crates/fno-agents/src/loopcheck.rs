@@ -301,6 +301,14 @@ pub(crate) struct Settings {
     /// an other_session attestation is still not "independent", but it is a
     /// SECOND session, which is what this key demands.
     require_corroboration: Option<bool>,
+    /// config.review.github_approval_satisfies (default true): a non-author
+    /// human GitHub APPROVED review counts toward coverage on its own and
+    /// satisfies the corroboration term. GitHub refuses an author's approval
+    /// of their own PR server-side; the gate still asserts the property
+    /// itself (an unreadable PR author fails closed to "exclude"). The limit:
+    /// GitHub's refusal is per identity, not per human - a second account
+    /// with its own token can still self-approve.
+    github_approval_satisfies: Option<bool>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -737,26 +745,14 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
             // stays None -> false here; the Python config loader rejects it,
             // so no config can load green on one side and parse false on the
             // other.
-            s.require_corroboration = v
-                .as_bool()
-                .or_else(|| {
-                    v.as_integer().and_then(|i| match i {
-                        1 => Some(true),
-                        0 => Some(false),
-                        _ => None,
-                    })
-                })
-                .or_else(|| {
-                    v.as_str()
-                        // pydantic's lax bool spellings in full, so one config
-                        // cannot load true on the Python side and parse false
-                        // here (round 2: "t"/"y" and the bare integers).
-                        .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
-                            "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
-                            "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
-                            _ => None,
-                        })
-                });
+            s.require_corroboration = lax_bool(v);
+        }
+        if let Some(v) = review.get("github_approval_satisfies") {
+            // Same lax-bool contract as require_corroboration: one coercion
+            // for every config bool, so the two gates cannot disagree on a
+            // config that loads at all. Malformed stays None -> true (the
+            // default-ON direction), matching the Python loader's rejection.
+            s.github_approval_satisfies = lax_bool(v);
         }
         if let Some(v) = review.get("self_review_required") {
             // A malformed value stays None -> normalized to true (obligation on,
@@ -775,6 +771,30 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
     }
 
     Ok(s)
+}
+
+/// One lax-bool coercion for config booleans: a real bool, a 0/1 integer, or
+/// pydantic's string spellings ("true"/"yes"/"on"/"y"/"t"/"1" and the false
+/// mirror). Anything else is None, so the caller's default decides - the
+/// Python config loader rejects the same shapes, so no config can load green
+/// on one side and parse differently here.
+fn lax_bool(v: &toml::Value) -> Option<bool> {
+    v.as_bool()
+        .or_else(|| {
+            v.as_integer().and_then(|i| match i {
+                1 => Some(true),
+                0 => Some(false),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            v.as_str()
+                .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                    "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
+                    "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
+                    _ => None,
+                })
+        })
 }
 
 /// Infallible wrapper: an unparseable file fails CLOSED (unsatisfiable login
@@ -1798,7 +1818,7 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
-const PR_VIEW_FIELDS: &str = "state,number,headRefName,headRefOid,mergeable,baseRefName";
+const PR_VIEW_FIELDS: &str = "state,number,headRefName,headRefOid,mergeable,baseRefName,author";
 
 fn pr_head_oid(pr_json: &Value) -> Option<String> {
     pr_json
@@ -2457,6 +2477,7 @@ fn read_pr_info(
     pr_selector: Option<&str>,
     prefetched_pr_json: Option<Value>,
     require_corroboration: bool,
+    github_approval_satisfies: bool,
 ) -> Result<PrInfo, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
@@ -2505,6 +2526,7 @@ fn read_pr_info(
             unattested_reviewers: Vec::new(),
             malformed_attestations: 0,
             coverage: CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: Vec::new(),
             },
@@ -2528,6 +2550,15 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // The PR author's login, for the human-approval counting rule: an
+    // approval counts only when its login provably is not this one. An
+    // absent/unreadable author is None, which the rule reads fail-closed
+    // (exclude the approval from the count, never include it on a guess).
+    let pr_author = pr_json
+        .pointer("/author/login")
+        .and_then(|v| v.as_str())
+        .filter(|a| !a.is_empty())
+        .map(str::to_string);
     // GitHub's mergeable state: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" (still
     // computing). Only "CONFLICTING" is a definitive no; UNKNOWN must not hold
     // the terminal (it clears on its own). Missing field -> "UNKNOWN".
@@ -2594,6 +2625,7 @@ fn read_pr_info(
             unattested_reviewers: Vec::new(),
             malformed_attestations: 0,
             coverage: CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: Vec::new(),
             },
@@ -2701,6 +2733,8 @@ fn read_pr_info(
             &head_branch,
             head_sha,
             Some(&tiling),
+            pr_author.as_deref(),
+            github_approval_satisfies,
         );
         // Same capture-then-apply order as the external-read arm below: the
         // predicate reads the pre-downgrade report, and the `reviewed` verdict
@@ -2941,6 +2975,8 @@ fn read_pr_info(
             &head_branch,
             head_sha,
             Some(&tiling),
+            pr_author.as_deref(),
+            github_approval_satisfies,
         );
         // The predicate reads the pre-downgrade report (the policy below only
         // flips the covered state, preserving verdicts), so capture it first.
@@ -4404,6 +4440,14 @@ pub(crate) fn login_matches_bot(login: &str, bot: &str) -> bool {
     !bot.is_empty() && login.to_lowercase().contains(&bot.to_lowercase())
 }
 
+/// Exact-login equality, case-insensitive the way GitHub treats logins.
+/// Deliberately NOT `login_matches_bot`'s substring match: "ali" must not
+/// read as the author "alice" when the approval-counting rule asks whether
+/// the approver IS the author.
+fn login_equals(a: &str, b: &str) -> bool {
+    !a.is_empty() && a.eq_ignore_ascii_case(b)
+}
+
 fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
     if !external_reviewers.is_empty() {
         let login_lower = login.to_lowercase();
@@ -5064,6 +5108,14 @@ pub struct ReviewerVerdict {
     /// One predicate flip in `CoverageReport::coverage_count` includes it.
     #[serde(skip_serializing_if = "is_false")]
     pub human_approval: bool,
+    /// Whether this human approval's login is the PR author's (or the PR
+    /// author could not be read, which asserts the same thing fail-closed).
+    /// Only meaningful alongside `human_approval`: a `false` here is what
+    /// lets a human approval count when `github_approval_satisfies` is on.
+    /// GitHub refuses an author's own approval server-side; this field
+    /// asserts the property the gate depends on rather than inferring it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub author_approval: bool,
     /// Whether a local attestation was emitted by the authoring session
     /// (`SelfAttested`), a different one (`OtherSession`), or that is
     /// unknowable (`Unknown`). `coverage_count` never reads it: a
@@ -5100,11 +5152,24 @@ pub struct ReviewerVerdict {
     pub scope: Option<AttestationScope>,
 }
 
+/// The one counting rule for human GitHub approvals: a `reviewed` verdict
+/// counts when it is not a human approval, or when the resolved flag is on
+/// AND the approver is provably not the PR author (`author_approval` false
+/// requires a read PR author; an unreadable one asserts the exclude side).
+fn human_approval_counts(v: &ReviewerVerdict, flag: bool) -> bool {
+    !v.human_approval || (flag && !v.author_approval)
+}
+
 /// The coverage over a PR plus the per-reviewer verdicts that produced it.
 #[derive(Debug, Clone)]
 pub struct CoverageReport {
     pub coverage: Coverage,
     pub verdicts: Vec<ReviewerVerdict>,
+    /// The resolved `config.review.github_approval_satisfies`, captured at
+    /// classify time so every count on this report applies one rule. False on
+    /// the bare `classify_coverage` spelling (today's semantics, for the
+    /// unit-test corpus); the production call sites pass the resolved flag.
+    pub github_approval_satisfies: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -5126,7 +5191,7 @@ impl CoverageReport {
             .iter()
             .filter(|v| {
                 v.verdict == CoverageVerdict::Reviewed
-                    && !v.human_approval
+                    && human_approval_counts(v, self.github_approval_satisfies)
                     && v.attestation_origin == AttestationOrigin::SelfAttested
             })
             .count()
@@ -5149,7 +5214,9 @@ impl CoverageReport {
         let mut counted = 0usize;
         let mut self_attested = 0usize;
         for v in &self.verdicts {
-            if v.verdict != CoverageVerdict::Reviewed || v.human_approval {
+            if v.verdict != CoverageVerdict::Reviewed
+                || !human_approval_counts(v, self.github_approval_satisfies)
+            {
                 continue;
             }
             counted += 1;
@@ -5178,7 +5245,10 @@ impl CoverageReport {
             Coverage::Covered(_) => Some(
                 self.verdicts
                     .iter()
-                    .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                    .filter(|v| {
+                        v.verdict == CoverageVerdict::Reviewed
+                            && human_approval_counts(v, self.github_approval_satisfies)
+                    })
                     .count(),
             ),
         }
@@ -5188,11 +5258,10 @@ impl CoverageReport {
         if matches!(self.coverage, Coverage::Unknown) {
             return None;
         }
-        if self
-            .verdicts
-            .iter()
-            .any(|verdict| verdict.verdict == CoverageVerdict::Reviewed && !verdict.human_approval)
-        {
+        if self.verdicts.iter().any(|verdict| {
+            verdict.verdict == CoverageVerdict::Reviewed
+                && human_approval_counts(verdict, self.github_approval_satisfies)
+        }) {
             return Some(ReviewState::Reviewed);
         }
         if self
@@ -5895,12 +5964,18 @@ pub fn classify_coverage(
         head_branch,
         head_sha,
         None,
+        None,
+        false,
     )
 }
 
 /// [`classify_coverage`] with the range-tiling answer supplied. The two
 /// production call sites compute the tiling once and pass it; the bare
 /// spelling keeps the pre-tiling semantics for the unit-test corpus.
+/// `pr_author` is the PR author's login (None = unreadable, which excludes
+/// human approvals from the count fail-closed); `github_approval_satisfies`
+/// is the resolved config flag (false on the bare spelling = today's
+/// semantics for the unit-test corpus).
 #[allow(clippy::too_many_arguments)]
 pub fn classify_coverage_tiled(
     reviews: &[Value],
@@ -5913,6 +5988,8 @@ pub fn classify_coverage_tiled(
     head_branch: &str,
     head_sha: &str,
     tiling: Option<&RangeTiling>,
+    pr_author: Option<&str>,
+    github_approval_satisfies: bool,
 ) -> CoverageReport {
     let local_passes = local_latest_passes(events_text, head_branch, head_sha);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
@@ -6010,6 +6087,7 @@ pub fn classify_coverage_tiled(
                 name: login.to_string(),
                 verdict,
                 human_approval: false,
+                author_approval: false,
                 attestation_origin: AttestationOrigin::Unknown,
                 reviewed_sha,
                 freshness: fresh,
@@ -6029,6 +6107,7 @@ pub fn classify_coverage_tiled(
                         CoverageVerdict::Stale
                     },
                     human_approval: false,
+                    author_approval: false,
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: sha.clone(),
                     freshness: Some(*fresh),
@@ -6065,6 +6144,15 @@ pub fn classify_coverage_tiled(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let fresh = freshness(oid);
+                // The belt over GitHub's braces: the server refuses an
+                // author's own approval, and this asserts the property the
+                // counting rule depends on instead of inferring it. An
+                // unreadable PR author (None) asserts author_approval - the
+                // fail-closed direction is "do not count", never "count".
+                let author_approval = match pr_author {
+                    Some(pa) => login_equals(pa, author),
+                    None => true,
+                };
                 verdicts.push(ReviewerVerdict {
                     producer: CoverageProducer::GithubApp,
                     name: author.to_string(),
@@ -6074,6 +6162,7 @@ pub fn classify_coverage_tiled(
                         CoverageVerdict::Stale
                     },
                     human_approval: true,
+                    author_approval,
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: oid.to_string(),
                     freshness: Some(fresh),
@@ -6105,6 +6194,7 @@ pub fn classify_coverage_tiled(
                 CoverageVerdict::Stale
             },
             human_approval: false,
+            author_approval: false,
             attestation_origin: classify_attestation_origin(lp.attester.as_deref(), author_session),
             reviewed_sha: lp.head.clone(),
             freshness: Some(fresh),
@@ -6135,12 +6225,19 @@ pub fn classify_coverage_tiled(
         Coverage::Covered(
             verdicts
                 .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                .filter(|v| {
+                    v.verdict == CoverageVerdict::Reviewed
+                        && human_approval_counts(v, github_approval_satisfies)
+                })
                 .count(),
         )
     };
 
-    CoverageReport { coverage, verdicts }
+    CoverageReport {
+        coverage,
+        verdicts,
+        github_approval_satisfies,
+    }
 }
 
 /// Build the `review_coverage` event payload. The per-reviewer verdicts
@@ -6280,7 +6377,10 @@ pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str
             let reviewed_names: Vec<&str> = rep
                 .verdicts
                 .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                .filter(|v| {
+                    v.verdict == CoverageVerdict::Reviewed
+                        && human_approval_counts(v, rep.github_approval_satisfies)
+                })
                 .map(|v| v.name.as_str())
                 .collect();
             if *n > 0 {
@@ -6302,7 +6402,10 @@ pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str
                 let (self_n, other_n, unknown_n) = rep
                     .verdicts
                     .iter()
-                    .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                    .filter(|v| {
+                        v.verdict == CoverageVerdict::Reviewed
+                            && human_approval_counts(v, rep.github_approval_satisfies)
+                    })
                     .fold((0, 0, 0), |(s, o, u), v| match v.attestation_origin {
                         AttestationOrigin::SelfAttested => (s + 1, o, u),
                         AttestationOrigin::OtherSession => (s, o + 1, u),
@@ -8578,6 +8681,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             &repo_slug,
             manifest.harness_session_id.as_deref(),
             settings.require_corroboration.unwrap_or(false),
+            settings.github_approval_satisfies.unwrap_or(true),
         );
 
         match done_result {
@@ -9432,6 +9536,7 @@ fn run_done(
     repo_slug: &str,
     author_session: Option<&str>,
     require_corroboration: bool,
+    github_approval_satisfies: bool,
 ) -> Result<PrInfo, GhReadError> {
     let info = read_pr_info(
         gh_bin,
@@ -9453,6 +9558,7 @@ fn run_done(
         None,
         None,
         require_corroboration,
+        github_approval_satisfies,
     )?;
     // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
@@ -12012,6 +12118,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 let data = coverage_event_data(
                     pr_num,
                     &CoverageReport {
+                        github_approval_satisfies: false,
                         coverage: Coverage::Unknown,
                         verdicts: Vec::new(),
                     },
@@ -12098,6 +12205,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         pr.as_deref(),
         prefetched_pr_json,
         inputs.settings.require_corroboration.unwrap_or(false),
+        inputs.settings.github_approval_satisfies.unwrap_or(true),
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {
@@ -12162,6 +12270,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 let data = coverage_event_data(
                     pr_num,
                     &CoverageReport {
+                        github_approval_satisfies: false,
                         coverage: Coverage::Unknown,
                         verdicts: Vec::new(),
                     },
@@ -12190,6 +12299,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         &head_sha,
                         &head_sha,
                         &CoverageReport {
+                            github_approval_satisfies: false,
                             coverage: Coverage::Unknown,
                             verdicts: Vec::new(),
                         },
@@ -13718,6 +13828,22 @@ mod tests {
     }
 
     #[test]
+    fn github_approval_satisfies_parses_lax_bool_spellings_and_defaults_on() {
+        // Absent -> None -> unwrap_or(true), the default-ON direction; the
+        // pydantic string spellings parse the same way require_corroboration's
+        // do, so one config cannot load true on one gate and false on the other.
+        let absent = parse_settings("[review]\n");
+        assert_eq!(absent.github_approval_satisfies, None);
+        assert_eq!(absent.github_approval_satisfies.unwrap_or(true), true);
+
+        let spelled = parse_settings("[review]\ngithub_approval_satisfies = \"yes\"\n");
+        assert_eq!(spelled.github_approval_satisfies, Some(true));
+
+        let off = parse_settings("[review]\ngithub_approval_satisfies = false\n");
+        assert_eq!(off.github_approval_satisfies, Some(false));
+    }
+
+    #[test]
     fn a_retraction_revokes_the_named_pair_not_the_retractor() {
         // The retraction verb addresses the EVENT, not the identity: an
         // operator session emits a fail carrying retracts_attester naming the
@@ -14059,6 +14185,7 @@ mod tests {
     #[test]
     fn coverage_event_carries_the_repo_slug() {
         let rep = CoverageReport {
+            github_approval_satisfies: false,
             coverage: Coverage::Covered(1),
             verdicts: vec![],
         };
@@ -14083,6 +14210,7 @@ mod tests {
         // must be able to tell "not attributed" from "attributed to nothing",
         // and decline to match it either way.
         let rep = CoverageReport {
+            github_approval_satisfies: false,
             coverage: Coverage::Unknown,
             verdicts: vec![],
         };
@@ -14100,6 +14228,7 @@ mod tests {
         let project = dir.path().join("worktree-events.jsonl");
         let global = dir.path().join("global-events.jsonl");
         let rep = CoverageReport {
+            github_approval_satisfies: false,
             coverage: Coverage::Covered(1),
             verdicts: vec![],
         };
@@ -15108,6 +15237,7 @@ mod tests {
             unattested_reviewers: vec![],
             malformed_attestations: 0,
             coverage: CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: vec![],
             },
@@ -15126,6 +15256,7 @@ mod tests {
         pr.ci_conclusion = CiConclusion::Success;
         pr.ci_has_pending = false;
         pr.coverage = CoverageReport {
+            github_approval_satisfies: false,
             coverage: Coverage::Unknown,
             verdicts: vec![],
         };
@@ -15320,6 +15451,7 @@ git_bounded();";
             unattested_reviewers: vec![],
             malformed_attestations: 0,
             coverage: CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: vec![],
             },
@@ -15335,12 +15467,14 @@ git_bounded();";
         let bounced = || {
             let mut pr = watch_pr();
             pr.coverage = CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: vec![ReviewerVerdict {
                     producer: CoverageProducer::GithubApp,
                     name: "chatgpt-codex-connector".to_string(),
                     verdict: CoverageVerdict::Refused,
                     human_approval: false,
+                    author_approval: false,
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: String::new(),
                     freshness: None,

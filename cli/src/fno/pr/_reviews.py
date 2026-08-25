@@ -803,12 +803,57 @@ def _stale_verdicts(verdicts: list[dict]) -> list[dict]:
     ]
 
 
-def _derive_review_state(coverage: object, verdicts: object, chain: set[str] | None = None) -> str | None:
+def _resolved_github_approval_flag(cwd: Optional[str]) -> bool:
+    """The resolved ``config.review.github_approval_satisfies`` for the repo at
+    ``cwd``. True is BOTH the config default and the unreadable-config
+    direction, mirroring the Rust fail-closed settings parse (None -> true):
+    the two surfaces must not split on the same unreadable config, or the
+    loop finishes a PR this gate refuses on the same row.
+    """
+    try:
+        from pathlib import Path
+
+        from fno.config import load_settings_for_repo
+
+        root = Path(cwd) if cwd else Path.cwd()
+        return bool(
+            getattr(
+                load_settings_for_repo(root).review,
+                "github_approval_satisfies",
+                True,
+            )
+        )
+    except Exception:  # noqa: BLE001 - mirror of the Rust None -> true default
+        return True
+
+
+def _human_approval_counts(verdict: dict, github_approval_satisfies: bool) -> bool:
+    """Mirror of the Rust counting rule: a human GitHub approval counts only
+    when the flag is on AND the approver is provably not the PR author.
+
+    ``author_approval`` absent reads as the exclude side (True), which is
+    both the fail-closed direction for an unreadable PR author and the
+    correct reading of every row emitted before the field existed.
+    """
+    return not verdict.get("human_approval") or (
+        github_approval_satisfies and not verdict.get("author_approval", True)
+    )
+
+
+def _derive_review_state(
+    coverage: object,
+    verdicts: object,
+    chain: set[str] | None = None,
+    github_approval_satisfies: bool = False,
+) -> str | None:
     """Derive one known outcome from validated per-reviewer verdicts.
 
     ``chain`` is the tiled chain's head shas (empty when the row does not
     carry a tiled answer): a chain member counts whatever its single-sha
     freshness says, because its RANGE covers the PR.
+    ``github_approval_satisfies`` defaults False (today's semantics) so the
+    pre-flag call sites and rows stay unchanged; the shaper resolves the
+    config flag and passes it.
     """
     chain = chain or set()
     if coverage == "unknown":
@@ -824,7 +869,7 @@ def _derive_review_state(coverage: object, verdicts: object, chain: set[str] | N
         return None
     if any(
         verdict.get("verdict") == "reviewed"
-        and not verdict.get("human_approval", False)
+        and _human_approval_counts(verdict, github_approval_satisfies)
         and (
             verdict.get("freshness") in _COUNTED_FRESHNESS
             or verdict.get("reviewed_sha") in chain
@@ -845,7 +890,12 @@ def _shape_review_coverage(
     verdicts = _verdicts_with_current_freshness(data, head, cwd, pr_number)
     shaped["verdicts"] = verdicts
     shaped["stale_verdicts"] = _stale_verdicts(verdicts)
-    review_state = _derive_review_state(data.get("coverage"), verdicts, _tiling_chain(data))
+    review_state = _derive_review_state(
+        data.get("coverage"),
+        verdicts,
+        _tiling_chain(data),
+        _resolved_github_approval_flag(cwd),
+    )
     if review_state in _KNOWN_REVIEW_STATES:
         shaped["review_state"] = review_state
     else:

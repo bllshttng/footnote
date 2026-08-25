@@ -14,8 +14,8 @@
 //! was a stale served row, not logic, and these tests keep it that way.
 
 use fno_agents::loopcheck::{
-    classify_coverage_tiled, compute_range_tiling, CoverageProducer, CoverageVerdict, Freshness,
-    RangeTiling,
+    classify_coverage_tiled, compute_range_tiling, coverage_receipt_line, Coverage,
+    CoverageProducer, CoverageVerdict, Freshness, RangeTiling, ReviewState,
 };
 use std::fs;
 use std::path::Path;
@@ -241,6 +241,8 @@ fn chain_members_count_as_reviewed_even_when_individually_stale() {
         BRANCH,
         &head,
         Some(&tiling),
+        None,
+        false,
     );
     let local: Vec<_> = rep
         .verdicts
@@ -267,6 +269,8 @@ fn chain_members_count_as_reviewed_even_when_individually_stale() {
         BRANCH,
         &head,
         None,
+        None,
+        false,
     );
     let local_untiled: Vec<_> = rep_untiled
         .verdicts
@@ -302,6 +306,8 @@ fn a_gapped_chain_does_not_rescue_its_members() {
         BRANCH,
         &head,
         Some(&tiling),
+        None,
+        false,
     );
     assert!(rep
         .verdicts
@@ -343,6 +349,8 @@ fn same_pair_reattest_keeps_the_newer_head() {
         BRANCH,
         &head,
         None,
+        None,
+        false,
     );
     let local: Vec<_> = rep
         .verdicts
@@ -381,6 +389,8 @@ fn distinct_attesters_yield_distinct_verdicts() {
         BRANCH,
         &head,
         None,
+        None,
+        false,
     );
     let local: Vec<_> = rep
         .verdicts
@@ -601,4 +611,135 @@ fn empty_chain_blocks_nothing() {
         disposition_blockers("", BRANCH, SPECIMEN_HEAD, true),
         Vec::new()
     );
+}
+
+// --- AC6: a non-author GitHub approval is a sufficient producer ---
+
+/// One human APPROVED review object in the `gh pr view --json reviews` shape
+/// (the same shape the REST adapter normalizes to).
+fn approval(login: &str, oid: &str) -> serde_json::Value {
+    serde_json::json!({
+        "author": {"login": login},
+        "state": "APPROVED",
+        "submittedAt": "2026-08-25T23:30:00Z",
+        "commit": {"oid": oid},
+        "body": "",
+    })
+}
+
+fn classify_approval(
+    reviews: &[serde_json::Value],
+    pr_author: Option<&str>,
+    flag: bool,
+    fresh: Freshness,
+) -> fno_agents::loopcheck::CoverageReport {
+    let head = "h1";
+    classify_coverage_tiled(
+        reviews,
+        &[],
+        "",
+        &[],
+        true,
+        None,
+        &|_| fresh,
+        BRANCH,
+        head,
+        None,
+        pr_author,
+        flag,
+    )
+}
+
+#[test]
+fn github_approval_counts_when_flag_on_and_approver_is_not_the_author() {
+    // AC6-HP: alice's PR, bob's APPROVED review pinned to the current head,
+    // no local attestation at all. Default-config direction (flag on): the
+    // approval covers on its own and corroborates by construction.
+    let rep = classify_approval(
+        &[approval("bob", "h1")],
+        Some("alice"),
+        true,
+        Freshness::Fresh,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    assert_eq!(rep.review_state(), Some(ReviewState::Reviewed));
+    let bob = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "bob")
+        .expect("bob's verdict is recorded");
+    assert!(bob.human_approval && !bob.author_approval);
+    assert_eq!(bob.producer, CoverageProducer::GithubApp);
+    // The receipt's counted list names bob: "1 reviewed (bob)".
+    let line = coverage_receipt_line(&rep, None);
+    assert!(line.contains("1 reviewed (bob)"), "receipt was: {line}");
+    // Corroboration falls out: a counted human approval is by construction
+    // not the author's own attestation.
+    assert!(!rep.rests_on_self_attestation_alone());
+}
+
+#[test]
+fn github_approval_by_the_pr_author_is_recorded_but_never_counted() {
+    // AC6-ERR: alice approving her own PR. The verdict stays on the list
+    // (auditable) and the counted set stays literally empty, so a run where
+    // no approval was collected at all cannot pass this test either.
+    let rep = classify_approval(
+        &[approval("alice", "h1")],
+        Some("alice"),
+        true,
+        Freshness::Fresh,
+    );
+    assert!(rep
+        .verdicts
+        .iter()
+        .any(|v| v.name == "alice" && v.human_approval && v.author_approval));
+    assert_eq!(rep.coverage_count(), Some(0));
+    assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+}
+
+#[test]
+fn github_approval_flag_off_keeps_todays_exclusion() {
+    // AC6-EDGE: github_approval_satisfies = false. bob's approval is still
+    // RECORDED on the verdict list and still excluded from the count.
+    let rep = classify_approval(
+        &[approval("bob", "h1")],
+        Some("alice"),
+        false,
+        Freshness::Fresh,
+    );
+    assert!(rep
+        .verdicts
+        .iter()
+        .any(|v| v.name == "bob" && v.human_approval && !v.author_approval));
+    assert_eq!(rep.coverage_count(), Some(0));
+    assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+}
+
+#[test]
+fn github_approval_with_unreadable_pr_author_fails_closed() {
+    // An unreadable PR author cannot prove the approver is not the author,
+    // so the fail-closed direction is "exclude", never "count".
+    let rep = classify_approval(&[approval("bob", "h1")], None, true, Freshness::Fresh);
+    assert!(rep
+        .verdicts
+        .iter()
+        .any(|v| v.name == "bob" && v.human_approval && v.author_approval));
+    assert_eq!(rep.coverage_count(), Some(0));
+}
+
+#[test]
+fn github_approval_stale_review_is_not_counted() {
+    // The freshness rule applies unchanged: an approval whose commit is not
+    // fresh reads Stale and never counts, flag or no flag.
+    let rep = classify_approval(
+        &[approval("bob", "h0")],
+        Some("alice"),
+        true,
+        Freshness::Stale,
+    );
+    assert!(rep
+        .verdicts
+        .iter()
+        .any(|v| v.name == "bob" && v.verdict == CoverageVerdict::Stale));
+    assert_eq!(rep.coverage_count(), Some(0));
 }

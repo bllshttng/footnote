@@ -937,6 +937,14 @@ class ReviewBlock(BaseModel):
     # changes behavior - flip it only with the doctor's self-attestation report
     # in hand.
     require_corroboration: bool = False
+    # Whether a non-author human GitHub APPROVED review satisfies coverage on
+    # its own (and the corroboration term). DEFAULT TRUE: this is the one
+    # producer a stranger's GitHub project emits with no footnote machinery
+    # at all. GitHub refuses an author's approval of their own PR
+    # server-side; the gate still asserts it (an unreadable PR author
+    # excludes fail-closed). The limit: GitHub's refusal is per identity, not
+    # per human - a second account with its own token can still self-approve.
+    github_approval_satisfies: bool = True
     # How long a registered review hold (`review:branch:<branch>`, taken where a
     # review is DISPATCHED) protects a PR from a merge before it ages out. A
     # review is unbounded, so this is a wedge bound rather than an estimate:
