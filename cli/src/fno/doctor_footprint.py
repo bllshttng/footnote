@@ -153,16 +153,19 @@ def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
 
 
 def _terminal_row_changed_after_snapshot(row: Any, snapshot_at: float) -> bool:
-    exited_at = getattr(row, "exited_at", None)
-    if exited_at is None:
-        return False
-    try:
-        timestamp = datetime.fromisoformat(str(exited_at).replace("Z", "+00:00"))
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-        return timestamp.timestamp() >= snapshot_at
-    except (TypeError, ValueError, OverflowError):
-        return True
+    for field in ("last_reconciled_at", "exited_at"):
+        stamp = getattr(row, field, None)
+        if stamp is None:
+            continue
+        try:
+            timestamp = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            if timestamp.timestamp() >= snapshot_at:
+                return True
+        except (TypeError, ValueError, OverflowError):
+            return True
+    return False
 
 
 def _live_root_pids(

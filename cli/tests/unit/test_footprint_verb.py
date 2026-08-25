@@ -225,7 +225,8 @@ def test_live_root_pids_refuses_terminal_root_cleared_after_snapshot(monkeypatch
         status="exited",
         pid=None,
         pid_start_time=None,
-        exited_at=datetime.now(timezone.utc).isoformat(),
+        last_reconciled_at=datetime.now(timezone.utc).isoformat(),
+        exited_at=None,
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
 
