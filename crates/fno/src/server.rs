@@ -7497,8 +7497,7 @@ impl Core {
                                 // carries the pane's OWN vt reading and the
                                 // drain-path activity stamp (x-d401).
                                 pane_activity: e.map(|e| e.vt.shell_activity()),
-                                last_activity_age_s: e
-                                    .map(|e| e.last_output.elapsed().as_secs()),
+                                last_activity_age_s: e.map(|e| e.last_output.elapsed().as_secs()),
                                 updated_at: None,
                                 pr: None,
                                 tail: None,

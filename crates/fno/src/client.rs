@@ -44,6 +44,7 @@ use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{
     self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
 };
+use crate::vt::ShellActivity;
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -826,11 +827,13 @@ fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
         } else {
             // The one state vocabulary (pane_state + the nav filter words): a
             // finished-but-unseen member is `done`, not `idle`.
-            match pane_state(a.badge, a.seen) {
+            match pane_state(a.badge, a.seen, a.pane_activity) {
                 PaneState::Blocked => "blocked",
                 PaneState::Working => "working",
                 PaneState::DoneUnseen => "done",
+                PaneState::Unmeasured => "unread",
                 PaneState::Idle => "idle",
+                PaneState::Empty => "empty",
             }
         };
         let pane = a
@@ -2640,7 +2643,9 @@ impl View {
                     squad: a.squad,
                     tab: a.tab,
                 });
-            } else if !a.exited && pane_state(a.badge, a.seen) == PaneState::DoneUnseen {
+            } else if !a.exited
+                && pane_state(a.badge, a.seen, a.pane_activity) == PaneState::DoneUnseen
+            {
                 rows.push(NeedRow {
                     kind: NeedKind::DoneUnseen,
                     name: a.name.clone(),
@@ -5122,8 +5127,10 @@ impl View {
                 None => Some(PaneState::Blocked),
                 Some(PaneState::Blocked) => Some(PaneState::Working),
                 Some(PaneState::Working) => Some(PaneState::DoneUnseen),
-                Some(PaneState::DoneUnseen) => Some(PaneState::Idle),
-                Some(PaneState::Idle) => None,
+                Some(PaneState::DoneUnseen) => Some(PaneState::Unmeasured),
+                Some(PaneState::Unmeasured) => Some(PaneState::Idle),
+                Some(PaneState::Idle) => Some(PaneState::Empty),
+                Some(PaneState::Empty) => None,
             };
             n.cursor = 0;
         }
@@ -5135,8 +5142,10 @@ impl View {
     fn nav_cycle_state_rev(&mut self) {
         if let Some(n) = self.nav.as_mut() {
             n.state_filter = match n.state_filter {
-                None => Some(PaneState::Idle),
-                Some(PaneState::Idle) => Some(PaneState::DoneUnseen),
+                None => Some(PaneState::Empty),
+                Some(PaneState::Empty) => Some(PaneState::Idle),
+                Some(PaneState::Idle) => Some(PaneState::Unmeasured),
+                Some(PaneState::Unmeasured) => Some(PaneState::DoneUnseen),
                 Some(PaneState::DoneUnseen) => Some(PaneState::Working),
                 Some(PaneState::Working) => Some(PaneState::Blocked),
                 Some(PaneState::Blocked) => None,
@@ -8360,12 +8369,12 @@ fn compare_agent_rows(
             let a_state = if a.exited {
                 u8::MAX
             } else {
-                pane_state(a.badge, a.seen) as u8
+                pane_state(a.badge, a.seen, a.pane_activity) as u8
             };
             let b_state = if b.exited {
                 u8::MAX
             } else {
-                pane_state(b.badge, b.seen) as u8
+                pane_state(b.badge, b.seen, b.pane_activity) as u8
             };
             apply_direction(
                 a_state
@@ -8702,27 +8711,41 @@ fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
 /// (x-653d), the squad-row rollup (x-d140), and seen/unseen surfacing (x-4328)
 /// all consume it. Derived, never wire-serialized - computed from [`AgentBadge`]
 /// + the seen bit at render time. The derive orders it `Blocked < Working <
-/// DoneUnseen < Idle`, so a squad rollup is `agents.map(pane_state).min()` (the
-/// worst state wins - x-d140's `min` and this filter agree on the ordering).
+/// DoneUnseen < Unmeasured < Idle < Empty`, so a squad rollup is
+/// `agents.map(pane_state).min()` (the worst state wins - x-d140's `min` and
+/// this filter agree on the ordering). `Unmeasured` (x-d401) ranks worse than
+/// every settled state: a no-reading row deserves a look before an idle one
+/// does. `Empty` (x-d401) is a pristine shell - nothing running, nothing done,
+/// the least severe reading there is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PaneState {
     Blocked,
     Working,
     DoneUnseen,
+    Unmeasured,
     Idle,
+    Empty,
 }
 
-/// Derive a [`PaneState`] from an agent's badge and whether its output has
-/// been seen (x-4328's `AgentRow.seen`, server-owned): a `Done` badge folds
-/// to `Idle` once seen, else `DoneUnseen` (a finished-but-unviewed agent
-/// stays surfaced).
-fn pane_state(badge: Option<AgentBadge>, seen: bool) -> PaneState {
+/// Derive a [`PaneState`] from an agent's badge, whether its output has been
+/// seen (x-4328's `AgentRow.seen`, server-owned), and the pane's own OSC 133
+/// activity reading (x-d401's `AgentRow.pane_activity`). A present badge wins
+/// (the registry worker's own in-TTL report); a `Done` badge folds to `Idle`
+/// once seen, else `DoneUnseen`. With NO badge the vt reading decides, and an
+/// absent/unmeasured reading renders `Unmeasured` - never a blind `Idle`, the
+/// fold that drew four working panes and thirty empty shells as one circle.
+fn pane_state(badge: Option<AgentBadge>, seen: bool, activity: Option<ShellActivity>) -> PaneState {
     match badge {
         Some(AgentBadge::Blocked) => PaneState::Blocked,
         Some(AgentBadge::Working) => PaneState::Working,
         Some(AgentBadge::Done) if seen => PaneState::Idle,
         Some(AgentBadge::Done) => PaneState::DoneUnseen,
-        None => PaneState::Idle,
+        None => match activity {
+            Some(ShellActivity::Running) => PaneState::Working,
+            Some(ShellActivity::Idle) => PaneState::Idle,
+            Some(ShellActivity::Empty) => PaneState::Empty,
+            Some(ShellActivity::Unmeasured) | None => PaneState::Unmeasured,
+        },
     }
 }
 
@@ -8806,7 +8829,7 @@ fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Rev
 /// `pane_state` also reads `Idle`) is never mistaken for live idle and swept
 /// into `+N idle`: dead rows are the section view's business, not the cap's.
 fn is_idle_row(a: &AgentRow) -> bool {
-    !a.exited && pane_state(a.badge, a.seen) == PaneState::Idle
+    !a.exited && pane_state(a.badge, a.seen, a.pane_activity) == PaneState::Idle
 }
 
 /// Why a session needs a human, worst-first (x-feec). Declaration order IS the
@@ -9010,7 +9033,7 @@ fn nav_agent_state(a: &AgentRow) -> PaneState {
     if a.exited {
         PaneState::Idle
     } else {
-        pane_state(a.badge, a.seen)
+        pane_state(a.badge, a.seen, a.pane_activity)
     }
 }
 
@@ -9033,7 +9056,7 @@ fn agent_lattice_state(a: &AgentRow) -> LatticeState {
             LatticeState::Exited
         }
     } else {
-        pane_to_lattice(pane_state(a.badge, a.seen))
+        pane_to_lattice(pane_state(a.badge, a.seen, a.pane_activity))
     }
 }
 
@@ -9668,6 +9691,12 @@ enum LatticeState {
     /// operator's routing decision turns on it - `Exited` means respawn is
     /// safe, `Unmeasured` means look before you spawn.
     Unmeasured,
+    /// (x-d401) A live pane that positively read as nothing-running-yet: OSC
+    /// 133 markers active, no command open, no completed block. Distinct from
+    /// `Idle` (a completed block, the prompt back) and from `Unmeasured` (no
+    /// reading at all): a pristine shell is an honest zero, not a waiting
+    /// worker and not an unknown.
+    Empty,
 }
 
 /// The terminal theme's accent (index 3 = the emulator's own amber/yellow), kept
@@ -9724,6 +9753,11 @@ fn lattice_style(s: LatticeState, accent: Color) -> LatticeStyle {
             flags: cell_flags::DIM,
             fg: Color::Default,
         },
+        LatticeState::Empty => LatticeStyle {
+            glyph: '∅',
+            flags: cell_flags::DIM,
+            fg: Color::Default,
+        },
     }
 }
 
@@ -9736,16 +9770,19 @@ fn lattice_glyph(s: LatticeState) -> (char, u8) {
 }
 
 /// (x-6851 US2) Severity order for the header rollup strip: most-severe first,
-/// so the strip reads `▲ ✓ ● ○ ✗ ?` and narrow-panel truncation drops from the
-/// least-severe (`?`) end. `Unmeasured` (x-9de7) sits after `Exited`: it is a
+/// so the strip reads `▲ ✓ ● ○ ∅ ✗ ?` and narrow-panel truncation drops from
+/// the least-severe (`?`) end. `Unmeasured` (x-9de7) sits after `Exited`: it is a
 /// sub-case of the same terminal bucket, just less certain, so it never
-/// outranks a live state. The single ordering authority the fold and the
-/// truncation share.
-const SEVERITY_ORDER: [LatticeState; 6] = [
+/// outranks a live state. `Empty` (x-d401) sits after `Idle` and before the
+/// terminal pair: a pristine shell is less severe than any worker state but
+/// still a live pane, not a terminal one. The single ordering authority the
+/// fold and the truncation share.
+const SEVERITY_ORDER: [LatticeState; 7] = [
     LatticeState::Blocked,
     LatticeState::DoneUnseen,
     LatticeState::Working,
     LatticeState::Idle,
+    LatticeState::Empty,
     LatticeState::Exited,
     LatticeState::Unmeasured,
 ];
@@ -9761,8 +9798,9 @@ fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeSta
             LatticeState::DoneUnseen => 1,
             LatticeState::Working => 2,
             LatticeState::Idle => 3,
-            LatticeState::Exited => 4,
-            LatticeState::Unmeasured => 5,
+            LatticeState::Empty => 4,
+            LatticeState::Exited => 5,
+            LatticeState::Unmeasured => 6,
         };
         // The match is exhaustive (a new state breaks the build), but the index
         // mapping is coupled by hand to SEVERITY_ORDER's order; this catches a
@@ -9851,7 +9889,9 @@ fn pane_to_lattice(s: PaneState) -> LatticeState {
         PaneState::Blocked => LatticeState::Blocked,
         PaneState::Working => LatticeState::Working,
         PaneState::DoneUnseen => LatticeState::DoneUnseen,
+        PaneState::Unmeasured => LatticeState::Unmeasured,
         PaneState::Idle => LatticeState::Idle,
+        PaneState::Empty => LatticeState::Empty,
     }
 }
 
@@ -9872,7 +9912,9 @@ fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
         Some(PaneState::Blocked) => "blocked",
         Some(PaneState::Working) => "working",
         Some(PaneState::DoneUnseen) => "done",
+        Some(PaneState::Unmeasured) => "unread",
         Some(PaneState::Idle) => "idle",
+        Some(PaneState::Empty) => "empty",
     };
     let mut lines = vec![pad_to(
         &format!(" find › {}   [{chip}]", nav.query),
@@ -15974,7 +16016,9 @@ mod tests {
     #[test]
     fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
         use LatticeState::*;
-        let states = [Working, Idle, Blocked, DoneUnseen, Exited, Unmeasured];
+        let states = [
+            Working, Idle, Blocked, DoneUnseen, Exited, Unmeasured, Empty,
+        ];
         let glyphs: Vec<char> = states.iter().map(|&s| lattice_glyph(s).0).collect();
         // Pairwise distinct: every state pair reads differently by GLYPH alone,
         // so a monochrome/weak-BOLD terminal never collapses two states
@@ -15994,6 +16038,62 @@ mod tests {
                 "lattice glyph {g:?} must not be an astral emoji"
             );
         }
+    }
+
+    #[test]
+    fn pane_activity_folds_to_working_empty_idle_or_unmeasured_never_blind_idle() {
+        // (x-d401, AC1-HP/EDGE) The render fold. With no badge, the pane's own
+        // OSC 133 reading decides: Running -> Working, Idle -> Idle, Empty ->
+        // Empty, and Unmeasured or absent -> Unmeasured. The old `None =>
+        // Idle` fold rendered four working panes and thirty empty shells as
+        // the same circle; the absent reading must render as the marked
+        // absence `?`, never as a measured idle.
+        use crate::vt::ShellActivity as SA;
+        assert_eq!(
+            pane_state(None, false, Some(SA::Running)),
+            PaneState::Working
+        );
+        assert_eq!(pane_state(None, false, Some(SA::Idle)), PaneState::Idle);
+        assert_eq!(pane_state(None, false, Some(SA::Empty)), PaneState::Empty);
+        assert_eq!(
+            pane_state(None, false, Some(SA::Unmeasured)),
+            PaneState::Unmeasured,
+            "an un-integrated pane reads as no-reading, not idle"
+        );
+        assert_eq!(
+            pane_state(None, false, None),
+            PaneState::Unmeasured,
+            "an absent field reads as no-reading, not idle"
+        );
+        // A present badge still wins: the registry worker's own report beats
+        // the vt reading for its row.
+        assert_eq!(
+            pane_state(Some(AgentBadge::Working), false, Some(SA::Idle)),
+            PaneState::Working
+        );
+    }
+
+    #[test]
+    fn unmeasured_pane_renders_the_question_glyph_not_the_idle_circle() {
+        // (x-d401, AC1-EDGE) The positive control: `?` is a marker only the
+        // no-reading outcome produces, and it is pinned as DISTINCT from the
+        // idle glyph it used to be confused with.
+        assert_eq!(lattice_glyph(pane_to_lattice(PaneState::Unmeasured)).0, '?');
+        assert_ne!(
+            lattice_glyph(pane_to_lattice(PaneState::Idle)).0,
+            lattice_glyph(pane_to_lattice(PaneState::Unmeasured)).0,
+            "the no-reading glyph must differ from the idle glyph"
+        );
+    }
+
+    #[test]
+    fn pristine_shell_and_live_workload_render_different_glyphs() {
+        // (x-d401, AC1-ERR) The reported bug as its own assertion: an empty
+        // shell tab and a pane running cargo test must not share a glyph.
+        use crate::vt::ShellActivity as SA;
+        let empty = lattice_glyph(pane_to_lattice(pane_state(None, false, Some(SA::Empty)))).0;
+        let running = lattice_glyph(pane_to_lattice(pane_state(None, false, Some(SA::Running)))).0;
+        assert_ne!(empty, running);
     }
 
     #[test]
@@ -16059,9 +16159,13 @@ mod tests {
 
         // `unmeasured` on a LIVE row (exited: false) is inert - a live row is
         // never rendered Unmeasured just because some upstream sentinel left
-        // the bit set.
+        // the bit set. (x-d401: the row now carries an explicit activity
+        // reading, so this proves the BIT is inert; a live row with NO reading
+        // at all renders Unmeasured for the absence, which is the new
+        // predicate, not the old bug.)
         let live_with_stale_bit = AgentRow {
             unmeasured: true,
+            pane_activity: Some(crate::vt::ShellActivity::Idle),
             ..tab_agent(None, None, false)
         };
         assert_ne!(
@@ -16075,25 +16179,38 @@ mod tests {
         // The x-653d state vocabulary: badge + seen -> PaneState. x-4328 flips
         // the seen bit later; today every Done is called with seen=false.
         assert_eq!(
-            pane_state(Some(AgentBadge::Blocked), false),
+            pane_state(Some(AgentBadge::Blocked), false, None),
             PaneState::Blocked
         );
         assert_eq!(
-            pane_state(Some(AgentBadge::Working), false),
+            pane_state(Some(AgentBadge::Working), false, None),
             PaneState::Working
         );
         assert_eq!(
-            pane_state(Some(AgentBadge::Done), false),
+            pane_state(Some(AgentBadge::Done), false, None),
             PaneState::DoneUnseen
         );
-        assert_eq!(pane_state(Some(AgentBadge::Done), true), PaneState::Idle);
-        assert_eq!(pane_state(None, false), PaneState::Idle);
+        assert_eq!(
+            pane_state(Some(AgentBadge::Done), true, None),
+            PaneState::Idle
+        );
+        // (x-d401) The blind fold is gone: no badge and no activity reading is
+        // a marked absence, never a measured idle.
+        assert_eq!(pane_state(None, false, None), PaneState::Unmeasured);
         // Worst-first ordering (Invariant): the squad rollup takes the `min`, so
         // the worst state must be the Ord-minimum - x-d140's `min` and the
         // navigator filter must agree on this ordering.
         assert!(PaneState::Blocked < PaneState::Working);
         assert!(PaneState::Working < PaneState::DoneUnseen);
         assert!(PaneState::DoneUnseen < PaneState::Idle);
+        assert!(
+            PaneState::Unmeasured < PaneState::Idle,
+            "no-reading outranks settled idle in a worst-wins rollup"
+        );
+        assert!(
+            PaneState::Idle < PaneState::Empty,
+            "a pristine shell is the least severe reading"
+        );
         let rollup = [PaneState::Idle, PaneState::Blocked, PaneState::Working]
             .into_iter()
             .min();
@@ -16587,7 +16704,15 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
-            pane_activity: None,
+            // (x-d401) A badgeless LIVE row in these fixtures means "an idle
+            // worker"; under the absence predicate that must be SAID (an
+            // explicit Idle reading), not implied by badge absence - absence
+            // now renders Unmeasured.
+            pane_activity: if badge.is_none() && !exited {
+                Some(ShellActivity::Idle)
+            } else {
+                None
+            },
         }
     }
 
@@ -19066,7 +19191,14 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
-            pane_activity: None,
+            // (x-d401) A badgeless LIVE row here means "an idle worker"; the
+            // reading is said explicitly, because absence now renders
+            // Unmeasured (`?`), never Idle.
+            pane_activity: if badge.is_none() && !exited {
+                Some(ShellActivity::Idle)
+            } else {
+                None
+            },
         }
     }
 
@@ -25328,14 +25460,19 @@ mod tests {
             let cell = frame.cells[r * cols + 2];
             (cell.c, cell.flags & cell_flags::DIM == cell_flags::DIM)
         };
-        // x-df4c: idle is now the outline `○` (was the near-invisible `·`); the
-        // external DIM modifier and the exited `✗` precedence are unchanged.
+        // x-df4c: idle was the outline `○` (was the near-invisible `·`); x-d401
+        // moves a badgeless reading-less row to the marked absence `?` - the
+        // mux cannot see an external/fno live row's workload, so it says so.
+        // The external DIM modifier and the no-reading DIM coincide by design
+        // (DIM is reinforcement, the glyph is the discriminator); the exited
+        // `✗` precedence below is unchanged, and external-ness still reads
+        // through the row's actions, not this glyph.
         assert_eq!(probe("z-exited"), ('\u{2717}', true), "exited: ✗ + DIM");
-        assert_eq!(probe("z-external"), ('\u{25cb}', true), "external: ○ + DIM");
+        assert_eq!(probe("z-external"), ('?', true), "external: ? + DIM");
         assert_eq!(
             probe("z-fnolive"),
-            ('\u{25cb}', false),
-            "fno-live: ○ + bright"
+            ('?', true),
+            "fno-live: ? + DIM (no reading; bright-idle is gone)"
         );
         // AC1-UI: external + Blocked renders the amber `▲`, BOLD, and NOT dimmed
         // even though it is external - the accent beats the external DIM.
@@ -28120,8 +28257,11 @@ mod tests {
     #[test]
     fn squad_rollup_bare_pane_folds_to_idle() {
         // x-0090 US4: the pane-union adds bare panes to the agent set; a bare
-        // pane (badge None) folds to Idle so it never overrides a blocked
-        // sibling in the x-d140 collapsed-squad rollup (Ord-min over states).
+        // pane whose vt reads Idle folds to Idle so it never overrides a
+        // blocked sibling in the x-d140 collapsed-squad rollup (Ord-min over
+        // states). (x-d401: a bare pane with NO reading folds to Unmeasured -
+        // that path is covered by pane_activity_folds_*, this one pins the
+        // rollup with a measured idle pane.)
         let row = |name: &str, pane, badge| AgentRow {
             spawned_by_session: None,
             harness_session_id: None,
@@ -28152,7 +28292,10 @@ mod tests {
             no_pane_reason: None,
             pane_activity: None,
         };
-        let bare = row("zsh", 10, None);
+        let bare = AgentRow {
+            pane_activity: Some(ShellActivity::Idle),
+            ..row("zsh", 10, None)
+        };
         let blocked = row("claude", 11, Some(AgentBadge::Blocked));
         assert_eq!(nav_agent_state(&bare), PaneState::Idle);
         let worst = [&bare, &blocked]
@@ -28552,8 +28695,8 @@ mod tests {
         nav_keys(&mut v, b"\x1b[Z", &mut buf).await.unwrap();
         assert_eq!(
             v.nav.as_ref().unwrap().state_filter,
-            Some(PaneState::Idle),
-            "Shift-Tab reverses to [idle]"
+            Some(PaneState::Empty),
+            "Shift-Tab reverses to [empty] (x-d401: the cycle gained empty/unread)"
         );
         assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "cursor re-clamped to 0");
         assert!(buf.is_empty(), "Shift-Tab sends nothing to the pane");
