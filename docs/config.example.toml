@@ -515,3 +515,29 @@ retries = 2
 enabled = false
 # Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work.
 autonomous_merge = false
+
+[accounts]
+# Name of the account record currently active for provider rotation.
+# active = <unset>   # optional; no default
+# Swap to a failover account automatically when the active one is locked out.
+auto_switch = false
+# Name of the combo currently driving provider rotation.
+# active_combo = <unset>   # optional; no default
+# Account records for rotation: list of {name, provider, model, ...} entries.
+records = []
+# Named provider combos, each {strategy (fallback or round_robin), sticky_limit, providers}.
+combos = {}
+# Provider-rotation failover: {max_swaps_per_phase}.
+# failover = <unset>   # optional; no default
+
+[accounts.quota]
+# Hold dispatch while the active account's quota use sits above the threshold.
+defer_dispatch = false
+# Quota-use percentage at or above which dispatch defers.
+defer_threshold_pct = 90.0
+# Seconds a quota probe result stays fresh before re-probing.
+probe_ttl_seconds = 300
+# How far ahead a quota-window reset is still worth deferring for.
+defer_horizon_minutes = 60
+# Pick the least-loaded account at spawn time instead of pinning one.
+pick_on_launch = false

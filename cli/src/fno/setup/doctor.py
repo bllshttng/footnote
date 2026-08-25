@@ -9,6 +9,7 @@ or settings could not be loaded.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 # Patterns that indicate misconfigured paths.
 # Each entry is (path_prefix, human_reason).
@@ -361,6 +362,111 @@ def check_agent_profiles(settings: object) -> list[str]:
     return problems
 
 
+_KNOWN_ACCOUNTS_KEYS = frozenset(
+    {"active", "auto_switch", "active_combo", "records", "combos", "quota", "failover"}
+)
+_KNOWN_QUOTA_KEYS = frozenset(
+    {"defer_dispatch", "defer_threshold_pct", "probe_ttl_seconds", "defer_horizon_minutes", "pick_on_launch"}
+)
+_KNOWN_FAILOVER_KEYS = frozenset({"max_swaps_per_phase"})
+_KNOWN_COMBO_KEYS = frozenset({"strategy", "sticky_limit", "providers"})
+
+
+def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list[str]:
+    problems: list[str] = []
+    raw_config = raw_data.get("config")
+    config = raw_config if isinstance(raw_config, dict) else {}
+    for block_key in ("accounts", "providers"):
+        for scope, prefix in ((raw_data, block_key), (config, f"config.{block_key}")):
+            block = scope.get(block_key)
+            if not isinstance(block, dict):
+                continue
+            for k in block:
+                if k not in _KNOWN_ACCOUNTS_KEYS:
+                    problems.append(
+                        f"{source_label}: {prefix} has unknown key {k!r}; it will be ignored"
+                    )
+            quota = block.get("quota")
+            if isinstance(quota, dict):
+                for k in quota:
+                    if k not in _KNOWN_QUOTA_KEYS:
+                        problems.append(
+                            f"{source_label}: {prefix}.quota has unknown key {k!r}; it will be ignored"
+                        )
+            elif quota is not None:
+                problems.append(
+                    f"{source_label}: {prefix}.quota is not a table "
+                    f"(got {type(quota).__name__}); it will be coerced to defaults"
+                )
+            failover = block.get("failover")
+            if isinstance(failover, dict):
+                for k in failover:
+                    if k not in _KNOWN_FAILOVER_KEYS:
+                        problems.append(
+                            f"{source_label}: {prefix}.failover has unknown key {k!r}; it will be ignored"
+                        )
+            elif failover is not None:
+                problems.append(
+                    f"{source_label}: {prefix}.failover is not a table "
+                    f"(got {type(failover).__name__}); it will be ignored"
+                )
+            combos = block.get("combos")
+            if isinstance(combos, dict):
+                for combo_name, combo_val in combos.items():
+                    if isinstance(combo_val, dict):
+                        for k in combo_val:
+                            if k not in _KNOWN_COMBO_KEYS:
+                                problems.append(
+                                    f"{source_label}: {prefix}.combos.{combo_name} has unknown key {k!r}; it will be ignored"
+                                )
+            # Record ENTRIES are deliberately not key-scanned:
+            # ProviderRecord is extra="allow", so unknown record metadata is
+            # retained and round-trips by design; flagging it made doctor
+            # exit 1 on legal config. Structural record errors surface
+            # through the load_providers() call in check_accounts.
+    return problems
+
+
+def check_accounts() -> list[str]:
+    """Validate configured accounts / providers and combos."""
+    from fno.adapters.providers.loader import (
+        _provider_candidates,
+        _read_parsed,
+        load_combos,
+        load_providers,
+    )
+    from fno.adapters.providers.model import ProviderConfigError
+
+    problems: list[str] = []
+    try:
+        load_providers()
+    except ProviderConfigError as exc:
+        problems.append(f"accounts/providers: {exc}")
+    except Exception as exc:
+        problems.append(f"accounts/providers load error: {exc}")
+
+    try:
+        load_combos()
+    except ProviderConfigError as exc:
+        problems.append(f"combos: {exc}")
+    except Exception as exc:
+        problems.append(f"combos load error: {exc}")
+
+    # Scan the SAME file set the loads above merge, parsed by the SAME
+    # reader (_read_parsed, including its settings.yaml fallback), so a
+    # change in reader behavior cannot split the two halves again.
+    seen_paths: set[Path] = set()
+    for candidate in _provider_candidates():
+        if candidate in seen_paths:
+            continue
+        seen_paths.add(candidate)
+        data = _read_parsed(candidate)
+        if isinstance(data, dict) and data:
+            problems.extend(_check_accounts_in_dict(data, str(candidate)))
+
+    return list(dict.fromkeys(problems))
+
+
 def run_doctor() -> int:
     """Run the doctor diagnostic. Returns 0 if clean, non-zero on errors or suspicious paths."""
     import os
@@ -478,7 +584,14 @@ def run_doctor() -> int:
             "grant is yours to make."
         )
 
-    if errors or issues or cap_problems or wt_problems or profile_problems or store_problems:
+    account_problems = check_accounts()
+    if account_problems:
+        print(f"\n[doctor] {len(account_problems)} account / provider issue(s):")
+        for reason in account_problems:
+            print(f"  - {reason}")
+        print("\nFix the accounts or combos configuration in config.toml.")
+
+    if errors or issues or cap_problems or wt_problems or profile_problems or store_problems or account_problems:
         return 1
 
     print("\n[doctor] OK; no suspicious paths detected.")
