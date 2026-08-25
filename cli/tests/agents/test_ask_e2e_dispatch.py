@@ -103,10 +103,9 @@ def _install_fake_codex_daemon(codex_home: Path) -> None:
     listener.listen()
     listener.settimeout(0.2)
 
-    (state_dir / "fno-harness-daemon.json").write_text(
-        json.dumps({"pid": os.getpid(), "processStartTime": "test-fixture"}),
-        encoding="utf-8",
-    )
+    state = json.dumps({"pid": os.getpid(), "processStartTime": "test-fixture"})
+    (state_dir / "fno-harness-daemon.json").write_text(state, encoding="utf-8")
+    (state_dir / "app-server.pid").write_text(state, encoding="utf-8")
 
     def _recv_until(conn: socket.socket, marker: bytes) -> bytes:
         data = b""
@@ -373,7 +372,8 @@ def test_codex_ask_short_flags_match_long_through_rust_binary(
 
     assert short.returncode == long.returncode, (
         f"exit-code drift: short={short.returncode} long={long.returncode}\n"
-        f"short stderr: {short.stderr}\nlong stderr: {long.stderr}"
+        f"short stderr: {short.stderr}\nlong stderr: {long.stderr}\n"
+        f"daemon: {(fake_codex_daemon_home / 'fake-daemon.log').read_text() if (fake_codex_daemon_home / 'fake-daemon.log').exists() else 'no connection'}"
     )
     assert short.returncode == 0, (
         f"short-flag spawn --once failed: {short.stderr}\n"
