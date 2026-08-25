@@ -361,6 +361,18 @@ enum CoreMsg {
         pane: u64,
         event: MouseEvent,
     },
+    /// (v56, hover affordance) One link-span lookup for the requester's hover
+    /// underline. Read-only and initiator-only: the core resolves the pane's
+    /// link match and answers THIS client with coordinates alone, so it is not
+    /// in the passive-observer mutation gate (a passive viewer already sees
+    /// the pane's frames; which cells form a link adds nothing they lack).
+    LinkHover {
+        id: u64,
+        pane: u64,
+        row: u16,
+        col: u16,
+        seq: u64,
+    },
     /// (v8) Walk a pane's OSC 133 blocks: jump the shared scroll or move the
     /// block-scoped selection. `id` is the requesting client (for a "no blocks"
     /// notice); the scroll/selection is shared, so the broadcast reaches every
@@ -7571,6 +7583,54 @@ impl Core {
         }
     }
 
+    /// (v56, hover affordance) One link-span lookup for the requesting client
+    /// only: resolve the link under pane-local `(row, col)` and reply with its
+    /// visible cells. The guards mirror the click path's ownership rule: the
+    /// pane must be in the requester's live view, and a plain left click must
+    /// be MUX-owned - a pane whose app negotiated mouse reporting gets no
+    /// hover affordance, because its grid interaction belongs to the app.
+    /// Coordinates only, never text; every miss (non-link cell, invisible
+    /// pane, app-owned click) answers an EMPTY cell list so the client clears
+    /// the underline instead of waiting. No pane state changes, no broadcast:
+    /// co-viewers never see another viewer's hover.
+    fn link_hover(&mut self, client_id: u64, pane: u64, row: u16, col: u16, seq: u64) {
+        // Bind the requester once: the visibility check and the reply send
+        // name the same client, and two independent finds are two places to
+        // drift. The wedge path mutates `clients`, so it runs after the
+        // borrows drop.
+        let wedged = {
+            let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {
+                return;
+            };
+            let cells = match self.panes.get(&pane) {
+                Some(e)
+                    if route_mouse(e.vt.modes(), MouseKind::Release(MouseButton::Left))
+                        == MouseAction::SelectRelease
+                        && c.visible.contains(&pane) =>
+                {
+                    e.vt.link_span(row, col)
+                        .map(|span| span.cells)
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            c.reliable_tx
+                .try_send(ServerMsg::LinkHover {
+                    pane_id: pane,
+                    seq,
+                    cells,
+                })
+                .is_err()
+        };
+        if wedged {
+            eprintln!(
+                "fno mux: client {client_id} reliable channel wedged on LinkHover; dropping it"
+            );
+            self.clients.retain(|c| c.id != client_id);
+            self.push_layout(true);
+        }
+    }
+
     /// Apply one block-navigation op to `pane` (v8, x-38c4). Jump moves the
     /// shared scroll and select moves the shared block selection - both broadcast
     /// so every co-viewer tracks (tmux precedent, brief). Rerun re-sends the
@@ -9901,6 +9961,16 @@ impl Core {
                 self.mouse(id, pane, event);
                 Flow::Continue
             }
+            CoreMsg::LinkHover {
+                id,
+                pane,
+                row,
+                col,
+                seq,
+            } => {
+                self.link_hover(id, pane, row, col, seq);
+                Flow::Continue
+            }
             CoreMsg::BlockNav { id, pane, op } => {
                 self.block_nav(id, pane, op);
                 Flow::Continue
@@ -12001,6 +12071,26 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
             Ok(ClientMsg::Mouse { pane, event }) => {
                 if core_tx
                     .send(CoreMsg::Mouse { id, pane, event })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMsg::LinkHover {
+                pane,
+                row,
+                col,
+                seq,
+            }) => {
+                if core_tx
+                    .send(CoreMsg::LinkHover {
+                        id,
+                        pane,
+                        row,
+                        col,
+                        seq,
+                    })
                     .await
                     .is_err()
                 {

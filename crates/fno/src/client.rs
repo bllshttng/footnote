@@ -265,6 +265,143 @@ const SQUAD_ROW_CAP: usize = 8;
 /// the burst to one `FocusPane` for the pane the pointer lands on.
 const HOVER_DEBOUNCE: Duration = Duration::from_millis(50);
 
+/// (hover affordance) How long the pointer must rest on ONE cell before the
+/// client asks the server whether that cell belongs to a link. A separate
+/// clock from [`HOVER_DEBOUNCE`]: focus-follows-mouse debounces the PANE
+/// (keeping the first landing time through in-pane motion), link detection
+/// debounces the exact CELL (every crossed cell restarts it), so the two
+/// share a duration but never a deadline. Same 50ms so the affordance feels
+/// like the focus it travels with.
+const LINK_HOVER_DEBOUNCE: Duration = HOVER_DEBOUNCE;
+
+/// (hover affordance) Client-local hover-link state. Detection is
+/// server-side (the grid, its scrollback and OSC 8 anchors live there); this
+/// holds the client's pointer target, the debounce clock, and the accepted
+/// underline span. Nothing here is shared: the underline is painted into the
+/// composed frame only, never the cached server `Frame`, and the server
+/// reply carries coordinates only, so no pane text crosses back.
+#[derive(Debug, Default)]
+struct LinkHoverState {
+    /// The cell the pointer last rested on, and when its quiet period ends.
+    /// `None` when the pointer is over chrome, a divider, an overlay, or out
+    /// of every live pane - those targets carry no probe and clear the
+    /// underline immediately, without a request.
+    pending: Option<LinkTarget>,
+    /// The next probe's seq, bumped per probe (and per frame-restart) so a
+    /// reply for a target the pointer has already left, or for a span a new
+    /// frame invalidated, is dropped on arrival.
+    next_seq: u64,
+    /// The accepted underline: which pane and which of its visible cells. A
+    /// miss (empty reply) clears it. Cleared on every new frame for that pane
+    /// and re-debounced, so streaming output never paints a stale span and
+    /// never scans at frame cadence.
+    accepted: Option<(u64, Vec<(u16, u16)>)>,
+}
+
+/// One debounced hover probe target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinkTarget {
+    pane: u64,
+    row: u16,
+    col: u16,
+    /// Identifies THIS probe on the wire and its reply.
+    seq: u64,
+    /// When the quiet period ends and the probe fires.
+    deadline: Instant,
+    /// Whether the probe already fired for this target. Kept so the deadline
+    /// arm does not re-send while the pointer rests motionless (a still
+    /// pointer emits no further events to re-arm on).
+    fired: bool,
+}
+
+impl LinkHoverState {
+    /// Fold one pointer position into the probe state. A new cell restarts
+    /// the quiet period and clears the old underline immediately (an
+    /// underline trailing the pointer reads as stuck, and the cell may not be
+    /// a link at all); the same cell changes nothing, so in-cell jitter does
+    /// not starve the probe. `None` (chrome/divider/overlay/outside) drops
+    /// the target and the underline with no request.
+    fn retarget(&mut self, hit: Option<(u64, u16, u16)>, now: Instant) {
+        match hit {
+            Some((pane, row, col)) => {
+                if !matches!(
+                    self.pending,
+                    Some(t) if (t.pane, t.row, t.col) == (pane, row, col)
+                ) {
+                    let seq = self.next_seq;
+                    self.next_seq += 1;
+                    self.pending = Some(LinkTarget {
+                        pane,
+                        row,
+                        col,
+                        seq,
+                        deadline: now + LINK_HOVER_DEBOUNCE,
+                        fired: false,
+                    });
+                    self.accepted = None;
+                }
+            }
+            None => {
+                self.pending = None;
+                self.accepted = None;
+            }
+        }
+    }
+
+    /// A new frame for `pane` invalidated whatever was accepted: clear the
+    /// span and restart the quiet period from this frame, so the probe waits
+    /// for the pane to go quiet again and repeated streaming frames keep
+    /// postponing the lookup instead of scanning at frame cadence.
+    fn on_frame(&mut self, pane: u64, now: Instant) {
+        if let Some(t) = &mut self.pending {
+            if t.pane == pane {
+                t.seq = self.next_seq;
+                self.next_seq += 1;
+                t.deadline = now + LINK_HOVER_DEBOUNCE;
+                t.fired = false;
+                self.accepted = None;
+            }
+        }
+    }
+
+    /// Take the probe that is due: the pending target whose quiet period
+    /// ended and has not fired. Marks it fired so a resting pointer never
+    /// re-sends.
+    fn take_due_probe(&mut self, now: Instant) -> Option<LinkTarget> {
+        let t = self.pending.as_mut()?;
+        if t.fired || now < t.deadline {
+            return None;
+        }
+        t.fired = true;
+        Some(*t)
+    }
+
+    /// Fold a reply in: accept it only when its pane and seq still identify
+    /// the current target. A stale reply (pointer moved, or a frame
+    /// invalidated and re-sequenced the target) is dropped whole; a current
+    /// reply installs the span, or clears it when the cell is no link.
+    fn on_reply(&mut self, pane: u64, seq: u64, cells: Vec<(u16, u16)>) -> bool {
+        let current = self.pending.is_some_and(|t| t.pane == pane && t.seq == seq);
+        if !current {
+            return false;
+        }
+        self.accepted = (!cells.is_empty()).then_some((pane, cells));
+        true
+    }
+
+    /// The next wake for the probe clock, when one is pending.
+    fn deadline(&self) -> Option<Instant> {
+        self.pending.filter(|t| !t.fired).map(|t| t.deadline)
+    }
+
+    /// Drop the target and the underline (pointer left the panes, or a popup
+    /// took the mouse). Never sends anything.
+    fn clear(&mut self) {
+        self.pending = None;
+        self.accepted = None;
+    }
+}
+
 /// How long a seam drag survives with no motion before it expires (x-d807,
 /// AC7-FR). A drag whose mouse-up never arrives - the terminal lost focus
 /// mid-gesture, or the release was eaten - would otherwise stay latched and
@@ -989,6 +1126,11 @@ struct View {
     /// and when it first landed there. `FocusPane` fires once the same pane holds
     /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
     hover_pending: Option<(u64, Instant)>,
+    /// (hover affordance) The link-probe clock and accepted underline span.
+    /// Independent of [`View::hover_focus`]: the link affordance tracks the
+    /// exact cell, and a focus-follows-mouse off-switch disables focus
+    /// stealing, not hover affordances.
+    link_hover: LinkHoverState,
     /// (x-a496) The `display_rows()` index the pointer is hovering in the
     /// sideline, painted with the selector's INVERSE bar. Highlight-only - never
     /// switches the viewed squad/tab. `None` off the panel.
@@ -1595,6 +1737,30 @@ enum MenuAction {
     Mail,
 }
 
+impl MenuAction {
+    /// (x-91a1) The stable id this action's in-menu accelerator is registered
+    /// under in `keys::menu_bindings`, when it has one. The drawn hint and the
+    /// dispatched byte both resolve through this id, so the key the menu
+    /// advertises and the key it answers cannot drift. The tab verbs and the
+    /// settled rename/close/remove pair carry one; everything else is
+    /// Enter/click only and renders no key.
+    fn accelerator_id(&self) -> Option<&'static str> {
+        match self {
+            MenuAction::TabNew => Some("new-tab"),
+            MenuAction::TabRename => Some("rename-tab"),
+            MenuAction::Rename => Some("rename-workspace"),
+            MenuAction::TabClose => Some("close-tab"),
+            MenuAction::TabReorder(delta) => Some(if *delta < 0 {
+                "move-tab-left"
+            } else {
+                "move-tab-right"
+            }),
+            MenuAction::Remove => Some("remove-row"),
+            _ => None,
+        }
+    }
+}
+
 /// What the numbered move picker is relocating: a whole tab (selector `m`) or a
 /// single pane-hosted row's live pane (the row menu's Move-to-workspace entry).
 /// Both list destination workspaces and resolve the same way; only the command
@@ -1605,14 +1771,16 @@ enum MoveSrc {
     Pane(u64),
 }
 
-/// (x-92d3 6.2) An entry whose action has a prefix binding: the hint is the
-/// LIVE glyph from `key_for`, never a literal chord. An unbound or unknown
-/// id resolves to nothing, which is the honest hint (LD9 / AC8).
-fn entry_kb(glyph: &str, label: &str, id: &str) -> PopupRow {
+/// (x-91a1) An entry whose action has an IN-MENU accelerator: the hint is the
+/// live glyph from the menu scope (`keys::menu_key_for`), never a prefix chord
+/// - the open menu does not run prefix chords, so advertising one describes an
+/// input path the reader is not on. An unscoped id resolves to nothing, which
+/// is the honest hint (LD9 / AC8).
+fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
     PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
-        hint: crate::keys::key_for(id).unwrap_or_default(),
+        hint: crate::keys::menu_key_for(id).unwrap_or_default(),
         enabled: true,
     }
 }
@@ -1655,7 +1823,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     add(PopupRow::Header(agent.name.clone()), &[]);
     add(PopupRow::Rule, &[]);
     if agent.exited {
-        add(entry("✕", "Remove"), &[MenuAction::Remove]);
+        add(
+            entry_acc("✕", "Remove", "remove-row"),
+            &[MenuAction::Remove],
+        );
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
         // Resume above the rule (AC7): the menu twin of peek `r`, on the row
         // state `r` accepts - an exited row.
@@ -1731,8 +1902,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     // Diff is common to every row state: it reads the row's worktree,
     // which an exited or paneless row has just as much as a live pane-hosted
     // one - and a finished worker's diff is the one you most want to read.
+    // No hint: its prefix chord is not a menu key, and the menu scope leaves
+    // it unbound (x-91a1).
     add(PopupRow::Rule, &[]);
-    add(entry_kb("±", "Diff", "diff-pane"), &[MenuAction::Diff]);
+    add(entry("±", "Diff"), &[MenuAction::Diff]);
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Agent(AgentIdent::of(agent)),
@@ -1875,7 +2048,7 @@ fn build_section_menu(
             hint: String::new(),
             enabled: true,
         };
-        rows.push(entry("✎", "Rename"));
+        rows.push(entry_acc("✎", "Rename", "rename-workspace"));
         actions.push(MenuAction::Rename);
         rows.push(entry("▲", "Move up"));
         actions.push(MenuAction::MoveSquad(-1));
@@ -1936,17 +2109,21 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
         &[],
     );
     add(PopupRow::Rule, &[]);
-    add(entry_kb("▭", "New tab", "new-tab"), &[MenuAction::TabNew]);
+    // (x-91a1) Every tab verb answers a bare in-menu key from the same
+    // registry its hint reads: n for New tab, the angle brackets for the
+    // reorder pair - app vocabulary beside the prefix chords (prefix+c, and
+    // prefix+< / prefix+> mean the same moves from outside the menu).
+    add(entry_acc("▭", "New tab", "new-tab"), &[MenuAction::TabNew]);
     add(
-        entry_kb("✎", "Rename", "rename-tab"),
+        entry_acc("✎", "Rename", "rename-tab"),
         &[MenuAction::TabRename],
     );
     add(
-        entry_kb("◧", "Move left", "move-tab-left"),
+        entry_acc("◧", "Move left", "move-tab-left"),
         &[MenuAction::TabReorder(-1)],
     );
     add(
-        entry_kb("◨", "Move right", "move-tab-right"),
+        entry_acc("◨", "Move right", "move-tab-right"),
         &[MenuAction::TabReorder(1)],
     );
     add(
@@ -1962,9 +2139,12 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
     );
     add(PopupRow::Rule, &[]);
     // `✕ Close`, not `✕ Close tab`: one shape with the row menu's `✕ Remove`,
-    // so the two destructive affordances read as one vocabulary. The action id
-    // and its `&` chord are untouched.
-    add(entry_kb("✕", "Close", "close-tab"), &[MenuAction::TabClose]);
+    // so the two destructive affordances read as one vocabulary. The prefix
+    // `&` chord is untouched; in-menu the entry answers the scoped `x`.
+    add(
+        entry_acc("✕", "Close", "close-tab"),
+        &[MenuAction::TabClose],
+    );
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Tab(tab.id),
@@ -2322,6 +2502,7 @@ impl View {
             theme: Theme::default_theme(),
             settings_tab: SettingsTab::General,
             hover_pending: None,
+            link_hover: LinkHoverState::default(),
             hover_row: None,
             hover_seam: None,
             seam_drag: None,
@@ -5037,6 +5218,14 @@ impl View {
         // of the focus-follow off-switch below).
         self.refresh_hover_affordances(row, col);
 
+        // (hover affordance) The link probe tracks the exact CELL, so every
+        // crossed cell restarts its quiet period - unlike focus-follows below,
+        // which keeps the pane's first landing time. Chrome/divider/overlay
+        // targets clear the probe and the underline immediately, no request.
+        // Deliberately ABOVE the focus off-switch: a disabled focus-follow
+        // steals no focus, but links still afford hovering.
+        self.link_hover.retarget(self.hit_test(row, col), now);
+
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
         // steals focus - only moving over pane content does.
@@ -5835,6 +6024,29 @@ impl View {
                     if let Some(f) = frame {
                         if fr < f.rows as usize && fc < f.cols as usize {
                             cells[r * cols + c] = f.cells[fr * f.cols as usize + fc];
+                        }
+                    }
+                }
+            }
+        }
+        // (hover affordance) Underline the accepted link span, client-local:
+        // OR UNDERLINE into exactly the pane-local cells the server named,
+        // after the blit (content is in place) and before the grip/indicator/
+        // overlay passes (chrome and overlays still win their cells). The
+        // cached server `Frame` is untouched, so the span clears on the next
+        // compose the moment it is dropped or invalidated. Suppressed while
+        // ANY modal is open: `menu_usurping_open` names the full set, which
+        // closes the keyboard-opened and overlay-blind cases the pointer-event
+        // clear cannot see (an overlay opened with no pointer motion paints no
+        // hover affordance beneath or around itself).
+        if !self.menu_usurping_open() {
+            if let Some((pid, span)) = self.link_hover.accepted.as_ref() {
+                if let Some((_, rect)) = self.layout.panes.iter().find(|(p, _)| p == pid) {
+                    for &(fr, fc) in span {
+                        let r = origin_r + rect.y as usize + fr as usize;
+                        let c = origin_c + rect.x as usize + fc as usize;
+                        if r < rows && c < cols {
+                            cells[r * cols + c].flags |= cell_flags::UNDERLINE;
                         }
                     }
                 }
@@ -10152,10 +10364,12 @@ async fn attach_and_run(
                 | ServerMsg::Err { .. }
                 // Copy and OpenLink answer a mouse-release, and SearchResult
                 // answers a search - all can only follow attach: stray in the
-                // preamble, ignore rather than desync.
+                // preamble, ignore rather than desync. LinkHover answers a
+                // hover probe (same class).
                 | ServerMsg::Copy { .. }
                 | ServerMsg::OpenLink { .. }
                 | ServerMsg::SearchResult { .. }
+                | ServerMsg::LinkHover { .. }
                 // PeekBody answers a post-attach PeekAgent (x-c376): impossible
                 // in the preamble, ignore rather than desync.
                 | ServerMsg::PeekBody { .. }
@@ -10423,6 +10637,11 @@ async fn attach_and_run(
         // its landing time + the debounce, re-armed each loop from the latest
         // pending, so a fast sweep's earlier panes are dropped before they fire.
         let hover_deadline = view.hover_pending.map(|(_, t0)| t0 + HOVER_DEBOUNCE);
+        // (hover affordance) The link probe's own clock: separate from
+        // `hover_deadline` because focus debounces the pane while the link
+        // probe debounces the exact cell, and a fired probe stops the clock
+        // until motion or a frame restarts it.
+        let link_hover_deadline = view.link_hover.deadline();
         // (x-1d91) A dispatched reorder verb the feed never confirmed: the `…`
         // marker must clear with a notice rather than spin forever.
         let backlog_deadline = view.backlog_pending_deadline();
@@ -10483,6 +10702,11 @@ async fn attach_and_run(
                     // ignored (Concurrency: flush-then-re-emit ordering).
                     let known = view.layout.panes.iter().any(|(id, _)| *id == pane_id);
                     if known {
+                        // (hover affordance) A new frame invalidates the
+                        // accepted span and restarts the probe's quiet period
+                        // from this frame, so streaming output neither paints
+                        // a stale span nor scans at frame cadence.
+                        view.link_hover.on_frame(pane_id, Instant::now());
                         view.frames.insert(pane_id, frame);
                         if let Err(e) = compositor.draw(&view.compose()) {
                             break Err(format!("draw: {e}"));
@@ -10584,6 +10808,23 @@ async fn attach_and_run(
                         let outcome = crate::link::open_url(&url);
                         let _ = tx.send((url, outcome));
                     });
+                }
+                Ok(ServerMsg::LinkHover {
+                    pane_id,
+                    seq,
+                    cells,
+                }) => {
+                    // (hover affordance) Accept only a reply that still names
+                    // the current target (its pane and seq): one for a cell
+                    // the pointer left, or one a new frame re-sequenced away,
+                    // paints a stale span. A current miss (empty cells)
+                    // clears the underline - the cell under the pointer is
+                    // not a link.
+                    if view.link_hover.on_reply(pane_id, seq, cells) {
+                        if let Err(e) = compositor.draw(&view.compose()) {
+                            break Err(format!("draw: {e}"));
+                        }
+                    }
                 }
                 Ok(ServerMsg::SearchResult {
                     pane_id,
@@ -11021,6 +11262,32 @@ async fn attach_and_run(
                     }
                 }
             }
+            _ = async {
+                match link_hover_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if link_hover_deadline.is_some() => {
+                // (hover affordance) The pointer rested on one cell past the
+                // quiet period: send exactly one probe. The target stays
+                // pending (marked fired) so the reply can still match it, but
+                // the clock stops until motion or a frame restarts it.
+                if let Some(t) = view.link_hover.take_due_probe(Instant::now()) {
+                    if let Err(e) = write_msg(
+                        &mut sock_w,
+                        &ClientMsg::LinkHover {
+                            pane: t.pane,
+                            row: t.row,
+                            col: t.col,
+                            seq: t.seq,
+                        },
+                    )
+                    .await
+                    {
+                        break Err(format!("link-hover send failed: {e}"));
+                    }
+                }
+            }
         }
     };
     drop(guard); // restore the terminal BEFORE printing the notice
@@ -11131,6 +11398,20 @@ async fn handle_stdin(
         // Hover is left armed so mouse drift never breaks a held resize.
         if !matches!(rep.kind, MouseKind::Move) {
             scanner.disarm_repeat();
+        }
+        // (hover affordance) While a popup or modal owns the pointer, a
+        // pointer event reports ITS hover, not a pane cell's: drop the link
+        // probe so the underline cannot linger beneath the overlay. Any event
+        // counts, not just Move - a right-click that opens a menu or an
+        // overlay's own press should clear the underline too, and a family-B
+        // overlay (confirm, rename, create, nav) owning the mouse is as much
+        // a popup as the three menus.
+        if view.keys_modal.is_some()
+            || view.row_menu.is_some()
+            || view.aux.is_some()
+            || view.active_overlay_layout().is_some()
+        {
+            view.link_hover.clear();
         }
         // x-8ccf US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
@@ -13067,8 +13348,32 @@ async fn row_menu_keys(
                 }
             }
             ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
-            // Any other (unbound) key dismisses, per the shared popup contract.
-            ModalKey::Byte(_) => view.row_menu = None,
+            // (x-91a1) A printable byte first resolves against the accelerators
+            // of the actions THIS menu offers: a hit moves the selection to
+            // that entry and runs it through the SAME execute path Enter and a
+            // click use, so keyboard and mouse execution cannot drift. A byte
+            // no selectable entry answers keeps the shared popup contract and
+            // dismisses. Disabled rows contribute no action, so an inert entry
+            // is never accelerated.
+            ModalKey::Byte(b) => {
+                let hit = view.row_menu.as_ref().and_then(|m| {
+                    m.actions.iter().position(|a| {
+                        a.accelerator_id()
+                            .and_then(crate::keys::menu_byte_for)
+                            .is_some_and(|kb| kb == b)
+                    })
+                });
+                match hit {
+                    Some(i) => {
+                        if let Some(m) = view.row_menu.as_mut() {
+                            m.popup.select(i);
+                            m.popup.follow_sel(trows);
+                        }
+                        row_menu_execute_selected(view, sock_w).await?;
+                    }
+                    None => view.row_menu = None,
+                }
+            }
         }
     }
     Ok(StdinFlow::Continue)
@@ -17983,6 +18288,160 @@ mod tests {
         view
     }
 
+    // -- (hover affordance) the link-probe clock and the local underline -------
+
+    #[test]
+    fn link_hover_probe_debounces_the_cell_and_fires_once() {
+        // The probe clock is per-CELL (every crossed cell restarts it) and
+        // fires exactly once per rest: a still pointer emits no further
+        // events, so re-firing would spam the server at wake cadence.
+        let mut st = LinkHoverState::default();
+        let t0 = Instant::now();
+        st.retarget(Some((10, 2, 3)), t0);
+        assert!(
+            st.take_due_probe(t0 + LINK_HOVER_DEBOUNCE - Duration::from_millis(1))
+                .is_none(),
+            "the quiet period holds"
+        );
+        let t = st
+            .take_due_probe(t0 + LINK_HOVER_DEBOUNCE)
+            .expect("fires at the deadline");
+        assert_eq!((t.pane, t.row, t.col, t.seq), (10, 2, 3, 0));
+        assert!(
+            st.take_due_probe(t0 + Duration::from_secs(5)).is_none(),
+            "a resting pointer never re-sends"
+        );
+        // Same cell again is jitter, not motion: no new clock.
+        st.retarget(Some((10, 2, 3)), t0 + Duration::from_secs(6));
+        assert_eq!(st.deadline(), None, "jitter does not re-arm a fired probe");
+        // A NEW cell restarts the clock with a fresh seq.
+        st.retarget(Some((10, 2, 4)), t0 + Duration::from_secs(7));
+        assert_eq!(
+            st.deadline(),
+            Some(t0 + Duration::from_secs(7) + LINK_HOVER_DEBOUNCE)
+        );
+    }
+
+    #[test]
+    fn link_hover_reply_is_accepted_only_for_the_current_target() {
+        // The seq guard is the whole stale-rejection story: a reply for a
+        // target the pointer left paints nothing; a current reply installs
+        // the span; a current MISS clears it (never leaves an earlier span).
+        let mut st = LinkHoverState::default();
+        let t0 = Instant::now();
+        st.retarget(Some((10, 2, 3)), t0);
+        let a = st.take_due_probe(t0 + LINK_HOVER_DEBOUNCE).unwrap();
+        // Pointer moved before the reply landed: stale, dropped whole.
+        st.retarget(Some((10, 2, 9)), t0 + Duration::from_millis(80));
+        assert!(
+            !st.on_reply(a.pane, a.seq, vec![(2, 3)]),
+            "stale reply dropped"
+        );
+        assert!(st.accepted.is_none(), "and paints nothing");
+        let b = st
+            .take_due_probe(t0 + Duration::from_millis(80) + LINK_HOVER_DEBOUNCE)
+            .unwrap();
+        assert!(
+            st.on_reply(b.pane, b.seq, vec![(2, 9), (2, 10)]),
+            "current reply accepted"
+        );
+        assert_eq!(st.accepted, Some((10, vec![(2, 9), (2, 10)])));
+        // A current miss clears rather than leaving the previous span.
+        st.retarget(Some((10, 3, 3)), t0 + Duration::from_secs(2));
+        let c = st
+            .take_due_probe(t0 + Duration::from_secs(2) + LINK_HOVER_DEBOUNCE)
+            .unwrap();
+        assert!(st.on_reply(c.pane, c.seq, Vec::new()));
+        assert!(st.accepted.is_none(), "an empty reply clears the underline");
+    }
+
+    #[test]
+    fn link_hover_frame_invalidates_and_resequences() {
+        // A new frame for the probed pane clears the accepted span and
+        // restarts the quiet period FROM THE FRAME, so streaming output
+        // postpones the next probe instead of scanning at frame cadence, and
+        // the pre-frame probe's reply is re-sequenced away.
+        let mut st = LinkHoverState::default();
+        let t0 = Instant::now();
+        st.retarget(Some((10, 2, 3)), t0);
+        let a = st.take_due_probe(t0 + LINK_HOVER_DEBOUNCE).unwrap();
+        st.accepted = Some((10, vec![(2, 3)]));
+        let tf = t0 + Duration::from_secs(1);
+        st.on_frame(10, tf);
+        assert!(st.accepted.is_none(), "the frame cleared the span");
+        assert_eq!(
+            st.deadline(),
+            Some(tf + LINK_HOVER_DEBOUNCE),
+            "postponed by the frame"
+        );
+        assert!(
+            !st.on_reply(a.pane, a.seq, vec![(2, 3)]),
+            "the pre-frame probe's reply is stale after re-sequencing"
+        );
+        // A frame for ANOTHER pane leaves this target alone.
+        st.on_frame(99, tf + Duration::from_secs(1));
+        assert_eq!(
+            st.deadline(),
+            Some(tf + LINK_HOVER_DEBOUNCE),
+            "another pane's frame is a no-op"
+        );
+        // Chrome/divider/outside: everything drops, with no request.
+        st.retarget(None, tf + Duration::from_secs(2));
+        assert!(st.pending.is_none() && st.accepted.is_none());
+        assert_eq!(st.deadline(), None);
+    }
+
+    #[test]
+    fn link_hover_compose_hides_the_span_while_a_modal_owns_the_screen() {
+        // A modal opened by KEYBOARD emits no pointer event, so the event-side
+        // clear never runs; the compose-side suppression is what keeps the
+        // underline from painting beneath or around it. Control: the same
+        // accepted span paints the moment the modal closes.
+        let mut view = two_pane_view();
+        view.link_hover.accepted = Some((10, vec![(0, 0)]));
+        view.keys_modal = Some(build_keys_modal());
+        let ul = cell_flags::UNDERLINE;
+        let lit = |f: &Frame| f.cells.iter().any(|c| c.flags & ul == ul);
+        assert!(!lit(&view.compose()), "no underline beneath an open modal");
+        view.keys_modal = None;
+        assert!(
+            lit(&view.compose()),
+            "control: the span paints once the modal closes"
+        );
+    }
+
+    #[test]
+    fn link_hover_compose_underlines_exactly_the_accepted_cells() {
+        // The affordance is client-local: compose ORs UNDERLINE onto exactly
+        // the accepted pane cells, and the cached server Frame is untouched,
+        // so clearing the span restores the byte-identical frame.
+        let mut view = two_pane_view();
+        let clean = view.compose();
+        view.link_hover.accepted = Some((10, vec![(0, 3), (1, 4)]));
+        let lit = view.compose();
+        let ul = cell_flags::UNDERLINE;
+        // Pane 10's rect sits at the content origin (row 1, col 28).
+        let underlined = |f: &Frame| -> Vec<(usize, usize)> {
+            (0..f.rows as usize)
+                .flat_map(move |r| (0..f.cols as usize).map(move |c| (r, c)))
+                .filter(|&(r, c)| f.cells[r * f.cols as usize + c].flags & ul == ul)
+                .collect()
+        };
+        assert_eq!(
+            underlined(&lit),
+            vec![(1, 28 + 3), (2, 28 + 4)],
+            "exactly the two accepted cells, at the pane's screen position"
+        );
+        assert!(
+            underlined(&clean).is_empty(),
+            "control: nothing is underlined without an accepted span"
+        );
+        // The cached server frame is untouched: a clear restores the exact
+        // prior compose.
+        view.link_hover.clear();
+        assert_eq!(view.compose().cells, clean.cells);
+    }
+
     #[test]
     fn hover_focus_settles_on_a_landed_pane() {
         // AC1-HP: land in a non-focused pane and rest. on_hover records the
@@ -21778,13 +22237,30 @@ mod tests {
     #[tokio::test]
     async fn row_menu_unbound_key_dismisses() {
         // codex P2: the shared popup contract says an unbound key dismisses; the
-        // row menu must not just ring BEL and stay open.
+        // row menu must not just ring BEL and stay open. (x-91a1) The byte is
+        // chosen against the OPEN menu's accelerator set, so this fixture keeps
+        // testing dismissal even after more actions gain menu keys.
         let mut v = unified_rows_view();
         let idx = agent_row_at(&v, |a| a.name == "bg-claude");
         v.open_row_menu(idx, Anchor::Center);
+        let bound: Vec<u8> = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .filter_map(|a| a.accelerator_id())
+            .filter_map(crate::keys::menu_byte_for)
+            .collect();
+        let unbound = (b'a'..=b'z')
+            .find(|b| !bound.contains(b))
+            .expect("the menu scope leaves some letter unbound");
         let mut buf: Vec<u8> = Vec::new();
-        row_menu_keys(&mut v, b"z", &mut buf).await.unwrap();
-        assert!(v.row_menu.is_none(), "an unbound key dismisses the menu");
+        row_menu_keys(&mut v, &[unbound], &mut buf).await.unwrap();
+        assert!(
+            v.row_menu.is_none(),
+            "a byte no entry of this menu answers still dismisses it"
+        );
     }
 
     #[tokio::test]
@@ -21987,6 +22463,160 @@ mod tests {
             .iter()
             .position(|a| *a == action)
             .unwrap_or_else(|| panic!("menu should offer {action:?}"));
+    }
+
+    // ---- (x-91a1) menu-scoped accelerators -----------------------------------
+
+    #[tokio::test]
+    async fn menu_accelerator_rename_opens_the_tab_rename_overlay() {
+        // AC2-HP: the byte drawn beside Rename - read from the menu registry,
+        // never a literal - opens the rename overlay for the menu's stable tab.
+        // The OVERLAY is the marker: asserting the menu closed would pass even
+        // if the advertised key merely dismissed it, which is the exact defect
+        // this node closes.
+        let mut v = view_with_agents(vec![]);
+        let want = squad_tabs(&v, 1)[0].id;
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+        let key = crate::keys::menu_byte_for("rename-tab").expect("rename-tab registered");
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
+        assert_eq!(
+            v.rename.as_ref().map(|(t, _)| t.clone()),
+            Some(super::RenameTarget::Tab(want)),
+            "the advertised key opened the rename overlay for this tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn menu_accelerator_new_tab_and_reorder_send_their_commands() {
+        // The tab menu's other advertised keys are executable too, bytes read
+        // from the registry: n sends NewTab, `<` reorders the pinned tab one
+        // slot left. Positive markers on the decoded commands.
+        let mut v = view_with_agents(vec![]);
+        let want = squad_tabs(&v, 1)[0].id;
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+        let n = crate::keys::menu_byte_for("new-tab").expect("new-tab registered");
+        row_menu_keys(&mut v, &[n], &mut buf).await.unwrap();
+        assert_eq!(decode_cmds(buf), vec![Command::NewTab], "n opened a tab");
+
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+        let left = crate::keys::menu_byte_for("move-tab-left").expect("move-tab-left registered");
+        row_menu_keys(&mut v, &[left], &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::ReorderTab {
+                squad: 1,
+                tab: want,
+                delta: -1
+            }],
+            "the angle bracket moved the pinned tab left"
+        );
+    }
+
+    #[tokio::test]
+    async fn menu_accelerator_close_arms_the_confirm_and_closes() {
+        // AC2-EDGE: the registry byte for Close arms the SAME confirm the click
+        // arms, and committing it selects then closes the captured tab.
+        let mut v = view_with_agents(vec![]);
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+        let key = crate::keys::menu_byte_for("close-tab").expect("close-tab registered");
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "arming sends nothing");
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(super::ConfirmKind::CloseTab { tab: 0 }) => {}
+            _ => panic!("expected CloseTab{{tab:0}} confirm"),
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::SelectTab(0), Command::CloseTab],
+            "the captured tab is selected then closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn menu_accelerator_remove_arms_the_dead_row_confirm() {
+        // AC2-EDGE: the scoped `x` on an EXITED row's menu arms the removal
+        // confirm for that exact row, the same confirm Enter on Remove arms.
+        let exited = {
+            let mut r = pane_hosted_row("dead", 0);
+            r.pane_id = None;
+            r.exited = true;
+            r
+        };
+        let mut v = view_with_agents(vec![exited]);
+        // A lone exited row makes the squad majority-exited -> LiveOnly, which
+        // hides the row under test; pin Expanded so it renders (same pin as
+        // the resume test).
+        v.section_view.insert(
+            SectionKey::Squad("/code/footnote".into()),
+            SectionView::Expanded,
+        );
+        let idx = agent_row_at(&v, |a| a.name == "dead");
+        v.open_row_menu(idx, Anchor::Center);
+        let key = crate::keys::menu_byte_for("remove-row").expect("remove-row registered");
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(super::ConfirmKind::RemoveAgent { name }) => assert_eq!(name, "dead"),
+            _ => panic!("expected RemoveAgent{{dead}} confirm"),
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::RemoveAgent {
+                name: "dead".into()
+            }],
+            "the confirm the key armed removes exactly this row"
+        );
+    }
+
+    #[test]
+    fn menu_accelerators_never_collide_within_one_menu() {
+        // Dispatch picks the FIRST action a byte answers, so a second entry in
+        // the SAME menu sharing that byte would be unreachable. Cross-menu
+        // reuse (tab close vs dead-row remove) is legal - the actions never
+        // share a popup - so uniqueness is asserted per built menu.
+        let exited = {
+            let mut r = pane_hosted_row("dead", 0);
+            r.pane_id = None;
+            r.exited = true;
+            r
+        };
+        let live = pane_hosted_row("p", 9);
+        let tabs = squad_tabs(&view_with_agents(vec![]), 1);
+        let menus: &[(&str, RowMenu)] = &[
+            ("exited row", super::build_row_menu(&exited, Anchor::Center)),
+            (
+                "live pane row",
+                super::build_row_menu(&live, Anchor::Center),
+            ),
+            ("tab", super::build_tab_menu(0, &tabs[0], Anchor::Center)),
+        ];
+        for (name, menu) in menus {
+            let mut seen: Vec<u8> = Vec::new();
+            for a in &menu.actions {
+                if let Some(id) = a.accelerator_id() {
+                    let b = crate::keys::menu_byte_for(id)
+                        .unwrap_or_else(|| panic!("{name}: {id} left the menu scope"));
+                    assert!(
+                        !seen.contains(&b),
+                        "{name}: two entries answer {} ({})",
+                        b as char,
+                        id
+                    );
+                    seen.push(b);
+                }
+            }
+        }
     }
 
     // ---- (x-7683) wave 1: right-click coverage on pane cells -----------------
@@ -23102,9 +23732,11 @@ mod tests {
 
     #[test]
     fn menu_hints_resolve_the_live_keymap_and_never_invent_one() {
-        // AC8-EDGE: bound actions show the LIVE glyph (diff-pane, the tab
-        // verbs); actions with no prefix binding - peek, mail, resume, stop,
-        // remove, focus - show NO hint, and no builder carries a literal chord.
+        // AC8-EDGE, x-91a1: hints resolve from the LIVE menu-scope registry
+        // (`menu_key_for`), never a literal and never a prefix-only chord - the
+        // open menu does not run prefix chords, so advertising one is the LD9
+        // lie. Prefix-only actions (Diff) and scope-less actions (peek,
+        // resume) render NO key.
         let exited = {
             let mut r = pane_hosted_row("dead", 0);
             r.pane_id = None;
@@ -23122,16 +23754,17 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("no entry labelled {label}"))
         };
-        // Diff is the one row-menu action a prefix chord names.
         assert_eq!(
-            hint_of(&row, "Diff"),
-            crate::keys::key_for("diff-pane").unwrap_or_default()
+            hint_of(&row, "Remove"),
+            crate::keys::menu_key_for("remove-row").unwrap_or_default(),
+            "Remove mirrors the menu-scope glyph for remove-row"
         );
-        for label in ["Remove", "Peek", "Resume"] {
-            assert_eq!(hint_of(&row, label), "", "{label} has no prefix binding");
+        for label in ["Diff", "Peek", "Resume"] {
+            assert_eq!(hint_of(&row, label), "", "{label} has no menu key");
         }
-        // Tab menu: every bound verb resolves live; the join grid carries no
-        // hint slot at all, so nothing can hardcode a chord there either.
+        // Tab menu: every tab verb mirrors its scoped glyph; the join grid
+        // carries no hint slot at all, so nothing can hardcode a chord there
+        // either.
         let tabs = squad_tabs(&view_with_agents(vec![]), 1);
         let tab = super::build_tab_menu(0, &tabs[0], Anchor::Center);
         for (label, id) in [
@@ -23143,8 +23776,8 @@ mod tests {
         ] {
             assert_eq!(
                 hint_of(&tab, label),
-                crate::keys::key_for(id).unwrap_or_default(),
-                "{label} mirrors key_for({id})"
+                crate::keys::menu_key_for(id).unwrap_or_default(),
+                "{label} mirrors menu_key_for({id})"
             );
         }
         for r in tab.popup.rows.iter().chain(row.popup.rows.iter()) {

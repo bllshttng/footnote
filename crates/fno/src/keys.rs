@@ -915,6 +915,78 @@ fn disp_for(action_id: &str, bindings: &[KeyBinding]) -> Option<String> {
         .map(|kb| kb.disp.clone())
 }
 
+/// One in-menu accelerator: the byte that selects an entry while a context
+/// menu is OPEN, under the same stable action-id vocabulary the prefix table
+/// uses. A SEPARATE scope, not a rebind: prefix chords read a byte only after
+/// the prefix, menu keys read it bare inside a popup, so the two layers never
+/// consult each other's tables (ruling d-a5e7569d - `x` stays kill-pane after
+/// a prefix and becomes the destructive verb inside a menu).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuKeyBinding {
+    pub action: &'static str,
+    pub key: u8,
+}
+
+/// The shipped in-menu accelerator table: app vocabulary inside the open menu
+/// (`r` renames, `x` is the destructive verb, `n` and the angle brackets drive
+/// the tab verbs). One byte MAY serve two action ids here (`close-tab` and
+/// `remove-row` never share a popup), so collision rules live with the caller,
+/// which knows which menu is open. A static slice: lookups run per popup row
+/// at build time and per offered action on every in-menu keypress.
+pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
+    MenuKeyBinding {
+        action: "rename-tab",
+        key: b'r',
+    },
+    MenuKeyBinding {
+        action: "rename-workspace",
+        key: b'r',
+    },
+    MenuKeyBinding {
+        action: "close-tab",
+        key: b'x',
+    },
+    MenuKeyBinding {
+        action: "remove-row",
+        key: b'x',
+    },
+    MenuKeyBinding {
+        action: "new-tab",
+        key: b'n',
+    },
+    MenuKeyBinding {
+        action: "move-tab-left",
+        key: b'<',
+    },
+    MenuKeyBinding {
+        action: "move-tab-right",
+        key: b'>',
+    },
+];
+
+/// The one resolver both menu-scope projections read: the binding registered
+/// for `action_id`, when the menu scope carries one.
+fn menu_binding_for(action_id: &str) -> Option<&'static MenuKeyBinding> {
+    MENU_BINDINGS.iter().find(|mb| mb.action == action_id)
+}
+
+/// The display glyph for `action_id` in menu scope: what the popup draws
+/// beside the entry, i.e. the byte that RUNS it in-menu. Unlike [`key_for`]
+/// (the prefix chord) this describes the input path the reader is actually
+/// on. `None` when the menu scope does not bind the action - a prefix-only
+/// action renders no menu key rather than advertising a chord the open menu
+/// would dismiss on (the LD9 lie this node closes).
+pub fn menu_key_for(action_id: &str) -> Option<String> {
+    menu_binding_for(action_id).map(|mb| key_disp(mb.key))
+}
+
+/// The dispatch half of [`menu_key_for`]: the byte that executes `action_id`
+/// in-menu, for the popup key handler to match a typed byte against the
+/// actions the OPEN menu actually offers.
+pub fn menu_byte_for(action_id: &str) -> Option<u8> {
+    menu_binding_for(action_id).map(|mb| mb.key)
+}
+
 /// The one-line teaser shown while a prefix is pending, built from the LIVE
 /// bindings.
 ///
@@ -1715,6 +1787,47 @@ mod tests {
                 kb.key as char
             );
         }
+    }
+
+    #[test]
+    fn menu_accelerators_round_trip_and_stay_out_of_the_prefix_scope() {
+        // x-91a1 AC1: every menu binding resolves to a glyph and back to the
+        // same byte/action pair, the prefix table keeps its own meanings
+        // untouched (menu `x` did not rebind prefix+x), and a prefix-only
+        // action has no menu key to advertise.
+        for mb in MENU_BINDINGS {
+            assert_eq!(
+                menu_key_for(mb.action),
+                Some(key_disp(mb.key)),
+                "{}",
+                mb.action
+            );
+            assert_eq!(menu_byte_for(mb.action), Some(mb.key), "{}", mb.action);
+        }
+        // The tab verbs read as this app in both scopes (menu n and angle
+        // brackets beside the prefix chords); Diff stays prefix-only - a
+        // row-menu action with no settled menu meaning renders no key.
+        assert!(
+            menu_key_for("diff-pane").is_none(),
+            "prefix-only: no menu key"
+        );
+        let rows = key_bindings();
+        let byte_of = |action: &str| {
+            rows.iter()
+                .find(|kb| kb.action == action)
+                .map(|kb| kb.key)
+                .unwrap_or_else(|| panic!("prefix table lost {action}"))
+        };
+        assert_eq!(byte_of("close-pane"), b'x', "prefix+x still kills a pane");
+        assert_eq!(byte_of("new-tab"), b'c', "prefix+c still opens a tab");
+        assert_eq!(byte_of("rename-tab"), b',');
+        assert_eq!(byte_of("close-tab"), b'&');
+        assert_eq!(byte_of("move-tab-left"), b'<');
+        assert_eq!(byte_of("move-tab-right"), b'>');
+        // The two scopes reuse `x` on purpose: menu close/remove can never
+        // co-occur with the prefix layer, which reads a byte only after the
+        // prefix byte.
+        assert!(MENU_BINDINGS.iter().any(|mb| mb.key == b'x'));
     }
 
     #[test]
