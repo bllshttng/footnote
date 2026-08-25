@@ -3055,3 +3055,111 @@ decisions:
     )
     _, live, _ = list_decisions("process-admission", lane="law", state="live")
     assert [row["decision_id"] for row in live] == ["d-fedcba98"]
+
+
+def test_standing_query_reports_one_current_repository_law(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-cab50789
+    subject: target-self-handoff
+    aliases: [handoff, target self-handoff]
+    decision: Context pressure is not a handoff trigger.
+    rationale: Compaction preserves ownership.
+""",
+    )
+
+    machine = runner.invoke(
+        decide_app,
+        ["list", "--subject", "handoff", "--lane", "law", "--state", "live", "--json"],
+    )
+    assert machine.exit_code == 0, machine.output
+    payload = json.loads(machine.stdout)
+    assert payload["canonical_subject"] == "target-self-handoff"
+    assert payload["current_law"] == {
+        "status": "single",
+        "decision_ids": ["d-cab50789"],
+        "decision_id": "d-cab50789",
+    }
+
+    human = runner.invoke(
+        decide_app,
+        ["list", "--subject", "handoff", "--lane", "law", "--state", "live"],
+    )
+    assert "CURRENT LAW  target-self-handoff  d-cab50789" in human.stdout
+
+
+def test_standing_query_and_review_list_surface_the_same_conflict(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-aaa00001
+    subject: deployment-policy
+    aliases: [deployments]
+    decision: Deploy on Tuesday.
+    rationale: First current ruling.
+  - decision_id: d-bbb00002
+    subject: deployment-policy
+    aliases: []
+    decision: Deploy on Wednesday.
+    rationale: Second unrelated current ruling.
+""",
+    )
+
+    direct = runner.invoke(
+        decide_app,
+        ["list", "--subject", "deployments", "--lane", "law", "--state", "live", "--json"],
+    )
+    payload = json.loads(direct.stdout)
+    assert payload["current_law"] == {
+        "status": "conflict",
+        "decision_ids": ["d-bbb00002", "d-aaa00001"],
+    }
+
+    human = runner.invoke(
+        decide_app,
+        ["list", "--subject", "deployments", "--lane", "law", "--state", "live"],
+    )
+    assert "LAW CONFLICT  deployment-policy  d-bbb00002,d-aaa00001" in human.stdout
+
+    review = json.loads(
+        runner.invoke(decide_app, ["list", "--review-list", "--json"]).stdout
+    )
+    group = next(item for item in review["groups"] if item["subject"] == "deployment-policy")
+    assert [row["decision_id"] for row in group["decisions"]] == payload["current_law"][
+        "decision_ids"
+    ]
+
+
+def test_standing_query_reports_none_but_catalog_damage_is_a_read_failure(
+    root: Path, tmp_graph: Path, index: Path
+):
+    empty = runner.invoke(
+        decide_app,
+        ["list", "--subject", "unknown-policy", "--lane", "law", "--state", "live", "--json"],
+    )
+    assert empty.exit_code == 0, empty.output
+    payload = json.loads(empty.stdout)
+    assert payload["canonical_subject"] == "unknown-policy"
+    assert payload["current_law"] == {"status": "none", "decision_ids": []}
+
+    human = runner.invoke(
+        decide_app,
+        ["list", "--subject", "unknown-policy", "--lane", "law", "--state", "live"],
+    )
+    assert "NO CURRENT LAW  unknown-policy" in human.stdout
+
+    path = _write_repository_catalog(root, "version: 2\ndecisions: []\n")
+    damaged = runner.invoke(
+        decide_app,
+        ["list", "--subject", "unknown-policy", "--lane", "law", "--state", "live", "--json"],
+    )
+    assert damaged.exit_code == 1
+    assert str(path) in damaged.stderr
+    assert '"status":"none"' not in damaged.stdout

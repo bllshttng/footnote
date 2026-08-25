@@ -1165,9 +1165,42 @@ def list_decisions(
     return subject or "(all)", out, damaged
 
 
+def current_law(subject: str) -> dict[str, Any]:
+    """Return one explicit current-law verdict without choosing by recency."""
+    from fno.decide.catalog import load_catalog
+
+    canonical_subject = load_catalog().canonical_subject(subject)
+    _, rows, _ = list_decisions(
+        canonical_subject,
+        limit=None,
+        lane="law",
+        state="live",
+    )
+    decision_ids = [str(row.get("decision_id") or "") for row in rows]
+    if not decision_ids:
+        status = "none"
+    elif len(decision_ids) == 1:
+        status = "single"
+    else:
+        status = "conflict"
+    verdict: dict[str, Any] = {
+        "status": status,
+        "decision_ids": decision_ids,
+    }
+    if status == "single":
+        verdict["decision_id"] = decision_ids[0]
+    return {
+        "canonical_subject": canonical_subject,
+        "current_law": verdict,
+    }
+
+
 def review_list() -> dict[str, Any]:
     """Report unresolved multi-ruling subjects without mutating the index."""
     _, rows, damaged = list_decisions(limit=None, state="all")
+    from fno.decide.catalog import load_catalog
+
+    catalog = load_catalog()
     grouped: dict[str, list[dict[str, Any]]] = {}
     display_subjects: dict[str, str] = {}
     try:
@@ -1194,12 +1227,16 @@ def review_list() -> dict[str, Any]:
         }
 
     for row in rows:
-        subject = str(row.get("subject") or "").strip()
+        subject = catalog.canonical_subject(str(row.get("subject") or ""))
         if not subject:
             subjectless += 1
             subjectless_rows.append(review_row(row))
         authority = row.get("authority_source")
-        if authority and authority not in AUTHORITY_SOURCES:
+        if (
+            authority
+            and row.get("_source") != "repository"
+            and authority not in AUTHORITY_SOURCES
+        ):
             invalid_authority += 1
         if row.get("lifecycle") != "live" or not subject:
             continue
