@@ -8238,10 +8238,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // (FNO_DRIVER_LIB, the same discriminator terminal_stop.rs
                     // uses) exits on allow. codex/gemini keep today's block
                     // behavior until their daemon-consumer waker ships (AC1-EDGE).
-                    let can_idle = harness_can_idle(
-                        author_harness.as_deref(),
-                        std::env::var("FNO_DRIVER_LIB").is_ok(),
-                    );
+                    let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
+                    let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
                     let blocker = if can_idle {
                         async_wait_class(&pr_info, open_findings.is_empty(), head_shipped)
                     } else {
@@ -8309,10 +8307,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // Not an async-wait class, or a loop-run child: fall through
                     // with an explicit refusal before the real blocker.
                     Some(if !can_idle {
-                        format!(
-                            "watching ignored: harness {} cannot idle",
-                            author_harness.as_deref().unwrap_or("unknown")
-                        )
+                        watching_harness_refusal(author_harness.as_deref(), is_loop_run_child)
                     } else if blocker.is_none() && !pr_info.unaddressed_findings.is_empty() {
                         format!(
                             "watching ignored: {} unaddressed findings, this is not an async wait",
@@ -8717,6 +8712,17 @@ fn watch_window_ms(timeout: Option<&str>) -> i64 {
 /// "unroutable harness -> status quo, never a dead watch" degradation.
 fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
     author_harness == Some("claude") && !is_loop_run_child
+}
+
+fn watching_harness_refusal(author_harness: Option<&str>, is_loop_run_child: bool) -> String {
+    if is_loop_run_child {
+        "watching ignored: loop-run child cannot idle".to_string()
+    } else {
+        format!(
+            "watching ignored: harness {} cannot idle",
+            author_harness.unwrap_or("unknown")
+        )
+    }
 }
 
 /// Whether the PR is in the async-wait class a `<watching>` tag may idle on
@@ -14103,6 +14109,18 @@ git_bounded();";
         assert!(!harness_can_idle(Some("gemini"), false));
         // Unknown harness (bare shell / daemon): conservative block.
         assert!(!harness_can_idle(None, false));
+    }
+
+    #[test]
+    fn watching_refusal_names_the_disqualifying_substrate() {
+        assert_eq!(
+            watching_harness_refusal(Some("claude"), true),
+            "watching ignored: loop-run child cannot idle"
+        );
+        assert_eq!(
+            watching_harness_refusal(Some("codex"), false),
+            "watching ignored: harness codex cannot idle"
+        );
     }
 
     #[test]
