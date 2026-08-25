@@ -568,7 +568,7 @@ impl Scanner {
 
     /// Open the matching repeat window for an emitted repeatable event. Resize
     /// emission funnels through here so letter and Ctrl-arrow paths agree.
-    fn arm_if_repeat(&mut self, ev: &Event, now: Instant) {
+    pub fn arm_if_repeat(&mut self, ev: &Event, now: Instant) {
         match ev {
             Event::Cmd(Command::ResizeDir(_)) => self.arm_repeat(now),
             Event::ShowPaneIds => self.arm_show_pane_ids(now),

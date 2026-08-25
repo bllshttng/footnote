@@ -12420,11 +12420,9 @@ async fn keys_modal_keys(
                 // chord uses (Locked 3), then the modal closes.
                 ev => {
                     view.keys_modal = None;
-                    // Parity with a typed chord: a modal-executed resize arms
-                    // the repeat window too (the scanner never saw this byte).
-                    if matches!(ev, Event::Cmd(Command::ResizeDir(_))) {
-                        scanner.arm_repeat(Instant::now());
-                    }
+                    // Parity with a typed chord: modal execution arms any
+                    // repeatable event too (the scanner never saw this byte).
+                    scanner.arm_if_repeat(&ev, Instant::now());
                     if matches!(
                         dispatch_event(view, ev, sock_w).await?,
                         DispatchFlow::Detach
@@ -12455,11 +12453,9 @@ async fn keys_modal_execute_selected(
     match ev {
         Some(ev) => {
             view.keys_modal = None;
-            // Parity with a typed chord: a modal-executed resize (Enter or click)
-            // arms the repeat window too (the scanner never saw a key here).
-            if matches!(ev, Event::Cmd(Command::ResizeDir(_))) {
-                scanner.arm_repeat(Instant::now());
-            }
+            // Parity with a typed chord: modal execution arms any repeatable
+            // event too (the scanner never saw a key here).
+            scanner.arm_if_repeat(&ev, Instant::now());
             dispatch_event(view, ev, sock_w).await
         }
         None => {
@@ -30717,6 +30713,28 @@ mod tests {
             ClientMsg::Command(Command::ResizeDir(crate::tree::Dir::Left)) => {}
             other => panic!("bare H after a modal resize should repeat-resize, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn keys_modal_executed_pane_ids_arms_the_repeat_window() {
+        let mut v = two_pane_view();
+        v.term = (40, 80);
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        v.open_keys_modal();
+        keys_modal_keys(&mut v, &mut scanner, b"\\", &mut buf)
+            .await
+            .unwrap();
+        buf.clear();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\\", &mut buf)
+            .await
+            .unwrap();
+        assert!(
+            buf.is_empty(),
+            "a modal pane-id repeat must stay client-local"
+        );
+        assert!(v.pane_ids_until.is_some(), "the repeat reopened the reveal");
     }
 
     #[tokio::test]
