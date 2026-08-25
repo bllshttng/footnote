@@ -39,7 +39,7 @@ def _live_root_pids() -> set[int]:
         for row in load_registry():
             if row.status not in LIVE_STATUSES or row.pid is None:
                 continue
-            if _pid_alive(row.pid, row.pid_start_time) is not False:
+            if _pid_alive(row.pid, row.pid_start_time) is True:
                 roots.add(row.pid)
     except Exception:
         pass
@@ -57,7 +57,7 @@ def _live_root_pids() -> set[int]:
         if (
             isinstance(pid, int)
             and not isinstance(pid, bool)
-            and _pid_alive(pid, pid_start) is not False
+            and _pid_alive(pid, pid_start) is True
         ):
             roots.add(pid)
     except Exception:

@@ -86,10 +86,15 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
     monkeypatch.setattr(
         "fno.agents.spawn_gate._pid_alive",
-        lambda pid, _start: pid == 900,
+        lambda pid, _start: True if pid == 900 else None,
     )
 
     assert doctor_footprint._live_root_pids() == {900}
+
+    (tmp_path / "opencode-serve.json").write_text(
+        json.dumps({"pid": 901, "pid_start": 123}), encoding="utf-8"
+    )
+    assert doctor_footprint._live_root_pids() == set()
 
 
 def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:
