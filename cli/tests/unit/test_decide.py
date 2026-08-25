@@ -754,6 +754,127 @@ def test_reindex_counts_decision_and_retraction_keys_once(
     assert counts["already"] == 2
 
 
+def test_default_decision_consumers_receive_only_live_rows(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.events import decision_retracted
+    from fno.decide import list_decisions
+
+    entries = json.loads(tmp_graph.read_text())
+    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
+    tmp_graph.write_text(json.dumps(entries) + "\n")
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-expired01",
+            "decision": "expired coordination",
+            "subject": "x-7d94",
+            "authority_source": "agent",
+            "expiry_ref": {"kind": "node", "node_id": "x-7d94"},
+            "ts": "2026-08-20T00:00:00Z",
+        },
+        {
+            "decision_id": "d-live0001",
+            "decision": "live law",
+            "subject": "live-topic",
+            "authority_source": "operator",
+            "ts": "2026-08-22T00:00:00Z",
+        },
+        {
+            "decision_id": "d-retract1",
+            "decision": "retracted law",
+            "subject": "retracted-topic",
+            "authority_source": "operator",
+            "ts": "2026-08-23T00:00:00Z",
+        },
+        {
+            "decision_id": "d-unscoped1",
+            "decision": "unscoped coordination",
+            "subject": "pr-99",
+            "authority_source": "agent",
+            "ts": "2026-08-24T00:00:00Z",
+        },
+    )
+    event = decision_retracted(
+        target_decision_id="d-retract1",
+        subject="retracted-topic",
+        reason="withdrawn",
+        authority_source="agent",
+    )
+    with index.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event) + "\n")
+
+    _, rows, _ = list_decisions()
+    assert [row["decision_id"] for row in rows] == ["d-live0001"]
+
+
+def test_missing_supersession_target_refuses_before_recording(
+    root: Path, tmp_graph: Path, index: Path
+):
+    result = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "x-7d94",
+            "--decision",
+            "coordination with missing target",
+            "--authority",
+            "agent",
+            "--supersedes",
+            "d-missing-law",
+        ],
+    )
+    assert result.exit_code != 0, result.output
+    assert not index.exists()
+    assert not (root / ".fno" / "events.jsonl").exists()
+
+
+def test_retraction_origin_is_floored_before_event_persistence(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path, monkeypatch
+):
+    _patch_claim_receipt_identity(monkeypatch, tmp_path, "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-origin01",
+            "decision": "coordination row",
+            "subject": "x-7d94",
+            "authority_source": "agent",
+            "ts": "2026-08-22T00:00:00Z",
+        },
+    )
+    result = runner.invoke(
+        decide_app,
+        [
+            "retract",
+            "d-origin01",
+            "--reason",
+            "withdrawn",
+            "--authority",
+            "agent",
+            "--origin",
+            "operator",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    event = [event for event in _events(root) if event["type"] == "decision_retracted"][-1]
+    assert event["data"]["origin"] == "peer"
+
+
+def test_retract_reports_unreadable_index_without_traceback(
+    root: Path, tmp_graph: Path, index: Path
+):
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.symlink_to(index.parent / "missing-decisions.jsonl")
+    result = runner.invoke(
+        decide_app,
+        ["retract", "d-anything", "--reason", "withdrawn", "--authority", "agent"],
+    )
+    assert result.exit_code == 1
+    assert "cannot read the decision index" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_review_list_reports_multiple_live_rulings_without_picking_a_winner(
     root: Path, tmp_graph: Path, index: Path
 ):
@@ -1168,9 +1289,13 @@ def test_list_derives_and_filters_authority_lanes_in_the_engine(
         row["question_id"] = question_id
     _write_decision_index(index, row)
 
-    _, decisions, _ = list_decisions("pr-923", lane=expected)
+    _, decisions, _ = list_decisions("pr-923", lane=expected, state="all")
     assert [d["lane"] for d in decisions] == [expected]
-    _, excluded, _ = list_decisions("pr-923", lane="unattributed" if expected != "unattributed" else "law")
+    _, excluded, _ = list_decisions(
+        "pr-923",
+        lane="unattributed" if expected != "unattributed" else "law",
+        state="all",
+    )
     assert excluded == []
 
 
@@ -2106,17 +2231,16 @@ def test_one_id_is_one_row_even_if_the_index_holds_it_twice(
     assert len(payload["decisions"]) == 1, payload
 
 
-def test_superseding_an_id_nobody_recorded_says_so(
+def test_superseding_an_id_nobody_recorded_fails_closed(
     root: Path, tmp_graph: Path, index: Path
 ):
-    """A transposed digit is otherwise a silent no-op, and the overturned
-    ruling keeps reading as current."""
+    """A missing target cannot bypass law protection during an index split."""
     res = runner.invoke(
         decide_app,
         ["--subject", "pr-923", "--decision", "held", "--supersedes", "d-1234657"],
     )
-    assert res.exit_code == 0, res.output
-    assert "no decision d-1234657 is on record" in res.output
+    assert res.exit_code != 0, res.output
+    assert "decide-reindex" in res.output
 
 
 def test_an_install_with_no_index_is_told_to_backfill(

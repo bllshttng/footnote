@@ -244,7 +244,7 @@ def _record(
         # of an overturned decision can tell it is not.
         from fno.decide import list_decisions
 
-        _, everything, _ = list_decisions()
+        _, everything, _ = list_decisions(state="all")
         if supersedes not in {d.get("decision_id") for d in everything}:
             typer.echo(
                 f"backlog decide: warning - no decision {supersedes} is on record, so "
@@ -375,6 +375,14 @@ def _retract(
             authority_source=authority,
             origin=origin,
         )
+    except OSError as exc:
+        typer.echo(
+            f"backlog decide-retract: cannot read the decision index: {exc}. "
+            "Restore the index or run `fno backlog decide-reindex`; no "
+            "retraction was recorded.",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
     except (KeyError, ValueError) as exc:
         typer.echo(f"backlog decide-retract: refused: {exc}", err=True)
         raise typer.Exit(2)
@@ -628,7 +636,7 @@ def _list_decisions(
         # and a truncated answer can say so - a silent cut on a recall verb is
         # the same lie as a missing record.
         label, found, damaged = list_decisions(
-            subject, limit=None, lane=lane, state=state
+            subject, limit=None, lane=lane, state=state if state is not None else "all"
         )
     except (OSError, ValueError) as exc:
         # ValueError covers UnicodeDecodeError, which a torn multi-byte append
@@ -696,7 +704,7 @@ def _list_decisions(
             # only the pre-cutover rows, so a subject with 2 unattributed and 3
             # coord rulings heard about the 2 and never the 3: the more
             # specific branch gave the less complete answer.
-            _, unfiltered, _ = list_decisions(subject, limit=None)
+            _, unfiltered, _ = list_decisions(subject, limit=None, state="all")
             if unfiltered:
                 noun = "decision" if len(unfiltered) == 1 else "decisions"
                 counts: "dict[str, int]" = {}

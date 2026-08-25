@@ -384,6 +384,11 @@ def record_decision(
 
     if supersedes:
         superseded_row = _decision_row_by_id(supersedes)
+        if superseded_row is None:
+            raise ValueError(
+                f"supersession target {supersedes} is not recoverable from the "
+                "decision index. Run `fno backlog decide-reindex` before retrying."
+            )
         if (
             superseded_row is not None
             and _decision_lane(superseded_row) == "law"
@@ -498,6 +503,7 @@ def retract_decision(
     if target is None:
         raise KeyError(decision_id)
 
+    origin = enforce_origin_floor(origin)
     provenance = _resolve_decider(None, authority_source, origin=origin)
     if _decision_lane(target) == "law" and provenance.authority_source != "operator":
         raise RefusedAuthorityError(provenance.decided_by, origin)
@@ -960,7 +966,7 @@ def list_decisions(
     subject: str | None = None,
     limit: int | None = None,
     lane: str | None = None,
-    state: str | None = None,
+    state: str | None = "live",
 ) -> "tuple[str, list[dict], int]":
     """Decision history from the index, newest first. Never raises LookupError.
 
