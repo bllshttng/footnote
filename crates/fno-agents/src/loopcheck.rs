@@ -1190,14 +1190,15 @@ fn is_documentation_path(path: &str) -> bool {
     p.ends_with(".md") || p.starts_with("docs/")
 }
 
-/// Whether the author harness has a self-review verb (claude `/code-review`,
-/// codex `/review`, opencode `/review-changes`). The self-review floor only
-/// applies on these: gemini/agy have no native review verb, so flooring
-/// code-review would demand an attestation nothing produces and wedge the
-/// loop. Their path is route 3 (a spawned reviewer), which is deferred. Pure
-/// so a unit test pins the set.
+/// Whether a lane THIS code drives can fire the harness's review verb (claude
+/// `/code-review`, codex `/review`). The self-review floor only applies on
+/// these: gemini/agy have no native review verb and opencode's recorded
+/// `/review-changes` has no fireable lane (the daemon lane submits text, the
+/// mux row declares submit unsupported), so flooring code-review would demand
+/// an attestation nothing produces and wedge the loop. Their path is route 3
+/// (a spawned reviewer), which is deferred. Pure so a unit test pins the set.
 fn harness_can_self_review(harness: Option<&str>) -> bool {
-    matches!(harness, Some("claude") | Some("codex") | Some("opencode"))
+    matches!(harness, Some("claude") | Some("codex"))
 }
 
 /// The KNOWN harnesses with no native self-review verb. A set, not
@@ -1207,12 +1208,13 @@ fn harness_can_self_review(harness: Option<&str>) -> bool {
 /// `cli/src/fno/review_capability.py`; the two are pinned to each other by
 /// `test_floor_verbless_set_stays_locked_to_the_rust_twin`, so a harness lands
 /// on both sides or the suite goes red.
-const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy"];
+const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy", "opencode"];
 
 /// The self-review FLOOR policy on the author harness (x-129b). Distinct from
 /// the capability question above: `None` answers "unattributable", not
 /// "verbless". A KNOWN harness with a native verb floors; a KNOWN verbless
-/// harness (gemini/agy) does not, because the floor would demand an
+/// harness (gemini/agy; opencode's verb is recorded but no lane this code
+/// drives can fire it) does not, because the floor would demand an
 /// attestation no native verb there produces. An UNRESOLVED harness (absent
 /// or ambiguous ambient markers - a claude session started from a codex
 /// shell) floors, because ambiguity about who authored the run is not
@@ -15410,9 +15412,10 @@ git_bounded();";
         // reviewer) is the path for harnesses without one and is deferred.
         assert!(harness_can_self_review(Some("claude")));
         assert!(harness_can_self_review(Some("codex")));
-        // opencode carries a recorded native verb (/review-changes), so the
-        // floor is satisfiable there; agy/gemini have none and stay unfloored.
-        assert!(harness_can_self_review(Some("opencode")));
+        // opencode's /review-changes is recorded but no lane this code drives
+        // can fire it (daemon lane submits text; mux declares submit
+        // unsupported), so the floor must not demand its attestation.
+        assert!(!harness_can_self_review(Some("opencode")));
         assert!(!harness_can_self_review(Some("gemini")));
         assert!(!harness_can_self_review(Some("agy")));
         assert!(!harness_can_self_review(None));
@@ -15429,6 +15432,7 @@ git_bounded();";
         assert!(!self_review_floor_applies(None, true));
         assert!(self_review_floor_applies(Some("claude"), false));
         assert!(self_review_floor_applies(Some("codex"), true));
+        assert!(!self_review_floor_applies(Some("opencode"), false));
         assert!(!self_review_floor_applies(Some("gemini"), false));
         assert!(!self_review_floor_applies(Some("agy"), false));
         // An unrecognized spelling is an unattributed run: it floors rather

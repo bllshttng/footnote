@@ -10,7 +10,7 @@ domains:
   {domain-name}:
     phases:
       execute: {skill-name}     # default: fno:execute waves
-      review: {skill-name}      # default: advisory self-review; fno:review (sigma) only when sigma is a configured reviewer
+      review: {skill-name}      # default: native final-head request-self-review; sigma runs once post-ship only when configured
       validate: {bash-command}  # default: detected from project
       ship: {skill-name}        # default: fno:pr create
       external: {skill-name}    # default: fno:pr check
@@ -29,7 +29,7 @@ The `code` domain is never declared — it's the implicit fallback. These are it
 | Phase | Default Skill/Command | Purpose |
 |-------|----------------------|---------|
 | execute | `fno:execute waves` | Wave orchestration with TDD |
-| review | advisory self-review (sigma via `fno:review` only when `config.review.reviewers` names it) | Code quality + integration tests |
+| review | `fno do target request-self-review --pr <n>` on the final pushed HEAD (sigma via `fno:review` only when configured) | Code quality + integration tests |
 | validate | *(project-detected)* | `npm run build` / `pytest` / etc. |
 | ship | `fno:pr create` | Create GitHub PR |
 | external | `fno:pr check` | External AI review (Gemini, etc.) |
