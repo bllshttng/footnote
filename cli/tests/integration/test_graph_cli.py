@@ -288,6 +288,39 @@ def test_ac1_hp_graph_ready_returns_json_array(tmp_graph):
     assert data[0]["title"] == "Feature 1"
 
 
+def test_ac1_hp_undispatched_names_known_node_and_scans_entries(tmp_graph, monkeypatch):
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    tmp_graph.write_text(json.dumps({
+        "entries": [{
+            "id": "x-known-undispatched",
+            "title": "Known",
+            "status": "ready",
+            "plan_path": "/plans/known.md",
+            "priority": "p0",
+            "domain": "code",
+            "blocked_by": [],
+        }]
+    }) + "\n")
+
+    r = _invoke("backlog", "undispatched", "--all", "--json")
+
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["entries_scanned"] == 1
+    assert any(row["id"] == "x-known-undispatched" for row in data["rows"])
+
+
+def test_ac2_err_undispatched_names_unreadable_graph(tmp_graph, monkeypatch):
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    tmp_graph.write_text('{"nodes": []}\n')
+
+    r = _invoke("backlog", "undispatched", "--all", "--json")
+
+    assert r.exit_code != 0
+    assert "graph" in r.output.lower()
+    assert r.output.strip().splitlines()[-1] != "[]"
+
+
 # --- get ---
 
 def test_ac1_hp_graph_get_returns_node(tmp_graph):
