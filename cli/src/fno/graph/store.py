@@ -752,6 +752,15 @@ def entries_with_archive(entries: list) -> list:
         return entries
 
 
+def read_graph_with_archive(path: Path | None = None) -> list[dict]:
+    """Read the working graph through the canonical seam, then overlay archive."""
+    if path is None:
+        from fno.paths import graph_json
+
+        path = graph_json()
+    return entries_with_archive(read_graph(path))
+
+
 def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     """Failure-surfacing counterpart to :func:`read_graph`.
 

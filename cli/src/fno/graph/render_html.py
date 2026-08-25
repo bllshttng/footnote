@@ -58,11 +58,9 @@ GROUPS = (
 
 def load_render_entries() -> list[dict]:
     """Load the working graph through its public seam and overlay the archive."""
-    import fno.graph as graph
-    from fno import paths
-    from fno.graph.store import entries_with_archive
+    from fno.graph.store import read_graph_with_archive
 
-    return entries_with_archive(graph.read_graph(paths.graph_json()))
+    return read_graph_with_archive()
 
 
 def group_for(entry: dict) -> str:

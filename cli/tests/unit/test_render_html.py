@@ -657,18 +657,17 @@ def test_html_render_does_not_need_claims_for_status_placement(tmp_path: Path):
 
 
 def test_load_render_entries_uses_canonical_reader_and_archive_overlay(monkeypatch):
-    import fno.graph as graph
     import fno.graph.store as store
     from fno.graph.render_html import load_render_entries
 
     calls: list[str] = []
     live = [{"id": "x-live", "title": "live"}]
     archive = [{"id": "x-archive", "title": "archive"}]
-    monkeypatch.setattr(graph, "read_graph", lambda *_: calls.append("read_graph") or live)
     monkeypatch.setattr(
         store,
-        "entries_with_archive",
-        lambda entries: calls.append("entries_with_archive") or [*entries, *archive],
+        "read_graph_with_archive",
+        lambda: calls.extend(["read_graph", "entries_with_archive"])
+        or [*live, *archive],
     )
 
     rows = load_render_entries()
