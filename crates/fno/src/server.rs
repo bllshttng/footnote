@@ -3462,11 +3462,11 @@ impl Core {
                 self.persist_remove(&name, &key);
             }
         }
+        self.tab_areas.remove(&tid);
         if matches!(outcome, RemoveOutcome::SessionEmpty) {
             self.template_specs.remove(&tid);
             return Some((tid, pids, outcome));
         }
-        self.tab_areas.remove(&tid);
         if self.template_specs.remove(&tid).is_some() {
             self.persist_template_specs(sid);
         }
@@ -12736,6 +12736,7 @@ mod tests {
         assert_eq!(result.1, vec![pane]);
         assert_eq!(result.2, RemoveOutcome::SessionEmpty);
         assert!(!core.panes.contains_key(&pane));
+        assert!(!core.tab_areas.contains_key(&5));
     }
 
     #[test]

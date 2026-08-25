@@ -2788,7 +2788,7 @@ fn squad_target(squad: Option<String>) -> PaneTarget {
     }
 }
 
-/// `fno mux tab ls|create|rename|join|close ...` (x-d865, x-a8f1).
+/// `fno mux tab ls|create|rename|join|close ...` (x-d865).
 pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     let verb = match args.first().and_then(|a| a.to_str()) {
         Some(v) => v.to_string(),
