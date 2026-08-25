@@ -27,10 +27,35 @@ git -C "$REPO" commit -qm feature
 cat > "$BIN/fno" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FNO_TEST_LOG"
+if [[ "${1:-}" == "do" && "${2:-}" == "review" && "${3:-}" == "classify" ]]; then
+  f=""; shift 3
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --findings-file) f="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  PYTHONPATH="$FNO_TEST_PYTHONPATH" "$FNO_TEST_PYTHON" - "$f" <<'PY'
+import json, sys
+from fno.review.cli import build_emit_record, RecordBuildError
+with open(sys.argv[1], encoding="utf-8") as fh:
+    payload = json.load(fh)
+try:
+    print(json.dumps(build_emit_record(payload)))
+except RecordBuildError as exc:
+    print(f"classify: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+  exit $?
+fi
+exit 0
 SH
 chmod +x "$BIN/fno"
 export PATH="$BIN:$PATH"
 export FNO_TEST_LOG="$TMP/events"
+REPO_ROOT="$(cd "$REVIEW_DIR/../.." && pwd)"
+export FNO_TEST_PYTHONPATH="$REPO_ROOT/cli/src"
+export FNO_TEST_PYTHON="$REPO_ROOT/cli/.venv/bin/python"
 
 run_case() {
   name="$1"
@@ -70,5 +95,29 @@ run_case bare_markers_are_headers 0 pass $'P1\nP2\nP3\nverdict\nfno-peer-verdict
 run_case bare_marker_with_colon 0 pass $'P1:\nP2:\nfno-peer-verdict: {"verdict":"clean","blocking_findings":0}\n'
 # ...but a header ABOVE real findings must not change the count.
 run_case headers_plus_findings 1 fail $'P1\nP1 a:1 - one - fix\nP2\nP2 b:2 - two - fix\nfno-peer-verdict: {"verdict":"blocked","blocking_findings":2}\n'
+
+# The current terminal-record shape: the findings array classifies through
+# the shared rule, and the emitted verdict follows the classified blocking
+# count. A P1 line in the body still has to agree with the classified count.
+run_case new_shape_clean_nonblocking_only 0 pass $'Looks fine apart from wording.\nfno-peer-verdict: {"verdict":"clean","findings":[{"category":"typo","file":"a.py","line":1,"summary":"teh","failure_scenario":"reader stumble"}]}\n'
+run_case new_shape_blocked 1 fail $'P1 src/lib.rs:9 - panic - handle the error\nfno-peer-verdict: {"verdict":"blocked","findings":[{"category":"correctness","file":"src/lib.rs","line":9,"summary":"panic","failure_scenario":"crash on empty input"}]}\n'
+run_case new_shape_clean_contradiction 1 fail $'P1 src/lib.rs:9 - panic - handle the error\nfno-peer-verdict: {"verdict":"clean","findings":[{"category":"correctness","file":"src/lib.rs","line":9,"summary":"panic","failure_scenario":"crash on empty input"}]}\n'
+run_case new_shape_count_mismatch 1 fail $'P1 a:1 - one - fix\nP1 b:2 - two - fix\nfno-peer-verdict: {"verdict":"blocked","findings":[{"category":"correctness","file":"a","line":1,"summary":"one","failure_scenario":"f"},{"category":"correctness","file":"b","line":2,"summary":"two","failure_scenario":"f"}]}\n'
+
+# The classified record rides on the emitted event: the pass over a
+# non-blocking finding carries findings_nonblocking:1, so the gate can
+# re-derive instead of trusting the verdict word.
+: > "$FNO_TEST_LOG"
+set +e
+(cd "$REPO" && bash "$CONSUME" "$TMP/new_shape_clean_nonblocking_only.txt") >/dev/null 2>&1
+rerun_rc=$?
+set -e
+if [[ $rerun_rc -ne 0 ]]; then
+  echo "clean rerun failed rc=$rerun_rc" >&2
+  exit 1
+fi
+grep -q '"findings_nonblocking":1' "$FNO_TEST_LOG" \
+  && echo "  PASS: pass carries the classified record" \
+  || { echo "  FAIL: pass carries the classified record" >&2; exit 1; }
 
 echo "PASS consume-peer-verdict"
