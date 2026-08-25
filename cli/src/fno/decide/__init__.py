@@ -1176,12 +1176,17 @@ def current_law(subject: str) -> dict[str, Any]:
     from fno.decide.catalog import load_catalog
 
     canonical_subject = load_catalog().canonical_subject(subject)
-    _, rows, _ = list_decisions(
+    _, rows, damaged = list_decisions(
         canonical_subject,
         limit=None,
         lane="law",
         state="live",
     )
+    if damaged:
+        noun = "row" if damaged == 1 else "rows"
+        raise ValueError(
+            f"decision index has {damaged} damaged {noun}; current law is unknown"
+        )
     decision_ids = [str(row.get("decision_id") or "") for row in rows]
     if not decision_ids:
         status = "none"

@@ -2876,6 +2876,20 @@ def test_repository_catalog_absence_is_an_explicit_empty_source(root: Path):
     assert catalog.canonical_subject("target self-handoff") == "target self-handoff"
 
 
+def test_repository_catalog_dangling_symlink_is_damage_not_absence(root: Path):
+    from fno.decide.catalog import DecisionCatalogError, load_catalog
+
+    path = root / "docs" / "architecture" / "decisions.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(root / "missing-decisions.yaml")
+
+    with pytest.raises(DecisionCatalogError) as exc:
+        load_catalog(root)
+
+    assert str(path) in str(exc.value)
+    assert "unreachable" in str(exc.value)
+
+
 def test_repository_catalog_normalizes_aliases_and_rows(root: Path):
     from fno.decide.catalog import load_catalog
 
@@ -3172,3 +3186,19 @@ def test_standing_query_reports_none_but_catalog_damage_is_a_read_failure(
     assert damaged.exit_code == 1
     assert str(path) in damaged.stderr
     assert '"status":"none"' not in damaged.stdout
+
+
+def test_standing_query_refuses_a_damaged_local_index(
+    root: Path, tmp_graph: Path, index: Path
+):
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text('{"type":"operator_decision","data":', encoding="utf-8")
+
+    result = runner.invoke(
+        decide_app,
+        ["list", "--subject", "safety-policy", "--lane", "law", "--state", "live", "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert "decision index has 1 damaged row" in result.stderr
+    assert '"current_law"' not in result.stdout

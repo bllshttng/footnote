@@ -69,8 +69,18 @@ def load_catalog(root: Path | None = None) -> DecisionCatalog:
 
         root = resolve_repo_root()
     path = root / CATALOG_RELATIVE_PATH
-    if not path.exists():
-        return DecisionCatalog((), MappingProxyType({}))
+    try:
+        path.stat()
+    except FileNotFoundError:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return DecisionCatalog((), MappingProxyType({}))
+        except OSError as exc:
+            raise _error(path, f"cannot inspect catalog path: {exc}") from exc
+        raise _error(path, "catalog path is unreachable")
+    except OSError as exc:
+        raise _error(path, f"cannot inspect catalog path: {exc}") from exc
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
