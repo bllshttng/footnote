@@ -55,9 +55,12 @@ def _has_pr(entry: dict) -> bool:
 def _blocked(entry: dict, by_id: dict[str, dict]) -> bool:
     for blocker_id in entry.get("blocked_by") or []:
         blocker = by_id.get(blocker_id)
-        if blocker is None or (blocker.get("status") != "done" and not blocker.get("completed_at")):
+        if blocker is None or (
+            blocker.get("status") != "done" and not blocker.get("completed_at")
+        ):
             return True
     return False
+
 
 def classify_planned_unclaimed(
     entries: list[dict],
@@ -151,10 +154,16 @@ def classify_planned_unclaimed(
     }
 
 
-def prepend_missed_rows(normal_rows: list[dict], observer_receipt: dict) -> tuple[list[dict], list[dict]]:
+def prepend_missed_rows(
+    normal_rows: list[dict], observer_receipt: dict
+) -> tuple[list[dict], list[dict]]:
     """Return observer-only rows before the normal selector frontier."""
     normal_ids = {row.get("id") for row in normal_rows}
-    missed = [row for row in observer_receipt.get("rows", []) if row.get("id") not in normal_ids]
+    missed = [
+        row
+        for row in observer_receipt.get("rows", [])
+        if row.get("id") not in normal_ids
+    ]
     return [*missed, *normal_rows], missed
 
 

@@ -47,6 +47,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -537,18 +538,49 @@ def _undispatched_nodes(
     return receipt
 
 
+def _dispatch_safe_observer(receipt: dict) -> dict:
+    """Reapply selector-only safety guards before lane-fill recovery."""
+    rows = receipt.get("rows", [])
+    if not rows:
+        return receipt
+    from fno import paths
+    from fno.graph.store import read_graph_strict
+
+    try:
+        entries = read_graph_strict(paths.graph_json())
+    except Exception as exc:  # noqa: BLE001 - unknown safety state refuses recovery
+        raise RuntimeError(f"observer safety graph unreadable: {exc}") from exc
+    by_id = {entry.get("id"): entry for entry in entries}
+    now = datetime.now(timezone.utc)
+    staleness_days = _guard_staleness_days()
+    safe: list[dict] = []
+    for row in rows:
+        entry = by_id.get(row.get("id"))
+        if entry is None:
+            continue
+        facts = row.get("facts")
+        if not isinstance(facts, dict):
+            raise RuntimeError(f"observer row {row.get('id')!r} has no predicate facts")
+        if facts.get("has_pr") or facts.get("batch_owner") or facts.get("completed"):
+            continue
+        if selection_guards(entry, by_id, now, staleness_days=staleness_days):
+            continue
+        safe.append(row)
+    return {**receipt, "rows": safe}
+
+
 def _ready_nodes(
     project: Optional[str],
     mission: Optional[str] = None,
     *,
     events_path: Optional[Path] = None,
 ) -> list[dict]:
-    """Ordered ready-node summaries via ``fno backlog ready`` (JSON list).
+    """Ordered ready-node summaries with independent omission recovery.
 
-    Reuses the SAME selection surface as ``fno backlog next``: claim-filtered,
-    open-PR-filtered, container-filtered, and rank-sorted. Lane-fill therefore
-    never diverges from the single-node dispatch path. Raises on a garbled
-    response so the caller skips rather than guessing (Failure Modes: Errors).
+    The normal ranked list remains the selector. The independent observer is
+    compared with it so a named omission is recovered before lane-fill applies
+    its existing claim, domain, collision, and spawn guards. Raises on a
+    garbled response so the caller skips rather than guessing.
     ``mission`` restricts to that mission's nodes, mirroring the sequential
     path's ``MegawalkQueue::with_mission`` (codex P1 on PR #137).
     """
@@ -570,7 +602,7 @@ def _ready_nodes(
         if not isinstance(nodes, list):
             raise RuntimeError(f"fno backlog ready returned an unexpected shape: {out[:200]}")
         normal = [n for n in nodes if isinstance(n, dict) and n.get("id")]
-    observer = _undispatched_nodes(project, mission)
+    observer = _dispatch_safe_observer(_undispatched_nodes(project, mission))
     from fno.backlog.undispatched import prepend_missed_rows
 
     merged, missed = prepend_missed_rows(normal, observer)

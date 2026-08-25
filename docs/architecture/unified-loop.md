@@ -198,7 +198,7 @@ A target driver asks whether its one deliverable shipped. A king has no PR, so p
 |---|---|---|
 | `operator_lane` | `cat ~/.fno/my-priorities.md` | yes, by filing a node or parking with a reason |
 | `undispatched` | `fno backlog undispatched --json` | yes, by spawning a worker |
-| `stalled_holder` | the same two, plus the holder's activity reading | yes, by one wake per node |
+| `stalled_holder` | `fno agents claim list -J` + `fno backlog get <id>` + `fno agents peek <holder>` | yes, by one wake per node |
 | `mergeable_pr` | `gh pr list` | only under `config.king.autonomous_merge` |
 | `stale_claim` | `fno agents claim list -J --include-stale` | yes, by `fno agents claim reap` |
 | `operator_question` | `fno inbox outstanding --json` | no, a human answers it |

@@ -954,6 +954,7 @@ def test_lane_ready_frontier_recovers_observer_miss_and_records_divergence(
         lambda *args, **kwargs: _FakeProc(0, json.dumps([normal])),
     )
     monkeypatch.setattr(adv, "_undispatched_nodes", lambda project, mission: observer, raising=False)
+    monkeypatch.setattr(adv, "_dispatch_safe_observer", lambda receipt: receipt)
 
     rows = adv._ready_nodes("fno", events_path=event_path)
 

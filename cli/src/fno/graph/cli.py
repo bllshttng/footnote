@@ -4263,7 +4263,7 @@ def cmd_next(
                     append_event(
                         build_selection_divergence_event(
                             node_id=row["id"],
-                            selector_command="fno backlog next --json",
+                            selector_command="fno backlog next",
                             scope=scope,
                             selector_entries_scanned=len(candidates),
                             observer_entries_scanned=observer_receipt["entries_scanned"],
