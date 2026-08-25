@@ -2249,7 +2249,11 @@ def _name_lane_send(
                 # pane and reports hosted -- suppressing the durable copy the
                 # real recipient still needs.
                 if entry.status == "live":
-                    injected = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
+                    # The mail lane holds the boolean contract; only the review
+                    # lane consumes the widened "started"/"queued"/"unconfirmed".
+                    injected = bool(
+                        _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
+                    )
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""

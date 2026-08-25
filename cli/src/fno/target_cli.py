@@ -998,7 +998,7 @@ def _resolve_self_review_identity() -> tuple[str, str]:
 
 def _send_self_review_payload(
     *, payload: str, harness: str, session_id: str
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Use the existing raw self-send router and normalize its receipt."""
     from fno.harness_identity import canonical_handle
     from fno.mail.cli import _raw_send

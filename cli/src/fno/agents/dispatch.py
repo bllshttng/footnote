@@ -6513,7 +6513,7 @@ def _mux_pane_send(
             return False
     try:
         sent = _paste_then_submit()
-        outcome: bool | str = sent
+        outcome = sent
         if sent and review and (getattr(entry, "harness", "") or "") == "codex":
             outcome = _review_outcome()
         elif sent and confirm:
