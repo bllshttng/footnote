@@ -241,6 +241,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
     monkeypatch.setenv("FNO_MUX_DIR", str(mux_dir))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claim-root"))
     monkeypatch.setenv("FNO_E2E", "1")
+    monkeypatch.setenv("FNO_MUX_MAX_LIVE", "512")
     monkeypatch.delenv("FNO_SESSION", raising=False)
 
     requested_name = "late-codex-identity"
@@ -488,6 +489,7 @@ sleep 5
         "FNO_MUX_DIR": str(mux_dir),
         "FNO_CLAIMS_ROOT": str(tmp_path / "claims"),
         "FNO_E2E": "1",
+        "FNO_MUX_MAX_LIVE": "512",
         "FAKE_CODEX_PROMPT_FILE": str(prompt_file),
     }
     for key, value in env.items():
@@ -1878,6 +1880,19 @@ def test_placement_omitted_leaves_pane_run_argv_unchanged(
     run_call = runner.calls[0]
     sep = run_call.index("--")
     assert "squad" not in run_call[:sep] and "split" not in run_call[:sep]
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [{}, {"squad": "review"}, {"split": "left"}, {"tab": "name:review"}],
+)
+def test_every_pane_route_carries_the_existing_cap(
+    tmp_path: Path, monkeypatch, placement: dict[str, str]
+) -> None:
+    monkeypatch.setattr("fno.agents.mux_spawn._pane_group_max", lambda: 7)
+    _result, runner = _spawn(monkeypatch, tmp_path, **placement)
+    run_call = runner.calls[0]
+    assert run_call[run_call.index("--max-panes") + 1] == "7"
 
 
 def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
