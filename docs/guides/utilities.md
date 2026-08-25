@@ -68,7 +68,8 @@ For higher-level discovery analysis (stack detection, conventions, patterns), se
 fno workspace worktree status                  # list worktrees; target: live:<name> / exited:<name> / none, from the agents registry
 fno workspace worktree status --json           # same, as {"worktrees":[...],"summary":{"total","live","dead","no_session"}}
 fno workspace worktree cleanup --older-than 7d  # remove stale worktrees
-fno workspace worktree archive <name>           # remove directory, keep branch
+fno workspace worktree archive <name|path>       # guarded archive, keep branch by default
+fno workspace worktree archive --force <name>    # disclose exact discarded state before override
 ```
 
-The actual worktree creation happens via Claude Code's native `EnterWorktree` / `ExitWorktree` tools (which fire the `WorktreeCreate` hook). This CLI exposes the bookkeeping subset.
+The archive verb delegates to `scripts/setup/archive-worktree.sh`. `--yes` skips process-kill confirmation. `--delete-branch` deletes the branch after removal. The actual worktree creation happens via Claude Code's native `EnterWorktree` / `ExitWorktree` tools (which fire the `WorktreeCreate` hook). This CLI exposes the bookkeeping subset.

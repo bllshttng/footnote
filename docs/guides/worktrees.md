@@ -57,13 +57,15 @@ Two ways to remove one:
 
 ```bash
 fno workspace worktree cleanup --merged --apply     # reap every landed worktree, with safety checks
-fno workspace worktree archive <name>               # force-remove one worktree, keep its branch
+fno workspace worktree archive <name|path>           # guarded archive, keep its branch by default
 ```
 
 Never remove a worktree with `rm -rf`.
 That leaves dangling git refs.
-The cleanup verb runs the safety checks for you: clean tree, no unpushed commits, no live session.
-The archive verb force-removes with no checks, so confirm the tree is clean first.
+
+Both removal commands use the guarded archive implementation: clean tree, no unpushed commits, no live session, and successful salvage and process checks.
+
+Accept the printed disclosure before using `--force`. It names exact dirty paths, unpushed commits, or live-session evidence that will be discarded. `--yes` skips process-kill confirmation, and `--delete-branch` deletes the branch after removal.
 
 ## Who holds what
 

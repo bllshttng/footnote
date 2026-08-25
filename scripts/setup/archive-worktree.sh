@@ -11,8 +11,9 @@
 #   bash scripts/setup/archive-worktree.sh                # archives cwd
 #
 # Flags:
-#   --force       Skip strict checks (dirty tree, unpushed commits, live
-#                 target). Equivalent to `git worktree remove --force`.
+#   --force       Measure and disclose dirty paths, unpushed commits, and live
+#                 target evidence, then override positive checks. Unreadable
+#                 evidence still refuses removal.
 #   --yes         Skip the process-kill confirmation prompt.
 #   --delete-branch  After removing the worktree, delete its branch with
 #                    `git branch -D` (force). Default: keep branch.
@@ -151,21 +152,175 @@ echo "=== Archiving worktree ===" >&2
 echo "    Path:   $TARGET" >&2
 echo "    Branch: $BRANCH" >&2
 
-# ---- Strict pre-removal checks (skip with --force) -----------------------
-if [[ "$FORCE" -eq 0 ]]; then
-  # 1. Working tree holds nothing removal would destroy. A tracked file MISSING
-  #    from disk is recoverable from HEAD, so it never blocks; see
-  #    scripts/lib/worktree-reapable.sh. Any unknown fails closed to exit 2,
-  #    which is what this check did for every kind of dirt before.
-  # Anchored on THIS SCRIPT, not on $TARGET: the target is routinely a worktree
-  # of another repo and carries no scripts/lib of its own.
-  _REAPABLE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-reapable.sh"
-  if [[ -f "$_REAPABLE_LIB" ]]; then
+# ---- Strict pre-removal checks and force disclosure -----------------------
+# Measure every strict condition in both modes. --force may override positive
+# dirty, unpushed, and live-session evidence, but it never overrides an
+# unreadable probe: an unknown state is not a safe state to discard.
+_CHECK_REAPABLE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-reapable.sh"
+if [[ -f "$_CHECK_REAPABLE_LIB" ]]; then
+  # shellcheck source=/dev/null
+  source "$_CHECK_REAPABLE_LIB"
+fi
+
+measure_strict_state() {
+  FORCE_DIRTY_STATUS=""
+  FORCE_DIRTY_STATUS_RC=0
+  if FORCE_DIRTY_STATUS="$(git -C "$TARGET" status --short 2>/dev/null)"; then
+    :
+  else
+    FORCE_DIRTY_STATUS_RC=$?
+  fi
+
+  FORCE_UNPUSHED_COUNT=0
+  FORCE_UNPUSHED_EVIDENCE=""
+  FORCE_UNPUSHED_REASON=""
+  FORCE_DEFAULT_REF=""
+  _FORCE_UNPUSHED_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-unpushed.sh"
+  if [[ -f "$_FORCE_UNPUSHED_LIB" ]]; then
     # shellcheck source=/dev/null
-    source "$_REAPABLE_LIB"
+    source "$_FORCE_UNPUSHED_LIB"
+  else
+    wt_refresh_remote_refs() { git -C "${1:-.}" fetch origin main >/dev/null 2>&1; }
+  fi
+  FORCE_REMOTE_REFRESH_OK=0
+  if wt_refresh_remote_refs "$TARGET" >/dev/null 2>&1; then
+    FORCE_REMOTE_REFRESH_OK=1
+  else
+    FORCE_UNPUSHED_REASON="remote refs not verifiable (fetch --all --prune failed)"
+  fi
+  FORCE_UPSTREAM="$(git -C "$TARGET" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [[ "$FORCE_REMOTE_REFRESH_OK" -eq 0 ]]; then
+    :
+  elif [[ "$BRANCH" == "(detached)" ]]; then
+    if wt_refresh_remote_refs "$TARGET" >/dev/null 2>&1; then
+      if ! FORCE_UNPUSHED_COUNT="$(git -C "$TARGET" rev-list --count HEAD --not --remotes 2>/dev/null)" || [[ ! "$FORCE_UNPUSHED_COUNT" =~ ^[0-9]+$ ]]; then
+        FORCE_UNPUSHED_REASON="git could not count commits absent from remotes"
+      elif [[ "$FORCE_UNPUSHED_COUNT" -gt 0 ]]; then
+        if ! FORCE_UNPUSHED_EVIDENCE="$(git -C "$TARGET" log --oneline -n 10 HEAD --not --remotes 2>/dev/null)"; then
+          FORCE_UNPUSHED_REASON="git could not list commits absent from remotes"
+        fi
+      fi
+    fi
+  elif [[ -n "$FORCE_UPSTREAM" ]]; then
+    if ! FORCE_AHEAD="$(git -C "$TARGET" rev-list --count "$FORCE_UPSTREAM"..HEAD 2>/dev/null)" || [[ ! "$FORCE_AHEAD" =~ ^[0-9]+$ ]]; then
+      FORCE_UNPUSHED_REASON="git could not compare HEAD with $FORCE_UPSTREAM"
+    else
+      FORCE_UNPUSHED_COUNT="$FORCE_AHEAD"
+      if [[ "$FORCE_UNPUSHED_COUNT" -gt 0 ]] && ! FORCE_UNPUSHED_EVIDENCE="$(git -C "$TARGET" log --oneline "$FORCE_UPSTREAM"..HEAD 2>/dev/null)"; then
+        FORCE_UNPUSHED_REASON="git could not list commits ahead of $FORCE_UPSTREAM"
+      fi
+    fi
+  else
+    FORCE_DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/||' || true)"
+    if [[ -z "$FORCE_DEFAULT_REF" ]]; then
+      FORCE_FIRST_REMOTE="$(git -C "$TARGET" remote 2>/dev/null)"
+      FORCE_FIRST_REMOTE="${FORCE_FIRST_REMOTE%%$'\n'*}"
+      if [[ -n "$FORCE_FIRST_REMOTE" ]]; then
+        FORCE_DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet "refs/remotes/$FORCE_FIRST_REMOTE/HEAD" 2>/dev/null | sed 's|^refs/remotes/||' || true)"
+      fi
+    fi
+    if [[ -n "$FORCE_DEFAULT_REF" ]] && git -C "$TARGET" rev-parse --verify --quiet "$FORCE_DEFAULT_REF" >/dev/null; then
+      if ! FORCE_AHEAD="$(git -C "$TARGET" rev-list --count "$FORCE_DEFAULT_REF"..HEAD 2>/dev/null)" || [[ ! "$FORCE_AHEAD" =~ ^[0-9]+$ ]]; then
+        FORCE_UNPUSHED_REASON="git could not compare HEAD with $FORCE_DEFAULT_REF"
+      else
+        FORCE_UNPUSHED_COUNT="$FORCE_AHEAD"
+        if [[ "$FORCE_UNPUSHED_COUNT" -gt 0 ]] && ! FORCE_UNPUSHED_EVIDENCE="$(git -C "$TARGET" log --oneline "$FORCE_DEFAULT_REF"..HEAD 2>/dev/null)"; then
+          FORCE_UNPUSHED_REASON="git could not list commits ahead of $FORCE_DEFAULT_REF"
+        fi
+      fi
+    else
+      FORCE_UNPUSHED_REASON="no upstream and no resolvable remote HEAD"
+    fi
+  fi
+  if [[ -n "$FORCE_UNPUSHED_REASON" ]]; then
+    if [[ "$FORCE" -eq 1 || "$BRANCH" == "(detached)" || -n "$FORCE_UPSTREAM" ]]; then
+      echo "archive-worktree: unpushed state not verifiable at $TARGET: $FORCE_UNPUSHED_REASON" >&2
+      echo "    Refusing removal until remote state is verifiable." >&2
+      exit 2
+    fi
+    echo "archive-worktree: WARN: $FORCE_UNPUSHED_REASON; skipping unpushed-commit check" >&2
+    echo "    Set with: git remote set-head <remote> --auto" >&2
+  fi
+
+  FORCE_LIVE_EVIDENCE=""
+  FORCE_LIVE_CLAIM_UNVERIFIABLE=0
+  FORCE_TARGET_STATE="$TARGET/.fno/target-state.md"
+  if [[ -f "$FORCE_TARGET_STATE" ]]; then
+    if grep -qE '^status:[[:space:]]*IN_PROGRESS' "$FORCE_TARGET_STATE"; then
+      FORCE_LIVE_EVIDENCE="status: IN_PROGRESS at $FORCE_TARGET_STATE"
+    else
+      FORCE_GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/target-guard.sh"
+      if [[ -f "$FORCE_GUARD_LIB" ]] && source "$FORCE_GUARD_LIB" 2>/dev/null; then
+        if target_claim_probe "$FORCE_TARGET_STATE"; then
+          FORCE_LIVE_EVIDENCE="live node claim at $FORCE_TARGET_STATE"
+        elif [[ "$?" -eq 2 ]]; then
+          FORCE_LIVE_CLAIM_UNVERIFIABLE=1
+        else
+          FORCE_OWNER_PID="$(sed -nE '/^owner_pid:[[:space:]]*[0-9]+/{s/^owner_pid:[[:space:]]*//;p;q;}' "$FORCE_TARGET_STATE" 2>/dev/null || true)"
+          if [[ -n "$FORCE_OWNER_PID" ]] && kill -0 "$FORCE_OWNER_PID" 2>/dev/null; then
+            FORCE_LIVE_EVIDENCE="owner_pid $FORCE_OWNER_PID alive at $FORCE_TARGET_STATE"
+          fi
+        fi
+      else
+        FORCE_LIVE_CLAIM_UNVERIFIABLE=1
+      fi
+    fi
+  fi
+  if [[ "$FORCE_LIVE_CLAIM_UNVERIFIABLE" -eq 1 ]]; then
+    echo "archive-worktree: live target claim not verifiable at $FORCE_TARGET_STATE" >&2
+    echo "    Refusing removal until claim state is readable." >&2
+    exit 2
+  fi
+
+  if [[ "$FORCE" -eq 1 ]]; then
+    if [[ "$FORCE_DIRTY_STATUS_RC" -ne 0 ]]; then
+      echo "archive-worktree: --force cannot override an unreadable working-tree status at $TARGET" >&2
+      exit 2
+    fi
+    echo "FORCE: pre-removal disclosure; the following worktree state will be discarded if removal proceeds:" >&2
+    if [[ -n "$FORCE_DIRTY_STATUS" ]]; then
+      echo "    dirty paths (git status --short):" >&2
+      printf '%s\n' "$FORCE_DIRTY_STATUS" | sed 's/^/      /' >&2
+    else
+      echo "    dirty paths: none" >&2
+    fi
+    if [[ "$FORCE_UNPUSHED_COUNT" -gt 0 ]]; then
+      echo "    unpushed commits ($FORCE_UNPUSHED_COUNT):" >&2
+      printf '%s\n' "$FORCE_UNPUSHED_EVIDENCE" | sed 's/^/      /' >&2
+    else
+      echo "    unpushed commits: none" >&2
+    fi
+    if [[ -n "$FORCE_LIVE_EVIDENCE" ]]; then
+      echo "    live-session evidence: $FORCE_LIVE_EVIDENCE" >&2
+    else
+      echo "    live-session evidence: none" >&2
+    fi
+  fi
+}
+
+measure_strict_state
+
+if [[ "$FORCE" -eq 1 ]]; then
+  INITIAL_DIRTY_STATUS="$FORCE_DIRTY_STATUS"
+  INITIAL_UNPUSHED_COUNT="$FORCE_UNPUSHED_COUNT"
+  INITIAL_UNPUSHED_EVIDENCE="$FORCE_UNPUSHED_EVIDENCE"
+  INITIAL_UNPUSHED_REASON="$FORCE_UNPUSHED_REASON"
+  INITIAL_UPSTREAM="$FORCE_UPSTREAM"
+  INITIAL_DEFAULT_REF="${FORCE_DEFAULT_REF:-}"
+  INITIAL_LIVE_EVIDENCE="$FORCE_LIVE_EVIDENCE"
+fi
+
+if [[ "$FORCE" -eq 0 ]]; then
+  if [[ "$FORCE_DIRTY_STATUS_RC" -ne 0 ]]; then
+    echo "archive-worktree: working-tree state not verifiable at $TARGET" >&2
+    echo "    Refusing removal; commit/stash first or repair the git checkout." >&2
+    exit 2
+  fi
+  _REAPABLE_LIB="$_CHECK_REAPABLE_LIB"
+  if [[ -f "$_REAPABLE_LIB" ]]; then
     if ! wt_reapable "$TARGET"; then
       echo "archive-worktree: $WT_REAPABLE_LINE at $TARGET" >&2
-      git -C "$TARGET" status --short >&2
+      printf '%s\n' "$FORCE_DIRTY_STATUS" >&2
       echo "    --force to override, or commit/stash first." >&2
       exit 2
     fi
@@ -176,115 +331,29 @@ if [[ "$FORCE" -eq 0 ]]; then
       *recoverable_deletions=*) _WT_RECOVERABLE_ONLY=1
         echo "archive-worktree: $WT_REAPABLE_LINE" >&2 ;;
     esac
-  elif [[ -n "$(git -C "$TARGET" status --porcelain 2>/dev/null)" ]]; then
+  elif [[ -n "$FORCE_DIRTY_STATUS" ]]; then
     echo "archive-worktree: dirty working tree at $TARGET" >&2
-    git -C "$TARGET" status --short >&2
+    printf '%s\n' "$FORCE_DIRTY_STATUS" >&2
     echo "    --force to override, or commit/stash first." >&2
     exit 2
   fi
 
-  # 2. No unpushed commits. If branch has an upstream, compare to it; else
-  #    compare to origin/main as a best-effort check for "anything not on
-  #    the remote". A DETACHED head has neither branch nor upstream, and the
-  #    default-ref comparison refuses a head that lives on a pushed
-  #    non-default branch, so it is judged by the same shared reachability
-  #    rule the sweep uses (wt_unpushed_count, fail toward keep).
-  _UNPUSHED_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-unpushed.sh"
-  if [[ -f "$_UNPUSHED_LIB" ]]; then
-    # shellcheck source=/dev/null
-    source "$_UNPUSHED_LIB"
-  else
-    wt_unpushed_count() { printf '1\n'; }   # partial deploy: keep everything
-    wt_refresh_remote_refs() { git -C "${1:-.}" fetch origin main >/dev/null 2>&1; }
-  fi
-  UPSTREAM="$(git -C "$TARGET" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
-  if [[ "$BRANCH" == "(detached)" ]]; then
-    # Refresh in THIS shell: the count below runs in a $( ) subshell whose
-    # exports die with it, so the receipt's verified-vs-unverifiable branch
-    # below needs the freshness flag here.
-    wt_refresh_remote_refs "$TARGET" >/dev/null 2>&1 || true
-    UNPUSHED="$(wt_unpushed_count "$TARGET")"
-    if [[ "$UNPUSHED" -gt 0 ]]; then
-      if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
-        echo "archive-worktree: $UNPUSHED commit(s) on detached HEAD not on any remote at $TARGET" >&2
-        git -C "$TARGET" log --oneline -n 10 HEAD --not --remotes >&2
-      else
-        echo "archive-worktree: remote refs not verifiable (fetch failed); refusing to judge the detached HEAD at $TARGET" >&2
-      fi
-      echo "    --force to override, or push first." >&2
-      exit 2
-    fi
-  elif [[ -n "$UPSTREAM" ]]; then
-    AHEAD="$(git -C "$TARGET" rev-list --count "$UPSTREAM"..HEAD 2>/dev/null || echo 0)"
-    if [[ "$AHEAD" -gt 0 ]]; then
-      echo "archive-worktree: $AHEAD unpushed commit(s) on $BRANCH vs $UPSTREAM" >&2
-      git -C "$TARGET" log --oneline "$UPSTREAM"..HEAD >&2
-      echo "    --force to override, or push first." >&2
-      exit 2
-    fi
-  else
-    # No upstream; compare against the remote's default branch. Resolve in
-    # this order so non-`main` defaults and non-`origin` remotes still get
-    # the safety check:
-    #   1. `git symbolic-ref refs/remotes/origin/HEAD`  ->  origin/<default>
-    #   2. First remote's symbolic-ref HEAD             ->  <remote>/<default>
-    #   3. Skip the check (warn) when nothing resolves
-    # `|| true`: symbolic-ref exits non-zero when origin/HEAD is unset, and
-    # under set -euo pipefail pipefail would propagate that and abort the whole
-    # archive before the empty-DEFAULT_REF fallback below could handle it.
-    DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/||' || true)"
-    if [[ -z "$DEFAULT_REF" ]]; then
-      # Pipe-free first-line (no `| head` that could SIGPIPE under pipefail).
-      FIRST_REMOTE="$(git -C "$TARGET" remote 2>/dev/null)"
-      FIRST_REMOTE="${FIRST_REMOTE%%$'\n'*}"
-      if [[ -n "$FIRST_REMOTE" ]]; then
-        DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet "refs/remotes/$FIRST_REMOTE/HEAD" 2>/dev/null | sed 's|^refs/remotes/||' || true)"
-      fi
-    fi
-    if [[ -n "$DEFAULT_REF" ]] && git -C "$TARGET" rev-parse --verify --quiet "$DEFAULT_REF" >/dev/null; then
-      AHEAD="$(git -C "$TARGET" rev-list --count "$DEFAULT_REF"..HEAD 2>/dev/null || echo 0)"
-      if [[ "$AHEAD" -gt 0 ]]; then
-        echo "archive-worktree: $AHEAD commit(s) on $BRANCH ahead of $DEFAULT_REF, no upstream set" >&2
-        git -C "$TARGET" log --oneline "$DEFAULT_REF"..HEAD >&2
-        echo "    --force to override, or push first." >&2
-        exit 2
-      fi
+  if [[ "$FORCE_UNPUSHED_COUNT" -gt 0 ]]; then
+    if [[ "$BRANCH" == "(detached)" ]]; then
+      echo "archive-worktree: $FORCE_UNPUSHED_COUNT commit(s) on detached HEAD not on any remote at $TARGET" >&2
+    elif [[ -n "$FORCE_UPSTREAM" ]]; then
+      echo "archive-worktree: $FORCE_UNPUSHED_COUNT unpushed commit(s) on $BRANCH vs $FORCE_UPSTREAM" >&2
     else
-      echo "archive-worktree: WARN: no upstream and no resolvable remote HEAD; skipping unpushed-commit check" >&2
-      echo "    Set with: git remote set-head <remote> --auto" >&2
+      echo "archive-worktree: $FORCE_UNPUSHED_COUNT commit(s) on $BRANCH ahead of $FORCE_DEFAULT_REF, no upstream set" >&2
     fi
+    printf '%s\n' "$FORCE_UNPUSHED_EVIDENCE" >&2
+    echo "    --force to override, or push first." >&2
+    exit 2
   fi
-
-  # 3. Live target session. target-state.md is the source of truth for
-  #    in-progress autonomous work. Legacy manifests carried status:
-  #    IN_PROGRESS; the modern immutable manifest has no status field. The
-  #    durable liveness signal is the NODE CLAIM (session-pid anchored + TTL).
-  #    owner_pid is checked last and only as a positive signal: it is the
-  #    transient `fno do target init` wrapper pid, dead about a second after init
-  #    returns, so on its own this check was a silent no-op for every current
-  #    session and would happily archive a running target's worktree.
-  TARGET_STATE="$TARGET/.fno/target-state.md"
-  if [[ -f "$TARGET_STATE" ]]; then
-    if grep -qE '^status:[[:space:]]*IN_PROGRESS' "$TARGET_STATE"; then
-      echo "archive-worktree: target session IN_PROGRESS at $TARGET_STATE" >&2
-      echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
-      exit 2
-    fi
-    GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/target-guard.sh"
-    # shellcheck source=../lib/target-guard.sh
-    if [[ -f "$GUARD_LIB" ]] && source "$GUARD_LIB" 2>/dev/null && target_claim_is_live "$TARGET_STATE"; then
-      echo "archive-worktree: live target session (node claim held) at $TARGET_STATE" >&2
-      echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
-      exit 2
-    fi
-    # Pipeline-free + fail-open: a manifest without owner_pid must degrade to
-    # empty (not-live), never abort the script under set -euo pipefail.
-    OWNER_PID="$(sed -nE '/^owner_pid:[[:space:]]*[0-9]+/{s/^owner_pid:[[:space:]]*//;p;q;}' "$TARGET_STATE" 2>/dev/null || true)"
-    if [[ -n "$OWNER_PID" ]] && kill -0 "$OWNER_PID" 2>/dev/null; then
-      echo "archive-worktree: live target session (owner_pid $OWNER_PID alive) at $TARGET_STATE" >&2
-      echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
-      exit 2
-    fi
+  if [[ -n "$FORCE_LIVE_EVIDENCE" ]]; then
+    echo "archive-worktree: live target session ($FORCE_LIVE_EVIDENCE)" >&2
+    echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
+    exit 2
   fi
 fi
 
@@ -415,6 +484,23 @@ if [[ -n "$ALL_PIDS" ]]; then
   fi
 fi
 
+if [[ "$FORCE" -eq 1 ]]; then
+  measure_strict_state
+  FORCE_STATE_CHANGED=0
+  [[ "$FORCE_DIRTY_STATUS" == "$INITIAL_DIRTY_STATUS" ]] || FORCE_STATE_CHANGED=1
+  [[ "$FORCE_UNPUSHED_COUNT" == "$INITIAL_UNPUSHED_COUNT" ]] || FORCE_STATE_CHANGED=1
+  [[ "$FORCE_UNPUSHED_EVIDENCE" == "$INITIAL_UNPUSHED_EVIDENCE" ]] || FORCE_STATE_CHANGED=1
+  [[ "$FORCE_UNPUSHED_REASON" == "$INITIAL_UNPUSHED_REASON" ]] || FORCE_STATE_CHANGED=1
+  [[ "$FORCE_UPSTREAM" == "$INITIAL_UPSTREAM" ]] || FORCE_STATE_CHANGED=1
+  [[ "${FORCE_DEFAULT_REF:-}" == "$INITIAL_DEFAULT_REF" ]] || FORCE_STATE_CHANGED=1
+  [[ "$FORCE_LIVE_EVIDENCE" == "$INITIAL_LIVE_EVIDENCE" ]] || FORCE_STATE_CHANGED=1
+  if [[ "$FORCE_STATE_CHANGED" -eq 1 ]]; then
+    echo "archive-worktree: forced state changed after disclosure; keeping $TARGET" >&2
+    echo "    Re-run after the worktree is idle and its state is stable." >&2
+    exit 2
+  fi
+fi
+
 # ---- Salvage local-only .fno do state before removal (data-loss guard) ------
 # A worktree's .fno mixes symlinks (canonical state) with REAL local-only
 # files (artifacts/, scratchpad/, target-state.md, *.log) that
@@ -474,8 +560,8 @@ fi
 REMOVE_FLAGS=""
 [[ "$FORCE" -eq 1 ]] && REMOVE_FLAGS="--force"
 # Two DIFFERENT forces share one word, and conflating them is why the strict
-# check alone was not enough. Our `--force` skips OUR checks (dirty, unpushed,
-# live session). `git worktree remove --force` skips GIT's own check, which
+# check alone was not enough. Our `--force` overrides disclosed positive checks
+# (dirty, unpushed, live session). `git worktree remove --force` skips GIT's own check, which
 # counts a tracked file missing from disk as "modified" and refuses with exit
 # 4. So a worktree we affirmatively cleared as recoverable-only still failed to
 # remove, and the whole predicate change was inert on exactly the 17 worktrees
@@ -501,10 +587,14 @@ fi
 git worktree prune
 
 # ---- Branch handling -----------------------------------------------------
+BRANCH_DELETE_RC=0
+BRANCH_DELETED=0
 if [[ "$DELETE_BRANCH" -eq 1 && "$BRANCH" != "(detached)" ]]; then
   if git branch -D "$BRANCH" 2>/dev/null; then
+    BRANCH_DELETED=1
     echo "    Deleted branch $BRANCH" >&2
   else
+    BRANCH_DELETE_RC=1
     echo "    Branch delete failed (already gone?): $BRANCH" >&2
   fi
 else
@@ -513,4 +603,21 @@ else
   fi
 fi
 
-echo "archive-worktree: archived $TARGET" >&2
+if [[ "$FORCE" -eq 1 ]]; then
+  if [[ "$BRANCH_DELETED" -eq 1 ]]; then
+    echo "archive-worktree: archived $TARGET (--force discarded the disclosed worktree state; branch $BRANCH deleted)" >&2
+  elif [[ "$BRANCH" != "(detached)" ]]; then
+    echo "archive-worktree: archived $TARGET (--force discarded the disclosed worktree state; branch $BRANCH preserved)" >&2
+  else
+    echo "archive-worktree: archived $TARGET (--force discarded the disclosed worktree state; detached branch data has no named branch)" >&2
+  fi
+else
+  if [[ "$BRANCH_DELETED" -eq 1 ]]; then
+    echo "archive-worktree: archived $TARGET (worktree directory discarded; branch $BRANCH deleted)" >&2
+  elif [[ "$BRANCH" != "(detached)" ]]; then
+    echo "archive-worktree: archived $TARGET (worktree directory discarded; branch $BRANCH preserved)" >&2
+  else
+    echo "archive-worktree: archived $TARGET (worktree directory discarded; detached branch data has no named branch)" >&2
+  fi
+fi
+exit "$BRANCH_DELETE_RC"

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from fno import paths
 from fno.cli import app
 
 runner = CliRunner()
@@ -66,12 +67,41 @@ def test_worktree_cleanup_in_foreign_repo(foreign_git_repo: Path, plugin_root: P
     assert "worktree-lifecycle script not found" not in (captured.err + captured.out + result.output)
 
 
-def test_worktree_archive_in_foreign_repo(foreign_git_repo: Path, plugin_root: Path, monkeypatch, capfd):
-    """fno worktree archive resolves worktree-lifecycle.sh from the plugin in a foreign repo."""
+def test_worktree_archive_in_foreign_repo(
+    foreign_git_repo: Path, plugin_root: Path, monkeypatch, capfd, tmp_path: Path
+):
+    """The public archive verb refuses a generated unpushed commit by identity."""
     monkeypatch.chdir(foreign_git_repo)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("FNO_REPO_ROOT", str(foreign_git_repo))
+    paths.resolve_repo_root.cache_clear()
 
-    # Add a worktree in the foreign repo under .claude/worktrees/test-archive
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(origin)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(origin)],
+        cwd=foreign_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"],
+        cwd=foreign_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "set-head", "origin", "--auto"],
+        cwd=foreign_git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Add a worktree in the foreign repo under .claude/worktrees/test-archive.
     wt_dir = foreign_git_repo / ".claude" / "worktrees" / "test-archive"
     wt_dir.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -80,13 +110,31 @@ def test_worktree_archive_in_foreign_repo(foreign_git_repo: Path, plugin_root: P
         check=True,
         capture_output=True,
     )
+    unique_subject = "unique unpushed archive specimen"
+    (wt_dir / "unpushed.txt").write_text("local-only\n", encoding="utf-8")
+    subprocess.run(["git", "add", "unpushed.txt"], cwd=wt_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", unique_subject],
+        cwd=wt_dir,
+        check=True,
+        capture_output=True,
+    )
+    short_sha = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=wt_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     assert wt_dir.exists()
 
     result = runner.invoke(app, ["worktree", "archive", "test-archive"])
-    assert result.exit_code == 0, f"Expected 0, got {result.exit_code}: {result.output}"
     captured = capfd.readouterr()
-    assert "worktree-lifecycle script not found" not in (captured.err + captured.out + result.output)
-    assert not wt_dir.exists()
+    diag = captured.err + captured.out + result.output
+    assert result.exit_code == 2, diag
+    assert short_sha in diag, diag
+    assert unique_subject in diag, diag
+    assert wt_dir.exists(), diag
 
 
 def test_worktree_verbs_resolve_via_codex_plugin_root(foreign_git_repo: Path, plugin_root: Path, monkeypatch, capfd):
