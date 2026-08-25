@@ -893,6 +893,7 @@ def _build_backlog_node(
     project: Optional[str] = None,
     cwd: Optional[str] = None,
     priority: str = "p2",
+    blocks_everything: bool = False,
     difficulty: Optional[str] = None,
     domain: str = "code",
     blocked_by: Optional[list[str]] = None,
@@ -919,7 +920,8 @@ def _build_backlog_node(
     dict has no ``id`` - the caller assigns one inside its locked mutator
     so duplicate-ID checks happen against the live snapshot.
     """
-    from fno.graph._constants import ID_PREFIX  # noqa: F401 (kept for symmetry)
+    from fno.graph._constants import ID_PREFIX, validate_priority_write  # noqa: F401
+    validate_priority_write(priority, blocks_everything=blocks_everything)
     # Parent-edge provenance (x-30f6): stamped from the running session's env +
     # manifest, or from an explicit --source-node. Centralized here so
     # every creator verb (add/idea/decompose) self-describes its origin.
@@ -935,6 +937,7 @@ def _build_backlog_node(
         "project": project,
         "cwd": cwd,
         "priority": priority,
+        "blocks_everything": blocks_everything,
         "difficulty": difficulty,
         "difficulty_history": (
             [{"value": difficulty, "source": "filed", "ts": datetime.now(timezone.utc).isoformat()}]
@@ -999,6 +1002,7 @@ def _create_node_impl(
     project: Optional[str] = None,
     cwd: Optional[str] = None,
     priority: str = "p2",
+    blocks_everything: bool = False,
     difficulty: Optional[str] = None,
     domain: str = "code",
     blocked_by: Optional[str] = None,
@@ -1026,6 +1030,7 @@ def _create_node_impl(
         PRIORITY_ORDER,
         mint_node_id,
         normalize_difficulty,
+        validate_priority_write,
     )
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
@@ -1042,6 +1047,11 @@ def _create_node_impl(
             err=True,
         )
         raise typer.Exit(code=1)
+    try:
+        validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     if difficulty is None and require_difficulty:
         if not sys.stdin.isatty():
@@ -1126,6 +1136,7 @@ def _create_node_impl(
             project=resolved_project,
             cwd=resolved_cwd,
             priority=priority,
+            blocks_everything=blocks_everything,
             difficulty=difficulty,
             domain=domain,
             blocked_by=blockers,
@@ -1284,6 +1295,7 @@ def cmd_add(
     title: str = typer.Argument(..., help="Feature title"),
     domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
     difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
@@ -1341,6 +1353,7 @@ def cmd_add(
         project=project,
         cwd=cwd,
         priority=priority,
+        blocks_everything=blocks_everything,
         difficulty=difficulty,
         domain=domain,
         blocked_by=blocked_by,
@@ -1436,6 +1449,7 @@ def cmd_idea(
     title: str = typer.Argument(..., help="Idea title - what is this?"),
     domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
     difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
     wave_of: Optional[str] = typer.Option(
         None,
@@ -1670,6 +1684,7 @@ def cmd_idea(
         project=project,
         cwd=cwd,
         priority=priority,
+        blocks_everything=blocks_everything,
         difficulty=difficulty,
         domain=domain,
         blocked_by=blocked_by,
@@ -2008,6 +2023,7 @@ def cmd_decompose(
                     project=route_proj if route_proj is not None else live_epic.get("project"),
                     cwd=route_cwd if route_cwd is not None else live_epic.get("cwd"),
                     priority=live_epic.get("priority", "p2"),
+                    blocks_everything=bool(live_epic.get("blocks_everything")),
                     domain=live_epic.get("domain", "code"),
                     plan_path=None,
                     known_ids={e.get("id") for e in graph_entries},
@@ -3124,6 +3140,7 @@ def cmd_update(
     ),
     pr_url: Optional[str] = typer.Option(None, "--pr-url", help="PR URL. 'null' clears."),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Update display title"),
     details: Optional[str] = typer.Option(
         None,
@@ -3265,6 +3282,7 @@ def cmd_update(
         has_node_id_prefix,
         normalize_difficulty,
         normalize_tag,
+        validate_priority_write,
     )
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
@@ -3287,6 +3305,12 @@ def cmd_update(
             err=True,
         )
         raise typer.Exit(code=1)
+    if priority == "p0":
+        try:
+            validate_priority_write(priority, blocks_everything=blocks_everything)
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2)
 
     if project is not None and (not isinstance(project, str) or not project.strip()):
         typer.echo("Error: --project must be a non-empty string", err=True)
@@ -3670,6 +3694,8 @@ def cmd_update(
             node["dispatch_brief"] = None if dispatch_brief.lower() == "null" else dispatch_brief
         if priority is not None:
             node["priority"] = priority
+            if priority == "p0":
+                node["blocks_everything"] = True
         if project is not None:
             node["project"] = project
         if cwd is not None:
@@ -11536,8 +11562,9 @@ def cmd_maintain(
 def cmd_reprioritize(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     priority: str = typer.Argument(..., help="New priority: p0|p1|p2|p3"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
 ) -> None:
-    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix
+    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, validate_priority_write
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
@@ -11552,6 +11579,11 @@ def cmd_reprioritize(
             err=True,
         )
         raise typer.Exit(code=1)
+    try:
+        validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     old_holder: list = [None]
 
@@ -11562,6 +11594,8 @@ def cmd_reprioritize(
             raise typer.Exit(code=1)
         old_holder[0] = node.get("priority", "p2")
         node["priority"] = priority
+        if priority == "p0":
+            node["blocks_everything"] = True
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)

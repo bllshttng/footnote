@@ -1172,6 +1172,7 @@ def _prepare_intake(
                 f"`fno backlog update <id> --plan-path {plan_path} --force`"
             )
     fm_raw, plan_dir = _collect_frontmatter_depends(plan_path)
+    fm = _read_plan_frontmatter(plan_path)
     resolved_fm, unresolved_fm = _resolve_depends_on(fm_raw, entries, plan_dir)
     for u in unresolved_fm:
         print(
@@ -1192,7 +1193,15 @@ def _prepare_intake(
             or os.path.basename(os.path.normpath(plan_path))
         )
     points = cli_points if cli_points is not None else (ledger_entry or {}).get("points")
-    priority = cli_priority or "p2"
+    priority = cli_priority or fm.get("priority") or "p2"
+    from fno.graph._constants import validate_priority_write
+    blocks_everything = fm.get("blocks_everything") is True or str(
+        fm.get("blocks_everything", "")
+    ).strip().lower() == "true"
+    try:
+        validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        raise ValueError(f"{plan_path}: {exc}") from exc
 
     if existing:
         # When a claim is set AND the plan_path already matches a different
@@ -1219,6 +1228,7 @@ def _prepare_intake(
         "roadmap_id": roadmap_id,
         "title": title,
         "priority": priority,
+        "blocks_everything": blocks_everything,
         "deps": all_deps,
         "points": points,
         "cli_project": cli_project,
@@ -1389,7 +1399,7 @@ def normalize_type(value: object) -> str:
 
 def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     from datetime import datetime, timezone
-    from fno.graph._constants import normalize_difficulty
+    from fno.graph._constants import normalize_difficulty, validate_priority_write
 
     project, node_cwd, fm = resolve_node_project_and_cwd(
         spec["plan_path"], spec.get("cli_project"), entries
@@ -1427,6 +1437,15 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         difficulty = normalize_difficulty(raw_difficulty)
     except ValueError as exc:
         raise ValueError(f"{spec['plan_path']}: {exc}") from exc
+    blocks_everything = fm.get("blocks_everything") is True or str(
+        fm.get("blocks_everything", "")
+    ).strip().lower() == "true"
+    try:
+        validate_priority_write(
+            spec["priority"], blocks_everything=blocks_everything
+        )
+    except ValueError as exc:
+        raise ValueError(f"{spec['plan_path']}: {exc}") from exc
 
     return {
         "id": mint_node_id({e.get("id") for e in entries if e.get("id")}),
@@ -1439,6 +1458,7 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "project": project,
         "cwd": node_cwd,
         "priority": spec["priority"],
+        "blocks_everything": blocks_everything,
         "difficulty": difficulty,
         "difficulty_history": (
             [{

@@ -1131,10 +1131,19 @@ def test_ac1_hp_graph_archive(tmp_graph):
 
 def test_priority_p0_accepted(tmp_graph):
     """`backlog add "X" --priority p0` succeeds; node has priority="p0"."""
-    r = _invoke("backlog", "add", "Drop everything", "--priority", "p0")
+    r = _invoke("backlog", "add", "Drop everything", "--priority", "p0", "--blocks-everything")
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
     assert entries[0]["priority"] == "p0"
+
+
+def test_priority_p0_requires_breaking_acknowledgment(tmp_graph):
+    """AC9-ERR: p0 refuses before minting without --blocks-everything."""
+    r = _invoke("backlog", "add", "Not actually broken", "--priority", "p0")
+    assert r.exit_code != 0
+    assert "p0 blocks everything else, usually a bug" in r.output
+    assert "fno backlog rank" in r.output
+    assert _read_graph(tmp_graph) == []
 
 
 def test_priority_default_is_p2(tmp_graph):

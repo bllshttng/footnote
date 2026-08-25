@@ -636,18 +636,22 @@ def _replace_item_line(text: str, fu_id: str, new_line: str) -> str:
     return new_text
 
 
-def _create_graph_node(*, title: str, priority: str, domain: str = "code", graph_path: Optional[Path] = None) -> str:
+def _create_graph_node(*, title: str, priority: str, domain: str = "code", graph_path: Optional[Path] = None, blocks_everything: bool = False) -> str:
     """Create a plan-less idea node on the graph; return its ab-id.
 
     Reuses the canonical node-build path so a schema addition shows up here
     too. Imported lazily to avoid the import cycle (graph.cli imports this
     module at load to register the subapp)."""
-    from fno.graph._constants import mint_node_id
+    from fno.graph._constants import mint_node_id, validate_priority_write
     from fno.graph._intake import detect_project_from_settings
     from fno.graph.cli import _build_backlog_node, _graph_path
     from fno.graph.store import locked_mutate_graph
 
     gpath = graph_path or _graph_path()
+    try:
+        validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        raise InboxValidationError(str(exc)) from exc
     resolved_cwd = os.getcwd()
     project = detect_project_from_settings(resolved_cwd)
 
@@ -659,6 +663,7 @@ def _create_graph_node(*, title: str, priority: str, domain: str = "code", graph
         node = _build_backlog_node(
             title=title,
             priority=priority,
+            blocks_everything=blocks_everything,
             domain=domain,
             project=project,
             cwd=resolved_cwd,
@@ -677,6 +682,7 @@ def promote_item(
     fu_id: str,
     *,
     priority: Optional[str] = None,
+    blocks_everything: bool = False,
     graph_path: Optional[Path] = None,
 ) -> dict:
     """Promote an inbox item to a graph node and strike its checkbox.
@@ -719,7 +725,12 @@ def promote_item(
         # Node creation acquires the graph lock; we hold the inbox lock. The
         # ordering is always inbox -> graph (add/promote/dismiss never take the
         # graph lock first), so there is no deadlock.
-        node_id = _create_graph_node(title=title, priority=node_priority, graph_path=graph_path)
+        node_id = _create_graph_node(
+            title=title,
+            priority=node_priority,
+            graph_path=graph_path,
+            blocks_everything=blocks_everything,
+        )
 
         new_line = f"- [x] {fu_id} - {m.group(3)} -> {node_id}"
         _atomic_write(path, _replace_item_line(text, fu_id, new_line))
@@ -1593,10 +1604,14 @@ def cmd_capture_pass(
 def cmd_promote(
     fu_id: str = typer.Argument(..., help="The fu-XXXXXX id to promote."),
     priority: Optional[str] = typer.Option(None, "--priority", help="Override node priority (else inherits the item's)."),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
 ) -> None:
     """Promote an inbox item to a graph node (idempotent)."""
     try:
-        result = promote_item(_inbox_path(), fu_id, priority=priority)
+        result = promote_item(
+            _inbox_path(), fu_id, priority=priority,
+            blocks_everything=blocks_everything,
+        )
     except InboxValidationError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)

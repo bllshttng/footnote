@@ -163,6 +163,7 @@ class PlanFrontmatter(BaseModel):
     # (intake + backlog update), never hand-edited. They give the Obsidian Bases
     # the navigation columns the graph already has (order "Next up" by priority).
     priority: str | None = None
+    blocks_everything: bool = False
     difficulty: str | None = None
     blocked_by: list[str] = []
     project: str | None = None

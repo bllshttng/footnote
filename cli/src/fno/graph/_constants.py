@@ -297,6 +297,17 @@ LOCK_TTL_HOURS = float(os.environ.get("TASK_LOCK_TTL_HOURS", "2"))
 PRIORITY_ORDER: dict[str, int] = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 PRIORITY_MIGRATION: dict[str, str] = {"high": "p1", "medium": "p2", "low": "p3"}
 DEFAULT_PRIORITY: str = "p2"
+P0_REFUSAL = (
+    "p0 blocks everything else, usually a bug. "
+    "Use --blocks-everything only when a broken service or fleet-wide resource "
+    "leak blocks all downstream work. Run this next: fno backlog rank <id> --top"
+)
+
+
+def validate_priority_write(priority: str, *, blocks_everything: bool = False) -> None:
+    """Refuse an unacknowledged p0 before any graph mutation."""
+    if priority == "p0" and not blocks_everything:
+        raise ValueError(P0_REFUSAL)
 
 # Difficulty is intrinsic work complexity, not a model or capacity hint.
 DIFFICULTY_BANDS: tuple[str, ...] = ("low", "medium", "high")

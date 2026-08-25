@@ -225,6 +225,24 @@ def test_idea_included_with_flag(tmp_graph, tmp_path):
     )
 
 
+def test_intake_p0_requires_plan_acknowledgment(tmp_graph, tmp_path):
+    """AC9-ERR/HP: plan intake requires and records blocks_everything."""
+    refused = tmp_path / "refused-p0.md"
+    refused.write_text("---\npriority: p0\n---\n# Broken service\n")
+    r = _invoke("backlog", "intake", str(refused))
+    assert r.exit_code != 0
+    assert "p0 blocks everything else" in r.output
+    assert _read_entries(tmp_graph) == []
+
+    accepted = tmp_path / "accepted-p0.md"
+    accepted.write_text(
+        "---\npriority: p0\nblocks_everything: true\n---\n# Broken service\n"
+    )
+    r2 = _invoke("--json", "backlog", "intake", str(accepted))
+    assert r2.exit_code == 0, r2.output
+    assert _read_entries(tmp_graph)[0]["blocks_everything"] is True
+
+
 def test_linked_idea_stub_excluded_from_ready_listing_by_default(tmp_graph, tmp_path):
     """`backlog ready` omits a LINKED idea stub (Rung.IDEA) by default; a
     plan-less idea (Rung.NONE) surfaces since x-e24a (its own test below)."""
