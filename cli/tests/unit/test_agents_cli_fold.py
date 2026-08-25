@@ -86,7 +86,7 @@ def test_rust_shellouts_use_the_folded_mcp_and_board_paths() -> None:
     loopcheck = (REPO_ROOT / "crates/fno-agents/src/loopcheck.rs").read_text()
 
     assert '.args(["agents", "mcp", "send", "--session-id", channel_id])' in daemon
-    assert '.args(["inbox", "board",' in loopcheck
+    assert '"inbox", "board"' in loopcheck
 
 
 def test_growth_launch_uses_the_folded_roles_path() -> None:
