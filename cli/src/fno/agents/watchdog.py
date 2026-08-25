@@ -325,6 +325,42 @@ def apply_recoverable(
                 raise ValueError(
                     "registry did not contain exactly one adopted Codex row"
                 )
+            if getattr(exact[0], "log_path", None) == "":
+                from fno import paths
+                from fno.agents.registry import update_registry
+
+                recovery_log_path = (
+                    paths.state_dir()
+                    / "agents"
+                    / session_id
+                    / "output.jsonl"
+                )
+
+                def fill_recovery_log_path(entries):
+                    for entry in entries:
+                        if (
+                            entry.harness == "codex"
+                            and entry.harness_session_id == session_id
+                            and entry.cwd == candidate.cwd
+                            and entry.origin == "adopted"
+                        ):
+                            entry.log_path = str(recovery_log_path)
+                    return entries
+
+                update_registry(fill_recovery_log_path, path=registry_path)
+                entries = load(registry_path)
+                exact = [
+                    entry for entry in entries
+                    if getattr(entry, "harness", None) == "codex"
+                    and getattr(entry, "harness_session_id", None) == session_id
+                    and getattr(entry, "cwd", None) == candidate.cwd
+                    and getattr(entry, "origin", None) == "adopted"
+                    and getattr(entry, "log_path", None) == str(recovery_log_path)
+                ]
+                if len(exact) != 1:
+                    raise ValueError(
+                        "registry did not persist the adopted Codex follow-up path"
+                    )
             post_evidence, post_reason, post_detail = _recovery_transcript_readback(
                 candidate
             )

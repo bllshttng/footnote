@@ -203,8 +203,19 @@ The verb reaches the same destination with none of that exposure.
 - **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no bg lane and no attach.
 - A **codex** pane's full thread ID is the shared identity in the registry, mux `fno_id`, discovery handles, requested-name resolution, and any session-keyed node claim.
 - Codex recovery uses that full thread ID as its only join.
-- `fno agents watchdog --only recoverable --since 24h --cwd PATH` subtracts registered Codex rows from recent exact-cwd rollouts.
-- `--apply` restores an `origin=adopted` row and addressable handle. It never spawns or resumes the thread. Repeated scans converge to `recoverable=0`.
+- `fno agents watchdog --only recoverable --since 24h --cwd PATH` subtracts registered Codex rows from recent exact-cwd rollouts, reports both discovered and usable counts, and refuses a short ID or a rollout without readable transcript work.
+- `--apply` restores only usable candidates as `origin=adopted` rows with full-UUID follow-up paths. It never spawns or resumes the thread. Repeated scans converge to `recoverable=0`.
+- A live recovery proof uses one disposable orphan and requires positive markers from the apply receipt, resumed reply, and exact full-ID row; row presence or an empty recovery queue is not proof:
+
+```bash
+repo=$(git rev-parse --show-toplevel)
+apply=$(uv run --project cli fno-py agents watchdog --only recoverable --since 24h --cwd "$repo" --apply --json)
+sid=$(jq -er '[.results[] | select(.outcome == "applied" and .transcript_usable == true) | .session_id] | if length == 1 then .[0] else error("expected exactly one usable applied orphan") end' <<<"$apply")
+marker="RECOVERY-RESUME-OK-$(uuidgen | tr -d '-')"
+reply=$(uv run --project cli fno-py agents ask "$sid" "Reply exactly $marker")
+test "$reply" = "$marker"
+uv run --project cli fno-py agents list --json | jq -e --arg sid "$sid" '.agents | any(.harness == "codex" and .harness_session_id == $sid and .last_message_at != null)'
+```
 - **agy** emits plain text with no parseable session ID, so it is **stateless**: the live pane works while attached, but there is nothing to re-enter after it settles. `ask`-by-name is refused; use a fresh `--once`.
 - **opencode** is pane-hostable with a readiness detector and badge manifest. Its `ses_` session id is captured at spawn (a best-effort store lookup; an ambiguous or missed capture leaves the row live-only), probed for store membership, and resumable via `opencode --session <id>`. The fno plugin exposes the footnote verbs in opencode's command palette AND headlessly, so dispatch renders the native `/fno:verb` (not a prose brief). The headless spawn routes it through `opencode run --command fno:verb <args>` (a bare `run <message>` treats a leading slash as prose - verified against opencode v1.14.50), so a rendered slash command actually invokes the plugin command.
 

@@ -374,6 +374,129 @@ def test_followup_codex_routes_to_resume_and_bumps_last_message_at(
     assert entries[0].harness_session_id == "real-uuid"
 
 
+def _adopt_usable_codex_orphan(workdir, session_id):
+    from fno import paths
+    from fno.agents.discover import scan_recoverable_codex_rollouts
+    from fno.agents.watchdog import apply_recoverable
+
+    sessions_dir = workdir / "codex-sessions"
+    day = sessions_dir / "2026" / "08" / "25"
+    day.mkdir(parents=True)
+    rollout = day / f"rollout-2026-08-25T00-00-00-{session_id}.jsonl"
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": session_id, "cwd": str(workdir)},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-08-25T15:00:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "orphaned work"}
+                            ],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    registry_path = paths.agents_registry_path()
+    scan = scan_recoverable_codex_rollouts(
+        workdir,
+        24 * 3600,
+        sessions_dir=sessions_dir,
+        registry_path=registry_path,
+        now=rollout.stat().st_mtime + 1,
+    )
+    assert scan.complete is True
+    assert [row.session_id for row in scan.usable_recoverable] == [session_id]
+    results = apply_recoverable(
+        scan,
+        scope_cwd=workdir,
+        registry_path=registry_path,
+        confine_fn=lambda token, hits, **kwargs: hits,
+    )
+    assert results[0]["outcome"] == "applied"
+    entries = load_registry(registry_path)
+    assert len(entries) == 1
+    assert entries[0].harness_session_id == session_id
+    assert entries[0].last_message_at is None
+    return entries[0]
+
+
+def test_recovered_full_id_resumes_marker_and_stamps_exact_row(
+    workdir, fake_codex_resume
+):
+    from fno.agents.dispatch import _codex_followup_path
+
+    session_id = "01a039cc-0000-7000-8000-000000000001"
+    marker = "RECOVERY-RESUME-OK-test-full-id"
+    entry = _adopt_usable_codex_orphan(workdir, session_id)
+    fake_codex_resume.return_value = CodexResult(
+        exit_code=0,
+        session_id=session_id,
+        last_msg=marker,
+        duration_ms=22,
+    )
+
+    result = _codex_followup_path(
+        name=entry.name,
+        message=f"Reply exactly {marker}",
+        from_name="fno",
+        existing=entry,
+        yolo=False,
+        timeout_sec=10,
+        lock_handle=_FakeLockHandle(),
+    )
+
+    assert result.reply == marker
+    assert fake_codex_resume.call_args.kwargs["session_id"] == session_id
+    assert fake_codex_resume.call_args.kwargs["session_id"] != session_id[:8]
+    recovered = load_registry()[0]
+    assert recovered.harness_session_id == session_id
+    assert recovered.last_message_at is not None
+
+
+def test_recovered_full_id_resume_failure_leaves_activity_unstamped(
+    workdir, fake_codex_resume
+):
+    from fno.agents.dispatch import DispatchAskError, _codex_followup_path
+
+    session_id = "01a039cc-0000-7000-8000-000000000002"
+    entry = _adopt_usable_codex_orphan(workdir, session_id)
+    fake_codex_resume.side_effect = CodexInvocationError(1)
+
+    with pytest.raises(DispatchAskError) as exc:
+        _codex_followup_path(
+            name=entry.name,
+            message="Reply exactly RECOVERY-RESUME-OK-never",
+            from_name="fno",
+            existing=entry,
+            yolo=False,
+            timeout_sec=10,
+            lock_handle=_FakeLockHandle(),
+        )
+
+    assert exc.value.exit_code == 1
+    assert fake_codex_resume.call_args.kwargs["session_id"] == session_id
+    assert load_registry()[0].last_message_at is None
+    failures = [
+        event for event in _read_events()
+        if event.get("kind") == "agent_followup_failed"
+    ]
+    assert failures and failures[-1]["stage"] == "codex-subprocess"
+
+
 def test_followup_codex_provider_mismatch_rejected(workdir, fake_codex_resume):
     """AC2-UI: ask with --provider claude against codex registry row -> exit 2."""
     write_registry([
