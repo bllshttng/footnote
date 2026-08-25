@@ -316,6 +316,17 @@ def _resolve_decider(
     )
 
 
+def require_operator_session() -> Provenance:
+    """Return positive operator provenance or refuse the decision write.
+
+    Decision writes without a law-consent receipt are operator-only. This
+    reuses the existing positive identity contract: a proven harness session
+    refuses, an attended terminal permits, and an unattributed process fails
+    closed. The law consent path carries its separate human-approval proof.
+    """
+    return _resolve_decider(None, "operator")
+
+
 @_consent_locked
 def record_decision(
     *,
@@ -349,6 +360,9 @@ def record_decision(
     """
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
+
+    if consent is None:
+        require_operator_session()
 
     # The event records this value, so the floor must bind here, not only in
     # the provenance resolution: a gated provenance beside a raw self-declared
