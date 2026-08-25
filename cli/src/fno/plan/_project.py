@@ -32,6 +32,8 @@ from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
 # supplied one must.
 MIRROR_KEYS: tuple[str, ...] = (
     "priority",
+    "blocks_everything",
+    "difficulty",
     "blocked_by",
     "tags",
     "project",
@@ -49,7 +51,7 @@ LIST_MIRROR_KEYS: frozenset[str] = frozenset({"blocked_by", "tags"})
 # stale doc mirror", not "skip" - otherwise the doc keeps the old parent/size
 # after the graph dropped it. parent_slug is tied to parent: the converger sets
 # it to None whenever parent is null/dangling so it clears in lockstep.
-CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "parent", "parent_slug"})
+CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "difficulty", "parent", "parent_slug"})
 
 
 def project_node_to_plan(

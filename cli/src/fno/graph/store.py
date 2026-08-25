@@ -1114,6 +1114,28 @@ def append_progress_note(
     return result["found"], result["plan_path"]
 
 
+def append_wave_note(path: Path, node_id: str, note: dict) -> tuple[bool, str | None]:
+    """Append a structured wave note, refusing missing or terminal targets."""
+    from fno.graph._intake import _find_node
+
+    result: dict[str, object] = {"found": False, "error": None}
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        node = _find_node(entries, node_id)
+        if node is None:
+            result["error"] = f"no node resolves to '{node_id}'"
+            return entries
+        if node.get("completed_at") or node.get("status") in {"done", "superseded"}:
+            result["error"] = f"wave target '{node_id}' is terminal"
+            return entries
+        node.setdefault("progress_notes", []).append(dict(note))
+        result["found"] = True
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    return bool(result["found"]), result["error"] if isinstance(result["error"], str) else None
+
+
 # Bounded ceiling for harness / session-id strings (x-b6e4). Real ids are UUIDs
 # (~36) or short markers; 200 leaves headroom while rejecting a runaway value
 # that would bloat the graph. ponytail: fixed cap, widen only if a real id

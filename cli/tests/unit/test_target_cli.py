@@ -754,6 +754,28 @@ def test_target_start_forwards_beastmode_to_init(tmp_path, monkeypatch):
     assert "--beastmode" not in (seen["init_cmd"] or []), "start forwarded --beastmode without the flag"
 
 
+def test_resolve_node_model_defers_difficulty_to_grid(monkeypatch):
+    """The start seam pins only model/model_tier: a canonical difficulty defers
+    to the capacity grid at the spawn seam (parity with advance's dispatch),
+    while the legacy tier pin still resolves statically."""
+    monkeypatch.setattr(
+        target_cli, "_find_node", lambda node_id: {"id": node_id, "difficulty": "high"}
+    )
+    model, source = target_cli._resolve_node_model("x-def1")
+    assert model is None
+    assert source == "provider-default"
+
+    monkeypatch.setattr(
+        target_cli, "_find_node", lambda node_id: {"id": node_id, "model_tier": "low"}
+    )
+    from fno.adapters.providers import benchmarks as _bm
+
+    monkeypatch.setattr(_bm, "load_snapshot", lambda path=None: None)
+    model, source = target_cli._resolve_node_model("x-def2")
+    assert model == "glm-4.7"  # STATIC_TIERS['low'][0]
+    assert source == "task-tier(low)"
+
+
 def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, monkeypatch):
     """x-6390: `start` no-ops inside a linked worktree and returns before it can
     forward --beastmode, so the grant is dropped. Same silent-drop class as the init

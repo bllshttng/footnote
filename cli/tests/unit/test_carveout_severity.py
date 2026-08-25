@@ -62,7 +62,9 @@ def test_explicit_priority_still_wins_over_severity():
 
 
 def test_all_severities_route():
-    assert severity_to_priority("critical") == "p0"
+    # critical lands p1, not p0: p0 means a breaking bug ONLY (d-36de723f),
+    # and an external review severity badge is not a broken service.
+    assert severity_to_priority("critical") == "p1"
     assert severity_to_priority("high") == "p1"
     assert severity_to_priority("medium") == "p2"
     assert severity_to_priority("low") == "p3"

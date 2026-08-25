@@ -120,6 +120,24 @@ def _project_names() -> list[str]:
     return names
 
 
+def _idea_receipt(stdout: str) -> Optional[dict]:
+    """The last JSON object ``fno backlog idea`` printed (its receipts are the
+    final stdout block). None when nothing parseable is there."""
+    import json
+    import re
+
+    decoder = json.JSONDecoder()
+    best: Optional[dict] = None
+    for m in re.finditer(r"(?m)^\{", stdout):
+        try:
+            obj, _end = decoder.raw_decode(stdout, m.start())
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            best = obj
+    return best
+
+
 def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]:
     """File a backlog node for an architectural finding (no-diff-helps path).
 
@@ -136,7 +154,10 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
     ).format(run_id=run_id)
     try:
         out = subprocess.run(
-            ["fno", "backlog", "idea", title, "-d", details, "-p", "p2", "-t", "feature"],
+            [
+                "fno", "backlog", "idea", title, "-d", details, "-p", "p2",
+                "-t", "feature", "--difficulty", "medium", "--json",
+            ],
             capture_output=True,
             text=True,
             check=True,
@@ -144,12 +165,43 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
     except (OSError, subprocess.CalledProcessError) as exc:
         _LOG.warning("skill-diff: filing no-diff-helps node failed: %s", exc)
         return None
-    # `idea` prints the new node id somewhere in its receipt; grab the first token
-    # matching the id shape.
-    import re
-
-    m = re.search(r"\b[a-z]+-[0-9a-f]{3,}\b", out.stdout)
-    return m.group(0) if m else None
+    receipt = _idea_receipt(out.stdout)
+    if receipt is None:
+        _LOG.warning(
+            "skill-diff: unreadable idea receipt: %r", (out.stdout or "")[:120]
+        )
+        return None
+    if receipt.get("outcome") == "choice_required":
+        # A near-duplicate exists and NOTHING was filed by that call. The old
+        # regex grabbed the receipt's candidate id, reported it as the filed
+        # node, and the terminal event marked the run processed - silently
+        # losing the finding. Fold into the candidate instead: the --wave-of
+        # path appends a note with no prompt and is the non-interactive fold.
+        candidates = receipt.get("candidates") or []
+        if not candidates or not candidates[0].get("id"):
+            return None
+        fold_id = candidates[0]["id"]
+        try:
+            out = subprocess.run(
+                [
+                    "fno", "backlog", "idea", title, "-d", details,
+                    "--wave-of", fold_id, "--difficulty", "medium", "--json",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            _LOG.warning("skill-diff: folding no-diff-helps node failed: %s", exc)
+            return None
+        receipt = _idea_receipt(out.stdout)
+        if receipt is None or receipt.get("outcome") != "wave":
+            _LOG.warning(
+                "skill-diff: unexpected fold receipt: %r", (out.stdout or "")[:120]
+            )
+            return None
+        return receipt.get("node_id") or fold_id
+    return receipt.get("id") or None
 
 
 def _no_diff_helps(name: str, level: str, run_id: str, skill_id: str, reason: str) -> None:

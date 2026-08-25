@@ -55,7 +55,7 @@ def test_idea_invokes_birth_hook_with_persisted_node(graph, monkeypatch):
 
     res = CliRunner().invoke(
         __import__("fno.cli", fromlist=["app"]).app,
-        ["backlog", "idea", "A real generated idea"],
+        ["backlog", "idea", "A real generated idea", "--difficulty", "low"],
     )
 
     assert res.exit_code == 0, res.output
@@ -77,7 +77,7 @@ def test_idea_gate_off_skips_hook_entirely(graph, monkeypatch):
 
     res = CliRunner().invoke(
         __import__("fno.cli", fromlist=["app"]).app,
-        ["backlog", "idea", "An idea filed with the feature off"],
+        ["backlog", "idea", "An idea filed with the feature off", "--difficulty", "low"],
     )
 
     assert res.exit_code == 0, res.output
@@ -97,7 +97,7 @@ def test_idea_hook_failure_is_non_fatal(graph, monkeypatch):
 
     res = CliRunner().invoke(
         __import__("fno.cli", fromlist=["app"]).app,
-        ["backlog", "idea", "Idea that survives a hook crash"],
+        ["backlog", "idea", "Idea that survives a hook crash", "--difficulty", "low"],
     )
 
     assert res.exit_code == 0, res.output

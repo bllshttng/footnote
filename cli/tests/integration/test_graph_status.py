@@ -225,6 +225,24 @@ def test_idea_included_with_flag(tmp_graph, tmp_path):
     )
 
 
+def test_intake_p0_requires_plan_acknowledgment(tmp_graph, tmp_path):
+    """AC9-ERR/HP: plan intake requires and records blocks_everything."""
+    refused = tmp_path / "refused-p0.md"
+    refused.write_text("---\npriority: p0\n---\n# Broken service\n")
+    r = _invoke("backlog", "intake", str(refused))
+    assert r.exit_code != 0
+    assert "p0 blocks everything else" in r.output
+    assert _read_entries(tmp_graph) == []
+
+    accepted = tmp_path / "accepted-p0.md"
+    accepted.write_text(
+        "---\npriority: p0\nblocks_everything: true\n---\n# Broken service\n"
+    )
+    r2 = _invoke("--json", "backlog", "intake", str(accepted))
+    assert r2.exit_code == 0, r2.output
+    assert _read_entries(tmp_graph)[0]["blocks_everything"] is True
+
+
 def test_linked_idea_stub_excluded_from_ready_listing_by_default(tmp_graph, tmp_path):
     """`backlog ready` omits a LINKED idea stub (Rung.IDEA) by default; a
     plan-less idea (Rung.NONE) surfaces since x-e24a (its own test below)."""
@@ -640,7 +658,7 @@ def test_include_ideas_long_flag_still_works(tmp_graph, tmp_path):
 
 def test_backlog_idea_creates_plan_less_node(tmp_graph):
     """`backlog idea "X"` creates an idea-stage node (no plan_path)."""
-    r = _invoke("--json", "backlog", "idea", "Capture this thought")
+    r = _invoke("--json", "backlog", "idea", "Capture this thought", "--difficulty", "low")
     assert r.exit_code == 0, r.output
     payload = json.loads(r.stdout)
     node_id = payload["id"]
@@ -652,11 +670,126 @@ def test_backlog_idea_creates_plan_less_node(tmp_graph):
     assert node.get("status") == "idea"
 
 
+def test_backlog_idea_requires_difficulty_noninteractive(tmp_graph):
+    """AC2-ERR: non-interactive filing must name the work difficulty."""
+    r = _invoke("--json", "backlog", "idea", "Missing difficulty")
+    assert r.exit_code != 0
+    assert "--difficulty" in r.output
+    assert _read_entries(tmp_graph) == []
+
+
+def test_backlog_idea_records_filed_difficulty(tmp_graph):
+    """AC1-HP: the filing estimate is stored with attributable history."""
+    r = _invoke("--json", "backlog", "idea", "Difficulty recorded", "--difficulty", "HIGH")
+    assert r.exit_code == 0, r.output
+    node = _read_entries(tmp_graph)[0]
+    assert node["difficulty"] == "high"
+    assert node["difficulty_history"][-1]["source"] == "filed"
+    assert node["difficulty_history"][-1]["value"] == "high"
+
+
+def test_backlog_idea_wave_appends_without_minting(tmp_graph):
+    """AC5-HP: a wave appends one structured note and mints no node."""
+    target = _invoke("--json", "backlog", "add", "Existing work")
+    target_id = json.loads(target.stdout)["id"]
+    r = _invoke(
+        "--json", "backlog", "idea", "New finding",
+        "--wave-of", target_id,
+        "--difficulty", "high",
+        "--details", "append this finding",
+    )
+    assert r.exit_code == 0, r.output
+    receipt = json.loads(r.stdout)
+    assert receipt["outcome"] == "wave"
+    assert receipt["node_id"] == target_id
+    assert receipt["minted_id"] is None
+    entries = _read_entries(tmp_graph)
+    assert len(entries) == 1
+    note = entries[0]["progress_notes"][-1]
+    assert note["kind"] == "wave"
+    assert note["title"] == "New finding"
+    assert note["details"] == "append this finding"
+    assert note["difficulty"] == "high"
+
+
+def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph):
+    """AC6-ERR: invalid wave targets fail before any note or node mutation."""
+    target = _invoke("--json", "backlog", "add", "Done work")
+    target_id = json.loads(target.stdout)["id"]
+    _invoke("backlog", "update", target_id, "--locked-by", "null")
+    _invoke("backlog", "done", target_id)
+    r = _invoke(
+        "--json", "backlog", "idea", "Late finding",
+        "--wave-of", target_id,
+        "--difficulty", "low",
+        "--parent", target_id,
+    )
+    assert r.exit_code != 0
+    assert "topology" in r.output or "terminal" in r.output
+    assert len(_read_entries(tmp_graph)) == 1
+
+
+def test_backlog_idea_offers_fold_before_minting_noninteractive(tmp_graph, monkeypatch, tmp_path):
+    """AC7-HP: a related live sibling produces a choice-required receipt."""
+    target = _invoke("--json", "backlog", "add", "Difficulty routing filing surface")
+    target_id = json.loads(target.stdout)["id"]
+    sidecar = tmp_path / "relatedness.json"
+    sidecar.write_text(json.dumps({target_id: []}))
+    monkeypatch.setattr("fno.graph.cli._relatedness_path", lambda: sidecar)
+    r = _invoke(
+        "--json", "backlog", "idea", "Difficulty routing filing surface estimate",
+        "--difficulty", "high",
+    )
+    assert r.exit_code == 0, r.output
+    receipt = json.loads(r.stdout)
+    assert receipt["outcome"] == "choice_required"
+    assert receipt["minted_id"] is None
+    assert receipt["candidates"][0]["id"] == target_id
+    assert "fold offered" in receipt["marker"]
+    assert len(_read_entries(tmp_graph)) == 1
+
+
+def test_backlog_idea_prompts_difficulty_before_fold_gate_interactive(
+    tmp_graph, monkeypatch, tmp_path
+):
+    """An interactive filing that omits --difficulty still gets the fold offer:
+    the gate keys on difficulty, so the prompt must run BEFORE it, not inside
+    the create impl where the gate has already passed the value over."""
+    import fno.graph.cli as gcli
+
+    target = _invoke("--json", "backlog", "add", "Difficulty routing filing surface")
+    target_id = json.loads(target.stdout)["id"]
+    sidecar = tmp_path / "relatedness.json"
+    sidecar.write_text(json.dumps({target_id: []}))
+    monkeypatch.setattr("fno.graph.cli._relatedness_path", lambda: sidecar)
+
+    monkeypatch.setattr(gcli, "_stdin_is_interactive", lambda: True)
+    prompted = []
+    confirmed = []
+    monkeypatch.setattr(
+        gcli.typer, "prompt", lambda *a, **k: prompted.append(a) or "high"
+    )
+    monkeypatch.setattr(
+        gcli.typer, "confirm", lambda *a, **k: confirmed.append(a) or False
+    )
+
+    r = _invoke(
+        "--json", "backlog", "idea", "Difficulty routing filing surface estimate"
+    )
+    assert r.exit_code == 0, r.output
+    assert prompted, "difficulty prompt never ran before the fold gate"
+    assert confirmed, "fold offer never fired on the interactive path"
+    receipt = json.loads(r.stdout)
+    assert receipt["id"]  # declined the fold -> minted separately
+    assert len(_read_entries(tmp_graph)) == 2
+
+
 def test_backlog_idea_accepts_description(tmp_graph):
     """`backlog idea "X" --description "Y"` stores Y in details."""
     r = _invoke(
         "--json", "backlog", "idea", "Idea with body",
         "--description", "explain the idea here",
+        "--difficulty", "medium",
     )
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]
@@ -670,6 +803,7 @@ def test_backlog_idea_accepts_priority(tmp_graph):
     r = _invoke(
         "--json", "backlog", "idea", "Urgent idea",
         "--priority", "p1",
+        "--difficulty", "high",
     )
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]

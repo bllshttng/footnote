@@ -2080,7 +2080,7 @@ def test_contained_in_survives_a_later_unrelated_mutation(graph_env):
 
     # Any other locked mutation: a priority bump on an unrelated node.
     assert _invoke(
-        ["backlog", "update", "ab-epic0001", "--priority", "p0"]
+        ["backlog", "update", "ab-epic0001", "--priority", "p0", "--blocks-everything"]
     ).exit_code == 0
 
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")

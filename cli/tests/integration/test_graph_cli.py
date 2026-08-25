@@ -110,7 +110,7 @@ def test_ac_hp_idea_stamps_ambient_session(tmp_graph, tmp_path, monkeypatch):
     # cwd without an owned manifest -> session+harness stamped, node/plan null.
     monkeypatch.chdir(tmp_path)
 
-    r = _invoke("backlog", "idea", "Ambient idea")
+    r = _invoke("backlog", "idea", "Ambient idea", "--difficulty", "low")
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
     assert entries[0]["source_session_id"] == "itest-sess-7"
@@ -125,7 +125,7 @@ def test_ac_edge_idea_no_env_null_provenance(tmp_graph, tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(tmp_path)
 
-    r = _invoke("backlog", "idea", "Quiet idea")
+    r = _invoke("backlog", "idea", "Quiet idea", "--difficulty", "low")
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
     assert entries[0]["source_session_id"] is None
@@ -207,6 +207,59 @@ def test_update_model_tier_null_clears(tmp_graph):
     assert _read_graph(tmp_graph)[0]["model_tier"] is None
 
 
+def test_update_difficulty_records_history(tmp_graph):
+    """A manual difficulty revision carries the same attributable trail the
+    birth paths keep; a same-value rewrite records nothing."""
+    r = _invoke("backlog", "add", "Hard Feature")
+    nid = json.loads(r.output)["id"]
+    _invoke("backlog", "update", nid, "--difficulty", "medium")
+    _invoke("backlog", "update", nid, "--difficulty", "high")
+    node = _read_graph(tmp_graph)[0]
+    assert node["difficulty"] == "high"
+    hist = node["difficulty_history"]
+    assert [h["value"] for h in hist] == ["medium", "high"]
+    assert hist[-1]["source"] == "update"
+
+    _invoke("backlog", "update", nid, "--difficulty", "high")
+    assert len(_read_graph(tmp_graph)[0]["difficulty_history"]) == 2
+
+
+def test_update_blocks_everything_alone_acks_existing_p0(tmp_graph):
+    """Standalone --blocks-everything acknowledges an already-p0 node (the
+    migrate-priorities ack spelling) instead of silently writing nothing."""
+    tmp_graph.write_text(
+        json.dumps({"entries": [{"id": "ab-aaaa1111", "title": "Legacy p0", "status": "idea", "priority": "p0"}]})
+    )
+    r = _invoke("backlog", "update", "ab-aaaa1111", "--blocks-everything")
+    assert r.exit_code == 0, r.output
+    assert _read_graph(tmp_graph)[0]["blocks_everything"] is True
+
+
+def test_update_blocks_everything_on_non_p0_is_loud(tmp_graph):
+    """--blocks-everything on a non-p0 node exits 2 rather than pretending to
+    have acknowledged something."""
+    r = _invoke("backlog", "add", "Ordinary")
+    nid = json.loads(r.output)["id"]
+    r2 = runner.invoke(app, ["backlog", "update", nid, "--blocks-everything"])
+    assert r2.exit_code == 2
+    assert "p0" in r2.output
+    node = _read_graph(tmp_graph)[0]
+    assert node["blocks_everything"] is False
+
+
+def test_difficulty_prompt_value_proc_reasks_on_bad_band():
+    """A bad band at the difficulty prompt raises click.UsageError (click's
+    re-ask signal); the old bare ValueError surfaced as a traceback instead."""
+    import click
+    import pytest as _pytest
+
+    import fno.graph.cli as gcli
+
+    with _pytest.raises(click.UsageError):
+        gcli._prompt_difficulty_value("hard")
+    assert gcli._prompt_difficulty_value("high") == "high"
+
+
 def test_pick_extract_id_ignores_prefixed_non_id_tokens(monkeypatch):
     """gemini HIGH: picker extraction must use the strict matcher so a token
     that merely starts with the prefix (e.g. a project name `fno-cli`) is not
@@ -240,7 +293,10 @@ def test_legacy_id_resolves_under_configured_install(tmp_graph, monkeypatch):
     model = SettingsModel(config={"backlog": {"id_prefix": "xy-", "id_hex_width": 4}})
     monkeypatch.setattr("fno.config.load_settings", lambda: model)
 
-    r = _invoke("backlog", "update", "ab-55ba9adb", "--priority", "p0")
+    r = _invoke(
+        "backlog", "update", "ab-55ba9adb", "--priority", "p0",
+        "--blocks-everything",
+    )
     assert r.exit_code == 0, r.output
     entries = _read_graph(g)
     assert entries[0]["priority"] == "p0"
@@ -1131,10 +1187,33 @@ def test_ac1_hp_graph_archive(tmp_graph):
 
 def test_priority_p0_accepted(tmp_graph):
     """`backlog add "X" --priority p0` succeeds; node has priority="p0"."""
-    r = _invoke("backlog", "add", "Drop everything", "--priority", "p0")
+    r = _invoke("backlog", "add", "Drop everything", "--priority", "p0", "--blocks-everything")
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
     assert entries[0]["priority"] == "p0"
+
+
+def test_priority_p0_requires_breaking_acknowledgment(tmp_graph):
+    """AC9-ERR: p0 refuses before minting without --blocks-everything."""
+    r = _invoke("backlog", "add", "Not actually broken", "--priority", "p0")
+    assert r.exit_code != 0
+    assert "p0 blocks everything else, usually a bug" in r.output
+    assert "fno backlog rank" in r.output
+    assert _read_graph(tmp_graph) == []
+
+
+def test_new_p0_requires_breaking_acknowledgment(tmp_graph):
+    """Every CLI birth path applies the p0 acknowledgment before mutation."""
+    refused = _invoke("backlog", "new", "Not actually broken", "--priority", "p0")
+    assert refused.exit_code != 0
+    assert "p0 blocks everything else, usually a bug" in refused.output
+    assert _read_graph(tmp_graph) == []
+
+    accepted = _invoke(
+        "backlog", "new", "Broken service", "--priority", "p0", "--blocks-everything"
+    )
+    assert accepted.exit_code == 0, accepted.output
+    assert _read_graph(tmp_graph)[0]["blocks_everything"] is True
 
 
 def test_priority_default_is_p2(tmp_graph):
@@ -1222,6 +1301,27 @@ def test_priority_migration_idempotent(tmp_graph):
     legacy_after_second = next(e for e in after_second["entries"] if e["id"] == "ab-old00001")
     assert legacy_after_first["priority"] == "p1"
     assert legacy_after_second["priority"] == "p1"
+
+
+def test_priority_migration_command_is_dry_run_then_idempotent(tmp_graph):
+    """AC11-HP: the migration command has explicit dry-run/apply receipts."""
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {"id": "ab-old00001", "title": "Legacy", "priority": "p0"},
+            {"id": "ab-old00002", "title": "Legacy 2", "priority": "p0"},
+        ]
+    }))
+    dry = _invoke("backlog", "migrate-priorities")
+    assert dry.exit_code == 0, dry.output
+    assert json.loads(dry.stdout)["legacy_p0"] == 2
+    assert _read_graph(tmp_graph)[0]["priority"] == "p0"
+    applied = _invoke("backlog", "migrate-priorities", "--apply")
+    assert json.loads(applied.stdout)["rebanded_to_p1"] == 2
+    second = _invoke("backlog", "migrate-priorities", "--apply")
+    assert json.loads(second.stdout)["already_migrated"] == 2
+    rollback = _invoke("backlog", "migrate-priorities", "--rollback")
+    assert json.loads(rollback.stdout)["restored_to_p0"] == 2
+    assert all(row["priority"] == "p0" for row in _read_graph(tmp_graph))
 
 
 def test_priority_missing_key_backfill(tmp_graph):
@@ -2211,7 +2311,7 @@ def test_ac2_hp_idea_explicit_project_stores_workmap_cwd(tmp_graph, tmp_path):
         "fno.graph._intake._settings_candidate_paths",
         return_value=[settings_path],
     ), patch("fno.graph._intake.repo_root", return_value="/some/foreign/cwd"):
-        r = _invoke("backlog", "idea", "Test idea", "--project", "fno")
+            r = _invoke("backlog", "idea", "Test idea", "--project", "fno", "--difficulty", "medium")
 
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
@@ -2232,7 +2332,7 @@ def test_ac2_err_idea_unmapped_project_falls_back_to_repo_root(tmp_graph, tmp_pa
         "fno.graph._intake._settings_candidate_paths",
         return_value=[settings_path],
     ), patch("fno.graph._intake.repo_root", return_value=fake_repo_root):
-        r = _invoke("backlog", "idea", "Unknown proj idea", "--project", "unknown-proj")
+            r = _invoke("backlog", "idea", "Unknown proj idea", "--project", "unknown-proj", "--difficulty", "medium")
 
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
@@ -2255,9 +2355,10 @@ def test_ac2_edge_idea_explicit_cwd_wins_over_workmap(tmp_graph, tmp_path):
     ):
         r = _invoke(
             "backlog", "idea", "Explicit cwd wins",
-            "--project", "fno",
-            "--cwd", "/tmp/deliberate",
-        )
+                "--project", "fno",
+                "--cwd", "/tmp/deliberate",
+                "--difficulty", "low",
+            )
 
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)

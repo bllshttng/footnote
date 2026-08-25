@@ -893,6 +893,8 @@ def _build_backlog_node(
     project: Optional[str] = None,
     cwd: Optional[str] = None,
     priority: str = "p2",
+    blocks_everything: bool = False,
+    difficulty: Optional[str] = None,
     domain: str = "code",
     blocked_by: Optional[list[str]] = None,
     roadmap_id: Optional[str] = None,
@@ -918,7 +920,7 @@ def _build_backlog_node(
     dict has no ``id`` - the caller assigns one inside its locked mutator
     so duplicate-ID checks happen against the live snapshot.
     """
-    from fno.graph._constants import ID_PREFIX  # noqa: F401 (kept for symmetry)
+    from fno.graph._constants import ID_PREFIX  # noqa: F401
     # Parent-edge provenance (x-30f6): stamped from the running session's env +
     # manifest, or from an explicit --source-node. Centralized here so
     # every creator verb (add/idea/decompose) self-describes its origin.
@@ -934,6 +936,13 @@ def _build_backlog_node(
         "project": project,
         "cwd": cwd,
         "priority": priority,
+        "blocks_everything": blocks_everything,
+        "difficulty": difficulty,
+        "difficulty_history": (
+            [{"value": difficulty, "source": "filed", "ts": datetime.now(timezone.utc).isoformat()}]
+            if difficulty is not None
+            else []
+        ),
         "domain": domain,
         "blocked_by": list(blocked_by or []),
         "session_id": None,
@@ -984,6 +993,26 @@ def _refuse_create_on_external_backend() -> None:
         raise typer.Exit(code=1)
 
 
+def _stdin_is_interactive() -> bool:
+    """One seam for the tty checks the filing prompts key on, so the fold
+    gate and the create impl agree (and tests can pin the answer)."""
+    return bool(sys.stdin.isatty())
+
+
+def _prompt_difficulty_value(value: str) -> str:
+    """``typer.prompt`` value_proc for the difficulty band: re-ask on a bad
+    answer instead of crashing. click re-prompts only on ``UsageError``, while
+    ``normalize_difficulty`` raises a bare ``ValueError`` that would surface as
+    a traceback straight out of the prompt."""
+    import click
+    from fno.graph._constants import DIFFICULTY_HELP, normalize_difficulty
+
+    try:
+        return normalize_difficulty(value) or ""
+    except ValueError as exc:
+        raise click.UsageError(f"{exc}. {DIFFICULTY_HELP}") from exc
+
+
 def _create_node_impl(
     *,
     title: str,
@@ -992,6 +1021,8 @@ def _create_node_impl(
     project: Optional[str] = None,
     cwd: Optional[str] = None,
     priority: str = "p2",
+    blocks_everything: bool = False,
+    difficulty: Optional[str] = None,
     domain: str = "code",
     blocked_by: Optional[str] = None,
     roadmap_id: Optional[str] = None,
@@ -1003,6 +1034,7 @@ def _create_node_impl(
     tags: Optional[list[str]] = None,
     source_node: Optional[str] = None,
     related: Optional[list[str]] = None,
+    require_difficulty: bool = False,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
 
@@ -1012,7 +1044,13 @@ def _create_node_impl(
     ``fno backlog update`` just to set parent/size/domain on a fresh idea.
     """
     _refuse_create_on_external_backend()
-    from fno.graph._constants import PRIORITY_ORDER, mint_node_id
+    from fno.graph._constants import (
+        DIFFICULTY_HELP,
+        PRIORITY_ORDER,
+        mint_node_id,
+        normalize_difficulty,
+        validate_priority_write,
+    )
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
         VALID_NODE_TYPES,
@@ -1028,6 +1066,29 @@ def _create_node_impl(
             err=True,
         )
         raise typer.Exit(code=1)
+    try:
+        validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    if difficulty is None and require_difficulty:
+        if not _stdin_is_interactive():
+            typer.echo(
+                "Error: non-interactive filing requires --difficulty "
+                f"({', '.join(('low', 'medium', 'high'))}). {DIFFICULTY_HELP}",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        difficulty = typer.prompt(
+            "Difficulty (low|medium|high)",
+            value_proc=_prompt_difficulty_value,
+        )
+    try:
+        difficulty = normalize_difficulty(difficulty)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}. {DIFFICULTY_HELP}", err=True)
+        raise typer.Exit(code=2)
 
     # `update --type` has always validated; these birth paths never did, so
     # `--type task` wrote an out-of-vocabulary value straight into the graph.
@@ -1094,6 +1155,8 @@ def _create_node_impl(
             project=resolved_project,
             cwd=resolved_cwd,
             priority=priority,
+            blocks_everything=blocks_everything,
+            difficulty=difficulty,
             domain=domain,
             blocked_by=blockers,
             roadmap_id=roadmap_id,
@@ -1251,6 +1314,8 @@ def cmd_add(
     title: str = typer.Argument(..., help="Feature title"),
     domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
+    difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
     type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
@@ -1307,6 +1372,8 @@ def cmd_add(
         project=project,
         cwd=cwd,
         priority=priority,
+        blocks_everything=blocks_everything,
+        difficulty=difficulty,
         domain=domain,
         blocked_by=blocked_by,
         roadmap_id=roadmap_id,
@@ -1323,14 +1390,98 @@ def cmd_add(
 
 # -- idea (sugar verb) --
 
+
+def _fold_candidates(
+    *, title: str, details: Optional[str], difficulty: str, entries: list[dict]
+) -> tuple[list[dict], str]:
+    """Find live filing siblings before the node-ID mint boundary."""
+    from fno.graph import relatedness
+
+    candidates, source = relatedness.filing_candidates(entries, _relatedness_path())
+    incoming = {
+        "id": "__incoming__",
+        "title": title,
+        "details": details,
+        "difficulty": difficulty,
+        "domain": "code",
+    }
+    ranked = relatedness.similar_nodes(incoming, candidates, k=5)
+    by_id = {entry.get("id"): entry for entry in candidates}
+    out: list[dict] = []
+    for node_id, score, reason in ranked:
+        node = by_id.get(node_id)
+        if node is None:
+            continue
+        out.append(
+            {
+                "id": node_id,
+                "title": node.get("title"),
+                "status": node.get("status"),
+                "holder": _live_worker(node_id),
+                "score": score,
+                "evidence": reason,
+            }
+        )
+    # A live plan surface is an independent fold signal when the filing names
+    # one of the same files. The claim holder comes from the lockfile, not the
+    # graph snapshot's stale locked_by field.
+    import re
+    from pathlib import Path
+    from fno.graph.collision import parse_files_to_modify
+
+    incoming_files = set(re.findall(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", details or ""))
+    if incoming_files:
+        known = {item["id"] for item in out}
+        for node in entries:
+            surface_node_id: object = node.get("id")
+            plan_path = node.get("plan_path")
+            if (
+                not isinstance(surface_node_id, str)
+                or surface_node_id in known
+                or node.get("status") != "in_progress"
+                or not isinstance(plan_path, str)
+            ):
+                continue
+            try:
+                overlap = incoming_files & parse_files_to_modify(Path(plan_path))
+            except Exception:  # noqa: BLE001 - surface evidence is advisory
+                overlap = set()
+            if overlap:
+                out.append(
+                    {
+                        "id": surface_node_id,
+                        "title": node.get("title"),
+                        "status": node.get("status"),
+                        "holder": _live_worker(surface_node_id),
+                        "score": 1.0,
+                        "evidence": "file overlap: " + ", ".join(sorted(overlap)),
+                    }
+                )
+                if isinstance(surface_node_id, str):
+                    known.add(surface_node_id)
+    return out, source
+
 @cli.command(
     "idea",
     epilog="Paired verb: `fno backlog remove <id>` deletes it (hidden; run its own --help).",
 )
 def cmd_idea(
+    ctx: typer.Context,
     title: str = typer.Argument(..., help="Idea title - what is this?"),
     domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
+    difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
+    wave_of: Optional[str] = typer.Option(
+        None,
+        "--wave-of",
+        help="Append this finding to an existing live node without minting a new id.",
+    ),
+    separate: bool = typer.Option(
+        False,
+        "--separate",
+        help="Force a separate node when a pre-mint fold offer is shown.",
+    ),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
     type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
@@ -1379,6 +1530,7 @@ def cmd_idea(
             "comma-separate. Refuses an id that does not resolve."
         ),
     ),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
 ) -> None:
     """Capture an idea (a plan-less backlog node) with minimal ceremony.
 
@@ -1389,6 +1541,172 @@ def cmd_idea(
     ``fno backlog update``). Shares ``add``'s full option set so a fresh idea
     can carry parent/size/domain without a follow-up ``fno backlog update``.
     """
+    if wave_of:
+        if separate:
+            typer.echo("Error: --wave-of and --separate are mutually exclusive", err=True)
+            raise typer.Exit(code=2)
+        topology_flags = []
+        if blocked_by:
+            topology_flags.append("--blocked-by")
+        if parent:
+            topology_flags.append("--parent")
+        if roadmap_id:
+            topology_flags.append("--roadmap-id")
+        if vision_path:
+            topology_flags.append("--vision-path")
+        if project:
+            topology_flags.append("--project")
+        if cwd:
+            topology_flags.append("--cwd")
+        if size:
+            topology_flags.append("--size")
+        if batch:
+            topology_flags.append("--batch")
+        if related:
+            topology_flags.append("--related")
+        if type_ != "feature":
+            topology_flags.append("--type")
+        if priority != "p2":
+            topology_flags.append("--priority")
+        if topology_flags:
+            typer.echo(
+                "Error: wave filing cannot use node-only topology flags: "
+                + ", ".join(topology_flags),
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        from fno.graph._constants import normalize_difficulty
+        if difficulty is None:
+            if not sys.stdin.isatty():
+                typer.echo(
+                    "Error: non-interactive wave filing requires --difficulty "
+                    "(low, medium, high)",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            difficulty = typer.prompt("Difficulty (low|medium|high)")
+        try:
+            difficulty = normalize_difficulty(difficulty)
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2)
+
+        from fno.graph.store import append_wave_note, read_graph
+
+        entries = read_graph(_graph_path())
+        try:
+            target_id = _resolve_asserted_id(wave_of, entries, flag="--wave-of")
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2)
+        note = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": "wave",
+            "title": title,
+            "details": details if details is not None else description,
+            "difficulty": difficulty,
+            "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
+            "text": (details if details is not None else description) or title,
+        }
+        found, error = append_wave_note(_graph_path(), target_id, note)
+        if not found:
+            typer.echo(f"Error: {error or 'wave append refused'}", err=True)
+            raise typer.Exit(code=2)
+        receipt = {
+            "outcome": "wave",
+            "node_id": target_id,
+            "note": note,
+            "minted_id": None,
+        }
+        if json_output or (ctx.obj and ctx.obj.get("json")):
+            typer.echo(json.dumps(receipt, indent=2))
+        else:
+            typer.echo(f"folded as wave into {target_id}; minted_id: null")
+        return
+
+    if difficulty is None and not separate and _stdin_is_interactive():
+        # Ask BEFORE the fold gate: the gate keys on difficulty, so an
+        # interactive filing that omits --difficulty would otherwise skip the
+        # fold offer entirely and mint straight past it (the in-impl prompt
+        # runs only after this gate has already passed the value over).
+        difficulty = typer.prompt(
+            "Difficulty (low|medium|high)", value_proc=_prompt_difficulty_value
+        )
+
+    if difficulty is not None and not separate:
+        from fno.graph._constants import normalize_difficulty
+        from fno.graph.store import read_graph
+        import shlex
+
+        try:
+            normalized_difficulty = normalize_difficulty(difficulty)
+        except ValueError:
+            normalized_difficulty = None
+        if normalized_difficulty is not None:
+            entries = read_graph(_graph_path())
+            try:
+                candidates, candidate_source = _fold_candidates(
+                    title=title,
+                    details=details if details is not None else description,
+                    difficulty=normalized_difficulty,
+                    entries=entries,
+                )
+            except Exception as exc:  # noqa: BLE001 - filing fallback stays recall-safe
+                candidates, candidate_source = [], f"fallback:fold-check-error:{exc}"
+            if candidates:
+                top = candidates[0]
+                wave_command = (
+                    "fno backlog idea "
+                    f"{shlex.quote(title)} --wave-of {top['id']} "
+                    f"--difficulty {normalized_difficulty}"
+                )
+                marker = (
+                    f"fold offered: {top['title']} status={top['status']} "
+                    f"holder={top['holder'] or 'none'} evidence={top['evidence']}"
+                )
+                choice_receipt: dict[str, object] = {
+                    "outcome": "choice_required",
+                    "marker": marker,
+                    "candidate_source": candidate_source,
+                    "candidates": candidates,
+                    "wave_command": wave_command,
+                    "separate_command": f"fno backlog idea {shlex.quote(title)} --separate --difficulty {normalized_difficulty}",
+                    "minted_id": None,
+                }
+                if not _stdin_is_interactive():
+                    if json_output or (ctx.obj and ctx.obj.get("json")):
+                        typer.echo(json.dumps(choice_receipt, indent=2))
+                    else:
+                        typer.echo(marker)
+                        typer.echo(f"wave: {wave_command}")
+                        typer.echo(f"separate: {choice_receipt['separate_command']}")
+                    return
+                if typer.confirm(f"{marker}. Fold into {top['id']}?", default=False):
+                    from fno.graph.store import append_wave_note
+
+                    note = {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "kind": "wave",
+                        "title": title,
+                        "details": details if details is not None else description,
+                        "difficulty": normalized_difficulty,
+                        "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
+                        "text": (details if details is not None else description) or title,
+                    }
+                    found, error = append_wave_note(_graph_path(), top["id"], note)
+                    if not found:
+                        typer.echo(f"Error: {error or 'wave append refused'}", err=True)
+                        raise typer.Exit(code=2)
+                    choice_receipt["outcome"] = "wave"
+                    choice_receipt["node_id"] = top["id"]
+                    choice_receipt["note"] = note
+                    if json_output or (ctx.obj and ctx.obj.get("json")):
+                        typer.echo(json.dumps(choice_receipt, indent=2))
+                    else:
+                        typer.echo(f"folded as wave into {top['id']}; minted_id: null")
+                    return
+
     _create_node_impl(
         title=title,
         type_=type_,
@@ -1396,6 +1714,8 @@ def cmd_idea(
         project=project,
         cwd=cwd,
         priority=priority,
+        blocks_everything=blocks_everything,
+        difficulty=difficulty,
         domain=domain,
         blocked_by=blocked_by,
         roadmap_id=roadmap_id,
@@ -1407,6 +1727,7 @@ def cmd_idea(
         tags=tag,
         source_node=source_node,
         related=related,
+        require_difficulty=True,
     )
 
 
@@ -1473,7 +1794,7 @@ def cmd_decompose(
     """
     _refuse_create_on_external_backend()
     import sys as _sys
-    from fno.graph._constants import mint_node_id
+    from fno.graph._constants import mint_node_id, validate_priority_write
     from fno.graph.store import locked_mutate_graph, read_graph, GraphUnreadableError
     from fno.graph._intake import _find_node, _would_create_cycle
     from fno.graph._decompose import (
@@ -1626,6 +1947,13 @@ def cmd_decompose(
         live_epic = _find_node(graph_entries, epic_id)
         if live_epic is None:
             raise DecomposeError(f"epic node {epic_id} not found", exit_code=3)
+        try:
+            validate_priority_write(
+                live_epic.get("priority", "p2"),
+                blocks_everything=bool(live_epic.get("blocks_everything")),
+            )
+        except ValueError as exc:
+            raise DecomposeError(str(exc), exit_code=2) from exc
         epic_resolved_id = live_epic["id"]
         epic_id_box[0] = epic_resolved_id
         base = plan_base(live_epic.get("plan_path"))
@@ -1732,6 +2060,7 @@ def cmd_decompose(
                     project=route_proj if route_proj is not None else live_epic.get("project"),
                     cwd=route_cwd if route_cwd is not None else live_epic.get("cwd"),
                     priority=live_epic.get("priority", "p2"),
+                    blocks_everything=bool(live_epic.get("blocks_everything")),
                     domain=live_epic.get("domain", "code"),
                     plan_path=None,
                     known_ids={e.get("id") for e in graph_entries},
@@ -2579,83 +2908,9 @@ def _intake_impl(
         claim_source = prep["claim_source"]
 
         def claim_mutator(es):
-            from fno.graph._intake import (
-                DEFAULT_NODE_TYPE,
-                _find_node,
-                _read_plan_frontmatter,
-                _would_exceed_epic_depth,
-                normalize_type,
-                resolve_node_project_and_cwd,
+            return _apply_claim_in_place(
+                es, claim_id, plan_path=plan_path, spec=spec, project=project
             )
-
-            # Intake has TWO lanes; the create lane reads `type` doc->graph in
-            # _build_intake_node, so this one must too or the flow is a guard on
-            # one of N paths. Same rule as priority below: the doc only speaks
-            # when it declares a real, non-default value.
-            claimed_type = normalize_type(
-                (_read_plan_frontmatter(plan_path) or {}).get("type")
-            )
-            for entry in es:
-                if entry.get("id") != claim_id:
-                    continue
-                entry["plan_path"] = plan_path
-                entry["title"] = spec["title"]
-                if (
-                    claimed_type != DEFAULT_NODE_TYPE
-                    and entry.get("type") != claimed_type
-                ):
-                    # `add` and `update` both refuse a write that would make a
-                    # third epic level; a doc-frontmatter lane that skips the cap
-                    # would be the decorative guard this whole change is about.
-                    # It SKIPS rather than refuses, unlike those two: there the
-                    # operator typed `--type` and deserves a hard error, here the
-                    # doc is advisory and the claim itself is still valid.
-                    parent_node = (
-                        _find_node(es, entry["parent"]) if entry.get("parent") else None
-                    )
-                    if (
-                        claimed_type == "epic"
-                        and parent_node is not None
-                        and _would_exceed_epic_depth(
-                            es, {**entry, "type": "epic"}, parent_node
-                        )
-                    ):
-                        typer.echo(
-                            f"warning: plan declares type: epic but {claim_id} sits "
-                            f"under {parent_node['id']}; promoting it would exceed "
-                            f"the epic-nesting cap - type left as "
-                            f"{entry.get('type')!r}",
-                            err=True,
-                        )
-                    else:
-                        entry["type"] = claimed_type
-                if spec["deps"]:
-                    merged = list(
-                        dict.fromkeys([*entry.get("blocked_by", []), *spec["deps"]])
-                    )
-                    entry["blocked_by"] = merged
-                # Only override priority if the plan supplied a non-default one.
-                if spec.get("priority") and spec["priority"] != "p2":
-                    entry["priority"] = spec["priority"]
-                if spec.get("points") is not None:
-                    entry["points"] = spec["points"]
-                # Backfill project/cwd when the node was created via
-                # `fno backlog new` (no plan path -> no auto-scope) and is
-                # now being claimed by a plan that lives in a project repo.
-                # Only fills nulls; never overwrites existing values.
-                if entry.get("project") is None or entry.get("cwd") is None:
-                    resolved_project, resolved_cwd, _ = resolve_node_project_and_cwd(
-                        plan_path, project, es,
-                    )
-                    if entry.get("project") is None and resolved_project:
-                        entry["project"] = resolved_project
-                    if entry.get("cwd") is None and resolved_cwd:
-                        entry["cwd"] = resolved_cwd
-                # Promote idea -> ready by clearing any stale claimed_at.
-                # status is recomputed by recompute_statuses on the next read.
-                entry["claimed_at"] = None
-                break
-            return es
 
         locked_mutate_graph(_graph_path(), claim_mutator)
         typer.echo(
@@ -2831,6 +3086,7 @@ def cmd_update(
     ),
     pr_url: Optional[str] = typer.Option(None, "--pr-url", help="PR URL. 'null' clears."),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Update display title"),
     details: Optional[str] = typer.Option(
         None,
@@ -2841,6 +3097,11 @@ def cmd_update(
     ),
     domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
     size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
+    difficulty: Optional[str] = typer.Option(
+        None,
+        "--difficulty",
+        help="Intrinsic work difficulty: low|medium|high. Not a model or capacity hint.",
+    ),
     model: Optional[str] = typer.Option(
         None,
         "--model",
@@ -2962,7 +3223,13 @@ def cmd_update(
         ),
     ),
 ) -> None:
-    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, normalize_tag
+    from fno.graph._constants import (
+        PRIORITY_ORDER,
+        has_node_id_prefix,
+        normalize_difficulty,
+        normalize_tag,
+        validate_priority_write,
+    )
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
         _parse_blocker_list,
@@ -2984,6 +3251,12 @@ def cmd_update(
             err=True,
         )
         raise typer.Exit(code=1)
+    if priority == "p0":
+        try:
+            validate_priority_write(priority, blocks_everything=blocks_everything)
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2)
 
     if project is not None and (not isinstance(project, str) or not project.strip()):
         typer.echo("Error: --project must be a non-empty string", err=True)
@@ -3367,6 +3640,22 @@ def cmd_update(
             node["dispatch_brief"] = None if dispatch_brief.lower() == "null" else dispatch_brief
         if priority is not None:
             node["priority"] = priority
+        # --blocks-everything acknowledges p0. Standalone, it acknowledges an
+        # ALREADY-p0 node (the migrate-priorities ack spelling); on anything
+        # else it is a loud error, never a silent no-op.
+        if blocks_everything:
+            effective_priority = (
+                priority if priority is not None else node.get("priority")
+            )
+            if effective_priority == "p0":
+                node["blocks_everything"] = True
+            else:
+                typer.echo(
+                    "Error: --blocks-everything acknowledges p0; pass "
+                    f"--priority p0 too (node priority is {node.get('priority')!r})",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
         if project is not None:
             node["project"] = project
         if cwd is not None:
@@ -3385,14 +3674,39 @@ def cmd_update(
             node["domain"] = domain
         if size is not None:
             node["size"] = size.upper() if size.lower() != "null" else None
+        if difficulty is not None:
+            try:
+                revised_difficulty = normalize_difficulty(
+                    None if difficulty.lower() == "null" else difficulty
+                )
+            except ValueError as exc:
+                typer.echo(f"fno backlog update: {exc}", err=True)
+                raise typer.Exit(code=2)
+            if revised_difficulty != node.get("difficulty"):
+                node["difficulty"] = revised_difficulty
+                # Same attributable trail the birth paths keep: a manual
+                # revision is the estimate most likely to have changed hands.
+                node.setdefault("difficulty_history", []).append(
+                    {
+                        "value": revised_difficulty,
+                        "source": "update",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
         if model is not None:
             node["model"] = None if model.lower() == "null" else model
         if model_tier is not None:
+            typer.echo(
+                "warning: --model-tier is deprecated; use --difficulty",
+                err=True,
+            )
             if model_tier.lower() == "null":
                 node["model_tier"] = None
+                node["difficulty"] = None
             else:
-                band = model_tier.strip().lower()
-                if band not in {"high", "medium", "low"}:
+                try:
+                    band = normalize_difficulty(model_tier)
+                except ValueError:
                     typer.echo(
                         f"fno backlog update: invalid --model-tier {model_tier!r}; "
                         "expected high, medium, or low.",
@@ -3400,6 +3714,7 @@ def cmd_update(
                     )
                     raise typer.Exit(code=2)
                 node["model_tier"] = band
+                node["difficulty"] = band
         if type_ is not None:
             node["type"] = type_
         if public is not None:
@@ -4189,6 +4504,7 @@ def cmd_next(
             "priority": e.get("priority"), "domain": e.get("domain"),
             "project": e.get("project"), "cwd": e.get("cwd"),
             "size": e.get("size"), "plan_path": e.get("plan_path"),
+            "difficulty": e.get("difficulty") or e.get("model_tier"),
             # x-571f: the per-node model pin must ride in the next-JSON so the
             # active-backlog drain can prefer it over cfg.model.
             # model_tier rides alongside it so the dispatch-time tier resolver
@@ -4588,6 +4904,7 @@ def cmd_ready(
         "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
         "domain": e.get("domain"), "project": e.get("project"),
         "cwd": e.get("cwd"), "parent": e.get("parent"),
+        "difficulty": e.get("difficulty") or e.get("model_tier"),
         # select_lane_fill's dispatch-time collision gate compares plan file
         # surfaces; without this it has nothing to read.
         "plan_path": e.get("plan_path"),
@@ -11216,8 +11533,9 @@ def cmd_maintain(
 def cmd_reprioritize(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     priority: str = typer.Argument(..., help="New priority: p0|p1|p2|p3"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
 ) -> None:
-    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix
+    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, validate_priority_write
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
@@ -11232,6 +11550,11 @@ def cmd_reprioritize(
             err=True,
         )
         raise typer.Exit(code=1)
+    try:
+        validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     old_holder: list = [None]
 
@@ -11242,10 +11565,45 @@ def cmd_reprioritize(
             raise typer.Exit(code=1)
         old_holder[0] = node.get("priority", "p2")
         node["priority"] = priority
+        if priority == "p0":
+            node["blocks_everything"] = True
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"Reprioritized {task_id}: {old_holder[0]} -> {priority}")
+
+
+@cli.command("migrate-priorities", hidden=True)
+def cmd_migrate_priorities(
+    apply: bool = typer.Option(False, "--apply", help="Apply the idempotent p0 to p1 migration."),
+    rollback: bool = typer.Option(False, "--rollback", help="Restore rows changed by the migration."),
+) -> None:
+    """Dry-run or apply the explicit legacy p0 re-band migration."""
+    from fno.graph.migrations import migrate_legacy_p0, rollback_legacy_p0
+    from fno.graph.store import locked_mutate_graph, read_graph
+
+    if apply and rollback:
+        typer.echo("Error: --apply and --rollback are mutually exclusive", err=True)
+        raise typer.Exit(code=2)
+    holder: list[dict] = []
+    if rollback:
+
+        def rollback_mutator(entries: list[dict]) -> list[dict]:
+            holder.append(rollback_legacy_p0(entries))
+            return entries
+
+        locked_mutate_graph(_graph_path(), rollback_mutator)
+        receipt = holder[0]
+    elif not apply:
+        receipt = migrate_legacy_p0(read_graph(_graph_path()), apply=False)
+    else:
+        def mutator(entries: list[dict]) -> list[dict]:
+            holder.append(migrate_legacy_p0(entries, apply=True))
+            return entries
+
+        locked_mutate_graph(_graph_path(), mutator)
+        receipt = holder[0]
+    typer.echo(json.dumps(receipt, sort_keys=True))
 
 
 # -- rank --
@@ -11985,6 +12343,115 @@ def cmd_unarchive(
 
 # -- Internal helpers for intake / update (avoid circular imports) --
 
+
+def _apply_claim_in_place(
+    es, claim_id: str, *, plan_path: str, spec: dict, project: Optional[str]
+):
+    """Update a claimed idea node in place: attach the plan, merge the
+    doc-declared fields, promote idea -> ready.
+
+    The single-plan claim lane's mutator body, shared with the multi lane so
+    a claim lands identically from either surface. A second copy here would
+    drift, and drift on this path mints duplicate nodes.
+    """
+    from fno.graph._intake import (
+        DEFAULT_NODE_TYPE,
+        _find_node,
+        _read_plan_frontmatter,
+        _would_exceed_epic_depth,
+        normalize_type,
+        resolve_node_project_and_cwd,
+    )
+
+    # Intake has TWO lanes; the create lane reads `type` doc->graph in
+    # _build_intake_node, so this one must too or the flow is a guard on
+    # one of N paths. Same rule as priority below: the doc only speaks
+    # when it declares a real, non-default value.
+    frontmatter = _read_plan_frontmatter(plan_path) or {}
+    claimed_type = normalize_type(frontmatter.get("type"))
+    from fno.graph._constants import normalize_difficulty
+    raw_difficulty = frontmatter.get("difficulty")
+    if raw_difficulty is None:
+        raw_difficulty = frontmatter.get("model_tier")
+    for entry in es:
+        if entry.get("id") != claim_id:
+            continue
+        entry["plan_path"] = plan_path
+        entry["title"] = spec["title"]
+        if raw_difficulty is not None:
+            try:
+                revised_difficulty = normalize_difficulty(raw_difficulty)
+            except ValueError as exc:
+                typer.echo(f"warning: {exc}; difficulty left unchanged", err=True)
+            else:
+                entry["difficulty"] = revised_difficulty
+                entry.setdefault("difficulty_history", []).append(
+                    {
+                        "value": revised_difficulty,
+                        "source": "blueprint",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+        if (
+            claimed_type != DEFAULT_NODE_TYPE
+            and entry.get("type") != claimed_type
+        ):
+            # `add` and `update` both refuse a write that would make a
+            # third epic level; a doc-frontmatter lane that skips the cap
+            # would be the decorative guard this whole change is about.
+            # It SKIPS rather than refuses, unlike those two: there the
+            # operator typed `--type` and deserves a hard error, here the
+            # doc is advisory and the claim itself is still valid.
+            parent_node = (
+                _find_node(es, entry["parent"]) if entry.get("parent") else None
+            )
+            if (
+                claimed_type == "epic"
+                and parent_node is not None
+                and _would_exceed_epic_depth(
+                    es, {**entry, "type": "epic"}, parent_node
+                )
+            ):
+                typer.echo(
+                    f"warning: plan declares type: epic but {claim_id} sits "
+                    f"under {parent_node['id']}; promoting it would exceed "
+                    f"the epic-nesting cap - type left as "
+                    f"{entry.get('type')!r}",
+                    err=True,
+                )
+            else:
+                entry["type"] = claimed_type
+        if spec["deps"]:
+            merged = list(
+                dict.fromkeys([*entry.get("blocked_by", []), *spec["deps"]])
+            )
+            entry["blocked_by"] = merged
+        # Only override priority if the plan supplied a non-default one.
+        if spec.get("priority") and spec["priority"] != "p2":
+            entry["priority"] = spec["priority"]
+        if spec.get("priority") == "p0" and spec.get("blocks_everything"):
+            entry["blocks_everything"] = True
+        if spec.get("points") is not None:
+            entry["points"] = spec["points"]
+        # Backfill project/cwd when the node was created via
+        # `fno backlog new` (no plan path -> no auto-scope) and is
+        # now being claimed by a plan that lives in a project repo.
+        # Only fills nulls; never overwrites existing values.
+        if entry.get("project") is None or entry.get("cwd") is None:
+            resolved_project, resolved_cwd, _ = resolve_node_project_and_cwd(
+                plan_path, project, es,
+            )
+            if entry.get("project") is None and resolved_project:
+                entry["project"] = resolved_project
+            if entry.get("cwd") is None and resolved_cwd:
+                entry["cwd"] = resolved_cwd
+        # Promote idea -> ready by clearing any stale claimed_at.
+        # status is recomputed by recompute_statuses on the next read.
+        entry["claimed_at"] = None
+        break
+    return es
+
+
 def _collect_intake_paths_typer(plan_paths: list[str], from_list: Optional[str]) -> list[str]:
     """Build the path list for intake from positional args + --from."""
     paths: list[str] = []
@@ -12020,11 +12487,11 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
     from fno.graph._intake import (
         _prepare_intake, _build_intake_node, _validate_cli_deps,
     )
-    from fno.graph.depends import _derive_title
 
     cli_deps: list[str] = (
         [d.strip() for d in args.deps.split(",") if d.strip()] if args.deps else []
     )
+    cli_project = getattr(args, "project", None)
     _refuse_create_on_external_backend()
     _validate_cli_deps(cli_deps, read_graph(_graph_path()))
 
@@ -12060,21 +12527,64 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
 
     if dry_run:
         typer.echo(f"Multi-intake preview (dry-run, no changes): {len(all_paths)} paths:")
+        would = 0
         for r in resolved:
             if r["status"] == "missing":
                 typer.echo(f"  warning: not found, skipped: {r['path']}")
                 continue
             for f in r["files"]:
-                t = _derive_title(Path(f), args.title) if os.path.isfile(f) else os.path.basename(f.rstrip(os.sep))
-                typer.echo(f'  would intake: "{t}"  (plan: {f})')
-        typer.echo(f"{len(concrete_files)} plans would be intaked. Run without --dry-run to apply.")
+                # Validate-then-preview, mirroring the single-plan dry run: a
+                # plan the real run would refuse (bad priority, a cross-roadmap
+                # owner conflict) or skip as already-intaked must preview as
+                # exactly that, never as would-intake.
+                try:
+                    prep = _prepare_intake(
+                        f, preview_entries,
+                        roadmap_id=roadmap_id, cli_title=args.title,
+                        cli_priority=args.priority, cli_deps=cli_deps,
+                        cli_points=args.points,
+                        cli_project=cli_project,
+                    )
+                except ValueError as exc:
+                    typer.echo(f"  error: would skip {f}: {exc}", err=True)
+                    continue
+                if prep["status"] == "already":
+                    typer.echo(
+                        f'  already intaked {prep["id"]}: "{prep["title"]}"  ({f})'
+                    )
+                    continue
+                spec = prep["node_spec"]
+                if prep["status"] == "claim":
+                    typer.echo(
+                        f'  would claim: "{spec["title"]}"  (plan: {f})'
+                        f'  (claims {prep["id"]})'
+                    )
+                    _apply_claim_in_place(
+                        preview_entries, prep["id"], plan_path=f,
+                        spec=spec, project=cli_project,
+                    )
+                    continue
+                # Grow the preview graph the way the real mutator grows its
+                # entries - the BUILT node, so a later duplicate of this plan
+                # previews the outcome the real run would produce (already
+                # intaked by this batch), not a second would-intake. Building
+                # here also previews build-time refusals (invalid difficulty)
+                # as would-skip, the same outcome the real run now lands.
+                try:
+                    preview_entries.append(_build_intake_node(spec, preview_entries))
+                except ValueError as exc:
+                    typer.echo(f"  error: would skip {f}: {exc}", err=True)
+                    continue
+                typer.echo(f'  would intake: "{spec["title"]}"  (plan: {f})')
+                would += 1
+        typer.echo(f"{would} plans would be intaked. Run without --dry-run to apply.")
         return
 
     typer.echo(f"Multi-intake {len(concrete_files)} plans:")
-    tallies = {"intaked": 0, "already": 0}
-    cli_project = getattr(args, "project", None)
+    tallies = {"intaked": 0, "claimed": 0, "already": 0, "invalid": 0}
     landed_projects: set[str] = set()
     new_ids: list[str] = []
+    claimed_ids: list[str] = []
 
     def mutator(es):
         for r in resolved:
@@ -12082,18 +12592,51 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
                 typer.echo(f"  warning: not found, skipped: {r['path']}")
                 continue
             for f in r["files"]:
-                prep = _prepare_intake(
-                    f, es,
-                    roadmap_id=roadmap_id, cli_title=args.title,
-                    cli_priority=args.priority, cli_deps=cli_deps,
-                    cli_points=args.points,
-                    cli_project=cli_project,
-                )
+                # A refusal names ONE file: skip it with a clean per-file error
+                # so the batch lands, exactly like the single-plan surface that
+                # catches the same ValueError. The try covers BOTH raise sites -
+                # _prepare_intake (bad priority, a cross-roadmap owner conflict)
+                # and _build_intake_node (invalid difficulty frontmatter).
+                # Uncaught, either aborted the whole mutator with a traceback
+                # from inside the lock and persisted nothing.
+                try:
+                    prep = _prepare_intake(
+                        f, es,
+                        roadmap_id=roadmap_id, cli_title=args.title,
+                        cli_priority=args.priority, cli_deps=cli_deps,
+                        cli_points=args.points,
+                        cli_project=cli_project,
+                    )
+                except ValueError as exc:
+                    tallies["invalid"] += 1
+                    typer.echo(f"  error: skipped {f}: {exc}", err=True)
+                    continue
                 if prep["status"] == "already":
                     tallies["already"] += 1
                     typer.echo(f'  already intaked {prep["id"]}: "{prep["title"]}"  ({f})')
                     continue
-                node = _build_intake_node(prep["node_spec"], es)
+                if prep["status"] == "claim":
+                    # The claim lands on the existing idea node in place, the
+                    # same helper the single-plan lane uses - never a fresh
+                    # node beside an unclaimed idea (the duplicate the claim
+                    # mechanism exists to prevent).
+                    _apply_claim_in_place(
+                        es, prep["id"], plan_path=f,
+                        spec=prep["node_spec"], project=cli_project,
+                    )
+                    tallies["claimed"] += 1
+                    claimed_ids.append(prep["id"])
+                    typer.echo(
+                        f'  claim {prep["id"]} via {prep["claim_source"]}: '
+                        f'"{prep["title"]}"  ({f})'
+                    )
+                    continue
+                try:
+                    node = _build_intake_node(prep["node_spec"], es)
+                except ValueError as exc:
+                    tallies["invalid"] += 1
+                    typer.echo(f"  error: skipped {f}: {exc}", err=True)
+                    continue
                 es.append(node)
                 tallies["intaked"] += 1
                 new_ids.append(node["id"])
@@ -12103,6 +12646,16 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
         return es
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # A claimed node gets the same nav-field projection the single-plan claim
+    # path runs; additive and guarded so it never wedges the batch.
+    if claimed_ids:
+        try:
+            from fno.plan._project import project_graph_nodes
+
+            project_graph_nodes(read_graph(_graph_path()), claimed_ids)
+        except Exception as e:  # noqa: BLE001
+            _safe_stderr_warn(f"warning: post-claim projection skipped: {e}\n")
 
     # Filing-time dedup net (plan x-6ac7): per just-born node, warn if it
     # resembles an existing one. Fresh post-write read; non-fatal.
@@ -12124,10 +12677,12 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
     missing = sum(1 for r in resolved if r["status"] == "missing")
     typer.echo(
         f'\n{tallies["intaked"]} newly intaked, '
+        f'{tallies["claimed"]} claimed, '
         f'{tallies["already"]} already intaked, '
         f'{missing} skipped.'
+        + (f' {tallies["invalid"]} refused.' if tallies["invalid"] else '')
     )
-    if tallies["intaked"] + tallies["already"] == 0:
+    if tallies["intaked"] + tallies["claimed"] + tallies["already"] == 0:
         raise typer.Exit(code=4)
 
 
@@ -12257,6 +12812,7 @@ def cmd_new(
         help="Project name. Defaults to current git repo's basename; pass --unscoped to skip auto-scope.",
     ),
     priority: str = typer.Option("p2", "--priority", help="p0|p1|p2|p3"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
     unscoped: bool = typer.Option(
         False, "--unscoped",
         help="Create with project=null and cwd=null. Default auto-scopes to current git repo.",
@@ -12280,7 +12836,7 @@ def cmd_new(
     --project always overrides the auto-detected name when both are present.
     """
     _refuse_create_on_external_backend()
-    from fno.graph._constants import PRIORITY_ORDER, mint_node_id
+    from fno.graph._constants import PRIORITY_ORDER, mint_node_id, validate_priority_write
     from fno.graph.fuzzy import suggest_domain
     from fno.graph.store import read_graph, locked_mutate_graph
 
@@ -12300,6 +12856,11 @@ def cmd_new(
             err=True,
         )
         raise typer.Exit(code=1)
+    try:
+        validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     entries = read_graph(_graph_path())
 
@@ -12358,6 +12919,7 @@ def cmd_new(
             "project": resolved_project,
             "cwd": resolved_cwd,
             "priority": priority,
+            "blocks_everything": blocks_everything,
             "domain": domain,
             "blocked_by": [],
             "session_id": None,
@@ -12933,7 +13495,7 @@ def _exec_liveness(state: str) -> str:
 
 _TRACKER_OWNED_VERBS = frozenset({
     # node lifecycle + creation
-    "add", "idea", "new", "intake", "decompose", "update", "note", "remove",
+    "add", "idea", "new", "intake", "decompose", "update", "note", "remove", "migrate-priorities",
     "reopen", "supersede", "unsupersede",
     # board/rank/queue state
     "rank", "reprioritize", "defer", "undefer", "queue", "unqueue", "pick",

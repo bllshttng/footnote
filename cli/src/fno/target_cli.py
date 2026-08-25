@@ -2088,6 +2088,12 @@ def _resolve_node_model(
     ``model`` is None -> the spawn path uses the provider default. Strictly
     non-fatal: any error degrades to the explicit value or the provider default,
     so a dispatch never fails because of the routing layer (inherited Locked 10).
+
+    ``difficulty`` is deliberately NOT resolved here: advance's dispatch seams
+    defer it to the capacity grid (``advance._spawn_worker``), and a static pin
+    at start would suppress the same grid for a bare ``target start`` - the
+    exact upstream pin the deferral exists to remove. A difficulty-only node
+    starts on the provider default.
     """
     try:
         from fno import route_resolve

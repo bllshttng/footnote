@@ -94,7 +94,7 @@ def test_ac1_ui_filing_receipt_names_the_origin_on_stderr(graph, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-1")
     monkeypatch.setenv("FNO_NODE", "x-aaaa")
 
-    result = runner.invoke(app, ["backlog", "idea", "follow-up"])
+    result = runner.invoke(app, ["backlog", "idea", "follow-up", "--difficulty", "low"])
     assert result.exit_code == 0, result.output
     assert "origin: x-aaaa" in result.output
     # stdout remains a clean JSON payload for `| jq` consumers.

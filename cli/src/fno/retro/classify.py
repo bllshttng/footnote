@@ -22,8 +22,11 @@ from fno.retro.types import (
 
 # Severity -> tier (Locked Decision #5): critical/high/medium -> node; low -> inbox.
 _NODE_SEVERITIES = {"critical", "high", "medium"}
-# Severity -> priority pN.
-_SEVERITY_PRIORITY = {"critical": "p0", "high": "p1", "medium": "p2", "low": "p3"}
+# Severity -> priority pN. critical lands p1, not p0: p0 means "blocks all
+# downstream work" and requires a human acknowledgment the harvest loop cannot
+# give, so a p0 mapping made every critical external finding fail to land and
+# re-fail on every harvest. The finding body keeps the severity verbatim.
+_SEVERITY_PRIORITY = {"critical": "p1", "high": "p1", "medium": "p2", "low": "p3"}
 
 DEFAULT_PRIORITY = "p3"
 TITLE_CAP = 100
