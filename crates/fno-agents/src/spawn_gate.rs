@@ -668,8 +668,15 @@ fn format_footprint_cause_json(raw: &str) -> Option<String> {
     ))
 }
 
+fn footprint_cli_binary() -> Option<&'static str> {
+    ["fno", "fno-py"]
+        .into_iter()
+        .find(|name| resolves_on_path(name))
+}
+
 fn footprint_cause_evidence() -> Option<String> {
-    let mut child = Command::new("fno")
+    let binary = footprint_cli_binary()?;
+    let mut child = Command::new(binary)
         .args(["doctor", "footprint", "--json", "--cause-only"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
