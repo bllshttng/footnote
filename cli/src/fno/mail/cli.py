@@ -681,6 +681,44 @@ def _is_job_name(name: Optional[str]) -> bool:
     return bool(is_job_token(name))
 
 
+def _append_ruling_to_node(subject: str, body: str) -> str:
+    """Append one dated ruling block to an exact working-graph node."""
+    from fno.graph import store as graph_store
+    from fno.graph.fuzzy import resolve_node
+
+    graph_path = paths.graph_json()
+    block = f"### Ruling ({datetime.now(timezone.utc).date().isoformat()})\n\n{body}"
+    node_id: str | None = None
+
+    def mutator(current: list[dict]) -> list[dict]:
+        nonlocal node_id
+        match = resolve_node(subject, current)
+        if match.kind != "exact" or not match.id:
+            raise ValueError(f"ruling node not found: {subject!r}")
+        node_id = match.id
+        for entry in current:
+            if not isinstance(entry, dict) or entry.get("id") != node_id:
+                continue
+            details = entry.get("details")
+            existing = details.rstrip() if isinstance(details, str) else ""
+            entry["details"] = f"{existing}\n\n{block}" if existing else block
+            break
+        return current
+
+    try:
+        graph_store.locked_mutate_graph(graph_path, mutator)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=2) from exc
+    assert node_id is not None
+    print(
+        f"ruling appended to {node_id} before transport; if transport fails, "
+        "retry the mail without --ruling",
+        file=sys.stderr,
+    )
+    return node_id
+
+
 def _refuse_unsafe_short_address(
     token: Optional[str], *, self_addressed: bool = False
 ) -> None:
@@ -3468,6 +3506,14 @@ def cmd_send(
         hidden=True,
         help="Stamped machine mail origin: operator, peer, scheduler, or recovery.",
     ),
+    ruling: str | None = typer.Option(
+        None,
+        "--ruling",
+        help=(
+            "Append this authored message to the governed node's details as a "
+            "dated ruling block before named-worker transport."
+        ),
+    ),
     from_self: bool = typer.Option(
         False, "--from-self",
         help=(
@@ -3622,6 +3668,21 @@ def cmd_send(
     from fno._flag_aliases import refuse_retired_provider
 
     refuse_retired_provider(_provider_tombstone)
+
+    if ruling is not None:
+        if raw or kind is not None or to_project is not None or to_self:
+            print(
+                "error: --ruling supports only send <worker> <message>; drop "
+                "--raw, --kind, --to-project, or --to-self",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if not name or message is None or _is_job_name(name):
+            print(
+                "error: --ruling supports only send <worker> <message>",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
 
@@ -4128,6 +4189,9 @@ def cmd_send(
     _refuse_forged_envelope(message)
     _enforce_body_cap(message)
     _enforce_style(message, allow_reason=style_exception)
+
+    if ruling is not None:
+        _append_ruling_to_node(ruling, message)
 
     # --force routes into the shared name-lane choke point with the ladder
     # skipped. Intercepted here rather than threaded through `dispatch_send`
