@@ -2800,6 +2800,33 @@ event_types:
           description: "Transcript path that was probed (best-effort; may be empty if manifest was unreadable)."
     consumers: [operator]
 
+  - name: dispatch_selection_diverged
+    retention: durable
+    description: "An independent planned-unclaimed observer named a node absent from the normal dispatch selector. This is completeness evidence and the node is recovered only after normal dispatch safety gates run."
+    sources: [backlog]
+    data:
+      required: [node_id, selector_command, observer_command, scope, selector_entries_scanned, observer_entries_scanned]
+      properties:
+        node_id:
+          type: string
+          description: "The observer row omitted by the normal selector."
+        selector_command:
+          type: string
+          description: "The selector surface whose result omitted the node."
+        observer_command:
+          type: string
+          description: "The independent observer surface that named the node."
+        scope:
+          type: string
+          description: "Project, mission, roadmap, and parent scope used for the comparison."
+        selector_entries_scanned:
+          type: integer
+          description: "Number of rows returned by the selector read used in the comparison."
+        observer_entries_scanned:
+          type: integer
+          description: "Number of graph entries scanned by the independent observer."
+    consumers: [operator]
+
   - name: advance_dispatched
     retention: durable
     description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target --no-merge worker for the next now-unblocked node after a PR merge. Also emitted by advance_dependents when it dispatches a now-unblocked direct blocked_by dependent: cross-project into its own work-map repo (cross_project=true, G1) or same-project into its own project root (cross_project=false, RC1/x-33b2; work-map resolved, recorded cwd as fallback). Surfaced in the next SessionStart reconcile reminder line."

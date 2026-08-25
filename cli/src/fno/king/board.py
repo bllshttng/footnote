@@ -62,7 +62,7 @@ _DEAD_CLAIM_STATES = frozenset({"stale", "corrupted"})
 
 #: The literal commands a reader can re-run. These strings ARE the checkability
 #: property, so they live beside the readers that run them.
-SRC_READY = "fno backlog ready --json"
+SRC_UNDISPATCHED = "fno backlog undispatched --json"
 SRC_CLAIMS = "fno agents claim list -J --include-stale --prefix node:"
 SRC_PRS = (
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url"
@@ -120,6 +120,9 @@ class BoardInputs:
     #: fetch time, never through `_run_json` - there is no verb behind it.
     lane: SourceRead
     warnings: list[str] = field(default_factory=list)
+    #: Independent planned-unclaimed inventory. Production collection always
+    #: supplies it; None keeps pure test fixtures source-compatible.
+    undispatched: SourceRead | None = None
 
 
 def _as_dict(value: Any) -> dict:
@@ -241,6 +244,7 @@ def build_board(
 ) -> dict:
     """Turn fetched sources into the board payload. Pure; does no I/O."""
     out_of_scope: list[dict] = []
+    undispatched_read = inputs.undispatched or inputs.ready
 
     def in_scope(queue: str, node_id: object, row: dict) -> bool:
         if scope_ids is None or not node_id:
@@ -264,7 +268,7 @@ def build_board(
             claim_by_node[key[len("node:") :]] = row
 
     undispatched: list[dict] = []
-    for node in inputs.ready.rows():
+    for node in undispatched_read.rows():
         if node.get("priority") not in KING_PRIORITIES:
             continue
         if not node.get("plan_path"):
@@ -425,8 +429,8 @@ def build_board(
         ),
         _queue(
             "undispatched",
-            f"{SRC_READY} + {SRC_CLAIMS}",
-            SourceRead(error=inputs.ready.error or inputs.claims.error),
+            f"{SRC_UNDISPATCHED} + {SRC_CLAIMS}",
+            SourceRead(error=undispatched_read.error or inputs.claims.error),
             undispatched,
             actionable=True,
             note="batch: up to 3 blueprints per session; merge same-shape nodes into one waved plan",
@@ -777,7 +781,7 @@ def _read_claimed_nodes(
 
 def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     """Fetch every source. Never raises; every failure lands in a SourceRead."""
-    ready = _run_json([*_fno(), "backlog", "ready", "--json"], timeout=timeout)
+    undispatched = _read_undispatched(timeout)
     claims = _run_json([*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
         timeout=timeout,
     )
@@ -786,7 +790,7 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     warnings.extend(claimed_warnings)
 
     return BoardInputs(
-        ready=ready,
+        ready=SourceRead(payload=[]),
         claims=claims,
         claimed_nodes=claimed_nodes,
         holder_activity=_resolve_holder_activity(holders),
@@ -795,7 +799,22 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
         needs=_run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
         lane=_read_lane(),
         warnings=warnings,
+        undispatched=undispatched,
     )
+
+
+def _read_undispatched(timeout: int) -> SourceRead:
+    """Unwrap and validate the observer receipt before board construction."""
+    read = _run_json([*_fno(), "backlog", "undispatched", "--json"], timeout=timeout)
+    if not read.ok:
+        return read
+    payload = read.payload
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return SourceRead(error="undispatched: unreadable observer receipt")
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        return SourceRead(error="undispatched: receipt rows are unreadable")
+    return SourceRead(payload=rows)
 
 
 def _fno() -> "list[str]":

@@ -174,13 +174,15 @@ def test_project_and_portfolio_scope_compile_to_their_project_union():
 
 
 def test_undispatched_row_names_the_node_and_carries_a_rerunnable_source():
-    board = build_board(_empty_inputs(ready=_ok([_node("x-1234")])))
+    board = build_board(
+        _empty_inputs(undispatched=_ok([_node("x-1234")]))
+    )
 
     q = _queue(board, "undispatched")
     assert q["actionable"] is True
     assert q["count"] == 1
     assert [r["id"] for r in q["rows"]] == ["x-1234"]
-    assert q["source"].startswith("fno backlog ready")
+    assert q["source"].startswith("fno backlog undispatched --json")
     assert board["actionable"] == 1
 
 
@@ -192,24 +194,68 @@ def test_every_queue_carries_a_source_command():
 
 
 def test_p2_node_is_not_undispatched_work():
-    board = build_board(_empty_inputs(ready=_ok([_node("x-1234", priority="p2")])))
+    board = build_board(
+        _empty_inputs(undispatched=_ok([_node("x-1234", priority="p2")]))
+    )
     assert _queue(board, "undispatched")["count"] == 0
     assert board["actionable"] == 0
 
 
 def test_node_without_a_plan_is_not_undispatched_work():
-    board = build_board(_empty_inputs(ready=_ok([_node("x-1234", plan_path=None)])))
+    board = build_board(
+        _empty_inputs(undispatched=_ok([_node("x-1234", plan_path=None)]))
+    )
     assert _queue(board, "undispatched")["count"] == 0
 
 
 def test_a_claim_of_any_state_takes_a_node_out_of_undispatched():
     inputs = _empty_inputs(
-        ready=_ok([_node("x-1234")]),
+        undispatched=_ok([_node("x-1234")]),
         claims=_ok([_claim("x-1234", state="stale")]),
     )
     board = build_board(inputs)
     assert _queue(board, "undispatched")["count"] == 0
     assert _queue(board, "stale_claim")["count"] == 1
+
+
+def test_ac2_err_unreadable_observer_blocks_clean_board():
+    board = build_board(
+        _empty_inputs(undispatched=SourceRead(error="graph unreadable: entries missing"))
+    )
+
+    q = _queue(board, "undispatched")
+    assert q["status"] == "unreadable"
+    assert q["count"] is None
+    assert board["actionable"] >= 1
+
+
+def test_collect_observer_unwraps_receipt_rows(monkeypatch):
+    from fno.king import board as board_mod
+
+    node = _node("x-receipt")
+    monkeypatch.setattr(
+        board_mod,
+        "_run_json",
+        lambda *args, **kwargs: _ok(
+            {"status": "ok", "entries_scanned": 1, "rows": [node]}
+        ),
+    )
+
+    read = board_mod._read_undispatched(timeout=1)
+
+    assert read.ok
+    assert read.rows() == [node]
+
+
+def test_collect_observer_rejects_unreadable_receipt(monkeypatch):
+    from fno.king import board as board_mod
+
+    monkeypatch.setattr(board_mod, "_run_json", lambda *args, **kwargs: _ok([]))
+
+    read = board_mod._read_undispatched(timeout=1)
+
+    assert not read.ok
+    assert "receipt" in read.error
 
 
 # --- AC1-EDGE ---------------------------------------------------------------
