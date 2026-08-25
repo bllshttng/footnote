@@ -20,6 +20,7 @@ LIFECYCLE_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-lifecycle.sh"
 LIFECYCLE_COMPAT_SRC = REPO_ROOT / "scripts" / "worktree-lifecycle.sh"
 UNPUSHED_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-unpushed.sh"
 ARCHIVE_SRC = REPO_ROOT / "scripts" / "setup" / "archive-worktree.sh"
+TARGET_GUARD_SRC = REPO_ROOT / "scripts" / "lib" / "target-guard.sh"
 SETUP_SRC = REPO_ROOT / "scripts" / "setup" / "setup-worktree.sh"
 runner = CliRunner()
 
@@ -60,6 +61,7 @@ def repo(tmp_path: Path) -> Path:
     shutil.copy2(LIFECYCLE_SRC, canon / "scripts" / "lib" / "worktree-lifecycle.sh")
     shutil.copy2(LIFECYCLE_COMPAT_SRC, canon / "scripts" / "worktree-lifecycle.sh")
     shutil.copy2(UNPUSHED_SRC, canon / "scripts" / "lib" / "worktree-unpushed.sh")
+    shutil.copy2(TARGET_GUARD_SRC, canon / "scripts" / "lib" / "target-guard.sh")
     shutil.copy2(ARCHIVE_SRC, canon / "scripts" / "setup" / "archive-worktree.sh")
     return canon
 
@@ -230,6 +232,25 @@ def test_cargo_target_cli_forwards_explicit_bounds(monkeypatch: pytest.MonkeyPat
         "--target-max-age",
         "3d",
     ]
+
+
+def test_archive_cli_forwards_explicit_guard_flags(monkeypatch: pytest.MonkeyPatch):
+    from fno.worktree_cli import cli as worktree_cli
+
+    seen: list[str] = []
+
+    def fake_run(*args: str) -> int:
+        seen.extend(args)
+        return 0
+
+    monkeypatch.setattr(worktree_cli, "_run_lifecycle", fake_run)
+    result = runner.invoke(
+        worktree_cli.app,
+        ["archive", "--force", "--yes", "--delete-branch", "fixture"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == ["archive", "--force", "--yes", "--delete-branch", "fixture"]
 
 
 def _add_merged(canon: Path, name: str) -> Path:
@@ -417,6 +438,160 @@ def test_archive_script_excludes_own_process_tree(repo: Path):
     )
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert not wt.exists(), f"stderr={r.stderr}"
+
+
+def test_archive_force_discloses_exact_dirty_and_unpushed_state(repo: Path):
+    wt = repo / "wt-force-disclosure"
+    _git(repo, "worktree", "add", str(wt), "-b", "feature/force-disclosure", "main")
+    unique_subject = "add force disclosure specimen"
+    _commit(wt, "committed.txt")
+    _git(wt, "commit", "--amend", "-m", unique_subject)
+    short_sha = _git(wt, "rev-parse", "--short", "HEAD").stdout.strip()
+    (wt / "dirty.txt").write_text("not committed\n")
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), "--force", "--yes", str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    diag = f"stdout={r.stdout}\nstderr={r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "FORCE" in diag
+    assert "dirty.txt" in diag
+    assert short_sha in diag
+    assert unique_subject in diag
+    assert "discarded" in diag
+    assert not wt.exists(), diag
+
+
+def test_archive_force_refreshes_upstream_before_disclosure(repo: Path):
+    wt = repo / "wt-force-stale-upstream"
+    branch = "feature/force-stale-upstream"
+    _git(repo, "worktree", "add", str(wt), "-b", branch, "main")
+    _commit(wt, "unique.txt")
+    unique_subject = "add unique.txt"
+    short_sha = _git(wt, "rev-parse", "--short", "HEAD").stdout.strip()
+    _git(wt, "push", "-u", "origin", branch)
+    _git(_origin_bare(repo), "branch", "-f", branch, "main")
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), "--force", "--yes", "--delete-branch", str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    diag = f"stdout={r.stdout}\nstderr={r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert short_sha in diag
+    assert unique_subject in diag
+    assert "branch feature/force-stale-upstream deleted" in r.stderr
+    assert not wt.exists(), diag
+    assert not _git(repo, "branch", "--list", branch).stdout.strip()
+
+
+def test_archive_delete_branch_refuses_unverifiable_remote_state(repo: Path):
+    wt = repo / "wt-delete-unverifiable"
+    branch = "feature/delete-unverifiable"
+    _git(repo, "worktree", "add", str(wt), "-b", branch, "main")
+    _commit(wt, "unique.txt")
+    unique_sha = _git(wt, "rev-parse", "--short", "HEAD").stdout.strip()
+    _git(repo, "remote", "remove", "origin")
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), "--yes", "--delete-branch", str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    diag = f"stdout={r.stdout}\nstderr={r.stderr}"
+
+    assert r.returncode == 2, diag
+    assert "not verifiable" in r.stderr, diag
+    assert wt.exists(), diag
+    assert _git(repo, "rev-parse", "--short", branch).stdout.strip() == unique_sha
+
+
+def test_archive_refuses_unreadable_live_claim(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    wt = _add_merged(repo, "unreadable-claim")
+    fno_bin = tmp_path / "bin"
+    fno_bin.mkdir()
+    fake_fno = fno_bin / "fno"
+    fake_fno.write_text("#!/bin/sh\nexit 1\n")
+    fake_fno.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fno_bin}:{os.environ['PATH']}")
+    state = wt / ".fno"
+    state.mkdir()
+    (state / "target-state.md").write_text(
+        "input: x-unreadable\ntarget_claim_key: node:x-unreadable\nowner_pid: 999999\n"
+    )
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), "--force", "--yes", str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 2
+    assert "live target claim not verifiable" in r.stderr
+    assert wt.exists()
+
+
+def test_archive_force_rechecks_state_after_process_cleanup(repo: Path):
+    wt = _add_merged(repo, "force-recheck")
+    late_path = wt / "late.txt"
+    holder_env = os.environ.copy()
+    holder_env["LATE_PATH"] = str(late_path)
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            f"cd '{wt}'; trap 'printf late > \"$LATE_PATH\"; exit 0' TERM; while :; do sleep 1; done",
+        ],
+        cwd=repo,
+        env=holder_env,
+        start_new_session=True,
+    )
+    try:
+        script = repo / "scripts" / "setup" / "archive-worktree.sh"
+        r = subprocess.run(
+            ["bash", str(script), "--force", "--yes", str(wt)],
+            cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+    finally:
+        if holder.poll() is None:
+            holder.terminate()
+        holder.wait(timeout=5)
+
+    diag = f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert r.returncode == 2, diag
+    assert "forced state changed after disclosure" in r.stderr, diag
+    assert (wt / "late.txt").exists(), diag
+    assert wt.exists(), diag
+
+
+def test_archive_reports_failed_branch_deletion(repo: Path):
+    wt = repo / "wt-delete-fail"
+    holder = repo / "wt-delete-holder"
+    branch = "feature/delete-fail"
+    _git(repo, "worktree", "add", str(wt), "-b", branch, "main")
+    _commit(wt, "delete-fail.txt")
+    _git(repo, "worktree", "add", "-f", str(holder), branch)
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), "--force", "--yes", "--delete-branch", str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    diag = f"stdout={r.stdout}\nstderr={r.stderr}"
+
+    assert r.returncode == 1, diag
+    assert not wt.exists(), diag
+    assert holder.exists(), diag
+    assert "branch delete failed" in r.stderr.lower()
+    assert "branch feature/delete-fail preserved" in r.stderr
+    assert _git(repo, "branch", "--list", branch).stdout.strip()
 
 
 def test_archive_refuses_codex_app_owned_worktree_even_with_force(

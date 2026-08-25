@@ -109,23 +109,21 @@ target_is_active() {
     esac
 }
 
-# Strict twin of the claim block above: return 0 ONLY when the manifest records
-# a claim that reads live/suspect right now. No claim key, no `fno`, or an
-# unreadable claim all return 1, so this NEVER preserves on absence of signal -
-# use it where a false "live" would block a legitimate teardown, and
-# target_is_active where a false "dead" would be worse.
+# Strict claim probe: return 0 for live/suspect, 1 for verified free/stale/no
+# claim, and 2 when the claim cannot be read or is malformed. Destructive
+# callers refuse 2 instead of treating an unreadable claim as dead.
 #
 # owner_pid is not a substitute and never was. It is the transient
 # `fno do target init` wrapper pid, dead within about a second of init returning,
 # so `kill -0 owner_pid` is false for EVERY live session; a guard resting on it
 # alone reads as protection and never once fires.
-target_claim_is_live() {
+target_claim_probe() {
     local state_file="${1:-.fno/target-state.md}"
     [[ -f "$state_file" ]] || return 1
     local claim_key claim_json
     claim_key=$(target_state_field "target_claim_key" "$state_file" || true)
     _target_guard_is_empty_yaml "$claim_key" && return 1
-    command -v fno >/dev/null 2>&1 || return 1
+    command -v fno >/dev/null 2>&1 || return 2
     # --no-roster for the same reason as the twin above: `state` is all this
     # reads, so the cross-check would be a subprocess bought and thrown away.
     # The unflagged retry covers a DEPLOYED fno that predates the flag and
@@ -142,9 +140,15 @@ target_claim_is_live() {
     if [ "$rc" -ne 0 ] && [ -z "$claim_json" ]; then
         claim_json=$(fno agents claim status "$claim_key" -J 2>/dev/null); rc=$?
     fi
-    [ "$rc" -eq 0 ] || return 1
+    [ "$rc" -eq 0 ] || return 2
     case "$(_target_guard_state "$claim_json")" in
         live|suspect) return 0 ;;
-        *) return 1 ;;
+        free|stale) return 1 ;;
+        *) return 2 ;;
     esac
+}
+
+target_claim_is_live() {
+    target_claim_probe "$@"
+    [[ "$?" -eq 0 ]]
 }
