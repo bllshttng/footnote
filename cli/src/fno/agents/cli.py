@@ -4097,7 +4097,14 @@ def cmd_watchdog(
                 results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
                 if json_out:
                     sys.stdout.write(
-                        json.dumps({**payload, "results": results}) + "\n"
+                        json.dumps(
+                            {
+                                **payload,
+                                "results": results,
+                                "result_counts": wd.recovery_result_counts(results),
+                            }
+                        )
+                        + "\n"
                     )
                 else:
                     print(results[0]["detail"], file=sys.stderr)
@@ -4149,18 +4156,35 @@ def cmd_watchdog(
                         f"handle={verdict.name} cwd={row.cwd}"
                     )
                 typer.echo(
-                    f"recoverable={payload['recoverable_count']} complete=true "
+                    f"recoverable={payload['recoverable_count']} "
+                    f"usable={payload['usable_recoverable_count']} "
+                    f"unusable={payload['unusable_recoverable_count']} complete=true "
                     f"scanned={payload['scanned_count']}"
                 )
             return
 
         results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
         if json_out:
-            sys.stdout.write(json.dumps({**payload, "results": results}) + "\n")
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        **payload,
+                        "results": results,
+                        "result_counts": wd.recovery_result_counts(results),
+                    }
+                )
+                + "\n"
+            )
         else:
             for result in results:
                 line = f"{result['outcome']:9} {result['detail']}"
                 print(line, file=sys.stderr if result["outcome"] != "applied" else sys.stdout)
+            result_counts = wd.recovery_result_counts(results)
+            typer.echo(
+                f"applied={result_counts['applied']} "
+                f"refused={result_counts['refused']} "
+                f"deferred={result_counts['deferred']}"
+            )
         return
 
     payload, rows = wd.run_sweep(now_s=now)

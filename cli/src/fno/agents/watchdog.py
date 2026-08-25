@@ -157,14 +157,22 @@ def run_recoverable_sweep(
     for candidate in scan.recoverable:
         handle = canonical_handle(candidate.session_id)
         rows.append(Row(candidate.session_id, handle, "orphaned", None, candidate.cwd, "adopted"))
+        usable = bool(candidate.transcript_usable)
         verdicts_out.append(
             Verdict(
                 candidate.session_id,
                 handle,
                 "orphaned",
                 RECOVERABLE,
-                f"Codex rollout {candidate.rollout_path} is absent from the registry",
-                "adopt",
+                (
+                    f"Codex rollout {candidate.rollout_path} is absent from the registry"
+                    if usable
+                    else (
+                        f"Codex rollout {candidate.rollout_path} is unusable: "
+                        f"{candidate.unusable_reason or 'transcript_unusable'}"
+                    )
+                ),
+                "adopt" if usable else "refuse",
             )
         )
     complete = bool(scan.complete)
@@ -184,7 +192,66 @@ def run_recoverable_sweep(
     }
     if complete:
         payload["recoverable_count"] = len(verdicts_out)
+        payload["usable_recoverable_count"] = scan.usable_recoverable_count
+        payload["unusable_recoverable_count"] = (
+            len(scan.recoverable) - scan.usable_recoverable_count
+        )
     return payload, rows, scan
+
+
+def _recovery_transcript_readback(candidate: Any) -> tuple[Optional[dict], Optional[str], str]:
+    from fno.agents.discover import _codex_meta, _codex_rollout_usability
+
+    if not candidate.transcript_usable:
+        reason = candidate.unusable_reason or "no_readable_transcript_turn"
+        return None, "transcript_unusable", f"transcript_unusable: {reason}"
+    if not candidate.rollout_path.is_file():
+        return (
+            None,
+            "transcript_unavailable",
+            f"rollout vanished before adoption: {candidate.rollout_path}",
+        )
+    if _codex_meta(candidate.rollout_path) != (candidate.session_id, candidate.cwd):
+        return (
+            None,
+            "transcript_changed",
+            f"transcript_changed: rollout identity changed: {candidate.rollout_path}",
+        )
+    try:
+        mtime = candidate.rollout_path.stat().st_mtime
+    except OSError as exc:
+        return None, "transcript_unavailable", f"transcript_unavailable: {exc}"
+    usable, last_event_at, last_turn_marker, unusable_reason = _codex_rollout_usability(
+        candidate.rollout_path,
+        session_id=candidate.session_id,
+        cwd=candidate.cwd,
+        sessions_dir=candidate.rollout_path.parent,
+        mtime=mtime,
+    )
+    if not usable:
+        return (
+            None,
+            "transcript_changed",
+            f"transcript_changed: {unusable_reason or 'transcript_unusable'}",
+        )
+    if (
+        last_event_at != candidate.last_event_at
+        or last_turn_marker != candidate.last_turn_marker
+    ):
+        return (
+            None,
+            "transcript_changed",
+            "transcript_changed: last event evidence no longer matches the scan",
+        )
+    return (
+        {
+            "transcript_usable": True,
+            "last_event_at": last_event_at,
+            "last_turn_marker": last_turn_marker,
+        },
+        None,
+        "",
+    )
 
 
 def apply_recoverable(
@@ -207,7 +274,6 @@ def apply_recoverable(
         }]
 
     from fno.agents import store_fallback
-    from fno.agents.discover import _codex_meta
     from fno.agents.registry import load_registry
 
     adopt = adopt_fn or store_fallback.adopt_store_hit
@@ -223,13 +289,21 @@ def apply_recoverable(
                 "detail": "tick budget spent; retry on the next tick",
             } for remaining in scan.recoverable[index:])
             break
+        evidence, refusal_reason, refusal_detail = _recovery_transcript_readback(
+            candidate
+        )
+        if refusal_reason is not None:
+            results.append(
+                {
+                    "session_id": session_id,
+                    "outcome": "refused",
+                    "reason": refusal_reason,
+                    "transcript_usable": False,
+                    "detail": refusal_detail,
+                }
+            )
+            continue
         try:
-            if not candidate.rollout_path.is_file():
-                raise ValueError(f"rollout vanished before adoption: {candidate.rollout_path}")
-            if _codex_meta(candidate.rollout_path) != (session_id, candidate.cwd):
-                raise ValueError(
-                    f"rollout changed before adoption: {candidate.rollout_path}"
-                )
             hits = confine(
                 session_id,
                 [store_fallback.StoreHit("codex", session_id, candidate.cwd)],
@@ -251,18 +325,47 @@ def apply_recoverable(
                 raise ValueError(
                     "registry did not contain exactly one adopted Codex row"
                 )
-            results.append({
-                "session_id": session_id,
-                "outcome": "applied",
-                "detail": f"adopted {session_id} handle={exact[0].name}",
-            })
+            post_evidence, post_reason, post_detail = _recovery_transcript_readback(
+                candidate
+            )
+            if post_reason is not None:
+                results.append(
+                    {
+                        "session_id": session_id,
+                        "outcome": "refused",
+                        "reason": post_reason,
+                        "transcript_usable": False,
+                        "detail": post_detail,
+                    }
+                )
+                continue
+            results.append(
+                {
+                    "session_id": session_id,
+                    "outcome": "applied",
+                    **(post_evidence or evidence or {}),
+                    "registry_row_count": len(exact),
+                    "detail": f"adopted {session_id} handle={exact[0].name}",
+                }
+            )
         except Exception as exc:  # noqa: BLE001 - one vanished row never aborts the batch
             results.append({
                 "session_id": session_id,
                 "outcome": "refused",
+                "reason": "adoption_failed",
+                "transcript_usable": bool(evidence and evidence["transcript_usable"]),
                 "detail": str(exc),
             })
     return results
+
+
+def recovery_result_counts(results: Iterable[dict]) -> dict[str, int]:
+    counts = {"applied": 0, "refused": 0, "deferred": 0}
+    for result in results:
+        outcome = result.get("outcome")
+        if outcome in counts:
+            counts[outcome] += 1
+    return counts
 
 
 #: How long a finished worker stays parked before the retire lane stops it.
