@@ -42,7 +42,6 @@ def _no_harness_markers(monkeypatch):
         ("claude", "high", ["--effort", "high"]),
         ("codex", "medium", ["-c", "model_reasoning_effort=medium"]),
         ("codex", "xhigh", ["-c", "model_reasoning_effort=xhigh"]),
-        ("agy", "medium", ["--effort", "medium"]),
         ("opencode", "max", []),
     ],
 )
@@ -51,13 +50,23 @@ def test_effort_mapping_accepts_native_values(provider, value, expected):
 
 
 @pytest.mark.parametrize(
-    "provider,value",
-    [("codex", "max"), ("claude", "minimal"), ("gemini", "high"), ("claude", "")],
+    "provider,value,expected",
+    [
+        ("codex", "max", ["-c", "model_reasoning_effort=max"]),
+        ("claude", "minimal", ["--effort", "minimal"]),
+        ("opencode", "model-specific", []),
+    ],
 )
-def test_effort_mapping_fails_closed(provider, value):
+def test_effort_mapping_passes_provider_values_verbatim(provider, value, expected):
+    assert effort_tokens(provider, value) == expected
+
+
+@pytest.mark.parametrize("provider", ["gemini", "agy"])
+def test_effort_mapping_refuses_only_harnesses_without_effort_surface(provider):
     with pytest.raises(DispatchAskError) as exc:
-        effort_tokens(provider, value)
+        effort_tokens(provider, "xhigh")
     assert exc.value.exit_code == 2
+    assert "no reasoning-effort surface" in str(exc.value)
 
 
 def test_pane_argv_threads_effort_and_unset_is_noop(monkeypatch):
@@ -67,14 +76,12 @@ def test_pane_argv_threads_effort_and_unset_is_noop(monkeypatch):
     monkeypatch.setattr("fno.agents.mux_spawn.worker_writable_dirs", lambda *a, **k: [])
     claude = build_pane_argv("claude", "hi", CWD, False, "uuid", effort="high")
     codex = build_pane_argv("codex", "hi", CWD, False, None, effort="medium")
-    agy = build_pane_argv("agy", "hi", CWD, False, None, effort="medium")
     assert claude[-4:] == ["--effort", "high", "--", "hi"]
     effort_pos = codex.index("model_reasoning_effort=medium")
     assert codex[effort_pos - 1:effort_pos + 1] == [
         "-c",
         "model_reasoning_effort=medium",
     ]
-    assert agy[agy.index("--effort") : agy.index("--effort") + 2] == ["--effort", "medium"]
     assert build_pane_argv("claude", "hi", CWD, False, "uuid", effort=None) == build_pane_argv(
         "claude", "hi", CWD, False, "uuid"
     )
@@ -274,17 +281,16 @@ def test_cli_threads_effort_to_pane_dispatch(runner, monkeypatch):
     assert received["effort"] == "high"
 
 
-def test_cli_rejects_unmappable_effort_before_spawn(runner, monkeypatch):
+def test_cli_forwards_model_specific_effort_before_spawn(runner, monkeypatch):
     received = _stub_pane_path(monkeypatch)
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "worker", "hi", "--harness", "codex", "--effort", "max"],
+        ["spawn", "--name", "worker", "hi", "--harness", "codex", "--effort", "light"],
     )
-    assert result.exit_code == 2
-    assert "codex supports" in result.output
-    assert received == {}
+    assert result.exit_code == 0, result.output
+    assert received["effort"] == "light"
 
 
 def test_cli_threads_effort_to_bg_dispatch(runner, monkeypatch):

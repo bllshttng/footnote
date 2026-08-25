@@ -106,7 +106,7 @@ def test_list_agents_empty_registry_json_shape(tmp_path, monkeypatch, _patch_cla
             "progress": None,
         },
         "fields_omitted": ["model"],
-        "schema_version": 3,
+        "schema_version": 4,
     }
     assert result.exit_code == 0
 

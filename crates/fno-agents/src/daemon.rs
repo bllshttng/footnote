@@ -5419,6 +5419,9 @@ where
                     // answer to what actually answered.
                     "harness": e.harness_name(),
                     "provider": e.provider,
+                    // Stored effort is a separate spawn axis. It is passed
+                    // through unchanged; observed_model remains transcript truth.
+                    "effort": e.effort,
                     "harness_session_id": e.harness_session_id,
                     "short_id": short_id,
                     "session_id": session_id,
@@ -12918,6 +12921,7 @@ done
             // provider axis exists to describe, and the one the pre-split
             // alias lied about by carrying "claude" here.
             e.provider = Some("zai".into());
+            e.effort = Some("xhigh".into());
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
@@ -12945,6 +12949,8 @@ done
         // absent depending on which reader answered.
         assert_eq!(row["provider"], "zai");
         assert_ne!(row["provider"], row["harness"]);
+        assert!(row.get("effort").is_some(), "effort key must be emitted");
+        assert_eq!(row["effort"], "xhigh");
         assert!(row.get("model").is_none());
         assert_eq!(
             row["harness_session_id"],

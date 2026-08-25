@@ -1014,6 +1014,7 @@ def _stamp_spawned_session_row(
     worker_name: "str | None",
     worker_harness: "str | None",
     worker_session_uuid: "str | None",
+    worker_effort: "str | None" = None,
 ) -> None:
     """Open the node's sessions row for a spawned contributor (x-4342).
 
@@ -1088,6 +1089,7 @@ def _stamp_spawned_session_row(
         if row is not None:
             harness = row.harness
             session_id = row.harness_session_id
+            worker_effort = row.effort or worker_effort
     if not session_id:
         # A pane binds its session uuid after the registry row exists, and a
         # one-shot tears its row down before returning; the receipt's own uuid
@@ -1107,6 +1109,7 @@ def _stamp_spawned_session_row(
         found, _added = append_session_record(
             graph_json(), node_id, phase=phase,
             harness=harness, session_id=session_id, started_at=started,
+            effort=worker_effort,
         )
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
         print(f"spawn: session row open skipped for {node_id}: {exc}", file=sys.stderr)
@@ -1332,8 +1335,8 @@ def cmd_spawn(
         None,
         "--effort",
         help=(
-            "Reasoning effort: minimal|low|medium|high|xhigh|max. Values are "
-            "validated against the selected provider; unset uses its default."
+            "Reasoning effort, passed through to the selected provider/model; "
+            "unset uses its default."
         ),
     ),
     resume: str | None = typer.Option(
@@ -2425,6 +2428,7 @@ def cmd_spawn(
                 node=(prov_env or {}).get("FNO_NODE"), message=message, phase=stamp_phase,
                 worker_name=pane_result.name, worker_harness=pane_result.provider,
                 worker_session_uuid=pane_result.session_uuid,
+                worker_effort=effort,
             )
             # Exit 22 means one thing: a receipt WAS written and something on it
             # is unverified - the seed, or the pane the seed was handed to. Both
@@ -2556,6 +2560,7 @@ def cmd_spawn(
         worker_name=getattr(result, "name", None),
         worker_harness=getattr(result, "provider", None),
         worker_session_uuid=None,
+        worker_effort=effort,
     )
 
     if result.kind == "created":

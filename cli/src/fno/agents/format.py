@@ -27,7 +27,8 @@ from fno.agents.session_truth import STALE_ATTENTION_S
 # v3 (x-f273): adds the additive ``provider`` key, the registry's
 # spawn-stamped model vendor (see the `stored` note in
 # schemas/agents-list-row.json).
-JSON_SCHEMA_VERSION = 3
+# v4 (x-3587): adds the stored reasoning-effort axis.
+JSON_SCHEMA_VERSION = 4
 
 # Basis values that are falsifiers rather than evidence: a positive
 # measurement that the worker is gone, which no other reading outranks.
@@ -177,6 +178,10 @@ def serialize_entry(
         # the transcript-derived answer to what actually answered.
         "harness": entry.harness,
         "provider": entry.provider,
+        # The selected reasoning-effort axis, recorded at spawn and passed
+        # through verbatim. It is not a transcript observation and is not
+        # inferred from harness, provider, or observed_model.
+        "effort": entry.effort,
         # The worker's own session id in its harness's store. Distinct from
         # `session_id` (the resume-target id, which is the 8-hex jobId for
         # claude) and from `short_id` (the transport key).

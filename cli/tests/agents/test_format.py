@@ -101,6 +101,14 @@ def test_serialize_entry_codex_keeps_short_id_null_and_live_status_null() -> Non
     assert row["live_status"] is None
 
 
+def test_serialize_entry_emits_the_stored_effort_axis() -> None:
+    """The list row exposes the selected effort, not a provider-derived guess."""
+    row = serialize_entry(_codex_entry(effort="xhigh"), live_status=None)
+
+    assert "effort" in row
+    assert row["effort"] == "xhigh"
+
+
 def test_serialize_entry_surfaces_codex_session_id_as_session_id() -> None:
     """Codex agents expose their resume target via the unified session_id key.
 

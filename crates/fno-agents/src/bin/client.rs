@@ -1030,33 +1030,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         );
         return Some(2);
     }
-    // Pane spawns re-exec the Python CLI, whose effort_tokens mapper is the
-    // validator for claude/codex/agy/opencode. Validate only client-owned lanes
-    // here; otherwise opencode pane effort would be rejected before re-exec.
+    // Pane spawns re-exec the Python CLI, whose effort_tokens mapper owns flag
+    // translation. The provider owns the effort vocabulary, so this client
+    // only refuses lanes with no effort surface and never keeps a value table.
     if substrate != "pane" {
-        if let Some(value) = effort {
-            let allowed = match provider {
-                "claude" => &["low", "medium", "high", "xhigh", "max"][..],
-                "codex" => &["minimal", "low", "medium", "high", "xhigh"][..],
-                "agy" => &["low", "medium", "high"][..],
-                _ => {
-                    eprintln!(
-                        "provider {} has no reasoning-effort surface; omit --effort",
-                        py_repr(provider)
-                    );
-                    return Some(2);
-                }
-            };
-            if !allowed.contains(&value) {
-                eprintln!(
-                    "{} --effort {} unmappable; {} supports {}",
-                    provider,
-                    py_repr(value),
-                    provider,
-                    allowed.join(", ")
-                );
-                return Some(2);
-            }
+        if effort.is_some() && matches!(provider, "gemini" | "agy") {
+            eprintln!(
+                "provider {} has no reasoning-effort surface; omit --effort",
+                py_repr(provider)
+            );
+            return Some(2);
         }
     }
 

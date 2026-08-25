@@ -557,43 +557,29 @@ def tier3_pane_tokens(
     return out
 
 
-_EFFORT_SUPERSET = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
-_EFFORT_ALLOWED = {
-    "claude": frozenset({"low", "medium", "high", "xhigh", "max"}),
-    "codex": frozenset({"minimal", "low", "medium", "high", "xhigh"}),
-    "agy": frozenset({"low", "medium", "high"}),
-    "opencode": _EFFORT_SUPERSET,
-}
-
-
 def effort_tokens(provider: str, value: str) -> list[str]:
-    """Validate effort and return the provider-native argv tokens."""
+    """Translate effort without maintaining a provider/model value catalog.
+
+    The selected provider owns the accepted vocabulary. fno only translates
+    the flag spelling and refuses lanes that have no effort flag at all.
+    """
     if not value:
         raise DispatchAskError("--effort requires a value", exit_code=2)
-    if value not in _EFFORT_SUPERSET:
-        raise DispatchAskError(
-            f"--effort {value!r} unknown; valid: {', '.join(sorted(_EFFORT_SUPERSET))}",
-            exit_code=2,
-        )
-    allowed = _EFFORT_ALLOWED.get(provider)
-    if allowed is None:
+    if provider in {"gemini", "agy"}:
         raise DispatchAskError(
             f"provider {provider!r} has no reasoning-effort surface; omit --effort",
-            exit_code=2,
-        )
-    if value not in allowed:
-        raise DispatchAskError(
-            f"{provider} --effort {value!r} unmappable; {provider} supports "
-            f"{', '.join(sorted(allowed))}",
             exit_code=2,
         )
     if provider == "claude":
         return ["--effort", value]
     if provider == "codex":
         return ["-c", f"model_reasoning_effort={value}"]
-    if provider == "agy":
-        return ["--effort", value]
-    return []
+    if provider == "opencode":
+        return []
+    raise DispatchAskError(
+        f"provider {provider!r} has no reasoning-effort surface; omit --effort",
+        exit_code=2,
+    )
 
 
 def apply_opencode_variant(model: str, effort: str, *, state_path: Optional[Path] = None) -> None:

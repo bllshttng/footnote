@@ -1460,11 +1460,14 @@ def test_cli_session_add_uses_ambient_identity(tmp_path, monkeypatch):
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-cli-1")
 
-    r = CliRunner().invoke(C.cli, ["session", "add", "ab-cli00001", "--phase", "think"])
+    r = CliRunner().invoke(
+        C.cli,
+        ["session", "add", "ab-cli00001", "--phase", "think", "--effort", "xhigh"],
+    )
     assert r.exit_code == 0, r.output
     rows = read_graph(g)[0]["sessions"]
     assert _strip_observed_model(rows) == [
-        {"phase": "think", "harness": "claude", "session_id": "sess-cli-1"}]
+        {"phase": "think", "harness": "claude", "session_id": "sess-cli-1", "effort": "xhigh"}]
 
 
 def test_cli_session_add_duplicate_exits_zero_added_false(tmp_path, monkeypatch):
@@ -1587,6 +1590,25 @@ def test_started_at_rejects_non_utc_like_at(tmp_path, monkeypatch, bad):
             g, "ab-guard001", phase="do", harness="claude", session_id="S", started_at=bad,
         )
     assert _sessions(g) == []
+
+
+def test_effort_is_recorded_as_an_independent_session_axis(tmp_path, monkeypatch):
+    """A graph provenance row preserves the selected effort verbatim."""
+    from fno.graph.store import append_session_record
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    append_session_record(
+        g,
+        "ab-guard001",
+        phase="do",
+        harness="codex",
+        session_id="S",
+        effort="xhigh",
+    )
+
+    row = _sessions(g)[0]
+    assert "effort" in row
+    assert row["effort"] == "xhigh"
 
 
 def test_started_at_is_not_part_of_the_idempotency_key(tmp_path, monkeypatch):
