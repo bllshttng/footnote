@@ -674,6 +674,7 @@ def _append_to_bus(
             from_model=from_model,
             to_kind=to_kind,
             word_count=word_count,
+            origin=origin,
         )
     )
 

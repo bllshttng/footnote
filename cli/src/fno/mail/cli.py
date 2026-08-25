@@ -212,18 +212,31 @@ def classify_origin(explicit_origin: str | None = None) -> str:
     """Classify the sender once, before a mail lane can narrow behavior."""
     from fno.decide import MAIL_ORIGINS
 
+    from fno.agents.self_stamp import resolve_self_identity
+
+    ident = resolve_self_identity()
+    agent_identity = bool(ident.session_id and ident.harness)
     if explicit_origin is not None:
         if explicit_origin not in MAIL_ORIGINS:
             raise ValueError(
                 f"unknown mail origin {explicit_origin!r}; expected one of "
                 f"{', '.join(MAIL_ORIGINS)}"
             )
+        # An origin above peer is a claim about the channel, and an ambient
+        # agent identity cannot make that claim. Downgrade to peer rather
+        # than honoring the flag: least authority by default cannot be
+        # forged, and a process with no session identity (a real scheduler,
+        # a recovery sweep) still declares its origin honestly.
+        if agent_identity and explicit_origin != "peer":
+            typer.echo(
+                f"mail origin {explicit_origin!r} downgraded to 'peer': an "
+                "agent session cannot declare an origin above peer",
+                err=True,
+            )
+            return "peer"
         return explicit_origin
 
-    from fno.agents.self_stamp import resolve_self_identity
-
-    ident = resolve_self_identity()
-    if ident.session_id and ident.harness:
+    if agent_identity:
         return "peer"
     try:
         attended = bool(sys.stdin.isatty())
@@ -5037,11 +5050,14 @@ def cmd_drain_self(
     # A live-injected send stores the full paired envelope durably (body
     # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
     # needs both shapes: the bare trailer, and the trailer immediately
-    # before a terminal close tag. Any origin's trailer counts: a body
-    # stamped `mail_trailer("operator")` is already stamped too, and
-    # appending the peer trailer after its close tag would contradict the
-    # provenance line it just carried.
-    from fno.mail.envelope import ends_with_authority_trailer
+    # before a terminal close tag.
+    # Only the PEER trailer is ever stamped or recognized here (ruling
+    # d-02625dda): the record carries no origin yet, so least authority is
+    # the default. An operator-origin envelope therefore renders with a
+    # second peer trailer after its close tag - the fail-safe outcome, not
+    # a bug: the genuine least-authority stamp stays visible beneath
+    # whatever the body claimed, and nothing sender-written is believed.
+    _trailer_then_close = f"{FNO_MAIL_TRAILER}\n</fno_mail>"
 
     def _render_body(body: str) -> str:
         # A durable heads-up body is sender-controlled, so a plain `in`
@@ -5050,7 +5066,7 @@ def cmd_drain_self(
         # then treat the body as already stamped and skip the real
         # terminal trailer. Require the stripped body to END with it.
         text = body.rstrip("\n")
-        if ends_with_authority_trailer(text):
+        if text.endswith(FNO_MAIL_TRAILER) or text.endswith(_trailer_then_close):
             return text
         return f"{text}\n{FNO_MAIL_TRAILER}"
 

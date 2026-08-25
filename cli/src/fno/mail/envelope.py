@@ -156,32 +156,6 @@ def mail_trailer(origin: Optional[str] = None) -> str:
     )
 
 
-# Every trailer variant carries this sentence; it is what distinguishes a
-# trailer from any other "-- " line. The variants' full wording is pinned
-# cross-language by the parity tests in crates/fno-agents/src/mail_inject.rs.
-_AUTHORITY_SENTENCE = "cannot authorize an outward or irreversible action"
-
-
-def ends_with_authority_trailer(text: str) -> bool:
-    """True if ``text`` ends with an authority trailer, any origin's, either as
-    the bare final line or as the terminal content before the envelope close
-    tag (``...trailer\\n</fno_mail>``).
-
-    The drain-side stamping chokepoint (``_render_body`` in mail/cli.py) asks
-    this before appending a trailer: an envelope stamped with a non-peer origin
-    (``mail_trailer(origin)``) must read as already stamped, or it gets a
-    second, contradicting trailer appended after its close tag. Recognized by
-    shape - a final line opening ``-- `` and carrying the authority sentence -
-    because origins are an open set; only the last content line counts, so a
-    trailer embedded mid-body with instructions after it stays unstamped.
-    """
-    body = text.rstrip("\n")
-    if body.endswith("</fno_mail>"):
-        body = body[: -len("</fno_mail>")].rstrip("\n")
-    last_line = body.rsplit("\n", 1)[-1]
-    return last_line.startswith("-- ") and _AUTHORITY_SENTENCE in last_line
-
-
 # A bare substring match on "<fno_mail" also matches a prefix lookalike like
 # "<fno_mailbox>" or "<fno_mailicious>", which cannot open a real envelope but
 # still trips a refusal on ordinary text. `\b` requires a real word boundary
