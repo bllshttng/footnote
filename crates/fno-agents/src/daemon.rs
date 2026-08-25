@@ -4737,7 +4737,7 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
 
     let message_at = row_timestamp(row.get("last_message_at"));
     let message_is_too_new = match (message_at, event_at) {
-        (Some(message), Some(event)) => (message - event).num_seconds() > 2,
+        (Some(message), Some(event)) => message - event > chrono::Duration::seconds(2),
         _ => false,
     };
     if message_is_too_new {

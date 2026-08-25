@@ -41,6 +41,19 @@
       }
     },
     {
+      "name": "fractional skew beyond the allowance is refused",
+      "row": {
+        "status": "live",
+        "basis": "transcript",
+        "last_message_at": "2026-08-21T00:30:02.500Z",
+        "last_event_at": "2026-08-21T00:30:00Z"
+      },
+      "expected": {
+        "last_message_at": null,
+        "last_message_at_basis": "refused-newer-than-transcript"
+      }
+    },
+    {
       "name": "genuinely dead row stays terminal",
       "row": {
         "status": "orphaned",
