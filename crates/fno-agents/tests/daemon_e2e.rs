@@ -221,17 +221,19 @@ fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, bud
             })
             .collect();
         if let Some(started) = started {
-            // `startup_reconcile_done` carries no pid, so the successor's sweep
-            // can only be named positionally: incumbent first, successor
-            // second. That reading holds only while exactly those two daemons
-            // have swept under this home. A third sweep means the storm forked
-            // an extra daemon and index 1 no longer names what it claims, so
-            // refuse rather than assert against the wrong event.
-            assert!(
-                sweeps.len() <= 2,
-                "{} startup sweeps under this home; the successor's cannot be named positionally; event_order={events:?}",
-                sweeps.len()
-            );
+            // `startup_reconcile_done` carries no pid, so the successor's
+            // sweep can only be named positionally: incumbent first,
+            // successor second. That reading is weaker than it looks when a
+            // third daemon sweeps, and an earlier version of this code
+            // asserted `sweeps.len() <= 2` to say so out loud. That assert was
+            // wrong: the calling test documents a third daemon reaching the
+            // accept loop as LEGITIMATE ("a verb in the burst can legitimately
+            // win the lock ahead of restart's own child"), and the assert sits
+            // inside this poll loop, so a legal outcome became an unwaitable
+            // panic and a flake source in the 20-trial job.
+            //
+            // Closing the weakness for real means putting a pid on the event.
+            // Until then this reads index 1 and does not pretend to more.
             if let Some(successor_sweep) = sweeps.get(1) {
                 assert!(
                     started < *successor_sweep,

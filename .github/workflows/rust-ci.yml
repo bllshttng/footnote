@@ -243,6 +243,12 @@ jobs:
 
   stress:
     name: rust e2e concurrency stress (20 trials)
+    # Pull requests only, like the `fmt` job above. The push trigger at the top
+    # of this file carries no `paths:` filter, so without this the 20 trials -
+    # about 24 minutes - would run on EVERY commit to main, which contradicts
+    # the path-triggered rationale below and buys nothing: the same trials
+    # already ran on the PR that produced that commit.
+    if: github.event_name == 'pull_request'
     # The determinism claim this workflow's --test-threads=1 steps make is a
     # claim about REPEATED runs, so something has to repeat them. That used to
     # ride the cli-ci smoke shard, where the 20-trial default cost 756s of a
@@ -334,9 +340,16 @@ jobs:
         env:
           STRESS_TRIALS: "20"
         run: |
-          set -o pipefail
-          bash scripts/tests/stress-rust-e2e-concurrency.sh 2>&1 | tee stress.log
-          rc=${PIPESTATUS[0]}
+          # No pipeline and no `pipefail`. Both were here, under the runner's
+          # default `bash -e`, which made a failing harness fatal at the pipe:
+          # the `rc=` capture and the whole summary block below never ran, so
+          # this job published ZERO evidence on exactly the runs it exists to
+          # report - and `continue-on-error` rendered that silence as a green
+          # check. A redirect plus `|| rc=$?` keeps the exit code exact and
+          # keeps `-e` out of it.
+          rc=0
+          bash scripts/tests/stress-rust-e2e-concurrency.sh > stress.log 2>&1 || rc=$?
+          cat stress.log
           # This job REPORTS. Its only output is the run summary, and it exits 0
           # whatever happened, because every non-zero path here is
           # infrastructure noise rather than a verdict: the harness exits 2 when
@@ -353,7 +366,10 @@ jobs:
             echo "$summary" >> "$GITHUB_STEP_SUMMARY"
             grep '^stress_trial .*=fail' stress.log >> "$GITHUB_STEP_SUMMARY" || true
           else
-            reason="$(grep -E '^stress_(skipped|setup)=' stress.log | tail -1)"
+            # `|| true`: no marker line is the ordinary case here, and a
+            # failing substitution would abort the step under `-e` at the one
+            # point whose whole job is to report that nothing was measured.
+            reason="$(grep -E '^stress_(skipped|setup)=' stress.log | tail -1 || true)"
             echo "stress_not_measured exit=$rc ${reason:-reason=unknown}" >> "$GITHUB_STEP_SUMMARY"
           fi
           cat "$GITHUB_STEP_SUMMARY"

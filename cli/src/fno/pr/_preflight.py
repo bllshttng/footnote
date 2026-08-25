@@ -43,6 +43,15 @@ UNRELATED = 4
 
 # The legs a full preflight MUST have run. Membership here is the real
 # assertion: a receipt missing one of these is not a full run.
+#
+# The 2026-08-25 rename (cargo-test:fno-agents -> -unit/-e2e, same for fno) has
+# a one-time transition cost: a receipt minted by an OLDER preflight carries the
+# two retired names and none of the four new ones, so it is discarded. Parking
+# the old spellings in the optional set below does NOT rescue it - the REQUIRED
+# set changed too, so such a receipt fails the "every required leg present" half
+# whatever the optional set says. Receipts are short-lived and the next
+# preflight run mints a current one, so the window is one run wide on the only
+# installs that consult them (preflight.required = true).
 _PREFLIGHT_BASE_SCOPE = frozenset(
     {
         "smoke",

@@ -1297,8 +1297,13 @@ else:
     print('absent')
 " 2>/dev/null
 }
-# The leak guard snapshots the real store around BOTH crates/fno test legs, so
-# the trio runs together: selecting either scope runs both legs.
+# The leak guard snapshots the real store around BOTH crates/fno test legs.
+# The pairing is ONE-WAY and the comment used to claim otherwise: selecting the
+# squads scope pulls in the e2e leg, but selecting the e2e leg alone does NOT
+# pull in the guard. A `--retry-leg cargo-test:fno-e2e` therefore runs with no
+# mtime window and records no guard in the receipt scope, which is correct for
+# the receipt (the guard is an optional leg) and is a coverage gap on that
+# retry path worth knowing before reading a retry as a clean run.
 RUN_FNO_UNIT=0
 RUN_FNO_E2E=0
 RUN_FNO_SQUADS=0

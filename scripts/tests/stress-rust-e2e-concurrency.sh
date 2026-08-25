@@ -33,6 +33,17 @@ if ((trials < 1 || trials > 20)); then
     exit 2
 fi
 
+# Checked here, by name. jq parses cargo's --message-format=json below, and
+# without it that parse yields nothing and the failure surfaces as
+# `reason=compiled-test-binary-not-found` - a diagnosis pointing at cargo for a
+# missing tool. This file is auto-discovered by `fno doctor test smoke`, so that
+# wrong diagnosis is what a contributor without jq gets from the whole suite.
+command -v jq >/dev/null 2>&1 || {
+    echo "stress_setup=unavailable reason=jq-not-on-path" >&2
+    echo "stress_setup_note=jq parses the cargo build manifest; install it (brew install jq)" >&2
+    exit 2
+}
+
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
     echo "stress_setup=unavailable reason=not-a-git-checkout" >&2
     exit 2
