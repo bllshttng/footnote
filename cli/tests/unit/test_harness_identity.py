@@ -763,24 +763,37 @@ def test_strip_flags_keep_foreign_name_with_different_session_id():
 # --- attester identity: bound to the emitting process -------------------------
 
 
-def test_attester_witness_process_on_equal_ancestor():
+def test_attester_witness_process_on_equal_family_ancestor():
     from fno.harness_identity import _attester_witness
 
-    assert _attester_witness("CODEX_THREAD_ID", "sess-a", [None, "sess-a"]) == "process"
+    # A NON-family carrier agreeing first (the fno CLI process carrying the
+    # inherited marker) still corroborates only through the family carrier
+    # behind it; here the family carrier agrees too.
+    assert (
+        _attester_witness("CODEX_THREAD_ID", "sess-a", [None, "sess-a"], [False, True])
+        == "process"
+    )
 
 
-def test_attester_witness_env_only_when_nothing_readable():
+def test_attester_witness_env_only_when_no_family_carrier():
     from fno.harness_identity import _attester_witness
 
-    assert _attester_witness("CODEX_THREAD_ID", "sess-a", [None, None]) == "env_only"
-    assert _attester_witness("CODEX_THREAD_ID", "sess-a", []) == "env_only"
+    # Carriers that agree but are not family processes (shells, the CLI
+    # python) corroborate nothing on their own: no family carrier, env_only -
+    # the daemon-carrier lane must degrade, never wedge or over-certify.
+    assert (
+        _attester_witness("CODEX_THREAD_ID", "sess-a", ["sess-a", None], [False, False])
+        == "env_only"
+    )
+    assert _attester_witness("CODEX_THREAD_ID", "sess-a", [None, None], [False, False]) == "env_only"
+    assert _attester_witness("CODEX_THREAD_ID", "sess-a", [], []) == "env_only"
 
 
-def test_attester_witness_raises_on_differing_ancestor():
+def test_attester_witness_raises_on_differing_family_ancestor():
     from fno.harness_identity import AttesterIdentityConflict, _attester_witness
 
     with pytest.raises(AttesterIdentityConflict) as exc:
-        _attester_witness("CODEX_THREAD_ID", "sess-forged", ["sess-true"])
+        _attester_witness("CODEX_THREAD_ID", "sess-forged", ["sess-true"], [True])
     # Both ids are named: the refusal is the one place a reader can see which
     # session the harness says versus which the env claims.
     assert "sess-true" in str(exc.value)
@@ -788,22 +801,56 @@ def test_attester_witness_raises_on_differing_ancestor():
 
 
 def test_attester_witness_raise_outranks_the_equal_match():
-    """The override shape yields BOTH an equal ancestor (the shell carrying the
-    assignment) and a differing one (the harness above it). Stopping at the
-    first equal ancestor would certify the forgery, so the raise must win."""
+    """The override shape yields BOTH an equal carrier (the shell carrying the
+    assignment, not a family process) and a differing family carrier (the
+    harness above it, the only kind that can mint the id). Stopping at the
+    first equal carrier would certify the forgery, so the family carrier's
+    disagreement raises."""
     from fno.harness_identity import AttesterIdentityConflict, _attester_witness
 
     with pytest.raises(AttesterIdentityConflict):
-        _attester_witness("CODEX_THREAD_ID", "sess-forged", ["sess-forged", None, "sess-true"])
+        _attester_witness(
+            "CODEX_THREAD_ID",
+            "sess-forged",
+            ["sess-forged", None, "sess-true"],
+            [False, False, True],
+        )
+
+
+def test_a_stale_marker_above_the_session_never_vetoes():
+    """The daemon-carrier lane: the session process (a family carrier) agrees
+    with the env, and a LONG-LIVED ancestor above it retains a previous
+    session's marker. The nearer family carrier decided; the stale value above
+    was never the minter of this id, so the witness is process, not a refusal
+    that would wedge every emit under that daemon."""
+    from fno.harness_identity import _attester_witness
+
+    assert (
+        _attester_witness(
+            "CODEX_THREAD_ID",
+            "sess-now",
+            ["sess-now", "sess-old"],
+            [True, True],
+        )
+        == "process"
+    )
 
 
 def test_resolve_attester_identity_reads_winning_marker_and_empty_without_one():
-    from fno.harness_identity import resolve_attester_identity
+    """Ancestry-adaptive, for the same reason the actor test is: run under a
+    real codex session, a family ancestor carries a DIFFERENT live id and the
+    resolver raises - the refusal is correct there, so this asserts it rather
+    than erroring. On any other host no codex ancestor exists and the honest
+    answer is env_only."""
+    from fno.harness_identity import AttesterIdentityConflict, resolve_attester_identity
 
-    assert resolve_attester_identity({"CODEX_SESSION_ID": "codex-sess"}) == (
-        "codex-sess",
-        "env_only",
-    )
+    try:
+        assert resolve_attester_identity({"CODEX_SESSION_ID": "codex-sess"}) == (
+            "codex-sess",
+            "env_only",
+        )
+    except AttesterIdentityConflict:
+        pass  # a live codex ancestry disagrees; the refusal is the verdict
     assert resolve_attester_identity({}) == ("", "env_only")
 
 

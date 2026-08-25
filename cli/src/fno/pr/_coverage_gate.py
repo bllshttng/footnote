@@ -136,9 +136,15 @@ def rests_on_self_attestation_alone(cov: dict) -> bool:
     not proof of its absence either.
     """
     reviewed = cov.get("reviewed_count")
-    if not isinstance(reviewed, int) or reviewed <= 0:
-        return False
     self_attested = cov.get("self_attested_count")
+    if not isinstance(reviewed, int) or reviewed <= 0:
+        # The corroboration policy itself rewrites the rows it holds to
+        # covered=uncovered / reviewed_count 0 while PRESERVING the
+        # self-attestation counts, so a 0-count row with a recorded
+        # self-attestation is exactly the held row - the one population this
+        # predicate exists to name. A 0-count row with no self-attestation is
+        # merely uncovered, not self-attested-only.
+        return isinstance(self_attested, int) and self_attested > 0
     if isinstance(self_attested, int):
         return self_attested == reviewed
     counted = [
@@ -237,12 +243,21 @@ def coverage_verdict(
             return UNANSWERED, "", "", f"events read raised: {exc}"
         recompute_note = ""
 
-    covered, _failed = covered_conjuncts(cov, head, code_review_required)
+    covered, failed = covered_conjuncts(cov, head, code_review_required)
     corroboration = _corroboration_refusal(cov, repo)
-    if corroboration:
+    if covered and corroboration:
         return REFUSED, corroboration, "", recompute_note
     if covered:
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", recompute_note
+    if failed == "uncovered" and corroboration:
+        # The policy-rewritten shape (0 counted, self-attestation preserved)
+        # fails the count conjunct, but the truer refusal names the policy and
+        # both remedies - "re-run your own review" can never satisfy it, and
+        # a worker told that will retry into budget. The other failures
+        # (stale head, missing local pass, reviewer refusal) keep their own
+        # refusals: those name a remedy that can actually work, and the
+        # corroboration question may dissolve once the head is re-attested.
+        return REFUSED, corroboration, "", recompute_note
 
     # Same branch order run_merge has always used: the attestation refusal is
     # checked first, so a config requiring code-review with no row names the

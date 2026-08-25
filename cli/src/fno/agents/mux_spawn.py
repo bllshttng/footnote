@@ -1468,31 +1468,28 @@ def _mesh_env_wrapper(
             incoherent_model_env_unset_args,
             overlay_restores_model_env,
             unrouted_model_clear_notice,
-            unrouted_model_keys,
         )
 
-        _flags = incoherent_model_env_unset_args()
-        if _flags:
-            unset += _flags
-            # The names ride the flag pairs (-u NAME), so the notice reads
-            # them back rather than scanning the env a second time.
+        # One argv for both causes, from the one helper that owns the
+        # substrate (no duplicate -u pairs where an incoherent var is also an
+        # inherited claim); each cause keeps its own notice sentence, read
+        # back from the flag pairs rather than scanning the env twice.
+        _routed = overlay_restores_model_env(account_env, resolved_route)
+        _flags = incoherent_model_env_unset_args(unrouted=not _routed)
+        _incoherent_names = incoherent_model_env_unset_args()[1::2]
+        if _incoherent_names:
             print(
-                incoherent_model_env_notice(
-                    _flags[1::2],
-                    routed=overlay_restores_model_env(account_env, resolved_route),
-                ),
+                incoherent_model_env_notice(_incoherent_names, routed=_routed),
                 file=sys.stderr,
             )
-        # An unrouted pane child carries no model claim either - coherent or
-        # not, the launching shell's pin is not a selection anyone made for
-        # this worker. `env -u` renders before `pairs`, so a composed route's
-        # own model vars still win where the two overlap.
-        if not overlay_restores_model_env(account_env, resolved_route):
-            _claimed = list(unrouted_model_keys())
-            for _k in _claimed:
-                unset += ["-u", _k]
-            if _claimed:
-                print(unrouted_model_clear_notice(_claimed), file=sys.stderr)
+        _claimed = [
+            name
+            for i, name in enumerate(_flags[1::2])
+            if name not in _incoherent_names
+        ]
+        if _claimed:
+            print(unrouted_model_clear_notice(_claimed), file=sys.stderr)
+        unset += _flags
     # Set-or-clear the whole triple, never merge. A pane spawned from a
     # node-bound worker inherits that worker's env, so adding only what this
     # spawn resolved would leave an ad-hoc pane carrying the parent's FNO_NODE

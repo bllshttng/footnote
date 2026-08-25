@@ -126,3 +126,52 @@ def test_retract_refuses_the_identity_override_shape(
     assert result.exit_code == 1
     assert "sess-true" in result.stderr and "sess-forged" in result.stderr
     assert len(journal.read_text().splitlines()) == 1
+
+
+def test_retract_mirrors_the_revocation_to_the_global_log(
+    tmp_path, monkeypatch, capsys
+):
+    """The pass being revoked reached the machine-global log on emit
+    (review_attestation rides GLOBAL_MIRROR_TYPES); a retraction appended to
+    the project log alone leaves the revoked pass live for every global-log
+    reader, which is the forgery the verb exists to undo."""
+    import json as _json
+
+    from fno.pr import _attestation
+
+    project = tmp_path / ".fno" / "events.jsonl"
+    project.parent.mkdir(parents=True)
+    head = "aaaa1111bbbb2222"
+    project.write_text(
+        _json.dumps(
+            {
+                "ts": "2026-08-25T00:00:00Z",
+                "type": "review_attestation",
+                "data": {
+                    "reviewer": "code-review",
+                    "head_sha": head,
+                    "verdict": "pass",
+                    "attester_session_id": "sess-author",
+                    "branch": "feature/x",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    mirrored_rows: list = []
+
+    def fake_mirror(event, resolved_events, repo_root):
+        mirrored_rows.append(event)
+
+    import fno.harness_identity
+
+    monkeypatch.setattr(fno.harness_identity, "resolve_attester_identity", lambda: ("s", "process"))
+    monkeypatch.setattr("fno.events.cli.mirror_to_global_log", fake_mirror)
+    rc = _attestation.retract(
+        "code-review", "sess-author", head, "forged", events=project
+    )
+    capsys.readouterr()
+    assert rc == 0
+    assert mirrored_rows, "the retraction must be mirrored like the pass it revokes"
+    assert mirrored_rows[0]["data"]["retracts_attester"] == "sess-author"

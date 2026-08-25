@@ -731,7 +731,20 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
             s.reviewers = value_as_reviewers(v);
         }
         if let Some(v) = review.get("require_corroboration") {
-            s.require_corroboration = v.as_bool();
+            // String spellings parse the way pydantic's lax bool coerces them
+            // ("true"/"false"/"yes"/"no"/"on"/"off"/"1"/"0"), so the two gates
+            // cannot disagree on a config that loads at all. Anything else
+            // stays None -> false here; the Python config loader rejects it,
+            // so no config can load green on one side and parse false on the
+            // other.
+            s.require_corroboration = v.as_bool().or_else(|| {
+                v.as_str()
+                    .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                        "true" | "yes" | "on" | "1" => Some(true),
+                        "false" | "no" | "off" | "0" => Some(false),
+                        _ => None,
+                    })
+            });
         }
         if let Some(v) = review.get("self_review_required") {
             // A malformed value stays None -> normalized to true (obligation on,
@@ -2253,6 +2266,12 @@ pub fn unattested_reviewers_scan(
         if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
             continue;
         }
+        // The SAME zero-evidence predicate the coverage axis uses: a review
+        // of nothing must not satisfy the config.review.reviewers gate either,
+        // which is the surface that floors the self-review obligation.
+        if zero_evidence_attestation(&val) {
+            continue;
+        }
         // The SAME predicate the coverage axis uses, not a second head-equality
         // rule beside it. Leaving this one a bare equality would have made the
         // softening decorative: this is the scan that satisfies
@@ -2872,6 +2891,9 @@ fn read_pr_info(
             &head_branch,
             head_sha,
         );
+        // The predicate reads the pre-downgrade report (the policy below only
+        // flips the covered state, preserving verdicts), so capture it first.
+        let self_attested_alone = coverage.rests_on_self_attestation_alone();
         coverage.apply_corroboration_policy(require_corroboration);
         let local_recovery = local_recovery_from_refusal(
             &info.reviewer_refused,
@@ -2879,7 +2901,13 @@ fn read_pr_info(
             &info.stale_bots,
             &coverage,
         );
+        // The corroboration policy must reach the `reviewed` verdict itself,
+        // not only the coverage axis: the DonePRGreen conjunct below reads
+        // this field and never consults coverage, so without this line the
+        // loop can finish a PR the merge gate refuses on the same row - the
+        // two surfaces this repo keeps unified would split under the flag.
         let reviewed = (info.all_required_passed() || local_recovery)
+            && !(require_corroboration && self_attested_alone)
             && unaddressed.is_empty()
             && reviewers_ok;
         (
@@ -5154,6 +5182,33 @@ struct LocalPass {
 /// out-of-scope line is skipped ENTIRELY (never a verdict, never a stale
 /// entry), which is also what keeps the pair key honest - one session
 /// attesting PR B after PR A no longer overwrites A's pass with B's head.
+/// A pass over a diff that changed NO FILE is a review of nothing, not a
+/// review: a session resolving its target from a checkout sitting on the base
+/// branch reads an empty diff and reports clean, and without this guard that
+/// pass is byte-identical to a real one. The producer refuses to emit with
+/// zero files, so a line carrying `reviewed_file_count: 0` is either
+/// pre-guard or hand-crafted - skipped either way. Lines alone never decide
+/// this: binary, pure-rename and empty-file diffs are real reviews whose
+/// `reviewed_line_count` is an honest 0, so a 0-line row WITH files counts,
+/// and a 0-line row from before the field existed (file count absent) is
+/// still skipped - absence must not be read as "had files".
+fn zero_evidence_attestation(val: &Value) -> bool {
+    if val
+        .pointer("/data/reviewed_line_count")
+        .and_then(|v| v.as_i64())
+        != Some(0)
+    {
+        return false;
+    }
+    match val
+        .pointer("/data/reviewed_file_count")
+        .and_then(|v| v.as_i64())
+    {
+        Some(files) => files <= 0,
+        None => true,
+    }
+}
+
 fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<LocalPass> {
     // (reviewer, attester_session_id) -> (head it attested, branch it named,
     // was it a pass). The attester lives in the key so cross-session
@@ -5183,18 +5238,7 @@ fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> 
         if line_head.is_empty() {
             continue;
         }
-        // A pass over a ZERO-LINE diff is a review of nothing, not a review:
-        // a session resolving its target from a checkout sitting on the base
-        // branch reads an empty diff and reports clean, and before this guard
-        // that pass was byte-identical to a real one. The producer refuses to
-        // emit at 0, so a line carrying the field as 0 is either pre-guard or
-        // hand-crafted - skipped either way. The field ABSENT is the pre-landed
-        // backlog and still counts; absence must not be read as zero.
-        if val
-            .pointer("/data/reviewed_line_count")
-            .and_then(|v| v.as_i64())
-            == Some(0)
-        {
+        if zero_evidence_attestation(&val) {
             continue;
         }
         // The branch this attestation named; empty on every event predating
@@ -5240,10 +5284,26 @@ fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> 
         // reviews performed, not approvals granted - the hold on a bad review
         // lives on `open_review_findings` and on `unattested_reviewers_scan`,
         // which keeps its name key (the config.review.reviewers gate).
-        latest.insert(
-            (r.trim_start_matches('/').to_string(), key_attester),
-            (line_head.to_string(), line_branch, is_pass),
-        );
+        // A retraction names ONE pass, by head. When the pair's entry already
+        // describes a different (newer) head, the named pass is superseded and
+        // the retraction must not touch it: the verb emits the retraction after
+        // any newer pass, so an unconditional insert would revoke a live pass
+        // nobody asked to revoke. Same-head (and first-entry) inserts keep
+        // today's semantics.
+        let pair_key = (r.trim_start_matches('/').to_string(), key_attester);
+        let is_retraction = val
+            .pointer("/data/retracts_attester")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if is_retraction {
+            if let Some((existing_head, _, _)) = latest.get(&pair_key) {
+                if existing_head != line_head {
+                    continue;
+                }
+            }
+        }
+        latest.insert(pair_key, (line_head.to_string(), line_branch, is_pass));
     }
     let mut out: Vec<LocalPass> = latest
         .into_iter()
@@ -12836,6 +12896,182 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_file_attestation_is_not_review_evidence_either() {
+        // The forged row of the future spells the file count explicitly: 0
+        // lines AND 0 files is the empty-diff shape the producer refuses, so
+        // the gate must refuse it too, whatever else the line claims.
+        let zero = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author",
+                     "reviewed_line_count": 0, "reviewed_file_count": 0}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &zero,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert!(
+            rep.verdicts.is_empty(),
+            "a zero-file pass must yield no verdict"
+        );
+    }
+
+    #[test]
+    fn a_zero_line_pass_with_files_is_a_real_review() {
+        // Binary, pure-rename and empty-file diffs change files without
+        // changing text lines: reviewed_line_count 0 WITH reviewed_file_count
+        // above zero is an honest measurement of a real review, and skipping
+        // it would strand exactly those PRs (images, fonts, renames) with no
+        // satisfiable producer path.
+        let binary = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author",
+                     "reviewed_line_count": 0, "reviewed_file_count": 1}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &binary,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+    }
+
+    #[test]
+    fn a_zero_file_pass_does_not_satisfy_the_reviewers_gate() {
+        // The reviewers gate (config.review.reviewers, the self-review floor)
+        // reads a separate scan; a review of nothing must not satisfy it
+        // there either, only on the coverage axis.
+        let zero = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author",
+                     "reviewed_line_count": 0, "reviewed_file_count": 0}
+        })
+        .to_string();
+        let dir = std::env::temp_dir().join(format!(
+            "fno-zero-file-scan-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = dir.join("events.jsonl");
+        std::fs::write(&events, zero).unwrap();
+        let reviewers = vec!["code-review".to_string()];
+        let (unattested, _malformed) =
+            unattested_reviewers_scan(&events, &reviewers, &|_| Freshness::Fresh, "", "h");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            !unattested.is_empty(),
+            "a zero-file pass must leave the reviewer unattested"
+        );
+        assert_eq!(unattested[0].name, "code-review");
+    }
+
+    #[test]
+    fn a_zero_file_retraction_for_an_old_head_spares_the_newer_pass() {
+        // The verb emits the retraction after any newer pass, so the events
+        // order is pass@head2 then retract@head1: the named (old) pass is
+        // already superseded, and revoking it must not also revoke the live
+        // head-2 pass nobody asked about.
+        let mut text = String::new();
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head2", "verdict": "pass",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "reviewed_line_count": 5, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        text.push('\n');
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head1", "verdict": "fail",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "retracts_attester": "sess-a",
+                         "reviewed_line_count": 3, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        // local_latest_passes returns PASSES only (fails are folded away),
+        // so "the head-2 pass survives" is exactly "a pass at head2 exists".
+        let passes = local_latest_passes(&text, "b", "head2");
+        assert!(
+            passes.iter().any(|p| p.head == "head2"),
+            "the newer head-2 pass must survive a retraction naming head-1: {passes:?}"
+        );
+    }
+
+    #[test]
+    fn retraction_for_the_current_head_still_revokes() {
+        // Same guard, the case it must not break: the retraction names the
+        // head the pair entry already holds, so it lands and revokes.
+        let mut text = String::new();
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "reviewed_line_count": 5, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        text.push('\n');
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "fail",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "retracts_attester": "sess-a",
+                         "reviewed_line_count": 5, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        let passes = local_latest_passes(&text, "b", "h");
+        assert!(
+            !passes.iter().any(|p| p.head == "h"),
+            "a same-head retraction must revoke the pass"
+        );
+    }
+
+    #[test]
+    fn require_corroboration_parses_the_string_spellings_pydantic_accepts() {
+        // The two gates must read one config one way: pydantic coerces
+        // require_corroboration = "true" to true, so the string spellings
+        // parse here too instead of silently reading false.
+        let mut s = Settings::default();
+        let review: serde_json::Value =
+            serde_json::from_str(r#"{"require_corroboration": "true"}"#).unwrap();
+        if let Some(v) = review.get("require_corroboration") {
+            s.require_corroboration = v.as_bool().or_else(|| {
+                v.as_str()
+                    .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                        "true" | "yes" | "on" | "1" => Some(true),
+                        "false" | "no" | "off" | "0" => Some(false),
+                        _ => None,
+                    })
+            });
+        }
+        assert_eq!(s.require_corroboration, Some(true));
+    }
+
     fn a_retraction_revokes_the_named_pair_not_the_retractor() {
         // The retraction verb addresses the EVENT, not the identity: an
         // operator session emits a fail carrying retracts_attester naming the

@@ -1791,7 +1791,15 @@ pub fn bg_create(
     let overlay_routes = extra_env
         .iter()
         .any(|(k, _)| crate::model_env_scrub::MODEL_ENV_KEYS.contains(k));
-    let mut floor = incoherent.clone();
+    // The floor stands down ENTIRELY under a route overlay, matching the gate
+    // it replaced: the route owns the settings slot, and flooring keys the
+    // route sets would fight it (the wrong-model defect in the other
+    // direction).
+    let mut floor = if overlay_routes {
+        Vec::new()
+    } else {
+        incoherent.clone()
+    };
     if !overlay_routes {
         for key in crate::model_env_scrub::unrouted_model_keys(&|k| std::env::var(k).ok()) {
             if !floor.iter().any(|(fk, _)| *fk == key) {

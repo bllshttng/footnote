@@ -1056,7 +1056,15 @@ def _self_attested_coverage_report() -> dict[str, Any]:
                 if cov is None:
                     continue
                 reviewed = cov.get("reviewed_count")
-                if not isinstance(reviewed, int) or reviewed <= 0:
+                self_attested_n = cov.get("self_attested_count")
+                # The corroboration policy rewrites held rows to
+                # reviewed_count 0 while preserving self_attested_count, so a
+                # count-only filter hides exactly the PRs the policy holds -
+                # the population this report exists to measure.
+                if (
+                    not isinstance(reviewed, int)
+                    or reviewed <= 0
+                ) and not (isinstance(self_attested_n, int) and self_attested_n > 0):
                     continue
                 # The SAME predicate the merge gate's corroboration policy
                 # applies, so the report and the gate cannot disagree about a

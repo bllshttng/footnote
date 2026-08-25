@@ -655,6 +655,12 @@ def resolve_owned_identity(
 # same marker is the override shape and raises.
 
 _MAX_ANCESTRY_DEPTH = 25
+# The argv token that names each marker's harness family: the process that can
+# MINT a marker value is a process of that family, and its own name/argv
+# carries the token (claude, codex, gemini, opencode).
+_MARKER_FAMILY_TOKEN = {
+    marker: family for marker, family in HARNESS_SESSION_MARKERS
+}
 
 
 class AttesterIdentityConflict(Exception):
@@ -719,24 +725,35 @@ def _read_ancestor_marker(pid: int, marker: str) -> Optional[str]:
     return None
 
 
-def _attester_witness(marker: str, session_id: str, chain: "list[Optional[str]]") -> str:
+def _attester_witness(
+    marker: str,
+    session_id: str,
+    chain: "list[Optional[str]]",
+    carrier_is_family: "list[bool]",
+) -> str:
     """The witness for a marker value from its ancestry (None = absent or
-    unreadable). Raises :class:`AttesterIdentityConflict` when any ancestor
-    carries a different value.
+    unreadable; ``carrier_is_family`` says whether that ancestor is a process
+    of the marker's own harness family, the only kind that can MINT the id).
 
-    The raise outranks an equal match, and that ordering is the point: the
-    override case produces BOTH readings - the immediate shell carries the
-    override (equal to this env) while the harness above it still carries the
-    truth - so stopping at the first equal ancestor would certify the forgery.
+    The NEAREST family carrier decides: agree -> ``process``; disagree ->
+    :class:`AttesterIdentityConflict`. An any-ancestor veto (this function's
+    earlier rule) wedges the daemon-carrier lane: a long-lived ancestor (tmux
+    server, bg daemon) retains a PREVIOUS session's marker in its env, and
+    vetoing on it refuses every emit from sessions under it, making the
+    self-review obligation unsatisfiable there. The stale value above the
+    session was never the minter of THIS id - the session process was, and it
+    is the nearer carrier. The override shape stays caught: the shell between
+    this process and the harness carries the override, but it is not a family
+    process, so the walk continues to the harness, whose value disagrees and
+    raises. No family carrier at all -> ``env_only``.
     """
-    witness = "env_only"
-    for value in chain:
-        if value is None:
+    for value, family in zip(chain, carrier_is_family):
+        if value is None or not family:
             continue
         if value != session_id:
             raise AttesterIdentityConflict(marker, value, session_id)
-        witness = "process"
-    return witness
+        return "process"
+    return "env_only"
 
 
 def resolve_attester_identity(
@@ -774,7 +791,9 @@ def resolve_attester_identity(
         return ("", "env_only")
     import psutil
 
+    family_token = _MARKER_FAMILY_TOKEN[marker_name]
     chain: list[Optional[str]] = []
+    carrier_is_family: list[bool] = []
     try:
         proc: "Optional[psutil.Process]" = psutil.Process(os.getppid())
     except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
@@ -782,12 +801,30 @@ def resolve_attester_identity(
     depth = 0
     while proc is not None and depth < _MAX_ANCESTRY_DEPTH:
         chain.append(_read_ancestor_marker(proc.pid, marker_name))
+        # Family membership from the process's own name/argv, the same
+        # surface _read_ancestor_marker already opens: the harness binary
+        # (claude, codex, ...) names its family there. Unreadable -> not
+        # family, which can only degrade the witness, never forge one.
+        try:
+            name_and_argv = " ".join(
+                [proc.name()] + (getattr(proc, "cmdline", lambda: [])() or [])
+            ).lower()
+        except psutil.Error:
+            name_and_argv = ""
+        carrier_is_family.append(family_token in name_and_argv)
+        if carrier_is_family[-1] and chain[-1] is not None:
+            # The nearest family carrier decides; stop walking (and stop
+            # paying one `ps` per ancestor) once it is found.
+            break
         try:
             proc = proc.parent()
         except psutil.Error:
             break
         depth += 1
-    return (session_id, _attester_witness(marker_name, session_id, chain))
+    return (
+        session_id,
+        _attester_witness(marker_name, session_id, chain, carrier_is_family),
+    )
 
 
 def current_session_id(env: Optional[Mapping[str, str]] = None) -> Optional[str]:

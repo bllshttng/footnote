@@ -421,6 +421,53 @@ def test_corroboration_on_holds_a_self_attested_only_pr(
     assert verb_line == merge_line, "both surfaces must refuse with one sentence"
 
 
+def test_corroboration_on_holds_a_policy_rewritten_row(
+    enabled, live_head, corroboration_on, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The reachable shape: the loop-side policy already rewrote the row to
+    covered=uncovered / reviewed_count 0 while PRESERVING the self-attestation
+    count. The gate must answer with the corroboration refusal naming both
+    remedies - the generic uncovered remedy ("re-run your own review") can
+    never satisfy the policy and would burn a worker to budget."""
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(
+        tmp_path,
+        coverage="uncovered",
+        count=0,
+        head=HEAD,
+        verdicts=_SELF_ONLY_VERDICTS,
+        self_attested=1,
+        review_state="reviewed",
+    )
+    rc, verb_line = _verb_refusal(capsys, tmp_path)
+    assert rc == 3
+    assert "rests on the author's own attestation alone" in verb_line
+    assert "second session's head-pinned attestation" in verb_line
+
+
+def test_corroboration_never_masks_a_stale_head(
+    enabled, live_head, corroboration_on, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """A self-attested-only row pinned to a MOVED head: the stale-head remedy
+    (re-attest at the live head) is the truer one and outranks the policy
+    sentence, which prescribes corroboration for a row that is stale anyway."""
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(
+        tmp_path,
+        coverage="covered",
+        count=1,
+        head="cccc3333dddd4444",
+        verdicts=_SELF_ONLY_VERDICTS,
+        self_attested=1,
+        review_state="reviewed",
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "eeee5555ffff6666")
+    rc, verb_line = _verb_refusal(capsys, tmp_path)
+    assert rc == 3
+    assert "attestations are head-pinned by design" in verb_line
+    assert "rests on the author's own attestation alone" not in verb_line
+
+
 def test_corroboration_off_by_default_covers_the_same_row(
     enabled, live_head, monkeypatch, capsys, tmp_path  # noqa: F811
 ):

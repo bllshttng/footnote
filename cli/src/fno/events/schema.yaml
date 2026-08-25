@@ -260,7 +260,15 @@ event_types:
         reviewed_head_sha:
           type: string
           description: "The HEAD the diff was measured against at emit - equal to head_sha, recorded explicitly so a reader never has to infer the range from two events. OPTIONAL, same pre-landed cohort as reviewed_base_sha."
-        reviewed_line_count:
+        reviewed_file_count:
+      description: >
+        Files changed in the reviewed range, counted by name: the measure that
+        decides whether a review had anything to read. Binary, pure-rename and
+        empty-file changes count as files with 0 lines, so reviewed_line_count
+        can be an honest 0 on a real review.
+      type: integer
+      optional: true
+    reviewed_line_count:
           type: integer
           description: "Added plus deleted lines across the reviewed diff (git diff --numstat of reviewed_base_sha..reviewed_head_sha). The producer refuses to emit at 0, and the coverage gate skips an attestation whose value is present and 0 - the gate-side guard catches an old or hand-crafted event the producer never saw. A line with the field ABSENT still counts: that is the pre-landed backlog and must not be invalidated. OPTIONAL."
     consumers: [fno-agents loop-check]

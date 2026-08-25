@@ -156,9 +156,15 @@ if [[ -z "$reviewed_base_sha" ]]; then
   exit 1
 fi
 reviewed_head_sha="$head_sha"
+# Files, not lines, decide whether there is anything to read: numstat prints
+# "-" for binary files and 0 for pure renames and empty files, so a LINES-only
+# count reads a real binary-only diff as empty and refuses the one review that
+# exists. The line count stays in the record (0 is an honest measurement of a
+# binary diff); the refusal fires only when the diff changed no file at all.
+reviewed_file_count="$(git diff --name-only "${reviewed_base_sha}..HEAD" 2>/dev/null | command grep -c . || true)"
 reviewed_line_count="$(git diff --numstat "${reviewed_base_sha}..HEAD" 2>/dev/null | awk '{ add += $1; del += $2 } END { print add + del + 0 }')"
-if (( reviewed_line_count == 0 )); then
-  echo "emit-attestation: the diff under review is 0 lines (base ${reviewed_base_sha} .. HEAD ${reviewed_head_sha} on branch ${branch})." >&2
+if (( reviewed_file_count == 0 )); then
+  echo "emit-attestation: the diff under review is empty (no changed files, base ${reviewed_base_sha} .. HEAD ${reviewed_head_sha} on branch ${branch})." >&2
   echo "A review with nothing to read is not a pass; no event emitted." >&2
   echo "If you are reviewing a worktree from the canonical checkout, hand the review its" >&2
   echo "target explicitly: run from the worktree path, or pass the PR number to the review verb." >&2
@@ -263,7 +269,8 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
   --arg reviewed_base_sha "$reviewed_base_sha" \
   --arg reviewed_head_sha "$reviewed_head_sha" \
   --argjson reviewed_line_count "$reviewed_line_count" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count}')"
+  --argjson reviewed_file_count "$reviewed_file_count" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count}')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
@@ -294,4 +301,4 @@ for _b in "${branch:-}" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   "${FNO:-fno}" do pr review-hold release --branch "$_b" >/dev/null 2>&1 || true
 done
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count files=$reviewed_file_count" >&2

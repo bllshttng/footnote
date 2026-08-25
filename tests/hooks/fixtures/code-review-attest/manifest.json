@@ -13,5 +13,6 @@
     "findings-then-exclusion-fence.silent": "real findings first, later empty exclusion fence",
     "unparseable-prose.silent": "no verdict shape at all",
     "empty-message.silent": "no message"
-  }
+  },
+  "byte_exactness_note": "The payloads are RECORDED data, not authored prose: they reproduce the fork's final text byte for byte, and live-specimen-scope-note.silent deliberately carries a real U+2014 em dash in a tracked file under the recorded-data exemption to the no-em-dash authoring rule. Rewriting it as a hyphen is the exact drift (green on the wrong bytes) this corpus exists to catch."
 }

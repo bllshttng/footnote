@@ -161,6 +161,17 @@ def retract(
     except Exception as exc:  # noqa: BLE001 - surface any append failure verbatim
         typer.echo(f"error: failed to append retraction: {exc}", err=True)
         return 1
+    # The pass being revoked reached the machine-global log when it was
+    # emitted (review_attestation rides GLOBAL_MIRROR_TYPES); a retraction
+    # appended to the project log alone would leave the revoked pass live for
+    # every global-log reader, which is the forgery this verb exists to undo.
+    try:
+        from fno.events.cli import mirror_to_global_log
+        from fno.paths import resolve_repo_root
+
+        mirror_to_global_log(event, events_path, resolve_repo_root())
+    except Exception as exc:  # noqa: BLE001 - the project append already stands
+        typer.echo(f"warning: retraction not mirrored to the global log: {exc}", err=True)
     typer.echo(
         f"retracted: reviewer={data['reviewer']} attester={attester} head={head[:12]} "
         f"by={resolved_id or 'unattributed'} reason={reason}"
