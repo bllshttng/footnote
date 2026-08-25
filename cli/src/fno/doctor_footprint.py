@@ -298,6 +298,18 @@ def _snapshot_pids(ps_output: str) -> set[int]:
     return pids
 
 
+def _bounded_json_command(command: str, byte_limit: int) -> str:
+    low, high = 0, len(command)
+    while low < high:
+        middle = (low + high + 1) // 2
+        encoded_size = len(json.dumps(command[:middle]).encode("utf-8"))
+        if encoded_size <= byte_limit:
+            low = middle
+        else:
+            high = middle - 1
+    return command[:low]
+
+
 def _roster_count() -> tuple[int | None, str | None]:
     result = subprocess.run(
         [_fno_binary(), "agents", "list", "--status", "live", "--json"],
@@ -355,7 +367,7 @@ def _payload(
             {
                 "cpu_percent": cpu_percent,
                 "command": (
-                    command[:command_limit]
+                    _bounded_json_command(command, command_limit)
                     if command_limit is not None
                     else command
                 ),

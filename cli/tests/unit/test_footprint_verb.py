@@ -254,7 +254,20 @@ def test_ac9_edge_cause_payload_is_bounded(monkeypatch) -> None:
     )
 
     assert len(payload["top"]) == 5
-    assert all(len(item["command"]) == 64 for item in payload["top"])
+    assert all(
+        len(json.dumps(item["command"]).encode("utf-8")) <= 64
+        for item in payload["top"]
+    )
+
+    reading.top[0] = (100.0, "😀" * 1000)
+    payload = doctor_footprint._payload(
+        reading,
+        process_threshold=None,
+        exit_code=0,
+        top_limit=1,
+        command_limit=64,
+    )
+    assert len(json.dumps(payload["top"][0]["command"]).encode("utf-8")) <= 64
 
 
 def test_ac5_edge_capacity_uses_affinity_on_python_without_process_cpu_count(
