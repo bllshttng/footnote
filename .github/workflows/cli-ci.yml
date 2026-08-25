@@ -31,6 +31,8 @@ on:
       - skill-bundles.yaml
       - tests/**
       - .github/workflows/cli-ci.yml
+      - .github/workflows/guards.yml
+      - .github/workflows/rust-ci.yml
   pull_request:
     paths:
       - cli/**
@@ -50,6 +52,8 @@ on:
       - skill-bundles.yaml
       - tests/**
       - .github/workflows/cli-ci.yml
+      - .github/workflows/guards.yml
+      - .github/workflows/rust-ci.yml
 
 jobs:
   real-codex-0145:
