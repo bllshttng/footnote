@@ -29,6 +29,23 @@ def _fno_binary() -> str:
     return shutil.which("fno") or shutil.which("fno-py") or "fno"
 
 
+def _live_root_pids() -> set[int]:
+    """Return positively live registry PIDs that may have detached children."""
+    try:
+        from fno.agents.registry import load_registry
+        from fno.agents.spawn_gate import LIVE_STATUSES, _pid_alive
+
+        roots: set[int] = set()
+        for row in load_registry():
+            if row.status not in LIVE_STATUSES or row.pid is None:
+                continue
+            if _pid_alive(row.pid, row.pid_start_time) is not False:
+                roots.add(row.pid)
+        return roots
+    except Exception:
+        return set()
+
+
 def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | None]:
     path: Path | None = None
     try:
@@ -200,7 +217,11 @@ def footprint_command(
         _emit_failure(error or "footprint unavailable: ps returned no output", json_output=json_output)
         raise typer.Exit(code=4)
 
-    reading = parse_footprint(ps_output, excluded_root_pids={os.getpid()})
+    reading = parse_footprint(
+        ps_output,
+        excluded_root_pids={os.getpid()},
+        attributed_root_pids=_live_root_pids(),
+    )
     if reading.unparsed_lines:
         _emit_failure(
             f"footprint unavailable: {reading.unparsed_lines} ps line(s) could not be parsed",

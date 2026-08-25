@@ -43,6 +43,28 @@ def test_ac1_hp_attributes_transitive_build_descendants_and_excludes_negative_tr
     ]
 
 
+def test_ac1_edge_attributes_detached_registered_root_and_descendants() -> None:
+    ps_output = """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        300 1 01:00:00 20.0 1024 opencode serve --detach
+        301 300 00:01:00 80.0 1024 cargo test -p fno
+        400 1 01:00:00 90.0 1024 cargo test -p unrelated
+    """
+
+    reading = parse_footprint(ps_output, attributed_root_pids={300})
+
+    assert reading.process_count == 2
+    assert reading.direct_process_count == 1
+    assert reading.descendant_process_count == 1
+    assert reading.sustained_cpu_cores == 0.2
+    assert reading.descendant_cpu_cores == 0.8
+    assert reading.fleet_cpu_cores == 1.0
+    assert [command for _, command in reading.top] == [
+        "cargo test -p fno",
+        "opencode serve --detach",
+    ]
+
+
 def test_ac1_hp_counts_attributed_rows_and_sustained_cpu() -> None:
     reading = parse_footprint(
         """\
