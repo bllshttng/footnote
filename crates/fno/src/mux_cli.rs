@@ -2793,7 +2793,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     let verb = match args.first().and_then(|a| a.to_str()) {
         Some(v) => v.to_string(),
         None => {
-            eprintln!("fno mux tab: needs a verb: ls|create|rename|join");
+            eprintln!("fno mux tab: needs a verb: ls|create|rename|join|close");
             return EXIT_USAGE;
         }
     };
