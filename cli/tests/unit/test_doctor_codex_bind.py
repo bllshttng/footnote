@@ -66,6 +66,7 @@ def test_binds_via_the_fd_oracle_and_reports_it(monkeypatch) -> None:
 
     assert result == {
         "bound": True,
+        "session_id": SID,
         "oracle": "rollout-fd",
         "elapsed_s": result["elapsed_s"],
         "codex_version": "codex-cli 0.148.0",
@@ -186,6 +187,7 @@ def test_binds_via_the_daemon_oracle_when_the_fd_probe_misses(monkeypatch) -> No
     result = doctor._codex_bind_report()
 
     assert result["bound"] is True
+    assert result["session_id"] == SID
     assert result["oracle"] == "daemon"
 
 
@@ -201,8 +203,24 @@ def test_neither_oracle_binding_fails_named_and_reaps(monkeypatch) -> None:
     result = doctor._codex_bind_report()
 
     assert result["bound"] is False
+    assert result["session_id"] is None
     assert result["oracle"] is None
     assert "neither oracle" in result["error"]
+
+
+def test_short_binding_candidate_cannot_pass_the_canary(monkeypatch) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID[:8]
+    )
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is False
+    assert result["session_id"] is None
+    assert result["oracle"] is None
+    assert "full canonical session id" in result["error"]
 
 
 def test_pane_run_failure_is_reported_without_a_child_pid_lookup(monkeypatch) -> None:

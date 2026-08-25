@@ -2487,6 +2487,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
     if proc.returncode != 0:
         return {
             "bound": False,
+            "session_id": None,
             "oracle": None,
             "elapsed_s": 0.0,
             "codex_version": version,
@@ -2501,6 +2502,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
         # leak.
         return {
             "bound": False,
+            "session_id": None,
             "oracle": None,
             "elapsed_s": 0.0,
             "codex_version": version,
@@ -2533,8 +2535,25 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
                 window_s=_CODEX_BIND_CANARY_WINDOW_S,
                 label="codex-bind-canary",
             )
-            session_id = binding.session_id
-            error = None if session_id else "neither oracle bound within the window"
+            candidate = binding.session_id
+            oracle = oracle_used[0] if oracle_used else None
+            try:
+                canonical = str(_uuid.UUID(candidate)) if candidate else ""
+            except (ValueError, AttributeError):
+                canonical = ""
+            if candidate and canonical == candidate.lower() and len(candidate) == 36:
+                session_id = candidate
+                error = None
+            elif candidate:
+                session_id = None
+                error = (
+                    f"{oracle or 'binding oracle'} returned {candidate!r}, not a full "
+                    "canonical session id"
+                )
+                oracle_used.clear()
+            else:
+                session_id = None
+                error = "neither oracle bound within the window"
         else:
             # No window was waited out here at all - a missing child pid is a
             # pane-lookup miss, not a timed-out bind, and reporting the timeout
@@ -2544,6 +2563,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
         elapsed = time.monotonic() - started
         return {
             "bound": session_id is not None,
+            "session_id": session_id,
             "oracle": oracle_used[0] if oracle_used else None,
             "elapsed_s": round(elapsed, 2),
             "codex_version": version,
@@ -2556,7 +2576,8 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
 def _emit_codex_bind_report(result: dict[str, Any]) -> None:
     if result["bound"]:
         typer.echo(
-            f"fno doctor: codex bind: ok, oracle={result['oracle']} "
+            f"fno doctor: codex bind: ok, session={result.get('session_id')} "
+            f"oracle={result['oracle']} "
             f"elapsed={result['elapsed_s']}s codex={result['codex_version'] or 'unknown'}"
         )
     else:
