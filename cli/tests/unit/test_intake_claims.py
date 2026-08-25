@@ -1034,6 +1034,35 @@ def test_multi_intake_dry_run_previews_refusals_not_would_intake(
     assert "1 plans would be intaked" in captured.out
 
 
+def test_multi_intake_dry_run_grows_preview_graph_for_batch_duplicates(
+    fixture_graph, tmp_path, capsys
+):
+    """A path passed twice (the caller's comma-split can produce this) previews
+    once as would-intake and once as already intaked by this batch - the real
+    run intakes the first and reports the second as already - never twice as
+    would-intake."""
+    from types import SimpleNamespace
+
+    plan = tmp_path / "dupe.md"
+    plan.write_text(
+        "\n".join(["---", "created: 2026-05-05T04:35", "---", "", "# Dupe plan zeta", "", "Body.", ""])
+        + "\n"
+    )
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(args, [str(plan), str(plan)], roadmap_id=None, dry_run=True)
+    captured = capsys.readouterr()
+
+    would_lines = [ln for ln in captured.out.splitlines() if "would intake" in ln]
+    assert len(would_lines) == 1
+    assert "Dupe plan zeta" in would_lines[0]
+    # The second occurrence previews the real run's outcome: already intaked
+    # by this batch, with the plan named.
+    assert "already intaked (this batch)" in captured.out
+    assert "1 plans would be intaked" in captured.out
+
+
 def test_old_idea_title_warning_function_is_gone():
     # AC6-FR: the difflib idea-state-only net cannot survive as a second path.
     import fno.graph._intake as _intake

@@ -12540,6 +12540,18 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
                 spec = prep["node_spec"]
                 typer.echo(f'  would intake: "{spec["title"]}"  (plan: {f})')
                 would += 1
+                # Grow the preview graph the way the real mutator grows its
+                # entries, so a later duplicate of this plan previews the
+                # outcome the real run would produce (already intaked by this
+                # batch), not a second would-intake.
+                preview_entries.append(
+                    {
+                        "id": "(this batch)",
+                        "plan_path": spec["plan_path"],
+                        "roadmap_id": spec["roadmap_id"],
+                        "title": spec["title"],
+                    }
+                )
         typer.echo(f"{would} plans would be intaked. Run without --dry-run to apply.")
         return
 
