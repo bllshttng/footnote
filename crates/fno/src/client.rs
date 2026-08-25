@@ -31,9 +31,9 @@ use crate::chrome;
 use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
-    self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentRow,
-    AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
-    Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
+    self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentNoPaneReason,
+    AgentRow, AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg,
+    Color, Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
     PlacementFallback, ProtoError, ServerMsg, SquadMeta, TabMeta, BUILD_VERSION, MAX_MAIL_TEXT,
     MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
@@ -8385,6 +8385,30 @@ enum ChromeHit {
     },
 }
 
+fn no_pane_notice(a: &AgentRow) -> String {
+    match a.no_pane_reason {
+        Some(AgentNoPaneReason::LivePaneless) => format!(
+            "fno agents peek {} --follow — worker {} is live but has no pane; resume refused because it would create a second writer",
+            a.name, a.name
+        ),
+        Some(AgentNoPaneReason::BackendNotLive) => format!(
+            "worker {} has no pane here: registry backend is not live; inspect its state before resuming",
+            a.name
+        ),
+        Some(AgentNoPaneReason::MissingHarness) => {
+            format!("worker {} has no pane here: no harness recorded", a.name)
+        }
+        Some(AgentNoPaneReason::MissingSessionId) => format!(
+            "worker {} has no pane here: supported harness has no session id",
+            a.name
+        ),
+        Some(AgentNoPaneReason::UnsupportedHarness) => {
+            format!("worker {} has no pane here: unsupported harness", a.name)
+        }
+        None => "agent has no pane here".into(),
+    }
+}
+
 /// The [`ChromeHit`] for an agent row: focus its pane, else attach a paneless
 /// claude bg row, else resume a resumable row through its harness, else say it
 /// has no pane here. Shared by a sideline click ([`View::row_action`]) and the
@@ -8417,7 +8441,7 @@ fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
             _ if a.resumable => ChromeHit::Cmds(vec![Command::ResumeAgent {
                 name: a.name.clone(),
             }]),
-            _ => ChromeHit::Notice("agent has no pane here".into()),
+            _ => ChromeHit::Notice(no_pane_notice(a)),
         },
     }
 }
@@ -15748,6 +15772,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         // A pane-hosted row focuses regardless of the active squad.
         assert!(
@@ -15783,6 +15808,68 @@ mod tests {
             ..hosted
         };
         assert!(matches!(agent_hit(&orphan, 2), ChromeHit::Notice(_)));
+
+        let live_paneless = AgentRow {
+            name: "t-live-paneless".into(),
+            exited: false,
+            no_pane_reason: Some(AgentNoPaneReason::LivePaneless),
+            ..orphan.clone()
+        };
+        for _ in 0..2 {
+            match agent_hit(&live_paneless, 2) {
+                ChromeHit::Notice(text) => {
+                    assert!(text.contains("live"), "live-paneless notice: {text}");
+                    assert!(
+                        text.contains("fno agents peek t-live-paneless --follow"),
+                        "live-paneless notice: {text}"
+                    );
+                }
+                other => panic!(
+                    "live paneless must remain a notice: {}",
+                    chrome_hit_label(&Some(other))
+                ),
+            }
+        }
+        let mut narrow = two_pane_view();
+        narrow.set_notice(match agent_hit(&live_paneless, 2) {
+            ChromeHit::Notice(text) => text,
+            other => panic!(
+                "live paneless must produce a notice for clipping: {}",
+                chrome_hit_label(&Some(other))
+            ),
+        });
+        let (_, clipped) = narrow.notice_overlay(80).expect("notice is set");
+        assert!(
+            clipped.contains("fno agents peek t-live-paneless --follow"),
+            "the actionable command must survive narrow clipping: {clipped}"
+        );
+
+        for (reason, marker) in [
+            (AgentNoPaneReason::MissingHarness, "no harness recorded"),
+            (
+                AgentNoPaneReason::MissingSessionId,
+                "supported harness has no session id",
+            ),
+            (AgentNoPaneReason::UnsupportedHarness, "unsupported harness"),
+        ] {
+            let dead = AgentRow {
+                name: "t-dead-paneless".into(),
+                exited: true,
+                no_pane_reason: Some(reason),
+                ..orphan.clone()
+            };
+            match agent_hit(&dead, 2) {
+                ChromeHit::Notice(text) => {
+                    assert!(text.contains("t-dead-paneless"), "dead notice: {text}");
+                    assert!(text.contains(marker), "dead notice: {text}");
+                    assert!(!text.contains("live"), "dead notice misclassified: {text}");
+                }
+                other => panic!(
+                    "dead paneless reason must remain a notice: {}",
+                    chrome_hit_label(&Some(other))
+                ),
+            }
+        }
     }
 
     #[test]
@@ -15819,6 +15906,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: true,
+            no_pane_reason: None,
         };
         assert!(matches!(
             agent_hit(&row, 2),
@@ -15831,6 +15919,7 @@ mod tests {
             attach_id: Some("c19cd2c3".into()),
             exited: false,
             resumable: true,
+            no_pane_reason: None,
             ..row.clone()
         };
         assert!(matches!(
@@ -15871,6 +15960,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         match agent_hit(&row, 1) {
             ChromeHit::OpenAttachPlace { id, squad } => {
@@ -16131,6 +16221,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }
     }
 
@@ -16568,6 +16659,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }
     }
 
@@ -18345,6 +18437,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }
     }
 
@@ -19014,6 +19107,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         view_with_agents(vec![
             row("live-a", false),
@@ -19202,6 +19296,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }]);
         let hdr = view
             .display_rows()
@@ -19516,6 +19611,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         let mut view = view_with_agents(vec![
             orphan("stray-live", false),
@@ -19571,6 +19667,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         let mut view = view_with_agents(vec![orphan("a", false), orphan("b", true)]);
         view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
@@ -19684,6 +19781,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         // A watch-only bg row with a claude jobId: a click opens the placement
         // picker (x-9c5f) so the operator chooses the split direction.
@@ -19714,6 +19812,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -19743,6 +19842,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         let mut view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
@@ -19803,6 +19903,7 @@ mod tests {
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
+                no_pane_reason: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -20350,6 +20451,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
         assert!(bg.actions.contains(&super::MenuAction::NewTab));
@@ -21556,6 +21658,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
         // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
@@ -23015,6 +23118,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }
     }
 
@@ -23738,6 +23842,7 @@ mod tests {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 },
                 AgentRow {
                     spawned_by_session: None,
@@ -23766,6 +23871,7 @@ mod tests {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 },
                 AgentRow {
                     spawned_by_session: None,
@@ -23794,6 +23900,7 @@ mod tests {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 },
             ],
             focus_node: None,
@@ -23878,6 +23985,7 @@ mod tests {
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
+                no_pane_reason: None,
             }
         }
         let mut view = two_pane_view();
@@ -24289,6 +24397,7 @@ mod tests {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 },
                 AgentRow {
                     spawned_by_session: None,
@@ -24317,6 +24426,7 @@ mod tests {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 },
                 AgentRow {
                     spawned_by_session: None,
@@ -24345,6 +24455,7 @@ mod tests {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 },
                 // x-df4c AC1-UI: an EXTERNAL row that is also Blocked - the
                 // load-bearing "attention is never dimmed" branch. The accent
@@ -24376,6 +24487,7 @@ mod tests {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 },
             ],
             focus_node: None,
@@ -24870,6 +24982,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -25598,6 +25711,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         let loading = PeekView {
             cursor: 0,
@@ -26035,6 +26149,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         let mut v = view_with_agents(vec![tomb]);
         v.set_squad_view(1, SectionView::Expanded);
@@ -26084,6 +26199,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }
     }
 
@@ -27111,6 +27227,7 @@ mod tests {
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
+                no_pane_reason: None,
             },
             AgentRow {
                 spawned_by_session: None,
@@ -27139,6 +27256,7 @@ mod tests {
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
+                no_pane_reason: None,
             },
         ];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -27203,6 +27321,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         };
         let bare = row("zsh", 10, None);
         let blocked = row("claude", 11, Some(AgentBadge::Blocked));
@@ -27271,6 +27390,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -27328,6 +27448,7 @@ mod tests {
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
+                no_pane_reason: None,
             },
             AgentRow {
                 spawned_by_session: None,
@@ -27356,6 +27477,7 @@ mod tests {
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
+                no_pane_reason: None,
             },
         ];
         let rows = v.nav_rows();
@@ -27448,6 +27570,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }];
         let idx = v
             .nav_rows()
@@ -27867,6 +27990,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -28033,6 +28157,7 @@ mod tests {
             basis: None,
             last_activity_age_s: None,
             resumable: false,
+            no_pane_reason: None,
         }
     }
 

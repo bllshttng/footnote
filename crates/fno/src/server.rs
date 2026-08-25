@@ -36,13 +36,13 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use crate::agents_view::{self, RegistryAgent};
 use crate::backlog_view;
 use crate::proto::{
-    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
-    AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg,
-    Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot, LayoutSpec,
-    LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement, ServerMsg,
-    SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta,
-    TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge,
+    AgentNoPaneReason, AgentRow, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel,
+    CardState, ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot,
+    LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
+    PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement,
+    ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
+    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -2501,6 +2501,12 @@ fn dispatch_notice(stdout: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowResumeDisposition {
+    Resumable,
+    NoPane(AgentNoPaneReason),
+}
+
 impl Core {
     /// The view-scoped smallest-client clamp (Locked 1): a tab's content
     /// area is the elementwise min over the dims of every client currently
@@ -4851,26 +4857,57 @@ impl Core {
         }
     }
 
-    /// (x-5f7f) Can this registry row be resumed into a pane? Only a DEAD
-    /// row: a live session has a process writing its state (its own harness
-    /// process, or claude's daemon), and resuming under it would open a
-    /// second writer on the same session. Needs a harness that owns a resume
-    /// form plus the session id it resumes. A live claude bg row with a jobId
-    /// is doubly excluded - its daemon owns the session, and the existing
-    /// attach path is the correct gesture.
-    fn row_resumable(a: &RegistryAgent) -> bool {
+    /// (v53) Classify the registry facts once so resumability and the final
+    /// paneless notice cannot disagree about harness/session/liveness truth.
+    fn row_resume_disposition(a: &RegistryAgent) -> RowResumeDisposition {
         let Some(h) = a.harness.as_deref() else {
-            return false;
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness);
         };
-        if !a.exited || Self::resume_form(h).is_none() {
-            return false;
+        if Self::resume_form(h).is_none() {
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness);
         }
         let has_sid = a
             .harness_session_id
             .as_deref()
             .or(a.claude_session_uuid.as_deref())
             .is_some_and(|s| !s.is_empty());
-        has_sid && !(h == "claude" && a.attach_id.is_some() && !a.exited)
+        if !has_sid {
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId);
+        }
+        if !a.exited {
+            return RowResumeDisposition::NoPane(if a.liveness == agents_view::Liveness::Alive {
+                AgentNoPaneReason::LivePaneless
+            } else {
+                AgentNoPaneReason::BackendNotLive
+            });
+        }
+        RowResumeDisposition::Resumable
+    }
+
+    /// (x-5f7f) Can this registry row be resumed into a pane? Only a DEAD
+    /// row: a live session has a process writing its state (its own harness
+    /// process, or claude's daemon), and resuming under it would open a
+    /// second writer on the same session. A live claude bg row with a jobId
+    /// is doubly excluded - its daemon owns the session, and the existing
+    /// attach path is the correct gesture.
+    fn row_resumable(a: &RegistryAgent) -> bool {
+        matches!(
+            Self::row_resume_disposition(a),
+            RowResumeDisposition::Resumable
+        )
+    }
+
+    /// A live attachable row has a higher-priority client action, so it carries
+    /// no registry refusal reason. Every other registry-backed paneless row can
+    /// expose the classification that explains its branch-four notice.
+    fn row_no_pane_reason(a: &RegistryAgent) -> Option<AgentNoPaneReason> {
+        if a.attach_id.is_some() && !a.exited {
+            return None;
+        }
+        match Self::row_resume_disposition(a) {
+            RowResumeDisposition::Resumable => None,
+            RowResumeDisposition::NoPane(reason) => Some(reason),
+        }
     }
 
     /// (x-5f7f) The registry names that still exist, for restore's ghost
@@ -6831,6 +6868,7 @@ impl Core {
                                 basis: self.truth_basis(&a.name),
                                 last_activity_age_s: self.truth_age(&a.name),
                                 resumable: false,
+                                no_pane_reason: None,
                             }
                         }
                         None => {
@@ -6875,6 +6913,7 @@ impl Core {
                                 basis: None,
                                 last_activity_age_s: None,
                                 resumable: false,
+                                no_pane_reason: None,
                             }
                         }
                     };
@@ -6952,6 +6991,7 @@ impl Core {
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable,
+                        no_pane_reason: Self::row_no_pane_reason(a),
                     })
                 }
                 None => {
@@ -7002,6 +7042,7 @@ impl Core {
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable: Self::row_resumable(a),
+                        no_pane_reason: Self::row_no_pane_reason(a),
                     })
                 }
             }
@@ -7052,6 +7093,7 @@ impl Core {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 })
             }
         }
@@ -7131,6 +7173,7 @@ impl Core {
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
+                no_pane_reason: None,
             })
         }
         out
@@ -12621,6 +12664,29 @@ mod tests {
                 liveness: agents_view::Liveness::Alive,
                 harness: None,
             },
+            // A live codex worker with a session identity but no pane or attach
+            // target must project the typed branch-four recovery reason.
+            RegistryAgent {
+                spawned_by_session: None,
+                session_id: None,
+                harness_session_id: Some("codex-live-id".into()),
+                name: "live-paneless".into(),
+                cwd: "/live".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+                attach_id: None,
+                external: false,
+                account: None,
+                claude_session_uuid: None,
+                updated_at: None,
+                crown_level: None,
+                crown_scope: None,
+                liveness: agents_view::Liveness::Alive,
+                harness: Some("codex".into()),
+            },
         ];
         let rows = core.agent_rows();
         assert!(
@@ -12641,6 +12707,16 @@ mod tests {
             bg.attach_id.as_deref(),
             Some("c19cd2c3"),
             "the claude jobId must carry through so the sideline can attach it"
+        );
+        assert_eq!(bg.no_pane_reason, None, "attachable rows carry no reason");
+        let live = rows
+            .iter()
+            .find(|r| r.name == "live-paneless")
+            .expect("the live paneless row must surface");
+        assert_eq!(
+            live.no_pane_reason,
+            Some(AgentNoPaneReason::LivePaneless),
+            "registry truth projects the typed live-paneless reason"
         );
     }
 
@@ -16251,10 +16327,10 @@ mod tests {
     }
 
     #[test]
-    fn row_resumable_gates_on_harness_form_and_session_id() {
-        // The row-level predicate: needs a harness with a resume form plus
-        // the session id it resumes; a LIVE claude bg row with a jobId is
-        // excluded (attach owns that gesture); agy has no form here.
+    fn row_resume_disposition_gates_on_harness_form_and_session_id() {
+        // One table of registry facts owns both the dead-row resume decision
+        // and the branch-four reason. A LIVE claude bg row with a jobId still
+        // uses attach, but its disposition remains live-paneless.
         let base = || RegistryAgent {
             spawned_by_session: None,
             session_id: None,
@@ -16274,18 +16350,44 @@ mod tests {
             updated_at: None,
             crown_level: None,
             crown_scope: None,
-            liveness: agents_view::Liveness::Dead,
+            liveness: agents_view::Liveness::Alive,
         };
+        assert_eq!(
+            Core::row_resume_disposition(&base()),
+            RowResumeDisposition::Resumable
+        );
         assert!(Core::row_resumable(&base()), "a dead codex row resumes");
         let mut live_codex = base();
         live_codex.exited = false;
+        assert_eq!(
+            Core::row_resume_disposition(&live_codex),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+        );
         assert!(
             !Core::row_resumable(&live_codex),
             "a live codex row has a process writing its rollout: resuming under it opens a second writer"
         );
+        let mut backend_not_live = base();
+        backend_not_live.exited = false;
+        backend_not_live.liveness = agents_view::Liveness::Unmeasured;
+        assert!(
+            !matches!(
+                Core::row_resume_disposition(&backend_not_live),
+                RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+            ),
+            "an unmeasured backend must not be labeled live"
+        );
+        assert_eq!(
+            Core::row_resume_disposition(&backend_not_live),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
+        );
         let mut agy = base();
         agy.harness = Some("agy".into());
         agy.harness_session_id = None;
+        assert_eq!(
+            Core::row_resume_disposition(&agy),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness)
+        );
         assert!(
             !Core::row_resumable(&agy),
             "no resume form and no session id: no Resume offered"
@@ -16294,6 +16396,10 @@ mod tests {
         live_claude.harness = Some("claude".into());
         live_claude.exited = false;
         live_claude.attach_id = Some("c19cd2c3".into());
+        assert_eq!(
+            Core::row_resume_disposition(&live_claude),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+        );
         assert!(
             !Core::row_resumable(&live_claude),
             "a live claude bg row attaches; its daemon owns the session"
@@ -16306,9 +16412,19 @@ mod tests {
         );
         let mut no_sid = base();
         no_sid.harness_session_id = None;
+        assert_eq!(
+            Core::row_resume_disposition(&no_sid),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId)
+        );
         assert!(
             !Core::row_resumable(&no_sid),
             "no session id means nothing to resume"
+        );
+        let mut no_harness = base();
+        no_harness.harness = None;
+        assert_eq!(
+            Core::row_resume_disposition(&no_harness),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness)
         );
     }
 

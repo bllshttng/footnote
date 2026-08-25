@@ -271,7 +271,7 @@ fn default_true() -> bool {
 /// index, so a captured `--tab <n>` selector changes meaning across the
 /// bump; the handshake is what tells an old client to restart. New variants
 /// are not additive-tolerant either.
-pub const PROTO_VERSION: u32 = 52;
+pub const PROTO_VERSION: u32 = 54;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -919,6 +919,21 @@ pub struct AnchoredLayoutSpec {
     pub slots: Vec<LayoutSlot>,
 }
 
+/// Why a paneless registry-backed agent cannot take the third row-action branch.
+/// The client renders this only after pane focus, daemon attach, and dead-row
+/// resume have all been ruled out. Missing fields from pre-v53 rows remain the
+/// generic compatibility notice. The enum is additive only within v54; older
+/// peers are rejected by the protocol handshake before they decode this row.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentNoPaneReason {
+    LivePaneless,
+    MissingHarness,
+    MissingSessionId,
+    UnsupportedHarness,
+    BackendNotLive,
+}
+
 /// One sideline agent row inside [`ServerMsg::Layout`] (v5, brief US2). The
 /// server's off-loop registry reader joins registry rows to panes via the
 /// `mux` ref and derives the 3-tier fact-badge lattice: `exited` (pane-exit
@@ -1103,6 +1118,13 @@ pub struct AgentRow {
     /// v48 reader wire-tolerant (defaults false = today's behavior).
     #[serde(default)]
     pub resumable: bool,
+    /// (v54) Why the row reaches the final paneless notice branch. This is
+    /// derived from the registry's authoritative harness/session fields on
+    /// the server; `None` means the row is pane-hosted, attachable, synthetic,
+    /// external, or came from a pre-v54 peer. `#[serde(default)]` keeps the
+    /// additive field wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_pane_reason: Option<AgentNoPaneReason>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -3824,7 +3846,9 @@ mod tests {
         // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
         // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
         // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
-        // receipts (x-588a) bumped it 51 -> 52.
+        // receipts (x-588a) bumped it 51 -> 52; the typed paneless recovery
+        // reason bumps it 52 -> 53; backend-not-live classification bumps it
+        // 53 -> 54.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3833,7 +3857,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 52);
+        assert_eq!(PROTO_VERSION, 54);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -3845,19 +3869,31 @@ mod tests {
             !row.unmeasured,
             "missing unmeasured => false (v46 reader stays wire-tolerant)"
         );
+        assert_eq!(
+            row.no_pane_reason, None,
+            "missing no_pane_reason => generic compatibility fallback"
+        );
         // A crowned row round-trips losslessly.
         let mut crowned = row.clone();
         crowned.crown_level = Some(1);
         crowned.crown_scope = Some("epic-x".into());
+        crowned.no_pane_reason = Some(AgentNoPaneReason::LivePaneless);
         let wire = serde_json::to_string(&crowned).unwrap();
         let back: AgentRow = serde_json::from_str(&wire).unwrap();
         assert_eq!(back.crown_level, Some(1));
         assert_eq!(back.crown_scope.as_deref(), Some("epic-x"));
+        assert_eq!(back.no_pane_reason, Some(AgentNoPaneReason::LivePaneless));
         // An un-crowned row omits the keys on the wire (skip_serializing_if), so
         // a pre-41 reader never sees an unknown field.
         assert!(
             !serde_json::to_string(&row).unwrap().contains("crown_level"),
             "un-crowned row omits crown on the wire"
+        );
+        assert!(
+            !serde_json::to_string(&row)
+                .unwrap()
+                .contains("no_pane_reason"),
+            "generic row omits the typed reason on the wire"
         );
     }
 
@@ -4143,6 +4179,7 @@ mod tests {
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
+                        no_pane_reason: None,
                     },
                     AgentRow {
                         spawned_by_session: None,
@@ -4171,6 +4208,7 @@ mod tests {
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
+                        no_pane_reason: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
