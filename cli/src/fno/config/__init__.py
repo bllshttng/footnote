@@ -904,6 +904,12 @@ class ReviewBlock(BaseModel):
     # documented escape hatch. Read by the stop gate (loopcheck.rs) and mirrored
     # into the merge primitive so the two agree.
     self_review_required: bool = True
+    # When true, a PR whose only coverage is the author's own (self_attested)
+    # local attestation reads as uncovered; a second session's attestation or a
+    # GitHub App review satisfies it. DEFAULT FALSE so no existing install
+    # changes behavior - flip it only with the doctor's self-attestation report
+    # in hand.
+    require_corroboration: bool = False
     # How long a registered review hold (`review:branch:<branch>`, taken where a
     # review is DISPATCHED) protects a PR from a merge before it ages out. A
     # review is unbounded, so this is a wedge bound rather than an estimate:

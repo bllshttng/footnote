@@ -126,6 +126,66 @@ def covered_conjuncts(
     return True, ""
 
 
+def rests_on_self_attestation_alone(cov: dict) -> bool:
+    """Whether a covered coverage row's whole count is the author's own
+    (self_attested) local attestation - the same predicate the Rust gate's
+    ``CoverageReport::rests_on_self_attestation_alone`` applies, read from the
+    serialized row. Prefers the recorded counts; derives from verdicts on
+    pre-field rows. Unmeasured authorship (no self_attested_count, no origins)
+    is NOT self-attestation alone: it is not proof of corroboration, but it is
+    not proof of its absence either.
+    """
+    reviewed = cov.get("reviewed_count")
+    if not isinstance(reviewed, int) or reviewed <= 0:
+        return False
+    self_attested = cov.get("self_attested_count")
+    if isinstance(self_attested, int):
+        return self_attested == reviewed
+    counted = [
+        v
+        for v in (cov.get("verdicts") or [])
+        if isinstance(v, dict)
+        and v.get("verdict") == "reviewed"
+        and not v.get("human_approval")
+    ]
+    return bool(counted) and all(
+        v.get("producer") == "local_attestation"
+        and v.get("attestation_origin") == "self_attested"
+        for v in counted
+    )
+
+
+def _corroboration_refusal(cov: Optional[dict], repo: str) -> Optional[str]:
+    """The refusal when ``config.review.require_corroboration`` is on and the
+    coverage row rests on the author's own attestation alone. None when the
+    policy is off, the row carries corroboration, or authorship is unmeasured
+    (an unmeasured row is not proof of corroboration, but it is not proof of
+    its absence either - fail open, as the Rust-side predicate does).
+    """
+    if not cov:
+        return None
+    try:
+        from pathlib import Path
+
+        from fno.config import load_settings_for_repo
+
+        root = Path(_merge._repo_state_dir(repo)).parent
+        review = load_settings_for_repo(root).review
+        if not getattr(review, "require_corroboration", False):
+            return None
+    except Exception:  # noqa: BLE001 - an unreadable config never tightens a gate
+        return None
+
+    if not rests_on_self_attestation_alone(cov):
+        return None
+    return (
+        "coverage rests on the author's own attestation alone "
+        "(config.review.require_corroboration = true); corroboration satisfies "
+        "it two ways: a second session's head-pinned attestation, or a GitHub "
+        "App review"
+    )
+
+
 def coverage_verdict(
     pr_number: int, repo: str, *, recompute: bool
 ) -> Tuple[int, str, str, str]:
@@ -178,6 +238,9 @@ def coverage_verdict(
         recompute_note = ""
 
     covered, _failed = covered_conjuncts(cov, head, code_review_required)
+    corroboration = _corroboration_refusal(cov, repo)
+    if corroboration:
+        return REFUSED, corroboration, "", recompute_note
     if covered:
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", recompute_note
 

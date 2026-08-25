@@ -295,6 +295,12 @@ pub(crate) struct Settings {
     /// absent, normalized to true (the obligation defaults ON); `false` is the
     /// documented escape hatch.
     self_review_required: Option<bool>,
+    /// config.review.require_corroboration (default false): when true, a PR
+    /// whose only coverage is the author's own (self_attested) local
+    /// attestation reads as uncovered. Recorded policy, not a proof upgrade:
+    /// an other_session attestation is still not "independent", but it is a
+    /// SECOND session, which is what this key demands.
+    require_corroboration: Option<bool>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -723,6 +729,9 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         }
         if let Some(v) = review.get("reviewers") {
             s.reviewers = value_as_reviewers(v);
+        }
+        if let Some(v) = review.get("require_corroboration") {
+            s.require_corroboration = v.as_bool();
         }
         if let Some(v) = review.get("self_review_required") {
             // A malformed value stays None -> normalized to true (obligation on,
@@ -2410,6 +2419,7 @@ fn read_pr_info(
     author_session: Option<&str>,
     pr_selector: Option<&str>,
     prefetched_pr_json: Option<Value>,
+    require_corroboration: bool,
 ) -> Result<PrInfo, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
@@ -2626,7 +2636,7 @@ fn read_pr_info(
         // "uncovered" and an instrument-health receipt for reviews that were
         // never queried. A fresh local pass still rescues it inside
         // classify_coverage (positive evidence).
-        let coverage = classify_coverage(
+        let mut coverage = classify_coverage(
             &[],
             &[],
             &events_text,
@@ -2637,6 +2647,7 @@ fn read_pr_info(
             &head_branch,
             head_sha,
         );
+        coverage.apply_corroboration_policy(require_corroboration);
         (
             "none".to_string(),
             reviewers_ok,
@@ -2850,7 +2861,7 @@ fn read_pr_info(
             }
         }
         // github_read_ok is true here: a failed gh read returned Err above.
-        let coverage = classify_coverage(
+        let mut coverage = classify_coverage(
             reviews_arr,
             comments_arr,
             &events_text,
@@ -2861,6 +2872,7 @@ fn read_pr_info(
             &head_branch,
             head_sha,
         );
+        coverage.apply_corroboration_policy(require_corroboration);
         let local_recovery = local_recovery_from_refusal(
             &info.reviewer_refused,
             &info.missing_bots,
@@ -5000,6 +5012,38 @@ impl CoverageReport {
                     && v.attestation_origin == AttestationOrigin::SelfAttested
             })
             .count()
+    }
+
+    /// Whether every counted review verdict rests on the author's own
+    /// (self_attested) local attestation: no GitHub App review, no second
+    /// session. Unmeasured origins (Unknown) are NOT self-attestation, so an
+    /// unmeasured row fails open - it is not proof of corroboration, but it is
+    /// not proof of its absence either.
+    pub fn rests_on_self_attestation_alone(&self) -> bool {
+        let mut counted = 0usize;
+        let mut self_attested = 0usize;
+        for v in &self.verdicts {
+            if v.verdict != CoverageVerdict::Reviewed || v.human_approval {
+                continue;
+            }
+            counted += 1;
+            if v.producer == CoverageProducer::LocalAttestation
+                && v.attestation_origin == AttestationOrigin::SelfAttested
+            {
+                self_attested += 1;
+            }
+        }
+        counted > 0 && counted == self_attested
+    }
+
+    /// Apply `config.review.require_corroboration`: a covered report whose
+    /// whole count is the author's own attestation reads as uncovered. The
+    /// verdicts stay on the event, so the evidence trail is reconstructable;
+    /// the VERDICT is what the merge gate reads.
+    pub fn apply_corroboration_policy(&mut self, on: bool) {
+        if on && self.rests_on_self_attestation_alone() {
+            self.coverage = Coverage::Covered(0);
+        }
     }
 
     pub fn coverage_count(&self) -> Option<usize> {
@@ -7858,6 +7902,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             &global_events,
             &repo_slug,
             manifest.harness_session_id.as_deref(),
+            settings.require_corroboration.unwrap_or(false),
         );
 
         match done_result {
@@ -8697,6 +8742,7 @@ fn run_done(
     global_events_path: &Path,
     repo_slug: &str,
     author_session: Option<&str>,
+    require_corroboration: bool,
 ) -> Result<PrInfo, GhReadError> {
     let info = read_pr_info(
         gh_bin,
@@ -8716,6 +8762,7 @@ fn run_done(
         author_session,
         None,
         None,
+        require_corroboration,
     )?;
     // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
@@ -11347,6 +11394,10 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_session.as_deref(),
         pr.as_deref(),
         prefetched_pr_json,
+        inputs
+            .settings
+            .require_corroboration
+            .unwrap_or(false),
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {
@@ -12867,6 +12918,70 @@ mod tests {
             .map(|v| v.reviewed_sha.as_str())
             .collect();
         assert!(shas.contains(&"head-1") && shas.contains(&"head-2"), "{:?}", shas);
+    }
+
+    #[test]
+    fn corroboration_policy_holds_self_attested_only_and_passes_corroborated() {
+        // config.review.require_corroboration, default false (first pin: the
+        // policy OFF leaves a self-attested-only report covered). ON, a report
+        // whose whole count is the author's own attestation reads as uncovered
+        // (Covered(0) serializes "uncovered"), and a corroborated report - one
+        // other_session attestation - stays covered.
+        let self_only = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let mut off = classify_coverage(
+            &[],
+            &[],
+            &self_only,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(off.coverage, Coverage::Covered(1));
+        off.apply_corroboration_policy(false);
+        assert_eq!(off.coverage, Coverage::Covered(1));
+
+        let mut on = classify_coverage(
+            &[],
+            &[],
+            &self_only,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert!(on.rests_on_self_attestation_alone());
+        on.apply_corroboration_policy(true);
+        assert_eq!(on.coverage, Coverage::Covered(0));
+
+        let corroborated = format!(
+            "{}\n{}",
+            self_only,
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                         "attester_session_id": "sess-peer", "branch": "feature/x"}
+            })
+        );
+        let mut corr = classify_coverage(
+            &[],
+            &[],
+            &corroborated,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(corr.coverage, Coverage::Covered(2));
+        assert!(!corr.rests_on_self_attestation_alone());
+        corr.apply_corroboration_policy(true);
+        assert_eq!(corr.coverage, Coverage::Covered(2));
     }
 
     #[test]

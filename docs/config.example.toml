@@ -167,6 +167,8 @@ reviewer_registry = {}
 reviewers = []
 # When true (default), a code payload floors the harness-resolved self-review reviewer (claude /code-review, codex /review) onto the required set on a stock install, so a /target that ships code is held for a head-pinned attestation instead of asking an epic leader. Set false to opt out and restore unreviewed code-PR shipping.
 self_review_required = true
+# When true (default false), a PR whose only coverage is the author's own (self_attested) local attestation reads as uncovered; the refusal names both satisfying paths: a second session's head-pinned attestation, or a GitHub App review. Read `fno doctor`'s self-attestation report before flipping it - that row is the number of recent merged PRs that would have been held.
+require_corroboration = false
 # How long a registered review hold blocks a merge before it ages out (default 90). A review that starts registers review:branch:<branch>; fno do pr status and fno do pr merge refuse while it is live, so a merge cannot land on the pre-review code. A wedge bound, not an estimate: an expired hold clears with a receipt rather than holding the lane forever.
 hold_ttl_minutes = 90
 # Which AI reviewers /pr requests a review from (the INVOCATION list).
