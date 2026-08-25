@@ -2908,102 +2908,9 @@ def _intake_impl(
         claim_source = prep["claim_source"]
 
         def claim_mutator(es):
-            from fno.graph._intake import (
-                DEFAULT_NODE_TYPE,
-                _find_node,
-                _read_plan_frontmatter,
-                _would_exceed_epic_depth,
-                normalize_type,
-                resolve_node_project_and_cwd,
+            return _apply_claim_in_place(
+                es, claim_id, plan_path=plan_path, spec=spec, project=project
             )
-
-            # Intake has TWO lanes; the create lane reads `type` doc->graph in
-            # _build_intake_node, so this one must too or the flow is a guard on
-            # one of N paths. Same rule as priority below: the doc only speaks
-            # when it declares a real, non-default value.
-            frontmatter = _read_plan_frontmatter(plan_path) or {}
-            claimed_type = normalize_type(frontmatter.get("type"))
-            from fno.graph._constants import normalize_difficulty
-            raw_difficulty = frontmatter.get("difficulty")
-            if raw_difficulty is None:
-                raw_difficulty = frontmatter.get("model_tier")
-            for entry in es:
-                if entry.get("id") != claim_id:
-                    continue
-                entry["plan_path"] = plan_path
-                entry["title"] = spec["title"]
-                if raw_difficulty is not None:
-                    try:
-                        revised_difficulty = normalize_difficulty(raw_difficulty)
-                    except ValueError as exc:
-                        typer.echo(f"warning: {exc}; difficulty left unchanged", err=True)
-                    else:
-                        entry["difficulty"] = revised_difficulty
-                        entry.setdefault("difficulty_history", []).append(
-                            {
-                                "value": revised_difficulty,
-                                "source": "blueprint",
-                                "ts": datetime.now(timezone.utc).isoformat(),
-                            }
-                        )
-                if (
-                    claimed_type != DEFAULT_NODE_TYPE
-                    and entry.get("type") != claimed_type
-                ):
-                    # `add` and `update` both refuse a write that would make a
-                    # third epic level; a doc-frontmatter lane that skips the cap
-                    # would be the decorative guard this whole change is about.
-                    # It SKIPS rather than refuses, unlike those two: there the
-                    # operator typed `--type` and deserves a hard error, here the
-                    # doc is advisory and the claim itself is still valid.
-                    parent_node = (
-                        _find_node(es, entry["parent"]) if entry.get("parent") else None
-                    )
-                    if (
-                        claimed_type == "epic"
-                        and parent_node is not None
-                        and _would_exceed_epic_depth(
-                            es, {**entry, "type": "epic"}, parent_node
-                        )
-                    ):
-                        typer.echo(
-                            f"warning: plan declares type: epic but {claim_id} sits "
-                            f"under {parent_node['id']}; promoting it would exceed "
-                            f"the epic-nesting cap - type left as "
-                            f"{entry.get('type')!r}",
-                            err=True,
-                        )
-                    else:
-                        entry["type"] = claimed_type
-                if spec["deps"]:
-                    merged = list(
-                        dict.fromkeys([*entry.get("blocked_by", []), *spec["deps"]])
-                    )
-                    entry["blocked_by"] = merged
-                # Only override priority if the plan supplied a non-default one.
-                if spec.get("priority") and spec["priority"] != "p2":
-                    entry["priority"] = spec["priority"]
-                if spec.get("priority") == "p0" and spec.get("blocks_everything"):
-                    entry["blocks_everything"] = True
-                if spec.get("points") is not None:
-                    entry["points"] = spec["points"]
-                # Backfill project/cwd when the node was created via
-                # `fno backlog new` (no plan path -> no auto-scope) and is
-                # now being claimed by a plan that lives in a project repo.
-                # Only fills nulls; never overwrites existing values.
-                if entry.get("project") is None or entry.get("cwd") is None:
-                    resolved_project, resolved_cwd, _ = resolve_node_project_and_cwd(
-                        plan_path, project, es,
-                    )
-                    if entry.get("project") is None and resolved_project:
-                        entry["project"] = resolved_project
-                    if entry.get("cwd") is None and resolved_cwd:
-                        entry["cwd"] = resolved_cwd
-                # Promote idea -> ready by clearing any stale claimed_at.
-                # status is recomputed by recompute_statuses on the next read.
-                entry["claimed_at"] = None
-                break
-            return es
 
         locked_mutate_graph(_graph_path(), claim_mutator)
         typer.echo(
@@ -12436,6 +12343,115 @@ def cmd_unarchive(
 
 # -- Internal helpers for intake / update (avoid circular imports) --
 
+
+def _apply_claim_in_place(
+    es, claim_id: str, *, plan_path: str, spec: dict, project: Optional[str]
+):
+    """Update a claimed idea node in place: attach the plan, merge the
+    doc-declared fields, promote idea -> ready.
+
+    The single-plan claim lane's mutator body, shared with the multi lane so
+    a claim lands identically from either surface. A second copy here would
+    drift, and drift on this path mints duplicate nodes.
+    """
+    from fno.graph._intake import (
+        DEFAULT_NODE_TYPE,
+        _find_node,
+        _read_plan_frontmatter,
+        _would_exceed_epic_depth,
+        normalize_type,
+        resolve_node_project_and_cwd,
+    )
+
+    # Intake has TWO lanes; the create lane reads `type` doc->graph in
+    # _build_intake_node, so this one must too or the flow is a guard on
+    # one of N paths. Same rule as priority below: the doc only speaks
+    # when it declares a real, non-default value.
+    frontmatter = _read_plan_frontmatter(plan_path) or {}
+    claimed_type = normalize_type(frontmatter.get("type"))
+    from fno.graph._constants import normalize_difficulty
+    raw_difficulty = frontmatter.get("difficulty")
+    if raw_difficulty is None:
+        raw_difficulty = frontmatter.get("model_tier")
+    for entry in es:
+        if entry.get("id") != claim_id:
+            continue
+        entry["plan_path"] = plan_path
+        entry["title"] = spec["title"]
+        if raw_difficulty is not None:
+            try:
+                revised_difficulty = normalize_difficulty(raw_difficulty)
+            except ValueError as exc:
+                typer.echo(f"warning: {exc}; difficulty left unchanged", err=True)
+            else:
+                entry["difficulty"] = revised_difficulty
+                entry.setdefault("difficulty_history", []).append(
+                    {
+                        "value": revised_difficulty,
+                        "source": "blueprint",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+        if (
+            claimed_type != DEFAULT_NODE_TYPE
+            and entry.get("type") != claimed_type
+        ):
+            # `add` and `update` both refuse a write that would make a
+            # third epic level; a doc-frontmatter lane that skips the cap
+            # would be the decorative guard this whole change is about.
+            # It SKIPS rather than refuses, unlike those two: there the
+            # operator typed `--type` and deserves a hard error, here the
+            # doc is advisory and the claim itself is still valid.
+            parent_node = (
+                _find_node(es, entry["parent"]) if entry.get("parent") else None
+            )
+            if (
+                claimed_type == "epic"
+                and parent_node is not None
+                and _would_exceed_epic_depth(
+                    es, {**entry, "type": "epic"}, parent_node
+                )
+            ):
+                typer.echo(
+                    f"warning: plan declares type: epic but {claim_id} sits "
+                    f"under {parent_node['id']}; promoting it would exceed "
+                    f"the epic-nesting cap - type left as "
+                    f"{entry.get('type')!r}",
+                    err=True,
+                )
+            else:
+                entry["type"] = claimed_type
+        if spec["deps"]:
+            merged = list(
+                dict.fromkeys([*entry.get("blocked_by", []), *spec["deps"]])
+            )
+            entry["blocked_by"] = merged
+        # Only override priority if the plan supplied a non-default one.
+        if spec.get("priority") and spec["priority"] != "p2":
+            entry["priority"] = spec["priority"]
+        if spec.get("priority") == "p0" and spec.get("blocks_everything"):
+            entry["blocks_everything"] = True
+        if spec.get("points") is not None:
+            entry["points"] = spec["points"]
+        # Backfill project/cwd when the node was created via
+        # `fno backlog new` (no plan path -> no auto-scope) and is
+        # now being claimed by a plan that lives in a project repo.
+        # Only fills nulls; never overwrites existing values.
+        if entry.get("project") is None or entry.get("cwd") is None:
+            resolved_project, resolved_cwd, _ = resolve_node_project_and_cwd(
+                plan_path, project, es,
+            )
+            if entry.get("project") is None and resolved_project:
+                entry["project"] = resolved_project
+            if entry.get("cwd") is None and resolved_cwd:
+                entry["cwd"] = resolved_cwd
+        # Promote idea -> ready by clearing any stale claimed_at.
+        # status is recomputed by recompute_statuses on the next read.
+        entry["claimed_at"] = None
+        break
+    return es
+
+
 def _collect_intake_paths_typer(plan_paths: list[str], from_list: Optional[str]) -> list[str]:
     """Build the path list for intake from positional args + --from."""
     paths: list[str] = []
@@ -12538,27 +12554,37 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
                     )
                     continue
                 spec = prep["node_spec"]
+                if prep["status"] == "claim":
+                    typer.echo(
+                        f'  would claim: "{spec["title"]}"  (plan: {f})'
+                        f'  (claims {prep["id"]})'
+                    )
+                    _apply_claim_in_place(
+                        preview_entries, prep["id"], plan_path=f,
+                        spec=spec, project=cli_project,
+                    )
+                    continue
+                # Grow the preview graph the way the real mutator grows its
+                # entries - the BUILT node, so a later duplicate of this plan
+                # previews the outcome the real run would produce (already
+                # intaked by this batch), not a second would-intake. Building
+                # here also previews build-time refusals (invalid difficulty)
+                # as would-skip, the same outcome the real run now lands.
+                try:
+                    preview_entries.append(_build_intake_node(spec, preview_entries))
+                except ValueError as exc:
+                    typer.echo(f"  error: would skip {f}: {exc}", err=True)
+                    continue
                 typer.echo(f'  would intake: "{spec["title"]}"  (plan: {f})')
                 would += 1
-                # Grow the preview graph the way the real mutator grows its
-                # entries, so a later duplicate of this plan previews the
-                # outcome the real run would produce (already intaked by this
-                # batch), not a second would-intake.
-                preview_entries.append(
-                    {
-                        "id": "(this batch)",
-                        "plan_path": spec["plan_path"],
-                        "roadmap_id": spec["roadmap_id"],
-                        "title": spec["title"],
-                    }
-                )
         typer.echo(f"{would} plans would be intaked. Run without --dry-run to apply.")
         return
 
     typer.echo(f"Multi-intake {len(concrete_files)} plans:")
-    tallies = {"intaked": 0, "already": 0, "invalid": 0}
+    tallies = {"intaked": 0, "claimed": 0, "already": 0, "invalid": 0}
     landed_projects: set[str] = set()
     new_ids: list[str] = []
+    claimed_ids: list[str] = []
 
     def mutator(es):
         for r in resolved:
@@ -12566,11 +12592,13 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
                 typer.echo(f"  warning: not found, skipped: {r['path']}")
                 continue
             for f in r["files"]:
-                # A refusal (bad priority vocabulary, a cross-roadmap owner
-                # conflict) names ONE file: skip it with a clean per-file error
+                # A refusal names ONE file: skip it with a clean per-file error
                 # so the batch lands, exactly like the single-plan surface that
-                # catches the same ValueError. Uncaught, it aborted the whole
-                # mutator with a traceback from inside the lock.
+                # catches the same ValueError. The try covers BOTH raise sites -
+                # _prepare_intake (bad priority, a cross-roadmap owner conflict)
+                # and _build_intake_node (invalid difficulty frontmatter).
+                # Uncaught, either aborted the whole mutator with a traceback
+                # from inside the lock and persisted nothing.
                 try:
                     prep = _prepare_intake(
                         f, es,
@@ -12587,7 +12615,28 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
                     tallies["already"] += 1
                     typer.echo(f'  already intaked {prep["id"]}: "{prep["title"]}"  ({f})')
                     continue
-                node = _build_intake_node(prep["node_spec"], es)
+                if prep["status"] == "claim":
+                    # The claim lands on the existing idea node in place, the
+                    # same helper the single-plan lane uses - never a fresh
+                    # node beside an unclaimed idea (the duplicate the claim
+                    # mechanism exists to prevent).
+                    _apply_claim_in_place(
+                        es, prep["id"], plan_path=f,
+                        spec=prep["node_spec"], project=cli_project,
+                    )
+                    tallies["claimed"] += 1
+                    claimed_ids.append(prep["id"])
+                    typer.echo(
+                        f'  claim {prep["id"]} via {prep["claim_source"]}: '
+                        f'"{prep["title"]}"  ({f})'
+                    )
+                    continue
+                try:
+                    node = _build_intake_node(prep["node_spec"], es)
+                except ValueError as exc:
+                    tallies["invalid"] += 1
+                    typer.echo(f"  error: skipped {f}: {exc}", err=True)
+                    continue
                 es.append(node)
                 tallies["intaked"] += 1
                 new_ids.append(node["id"])
@@ -12597,6 +12646,16 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
         return es
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # A claimed node gets the same nav-field projection the single-plan claim
+    # path runs; additive and guarded so it never wedges the batch.
+    if claimed_ids:
+        try:
+            from fno.plan._project import project_graph_nodes
+
+            project_graph_nodes(read_graph(_graph_path()), claimed_ids)
+        except Exception as e:  # noqa: BLE001
+            _safe_stderr_warn(f"warning: post-claim projection skipped: {e}\n")
 
     # Filing-time dedup net (plan x-6ac7): per just-born node, warn if it
     # resembles an existing one. Fresh post-write read; non-fatal.
@@ -12618,11 +12677,12 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
     missing = sum(1 for r in resolved if r["status"] == "missing")
     typer.echo(
         f'\n{tallies["intaked"]} newly intaked, '
+        f'{tallies["claimed"]} claimed, '
         f'{tallies["already"]} already intaked, '
         f'{missing} skipped.'
         + (f' {tallies["invalid"]} refused.' if tallies["invalid"] else '')
     )
-    if tallies["intaked"] + tallies["already"] == 0:
+    if tallies["intaked"] + tallies["claimed"] + tallies["already"] == 0:
         raise typer.Exit(code=4)
 
 

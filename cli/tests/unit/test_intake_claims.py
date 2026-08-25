@@ -1059,8 +1059,119 @@ def test_multi_intake_dry_run_grows_preview_graph_for_batch_duplicates(
     assert "Dupe plan zeta" in would_lines[0]
     # The second occurrence previews the real run's outcome: already intaked
     # by this batch, with the plan named.
-    assert "already intaked (this batch)" in captured.out
+    assert "already intaked" in captured.out
+    assert str(plan) in [ln for ln in captured.out.splitlines() if "already intaked" in ln][0]
     assert "1 plans would be intaked" in captured.out
+
+
+def test_multi_intake_build_refusal_skips_one_file_not_batch(
+    fixture_graph, tmp_path, capsys
+):
+    """A build-time refusal (invalid difficulty frontmatter) names ONE file:
+    the batch lands the rest and skips the file with a clean per-file error.
+    Uncaught, the ValueError escaped the lock and persisted NOTHING."""
+    from types import SimpleNamespace
+
+    def _plan(path: Path, title: str, difficulty: str | None = None) -> Path:
+        fm = ["---"]
+        if difficulty:
+            fm.append(f"difficulty: {difficulty}")
+        fm += ["created: 2026-05-05T04:35", "---"]
+        path.write_text(
+            "\n".join(fm + ["", f"# {title}", "", "Body.", ""]) + "\n"
+        )
+        return path
+
+    good = _plan(tmp_path / "good.md", "Build refusal batch good eta")
+    bad = _plan(tmp_path / "baddiff.md", "Build refusal batch bad theta", difficulty="bogus")
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(args, [str(good), str(bad)], roadmap_id=None, dry_run=False)
+    captured = capsys.readouterr()
+
+    assert "invalid difficulty" in captured.err
+    assert "skipped" in captured.err
+    assert "1 refused" in captured.out
+    # The batch landed: the good plan persisted, no node for the refused one.
+    entries = _read_entries(fixture_graph)
+    assert len(entries) == 4
+    assert any("good eta" in (e.get("title") or "") for e in entries)
+    assert not any("bad theta" in (e.get("title") or "") for e in entries)
+
+
+def test_multi_intake_claim_updates_idea_node_in_place(fixture_graph, tmp_path, capsys):
+    """A frontmatter claim in a multi batch claims the EXISTING idea node in
+    place - plan attached, idea promoted - exactly like the single-plan lane.
+    Never a fresh duplicate node beside an unclaimed idea."""
+    from types import SimpleNamespace
+
+    plan = tmp_path / "claimed.md"
+    plan.write_text(
+        "\n".join(
+            ["---", "claims: ab-1dea1234", "created: 2026-05-05T04:35", "---",
+             "", "# Claimed by multi batch iota", "", "Body.", ""]
+        ) + "\n"
+    )
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(args, [str(plan)], roadmap_id=None, dry_run=False)
+    captured = capsys.readouterr()
+
+    # No duplicate: the graph still holds exactly the three seeded nodes.
+    entries = _read_entries(fixture_graph)
+    assert len(entries) == 3
+    claimed = next(e for e in entries if e["id"] == "ab-1dea1234")
+    assert claimed["plan_path"] == str(plan)
+    assert claimed["claimed_at"] is None
+    assert "Claimed by multi batch iota" in claimed["title"]
+    assert "claim ab-1dea1234" in captured.out
+    assert "1 claimed" in captured.out
+
+
+def test_multi_intake_dry_run_previews_claim_and_build_refusal(
+    fixture_graph, tmp_path, capsys
+):
+    """Preview parity for both per-file outcomes: a claims plan previews as
+    would claim (naming the claimed node), and a plan whose build would raise
+    (invalid difficulty) previews as would skip - never would-intake."""
+    from types import SimpleNamespace
+
+    claimy = tmp_path / "claimy.md"
+    claimy.write_text(
+        "\n".join(
+            ["---", "claims: ab-1dea1234", "created: 2026-05-05T04:35", "---",
+             "", "# Preview claim kappa", "", "Body.", ""]
+        ) + "\n"
+    )
+    baddiff = tmp_path / "baddiff.md"
+    baddiff.write_text(
+        "\n".join(
+            ["---", "difficulty: bogus", "created: 2026-05-05T04:35", "---",
+             "", "# Preview refusal lambda", "", "Body.", ""]
+        ) + "\n"
+    )
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(
+        args, [str(claimy), str(baddiff)], roadmap_id=None, dry_run=True
+    )
+    captured = capsys.readouterr()
+
+    assert "would claim" in captured.out
+    assert "(claims ab-1dea1234)" in captured.out
+    assert "would skip" in captured.err
+    assert "invalid difficulty" in captured.err
+    would_lines = [ln for ln in captured.out.splitlines() if "would intake" in ln]
+    assert not any("kappa" in ln for ln in would_lines)
+    assert not any("lambda" in ln for ln in would_lines)
+    assert "0 plans would be intaked" in captured.out
+    # The preview mutated nothing: the idea node is unclaimed, no nodes added.
+    entries = _read_entries(fixture_graph)
+    assert len(entries) == 3
+    assert next(e for e in entries if e["id"] == "ab-1dea1234")["plan_path"] is None
 
 
 def test_old_idea_title_warning_function_is_gone():
