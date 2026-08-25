@@ -533,6 +533,11 @@ fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(format!("child marker ledger unavailable: {error}")),
     };
+    let roots = process_root_names()?;
+    let names: HashMap<u32, &str> = rows
+        .iter()
+        .map(|row| (row.pid, row.name.as_str()))
+        .collect();
     let mut live = Vec::new();
     let mut seen = HashSet::new();
     let mut unattributed_live = 0;
@@ -549,7 +554,8 @@ fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize,
             continue;
         }
         live.push(pid);
-        if !attributed.contains(&pid) {
+        let is_root = names.get(&pid).is_some_and(|name| roots.contains(*name));
+        if !attributed.contains(&pid) && !is_root {
             unattributed_live += 1;
         }
     }
@@ -568,6 +574,22 @@ fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize,
 }
 
 fn attributed_pids(rows: &[ProcessRow]) -> Result<HashSet<u32>, String> {
+    let roots = process_root_names()?;
+    let by_pid: HashMap<u32, &ProcessRow> = rows.iter().map(|row| (row.pid, row)).collect();
+    let mut attributed = HashSet::new();
+    for row in rows {
+        // The mux/client/test executable is the admission observer, not a
+        // worker slot. Count its descendants, including zombies, so a fresh
+        // server can admit two children under a ceiling of two.
+        let is_attributed = !roots.contains(&row.name) && reaches_root(row, &by_pid, &roots)?;
+        if is_attributed {
+            attributed.insert(row.pid);
+        }
+    }
+    Ok(attributed)
+}
+
+fn process_root_names() -> Result<HashSet<String>, String> {
     let current_name = std::env::current_exe()
         .map_err(|e| format!("current executable unavailable: {e}"))?
         .file_name()
@@ -582,19 +604,7 @@ fn attributed_pids(rows: &[ProcessRow]) -> Result<HashSet<u32>, String> {
     if current_name == "fno" || current_name.starts_with("fno-") {
         roots.insert("fno".to_string());
     }
-
-    let by_pid: HashMap<u32, &ProcessRow> = rows.iter().map(|row| (row.pid, row)).collect();
-    let mut attributed = HashSet::new();
-    for row in rows {
-        // The mux/client/test executable is the admission observer, not a
-        // worker slot. Count its descendants, including zombies, so a fresh
-        // server can admit two children under a ceiling of two.
-        let is_attributed = !roots.contains(&row.name) && reaches_root(row, &by_pid, &roots)?;
-        if is_attributed {
-            attributed.insert(row.pid);
-        }
-    }
-    Ok(attributed)
+    Ok(roots)
 }
 
 fn reaches_root(
@@ -778,6 +788,11 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, String> {
         let Some((comm, rest)) = stat.rsplit_once(") ") else {
             return Err(format!("malformed process snapshot row for pid={pid}"));
         };
+        let name = comm
+            .split_once(" (")
+            .map(|(_, name)| name)
+            .unwrap_or(comm)
+            .to_string();
         let fields = rest.split_whitespace().collect::<Vec<_>>();
         let Some(ppid_text) = fields.get(1) else {
             return Err(format!("malformed process snapshot row for pid={pid}"));
@@ -785,11 +800,7 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, String> {
         let ppid = ppid_text
             .parse::<u32>()
             .map_err(|e| format!("invalid parent pid for pid={pid}: {e}"))?;
-        rows.push(ProcessRow {
-            pid,
-            ppid,
-            name: comm.trim_start_matches('(').to_string(),
-        });
+        rows.push(ProcessRow { pid, ppid, name });
     }
     if rows.is_empty() {
         return Err("process snapshot is empty".into());
