@@ -571,7 +571,8 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "sustained CPU: 0.200 cores (threshold 1.000)" in result.stdout
-    assert "processes: 2 (threshold 3)" in result.stdout
+    assert "processes: 2" in result.stdout
+    assert "direct processes: 2 (threshold 3)" in result.stdout
     assert "transient calls: 1" in result.stdout
     assert [call for call in calls if call[0] in {"ps", "/usr/local/bin/fno"}] == [
         ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"],
@@ -627,7 +628,8 @@ def test_ac4_edge_process_count_also_exits_three(monkeypatch) -> None:
 
     assert result.exit_code == 3
     assert "sustained CPU: 0.200 cores" in result.stdout
-    assert "processes: 2 (threshold 1)" in result.stdout
+    assert "processes: 2" in result.stdout
+    assert "direct processes: 2 (threshold 1)" in result.stdout
 
 
 def test_ac5_edge_roster_failure_exits_four_without_a_default_threshold(monkeypatch) -> None:
