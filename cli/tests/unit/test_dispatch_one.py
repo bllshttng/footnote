@@ -101,10 +101,32 @@ def test_launched_passes_the_guard_and_spawns(monkeypatch, tmp_path):
     assert v["pane_id"] == 7
     assert calls[0]["session"] == "work"
     assert calls[0]["message"] == "/target --no-merge x-1"
+    assert "tab" not in calls[0]
     # The gate's guard rode into the spawn (AC2-EDGE) and was released once the
     # registry row existed.
     assert calls[0]["provider_gate"] is gate
     assert gate.releases == 1
+
+
+@pytest.mark.parametrize("slug", ["parser", "runtime", "custom-checks"])
+def test_parented_child_uses_parent_as_pane_group(monkeypatch, tmp_path, slug):
+    calls, _gate = _wire(
+        monkeypatch,
+        tmp_path,
+        next_node={
+            "id": f"x-{slug}",
+            "slug": slug,
+            "parent": "x-feature",
+            "cwd": str(tmp_path),
+        },
+    )
+
+    verdict = dispatch._dispatch_one(session="work", node=None, project=None)
+
+    assert verdict["outcome"] == "launched"
+    assert verdict["node"] == f"x-{slug}"
+    assert calls[0]["tab"] == "x-feature"
+    assert calls[0]["name"] == f"target-x-{slug}"
 
 
 def _real_result(**fields):

@@ -16525,8 +16525,10 @@ mod tests {
                 .collect();
             assert_eq!(painted, label, "pane {pid} label is not in its rectangle");
             assert!(start >= view.panel_w() as usize + rect.x as usize);
-            assert!(start + label.chars().count()
-                <= view.panel_w() as usize + rect.x as usize + rect.cols as usize);
+            assert!(
+                start + label.chars().count()
+                    <= view.panel_w() as usize + rect.x as usize + rect.cols as usize
+            );
         }
     }
 
@@ -16540,8 +16542,24 @@ mod tests {
         assert!(first.contains("pane 11"));
 
         view.layout.panes = vec![
-            (91, Rect { x: 0, y: 0, rows: 29, cols: 35 }),
-            (94, Rect { x: 36, y: 0, rows: 29, cols: 36 }),
+            (
+                91,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 35,
+                },
+            ),
+            (
+                94,
+                Rect {
+                    x: 36,
+                    y: 0,
+                    rows: 29,
+                    cols: 36,
+                },
+            ),
         ];
         view.frames.insert(91, text_frame(29, 35, 'c'));
         view.frames.insert(94, text_frame(29, 36, 'd'));
@@ -16551,9 +16569,8 @@ mod tests {
         assert!(!second.contains("pane 10"));
         assert!(!second.contains("pane 11"));
 
-        let expired = frame_text(
-            &view.compose_at(t0 + PANE_ID_REVEAL_WINDOW + Duration::from_millis(1)),
-        );
+        let expired =
+            frame_text(&view.compose_at(t0 + PANE_ID_REVEAL_WINDOW + Duration::from_millis(1)));
         assert!(!expired.contains("pane 91"));
         assert!(!expired.contains("pane 94"));
     }

@@ -533,7 +533,7 @@ impl Scanner {
         matches!(self.state, State::Prefix | State::PrefixEsc(_))
     }
 
-    /// True while a resize repeat window is open at `now`.
+    /// True while the selected repeat action's window is open at `now`.
     fn repeat_armed(&self, action: RepeatAction, now: Instant) -> bool {
         self.repeat
             .is_some_and(|state| state.action == action && now < state.until)
@@ -566,9 +566,8 @@ impl Scanner {
         self.repeat = None;
     }
 
-    /// Open the repeat window iff the just-emitted event is a resize; every
-    /// resize emission funnels through here so the window arms the same way
-    /// whether it fired from a letter chord or a Ctrl-arrow.
+    /// Open the matching repeat window for an emitted repeatable event. Resize
+    /// emission funnels through here so letter and Ctrl-arrow paths agree.
     fn arm_if_repeat(&mut self, ev: &Event, now: Instant) {
         match ev {
             Event::Cmd(Command::ResizeDir(_)) => self.arm_repeat(now),
@@ -2011,18 +2010,15 @@ mod tests {
     fn pane_id_chord_is_rebindable_and_repeats_without_prefix() {
         assert_eq!(format!("{:?}", resolve_chord(b'\\')), "ShowPaneIds");
 
-        let (map, warnings) = resolve_keymap(
-            None,
-            &[("show-pane-ids".into(), ";".into())],
+        let (map, warnings) = resolve_keymap(None, &[("show-pane-ids".into(), ";".into())]);
+        assert!(
+            warnings.is_empty(),
+            "rebind should be accepted: {warnings:?}"
         );
-        assert!(warnings.is_empty(), "rebind should be accepted: {warnings:?}");
         let t0 = Instant::now();
         let mut scanner = Scanner::with_keymap(map);
         assert_eq!(format!("{:?}", scanner.scan(b"\x02\\", t0)), "[Bell]");
-        assert_eq!(
-            format!("{:?}", scanner.scan(b"\x02;", t0)),
-            "[ShowPaneIds]"
-        );
+        assert_eq!(format!("{:?}", scanner.scan(b"\x02;", t0)), "[ShowPaneIds]");
         assert_eq!(
             format!("{:?}", scanner.scan(b";", t0 + Duration::from_millis(40))),
             "[ShowPaneIds]"

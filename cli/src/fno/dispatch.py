@@ -516,6 +516,7 @@ def _dispatch_one(
             return {"outcome": "failed", "detail": f"--account {account}: {str(exc)[:180]}"}
 
     # 1. Select the node: explicit --node, else the board's next ready one.
+    rec: Optional[dict] = None
     if node:
         rec = _lookup_node(node)
         node_id = rec.get("id") if rec else node
@@ -530,6 +531,7 @@ def _dispatch_one(
             return {"outcome": "failed", "detail": str(exc)[:200]}
         if not picked:
             return {"outcome": "no-work"}
+        rec = picked
         node_id = picked["id"]
         slug = picked.get("slug")
         cwd = picked.get("_resolved_cwd") or picked.get("cwd")
@@ -538,6 +540,8 @@ def _dispatch_one(
 
     if not isinstance(node_id, str) or not node_id:
         return {"outcome": "failed", "detail": "resolved node has no id"}
+    parent = rec.get("parent") if isinstance(rec, dict) else None
+    parent_id = parent.strip() if isinstance(parent, str) and parent.strip() else None
 
     # 1b. Quota-aware defer (x-5d3e). Only the ambient/autonomous default
     #     selection defers; an explicit --node dispatch always fires (LD#5).
@@ -798,16 +802,19 @@ def _dispatch_one(
             # The guard rides into the spawn as provider_gate, so the provider
             # admission the pane consumes is one the caller actually obtained
             # (AC2-EDGE) - not the ungated launch dispatch used to perform.
-            result = dispatch_spawn_pane(
-                name=_worker_agent_name(node_id, slug),
-                message=message,
-                provider=spawn_harness,
-                cwd=workdir,
-                session=session,
-                provenance=provenance,
-                account_env=account_env,
-                provider_gate=gate,
-            )
+            spawn_kwargs = {
+                "name": _worker_agent_name(node_id, slug),
+                "message": message,
+                "provider": spawn_harness,
+                "cwd": workdir,
+                "session": session,
+                "provenance": provenance,
+                "account_env": account_env,
+                "provider_gate": gate,
+            }
+            if parent_id is not None:
+                spawn_kwargs["tab"] = parent_id
+            result = dispatch_spawn_pane(**spawn_kwargs)
         finally:
             # The gate's claims go back once the registry row exists (or the
             # spawn failed): the row carries the count from here, the same
