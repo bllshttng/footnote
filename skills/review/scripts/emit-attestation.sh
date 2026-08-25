@@ -215,15 +215,25 @@ fi
 # assert-a-positive-marker trap this script exists to keep out of the record, one
 # level down. The refusal is a finding, so it is written as one.
 #
-# Host match is exact-or-subdomain so notanthropic.com stays foreign. This
-# predicate is duplicated from the hook because a skill script may not source
-# outside its own directory; tests/hooks/test_attest_model.sh drives both over
-# one env matrix and fails when they disagree.
+# Host match is exact-or-subdomain so notanthropic.com stays foreign. The RULE
+# is hooks/attest-model.sh's and this copy may not extend it: a skill script
+# cannot source outside its own directory, so the rule lives in two bodies held
+# equal by tests/hooks/test_attest_model.sh, which drives both over one env
+# matrix (aliases, case, padding, userinfo hosts included) and fails when they
+# disagree. Change the rule there first, then mirror it here, or the matrix
+# goes red.
 drift_host="${ANTHROPIC_BASE_URL:-}"
 drift_host="${drift_host#*://}"; drift_host="${drift_host%%/*}"
 drift_host="${drift_host##*@}"; drift_host="${drift_host%%:*}"
-case "$model" in
-  ""|claude*) ;;
+drift_host="$(printf '%s' "$drift_host" | tr '[:upper:]' '[:lower:]')"
+# Judge a trimmed, case-folded copy like the hook does (Python's
+# is_anthropic_model lowercases, and "Claude-Haiku-4-5" is coherent); store the
+# original verbatim when the claim stands.
+claim="${model#"${model%%[![:space:]]*}"}"
+claim="${claim%"${claim##*[![:space:]]}"}"
+claim="$(printf '%s' "$claim" | tr '[:upper:]' '[:lower:]')"
+case "$claim" in
+  ""|claude-*|opus|sonnet|haiku|fable) ;;
   *)
     if [[ -z "$drift_host" || "$drift_host" == "anthropic.com" || "$drift_host" == *.anthropic.com ]]; then
       model="unobserved"

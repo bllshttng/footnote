@@ -48,7 +48,7 @@ fi
 BASE_HOST=""
 if [[ -n "$BASE" ]]; then
   BASE_HOST="$(printf '%s' "$BASE" | tr '[:upper:]' '[:lower:]')"
-  BASE_HOST="${BASE_HOST#*://}"; BASE_HOST="${BASE_HOST%%/*}"; BASE_HOST="${BASE_HOST%%:*}"
+  BASE_HOST="${BASE_HOST#*://}"; BASE_HOST="${BASE_HOST%%/*}"; BASE_HOST="${BASE_HOST##*@}"; BASE_HOST="${BASE_HOST%%:*}"
 fi
 
 # Record the resolved intended identity for Layer 2 + post-hoc audit (best effort).

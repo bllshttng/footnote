@@ -210,6 +210,11 @@ else
   }
 
   # model|base|expected-drift
+  # The rows past the original seven are the surfaces the two copies judged
+  # differently before the collapse: bare tier aliases (the emitter's old
+  # claude* glob refused a coherent "opus"), mixed case (case-folded claim and
+  # host), padding, and a userinfo URL (the hook's old host parse kept the
+  # user@ prefix and missed the anthropic host under it).
   MATRIX=(
     "||no"
     "claude-opus-4-8||no"
@@ -218,6 +223,12 @@ else
     "glm-4.6|https://eu.anthropic.com|yes"
     "glm-4.6|https://open.bigmodel.cn/api/anthropic|no"
     "glm-4.6|https://notanthropic.com/api|no"
+    "opus||no"
+    "fable||no"
+    "Claude-Haiku-4-5||no"
+    "opus ||no"
+    "glm-4.6|https://API.Anthropic.com|yes"
+    "glm-4.6|https://key@anthropic.com|yes"
   )
   for row in "${MATRIX[@]}"; do
     IFS='|' read -r m b want <<<"$row"
