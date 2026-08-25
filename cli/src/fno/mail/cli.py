@@ -210,9 +210,8 @@ _BODY_REFUSE_BYTES = _cap_env_int("FNO_MAIL_BODY_REFUSE", 5000)
 
 def classify_origin(explicit_origin: str | None = None) -> str:
     """Classify the sender once, before a mail lane can narrow behavior."""
-    from fno.decide import MAIL_ORIGINS
-
     from fno.agents.self_stamp import resolve_self_identity
+    from fno.decide import MAIL_ORIGINS, enforce_origin_floor
 
     ident = resolve_self_identity()
     agent_identity = bool(ident.session_id and ident.harness)
@@ -227,14 +226,14 @@ def classify_origin(explicit_origin: str | None = None) -> str:
         # than honoring the flag: least authority by default cannot be
         # forged, and a process with no session identity (a real scheduler,
         # a recovery sweep) still declares its origin honestly.
-        if agent_identity and explicit_origin != "peer":
+        floored = enforce_origin_floor(explicit_origin)
+        if floored != explicit_origin:
             typer.echo(
                 f"mail origin {explicit_origin!r} downgraded to 'peer': an "
                 "agent session cannot declare an origin above peer",
                 err=True,
             )
-            return "peer"
-        return explicit_origin
+        return floored
 
     if agent_identity:
         return "peer"
@@ -3372,19 +3371,12 @@ def _raw_send(
             review=review_request,
         )
     else:  # claude control.sock - the only other keystroke lane
-        if origin is None:
-            delivered = _mail_inject_claude(
-                session_id,
-                stripped,
-                sender=transport_sender,
-            )
-        else:
-            delivered = _mail_inject_claude(
-                session_id,
-                stripped,
-                sender=transport_sender,
-                origin=origin,
-            )
+        delivered = _mail_inject_claude(
+            session_id,
+            stripped,
+            sender=transport_sender,
+            origin=origin,
+        )
 
     # 8. Four-state receipt (never a boolean; never a durable write).
     # The note used to read as a refusal: it named a defect in the argument and
@@ -3642,7 +3634,10 @@ def cmd_send(
         origin=classified_origin,
         lane="raw" if raw else "inbox" if kind is not None else "project" if to_project else "peer",
         sender=from_name,
-        target_session=name if raw else None,
+        # Under --to-self the positional parks the payload, so `name` is not
+        # a handle at this point; recording it wrote the payload into the
+        # audit row. The self target resolves below.
+        target_session=name if raw and not to_self else None,
     )
     # Unknown is an explicit audit result, not a wire authority. Legacy
     # carriers omit the attribute so a law gate cannot mistake silence for an
@@ -3752,23 +3747,14 @@ def cmd_send(
         if message is None:
             print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
             raise typer.Exit(code=2)
-        if mail_origin is None:
-            _raw_send(
-                name,
-                message,
-                self_ok=to_self,
-                check=check,
-                style_exception=style_exception,
-            )
-        else:
-            _raw_send(
-                name,
-                message,
-                self_ok=to_self,
-                check=check,
-                style_exception=style_exception,
-                origin=mail_origin,
-            )
+        _raw_send(
+            name,
+            message,
+            self_ok=to_self,
+            check=check,
+            style_exception=style_exception,
+            origin=mail_origin,
+        )
         return
     if check:
         # Only the --raw lane has a keystroke path to have or lack; a wrapped send
@@ -5050,31 +5036,23 @@ def cmd_drain_self(
     # A live-injected send stores the full paired envelope durably (body
     # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
     # needs both shapes: the bare trailer, and the trailer immediately
-    # before a terminal close tag.
-    # Only the PEER trailer is ever stamped or recognized here (ruling
-    # d-02625dda): the record carries no origin yet, so least authority is
-    # the default. An operator-origin envelope therefore renders with a
-    # second peer trailer after its close tag - the fail-safe outcome, not
-    # a bug: the genuine least-authority stamp stays visible beneath
-    # whatever the body claimed, and nothing sender-written is believed.
-    _trailer_then_close = f"{FNO_MAIL_TRAILER}\n</fno_mail>"
+    # before a terminal close tag. The trailer comes from the record's own
+    # origin field (d-b2dbf5ad): gated at write time by classify_origin,
+    # trustworthy at drain time. A forged trailer in the body never
+    # suppresses the stamp - only the record's exact trailer dedups, and a
+    # mismatch gets the real one appended beneath it.
+    from fno.mail.envelope import render_body_with_record_trailer
 
-    def _render_body(body: str) -> str:
-        # A durable heads-up body is sender-controlled, so a plain `in`
-        # check is satisfiable by embedding the trailer text mid-body and
-        # placing an outward-action instruction after it: the render would
-        # then treat the body as already stamped and skip the real
-        # terminal trailer. Require the stripped body to END with it.
-        text = body.rstrip("\n")
-        if text.endswith(FNO_MAIL_TRAILER) or text.endswith(_trailer_then_close):
-            return text
-        return f"{text}\n{FNO_MAIL_TRAILER}"
+    def _render_body(m) -> str:
+        return render_body_with_record_trailer(
+            m.body, getattr(m, "origin", None)
+        )
 
     if json_out:
         out = [
             {
                 "id": m.id, "from": m.from_, "to": m.to,
-                "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
+                "kind": m.kind, "ts": m.ts, "body": _render_body(m),
             }
             for m in to_print
         ]
@@ -5082,7 +5060,7 @@ def cmd_drain_self(
             out.append(
                 {
                     "id": m.id, "from": m.from_, "to": m.to,
-                    "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
+                    "kind": m.kind, "ts": m.ts, "body": _render_body(m),
                     "job": job_addr or "",
                 }
             )
@@ -5092,12 +5070,12 @@ def cmd_drain_self(
             print(f"[fno agents mail] {len(to_print)} message(s) for {handle}:")
             for m in to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(_render_body(m.body))
+                print(_render_body(m))
         if job_to_print:
             print(f"\n[fno agents mail] {len(job_to_print)} job message(s) for {job_addr}:")
             for m in job_to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(_render_body(m.body))
+                print(_render_body(m))
         # This render is what a session sees on receive, so surface the id (which
         # `reply --to` correlates against) and the how-to. Replying is optional --
         # an FYI/broadcast needs none.

@@ -52,6 +52,28 @@ MAIL_ORIGINS: tuple[str, ...] = (
     "scheduler",
     "recovery",
 )
+
+
+def enforce_origin_floor(origin: str | None) -> str | None:
+    """An ambient agent identity cannot declare an origin above peer.
+
+    The one gate every explicit origin claim routes through (d-02625dda,
+    d-8f396483): mail send's classify_origin, record_decision for the law
+    record, and the dispatch ctx builder all ask this before trusting a
+    caller-stated origin. Identity is proven by ancestry (a process-tree walk,
+    never env markers), so a caller that resolves an agent identity is an
+    agent claiming a channel it does not own, scheduler and recovery included;
+    a detached scheduler or recovery daemon has no harness ancestor and keeps
+    its honest declaration.
+    """
+    if origin is None or origin == "peer":
+        return origin
+    from fno.agents.self_stamp import resolve_self_identity
+
+    ident = resolve_self_identity()
+    if ident.session_id and ident.harness:
+        return "peer"
+    return origin
 MAX_AUTHORITY_BY_ORIGIN: dict[str, str] = {
     "operator": "operator",
     "peer": "agent",
@@ -316,6 +338,11 @@ def record_decision(
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
 
+    # The event records this value, so the floor must bind here, not only in
+    # the provenance resolution: a gated provenance beside a raw self-declared
+    # origin on the same row would be the inconsistency the gate exists to
+    # close.
+    origin = enforce_origin_floor(origin)
     if consent is not None and authority_source != "chat_attested":
         from fno.law import InvalidOperatorConsentError
 

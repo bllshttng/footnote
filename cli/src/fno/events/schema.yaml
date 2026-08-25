@@ -2422,7 +2422,7 @@ event_types:
           description: "Closed mail origin: operator, peer, scheduler, or recovery; unknown records an unresolved classifier and is never stamped on the authority wire."
         lane:
           type: string
-          description: "Mail surface classified before delivery: raw, durable, project, or peer."
+          description: "Mail surface classified before delivery: raw, inbox, reply, project, or peer."
         presumed_human:
           type: boolean
           description: "Positive marker for an origin still presumed operator-authored."

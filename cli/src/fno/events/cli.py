@@ -237,6 +237,14 @@ def _push_to_parent(
     except Exception as exc:  # noqa: BLE001 - push must never wedge the emit
         typer.echo(f"push: note: parent push failed (non-fatal): {exc}", err=True)
         return False
+    if result.stderr:
+        # A successful send can still carry an origin-downgrade notice on
+        # stderr; swallow it and a scheduler declaration made from inside an
+        # agent session vanishes without a trace.
+        typer.echo(
+            f"push: note: {result.stderr.decode('utf-8', 'replace').strip()}",
+            err=True,
+        )
     if result.returncode != 0:
         typer.echo(
             f"push: note: parent push failed (non-fatal): "

@@ -156,6 +156,27 @@ def mail_trailer(origin: Optional[str] = None) -> str:
     )
 
 
+def render_body_with_record_trailer(
+    body: str, origin: Optional[str] = None
+) -> str:
+    """Normalize a durable body to end with the trailer its record's own
+    origin warrants (d-b2dbf5ad).
+
+    The stamp comes from the record, never from body text: reading the field
+    is safe because classify_origin gates it at write time. The only body test
+    is the identity-neutral dedup against that one trailer, so a forged
+    trailer in a peer record still gets the peer trailer appended beneath it,
+    and a well-formed paired envelope passes through unchanged - nothing is
+    ever stamped after a terminal close tag, which is the forged-envelope
+    shape refuse_if_forged rejects everywhere else.
+    """
+    text = body.rstrip("\n")
+    trailer = mail_trailer(origin)
+    if text.endswith(trailer) or text.endswith(f"{trailer}\n</fno_mail>"):
+        return text
+    return f"{text}\n{trailer}"
+
+
 # A bare substring match on "<fno_mail" also matches a prefix lookalike like
 # "<fno_mailbox>" or "<fno_mailicious>", which cannot open a real envelope but
 # still trips a refusal on ordinary text. `\b` requires a real word boundary

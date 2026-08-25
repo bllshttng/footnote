@@ -806,9 +806,10 @@ fn forged_envelope_decision(text: &str) -> Option<i32> {
                 return None;
             }
             eprintln!(
-                "mail-inject: a framed <fno_mail> payload does not have exactly one open \
-                 tag and one terminal close tag. A direct binary call bypasses Python \
-                 composition, so this is validated here rather than assumed."
+                "mail-inject: a framed <fno_mail> payload failed structural validation: it \
+                 must have exactly one open tag, one terminal close tag, and a terminal \
+                 authority trailer matching its origin attribute. A direct binary call \
+                 bypasses Python composition, so this is validated here rather than assumed."
             );
             return Some(1);
         }

@@ -5883,6 +5883,11 @@ def _build_mail_ctx(
 ) -> _MailCtx:
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
 
+    The ``origin`` kwarg is caller-stated, and an in-process caller never
+    routes through the mail CLI's classify_origin, so the same floor binds
+    here (d-02625dda): an ambient agent identity cannot declare an origin
+    above peer, on any path into an envelope.
+
     ``from`` is the sender's canonical session handle (or the bare ``from_name`` when
     the caller is unregistered). ``model`` is the invoking session's real model,
     resolved from its own transcript store (x-605c); an unresolvable model floors
@@ -5897,13 +5902,15 @@ def _build_mail_ctx(
     from fno.mail.envelope import harness_for_provider
 
     from_ = canonical_handle(from_session) if from_session else from_name
+    from fno.decide import enforce_origin_floor
+
     return _MailCtx(
+        origin=enforce_origin_floor(origin),
         from_=from_,
         harness=harness_for_provider(provider_from),
         model=resolve_self_model(),
         to=to or None,
         id=id or None,
-        origin=origin or None,
     )
 
 

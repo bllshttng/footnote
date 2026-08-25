@@ -655,8 +655,9 @@ def _append_to_bus(
         meta["owner"] = owner
     if ttl_at is not None:
         meta["ttl_at"] = _format_dt(ttl_at)
-    if origin is not None:
-        meta["origin"] = origin
+    # Origin rides the Envelope field only (from_json_line falls back to the
+    # legacy meta copy for pre-field rows); writing both channels left two
+    # places a future edit could update divergently.
     _bus_append(
         Envelope(
             id=msg_id,
@@ -1118,7 +1119,7 @@ def rebuild_render(recipient: str) -> int:
             from_project=root.from_,
             to_project=recipient,
             kind=root.kind,
-            origin=str(meta["origin"]) if meta.get("origin") is not None else None,
+            origin=root.origin,
             created=created,
             read_at=None,
             replies_to=root.in_reply_to,
