@@ -49,7 +49,9 @@ def _patch_common(monkeypatch, *, run_returncode: int = 0, pane_id_out: str = "7
         "_reap_spawned_pane",
         lambda session, pane_id, runner: (reaped.append((session, pane_id)), (True, ""))[1],
     )
-    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", lambda cwd: set())
+    monkeypatch.setattr(
+        mux_spawn, "_codex_session_ids_loaded", lambda cwd, **_kw: set()
+    )
     monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
     monkeypatch.setattr(mux_spawn, "_read_pane_tail", lambda *a, **k: "")
     return reaped
@@ -189,6 +191,35 @@ def test_binds_via_the_daemon_oracle_when_the_fd_probe_misses(monkeypatch) -> No
     assert result["bound"] is True
     assert result["session_id"] == SID
     assert result["oracle"] == "daemon"
+
+
+def test_daemon_oracle_uses_the_canary_codex_home(monkeypatch) -> None:
+    _patch_common(monkeypatch)
+    homes: list[tuple[str, Path]] = []
+
+    def baseline(_cwd, *, codex_home):
+        homes.append(("baseline", codex_home))
+        return set()
+
+    def candidate(_cwd, _baseline, *, codex_home):
+        homes.append(("candidate", codex_home))
+        return SID
+
+    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", baseline)
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None
+    )
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", candidate)
+    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(mux_spawn.time, "sleep", lambda *_a, **_k: None)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is True
+    assert result["oracle"] == "daemon"
+    assert [kind for kind, _home in homes] == ["baseline", "candidate", "candidate"]
+    assert len({home for _kind, home in homes}) == 1
+    assert homes[0][1].name == ".codex-home"
 
 
 def test_neither_oracle_binding_fails_named_and_reaps(monkeypatch) -> None:

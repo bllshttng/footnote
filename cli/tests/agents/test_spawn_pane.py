@@ -4696,6 +4696,35 @@ def test_codex_hook_review_bypass_posture_keeps_argv_seed_contract(
     assert result.seed_source == "argv"
 
 
+@pytest.mark.parametrize(
+    "modal, expected",
+    [
+        ("Do you trust the contents of this directory?", "Codex project trust required"),
+        ("Hooks need review", "Codex hooks need review"),
+    ],
+)
+def test_empty_codex_spawn_still_refuses_trust_prompt(
+    tmp_path: Path, monkeypatch, modal: str, expected: str
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    runner = FakeRunner(read_stdout=modal)
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            provider="codex",
+            runner=runner,
+            message="",
+        )
+
+    assert expected in str(exc.value)
+    assert runner.kill_calls
+    assert load_registry() == []
+
+
 def test_a_timed_out_submit_keeps_the_row_and_never_retries(
     tmp_path: Path, monkeypatch
 ) -> None:

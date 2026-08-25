@@ -2478,7 +2478,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
     argv = ["env", f"CODEX_HOME={codex_home}", *argv]
     # None (daemon unreachable at this instant) is passed through as-is; the
     # probe below refuses to correlate against a fabricated empty baseline.
-    baseline_ids = _codex_session_ids_loaded(cwd)
+    baseline_ids = _codex_session_ids_loaded(cwd, codex_home=codex_home)
     spawn_started_ms = int(time.time() * 1000)
     proc = _run_mux(
         ["mux", "pane", "run", "--session", session, "--cwd", str(cwd), "--", *argv],
@@ -2530,6 +2530,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
                     mux=mux,
                     runner=subprocess.run,
                     oracle_used=oracle_used,
+                    daemon_codex_home=codex_home,
                 ),
                 runner=subprocess.run,
                 window_s=_CODEX_BIND_CANARY_WINDOW_S,
