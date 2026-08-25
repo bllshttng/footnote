@@ -1219,8 +1219,26 @@ mod tests {
         }
     }
 
+    /// Serializes the tests that mutate the process-global FNO_BOARD_SCOPE.
+    /// The guard RESTORES the outer value on drop, and the harness runs tests
+    /// on parallel threads: one test's restore can land while a sibling sits
+    /// between its own remove and its first read, so the sibling sees the
+    /// outer value (a developer shell exporting FNO_BOARD_SCOPE=fno, the
+    /// exact shape observed in a full-suite run) and answers from the env
+    /// branch instead of the injected config closure. One mutex for all five:
+    /// each test is instant, so serializing them costs nothing.
+    static BOARD_SCOPE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Lock the board-scope env mutex for the test's duration.
+    fn lock_board_scope_env() -> std::sync::MutexGuard<'static, ()> {
+        BOARD_SCOPE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn resolve_board_scope_defaults_to_the_repo_project() {
+        let _env_lock = lock_board_scope_env();
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         let (scope, why) = resolve_board_scope(|k| match k {
             "mux.board_scope" => Some("repo\n".into()),
@@ -1236,6 +1254,7 @@ mod tests {
 
     #[test]
     fn resolve_board_scope_expands_a_workspace_and_refuses_an_empty_one() {
+        let _env_lock = lock_board_scope_env();
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         let ws = r#"{"projects":[{"name":"web"},{"name":"etl"},{"name":"fno"}]}"#;
         let (scope, _) = resolve_board_scope(|k| match k {
@@ -1263,6 +1282,7 @@ mod tests {
 
     #[test]
     fn resolve_board_scope_refuses_rather_than_widening() {
+        let _env_lock = lock_board_scope_env();
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         // No project.id resolves (a cwd outside any repo): resolve to the empty
         // set, and SAY which board that produces.
@@ -1278,6 +1298,7 @@ mod tests {
 
     #[test]
     fn every_refusal_reason_names_the_board_it_actually_produces() {
+        let _env_lock = lock_board_scope_env();
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         // The reason is the ONLY place the fallback is visible: `mux doctor`
         // prints it verbatim and the server logs it. Each of these three paths
@@ -1322,6 +1343,7 @@ mod tests {
 
     #[test]
     fn resolve_board_scope_honors_all() {
+        let _env_lock = lock_board_scope_env();
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
         let (scope, _) =
             resolve_board_scope(|k| (k == "mux.board_scope").then(|| "all".to_string()));
