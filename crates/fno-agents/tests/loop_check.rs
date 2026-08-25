@@ -8410,3 +8410,331 @@ fn a_clean_king_terminal_does_not_ask_the_operator_anything() {
         fs::read_to_string(&log).unwrap_or_default()
     );
 }
+
+// ── bounded external reads: every stop-gate read is bounded and a killed
+// child is named as the exact read that timed out ──────────────────────────
+//
+// Each case wedges ONE logical read behind a 30s sleep and injects a 1s
+// bound, then asserts three things: the fire RETURNS (bounded), the decision
+// message names exactly the wedged read as a killed timeout, and it never
+// names an unrelated read (the pr_info_rest misattribution this family of
+// tests exists to close).
+
+/// A gh mock that answers every read green EXCEPT `wedge`, which sleeps 30s
+/// past any test bound. The fingerprint read's exact argv
+/// (`state,number,headRefName` with no `headRefOid`) is distinguished from
+/// done()'s full-field view so each read can wedge independently.
+fn wedged_gh(dir: &Path, wedge: &str) -> PathBuf {
+    let body = r#"# wedge2: sleep only on the SECOND invocation of the read. The fingerprint
+# block reads checks/reviews BEFORE done() does with identical argv, so a
+# first-call wedge proves the fingerprint path and a second-call wedge is the
+# only way to reach the done() read's own timeout.
+wedge2() {
+  [ "$1" = "WEDGE" ] || return 0
+  c=$(dirname "$0")/count.$1
+  n=$(cat "$c" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > "$c"
+  [ "$n" -ge 2 ] && sleep 30
+}
+wedge() { [ "$1" = "WEDGE" ] && sleep 30; }
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+# fingerprint read: exactly state,number,headRefName (no headRefOid)
+if echo "$*" | grep -q "state,number,headRefName" && ! echo "$*" | grep -q "headRefOid"; then
+  wedge fingerprint_pr_view
+  echo '{"state":"OPEN","number":1,"headRefName":"main"}'
+  exit 0
+fi
+# done() Read 1: the full-field view
+if echo "$*" | grep -q "headRefOid"; then
+  wedge pr_view
+  echo '{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000001","mergeable":"MERGEABLE","baseRefName":"main"}'
+  exit 0
+fi
+if echo "$*" | grep -q "pulls/"; then
+  wedge pulls_comments
+  echo '[]'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  wedge2 pr_checks
+  echo '[{"name":"ci","state":"SUCCESS","bucket":"pass"}]'
+  exit 0
+fi
+if echo "$*" | grep -q "reviews"; then
+  wedge2 pr_reviews
+  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
+  exit 0
+fi
+exit 1"#
+        .replace("WEDGE", wedge);
+    make_script(dir, "gh", &body)
+}
+
+/// Standard target-driver fire against a wedged gh: promise intent so the
+/// done() reads actually run, 1s read bound so a wedge kills at ~1s.
+fn wedged_fire(
+    cwd: &Path,
+    manifest_path: &Path,
+    transcript_path: &Path,
+    gh: &Path,
+    git: &Path,
+) -> (i32, Decision, std::time::Duration) {
+    let started = std::time::Instant::now();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--read-timeout-ms=1000",
+    ]);
+    (code, d, started.elapsed())
+}
+
+/// Shared setup for the target-driver wedge cases. The `WedgedSetup` keeps
+/// BOTH tempdirs alive for the test body: dropping the mock's dir here (the
+/// classic TempDir-in-a-helper bug) deletes the gh binary before the fire
+/// and every read answers ENOENT.
+struct WedgedSetup {
+    _tmp: TempDir,
+    _bins: TempDir,
+    manifest: PathBuf,
+    transcript: PathBuf,
+    gh: PathBuf,
+}
+
+fn wedged_setup(wedge: &str) -> WedgedSetup {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest = cwd.join("target-state.md");
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest,
+        new_manifest("sess-wedge", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+    let bins = TempDir::new().unwrap();
+    let gh = wedged_gh(bins.path(), wedge);
+    WedgedSetup {
+        _tmp: tmp,
+        _bins: bins,
+        manifest,
+        transcript,
+        gh,
+    }
+}
+
+/// Assert the killed-timeout shape: bounded return, exact read named, the
+/// timeout event row present, and no misattributed read in the message.
+fn assert_timeout_block(
+    code: i32,
+    d: &Decision,
+    elapsed: std::time::Duration,
+    expected_read: &str,
+    events: &Path,
+) {
+    assert_eq!(code, 0, "a bounded read blocks, never errors: {d:?}");
+    assert_eq!(d.decision, "block", "{d:?}");
+    assert!(
+        d.message
+            .contains(&format!("external read '{expected_read}' timed out after")),
+        "message must name the wedged read as a killed timeout: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("was killed"),
+        "message must say the child was killed: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("gh read '"),
+        "a killed timeout must not render the ordinary failed-read wording: {}",
+        d.message
+    );
+    // Bounded: 1s bound plus generous cleanup and scheduling slack.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "fire must return within the bound plus slack, took {elapsed:?}"
+    );
+    let journal = fs::read_to_string(events).unwrap_or_default();
+    assert!(
+        journal.contains("\"outcome\":\"timeout\""),
+        "the gh_error event must carry the positive timeout outcome: {journal}"
+    );
+    assert!(
+        journal.contains(expected_read),
+        "the gh_error event must name the wedged read {expected_read}: {journal}"
+    );
+}
+
+#[test]
+fn external_read_timeout_pr_view_names_the_read_not_a_sibling() {
+    let ws = wedged_setup("pr_view");
+    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let git = MockBins::green().git;
+    let (code, d, elapsed) =
+        wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
+    // The misattribution this closes: a killed pr_view reported as pr_info_rest.
+    assert!(!d.message.contains("pr_info_rest"), "{}", d.message);
+    assert_timeout_block(code, &d, elapsed, "pr_view", &events);
+}
+
+#[test]
+fn external_read_timeout_pr_checks_names_the_read() {
+    let ws = wedged_setup("pr_checks");
+    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let git = MockBins::green().git;
+    let (code, d, elapsed) =
+        wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
+    assert_timeout_block(code, &d, elapsed, "pr_checks", &events);
+}
+
+#[test]
+fn external_read_timeout_pr_reviews_names_the_read() {
+    let ws = wedged_setup("pr_reviews");
+    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let git = MockBins::green().git;
+    let (code, d, elapsed) =
+        wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
+    assert_timeout_block(code, &d, elapsed, "pr_reviews", &events);
+}
+
+#[test]
+fn external_read_timeout_fingerprint_read_names_the_read() {
+    let ws = wedged_setup("fingerprint_pr_view");
+    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let git = MockBins::green().git;
+    let (code, d, elapsed) =
+        wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
+    assert_timeout_block(code, &d, elapsed, "fingerprint_pr_view", &events);
+}
+
+/// A wedged LOCAL git read (the external-diff-driver shape) must not hang
+/// the fire either: the stop-gate git calls route through the same bounded
+/// transport, and a killed read degrades to each caller's conservative
+/// no-answer instead of wedging the stop gate.
+#[test]
+fn wedged_git_read_degrades_bounded_instead_of_hanging() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest = cwd.join("target-state.md");
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest,
+        new_manifest("sess-gitwedge", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+    let bins = TempDir::new().unwrap();
+    // Everything answers green except the payload-classify diff (the
+    // three-dot range), which sleeps past any test bound.
+    let git = make_script(
+        bins.path(),
+        "git",
+        r#"if echo "$*" | grep -q -- "--version"; then exit 0; fi
+if [ "$1" = "diff" ] && echo "$*" | grep -q "\.\.\."; then sleep 30; fi
+if [ "$1" = "rev-parse" ]; then
+  if echo "$*" | grep -q "HEAD"; then echo "deadbeefdeadbeefdeadbeefdeadbeef00000001"; exit 0; fi
+  echo "cafecafecafecafecafecafecafecafe00000001"; exit 0
+fi
+[ "$1" = "merge-base" ] && exit 1
+[ "$1" = "status" ] && exit 0
+[ "$1" = "branch" ] && { echo "feature/x"; exit 0; }
+exit 0"#,
+    );
+    let gh = MockBins::green().gh;
+    let started = std::time::Instant::now();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest.to_str().unwrap(),
+        "--transcript",
+        transcript.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--read-timeout-ms=1000",
+    ]);
+    let elapsed = started.elapsed();
+    assert_eq!(code, 0, "a degraded git read still decides: {d:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "a wedged git read must not hang the fire, took {elapsed:?}"
+    );
+    assert!(
+        !d.message.is_empty(),
+        "the fire must emit a decision message, not die silently: {d:?}"
+    );
+}
+
+/// The king driver's one external read (the board) is bounded too, and a
+/// wedged board blocks with the killed-timeout wording rather than hanging
+/// the king's fire.
+#[test]
+fn external_read_timeout_king_board_blocks_named() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-wedge");
+    let events = cwd.join("events.jsonl");
+    let bins = TempDir::new().unwrap();
+    // The mock must answer the harness's `--version` probe instantly: an
+    // unconditional sleep costs the setup 30s before the fire even starts
+    // (make_script probe-runs every generated script once).
+    let fno = make_script(
+        bins.path(),
+        "fno-king-mock",
+        "[ \"$1\" = \"--version\" ] && exit 0\nsleep 30",
+    );
+
+    let started = std::time::Instant::now();
+    let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[
+        "loop-check".to_string(),
+        "--driver".to_string(),
+        "king".to_string(),
+        "--state".to_string(),
+        state.to_str().unwrap().to_string(),
+        "--transcript".to_string(),
+        cwd.join("transcript.jsonl").to_str().unwrap().to_string(),
+        "--cwd".to_string(),
+        cwd.to_str().unwrap().to_string(),
+        "--events".to_string(),
+        events.to_str().unwrap().to_string(),
+        "--global-events".to_string(),
+        events.to_str().unwrap().to_string(),
+        "--fno-bin".to_string(),
+        fno.to_str().unwrap().to_string(),
+        "--read-timeout-ms".to_string(),
+        "1000".to_string(),
+    ]);
+    let elapsed = started.elapsed();
+    let d: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(d["decision"], "block", "{d}");
+    let reason = d["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("external read 'king_board' timed out after"),
+        "the king block reason must name the wedged board read: {reason}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "king fire must return within the bound plus slack, took {elapsed:?}"
+    );
+    assert_eq!(
+        code, 2,
+        "a king block exits 2 like the non-empty board: {code}"
+    );
+}
