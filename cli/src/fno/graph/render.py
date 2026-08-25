@@ -194,9 +194,7 @@ def _kanban_card(
         blocker_titles = []
         for bid in blockers:
             blocker = id_to_entry.get(bid)
-            if blocker and not (
-                blocker.get("completed_at") or blocker.get("status") == "done"
-            ):
+            if blocker and not blocker.get("completed_at"):
                 blocker_titles.append(f"{bid} ({(blocker.get('title') or '?')[:40]})")
         if blocker_titles:
             body_lines.append(f"  blocked by: {', '.join(blocker_titles)}")

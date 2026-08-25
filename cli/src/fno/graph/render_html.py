@@ -329,9 +329,7 @@ def _card_html(
         open_blockers = []
         for bid in blockers:
             blocker = id_to_entry.get(bid)
-            if blocker and not (
-                blocker.get("completed_at") or blocker.get("status") == "done"
-            ):
+            if blocker and not blocker.get("completed_at"):
                 btitle = (blocker.get("title") or "?")[:40]
                 open_blockers.append(f"{html.escape(bid)} ({html.escape(btitle)})")
         if open_blockers:
