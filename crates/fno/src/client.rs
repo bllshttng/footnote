@@ -2097,12 +2097,6 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
         glyph: glyph.into(),
         label: label.into(),
     };
-    let entry = |glyph: &str, label: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: String::new(),
-        enabled: true,
-    };
     // Join mirrors the row menu's split grid: the picked cell IS the side of
     // the focused pane the joined tab lands on. No hint: no prefix binding
     // names a join (the gesture path is the tab drag), and LD9 forbids a
@@ -6040,14 +6034,20 @@ impl View {
         // after the blit (content is in place) and before the grip/indicator/
         // overlay passes (chrome and overlays still win their cells). The
         // cached server `Frame` is untouched, so the span clears on the next
-        // compose the moment it is dropped or invalidated.
-        if let Some((pid, span)) = self.link_hover.accepted.as_ref() {
-            if let Some((_, rect)) = self.layout.panes.iter().find(|(p, _)| p == pid) {
-                for &(fr, fc) in span {
-                    let r = origin_r + rect.y as usize + fr as usize;
-                    let c = origin_c + rect.x as usize + fc as usize;
-                    if r < rows && c < cols {
-                        cells[r * cols + c].flags |= cell_flags::UNDERLINE;
+        // compose the moment it is dropped or invalidated. Suppressed while
+        // ANY modal is open: `menu_usurping_open` names the full set, which
+        // closes the keyboard-opened and overlay-blind cases the pointer-event
+        // clear cannot see (an overlay opened with no pointer motion paints no
+        // hover affordance beneath or around itself).
+        if !self.menu_usurping_open() {
+            if let Some((pid, span)) = self.link_hover.accepted.as_ref() {
+                if let Some((_, rect)) = self.layout.panes.iter().find(|(p, _)| p == pid) {
+                    for &(fr, fc) in span {
+                        let r = origin_r + rect.y as usize + fr as usize;
+                        let c = origin_c + rect.x as usize + fc as usize;
+                        if r < rows && c < cols {
+                            cells[r * cols + c].flags |= cell_flags::UNDERLINE;
+                        }
                     }
                 }
             }
@@ -18389,6 +18389,25 @@ mod tests {
         st.retarget(None, tf + Duration::from_secs(2));
         assert!(st.pending.is_none() && st.accepted.is_none());
         assert_eq!(st.deadline(), None);
+    }
+
+    #[test]
+    fn link_hover_compose_hides_the_span_while_a_modal_owns_the_screen() {
+        // A modal opened by KEYBOARD emits no pointer event, so the event-side
+        // clear never runs; the compose-side suppression is what keeps the
+        // underline from painting beneath or around it. Control: the same
+        // accepted span paints the moment the modal closes.
+        let mut view = two_pane_view();
+        view.link_hover.accepted = Some((10, vec![(0, 0)]));
+        view.keys_modal = Some(build_keys_modal());
+        let ul = cell_flags::UNDERLINE;
+        let lit = |f: &Frame| f.cells.iter().any(|c| c.flags & ul == ul);
+        assert!(!lit(&view.compose()), "no underline beneath an open modal");
+        view.keys_modal = None;
+        assert!(
+            lit(&view.compose()),
+            "control: the span paints once the modal closes"
+        );
     }
 
     #[test]

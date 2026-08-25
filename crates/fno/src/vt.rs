@@ -2020,7 +2020,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn link_span_covers_a_soft_wrapped_osc8_anchor_exactly_once() {
         // An OSC 8 anchor whose text wraps across three rows: hovering the
         // MIDDLE row returns every cell of the anchor exactly once. The two
