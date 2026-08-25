@@ -165,7 +165,21 @@ def _live_root_pids(
         if not getattr(rows, "complete", True):
             return roots, "worker registry incomplete"
         for row in rows:
-            if row.status not in LIVE_STATUSES or row.pid is None:
+            if row.status not in LIVE_STATUSES:
+                if (
+                    snapshot_pids is None
+                    or row.pid is None
+                    or row.pid not in snapshot_pids
+                ):
+                    continue
+                if row.pid_start_time is None:
+                    return roots, "worker root liveness unavailable"
+                root_live = _root_pid_is_live(row.pid, row.pid_start_time)
+                if root_live is not True:
+                    return roots, "worker root liveness unavailable"
+                roots.add(row.pid)
+                continue
+            if row.pid is None:
                 continue
             if row.pid_start_time is None:
                 return roots, "worker root liveness unavailable"
