@@ -125,6 +125,16 @@ def test_unrelated_bash_commands_are_not_decided() -> None:
     assert gate.evaluate(_payload("git status"), arm=lambda **kwargs: {}) is None
 
 
+def test_spawn_brief_quoting_enact_is_not_a_law_action() -> None:
+    gate = _gate()
+    command = (
+        'fno agents spawn --name law-worker '
+        '"Explain why fno law enact requires attended human approval."'
+    )
+
+    assert gate.evaluate(_payload(command), arm=lambda **kwargs: {}) is None
+
+
 def test_missing_session_and_arm_failure_deny() -> None:
     gate = _gate()
     missing = gate.evaluate(_payload(session_id=""), arm=lambda **kwargs: {})

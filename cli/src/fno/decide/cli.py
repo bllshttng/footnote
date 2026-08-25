@@ -594,6 +594,7 @@ def _list_decisions(
 ) -> None:
     """Recover the decision history for a subject, newest first."""
     from fno.decide import (
+        current_law,
         list_decisions,
         looks_like_decision_id,
         near_miss_subjects,
@@ -638,6 +639,11 @@ def _list_decisions(
         label, found, damaged = list_decisions(
             subject, limit=None, lane=lane, state=state if state is not None else "all"
         )
+        standing_law = (
+            current_law(subject)
+            if subject is not None and lane == "law" and state == "live"
+            else None
+        )
     except (OSError, ValueError) as exc:
         # ValueError covers UnicodeDecodeError, which a torn multi-byte append
         # raises and which is NOT an OSError.
@@ -675,6 +681,8 @@ def _list_decisions(
         "matched_by": matched if subject else None,
         "near_misses": [{"subject": s, "count": n} for s, n in near],
     }
+    if standing_law is not None:
+        payload.update(standing_law)
     if output:
         payload["decisions"] = found
         payload["truncated"] = False
@@ -683,6 +691,18 @@ def _list_decisions(
     if as_json:
         typer.echo(json.dumps(payload, separators=(",", ":")))
         return
+
+    if standing_law is not None:
+        canonical = standing_law["canonical_subject"]
+        verdict = standing_law["current_law"]
+        if verdict["status"] == "single":
+            typer.echo(f"CURRENT LAW  {canonical}  {verdict['decision_id']}")
+        elif verdict["status"] == "conflict":
+            typer.echo(
+                f"LAW CONFLICT  {canonical}  {','.join(verdict['decision_ids'])}"
+            )
+        else:
+            typer.echo(f"NO CURRENT LAW  {canonical}")
 
     if not decisions:
         # Exit 0: a read that answered "none" is a successful read. Only a read

@@ -687,7 +687,30 @@ fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize,
         {
             continue;
         }
-        let Some(observed_start) = crate::proto::pid_start_time(pid) else {
+        let mut observed_start = None;
+        for attempt in 0..=5 {
+            observed_start = crate::proto::pid_start_time(pid);
+            if observed_start.is_some() {
+                break;
+            }
+            // A just-spawned or just-exited child can briefly report alive
+            // before macOS exposes its start time. Keep the bound tiny and
+            // require positive death evidence or a later readable start time.
+            if crate::proto::pid_confirmed_dead(pid as libc::pid_t)
+                || crate::proto::pid_is_zombie(pid as libc::pid_t)
+            {
+                break;
+            }
+            if attempt < 5 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let Some(observed_start) = observed_start else {
+            if crate::proto::pid_confirmed_dead(pid as libc::pid_t)
+                || crate::proto::pid_is_zombie(pid as libc::pid_t)
+            {
+                continue;
+            }
             return Err(format!(
                 "process start time unavailable for marker pid={pid}"
             ));

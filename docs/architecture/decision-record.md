@@ -1,6 +1,6 @@
 # The decision record
 
-A ruling stated in chat dies with the context. The operator then asks, weeks later, "there was this thing we discussed, what happened with that?" This page owns the answer: what records a decision, where it lands, and how to get it back.
+A ruling stated in chat dies with the context. Weeks later, the operator asks, "there was this thing we discussed, what happened with that?" This page explains recording, storage, shipped design law, and current-law queries.
 
 ## The verb
 
@@ -25,7 +25,7 @@ Both are explicit on purpose. Automatic classification of "was that a ruling?" i
 
 ## Authority lanes
 
-Every read derives an authority lane in the engine. `operator` authority is `law`. `agent` and `crown` authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
+Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and crown authority are both `coord`. `beastmode` authority is `grant`. A row in the checked-in repository catalog is also `law`, because code review is the authority event that promotes design law into the product. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
 
 `--authority` takes exactly four values: `operator`, `crown`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `crown` for a king ruling inside its own crown scope. That value exists because three rows on disk carry invented `crown-l1` and `crown-l2-<node>` spellings. Kings wrote them because no correct value existed. The scope belongs on the crown row, so the value carries no suffix.
 
@@ -67,6 +67,8 @@ The split closes that without deleting the honest case. An agent relaying a real
 
 A decision id is a lookup key. `fno backlog decisions d-1a2b3c4d` returns that decision whatever subject it was filed under, and `--json` says `matched_by: "decision_id"` so a machine reader is never confused about which key answered.
 
+Repository design law declares a canonical subject and explicit aliases in `docs/architecture/decisions.yaml`. The reader canonicalizes both the query and recorded local subjects through that table. An alias is exact and one-to-one: `handoff` reaches `target-self-handoff` only because the catalog declares it, never because a fuzzy matcher guessed.
+
 Every read of a subject also scans for near misses and names them with their counts. Without that scan, a ruling filed under the free-text subject `force-push policy` stays invisible to `--subject force-push`.
 
 Even where the exact subject DID answer, the scan still runs. The case that cost a reader four rulings returned one row, not zero. A scan gated on an empty answer stays silent on exactly that case.
@@ -77,19 +79,22 @@ The fixed cutover is `2026-08-21T00:00:00Z`, chosen to safely postdate every row
 
 There is no new recording gate, and none is needed. `crates/fno-agents/src/loopcheck.rs` already holds a session that closed its own question with an answer and emitted no matching decision. Its refusal already names the verb. That gate is starved, not missing: only two `operator_question` events exist across 194,109 events.
 
-## Three stores, one write
+## Three local stores plus shipped design law
 
 | Store | What it is for | Path |
 |---|---|---|
 | Project journal | Durability and the project audit trail | `<canonical-repo>/.fno/events.jsonl` |
-| Decision index | Recall. The reader's only source | `~/.fno/decisions.jsonl` via `paths.decisions_jsonl()` |
+| Decision index | Local project-policy recall | `~/.fno/decisions.jsonl` via `paths.decisions_jsonl()` |
 | Graph projection | The node view, for anyone reading the node | the subject node's `decisions` array |
+| Repository catalog | Reviewed design law that every clone inherits | `docs/architecture/decisions.yaml` |
 
 One `fno backlog decide` call writes the journal, then the index, then the projection. A failed index write is not a success: the command exits 1, because a write the operator cannot read back is worse than a refusal.
 
 It does NOT ask for a retry. The durable event has already landed by then, so a second run records one ruling twice under two ids. Both producers say so and name `fno backlog decide-reindex` as the recovery.
 
 A failed PROJECTION does not fail the command at all. Both durable stores already hold the decision by then, so the ruling is recorded and recoverable. Only the node view is missing, and the command says which decision id it is.
+
+The repository catalog is read-only to `fno backlog decide`. A repository change adds or revises design law through normal code review. The reader composes catalog rows with the local index by decision id. It uses reviewed content and keeps machine-local audit fields. Project policy can structurally supersede a repository default. The existing operator-law guard still applies.
 
 ## Why the index is separate from the global journal
 
@@ -106,13 +111,13 @@ So the index is its own file, it never rotates, and it holds nothing else. It ca
 
 ## The subject convention
 
-The subject is any string. When a node exists, use its id. Otherwise use `pr-<n>`, or the area.
+When a node exists, use its id. Otherwise use `pr-<n>` or a catalog canonical subject. A checked-in alias is accepted. Durable design work must use the canonical spelling so a new synonym does not split history.
 
 The reader takes every subject the writer takes. That is the defect this page was written for. The writer accepted free text while the reader resolved a graph node first, so a ruling about `pr-923` was written, receipted, and lost.
 
 Both sides expand, not just the query. A subject that names a node answers to every spelling of that node: the id, the slug, any case. The operator records under whatever was in front of them. The receipt then prints the canonical id as the way back. A reader that expands only the query sends them to a command that returns nothing.
 
-A subject that names no node matches itself and nothing more. A decision about `pr-92` never answers a query for `pr-921`.
+A subject that names no node and no catalog alias matches itself and nothing more. A decision about `pr-92` never answers a query for `pr-921`.
 
 A decision with no subject at all is reachable only through `fno backlog decisions` with no `--subject`. When the question names no node, that is what `fno outstanding clear --answer` writes.
 
@@ -120,7 +125,7 @@ A decision with no subject at all is reachable only through `fno backlog decisio
 
 `--supersedes <decision-id>` overturns an earlier ruling. The older row stays and is marked `[superseded by ...]`, because a reader of an overturned decision must be able to tell it is not current.
 
-The graph projection stamps that mark at write time under the lock. The index is append-only and cannot, so the reader derives it from the rows it scanned.
+The graph projection stamps that mark at write time under the lock. The index and repository catalog are append-only histories from the reader's perspective, so the reader derives `superseded_by` from the combined rows it scanned. Catalog validation refuses a missing target or supersession cycle.
 
 ## Backfill
 
@@ -134,14 +139,14 @@ The command is idempotent by decision id, so a second run adds nothing.
 
 The index remains append-only. A retraction is a new `decision_retracted` event, never an edit or delete: `fno backlog decide-retract d-1a2b3c4d --reason "the decision no longer applies"`. The command resolves the target first, refuses a blank reason or unknown id, and requires the operator lane to retract law. If the project journal is durable but the recall-index append fails, the command names `fno backlog decide-reindex` and never recommends retrying the retraction.
 
-Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retracted`, or `unscoped`. Human output leads with that marker and JSON includes `lifecycle`, reason, and positive closure evidence when available. `--state live|expired|superseded|retracted|unscoped|all` filters the same projection. A coord row stamped to a node expires only when that node's graph entry has positive closure evidence. A repository-scoped PR row expires only when its exact graph binding is marked merged. Missing, ambiguous, or unreadable closure evidence is `unscoped`, never live. Law does not expire because a node or PR closes.
+Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retracted`, or `unscoped`. Human output leads with that marker, and JSON includes `lifecycle`, reason, and any positive closure evidence. `--state live|expired|superseded|retracted|unscoped|all` filters the same projection. If a coord row is stamped to a node, it expires only after that node's graph entry has positive closure evidence. If a repository-scoped PR row exists, it expires only after its exact graph binding is marked merged. Missing, ambiguous, or unreadable closure evidence is `unscoped`, never live. Law does not expire because a node or PR closes.
 
-The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. Peer-mail trailers use that exact query. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
+The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. Peer-mail trailers use that exact query. JSON adds the canonical subject and a `current_law.status` of `single`, `conflict`, or `none`. Human output prints `CURRENT LAW`, `LAW CONFLICT`, or `NO CURRENT LAW`. Only `single` is an actionable current answer. Conflict never chooses the newest, and catalog damage is a nonzero read failure rather than `none`. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
 
 ## Review and export
 
-`fno backlog decisions --review-list` is a non-mutating operator report. It groups subjects with more than one unrelated live decision after supersession, retraction, and coord expiry have been applied. It names every candidate id, lane, timestamp, and decision, and never chooses a winner or writes the index. Legacy subjectless rows remain visible under `(unscoped)` and are counted as data-quality findings. New answers to subjectless outstanding questions use `question:<question-id>` as their recovery subject.
+`fno backlog decisions --review-list` is a non-mutating operator report. It groups canonical subjects with more than one unrelated live decision after alias resolution, supersession, retraction, and coord expiry have been applied. It names every candidate id, lane, timestamp, and decision, and never chooses a winner or writes the index. Its conflict membership uses the same combined projection as the direct standing query. Legacy subjectless rows remain visible under `(unscoped)` and are counted as data-quality findings. New answers to subjectless outstanding questions use `question:<question-id>` as their recovery subject.
 
-`--output PATH` writes the complete requested report, ignoring the display limit. `.json`, `.md`, and `.markdown` infer the format; `--format json|markdown` is explicit and conflicting or unknown formats are refused. The command prints a positive receipt with the exact path and byte count only after the file is written.
+`--output PATH` writes the complete requested report, ignoring the display limit. `.json`, `.md`, and `.markdown` infer the format. `--format json|markdown` is explicit, and conflicting or unknown formats are refused. The command prints a positive receipt with the exact path and byte count only after the file is written.
 
 The upstream provenance seam owns mail-origin classification, stamped carriage, and the law chokepoint. The law command owns human-origin proof, law recording, and coord-to-law promotion. This lifecycle feature consumes those seams and owns expiry, retraction, review, export, and law-only reads. It does not add another origin classifier, law command, promotion path, or decision store.

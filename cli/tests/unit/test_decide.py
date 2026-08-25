@@ -1061,7 +1061,14 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path, inde
     ).stdout.strip().splitlines()[-1]
     second = runner.invoke(
         decide_app,
-        ["--subject", "x-7d94", "--decision", "fold first", "--supersedes", first],
+        [
+            "--subject",
+            "x-7d94",
+            "--decision",
+            "fold first",
+            "--supersedes",
+            first.upper(),
+        ],
     )
     assert second.exit_code == 0, second.output
 
@@ -2851,3 +2858,347 @@ def test_relaying_nothing_records_no_relayed_by(
         )["decisions"][0]
         assert row["decided_by"] == handle
         assert "relayed_by" not in row, subject
+
+
+def _write_repository_catalog(root: Path, body: str) -> Path:
+    path = root / "docs" / "architecture" / "decisions.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_repository_catalog_absence_is_an_explicit_empty_source(root: Path):
+    from fno.decide.catalog import load_catalog
+
+    catalog = load_catalog(root)
+
+    assert catalog.rows == ()
+    assert catalog.canonical_subject("target self-handoff") == "target self-handoff"
+
+
+def test_repository_catalog_dangling_symlink_is_damage_not_absence(root: Path):
+    from fno.decide.catalog import DecisionCatalogError, load_catalog
+
+    path = root / "docs" / "architecture" / "decisions.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(root / "missing-decisions.yaml")
+
+    with pytest.raises(DecisionCatalogError) as exc:
+        load_catalog(root)
+
+    assert str(path) in str(exc.value)
+    assert "unreachable" in str(exc.value)
+
+
+def test_repository_catalog_normalizes_aliases_and_rows(root: Path):
+    from fno.decide.catalog import load_catalog
+
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-cab50789
+    subject: target-self-handoff
+    aliases: [handoff, target self-handoff]
+    decision: Context pressure is not a handoff trigger.
+    rationale: A harness compaction preserves ownership while a handoff recreates it.
+""",
+    )
+
+    catalog = load_catalog(root)
+
+    assert catalog.canonical_subject("HANDOFF") == "target-self-handoff"
+    assert catalog.canonical_subject("target self-handoff") == "target-self-handoff"
+    assert [row["decision_id"] for row in catalog.rows] == ["d-cab50789"]
+    assert catalog.rows[0]["_source"] == "repository"
+    assert catalog.rows[0]["subject"] == "target-self-handoff"
+
+
+@pytest.mark.parametrize(
+    "body,marker",
+    [
+        (
+            """version: 1
+decisions:
+  - decision_id: d-aaa00001
+    subject: first
+    aliases: [shared]
+    decision: First law.
+    rationale: First reason.
+  - decision_id: d-bbb00002
+    subject: second
+    aliases: [shared]
+    decision: Second law.
+    rationale: Second reason.
+""",
+            "alias 'shared'",
+        ),
+        (
+            """version: 1
+decisions:
+  - decision_id: d-aaa00001
+    subject: first
+    aliases: []
+    decision: First law.
+    rationale: First reason.
+    supersedes: d-bbb00002
+  - decision_id: d-bbb00002
+    subject: first
+    aliases: []
+    decision: Second law.
+    rationale: Second reason.
+    supersedes: d-aaa00001
+""",
+            "supersession cycle",
+        ),
+    ],
+    ids=["duplicate-alias", "supersession-cycle"],
+)
+def test_repository_catalog_rejects_ambiguous_or_cyclic_law(
+    root: Path, body: str, marker: str
+):
+    from fno.decide.catalog import DecisionCatalogError, load_catalog
+
+    path = _write_repository_catalog(root, body)
+
+    with pytest.raises(DecisionCatalogError) as exc:
+        load_catalog(root)
+
+    assert str(path) in str(exc.value)
+    assert marker in str(exc.value)
+
+
+def test_repository_catalog_is_live_law_on_a_fresh_clone(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.decide import list_decisions
+
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-cab50789
+    subject: target-self-handoff
+    aliases: [handoff, target self-handoff]
+    decision: Context pressure is not a handoff trigger.
+    rationale: Compaction preserves the claim and worktree.
+""",
+    )
+
+    label, rows, damaged = list_decisions("handoff", lane="law", state="live")
+
+    assert label == "handoff"
+    assert damaged == 0
+    assert [row["decision_id"] for row in rows] == ["d-cab50789"]
+    assert rows[0]["subject"] == "target-self-handoff"
+    assert rows[0]["lane"] == "law"
+    assert rows[0]["lifecycle"] == "live"
+
+
+def test_repository_metadata_promotes_the_same_local_id_without_promoting_its_lane(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.decide import list_decisions
+
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-cab50789
+    subject: target-self-handoff
+    aliases: [handoff, target self-handoff]
+    decision: Shipped repository law.
+    rationale: Code review promotes this exact row.
+""",
+    )
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-cab50789",
+            "subject": "target self-handoff",
+            "decision": "machine-local wording",
+            "rationale": "machine-local rationale",
+            "authority_source": "agent",
+            "decided_by": "king-session",
+            "supersedes": "d-deadbeef",
+            "ts": "2026-08-25T17:00:00Z",
+        },
+    )
+
+    _, rows, _ = list_decisions("handoff", lane="law", state="live")
+
+    assert [row["decision_id"] for row in rows] == ["d-cab50789"]
+    assert rows[0]["decision"] == "Shipped repository law."
+    assert rows[0]["decided_by"] == "king-session"
+    assert rows[0]["_source"] == "repository"
+    assert "supersedes" not in rows[0]
+
+
+def test_catalog_supersession_and_local_override_share_one_projection(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.decide import _decision_row_by_id, list_decisions
+
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-880626b7
+    subject: process-admission
+    aliases: []
+    decision: Never compare agent and process counts.
+    rationale: They are different units.
+  - decision_id: d-94b2df45
+    subject: process-admission
+    aliases: [process admission]
+    decision: Give the process ceiling its own plumbing.
+    rationale: Shared plumbing recreates the invalid comparison.
+    supersedes: d-880626b7
+""",
+    )
+
+    assert _decision_row_by_id("d-94b2df45")["_source"] == "repository"
+    _, history, _ = list_decisions("process admission", state="all")
+    by_id = {row["decision_id"]: row for row in history}
+    assert by_id["d-880626b7"]["lifecycle"] == "superseded"
+    assert by_id["d-880626b7"]["superseded_by"] == "d-94b2df45"
+    assert by_id["d-94b2df45"]["supersedes"] == "d-880626b7"
+
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-fedcba98",
+            "subject": "process admission",
+            "decision": "Project policy overrides the repository default.",
+            "rationale": "This project needs a stricter ceiling.",
+            "authority_source": "operator",
+            "supersedes": "D-94B2DF45",
+            "ts": "2026-08-26T00:00:00Z",
+        },
+    )
+    _, live, _ = list_decisions("process-admission", lane="law", state="live")
+    assert [row["decision_id"] for row in live] == ["d-fedcba98"]
+
+
+def test_standing_query_reports_one_current_repository_law(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-cab50789
+    subject: target-self-handoff
+    aliases: [handoff, target self-handoff]
+    decision: Context pressure is not a handoff trigger.
+    rationale: Compaction preserves ownership.
+""",
+    )
+
+    machine = runner.invoke(
+        decide_app,
+        ["list", "--subject", "handoff", "--lane", "law", "--state", "live", "--json"],
+    )
+    assert machine.exit_code == 0, machine.output
+    payload = json.loads(machine.stdout)
+    assert payload["canonical_subject"] == "target-self-handoff"
+    assert payload["current_law"] == {
+        "status": "single",
+        "decision_ids": ["d-cab50789"],
+        "decision_id": "d-cab50789",
+    }
+
+    human = runner.invoke(
+        decide_app,
+        ["list", "--subject", "handoff", "--lane", "law", "--state", "live"],
+    )
+    assert "CURRENT LAW  target-self-handoff  d-cab50789" in human.stdout
+
+
+def test_standing_query_and_review_list_surface_the_same_conflict(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-aaa00001
+    subject: deployment-policy
+    aliases: [deployments]
+    decision: Deploy on Tuesday.
+    rationale: First current ruling.
+  - decision_id: d-bbb00002
+    subject: deployment-policy
+    aliases: []
+    decision: Deploy on Wednesday.
+    rationale: Second unrelated current ruling.
+""",
+    )
+
+    direct = runner.invoke(
+        decide_app,
+        ["list", "--subject", "deployments", "--lane", "law", "--state", "live", "--json"],
+    )
+    payload = json.loads(direct.stdout)
+    assert payload["current_law"] == {
+        "status": "conflict",
+        "decision_ids": ["d-bbb00002", "d-aaa00001"],
+    }
+
+    human = runner.invoke(
+        decide_app,
+        ["list", "--subject", "deployments", "--lane", "law", "--state", "live"],
+    )
+    assert "LAW CONFLICT  deployment-policy  d-bbb00002,d-aaa00001" in human.stdout
+
+    review = json.loads(
+        runner.invoke(decide_app, ["list", "--review-list", "--json"]).stdout
+    )
+    group = next(item for item in review["groups"] if item["subject"] == "deployment-policy")
+    assert [row["decision_id"] for row in group["decisions"]] == payload["current_law"][
+        "decision_ids"
+    ]
+
+
+def test_standing_query_reports_none_but_catalog_damage_is_a_read_failure(
+    root: Path, tmp_graph: Path, index: Path
+):
+    empty = runner.invoke(
+        decide_app,
+        ["list", "--subject", "unknown-policy", "--lane", "law", "--state", "live", "--json"],
+    )
+    assert empty.exit_code == 0, empty.output
+    payload = json.loads(empty.stdout)
+    assert payload["canonical_subject"] == "unknown-policy"
+    assert payload["current_law"] == {"status": "none", "decision_ids": []}
+
+    human = runner.invoke(
+        decide_app,
+        ["list", "--subject", "unknown-policy", "--lane", "law", "--state", "live"],
+    )
+    assert "NO CURRENT LAW  unknown-policy" in human.stdout
+
+    path = _write_repository_catalog(root, "version: 2\ndecisions: []\n")
+    damaged = runner.invoke(
+        decide_app,
+        ["list", "--subject", "unknown-policy", "--lane", "law", "--state", "live", "--json"],
+    )
+    assert damaged.exit_code == 1
+    assert str(path) in damaged.stderr
+    assert '"status":"none"' not in damaged.stdout
+
+
+def test_standing_query_refuses_a_damaged_local_index(
+    root: Path, tmp_graph: Path, index: Path
+):
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text('{"type":"operator_decision","data":', encoding="utf-8")
+
+    result = runner.invoke(
+        decide_app,
+        ["list", "--subject", "safety-policy", "--lane", "law", "--state", "live", "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert "decision index has 1 damaged row" in result.stderr
+    assert '"current_law"' not in result.stdout
