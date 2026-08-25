@@ -1736,11 +1736,13 @@ def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
             if name == _default_alias(project, row.get("short_id") or ""):
                 candidates.append(_fit_sid_alias(_default_alias(project, sid), sid))
             candidates.append(_fit_sid_alias(f"{name}-{sid}", sid))
-            name = next(
+            rebuilt = next(
                 (c for c in candidates if c not in seen and not _is_accreted(c)),
                 None,
             )
-            if name is None:
+            if rebuilt is not None:
+                name = rebuilt
+            else:
                 # Every candidate taken. Only a hand-edited map aliasing another
                 # session to exactly `<name>-<sid>` gets here, but falling
                 # through would emit a DUPLICATE - the one thing this function
