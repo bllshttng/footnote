@@ -141,7 +141,7 @@ def _decisions_section(node_id: str | None) -> dict[str, Any]:
     from fno.tracker.metadata import ExternalMetadataUnavailable
 
     try:
-        _label, rows, _damaged = list_decisions(node_id, limit=None)
+        _label, rows, _damaged = list_decisions(node_id, limit=None, state="live")
     except (OSError, ValueError, ExternalMetadataUnavailable) as exc:
         return {
             "decisions": [],

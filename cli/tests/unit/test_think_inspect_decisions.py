@@ -43,7 +43,7 @@ def _receipt(monkeypatch, tmp_path: Path, seed: str, fake_list_decisions):
 
 
 def test_receipt_carries_one_live_decision(monkeypatch, tmp_path: Path) -> None:
-    def fake(subject, limit=None, lane=None):
+    def fake(subject, limit=None, lane=None, state=None):
         assert subject == "x-38d3"
         row = {
             "decision_id": "d-a4b6e1c8",
@@ -65,7 +65,7 @@ def test_receipt_carries_one_live_decision(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_superseded_ruling_is_dropped_by_the_derived_field(monkeypatch, tmp_path: Path) -> None:
-    def fake(subject, limit=None, lane=None):
+    def fake(subject, limit=None, lane=None, state=None):
         withdrawn = {
             "decision_id": "d-85352ee7",
             "ts": "2026-08-22T12:12:00Z",
@@ -98,7 +98,7 @@ def test_superseded_ruling_is_dropped_by_the_derived_field(monkeypatch, tmp_path
 
 
 def test_unreadable_decision_index_reports_error_not_empty(monkeypatch, tmp_path: Path) -> None:
-    def fake(subject, limit=None, lane=None):
+    def fake(subject, limit=None, lane=None, state=None):
         raise OSError("index corrupt")
 
     receipt = _receipt(monkeypatch, tmp_path, "x-38d3", fake)
@@ -109,7 +109,7 @@ def test_unreadable_decision_index_reports_error_not_empty(monkeypatch, tmp_path
 
 
 def test_node_with_no_rulings_reads_clean(monkeypatch, tmp_path: Path) -> None:
-    def fake(subject, limit=None, lane=None):
+    def fake(subject, limit=None, lane=None, state=None):
         return subject, [], 0
 
     receipt = _receipt(monkeypatch, tmp_path, "x-953b", fake)
@@ -122,7 +122,7 @@ def test_node_with_no_rulings_reads_clean(monkeypatch, tmp_path: Path) -> None:
 def test_decisions_list_is_capped_and_says_so(monkeypatch, tmp_path: Path) -> None:
     from fno import think_inspect
 
-    def fake(subject, limit=None, lane=None):
+    def fake(subject, limit=None, lane=None, state=None):
         rows = [
             {
                 "decision_id": f"d-{i:08x}",
@@ -157,7 +157,7 @@ def test_no_decisions_result_is_not_a_shared_mutable_list(monkeypatch, tmp_path:
 
         return subprocess.CompletedProcess(argv, 1, "", "unavailable")
 
-    def fake(subject, limit=None, lane=None):
+    def fake(subject, limit=None, lane=None, state=None):
         return subject, [], 0
 
     monkeypatch.setattr("fno.decide.list_decisions", fake)

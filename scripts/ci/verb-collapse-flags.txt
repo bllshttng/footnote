@@ -22,6 +22,7 @@ backlog cost !--session
 backlog decide !--decision
 backlog decide !--subject
 backlog decide !--origin
+backlog decide-retract !--origin
 backlog decisions !--subject
 backlog idea !--tag
 backlog intake !--batch

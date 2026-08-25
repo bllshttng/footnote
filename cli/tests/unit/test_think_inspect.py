@@ -136,6 +136,25 @@ def test_receipt_exposes_unavailable_evidence(tmp_path: Path) -> None:
     assert "database schema evidence is missing" in receipt["warnings"]
 
 
+def test_decisions_consumer_requests_live_rows(monkeypatch) -> None:
+    from fno import decide
+    from fno.think_inspect import _decisions_section
+
+    seen: dict[str, object] = {}
+
+    def fake_list_decisions(subject, limit=None, lane=None, state=None):
+        seen["state"] = state
+        return subject, [
+            {"decision_id": "d-live", "decision": "keep", "lifecycle": "live"},
+        ], 0
+
+    monkeypatch.setattr(decide, "list_decisions", fake_list_decisions)
+    section = _decisions_section("x-4007")
+
+    assert seen["state"] == "live"
+    assert [row["decision_id"] for row in section["decisions"]] == ["d-live"]
+
+
 def test_corrupt_graph_is_not_recast_as_empty(tmp_path: Path) -> None:
     from fno.think_inspect import _load_graph
 

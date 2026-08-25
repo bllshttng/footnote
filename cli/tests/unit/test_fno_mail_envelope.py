@@ -122,6 +122,12 @@ def test_absent_reply_to_is_byte_identical_to_pre_change():
     )
 
 
+def test_peer_trailer_queries_only_live_law():
+    from fno.mail.envelope import FNO_MAIL_TRAILER
+
+    assert "fno backlog decisions <topic> --lane law --state live" in FNO_MAIL_TRAILER
+
+
 def test_wrap_is_paired_envelope_with_trailer():
     # open tag, newline, body, newline, trailer, newline, close tag.
     assert (
