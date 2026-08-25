@@ -556,6 +556,62 @@ def validate(event: dict[str, Any]) -> None:
                 f"unknown review_attestation data.verdict: {data.get('verdict')!r} "
                 f"(allowed: {allowed})"
             )
+        # The finding record is optional as a whole (every pre-existing
+        # attestation carries none of it), but a PRESENT key must be the
+        # right shape: this is the record the gate re-derives blocking from,
+        # so a silently-malformed one is a forged count one level down.
+        for count_field in ("findings_blocking", "findings_nonblocking", "review_round"):
+            value = data.get(count_field)
+            if value is not None and (
+                not _is_nonnegative_integral_number(value)
+                or int(value) > MAX_SAFE_EVENT_INTEGER
+            ):
+                raise ValidationError(
+                    f"review_attestation data.{count_field} must be a non-negative integer"
+                )
+        if data.get("findings_truncated") is not None and not isinstance(
+            data.get("findings_truncated"), bool
+        ):
+            raise ValidationError("review_attestation data.findings_truncated must be boolean")
+        findings = data.get("findings")
+        if findings is not None:
+            if not isinstance(findings, list) or not all(
+                isinstance(item, dict)
+                and isinstance(item.get("blocking"), bool)
+                and isinstance(item.get("has_required_fields"), bool)
+                and isinstance(item.get("finding_key"), str)
+                and item["finding_key"].strip()
+                and (
+                    item.get("category") is None
+                    or isinstance(item.get("category"), str)
+                )
+                and (item.get("verdict") is None or isinstance(item.get("verdict"), str))
+                for item in findings
+            ):
+                raise ValidationError(
+                    "review_attestation data.findings must be an array of "
+                    "{category, verdict, blocking, has_required_fields, finding_key} "
+                    "primitives"
+                )
+        dispositions = data.get("dispositions")
+        if dispositions is not None:
+            disposition_enum = type_spec["data"]["properties"]["dispositions"]["items"][
+                "properties"
+            ]["disposition"]["enum"]
+            if not isinstance(dispositions, list) or not all(
+                isinstance(item, dict)
+                and isinstance(item.get("finding_key"), str)
+                and item["finding_key"].strip()
+                and item.get("disposition") in disposition_enum
+                and isinstance(item.get("reason"), str)
+                and item["reason"].strip()
+                for item in dispositions
+            ):
+                raise ValidationError(
+                    "review_attestation data.dispositions must be an array of "
+                    "{finding_key, disposition in "
+                    f"{disposition_enum}, reason}} objects"
+                )
 
     # Same chokepoint rationale: mail_escalation's reason drives the overlay
     # evidence text and the question-vs-attended-miss split, so a typo'd reason

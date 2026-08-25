@@ -142,6 +142,8 @@ def normalize(payload: Any, source: str) -> list[FindingRecord]:
     - ``codex_review_output``: the ``ExitedReviewMode`` ``review_output``
       object; reads ``.findings``. Field names outside the shared vocabulary
       map to ``unmappable`` records.
+    - ``records``: a bare array already in the shared vocabulary (the
+      findings-file shape ``fno do review classify`` reads).
 
     Raises :class:`FindingsNormalizeError` when the findings key itself is
     absent or not an array: that is "not a review", which the caller treats
@@ -166,6 +168,10 @@ def normalize(payload: Any, source: str) -> list[FindingRecord]:
         return records
     if source == "codex_review_output":
         return [_record(item) for item in _findings_array(payload, "findings")]
+    if source == "records":
+        if not isinstance(payload, list):
+            raise FindingsNormalizeError("records payload must be an array")
+        return [_record(item) for item in payload]
     raise FindingsNormalizeError(f"unknown source '{source}'")
 
 
