@@ -98,7 +98,10 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
     (tmp_path / "opencode-serve.json").write_text(
         json.dumps({"pid": 901, "pid_start": 123}), encoding="utf-8"
     )
-    assert doctor_footprint._live_shared_serve_root_pids() == (set(), None)
+    assert doctor_footprint._live_shared_serve_root_pids() == (
+        set(),
+        "shared serve root liveness unavailable",
+    )
 
     (tmp_path / "opencode-serve.json").write_text(
         json.dumps({"pid": 900, "pid_start": None}), encoding="utf-8"
@@ -121,6 +124,29 @@ def test_live_root_pids_refuses_registry_pid_without_start_token(monkeypatch) ->
         short_id="oc",
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    assert doctor_footprint._live_root_pids() == (
+        set(),
+        "worker root liveness unavailable",
+    )
+
+
+def test_live_root_pids_refuses_unknown_registry_liveness(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=902,
+        pid_start_time=123,
+        harness="opencode",
+        short_id="oc",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda _pid, _start: None,
+    )
 
     assert doctor_footprint._live_root_pids() == (
         set(),
@@ -355,7 +381,8 @@ def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(monkeypatc
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 0, result.output
-    assert "processes: 3 (threshold 2)" in result.stdout
+    assert "processes: 3" in result.stdout
+    assert "direct processes: 1 (threshold 2)" in result.stdout
 
 
 def test_ac9_edge_cpu_share_uses_constrained_capacity(monkeypatch) -> None:

@@ -43,15 +43,15 @@ def _fno_binary() -> str:
     return shutil.which("fno") or shutil.which("fno-py") or "fno"
 
 
-def _root_pid_is_live(pid: int, pid_start: int | None) -> bool:
+def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
     from fno.agents.spawn_gate import _pid_alive, _process_start_time
 
     if pid == 1:
         current_start = _process_start_time(pid)
-        return current_start is not None and (
-            pid_start is None or current_start == pid_start
-        )
-    return _pid_alive(pid, pid_start) is True
+        if current_start is None:
+            return None
+        return pid_start is None or current_start == pid_start
+    return _pid_alive(pid, pid_start)
 
 
 def _live_root_pids(
@@ -70,7 +70,10 @@ def _live_root_pids(
                 continue
             if row.pid_start_time is None:
                 return roots, "worker root liveness unavailable"
-            if _root_pid_is_live(row.pid, row.pid_start_time):
+            root_live = _root_pid_is_live(row.pid, row.pid_start_time)
+            if root_live is None:
+                return roots, "worker root liveness unavailable"
+            if root_live:
                 roots.add(row.pid)
         pidless_claude_rows = [
             row
@@ -97,7 +100,10 @@ def _live_root_pids(
             return roots, "worker root discovery unavailable"
         for row in pidless_claude_rows:
             pid = socket_pids[row.short_id]
-            if _root_pid_is_live(pid, None):
+            root_live = _root_pid_is_live(pid, None)
+            if root_live is None:
+                return roots, "worker root liveness unavailable"
+            if root_live:
                 roots.add(pid)
             else:
                 return roots, "worker root liveness unavailable"
@@ -111,7 +117,6 @@ def _live_shared_serve_root_pids() -> tuple[set[int], str | None]:
     roots: set[int] = set()
     try:
         from fno import paths
-        from fno.agents.spawn_gate import _pid_alive
 
         record = json.loads(
             (paths.agents_home_dir() / "opencode-serve.json").read_text(encoding="utf-8")
@@ -123,9 +128,12 @@ def _live_shared_serve_root_pids() -> tuple[set[int], str | None]:
             and not isinstance(pid, bool)
             and isinstance(pid_start, int)
             and not isinstance(pid_start, bool)
-            and _pid_alive(pid, pid_start) is True
         ):
-            roots.add(pid)
+            root_live = _root_pid_is_live(pid, pid_start)
+            if root_live is None:
+                return roots, "shared serve root liveness unavailable"
+            if root_live:
+                roots.add(pid)
         elif isinstance(record, dict) and "pid_start" not in record:
             return roots, "shared serve root liveness unavailable"
         elif isinstance(record, dict) and record.get("pid_start") is None:
@@ -286,10 +294,12 @@ def _emit_result(
             f"({reading.descendant_process_count} processes)"
         )
         typer.echo(
-            f"processes: {reading.process_count} "
+            f"processes: {reading.process_count}"
+        )
+        typer.echo(
+            f"direct processes: {reading.direct_process_count} "
             f"(threshold {process_threshold if process_threshold is not None else 'n/a'})"
         )
-        typer.echo(f"direct processes: {reading.direct_process_count}")
         typer.echo(f"transient calls: {reading.transient_call_count}")
         typer.echo(f"verdict: {verdict} (exit {exit_code})")
         if reading.unparsed_lines:
