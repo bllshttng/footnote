@@ -20,6 +20,8 @@ from fno.test_cmd import _RUST_BUILD_STEP, _name_matches, smoke_steps
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "cli-ci.yml"
+_RUST_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "rust-ci.yml"
+_SMOKE_SETUP = _REPO_ROOT / ".github" / "actions" / "smoke-setup" / "action.yml"
 
 # `--only 'a,b'` / `--skip 'a'`, quoted or bare, as the workflow writes them.
 _SELECTOR = re.compile(r"--(only|skip)[= ]+'([^']*)'|--(only|skip)[= ]+(\S+)")
@@ -147,3 +149,23 @@ def test_every_shard_clears_the_rust_binary_before_it_starts() -> None:
         assert triggers & selected, (
             f"{job} selects neither pytest nor the rust build, so it never "
             "clears the binary and its pre-build steps run with it present")
+
+
+def test_smoke_setup_cleans_fno_agents_before_building_cached_artifacts() -> None:
+    action = yaml.safe_load(_SMOKE_SETUP.read_text())
+    run = "\n".join(step.get("run", "") for step in action["runs"]["steps"])
+
+    clean = run.index("cargo clean -p fno-agents")
+    build = run.index("cargo build --manifest-path crates/fno-agents/Cargo.toml")
+
+    assert clean < build, "smoke setup can execute a stale cached fno-agents binary"
+
+
+def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
+    workflow = yaml.safe_load(_RUST_WORKFLOW.read_text())
+    steps = workflow["jobs"]["test"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    clean = names.index("Clean cached fno-agents package artifacts")
+    unit = names.index("cargo test --lib --bins (fno-agents)")
+
+    assert clean < unit, "rust-ci can test a stale cached fno-agents harness"
