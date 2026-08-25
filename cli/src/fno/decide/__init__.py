@@ -44,6 +44,7 @@ AUTHORITY_SOURCES: tuple[str, ...] = (
     "agent",      # any other agent ruling: coordination
     "beastmode",  # an agent acting under an explicit grant
 )
+READ_AUTHORITY_SOURCES = frozenset((*AUTHORITY_SOURCES, "chat_attested"))
 
 # Origin is evidence about the channel, not an authority claim. Keep the two
 # axes separate: only operator-origin evidence can carry operator intent into
@@ -105,6 +106,7 @@ PROJECTION_FIELDS = (
     "relayed_by",
     "origin",
     "authority_source",
+    "graduation",
     "rationale",
     "supersedes",
     "question_id",
@@ -334,6 +336,7 @@ def record_decision(
     subject: str | None = None,
     decided_by: str | None = None,
     authority_source: str | None = None,
+    graduation: dict[str, str] | None = None,
     consent: OperatorConsent | None = None,
     origin: str | None = None,
     rationale: str | None = None,
@@ -360,9 +363,11 @@ def record_decision(
     """
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
+    from fno.decide.graduation import normalize_graduation
 
     if consent is None:
         require_operator_session()
+    graduation = normalize_graduation(graduation)
 
     # The event records this value, so the floor must bind here, not only in
     # the provenance resolution: a gated provenance beside a raw self-declared
@@ -386,6 +391,7 @@ def record_decision(
             "rationale": rationale,
             "options": list(options or []),
             "supersedes": supersedes,
+            "graduation": graduation,
         }
         validate_operator_consent(consent, expected=consent_expected)
         # The permission click approves the attribution; it does not prove a
@@ -434,6 +440,7 @@ def record_decision(
         relayed_by=provenance.relayed_by,
         origin=origin,
         authority_source=provenance.authority_source,
+        graduation=graduation,
         rationale=rationale,
         supersedes=supersedes,
     )
@@ -879,7 +886,7 @@ def _decision_lane(row: dict) -> str:
         return "coord"
     if authority == "beastmode":
         return "grant"
-    if authority == "operator":
+    if authority in {"operator", "chat_attested"}:
         if str(row.get("ts") or "") >= AUTHORITY_LANE_CUTOVER:
             return "law"
         return "unattributed"
@@ -1260,7 +1267,7 @@ def review_list() -> dict[str, Any]:
         if (
             authority
             and row.get("_source") != "repository"
-            and authority not in AUTHORITY_SOURCES
+            and authority not in READ_AUTHORITY_SOURCES
         ):
             invalid_authority += 1
         if row.get("lifecycle") != "live" or not subject:

@@ -91,6 +91,7 @@ def test_operator_records_law_in_one_call_with_two_positionals(
     assert rows[0]["data"]["subject"] == "worktree-policy"
     assert rows[0]["data"]["decision"] == "Codex uses path-addressed worktrees"
     assert rows[0]["data"]["authority_source"] == "operator"
+    assert rows[0]["data"]["graduation"] == {"kind": "guidance"}
 
 
 def test_agent_cannot_use_one_call_law_writer(

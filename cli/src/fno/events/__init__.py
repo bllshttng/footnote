@@ -977,6 +977,7 @@ def operator_decision(
     relayed_by: str | None = None,
     origin: str | None = None,
     authority_source: str | None = None,
+    graduation: dict[str, str] | None = None,
     rationale: str | None = None,
     supersedes: str | None = None,
     source: str = "target",
@@ -1002,6 +1003,7 @@ def operator_decision(
         ("relayed_by", relayed_by),
         ("origin", origin),
         ("authority_source", authority_source),
+        ("graduation", graduation),
         ("rationale", rationale[:QUESTION_CAP] if rationale else None),
         ("supersedes", supersedes),
     ):

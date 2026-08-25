@@ -1018,6 +1018,7 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     assert data["decision_id"] == did
     assert data["subject"] == "x-7d94"
     assert data["decision"] == "fold every project's inbox"
+    assert data["graduation"] == {"kind": "guidance"}
     # decided_by, not authority_source. Authority is legitimately ABSENT for a
     # caller with no session identity and no terminal: that state refuses to
     # claim one, and the reader's `unattributed` lane covers it.
@@ -1026,12 +1027,45 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     entry = json.loads(tmp_graph.read_text())["entries"][0]
     assert [d["decision_id"] for d in entry["decisions"]] == [did]
     assert entry["decisions"][0]["rationale"].startswith("a fold is a read")
+    assert entry["decisions"][0]["graduation"] == {"kind": "guidance"}
     assert entry["decisions"][0]["options"] == ["fold first", "migrate first"]
     assert entry["decisions"][0]["superseded_by"] is None
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
     assert "options: fold first, migrate first" in listed.output
+
+
+def test_explicit_enforced_graduation_reaches_every_decision_store(
+    root: Path, tmp_graph: Path, index: Path
+):
+    result = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "x-7d94",
+            "--decision",
+            "operator-only writes are enforced",
+            "--graduation",
+            "enforced",
+            "--graduation-ref",
+            "test:tests.unit.test_decide::test_operator_only",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    decision_id = result.stdout.strip().splitlines()[-1]
+    expected = {
+        "kind": "enforced",
+        "artifact": "test:tests.unit.test_decide::test_operator_only",
+    }
+    assert _events(root)[0]["data"]["graduation"] == expected
+    indexed = json.loads(index.read_text().splitlines()[0])["data"]
+    assert indexed["decision_id"] == decision_id
+    assert indexed["graduation"] == expected
+    projected = json.loads(tmp_graph.read_text())["entries"][0]["decisions"][0]
+    assert projected["decision_id"] == decision_id
+    assert projected["graduation"] == expected
 
 
 def test_new_coord_record_stamps_an_exact_node_expiry_reference(
@@ -1423,12 +1457,22 @@ def test_limit_caps_the_newest_and_zero_means_no_cap(
     "authority,ts,question_id,expected",
     [
         ("operator", "2026-08-21T00:00:01Z", None, "law"),
+        ("chat_attested", "2026-08-21T00:00:01Z", None, "law"),
+        ("chat_attested", "2026-08-20T23:59:59Z", None, "unattributed"),
         ("operator", "2026-08-20T23:59:59Z", "q-human", "unattributed"),
         ("agent", "2026-08-20T23:59:59Z", None, "coord"),
         ("beastmode", "2026-08-20T23:59:59Z", None, "grant"),
         ("operator", "2026-08-20T23:59:59Z", None, "unattributed"),
     ],
-    ids=["post-cutover-law", "legacy-question", "coord", "grant", "legacy"],
+    ids=[
+        "post-cutover-law",
+        "post-cutover-chat-law",
+        "legacy-chat",
+        "legacy-question",
+        "coord",
+        "grant",
+        "legacy",
+    ],
 )
 def test_list_derives_and_filters_authority_lanes_in_the_engine(
     index: Path,
