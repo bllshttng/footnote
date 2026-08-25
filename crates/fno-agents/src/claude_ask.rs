@@ -989,6 +989,206 @@ impl ClaudeHome {
     }
 }
 
+/// Adapter for Claude's persistent `--bg` supervisor. Claude owns the roster,
+/// so fno records a separate sidecar after a positive control-socket attach and
+/// never writes Claude's provider state.
+pub struct ClaudeDaemonAdapter {
+    roster_path: PathBuf,
+    state_path: PathBuf,
+    lock_path: PathBuf,
+}
+
+impl ClaudeDaemonAdapter {
+    pub fn new(roster_path: PathBuf) -> Self {
+        let daemon_dir = roster_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self {
+            state_path: daemon_dir.join("fno-harness-daemon.json"),
+            lock_path: daemon_dir.join("fno-harness-daemon.lock"),
+            roster_path,
+        }
+    }
+
+    fn roster_state(&self) -> Result<crate::harness_daemon::DaemonState, String> {
+        let roster = crate::claude_roster::ClaudeRoster::load(&self.roster_path)
+            .map_err(|error| format!("Claude daemon roster unreadable: {error}"))?;
+        let supervisor_pid = roster
+            .supervisor_pid
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| "Claude roster has no supervisorPid".to_string())?;
+        let worker = roster
+            .workers_deduped()
+            .into_iter()
+            .find_map(|worker| {
+                worker
+                    .resolve_control_sock()
+                    .map(|control_socket| (worker.short_id().to_string(), control_socket))
+            })
+            .ok_or_else(|| "Claude roster has no worker control socket".to_string())?;
+        let process_start_time = crate::daemon::process_start_time(supervisor_pid)
+            .ok_or_else(|| "Claude supervisor start time is unreadable".to_string())?;
+        let raw = serde_json::json!({
+            "supervisorPid": supervisor_pid,
+            "processStartTime": process_start_time,
+            "controlSocket": worker.1,
+            "shortId": worker.0,
+            "updatedAt": roster.updated_at,
+        });
+        crate::harness_daemon::DaemonState::new(
+            raw,
+            supervisor_pid,
+            process_start_time,
+            worker.1.to_string_lossy(),
+            format!("{supervisor_pid}:{process_start_time}"),
+        )
+    }
+
+    fn needs_bootstrap(&self) -> Result<bool, String> {
+        let roster = match crate::claude_roster::ClaudeRoster::load(&self.roster_path) {
+            Ok(roster) => roster,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(format!("Claude daemon roster unreadable: {error}")),
+        };
+        Ok(roster.supervisor_pid.is_none()
+            || !roster
+                .workers_deduped()
+                .into_iter()
+                .any(|worker| worker.resolve_control_sock().is_some()))
+    }
+}
+
+impl crate::harness_daemon::HarnessDaemonAdapter for ClaudeDaemonAdapter {
+    fn harness(&self) -> &str {
+        "claude"
+    }
+
+    fn state_path(&self) -> &Path {
+        &self.state_path
+    }
+
+    fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+
+    fn parse_state(&self, raw: &str) -> Result<crate::harness_daemon::DaemonState, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        let pid = value
+            .get("supervisorPid")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| "missing Claude supervisorPid".to_string())? as u32;
+        let process_start_time = value
+            .get("processStartTime")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|start| *start > 0)
+            .ok_or_else(|| "missing Claude supervisor process start time".to_string())?;
+        let endpoint = value
+            .get("controlSocket")
+            .and_then(serde_json::Value::as_str)
+            .filter(|socket| !socket.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "missing Claude control socket".to_string())?;
+        let short_id = value
+            .get("shortId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|short_id| !short_id.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "missing Claude worker identity".to_string())?;
+        crate::harness_daemon::DaemonState::new(
+            value,
+            pid,
+            process_start_time,
+            endpoint,
+            format!("{pid}:{process_start_time}:{short_id}"),
+        )
+    }
+
+    fn is_healthy(&self, state: &crate::harness_daemon::DaemonState) -> bool {
+        let short_id = state
+            .raw
+            .get("shortId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let Ok(mut transport) =
+            crate::claude_attach::UnixControlTransport::connect(Path::new(&state.endpoint))
+        else {
+            return false;
+        };
+        crate::claude_attach::perform_attach(
+            &mut transport,
+            &crate::claude_attach::AttachRequest::for_frame_stream(
+                short_id,
+                crate::claude_roster::read_control_key(),
+            ),
+        )
+        .is_ok()
+    }
+
+    fn healthy_state(
+        &self,
+        _state: &crate::harness_daemon::DaemonState,
+    ) -> Option<crate::harness_daemon::DaemonState> {
+        let current = self.roster_state().ok()?;
+        self.is_healthy(&current).then_some(current)
+    }
+
+    fn may_replace(&self) -> bool {
+        false
+    }
+
+    fn may_refresh_unhealthy(&self) -> bool {
+        true
+    }
+
+    fn unreadable_state_may_boot(&self) -> bool {
+        true
+    }
+
+    fn boot(&self) -> Result<crate::harness_daemon::DaemonState, String> {
+        // Claude has no standalone daemon-start command. Read the provider's
+        // roster and prove its existing supervisor instead of creating an
+        // unrequested worker as a preflight side effect.
+        let state = self
+            .roster_state()
+            .map_err(|error| format!("{error}; start `claude --bg` once, then retry"))?;
+        Ok(state)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeDaemonPreflight {
+    Ready(crate::harness_daemon::DaemonReceipt),
+    NeedsBootstrap,
+}
+
+pub fn preflight_claude_daemon(claude_home: &ClaudeHome) -> Result<ClaudeDaemonPreflight, String> {
+    let adapter = ClaudeDaemonAdapter::new(claude_home.daemon_roster_path());
+    match crate::harness_daemon::ensure_harness_daemon(&adapter) {
+        Ok(result) => Ok(ClaudeDaemonPreflight::Ready(result.receipt)),
+        Err(error) => {
+            if adapter.needs_bootstrap()? {
+                Ok(ClaudeDaemonPreflight::NeedsBootstrap)
+            } else {
+                Err(error.to_string())
+            }
+        }
+    }
+}
+
+/// Ensure Claude's persistent supervisor before a `claude --bg` spawn.
+pub fn ensure_claude_daemon(
+    claude_home: &ClaudeHome,
+) -> Result<crate::harness_daemon::DaemonReceipt, String> {
+    crate::harness_daemon::ensure_harness_daemon(&ClaudeDaemonAdapter::new(
+        claude_home.daemon_roster_path(),
+    ))
+    .map(|result| result.receipt)
+    .map_err(|error| error.to_string())
+}
+
 /// Pointer into the claude session registry for one bg supervisor session
 /// (`SessionLocator`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2293,6 +2493,30 @@ impl AskOutcome {
             stderr: format!("{}\n", msg.into()),
             exit_code: code,
         }
+    }
+}
+
+/// Add the positive daemon ownership proof to the JSON spawn receipt emitted by
+/// the client-side Claude lane.
+pub fn stamp_daemon_receipt(
+    outcome: &mut AskOutcome,
+    receipt: &crate::harness_daemon::DaemonReceipt,
+) {
+    if outcome.exit_code != 0 {
+        return;
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(outcome.stdout.trim()) else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert("durability".into(), receipt.durability.clone().into());
+    object.insert("harness".into(), receipt.harness.clone().into());
+    object.insert("incarnation".into(), receipt.incarnation.clone().into());
+    object.insert("endpoint".into(), receipt.endpoint.clone().into());
+    if let Ok(json) = serde_json::to_string(&value) {
+        outcome.stdout = format!("{json}\n");
     }
 }
 
@@ -5307,5 +5531,28 @@ mod tests {
         // A non-JSON stdout (e.g. a crashed probe) falls back to the stderr tail.
         let detail = family1_truth_failure_detail(b"not json", "  banner  ");
         assert_eq!(detail, "banner");
+    }
+
+    #[test]
+    fn claude_daemon_state_requires_start_time_and_worker_endpoint() {
+        use crate::harness_daemon::HarnessDaemonAdapter;
+        let adapter = ClaudeDaemonAdapter::new(PathBuf::from("/tmp/claude-roster.json"));
+        let error = adapter
+            .parse_state(
+                r#"{"supervisorPid":42,"controlSocket":"/tmp/control.sock","shortId":"a1b2c3d4"}"#,
+            )
+            .expect_err("a sidecar without supervisor start time is unreadable");
+        assert!(error.contains("process start"), "{error}");
+    }
+
+    #[test]
+    fn claude_daemon_state_receipt_names_control_socket_and_incarnation() {
+        use crate::harness_daemon::HarnessDaemonAdapter;
+        let adapter = ClaudeDaemonAdapter::new(PathBuf::from("/tmp/claude-roster.json"));
+        let state = adapter
+            .parse_state(r#"{"supervisorPid":42,"processStartTime":99,"controlSocket":"/tmp/control.sock","shortId":"a1b2c3d4"}"#)
+            .unwrap();
+        assert_eq!(state.endpoint, "/tmp/control.sock");
+        assert_eq!(state.incarnation, "42:99:a1b2c3d4");
     }
 }

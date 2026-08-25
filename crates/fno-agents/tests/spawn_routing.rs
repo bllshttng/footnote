@@ -60,6 +60,10 @@ if [ -n "$FAKE_CLAUDE_SESSIONS" ]; then
   mkdir -p "$FAKE_CLAUDE_SESSIONS"
   printf '%s\n' '{"jobId":"7c5dcf5d","kind":"bg","messagingSocketPath":"/tmp/fake-claude.sock","sessionId":"12345678-1234-4234-8234-123456789abc"}' > "$FAKE_CLAUDE_SESSIONS/999.json"
 fi
+if [ -n "$FAKE_CLAUDE_DAEMON_DIR" ]; then
+  mkdir -p "$FAKE_CLAUDE_DAEMON_DIR" "$FAKE_CLAUDE_CONTROL_DIR/spare"
+  printf '{"proto":1,"supervisorPid":%s,"updatedAt":1,"workers":{"12345678":{"sessionId":"12345678-1234-4234-8234-123456789abc","pid":%s,"procStart":1,"ptySock":"%s/spare/12345678.pty.sock","cwd":"/tmp"}}}\n' "$FAKE_CLAUDE_SUPERVISOR_PID" "$FAKE_CLAUDE_SUPERVISOR_PID" "$FAKE_CLAUDE_CONTROL_DIR" > "$FAKE_CLAUDE_DAEMON_DIR/roster.json"
+fi
 printf 'backgrounded · 7c5dcf5d · %s\n' "$name"
 exit 0
 "#;
@@ -67,6 +71,71 @@ exit 0
     fs::write(&path, script).unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Install the smallest positive Claude daemon fixture: a roster, a control
+/// socket, and one attachable worker. The client must complete the attach
+/// handshake before the fake `claude --bg` binary is allowed to run.
+fn install_fake_claude_daemon(daemon_dir: &Path) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let shard = daemon_dir.join("fixture");
+    let spare = shard.join("spare");
+    fs::create_dir_all(&spare).unwrap();
+    let control_dir = PathBuf::from(format!(
+        "/tmp/fno-cd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(control_dir.join("spare")).unwrap();
+    let control = control_dir.join("control.sock");
+    let listener = UnixListener::bind(&control).unwrap();
+    let pty = control_dir.join("spare").join("12345678.pty.sock");
+    let roster = serde_json::json!({
+        "proto": 1,
+        "supervisorPid": std::process::id(),
+        "updatedAt": 1,
+        "workers": {
+            "12345678": {
+                "sessionId": CLAUDE_SESSION_ID,
+                "pid": std::process::id(),
+                "procStart": 1,
+                "ptySock": pty,
+                "cwd": "/tmp"
+            }
+        }
+    });
+    fs::write(daemon_dir.join("roster.json"), roster.to_string()).unwrap();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let _ = reader.read_line(&mut request);
+            let mut stream = stream;
+            let _ = stream.write_all(b"{\"ok\":true,\"op\":\"attach\"}\n");
+        }
+    });
+}
+
+fn install_fake_claude_control_socket(control_dir: &Path) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    fs::create_dir_all(control_dir.join("spare")).unwrap();
+    let listener = UnixListener::bind(control_dir.join("control.sock")).unwrap();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let _ = reader.read_line(&mut request);
+            let mut stream = stream;
+            let _ = stream.write_all(b"{\"ok\":true,\"op\":\"attach\"}\n");
+        }
+    });
 }
 
 /// Install a fake codex binary that emits a one-shot JSONL session.
@@ -1275,6 +1344,20 @@ fn client_spawn_pane_no_provider_falls_through() {
 fn client_spawn_bg_claude_happy_path_prints_receipt() {
     let home_dir = tmpdir("cli-spawn-claude-hp-home");
     let claude_home = tmpdir("cli-spawn-claude-hp-claude");
+    let daemon_dir = claude_home.join("daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+    install_fake_claude_daemon(&daemon_dir);
+    fs::write(
+        daemon_dir.join("fno-harness-daemon.json"),
+        serde_json::json!({
+            "supervisorPid": std::process::id(),
+            "processStartTime": fno_agents::daemon::process_start_time(std::process::id()),
+            "controlSocket": "/tmp/reaped-worker/control.sock",
+            "shortId": "deadbeef",
+        })
+        .to_string(),
+    )
+    .unwrap();
     let sessions = claude_home.join(".claude").join("sessions");
     let bin_dir = tmpdir("cli-spawn-claude-hp-bin");
     let cwd = tmpdir("cli-spawn-claude-hp-cwd");
@@ -1302,6 +1385,7 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
         .env("HOME", &claude_home)
+        .env("FNO_CLAUDE_DAEMON_DIR", &daemon_dir)
         .env("FAKE_CLAUDE_SESSIONS", &sessions)
         .env("PATH", path_with(&bin_dir))
         .current_dir(&cwd)
@@ -1315,15 +1399,19 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
         Some(0),
         "claude spawn happy path must exit 0; stderr: {stderr}"
     );
-    // Receipt is exactly one compact JSON line (the contract the shell
-    // callers' `grep -F '"short_id"' | jq -r .short_id` parse relies on).
-    // harness axis under `harness`; an unrouted bg spawn carries no provider
-    // (vendor) or model key (AC5).
-    let expected = "{\"name\": \"hp-agent\", \"short_id\": \"7c5dcf5d\", \"harness\": \"claude\", \"status\": \"live\"}\n";
-    assert_eq!(
-        stdout, expected,
-        "claude spawn receipt must be the exact compact JSON line"
-    );
+    // Receipt is one compact JSON line with positive daemon ownership proof.
+    let receipt: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(receipt["name"], "hp-agent");
+    assert_eq!(receipt["short_id"], "7c5dcf5d");
+    assert_eq!(receipt["harness"], "claude");
+    assert_eq!(receipt["status"], "live");
+    assert_eq!(receipt["durability"], "daemon-owned");
+    assert!(receipt["incarnation"]
+        .as_str()
+        .is_some_and(|value| value.contains(':')));
+    assert!(receipt["endpoint"]
+        .as_str()
+        .is_some_and(|value| value.ends_with("control.sock")));
     // And the registry row landed under the temp home.
     let registry_raw = fs::read_to_string(home_dir.join("registry.json")).unwrap_or_default();
     let registry: serde_json::Value = serde_json::from_str(&registry_raw).unwrap();
@@ -1331,6 +1419,73 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
     assert_eq!(row["name"], "hp-agent");
     assert_eq!(row["short_id"], "7c5dcf5d");
     assert_eq!(row["harness_session_id"], CLAUDE_SESSION_ID);
+}
+
+#[test]
+fn client_spawn_bg_claude_bootstraps_the_first_daemon_worker() {
+    let _path_guard = PATH_MUTEX.lock().unwrap();
+    let home_dir = tmpdir("cli-spawn-claude-bootstrap-home");
+    let claude_home = tmpdir("cli-spawn-claude-bootstrap-claude");
+    let daemon_dir = claude_home.join("daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+    let control_dir = PathBuf::from(format!(
+        "/tmp/fno-cb-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    install_fake_claude_control_socket(&control_dir);
+    let sessions = claude_home.join(".claude").join("sessions");
+    let bin_dir = tmpdir("cli-spawn-claude-bootstrap-bin");
+    let cwd = tmpdir("cli-spawn-claude-bootstrap-cwd");
+    install_fake_claude(&bin_dir);
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!(
+            "skipping client_spawn_bg_claude_bootstraps_the_first_daemon_worker: binary not found at {:?}",
+            bin
+        );
+        return;
+    }
+
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "bootstrap-agent",
+            "hello there",
+            "--harness",
+            "claude",
+            "--substrate",
+            "bg",
+        ])
+        .env("FNO_SPAWN_GATE", "0")
+        .env("FNO_E2E", "1")
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .env("HOME", &claude_home)
+        .env("FNO_CLAUDE_DAEMON_DIR", &daemon_dir)
+        .env("FAKE_CLAUDE_SESSIONS", &sessions)
+        .env("FAKE_CLAUDE_DAEMON_DIR", &daemon_dir)
+        .env("FAKE_CLAUDE_CONTROL_DIR", &control_dir)
+        .env("FAKE_CLAUDE_SUPERVISOR_PID", std::process::id().to_string())
+        .env("PATH", path_with(&bin_dir))
+        .current_dir(&cwd)
+        .output()
+        .expect("failed to run fno-agents");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "first claude bg spawn must bootstrap its supervisor; stderr: {stderr}"
+    );
+    let receipt: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(receipt["durability"], "daemon-owned");
+    assert!(receipt["endpoint"]
+        .as_str()
+        .is_some_and(|value| value.ends_with("control.sock")));
 }
 
 /// AC5-EDGE (x-f54c): `host` was retired at G4 (interactive daemon PTY hosting
