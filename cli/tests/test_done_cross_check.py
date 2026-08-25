@@ -310,6 +310,27 @@ def test_backlog_done_closes_from_routed_rest_merge_evidence(tmp_graph, monkeypa
     assert calls == [("info", 1140, "bllshttng/footnote"), ("files", 1140, "bllshttng/footnote")]
 
 
+def test_nonretryable_refusal_wins_over_an_open_sibling():
+    from fno.graph._reconcile import ReconcileError, resolve_merge_evidence
+
+    def query(number, **kwargs):
+        if number == 1:
+            raise ReconcileError("stored repository PR not found", kind="not_found")
+        return type("State", (), {"state": "OPEN"})()
+
+    evidence = resolve_merge_evidence(
+        [
+            (1, "https://github.com/jasonnoahchoi/.claude/pull/1"),
+            (2, "https://github.com/o/r/pull/2"),
+        ],
+        query=query,
+    )
+
+    assert evidence.outcome == "refused"
+    assert evidence.failure_kind == "not_found"
+    assert evidence.remedy is not None
+
+
 # ---------------------------------------------------------------------------
 # AC2-HP: OPEN no longer closes, even with green CI (regression against the
 # removed behavior). Exit 5, node stays in_review, and no CI query is issued.

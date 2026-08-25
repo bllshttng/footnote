@@ -227,6 +227,8 @@ class ReconcileError(Exception):
             or "could not resolve to a pullrequest" in text
         ):
             return "not_found"
+        if "3,000-file cap" in text:
+            return "evidence_incomplete"
         if any(
             token in text
             for token in ("not json", "malformed", "parse", "json value", "no output")
@@ -258,6 +260,14 @@ class ReconcileError(Exception):
             )
         if self.kind == "malformed":
             return "Inspect the malformed GitHub response and fix the reader; this is not retryable."
+        if self.kind == "evidence_incomplete":
+            return (
+                "GitHub's REST files endpoint reached its 3,000-file cap without "
+                "a complete tail; review the full PR evidence before using "
+                "`fno backlog done <node> --force --reason TEXT`."
+            )
+        if self.kind == "reader_error":
+            return "The REST reader raised an unexpected error; inspect the reader before retrying."
         if "rate limit" in str(self).lower() or "quota" in str(self).lower():
             return "Back off GitHub API requests and retry after the rate limit clears."
         return "Retry the GitHub read when availability returns; the node stays open."
@@ -669,6 +679,13 @@ def resolve_merge_evidence(
         try:
             pr_state = query(pr_number, repo=pr_repo, cwd=pr_cwd)
         except ReconcileError as exc:
+            log.warning(
+                "merge evidence read failed for #%s repo=%s kind=%s: %s",
+                pr_number,
+                pr_repo,
+                exc.kind,
+                exc,
+            )
             if exc.retryable:
                 outage_error = str(exc)
                 outage_remedy = exc.remedy_for(pr_number=pr_number, repo=pr_repo)
@@ -688,6 +705,13 @@ def resolve_merge_evidence(
             if refusal_reason is None and refusal_kind is None:
                 refusal_reason = f"PR #{pr_number} state={pr_state.state} (not merged)"
 
+    if refusal_kind is not None:
+        return MergeEvidence(
+            outcome="refused",
+            reason=refusal_reason,
+            failure_kind=refusal_kind,
+            remedy=refusal_remedy,
+        )
     if open_pr_number is not None:
         # Carry any outage alongside: a ref we could not reach stays invisible
         # across every retry otherwise, since OPEN outranks it.
@@ -1199,9 +1223,10 @@ def query_pr_merge_state(
         raise
     except Exception as exc:  # noqa: BLE001 - reader failures become typed read errors
         log.exception("REST PR info reader failed for #%s repo=%s", pr_number, repo)
-        kind = "availability" if type(exc).__name__ == "ToolMissing" else None
+        kind = "availability" if type(exc).__name__ == "ToolMissing" else "reader_error"
         raise ReconcileError(str(exc), kind=kind) from exc
     if info is None:
+        log.warning("REST PR info read failed for #%s repo=%s: %s", pr_number, repo, reason)
         failure = ReconcileError(str(reason or "REST PR info read failed"))
         failure.remedy = failure.remedy_for(pr_number=pr_number, repo=repo)
         raise failure
@@ -1211,7 +1236,12 @@ def query_pr_merge_state(
             kind="malformed",
         )
 
-    state = info.get("state", "UNKNOWN")
+    if "pr" not in info or "state" not in info:
+        raise ReconcileError(
+            "REST PR info reader omitted required PR number or state",
+            kind="malformed",
+        )
+    state = info["state"]
     if state not in {"OPEN", "CLOSED", "MERGED", "UNKNOWN"}:
         raise ReconcileError(
             f"REST PR info reader returned malformed state {state!r}",
@@ -1226,9 +1256,10 @@ def query_pr_merge_state(
             raise
         except Exception as exc:  # noqa: BLE001 - reader failures become typed read errors
             log.exception("REST PR files reader failed for #%s repo=%s", pr_number, repo)
-            kind = "availability" if type(exc).__name__ == "ToolMissing" else None
+            kind = "availability" if type(exc).__name__ == "ToolMissing" else "reader_error"
             raise ReconcileError(str(exc), kind=kind) from exc
         if file_paths is None:
+            log.warning("REST PR files read failed for #%s repo=%s: %s", pr_number, repo, reason)
             failure = ReconcileError(str(reason or "REST PR files read failed"))
             failure.remedy = failure.remedy_for(pr_number=pr_number, repo=repo)
             raise failure
@@ -1856,6 +1887,14 @@ def scan_merge_drift(
             try:
                 state = query(number, repo=repo, cwd=cwd)
             except ReconcileError as exc:
+                log.warning(
+                    "reconcile scan read failed for node=%s PR #%s repo=%s kind=%s: %s",
+                    nid,
+                    number,
+                    repo,
+                    exc.kind,
+                    exc,
+                )
                 if first_error is None:
                     first_error = str(exc)
                     first_error_kind = exc.kind

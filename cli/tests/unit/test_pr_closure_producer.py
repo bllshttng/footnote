@@ -944,6 +944,46 @@ def test_query_rate_limit_reader_forwards_timeout_to_bucket_probe():
     assert probe_timeouts == [30.0]
 
 
+def test_query_file_cap_is_non_retryable_incomplete_evidence():
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(
+            5,
+            repo="o/r",
+            info_reader=lambda number, *, repo=None, cwd=None: ({
+                "pr": 5,
+                "state": "MERGED",
+                "url": "u",
+                "merged_at": "t",
+                "merge_sha": "sha",
+            }, ""),
+            files_reader=lambda number, *, repo=None, cwd=None: (
+                None,
+                "gh api pull files reached GitHub's 3,000-file cap without a short page",
+            ),
+        )
+
+    assert raised.value.kind == "evidence_incomplete"
+    assert raised.value.retryable is False
+    assert "force --reason" in raised.value.remedy_for(pr_number=5, repo="o/r")
+
+
+def test_query_rejects_missing_required_reader_metadata():
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(
+            5,
+            repo="o/r",
+            info_reader=lambda number, *, repo=None, cwd=None: ({"url": "u"}, ""),
+            files_reader=lambda number, *, repo=None, cwd=None: ([], ""),
+        )
+
+    assert raised.value.kind == "malformed"
+    assert raised.value.retryable is False
+
+
 def test_manifest_node_id_beats_a_stale_branch():
     """A reused worktree's branch still names the PREVIOUS node; the manifest wins."""
     from fno.pr.closure import bind_created_pr

@@ -1773,7 +1773,15 @@ class TestReadPrStateJsonGuards:
             # First call: merge state check (query_pr_merge_state) - must succeed
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0,
-                stdout='{"state":"OPEN","number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":null}',
+                stdout=json.dumps({
+                    "state": "open",
+                    "number": 1,
+                    "html_url": "https://github.com/owner/repo/pull/1",
+                    "merged": False,
+                    "merged_at": None,
+                    "head": {"sha": "head", "ref": "feature/test"},
+                    "base": {"ref": "main"},
+                }),
                 stderr=""
             )
 
@@ -1797,7 +1805,15 @@ class TestReadPrStateJsonGuards:
                 )
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0,
-                stdout='{"state":"OPEN","number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":null}',
+                stdout=json.dumps({
+                    "state": "open",
+                    "number": 1,
+                    "html_url": "https://github.com/owner/repo/pull/1",
+                    "merged": False,
+                    "merged_at": None,
+                    "head": {"sha": "head", "ref": "feature/test"},
+                    "base": {"ref": "main"},
+                }),
                 stderr=""
             )
 
@@ -1976,7 +1992,15 @@ class TestCommentsInActivity:
             # merge state
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0,
-                stdout='{"state":"OPEN","number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":null}',
+                stdout=json.dumps({
+                    "state": "open",
+                    "number": 1,
+                    "html_url": "https://github.com/owner/repo/pull/1",
+                    "merged": False,
+                    "merged_at": None,
+                    "head": {"sha": "head", "ref": "feature/test"},
+                    "base": {"ref": "main"},
+                }),
                 stderr=""
             )
 
