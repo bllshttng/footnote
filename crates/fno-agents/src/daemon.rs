@@ -4805,7 +4805,9 @@ fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>>
 /// Refuse a row-level verdict when the same emitted row carries fresher
 /// evidence against it. This is deliberately pure and shared by the fixture
 /// test with Python; the caller supplies all fields before the row is written.
-fn apply_row_contradiction(row: &mut Map<String, Value>) {
+/// `now` is injected so the fixture's fixed clock and production's wall clock
+/// assert the same rules.
+fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<chrono::Utc>) {
     let event_at = row_timestamp(row.get("last_event_at"));
     let reconciled_at = row_timestamp(row.get("last_reconciled_at"));
     let terminal = matches!(
@@ -4825,6 +4827,22 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
             json!("refused-newer-than-transcript"),
         );
     }
+
+    // (x-d401) A stored `spawning` token a live pid has outlived: the token
+    // stopped being a measurement. Fires only on POSITIVE liveness (the
+    // caller measured a live pid and injected `pid_alive: true`); unknown
+    // keeps the token, and a missing `created_at` is absent age evidence,
+    // not staleness. Mirrors `_spawning_outlived_by_a_live_pid` in Python;
+    // rows read `spawning` for 3-16 hours while alive (x-0248).
+    if row.get("status").and_then(Value::as_str) == Some("spawning")
+        && row.get("pid_alive") == Some(&Value::Bool(true))
+        && row_timestamp(row.get("created_at"))
+            .is_some_and(|created_at| (now - created_at).num_seconds() > 600)
+    {
+        row.insert("status".into(), json!("live"));
+        row.insert("basis".into(), json!("stale-spawning-live-pid"));
+    }
+    row.remove("pid_alive");
 
     // Both keys ALWAYS ride the row, as `reachability`/`basis` and
     // `progress`/`progress_basis` already do on this same row. A conditional
@@ -5424,7 +5442,7 @@ where
                     "project_root": e.project_root,
                 });
                 if let Some(object) = row.as_object_mut() {
-                    apply_row_contradiction(object);
+                    apply_row_contradiction(object, chrono::Utc::now());
                     object.remove("pid_start_time");
                 }
                 row
@@ -12893,9 +12911,14 @@ done
             "/../../schemas/agents-row-contradiction.json"
         ));
         let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
+        let now = chrono::DateTime::parse_from_rfc3339(
+            fixture["now"].as_str().expect("fixture now is a string"),
+        )
+        .expect("fixture now is a timestamp")
+        .with_timezone(&chrono::Utc);
         for case in fixture["cases"].as_array().expect("cases is an array") {
             let mut row = case["row"].as_object().expect("row is an object").clone();
-            apply_row_contradiction(&mut row);
+            apply_row_contradiction(&mut row, now);
             for (key, expected) in case["expected"].as_object().expect("expected is an object") {
                 assert_eq!(row.get(key), Some(expected), "case={}", case["name"]);
             }

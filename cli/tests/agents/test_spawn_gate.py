@@ -112,6 +112,36 @@ class TestCensus:
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
         assert spawn_gate.census().count == 0
 
+    def test_spawning_outlived_by_a_live_pid_renders_live_with_basis(
+        self, monkeypatch
+    ):
+        """(x-d401 / x-0248) AC3-HP: a stored `spawning` token a live pid has
+        outlived does not render a bare `spawning` - the row names the
+        movement-derived state and a basis for the rewrite. AC3-EDGE: a row
+        with no pid recorded yet keeps its honest token."""
+        from datetime import datetime, timedelta, timezone
+
+        stale = datetime.now(timezone.utc) - timedelta(hours=13)
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=5)
+        rows = [
+            _row("stale-spawn", status="spawning", pid=ALIVE),
+            _row("fresh-spawn", status="spawning", pid=ALIVE),
+        ]
+        rows[0].created_at = stale.strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows[1].created_at = fresh.strftime("%Y-%m-%dT%H:%M:%SZ")
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+
+        by_name = {w.name: w for w in spawn_gate.census().workers}
+
+        assert by_name["stale-spawn"].status == "live", (
+            "a working row must not read spawning"
+        )
+        assert by_name["stale-spawn"].status_basis == "stale-spawning-live-pid"
+        assert by_name["fresh-spawn"].status == "spawning", (
+            "a live pid younger than the spawn timeout is still mid-spawn"
+        )
+        assert by_name["fresh-spawn"].status_basis is None
+
     def test_unknown_process_incarnation_counts_conservatively(self, monkeypatch):
         row = _row("unreadable-worker", pid=ALIVE)
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])

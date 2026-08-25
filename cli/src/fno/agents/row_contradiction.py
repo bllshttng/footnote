@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Tuple
 
 
 _TERMINAL_STATUSES = {"orphaned", "exited"}
 _RESUME_BAND_SECONDS = 600
+
+#: (x-d401) How long a stored `spawning` token can stay honest while a live
+#: pid exists. A spawn completes when the worker names itself or the row
+#: acquires a pid; past this age a still-`spawning` row with a LIVE pid is a
+#: token the emitter never refreshed (rows read `spawning` for 3-16 hours
+#: while alive, hiding reclaimable roster capacity). Mirrors the spawn gate's
+#: own QUEUE_TIMEOUT_S: the gate gives up waiting at the same bound.
+SPAWN_TIMEOUT_S = 600.0
 
 # A start token at or below this reads as clock ticks since boot, not epoch
 # microseconds, so it cannot be compared to created_at. Both languages share
@@ -79,8 +87,16 @@ def _liveness_origin(
 
 
 def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
-    """Return the row fields after applying emitter-side contradiction rules."""
+    """Return the row fields after applying emitter-side contradiction rules.
+
+    ``pid_alive`` is an INPUT the caller measured (census probes it; the raw
+    registry row never stores liveness), not a registry field: inject it into
+    the mapping before calling. Absent means unmeasured and every rule that
+    needs it refuses to fire.
+    """
     projected = dict(row)
+    # The measurement input never rides the projection out.
+    projected.pop("pid_alive", None)
     event_at = _timestamp(row.get("last_event_at"))
     reconciled_at = _timestamp(row.get("last_reconciled_at"))
     message_at = _timestamp(row.get("last_message_at"))
@@ -95,6 +111,12 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
     if message_at is not None and event_at is not None and message_at > event_at:
         projected["last_message_at"] = None
         projected["last_message_at_basis"] = "refused-newer-than-transcript"
+    if _spawning_outlived_by_a_live_pid(row, now=now):
+        # The movement-derived state with a basis naming the contradiction:
+        # a bare `spawning` for a working row is the stored token standing in
+        # for a measurement nobody took (x-d401 / x-0248).
+        projected["status"] = "live"
+        projected["basis"] = "stale-spawning-live-pid"
 
     # Both keys ALWAYS ride the row, as `reachability`/`basis` and
     # `progress`/`progress_basis` already do on this same row. A conditional
@@ -104,3 +126,25 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
     projected["liveness_origin"] = origin
     projected["liveness_origin_basis"] = origin_basis
     return projected
+
+
+def _spawning_outlived_by_a_live_pid(
+    row: Mapping[str, Any], *, now: Any = None
+) -> bool:
+    """A stored ``spawning`` token a live pid has outlived.
+
+    Fires only on POSITIVE pid liveness (a measured live pid, or a session pid
+    the bg rendezvous resolved); unknown liveness keeps the token - a row
+    mid-spawn is telling the truth and must not be marked. A missing
+    ``created_at`` is absent age evidence, not staleness, so it also keeps
+    the token.
+    """
+    if row.get("status") != "spawning" or row.get("pid_alive") is not True:
+        return False
+    created_at = _timestamp(row.get("created_at"))
+    if created_at is None:
+        return False
+    now_dt = now or datetime.now(timezone.utc)
+    if not isinstance(now_dt, datetime):
+        now_dt = _timestamp(now_dt)
+    return (now_dt - created_at) > timedelta(seconds=SPAWN_TIMEOUT_S)

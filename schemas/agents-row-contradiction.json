@@ -159,6 +159,65 @@
         "liveness_origin": "survivor",
         "liveness_origin_basis": null
       }
+    },
+    {
+      "name": "spawning token outlived by a live pid renders the movement-derived state",
+      "row": {
+        "status": "spawning",
+        "created_at": "2026-08-20T12:00:00Z",
+        "pid": 123,
+        "pid_alive": true
+      },
+      "expected": {
+        "status": "live",
+        "basis": "stale-spawning-live-pid"
+      }
+    },
+    {
+      "name": "spawning with no live pid yet is telling the truth",
+      "row": {
+        "status": "spawning",
+        "created_at": "2026-08-20T12:00:00Z",
+        "pid": null,
+        "pid_alive": false
+      },
+      "expected": {
+        "status": "spawning"
+      }
+    },
+    {
+      "name": "spawning with a live pid younger than the spawn timeout keeps its token",
+      "row": {
+        "status": "spawning",
+        "created_at": "2026-08-21T00:59:30Z",
+        "pid": 123,
+        "pid_alive": true
+      },
+      "expected": {
+        "status": "spawning"
+      }
+    },
+    {
+      "name": "spawning with unknown pid liveness keeps its token",
+      "row": {
+        "status": "spawning",
+        "created_at": "2026-08-20T12:00:00Z",
+        "pid": 123
+      },
+      "expected": {
+        "status": "spawning"
+      }
+    },
+    {
+      "name": "spawning with no created_at has no age evidence to contradict",
+      "row": {
+        "status": "spawning",
+        "pid": 123,
+        "pid_alive": true
+      },
+      "expected": {
+        "status": "spawning"
+      }
     }
   ]
 }
