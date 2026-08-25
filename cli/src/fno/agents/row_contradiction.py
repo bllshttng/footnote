@@ -17,6 +17,11 @@ _RESUME_BAND_SECONDS = 600
 #: own QUEUE_TIMEOUT_S: the gate gives up waiting at the same bound.
 SPAWN_TIMEOUT_S = 600.0
 
+#: Supervisor words that are POSITIVE claims of a live, acting process. Only
+#: these can contradict a fired falsifier: "idle"/"done" claim nothing, so
+#: they stand beside an unreachable verdict without disagreement.
+_ACTIVE_SUPERVISOR_WORDS = frozenset({"working", "needs input"})
+
 # A start token at or below this reads as clock ticks since boot, not epoch
 # microseconds, so it cannot be compared to created_at. Both languages share
 # the bound; see `row_timestamp` in crates/fno-agents/src/daemon.rs.
@@ -125,7 +130,31 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
     origin, origin_basis = _liveness_origin(row)
     projected["liveness_origin"] = origin
     projected["liveness_origin_basis"] = origin_basis
+    # Always rides the row (null = no contradiction): a superseded supervisor
+    # claim beside the falsifier that beat it, so the operator reads WHICH
+    # source said what rather than only which one won (x-d401 / x-d4a6).
+    projected["live_status_basis"] = _supervisor_contradicted(row)
+    projected.pop("superseded_live_status", None)
     return projected
+
+
+def _supervisor_contradicted(row: Mapping[str, Any]) -> Optional[str]:
+    """The falsifier that superseded a supervisor's positive claim, or None.
+
+    ``superseded_live_status`` is an INPUT the caller injects (like ``pid``):
+    the non-idle supervisor word the truth-status fallback replaced after a
+    falsifier fired. The claim it stood against rides ``reachability``/
+    ``basis``. The input is popped; only the basis key survives.
+    """
+    word = row.get("superseded_live_status")
+    if not isinstance(word, str) or word.lower() not in _ACTIVE_SUPERVISOR_WORDS:
+        return None
+    if row.get("reachability") != "unreachable":
+        return None
+    falsifier = row.get("basis")
+    if not isinstance(falsifier, str) or not falsifier:
+        return None
+    return f"contradicted-by-{falsifier}"
 
 
 def _spawning_outlived_by_a_live_pid(

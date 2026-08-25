@@ -493,6 +493,72 @@ def test_list_agents_family1_truth_overrides_stale_orphaned_render(
     assert row["status"] == "live"
 
 
+def test_a_dead_pid_outvotes_a_stale_working_supervisor_status(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """(x-d401 / x-d4a6) AC4-HP: a claude bg row whose supervisor JSON says
+    `working` while its recorded pid is confirmed gone must not read
+    live-and-working. The fired falsifier admits the truth-status fallback,
+    whose reading replaces the stale word, and the supersession is marked:
+    the row says WHICH source was beaten by WHAT."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            _claude(
+                name="target-x-d4a6-stale-worker",
+                pid=4194321,  # realistically never alive
+                short_id="abc12345",
+            )
+        ]
+    )
+    _patch_claude_agents_json(
+        {"abc12345": {"sessionId": "abc12345-1-2-3-4", "live_status": "working"}}
+    )
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(truth_status, "resolve_truth_status", lambda *_a, **_k: {"state": "stalled"})
+
+    row = json.loads(list_agents(json_out=True, tty=True).output)["agents"][0]
+    assert row["status"] == "orphaned", "the falsifier condemned the row"
+    assert row["live_status"] == "Stalled (claim stale)", (
+        "the truth reading replaces the stale supervisor word"
+    )
+    assert row["live_status_basis"] == "contradicted-by-process-gone", (
+        "the disagreement between the two sources stays visible"
+    )
+
+
+def test_a_live_pid_keeps_the_harness_working_verdict(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """AC4-EDGE (Locked Decision 1): a row whose pid is alive and whose
+    supervisor JSON says `working` keeps the harness word - the fallback does
+    not fire and no contradiction is marked."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            _claude(
+                name="target-x-d4a6-live-worker",
+                pid=None,  # no pid recorded: no pid falsifier can fire
+                short_id="abc12345",
+            )
+        ]
+    )
+    _patch_claude_agents_json(
+        {"abc12345": {"sessionId": "abc12345-1-2-3-4", "live_status": "working"}}
+    )
+    from fno.agents import truth_status
+
+    def _bomb(*_args, **_kwargs):
+        raise AssertionError("the fallback must not fire without a falsifier")
+
+    monkeypatch.setattr(truth_status, "resolve_truth_status", _bomb)
+
+    row = json.loads(list_agents(json_out=True, tty=True).output)["agents"][0]
+    assert row["live_status"] == "working"
+    assert row["live_status_basis"] is None
+
+
 def test_list_agents_live_worker_with_null_activity_age_has_unknown_progress(
     tmp_path, monkeypatch, _patch_claude_agents_json
 ):

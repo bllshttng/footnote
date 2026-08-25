@@ -4854,6 +4854,37 @@ fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<c
         "liveness_origin_basis".into(),
         origin_basis.map_or(Value::Null, |basis| json!(basis)),
     );
+    // (x-d401, x-d4a6) A superseded supervisor claim beside the falsifier
+    // that beat it: `superseded_live_status` is a caller-injected input (like
+    // `pid`), popped here; only the basis key survives, null when no
+    // supersession happened. Mirrors `_supervisor_contradicted` in Python.
+    let superseded = row
+        .get("superseded_live_status")
+        .and_then(Value::as_str)
+        .is_some_and(|word| {
+            let lower = word.to_ascii_lowercase();
+            lower == "working" || lower == "needs input"
+        });
+    let contradicted = superseded
+        && row.get("reachability").and_then(Value::as_str) == Some("unreachable")
+        && row
+            .get("basis")
+            .and_then(Value::as_str)
+            .is_some_and(|f| !f.is_empty());
+    let basis_word = row
+        .get("basis")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    row.insert(
+        "live_status_basis".into(),
+        if contradicted {
+            json!(format!("contradicted-by-{basis_word}"))
+        } else {
+            Value::Null
+        },
+    );
+    row.remove("superseded_live_status");
 }
 
 /// Parse one row timestamp into `(value, basis)`, separating absent from

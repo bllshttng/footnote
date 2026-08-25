@@ -218,6 +218,70 @@
       "expected": {
         "status": "spawning"
       }
+    },
+    {
+      "name": "a working supervisor word superseded by a fired falsifier is marked",
+      "row": {
+        "status": "orphaned",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "working",
+        "reachability": "unreachable",
+        "basis": "process-gone"
+      },
+      "expected": {
+        "live_status_basis": "contradicted-by-process-gone"
+      }
+    },
+    {
+      "name": "a needs-input word superseded by a falsifier is equally contradicted",
+      "row": {
+        "status": "orphaned",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "Needs input",
+        "reachability": "unreachable",
+        "basis": "pane-gone"
+      },
+      "expected": {
+        "live_status_basis": "contradicted-by-pane-gone"
+      }
+    },
+    {
+      "name": "a superseded word with a reachable verdict is not a contradiction",
+      "row": {
+        "status": "live",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "working",
+        "reachability": "reachable",
+        "basis": "transcript"
+      },
+      "expected": {
+        "live_status_basis": null
+      }
+    },
+    {
+      "name": "an idle supervisor word superseded by a falsifier claims nothing",
+      "row": {
+        "status": "orphaned",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "idle",
+        "reachability": "unreachable",
+        "basis": "process-gone"
+      },
+      "expected": {
+        "live_status_basis": null
+      }
+    },
+    {
+      "name": "a row with no supersession carries no contradiction basis",
+      "row": {
+        "status": "live",
+        "live_status": "working",
+        "reachability": "reachable",
+        "basis": "transcript"
+      },
+      "expected": {
+        "live_status_basis": null
+      }
     }
   ]
 }

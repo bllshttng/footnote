@@ -22,6 +22,7 @@ from fno.agents import format as fmt
 from fno.agents.row_contradiction import project_row
 from fno.agents import truth_status
 from fno.agents.reachability import (
+    UNREACHABLE,
     WIRE_STATUS,
     classify_progress,
     classify_reachability,
@@ -210,7 +211,24 @@ def list_agents(
         # ``--all``: a stopped/completed row now arrives in live_map instead
         # of being absent, and without this, its raw supervisor status would
         # silently win over the richer PR/CI-aware truth-status fallback.
-        if live_status is None or str(live_status).lower() in not_blocked_minus_working:
+        # (x-d401, x-d4a6) A FIRED falsifier widens the gate: a stale
+        # non-idle supervisor token standing against a confirmed-gone pid is
+        # a self-contradicting row, so the richer truth reading runs for it
+        # too. The supersession is not silent - the original word rides the
+        # row as an internal input and `project_row` marks the disagreement
+        # (`live_status_basis: contradicted-by-<falsifier>`). An UNMEASURED
+        # verdict (unknown) never widens the gate: Locked Decision 1 keeps a
+        # legitimate harness `working`.
+        falsifier_admits_gate = reach.verdict == UNREACHABLE and (
+            live_status is not None
+            and str(live_status).lower() not in not_blocked_minus_working
+        )
+        if (
+            live_status is None
+            or str(live_status).lower() in not_blocked_minus_working
+            or reach.verdict == UNREACHABLE
+        ):
+            superseded_live_status = str(live_status) if falsifier_admits_gate else None
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(
@@ -221,6 +239,8 @@ def list_agents(
                 rendered = truth_status.render_truth_status(truth)
                 if rendered is not None:
                     live_status = rendered
+        else:
+            superseded_live_status = None
         # The verdict travels with the evidence it was reached from. `status`
         # keeps the wire vocabulary its consumers already parse; the three
         # reachability fields carry what `status` alone cannot say, which is
@@ -238,6 +258,8 @@ def list_agents(
             last_message=last_message,
         )
         row["status"] = rendered_status
+        if superseded_live_status is not None:
+            row["superseded_live_status"] = superseded_live_status
         row = project_row(row)
         rows.append(row)
 
