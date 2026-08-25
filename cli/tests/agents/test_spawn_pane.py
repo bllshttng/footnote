@@ -1895,6 +1895,35 @@ def test_every_pane_route_carries_the_existing_cap(
     assert run_call[run_call.index("--max-panes") + 1] == "7"
 
 
+def test_pane_env_carries_separate_process_and_pane_unit_wires(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    assert hasattr(mux_spawn, "_process_admission_max"), (
+        "process admission needs a process-valued resolver independent of agents.max_live"
+    )
+
+    class EnvRunner(FakeRunner):
+        run_env: Optional[dict[str, str]] = None
+
+        def __call__(self, argv, **kwargs):
+            if argv[1:4] == ["mux", "pane", "run"]:
+                self.run_env = kwargs.get("env")
+            return super().__call__(argv, **kwargs)
+
+    runner = EnvRunner()
+    monkeypatch.setattr(mux_spawn, "_process_admission_max", lambda: 650)
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 7)
+
+    _spawn(monkeypatch, tmp_path, runner=runner)
+
+    assert runner.run_env is not None
+    assert runner.run_env["FNO_PROCESS_ADMISSION_MAX"] == "650"
+    assert runner.run_env["FNO_MUX_PANE_GROUP_MAX"] == "7"
+    assert "FNO_MUX_MAX_LIVE" not in runner.run_env
+
+
 def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
     # AC4-ERR: pane geometry flags fail closed on a substrate with no pane tree,
     # before any spawn.

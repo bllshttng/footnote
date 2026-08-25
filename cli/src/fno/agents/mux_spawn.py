@@ -1644,16 +1644,16 @@ def _pane_group_max() -> int:
         return 4
 
 
-def _mux_max_live() -> int:
+def _process_admission_max() -> int:
     try:
-        explicit = os.environ.get("FNO_MUX_MAX_LIVE")
+        explicit = os.environ.get("FNO_PROCESS_ADMISSION_MAX")
         if explicit is not None:
             return max(1, int(explicit))
         from fno.config import load_settings
 
-        return max(1, int(load_settings().agents.max_live))
+        return max(1, int(load_settings().process_admission.max_processes))
     except Exception:
-        return 3
+        return 400
 
 
 def _resolve_group_tab(requested: str) -> tuple[Optional[str], Optional[str]]:
@@ -3475,7 +3475,7 @@ def dispatch_spawn_pane(
             k: v for k, v in os.environ.items() if k != WORKER_ADD_DIRS_ENV
         }
         pane_env["FNO_MUX_SHELL_INTEGRATION"] = _shell_integration()
-        pane_env["FNO_MUX_MAX_LIVE"] = str(_mux_max_live())
+        pane_env["FNO_PROCESS_ADMISSION_MAX"] = str(_process_admission_max())
         pane_env["FNO_MUX_PANE_GROUP_MAX"] = str(_pane_group_max())
         proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None
