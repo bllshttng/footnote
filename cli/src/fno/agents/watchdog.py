@@ -40,7 +40,7 @@ import time
 from collections import Counter, namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 # The shipped tail classifier is the POSITIVE resumability marker: its
 # ``stalled`` verdict asserts the session went silent while still owing its
