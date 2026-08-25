@@ -236,6 +236,8 @@ class ReconcileError(Exception):
             return "not_found"
         if "3,000-file cap" in text:
             return "evidence_incomplete"
+        if "rate limit" in text or "quota" in text:
+            return "availability"
         if any(
             token in text
             for token in ("not json", "malformed", "parse", "json value", "no output")
