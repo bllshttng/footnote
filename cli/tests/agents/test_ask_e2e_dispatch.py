@@ -160,6 +160,8 @@ def _install_fake_codex_daemon(codex_home: Path) -> None:
                     payload = json.loads(_read_frame(conn))
                     response = json.dumps({"id": payload["id"], "result": {}}).encode()
                     conn.sendall(bytes([0x81, len(response)]) + response)
+                    initialized = json.loads(_read_frame(conn))
+                    assert initialized["method"] == "initialized"
                     log_path.write_text("initialize-ok\n", encoding="utf-8")
             except Exception as exc:
                 log_path.write_text(f"server-error: {exc!r}\n", encoding="utf-8")
