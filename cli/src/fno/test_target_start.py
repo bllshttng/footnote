@@ -729,11 +729,13 @@ def test_native_codex_resume_preserves_exact_node_claim(
         "_reacquire_node_claim",
         lambda node, cwd, info: reacquired.append(node) or "holder",
     )
-    monkeypatch.setattr(
-        target_cli.subprocess,
-        "run",
-        lambda *args, **kwargs: pytest.fail("native resume must not rerun init"),
-    )
+    def _no_init(*args, **kwargs):
+        argv = args if isinstance(args, list) else list(args)
+        if "init" in argv:
+            pytest.fail("native resume must not rerun init")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _no_init)
 
     target_cli._start_codex_native(
         canonical=canonical,
@@ -985,6 +987,69 @@ def test_existing_manifest_is_idempotent(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert "node=already-claimed" in result.stdout
     assert init_calls == []  # invariant: never double-claim
+
+
+def test_receipt_base_line_measures_the_real_distance(monkeypatch, tmp_path):
+    """(x-d401 / x-3ae1) AC6-HP: base= never reads as a bare ref. A stale
+    local origin/main answers rev-list 0 for a branch dozens of commits
+    behind, so the receipt fetches and prints the measured distance."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _wire_happy(monkeypatch, wt, manifest_exists=False)
+
+    def fake_git_out(cwd, *args):
+        if args == ("rev-list", "--count", "HEAD..origin/main"):
+            return "10"
+        return "/canonical/repo"
+
+    monkeypatch.setattr(target_cli, "_git_out", fake_git_out)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0, result.stdout
+    assert "base=origin/main behind=10" in result.stdout
+
+
+def test_receipt_base_line_marks_an_unmeasured_distance_when_fetch_fails(
+    monkeypatch, tmp_path
+):
+    """AC6-ERR: offline, the distance is explicitly unmeasured, never a bare
+    ref that reads as up-to-date."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _wire_happy(monkeypatch, wt, manifest_exists=False)
+
+    def fake_run(args, **kwargs):
+        argv = args if isinstance(args, list) else list(args)
+        if argv[3:5] == ["fetch", "--quiet"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="offline")
+        if "ensure" in argv:
+            return subprocess.CompletedProcess(args, 0, stdout=str(wt), stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0, result.stdout
+    assert "behind=unmeasured (fetch failed)" in result.stdout
+
+
+def test_already_claimed_receipt_names_the_live_holder(monkeypatch, tmp_path):
+    """(x-d401 / x-3ae1) The claim line says WHO holds the node, read from the
+    live claim lockfile, rather than only that someone does."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _wire_happy(monkeypatch, wt, manifest_exists=True)
+    monkeypatch.setattr(
+        target_cli,
+        "_classify_node_claim",
+        lambda n: (
+            "ours",
+            {"state": "live", "holder": "target-session:abc123", "pid": 4242},
+        ),
+    )
+    monkeypatch.setattr(target_cli, "_find_node", lambda n: {"id": n})
+    result = runner.invoke(target_app, ["start", "x-d91b"])
+    assert result.exit_code == 0, result.stdout
+    assert "node=already-claimed" in result.stdout
+    assert "holder target-session:abc123" in result.stdout
 
 
 def test_ensure_failure_is_loud_and_skips_init(monkeypatch, tmp_path):

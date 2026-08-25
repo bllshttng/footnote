@@ -282,6 +282,34 @@ def test_plan_line(tmp_path) -> None:
     assert "stale-reference" in orient._plan_line(str(plan), tmp_path)
 
 
+def test_plan_line_reads_the_nodes_bound_plan_when_the_manifest_carries_none(
+    monkeypatch, tmp_path
+) -> None:
+    """(x-d401 / x-3ae1) AC6-HP: a node whose graph entry binds a plan_path
+    must never report plan: none just because the manifest field is empty -
+    the manifest is a carrier, not the binding's truth."""
+    plan = tmp_path / "p.md"
+    plan.write_text("edits `a/b.py`\n", encoding="utf-8")
+    monkeypatch.setattr(
+        orient, "_graph_entry", lambda node_id, root: {"plan_path": str(plan)}
+    )
+    line = orient._plan_line(None, tmp_path, node_id="x-1")
+    assert "stale-reference" in line, "the bound plan was actually read"
+
+
+def test_plan_line_absence_carries_its_basis(monkeypatch, tmp_path) -> None:
+    """AC6-EDGE: no plan anywhere reads as an absence with a basis, and an
+    unreadable graph reads as unknown - never as a measured none."""
+    monkeypatch.setattr(orient, "_graph_entry", lambda node_id, root: {})
+    assert "no plan bound" in orient._plan_line(None, tmp_path, node_id="x-1")
+
+    def boom(*_args):
+        raise RuntimeError("graph blew up")
+
+    monkeypatch.setattr(orient, "_graph_entry", boom)
+    assert "unknown" in orient._plan_line(None, tmp_path, node_id="x-1")
+
+
 def test_build_report_is_read_only_eight_lines(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(orient, "_graph_entry", lambda *_: None)
     lines = orient.build_report(tmp_path, node_id="x-1", plan_path=None, manifest_raw={})

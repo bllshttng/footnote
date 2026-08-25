@@ -673,7 +673,22 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
     return line
 
 
-def _plan_line(plan_path: Optional[str], project_root: Path) -> str:
+def _plan_line(
+    plan_path: Optional[str], project_root: Path, node_id: Optional[str] = None
+) -> str:
+    """The plan line, read from the binding's truth (x-d401 / x-3ae1).
+
+    An empty manifest field is a CARRIER miss, not an unbound node: when a
+    node is bound, its graph entry's plan_path is the truth and is read at
+    receipt time. The remaining absences carry their basis - "no plan bound"
+    states the graph's own emptiness, and an unreadable graph reads
+    unknown, never as a measured none."""
+    if not plan_path and node_id:
+        try:
+            entry = _graph_entry(node_id, project_root) or {}
+        except Exception:  # noqa: BLE001 - never abort the report
+            return "unknown (plan unreadable: graph unreadable)"
+        plan_path = str(entry.get("plan_path") or "").strip() or None
     if not plan_path:
         return "none (no plan bound)"
     return reconcile_plan(plan_path, project_root).summary()
@@ -744,7 +759,7 @@ def build_report(
         OrientLine("attended", _attended_line(manifest_raw)),
         OrientLine("worktree", _worktree_line(project_root, node_id)),
         OrientLine("tests", _tests_line(project_root)),
-        OrientLine("plan", _plan_line(plan_path, project_root)),
+        OrientLine("plan", _plan_line(plan_path, project_root, node_id)),
         OrientLine("boundary-reconcile", _boundary_line(node_id, plan_path, project_root)),
         OrientLine("manifest-live", _manifest_live_line(manifest_raw)),
         OrientLine("done-when", _done_when_line(manifest_raw, project_root)),

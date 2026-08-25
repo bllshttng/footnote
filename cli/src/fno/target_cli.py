@@ -2317,15 +2317,10 @@ def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
 def _remote_base_ref(cwd: Path, *, fetch: bool = False) -> str:
     """Verified remote default-branch ref used by native target bootstrap."""
     if fetch:
-        refreshed = subprocess.run(
-            ["git", "-C", str(cwd), "fetch", "--quiet", "origin"],
-            capture_output=True,
-            text=True,
-        )
-        if refreshed.returncode != 0:
+        if not _refresh_remote(cwd, "origin"):
             typer.echo(
                 "fno do target start: could not refresh remote base: "
-                f"{refreshed.stderr.strip() or 'git fetch origin failed'}",
+                "git fetch origin failed",
                 err=True,
             )
             raise typer.Exit(code=1)
@@ -2351,13 +2346,67 @@ def _base_receipt(cwd: Path, base: str, *, head: str = "HEAD") -> str:
     return f"{base}@{fork[:12]}"
 
 
+_REFRESHED_REMOTES: set = set()
+
+
+def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> bool:
+    """One fetch per (repo, remote) per process (x-3ae1).
+
+    Shared by the base-ref resolution and the truthful-base measurement so a
+    start that already refreshed origin never pays a second network round
+    trip for the same information. Returns whether the fetch succeeded."""
+    key = (str(cwd), remote)
+    if key in _REFRESHED_REMOTES:
+        return True
+    try:
+        fetched = subprocess.run(
+            ["git", "-C", str(cwd), "fetch", "--quiet", remote, *refspec],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if fetched.returncode != 0:
+        return False
+    _REFRESHED_REMOTES.add(key)
+    return True
+
+
+def _truthful_base(cwd: Path, base_label: str) -> str:
+    """The base label with a MEASURED distance, or an explicit unmeasured
+    marker (x-d401 / x-3ae1).
+
+    A bare ref reads as a distance: ``rev-list --count HEAD..origin/main``
+    consults the LOCAL ref, so a branch dozens of commits behind answers 0
+    whenever the ref is stale, and the caller learns otherwise only at PR
+    conflict time. The receipt either fetches and prints the real count, or
+    says the distance was not measured. Never a silent zero.
+    """
+    if base_label == "in-place":
+        return base_label
+    # A `_base_receipt` label carries `@<fork-sha>` provenance; the distance
+    # is measured against the bare ref underneath it.
+    bare = base_label.rpartition("@")[0] or base_label
+    remote = bare.split("/", 1)[0] if "/" in bare else "origin"
+    branch = bare.split("/", 1)[1] if "/" in bare else "main"
+    if not _refresh_remote(cwd, remote, branch):
+        return f"{base_label} behind=unmeasured (fetch failed)"
+    count = _git_out(cwd, "rev-list", "--count", f"HEAD..{bare}")
+    count = (count or "").strip()
+    if not count.isdigit():
+        return f"{base_label} behind=unmeasured (rev-list failed)"
+    return f"{base_label} behind={count}"
+
+
 def _request_codex_native_handoff(
     repo_root: Path, node: str, policy: Any, base: str
 ) -> None:
     """Emit the supported same-thread Desktop handoff receipt and stop."""
     typer.echo(
         "native-handoff=required "
-        f"project={policy.project} canonical={repo_root} base={base} node={node}\n"
+        f"project={policy.project} canonical={repo_root} "
+        f"base={_truthful_base(repo_root, base)} node={node}\n"
         "Use `/worktree` or **Hand off -> Worktree** in Codex Desktop, select "
         "the remote main branch, then rerun:\n"
         f"  fno do target start {node}\n"
@@ -2537,7 +2586,8 @@ def _start_codex_native(
                 )
                 raise typer.Exit(code=1)
             typer.echo(
-                f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
+                f"worktree={cwd}  app-owned=codex  .fno=ok  "
+                f"base={_truthful_base(cwd, base)}  "
                 "node=unclaimed"
             )
             if beastmode:
@@ -2563,15 +2613,18 @@ def _start_codex_native(
             raise typer.Exit(code=1)
         if verdict == "ours":
             typer.echo(
-                f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
-                "node=already-claimed"
+                f"worktree={cwd}  app-owned=codex  .fno=ok  "
+                f"base={_truthful_base(cwd, base)}  "
+                f"node=already-claimed (holder {info.get('holder', '?') if info else '?'}, "
+                f"state {info.get('state', '?') if info else '?'})"
             )
             if beastmode:
                 _warn_if_authority_not_granted(cwd)
             return
         _reacquire_node_claim(node, cwd, info)
         typer.echo(
-            f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  node=reacquired"
+            f"worktree={cwd}  app-owned=codex  .fno=ok  "
+            f"base={_truthful_base(cwd, base)}  node=reacquired"
         )
         return
 
@@ -2632,7 +2685,8 @@ def _start_codex_native(
         claim_state = "claimed"
     model_note = f"  model={resolved_model} ({source})" if resolved_model else ""
     typer.echo(
-        f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
+        f"worktree={cwd}  app-owned=codex  .fno=ok  "
+        f"base={_truthful_base(cwd, base)}  "
         f"node={claim_state}{model_note}"
     )
 
@@ -3192,8 +3246,10 @@ def start(
             raise typer.Exit(code=1)
         if verdict == "ours":
             typer.echo(
-                f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
-                f"node=already-claimed"
+                f"worktree={wt_path}  .fno={fno_state}  "
+                f"base={_truthful_base(wt_path, base_label)}  "
+                f"node=already-claimed (holder {claim_info.get('holder', '?') if claim_info else '?'}, "
+                f"state {claim_info.get('state', '?') if claim_info else '?'})"
             )
             if beastmode:
                 _warn_if_authority_not_granted(wt_path)
@@ -3228,7 +3284,8 @@ def start(
             else "no prior claim"
         )
         typer.echo(
-            f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
+            f"worktree={wt_path}  .fno={fno_state}  "
+            f"base={_truthful_base(wt_path, base_label)}  "
             f"node=reacquired (successor took over from {prior})"
         )
         typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
@@ -3275,6 +3332,7 @@ def start(
     #    auditable (x-d7a7); absent -> today's line, byte-identical.
     model_note = f"  model={model} ({decision_source})" if model else ""
     typer.echo(
-        f"worktree={wt_path}  .fno={fno_state}  base={base_label}  node=claimed{model_note}"
+        f"worktree={wt_path}  .fno={fno_state}  "
+        f"base={_truthful_base(wt_path, base_label)}  node=claimed{model_note}"
     )
     typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
