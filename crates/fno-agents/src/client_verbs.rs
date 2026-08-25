@@ -1184,6 +1184,23 @@ fn is_session_shaped(token: &str) -> bool {
         || is_uuid_shaped(&token.to_ascii_lowercase())
 }
 
+fn helper_registry_path(registry_path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = if registry_path.is_absolute() {
+        registry_path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(registry_path)
+    };
+    if let Ok(canonical) = fs::canonicalize(&absolute) {
+        return Ok(canonical);
+    }
+    if let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) {
+        if let Ok(canonical_parent) = fs::canonicalize(parent) {
+            return Ok(canonical_parent.join(name));
+        }
+    }
+    Ok(absolute)
+}
+
 fn token_helper_args(token: &str, registry_path: &Path, cross_project: bool) -> Vec<String> {
     let mut args = vec![
         "agents".to_string(),
@@ -1207,9 +1224,10 @@ fn token_helper_output(
 ) -> std::io::Result<std::process::Output> {
     use std::process::Command;
 
+    let registry_path = helper_registry_path(registry_path)?;
     let mut command = Command::new("fno");
     command
-        .args(token_helper_args(token, registry_path, cross_project))
+        .args(token_helper_args(token, &registry_path, cross_project))
         .env("FNO_AGENTS_RUNTIME", "python");
     if let Some(cwd) = scope_cwd {
         command.current_dir(cwd);
@@ -4630,10 +4648,11 @@ mod tests {
         let scope = dir.path().join("replacement");
         fs::create_dir(&scope).unwrap();
         let marker = dir.path().join("helper-cwd");
+        let registry_marker = dir.path().join("helper-registry");
         let fake_fno = dir.path().join("fno");
         fs::write(
             &fake_fno,
-            "#!/bin/sh\npwd > \"$FNO_TEST_HELPER_CWD\"\nexit 0\n",
+            "#!/bin/sh\npwd > \"$FNO_TEST_HELPER_CWD\"\nprintf '%s\\n' \"$5\" > \"$FNO_TEST_HELPER_REGISTRY\"\nexit 0\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&fake_fno).unwrap().permissions();
@@ -4641,26 +4660,30 @@ mod tests {
         fs::set_permissions(&fake_fno, permissions).unwrap();
 
         let old_path = std::env::var_os("PATH");
+        let caller_cwd = std::env::current_dir().unwrap();
+        let relative_registry = Path::new("relative/registry.json");
+        let expected_registry = caller_cwd.join(relative_registry);
         std::env::set_var("PATH", dir.path());
         std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
-        let output = token_helper_output(
-            "deadbeef",
-            &dir.path().join("registry.json"),
-            false,
-            Some(&scope),
-        )
-        .unwrap();
+        std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
+        let output =
+            token_helper_output("deadbeef", relative_registry, false, Some(&scope)).unwrap();
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
         }
         std::env::remove_var("FNO_TEST_HELPER_CWD");
+        std::env::remove_var("FNO_TEST_HELPER_REGISTRY");
 
         assert!(output.status.success());
         let observed = Path::new(fs::read_to_string(marker).unwrap().trim())
             .canonicalize()
             .unwrap();
         assert_eq!(observed, scope.canonicalize().unwrap());
+        assert_eq!(
+            Path::new(fs::read_to_string(registry_marker).unwrap().trim()),
+            expected_registry
+        );
     }
 
     #[test]
