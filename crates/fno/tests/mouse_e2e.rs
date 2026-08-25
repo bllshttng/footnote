@@ -354,9 +354,13 @@ fn hover_link_refuses_a_pane_whose_app_owns_the_mouse() {
     let (_, _, before) = a.wait(10, "span before", |c| c.link_hovers.first().cloned());
     assert!(!before.is_empty(), "control: the same cell yields a span");
 
-    // Take the mouse in-app (?1000 clicks + ?1006 SGR), then re-probe.
-    a.input(b"printf '\\033[?1000h\\033[?1006h\\n'\r");
-    a.wait_prompt(pane);
+    // Take the mouse in-app (?1000 clicks + ?1006 SGR), then re-probe. Key on
+    // the printf's OUTPUT line (echo_line's trick), not a prompt: the screen
+    // already ends in a prompt, so a prompt wait returns on the stale
+    // pre-printf frame. The output marker only exists after the escapes were
+    // parsed.
+    a.input(b"printf '\\033[?1000h\\033[?1006h'; echo mouse-on#\r");
+    a.wait_pane_text(15, pane, |t| t.lines().any(|l| l.starts_with("mouse-on#")));
     a.link_hover(pane, row, 10, 2);
     let (_, _, after) = a.wait(10, "span after", |c| {
         c.link_hovers.iter().find(|(_, s, _)| *s == 2).cloned()
