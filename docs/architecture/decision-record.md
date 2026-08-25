@@ -1,6 +1,6 @@
 # The decision record
 
-A ruling stated in chat dies with the context. The operator then asks, weeks later, "there was this thing we discussed, what happened with that?" This page owns the answer: what records a decision, where it lands, how design law ships, and how to ask what is current.
+A ruling stated in chat dies with the context. Weeks later, the operator asks, "there was this thing we discussed, what happened with that?" This page explains recording, storage, shipped design law, and current-law queries.
 
 ## The verb
 
@@ -94,7 +94,7 @@ It does NOT ask for a retry. The durable event has already landed by then, so a 
 
 A failed PROJECTION does not fail the command at all. Both durable stores already hold the decision by then, so the ruling is recorded and recoverable. Only the node view is missing, and the command says which decision id it is.
 
-The repository catalog is read-only to `fno backlog decide`. A repository change adds or revises design law through normal code review. The reader composes catalog rows with the local index by decision id, uses reviewed subject and decision content, and keeps machine-local audit fields such as timestamp and decider. Project policy can supersede a repository default through the existing structural `supersedes` field and operator-law guard.
+The repository catalog is read-only to `fno backlog decide`. A repository change adds or revises design law through normal code review. The reader composes catalog rows with the local index by decision id. It uses reviewed content and keeps machine-local audit fields. Project policy can structurally supersede a repository default. The existing operator-law guard still applies.
 
 ## Why the index is separate from the global journal
 
@@ -111,7 +111,7 @@ So the index is its own file, it never rotates, and it holds nothing else. It ca
 
 ## The subject convention
 
-When a node exists, use its id. Otherwise use `pr-<n>` or a catalog canonical subject. A checked-in alias is accepted, but durable design work should use the canonical spelling so a new synonym does not split history.
+When a node exists, use its id. Otherwise use `pr-<n>` or a catalog canonical subject. A checked-in alias is accepted. Durable design work must use the canonical spelling so a new synonym does not split history.
 
 The reader takes every subject the writer takes. That is the defect this page was written for. The writer accepted free text while the reader resolved a graph node first, so a ruling about `pr-923` was written, receipted, and lost.
 
@@ -141,7 +141,7 @@ The index remains append-only. A retraction is a new `decision_retracted` event,
 
 Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retracted`, or `unscoped`. Human output leads with that marker and JSON includes `lifecycle`, reason, and positive closure evidence when available. `--state live|expired|superseded|retracted|unscoped|all` filters the same projection. A coord row stamped to a node expires only when that node's graph entry has positive closure evidence. A repository-scoped PR row expires only when its exact graph binding is marked merged. Missing, ambiguous, or unreadable closure evidence is `unscoped`, never live. Law does not expire because a node or PR closes.
 
-The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. Peer-mail trailers use that exact query. JSON adds the canonical subject and a `current_law.status` of `single`, `conflict`, or `none`; human output prints `CURRENT LAW`, `LAW CONFLICT`, or `NO CURRENT LAW`. Only `single` is an actionable current answer. Conflict never chooses the newest, and catalog damage is a nonzero read failure rather than `none`. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
+The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. Peer-mail trailers use that exact query. JSON adds the canonical subject and a `current_law.status` of `single`, `conflict`, or `none`. Human output prints `CURRENT LAW`, `LAW CONFLICT`, or `NO CURRENT LAW`. Only `single` is an actionable current answer. Conflict never chooses the newest, and catalog damage is a nonzero read failure rather than `none`. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
 
 ## Review and export
 
