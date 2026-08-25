@@ -31,19 +31,38 @@ def _fno_binary() -> str:
 
 def _live_root_pids() -> set[int]:
     """Return positively live registry PIDs that may have detached children."""
+    roots: set[int] = set()
     try:
         from fno.agents.registry import load_registry
         from fno.agents.spawn_gate import LIVE_STATUSES, _pid_alive
 
-        roots: set[int] = set()
         for row in load_registry():
             if row.status not in LIVE_STATUSES or row.pid is None:
                 continue
             if _pid_alive(row.pid, row.pid_start_time) is not False:
                 roots.add(row.pid)
-        return roots
     except Exception:
-        return set()
+        pass
+    try:
+        from fno import paths
+        from fno.agents.spawn_gate import _pid_alive
+
+        record = json.loads(
+            (paths.agents_home_dir() / "opencode-serve.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        pid = record.get("pid") if isinstance(record, dict) else None
+        pid_start = record.get("pid_start") if isinstance(record, dict) else None
+        if (
+            isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and _pid_alive(pid, pid_start) is not False
+        ):
+            roots.add(pid)
+    except Exception:
+        pass
+    return roots
 
 
 def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | None]:

@@ -76,6 +76,22 @@ def test_ac9_edge_ps_timeout_caller_refuses_with_exit_four(monkeypatch) -> None:
     }
 
 
+def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_path) -> None:
+    from fno import doctor_footprint
+
+    (tmp_path / "opencode-serve.json").write_text(
+        json.dumps({"pid": 900, "pid_start": 123}), encoding="utf-8"
+    )
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 900,
+    )
+
+    assert doctor_footprint._live_root_pids() == {900}
+
+
 def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:
     from fno import doctor_footprint
 

@@ -223,6 +223,10 @@ def parse_footprint(
             descendant_cpu_percent += process.cpu_percent
             if process.cpu_percent:
                 sustained.append((process.cpu_percent, process.command))
+        elif pid in attributed_roots:
+            direct_process_count += 1
+            sustained_cpu_percent += process.cpu_percent
+            sustained.append((process.cpu_percent, process.command))
         elif process.elapsed_seconds < sustained_floor_seconds:
             direct_process_count += 1
             transient_call_count += 1
