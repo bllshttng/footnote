@@ -92,7 +92,7 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
         lambda pid, _start: True if pid == 900 else None,
     )
 
-    assert doctor_footprint._live_root_pids() == set()
+    assert doctor_footprint._live_root_pids() == (set(), None)
     assert doctor_footprint._live_shared_serve_root_pids() == {900}
 
     (tmp_path / "opencode-serve.json").write_text(
@@ -126,7 +126,29 @@ def test_live_root_pids_includes_roster_resolved_claude_bg_worker(monkeypatch) -
         lambda pid, _start: pid == 902,
     )
 
-    assert doctor_footprint._live_root_pids() == {902}
+    assert doctor_footprint._live_root_pids() == ({902}, None)
+
+
+def test_live_root_pids_refuses_unavailable_pidless_worker_discovery(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        harness="claude",
+        short_id="cl-bg",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+
+    assert doctor_footprint._live_root_pids() == (
+        set(),
+        "worker root discovery unavailable",
+    )
 
 
 def test_ac9_edge_cause_payload_is_bounded(monkeypatch) -> None:
@@ -205,7 +227,11 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(monkeypa
 
     observer_pid = os.getpid()
     calls: list[list[str]] = []
-    monkeypatch.setattr(doctor_footprint, "_live_root_pids", lambda: set())
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_root_pids",
+        lambda: (set(), None),
+    )
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -234,7 +260,11 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(monkeypa
 def test_ac6_edge_cause_only_seeds_live_detached_registry_root(monkeypatch) -> None:
     from fno import doctor_footprint
 
-    monkeypatch.setattr(doctor_footprint, "_live_root_pids", lambda: {100})
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_root_pids",
+        lambda: ({100}, None),
+    )
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",

@@ -867,7 +867,9 @@ def _footprint_cause_evidence() -> Optional[str]:
         ps_output, error = _read_ps(timeout=5.0)
         if error is not None or ps_output is None:
             return None
-        root_pids = _live_root_pids(deadline=probe_deadline)
+        root_pids, root_error = _live_root_pids(deadline=probe_deadline)
+        if root_error is not None:
+            return None
         shared_serve_pids = _live_shared_serve_root_pids()
         reading = parse_footprint(
             ps_output,

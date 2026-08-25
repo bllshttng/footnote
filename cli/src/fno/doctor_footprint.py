@@ -43,41 +43,65 @@ def _fno_binary() -> str:
     return shutil.which("fno") or shutil.which("fno-py") or "fno"
 
 
-def _live_root_pids(*, deadline: float | None = None) -> set[int]:
+def _root_pid_is_live(pid: int, pid_start: int | None) -> bool:
+    from fno.agents.spawn_gate import _pid_alive, _process_start_time
+
+    if pid == 1:
+        current_start = _process_start_time(pid)
+        return current_start is not None and (
+            pid_start is None or current_start == pid_start
+        )
+    return _pid_alive(pid, pid_start) is True
+
+
+def _live_root_pids(
+    *, deadline: float | None = None
+) -> tuple[set[int], str | None]:
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
     try:
         from fno.agents.registry import load_registry
         from fno.agents.session_procs import bg_socket_pid_map
-        from fno.agents.spawn_gate import LIVE_STATUSES, _pid_alive
+        from fno.agents.spawn_gate import LIVE_STATUSES
 
         rows = load_registry()
         for row in rows:
             if row.status not in LIVE_STATUSES or row.pid is None:
                 continue
-            if _pid_alive(row.pid, row.pid_start_time) is True:
+            if _root_pid_is_live(row.pid, row.pid_start_time):
                 roots.add(row.pid)
+        pidless_claude_rows = [
+            row
+            for row in rows
+            if (
+                row.status in LIVE_STATUSES
+                and row.pid is None
+                and row.harness == "claude"
+                and row.short_id
+            )
+        ]
+        if not pidless_claude_rows:
+            return roots, None
         if deadline is not None and time.monotonic() >= deadline:
-            return roots
+            return roots, "worker root discovery timed out"
         socket_timeout = (
             15.0
             if deadline is None
             else max(0.01, deadline - time.monotonic())
         )
         socket_pids = bg_socket_pid_map(timeout=socket_timeout)
-        for row in rows:
-            if (
-                row.status in LIVE_STATUSES
-                and row.pid is None
-                and row.harness == "claude"
-                and row.short_id
-            ):
-                pid = socket_pids.get(row.short_id)
-                if pid is not None and _pid_alive(pid, None) is True:
-                    roots.add(pid)
+        missing = [row.short_id for row in pidless_claude_rows if row.short_id not in socket_pids]
+        if missing:
+            return roots, "worker root discovery unavailable"
+        for row in pidless_claude_rows:
+            pid = socket_pids[row.short_id]
+            if _root_pid_is_live(pid, None):
+                roots.add(pid)
+            else:
+                return roots, "worker root liveness unavailable"
     except Exception:
-        pass
-    return roots
+        return roots, "worker root discovery unavailable"
+    return roots, None
 
 
 def _live_shared_serve_root_pids() -> set[int]:
@@ -291,7 +315,10 @@ def footprint_command(
         _emit_failure(error or "footprint unavailable: ps returned no output", json_output=json_output)
         raise typer.Exit(code=4)
 
-    root_pids = _live_root_pids()
+    root_pids, root_error = _live_root_pids()
+    if root_error is not None:
+        _emit_failure(f"footprint unavailable: {root_error}", json_output=json_output)
+        raise typer.Exit(code=4)
     shared_serve_pids = _live_shared_serve_root_pids()
     reading = parse_footprint(
         ps_output,

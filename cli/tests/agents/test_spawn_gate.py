@@ -289,7 +289,11 @@ class TestRunGate:
     def test_footprint_cause_reader_formats_fleet_share(self, monkeypatch):
         from fno import doctor_footprint
 
-        monkeypatch.setattr(doctor_footprint, "_live_root_pids", lambda **_kwargs: set())
+        monkeypatch.setattr(
+            doctor_footprint,
+            "_live_root_pids",
+            lambda **_kwargs: (set(), None),
+        )
         monkeypatch.setattr(
             doctor_footprint,
             "_read_ps",
