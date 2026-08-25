@@ -209,7 +209,6 @@ forked_meta_stop() {
 }
 
 JSON_CLEAN=$'Reviewed the diff at HEAD.\n\n```json\n[]\n```\n\nNothing survived verification.'
-JSON_DIRTY=$'```json\n[{"file":"a.py","summary":"boom","failure_scenario":"x"}]\n```'
 
 echo "== PostToolUse(ReportFindings) =="
 run_hook "$(post_tool_use ReportFindings '{"findings":[]}')"
@@ -274,9 +273,41 @@ run_hook "$(jq -nc --arg cwd "$WORK" --arg turn "$CODEX_TURN" \
     last_assistant_message:"no findings"}')"
 expect_silent "codex-stop-prose-without-structured-review"
 
-echo "== SubagentStop: shapes that must attest =="
-run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$JSON_CLEAN")"
-expect_attest "headered-json-clean"
+# --- THE VERDICT CORPUS (tests/hooks/fixtures/code-review-attest) ----------
+# One byte-exact file per measured final-text shape, the ruled verdict encoded
+# in the filename suffix (.attest / .silent). The walker below drives the hook
+# over every file, so the suite is pinned to the MEASURED PAYLOADS rather than
+# to the predicate: flipping the hook's rule without re-measuring the corpus
+# goes red here (the negative control: flip the rule, watch this walk go red,
+# revert). The payloads live in files because a retyped copy drifts - the live
+# specimen's em dash reached an earlier inline copy as a hyphen and the suite
+# stayed green on the wrong bytes.
+FIXTURES="$REPO_ROOT/tests/hooks/fixtures/code-review-attest"
+CORPUS_DIR="$TMP/corpus"
+mkdir -p "$CORPUS_DIR"
+CORPUS_TX="$CORPUS_DIR/agent-c0rpu5.jsonl"
+: > "$CORPUS_TX"
+jq -nc '{forkedSkill:true, skillName:"code-review"}' \
+  > "$CORPUS_DIR/agent-c0rpu5.forked-skill.marker.json"
+
+echo "== The verdict corpus: every measured shape, ruled by filename =="
+for fixture in "$FIXTURES"/*.attest "$FIXTURES"/*.silent; do
+  [[ -f "$fixture" ]] || continue
+  name="$(basename "$fixture")"
+  payload="$(jq -nc --arg cwd "$WORK" --arg tp "$CORPUS_TX" --rawfile msg "$fixture" \
+    '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"general-purpose",
+      agent_id:"c0rpu5", agent_transcript_path:$tp, last_assistant_message:$msg}')"
+  run_hook "$payload"
+  if [[ "$name" == *.attest ]]; then
+    if attested; then pass "corpus $name: attested"; else fail "corpus $name: NO attestation (ruled attest)"; fi
+  else
+    if attested; then fail "corpus $name: attested (ruled silent)"; else pass "corpus $name: silent"; fi
+  fi
+done
+
+echo "== SubagentStop: the header identity lane (payload from the corpus) =="
+run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$(<"$FIXTURES/headered-json-clean.attest")")"
+expect_attest "header-opens-message"
 
 echo "== SubagentStop: caller-chosen names never identify a review =="
 # The one name the harness controls: agent_type naming the skill type. This
@@ -304,26 +335,11 @@ expect_silent "agent-name-none-marker"
 # final text equal to "(none)"; anything longer must never clear the gate,
 # an excuse line above the marker least of all. These carry a REAL marker
 # sidecar, so it is the verdict that stays silent, not the identity.
-run_hook "$(forked_skill_stop $'Reviewed.\n\n(none)\n' "code-review")"
-expect_silent "none-marker-buried-in-prose"
-
-run_hook "$(forked_skill_stop $'I could not inspect the diff.\n\n(none)' "code-review")"
-expect_silent "none-marker-after-failure"
-
 echo "== SubagentStop: the forked-skill shape measured live =="
 # This is the exact payload that produced six unmergeable PRs. Nothing in it
 # names code-review except the sidecar.
-run_hook "$(forked_skill_stop "(none)" "code-review")"
-expect_attest "forked-marker-none"
-
-run_hook "$(forked_skill_stop "$JSON_CLEAN" "code-review")"
-expect_attest "forked-marker-json-clean"
-
 run_hook "$(forked_meta_stop "(none)" "/code-review <level>")"
 expect_silent "meta-spawn-name-none"
-
-run_hook "$(forked_skill_stop "$JSON_DIRTY" "code-review")"
-expect_silent "forked-marker-json-dirty"
 
 # A fork of some OTHER skill must never clear the gate, whatever it printed.
 run_hook "$(forked_skill_stop "(none)" "brainstorming")"
@@ -333,15 +349,6 @@ expect_silent "forked-marker-other-skill"
 # structural signal at 0. Silence, not a guess.
 run_hook "$(forked_skill_stop "(none)" "")"
 expect_silent "forked-no-sidecar"
-
-# The live specimen, byte exact: the marker, a blank line, then the scope
-# sentence naming the file the fork excluded. That review read zero files, so
-# strict equality stays silent on its real text, not a paraphrase of it. The
-# em-dash arrives via printf splice: the source stays ASCII and the tested
-# byte is still the fork's own.
-SPECIMEN="$(printf '(none)\n\nThe only change is `tests/hooks/test_code_review_attest.sh`, a new test file \xe2\x80\x94 excluded from review at this level.')"
-run_hook "$(forked_skill_stop "$SPECIMEN" "code-review")"
-expect_silent "forked-real-specimen-marker-then-scope-note"
 
 # skillName alone is not a skill fork. The forkedSkill flag is the part only
 # the harness writes; a marker without it gates nothing.
@@ -365,20 +372,6 @@ run_hook "$(jq -nc --arg cwd "$WORK" \
 expect_silent "task-payload-description-prose"
 
 echo "== SubagentStop: shapes that must stay silent =="
-run_hook "$(subagent_stop "/code-review" "$JSON_DIRTY")"
-expect_silent "described-json-dirty"
-
-run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$JSON_DIRTY")"
-expect_silent "headered-json-dirty"
-
-# A review that produced no parseable verdict at all is NOT a clean pass.
-# Absence has two explanations and a producer must never guess between them.
-run_hook "$(subagent_stop "/code-review" "I could not read the diff.")"
-expect_silent "described-unparseable"
-
-run_hook "$(subagent_stop "/code-review" "")"
-expect_silent "described-empty-message"
-
 # An unrelated subagent that happens to end in an empty json array must not
 # clear a merge gate. Whatever identifies a code-review must be positive.
 run_hook "$(subagent_stop "general-purpose" $'Here is the list.\n\n```json\n[]\n```')"
@@ -388,19 +381,6 @@ expect_silent "unrelated-subagent-empty-array"
 # the review's shape.
 run_hook "$(subagent_stop "" $'Notes on the skill:\n## Review findings\n```json\n[]\n```')"
 expect_silent "heading-quoted-midtext"
-
-# When fences carry different arrays, the LAST fence is the verdict: a
-# leading quoted [] over a closing non-empty findings block attests nothing.
-run_hook "$(subagent_stop "/code-review" $'Spec excerpt:\n```json\n[]\n```\n\n```json\n[{"file":"a.py","summary":"boom","failure_scenario":"x"}]\n```')"
-expect_silent "later-fence-carries-findings"
-
-# And the inverse: real findings FIRST, then a later empty fence listing
-# excluded files. The verdict is clean only when EVERY fence is empty.
-FINDINGS_THEN_EMPTY=$'```json\n[{"file":"a.py","summary":"boom","failure_scenario":"x"}]\n```\n\nExcluded files:\n```json\n[]\n```'
-run_hook "$(jq -nc --arg cwd "$WORK" --arg msg "$FINDINGS_THEN_EMPTY" \
-  '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"code-review",
-    last_assistant_message:$msg}')"
-expect_silent "findings-then-empty-exclusion-fence"
 
 run_hook "$(subagent_stop "general-purpose" "(none)")"
 expect_silent "unrelated-subagent-none-word"

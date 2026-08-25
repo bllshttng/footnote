@@ -1,0 +1,17 @@
+{
+  "rule": "strict equality over the whole final text: every json fence parses to [], or no fences and the entire text is the bare (none) marker",
+  "context": "every payload is delivered as a SubagentStop under a forked-skill marker sidecar (forkedSkill true, skillName code-review); only the text varies",
+  "shapes": {
+    "bare-none-marker.attest": "the low-level protocol's whole-verdict marker",
+    "headered-json-clean.attest": "the two live self-review shapes: header, empty fence, closing sentence",
+    "bare-fence-clean.attest": "a fork ending in a fenced empty array with no header",
+    "fence-nonempty.silent": "findings present",
+    "none-buried-in-prose.silent": "the marker inside longer output is not the marker",
+    "none-after-failure-note.silent": "an excuse line above the marker",
+    "live-specimen-scope-note.silent": "measured live 2026-08: marker, blank line, scope sentence naming the excluded file, em dash byte-exact",
+    "later-fence-carries-findings.silent": "the LAST fence is the verdict",
+    "findings-then-exclusion-fence.silent": "real findings first, later empty exclusion fence",
+    "unparseable-prose.silent": "no verdict shape at all",
+    "empty-message.silent": "no message"
+  }
+}
