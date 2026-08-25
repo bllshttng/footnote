@@ -6584,17 +6584,15 @@ impl View {
             .footer("enter confirm · esc cancel")
             .fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
         let lines = [self.confirm_text(action)];
-        layout_lines_overlay(
-            origin,
-            dims,
-            &chrome,
-            &lines,
-            None,
+        let anchor = if matches!(&action.action, ConfirmKind::CloseTab { .. }) {
+            OverlayAnchor::Center
+        } else {
             OverlayAnchor::At {
                 row: self.confirm_anchor_row(rows, action),
                 col: origin.1,
-            },
-        )
+            }
+        };
+        layout_lines_overlay(origin, dims, &chrome, &lines, None, anchor)
     }
 
     fn draw_confirm_line(
@@ -10128,7 +10126,8 @@ async fn attach_and_run(
                 | ServerMsg::PaneFocused { .. }
                 | ServerMsg::LayoutApplied { .. }
                 | ServerMsg::LayoutGrafted { .. }
-                | ServerMsg::TabLocation { .. },
+                | ServerMsg::TabLocation { .. }
+                | ServerMsg::TabClosed { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -10515,7 +10514,8 @@ async fn attach_and_run(
                     | ServerMsg::PaneFocused { .. }
                     | ServerMsg::LayoutApplied { .. }
                     | ServerMsg::LayoutGrafted { .. }
-                    | ServerMsg::TabLocation { .. }) => {}
+                    | ServerMsg::TabLocation { .. }
+                    | ServerMsg::TabClosed { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback
@@ -16829,6 +16829,33 @@ mod tests {
         assert!(
             screen.contains("close workspace"),
             "the confirm prompt paints at the target row: {screen}"
+        );
+    }
+
+    #[test]
+    fn close_tab_confirm_is_centered_in_the_content_viewport() {
+        let view = two_pane_view();
+        let action = ConfirmAction {
+            action: ConfirmKind::CloseTab { tab: 1 },
+            label: "2".into(),
+        };
+        let layout = view.confirm_overlay_layout(view.term.0 as usize, &action);
+        let (content_origin, content_dims) = view.overlay_viewport();
+        let centered = family_b_origin(
+            OverlayAnchor::Center,
+            layout.framed.width,
+            layout.framed.lines.len(),
+            content_origin,
+            content_dims,
+        );
+        assert_eq!(
+            layout.origin, centered,
+            "Close tab must use the shared centered modal origin"
+        );
+        assert_ne!(
+            layout.origin.0,
+            view.term.0 as usize - 1,
+            "Close tab must not fall back to the bottom row"
         );
     }
 

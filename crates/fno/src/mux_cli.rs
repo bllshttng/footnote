@@ -2788,12 +2788,12 @@ fn squad_target(squad: Option<String>) -> PaneTarget {
     }
 }
 
-/// `fno mux tab ls|create|rename|join ...` (x-d865).
+/// `fno mux tab ls|create|rename|join|close ...` (x-d865).
 pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     let verb = match args.first().and_then(|a| a.to_str()) {
         Some(v) => v.to_string(),
         None => {
-            eprintln!("fno mux tab: needs a verb: ls|create|rename|join");
+            eprintln!("fno mux tab: needs a verb: ls|create|rename|join|close");
             return EXIT_USAGE;
         }
     };
@@ -2806,6 +2806,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     let mut src = None;
     let mut at = None;
     let mut dir = None;
+    let mut force = false;
     let mut i = 1;
     while i < args.len() {
         let tok = match args[i].to_str() {
@@ -2821,11 +2822,22 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 "--session" => session = Some(flag_value(args, &mut i, "--session")?),
                 "--workspace" | "--squad" | "-s" => squad = Some(flag_value(args, &mut i, tok)?),
                 "--name" => name = Some(flag_value(args, &mut i, "--name")?),
-                "--tab" => tab_sel = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
+                "--tab" => {
+                    if tab_sel.is_some() {
+                        return Err("duplicate --tab".into());
+                    }
+                    tab_sel = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?);
+                }
                 "--src" => src = Some(parse_tab_sel(&flag_value(args, &mut i, "--src")?)?),
                 "--at" => at = Some(parse_u64(&flag_value(args, &mut i, "--at")?, "--at")?),
                 "--dir" | "--direction" | "-d" => {
                     dir = Some(parse_dir(&flag_value(args, &mut i, tok)?, tok)?)
+                }
+                "--force" => {
+                    if force {
+                        return Err("duplicate --force".into());
+                    }
+                    force = true;
                 }
                 t => return Err(format!("unknown flag: {t}")),
             }
@@ -2868,8 +2880,19 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 direction,
             }
         }
+        "close" => {
+            let Some(tab) = tab_sel else {
+                eprintln!("fno mux tab close: needs --tab <sel>");
+                return EXIT_USAGE;
+            };
+            ControlVerb::TabClose {
+                squad: squad_target(squad),
+                tab,
+                force,
+            }
+        }
         other => {
-            eprintln!("fno mux tab: unknown verb {other} (ls|create|rename|join)");
+            eprintln!("fno mux tab: unknown verb {other} (ls|create|rename|join|close)");
             return EXIT_USAGE;
         }
     };
@@ -4814,6 +4837,30 @@ fn render_reply(
                 ) {
                     println!("{line}");
                 }
+            }
+            EXIT_OK
+        }
+        ServerMsg::TabClosed {
+            tab_id,
+            pane_ids,
+            forced,
+        } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "tab_id": tab_id,
+                        "pane_ids": pane_ids,
+                        "forced": forced,
+                    })
+                );
+            } else {
+                let panes = pane_ids
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!("closed tab_id={tab_id} panes={panes} forced={forced}");
             }
             EXIT_OK
         }
