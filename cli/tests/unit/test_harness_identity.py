@@ -893,15 +893,19 @@ def test_resolve_attester_identity_refuses_the_command_line_override():
     import fno as _fno
 
     src_dir = str(Path(_fno.__file__).resolve().parents[1])
-    # The parent must be a FAMILY carrier (a process whose argv names the
+    # The parent must be a FAMILY carrier (a process whose argv0 names the
     # marker's harness), because the nearest family carrier is what decides:
-    # `exec -a codex` renames the intermediate bash, so its cmdline carries
-    # the family token while its env still holds the harness's own id.
+    # `exec -a codex` renames the intermediate bash, so its argv0 carries the
+    # family token while its env still holds the harness's own id. The `; :`
+    # tail is load-bearing: a lone command gets tail-exec'd (the leaf REPLACES
+    # the renamed bash and inherits its pid), leaving the walk no family
+    # carrier at all - the pre-tail shape passed only via full-argv matching,
+    # the exact artifact the argv0 rule removed.
     import shlex
 
     leaf = (
         f"CODEX_THREAD_ID=foreign-sess {sys.executable} -c "
-        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'"
+        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'; :"
     )
     wrapped = "exec -a codex bash -c " + shlex.quote(leaf)
     r = subprocess.run(
@@ -921,14 +925,16 @@ def test_resolve_attester_identity_refuses_the_command_line_override():
         assert r.returncode == 3, r.stdout + r.stderr
         assert "true-sess" in r.stdout and "foreign-sess" in r.stdout
     else:
-        # darwin: a FRESH child's environment is not readable (KERN_PROCARGS2
-        # exposes argv only), so no family carrier corroborates and the
-        # resolver records the claim as env_only instead of guessing. The
-        # real harness chain above a session IS readable on darwin - that is
-        # the lane the rule exists for - just not a child spawned seconds ago.
-        assert r.returncode == 0, r.stdout + r.stderr
-        assert "foreign-sess" in r.stdout
-        assert "env_only" in r.stdout
+        # darwin: `ps eww` readability is partial by measurement, so the
+        # carrier is either readable (the disagreement raises) or not
+        # (env_only). Both are honest. The one forbidden outcome on every
+        # OS is the forged stamp: the override resolving with a `process`
+        # witness, which is what full-argv family matching shipped.
+        if r.returncode == 0:
+            assert "env_only" in r.stdout, r.stdout + r.stderr
+        else:
+            assert r.returncode == 3, r.stdout + r.stderr
+            assert "true-sess" in r.stdout and "foreign-sess" in r.stdout
 
 
 def test_resolve_attester_identity_corroborates_the_own_id():
@@ -947,14 +953,15 @@ def test_resolve_attester_identity_corroborates_the_own_id():
 
     src_dir = str(Path(_fno.__file__).resolve().parents[1])
     # Same family-carrier parent as the override test (exec -a codex renames
-    # the intermediate bash): the carrier agrees with the env. linux reads it
-    # and answers process; darwin cannot read a fresh child's environment, so
-    # the same chain honestly degrades to env_only there.
+    # the intermediate bash; the `; :` tail keeps it alive under the leaf):
+    # the carrier agrees with the env. linux reads it and answers process;
+    # darwin cannot read a fresh child's environment, so the same chain
+    # honestly degrades to env_only there.
     import shlex
 
     leaf = (
         f"{sys.executable} -c "
-        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'"
+        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'; :"
     )
     wrapped = "exec -a codex bash -c " + shlex.quote(leaf)
     r = subprocess.run(
@@ -974,4 +981,7 @@ def test_resolve_attester_identity_corroborates_the_own_id():
     if _proc_environ_strictly_readable():
         assert witness == "process"
     else:
-        assert witness == "env_only"
+        # darwin: ps eww readability is partial, so the agreeing carrier is
+        # corroborated where it was readable (process) and honestly
+        # env_only where it was not. Either is correct; a raise is not.
+        assert witness in ("process", "env_only")

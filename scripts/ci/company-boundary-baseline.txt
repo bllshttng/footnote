@@ -22,8 +22,8 @@
 # probe must parse a holder to look its session up, and duplicating that
 # parser in core is how two spellings of one vocabulary start drifting.
 # See docs/architecture/company-boundaries.md.
-cli/src/fno/events/cli.py:133: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
-cli/src/fno/events/cli.py:165: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
+cli/src/fno/events/cli.py:136: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
+cli/src/fno/events/cli.py:168: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
 cli/src/fno/claims/cli.py:843: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
 cli/src/fno/claims/cli.py:859: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
 cli/src/fno/claims/cli.py:933: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES

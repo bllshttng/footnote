@@ -718,8 +718,24 @@ def _read_ancestor_marker(pid: int, marker: str) -> Optional[str]:
         return None
     if out.returncode != 0:
         return None
+    text = out.stdout
+    # `ps eww` prints argv and env as one merged line, so a MARKER=value
+    # token in the COMMAND text (an assignment inside a -c script) would be
+    # read as the ancestor's env value - the carrier then "corroborates" the
+    # very override it was supposed to catch. Strip the argv prefix psutil
+    # already knows before scanning; when the join does not match (ps may
+    # reformat), fall back to scanning the whole line, which is the old
+    # partial-by-measurement behavior, never a worse one.
+    try:
+        import psutil
+
+        argv_text = " ".join(psutil.Process(pid).cmdline() or [])
+        if argv_text and text.startswith(argv_text):
+            text = text[len(argv_text) :]
+    except (ImportError, psutil.Error, ValueError):
+        pass
     text_prefix = marker + "="
-    for token in out.stdout.split():
+    for token in text.split():
         if token.startswith(text_prefix):
             return token[len(text_prefix) :]
     return None
