@@ -139,18 +139,18 @@ def test_valid_consent_records_once_and_replay_refuses_before_writes(
         subject=proposal["subject"],
         decision=proposal["decision"],
         rationale=proposal["rationale"],
-        authority_source="operator",
+        authority_source="chat_attested",
         consent=consent,
         events_root=tmp_path,
     )
 
-    assert written["event"]["data"]["authority_source"] == "operator"
+    assert written["event"]["data"]["authority_source"] == "chat_attested"
     assert law.load_proposal(proposal["proposal_id"])["status"] == "consumed"
     with pytest.raises(law.InvalidOperatorConsentError, match="consumed"):
         decide.record_decision(
             subject=proposal["subject"],
             decision=proposal["decision"],
-            authority_source="operator",
+            authority_source="chat_attested",
             consent=consent,
             events_root=tmp_path,
         )
@@ -375,7 +375,7 @@ def test_mismatched_consent_refuses_before_any_decision_store(
         decide.record_decision(
             subject=proposal["subject"],
             decision=proposal["decision"],
-            authority_source="operator",
+            authority_source="chat_attested",
             consent=consent,
             events_root=tmp_path,
         )
@@ -452,7 +452,7 @@ def test_event_failure_leaves_valid_consent_retryable(
             subject=proposal["subject"],
             decision=proposal["decision"],
             rationale=proposal["rationale"],
-            authority_source="operator",
+            authority_source="chat_attested",
             consent=consent,
             events_root=tmp_path,
         )

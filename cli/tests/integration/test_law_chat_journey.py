@@ -97,7 +97,7 @@ def test_exact_approval_writes_two_stores_and_replay_is_refused(isolated) -> Non
         subject=proposal["subject"],
         decision=proposal["decision"],
         rationale=proposal["rationale"],
-        authority_source="operator",
+        authority_source="chat_attested",
         consent=consent,
         events_root=root,
     )
@@ -111,14 +111,16 @@ def test_exact_approval_writes_two_stores_and_replay_is_refused(isolated) -> Non
     index_rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines() if line]
     assert [event["data"]["decision_id"] for event in events] == [decision_id]
     assert [row["data"]["decision_id"] for row in index_rows] == [decision_id]
-    _, rows, _ = decide.list_decisions("x-12ba", limit=None, lane="law")
+    # A chat approval cannot reach the law lane, so the row reads back in the
+    # unattributed lane a human must consciously trust.
+    _, rows, _ = decide.list_decisions("x-12ba", limit=None, lane="unattributed")
     assert [row["decision_id"] for row in rows] == [decision_id]
 
     with pytest.raises(law.InvalidOperatorConsentError, match="consumed"):
         decide.record_decision(
             subject=proposal["subject"],
             decision=proposal["decision"],
-            authority_source="operator",
+            authority_source="chat_attested",
             consent=consent,
             events_root=root,
         )

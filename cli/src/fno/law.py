@@ -440,7 +440,10 @@ def enact_proposal(
         rationale=proposal["rationale"],
         options=proposal["options"],
         supersedes=proposal["supersedes"],
-        authority_source="operator",
+        # The permission click proves a chat approval, never a human origin
+        # (ruling d-15ddfab0: origin_provenance not_exposed), so the row
+        # never claims the operator lane.
+        authority_source="chat_attested",
         consent=consent,
     )
     return {"proposal_id": proposal_id, "status": "consumed", **result}

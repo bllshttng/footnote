@@ -273,10 +273,12 @@ def record_decision(
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
 
-    if consent is not None and authority_source != "operator":
+    if consent is not None and authority_source != "chat_attested":
         from fno.law import InvalidOperatorConsentError
 
-        raise InvalidOperatorConsentError("consent requires operator authority")
+        raise InvalidOperatorConsentError(
+            "consent proves a chat approval, never operator authority"
+        )
 
     consent_expected = None
     if consent is not None:
@@ -290,7 +292,11 @@ def record_decision(
             "supersedes": supersedes,
         }
         validate_operator_consent(consent, expected=consent_expected)
-        provenance = Provenance("operator", "operator", "operator", None)
+        # The permission click approves the attribution; it does not prove a
+        # human origin (the 2026-08-24 UserPromptSubmit probe found no
+        # discriminator), so authority_source keeps the caller's honest value
+        # and the reader lanes the row accordingly.
+        provenance = Provenance("operator", authority_source, "operator", None)
     else:
         provenance = _resolve_decider(decided_by, authority_source)
 
