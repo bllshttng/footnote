@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -215,6 +216,115 @@ def test_expired_consent_window_allows_rearming(
 
     assert rearmed["status"] == "armed"
     assert rearmed["armed_session_id"] == "new-session"
+
+
+def test_approval_receipt_is_not_persisted_in_proposal_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno import law
+
+    proposal = law.prepare_proposal(
+        subject="x-12ba",
+        decision="Merges belong to the operator",
+        rationale="Durable policy needs human approval.",
+    )
+    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    armed = law._arm_proposal_from_hook(
+        proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="human-session-1",
+        permission_mode="default",
+        tool_input=tool_input,
+    )
+    stored = law.load_proposal(proposal["proposal_id"])
+
+    assert "approval_receipt" in armed
+    assert "approval_receipt" not in stored
+    assert "armed_tool_input" not in stored
+
+
+def test_proposal_arming_holds_the_proposal_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno import law
+
+    proposal = law.prepare_proposal(
+        subject="x-12ba",
+        decision="Merges belong to the operator",
+        rationale="Durable policy needs human approval.",
+    )
+    calls: list[str] = []
+
+    @contextmanager
+    def lock(proposal_id: str):
+        calls.append(proposal_id)
+        yield
+
+    monkeypatch.setattr(law, "proposal_lock", lock)
+    law._arm_proposal_from_hook(
+        proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="human-session-1",
+        permission_mode="default",
+        tool_input=f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}",
+    )
+
+    assert calls == [proposal["proposal_id"]]
+
+
+def test_consuming_proposal_cannot_be_rearmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno import law
+
+    proposal = law.prepare_proposal(
+        subject="x-12ba",
+        decision="Merges belong to the operator",
+        rationale="Durable policy needs human approval.",
+    )
+    stored = law.load_proposal(proposal["proposal_id"])
+    stored.update({"status": "consuming", "consuming_decision_id": "d-12345678"})
+    law.write_proposal(stored)
+
+    with pytest.raises(law.InvalidOperatorConsentError, match="consuming"):
+        law._arm_proposal_from_hook(
+            proposal["proposal_id"],
+            content_hash=proposal["content_hash"],
+            session_id="new-session",
+            permission_mode="default",
+            tool_input=f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}",
+        )
+
+
+def test_enact_surfaces_index_recovery_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+    from fno import decide, law
+
+    def fail(*args: object, **kwargs: object) -> dict[str, object]:
+        raise decide.IndexWriteError("d-12345678", OSError("index unavailable"))
+
+    monkeypatch.setattr(law, "enact_proposal", fail)
+    result = CliRunner().invoke(
+        law.law_app,
+        [
+            "enact",
+            "--proposal",
+            "lp-0123456789ab",
+            "--hash",
+            "a" * 64,
+            "--receipt",
+            "receipt-1",
+        ],
+    )
+
+    assert result.exit_code == 4
+    assert "d-12345678" in result.output
+    assert "fno backlog decide-reindex" in result.output
 
 
 @pytest.mark.parametrize(
