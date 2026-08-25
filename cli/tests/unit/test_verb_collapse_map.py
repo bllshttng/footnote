@@ -147,8 +147,10 @@ def test_live_baseline_matches_the_projected_allocation():
     # +1 for `king done`, the crown expire verb.
     # +1 for `doctor footprint`, landed on main while this branch ran; the
     # merged tree carries both rows, so both counts include it.
+    # +4 for the hidden `law` proposal verbs (prepare, enact, resume,
+    # inspect), each baselined in this PR.
     # Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 117
+    assert len(leaves) <= 121
     assert "fno-agents" in leaves
 
 
