@@ -5136,13 +5136,24 @@ fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> 
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
+        // A RETRACTION names the pair it revokes in retracts_attester: an
+        // operator session revoking a forged pass must not have to emit under
+        // the victim's identity (which the attester binding now refuses). Key
+        // the retraction on the NAMED pair so it lands on the pass being
+        // revoked, while the retracting session's own entry stays untouched.
+        let key_attester = val
+            .pointer("/data/retracts_attester")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .or(attester);
         // Under the pair key a peer's `fail` revokes only the peer's own pass;
         // the author's `pass` still counts toward coverage. Coverage counts
         // reviews performed, not approvals granted - the hold on a bad review
         // lives on `open_review_findings` and on `unattested_reviewers_scan`,
         // which keeps its name key (the config.review.reviewers gate).
         latest.insert(
-            (r.trim_start_matches('/').to_string(), attester),
+            (r.trim_start_matches('/').to_string(), key_attester),
             (line_head.to_string(), line_branch, is_pass),
         );
     }
@@ -12727,6 +12738,93 @@ mod tests {
             "h",
         );
         assert_eq!(rep.coverage, Coverage::Covered(1));
+    }
+
+    #[test]
+    fn a_retraction_revokes_the_named_pair_not_the_retractor() {
+        // The retraction verb addresses the EVENT, not the identity: an
+        // operator session emits a fail carrying retracts_attester naming the
+        // pair that passed. The pair-keyed scan must revoke THAT pair while
+        // the retracting session's own entry stays untouched - undoing an
+        // impersonation must not require performing it a second time.
+        let pass = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-A", "branch": "feature/x"}
+        })
+        .to_string();
+        let control = classify_coverage(
+            &[],
+            &[],
+            &pass,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(control.coverage, Coverage::Covered(1));
+
+        let retraction = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "fail",
+                     "attester_session_id": "sess-operator",
+                     "retracts_attester": "sess-A", "branch": "feature/x"}
+        })
+        .to_string();
+        let revoked = classify_coverage(
+            &[],
+            &[],
+            &format!("{}\n{}", pass, retraction),
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert!(revoked.verdicts.is_empty(), "the named pair must yield no verdict");
+        assert_eq!(revoked.coverage, Coverage::Unknown);
+    }
+
+    #[test]
+    fn one_attesters_emit_never_moves_another_pairs_head() {
+        // The staleness defence of the pair key, pinned: session B emitting at
+        // a new head inserts B's own entry and leaves A's pass pinned to the
+        // head A actually reviewed. A same-key overwrite would have refreshed
+        // A's stale verdict onto code A never saw.
+        let events = format!(
+            "{}\n{}",
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head-1", "verdict": "pass",
+                         "attester_session_id": "sess-A", "branch": "feature/x"}
+            }),
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head-2", "verdict": "pass",
+                         "attester_session_id": "sess-B", "branch": "feature/x"}
+            })
+        );
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "head-2",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(2));
+        let shas: Vec<&str> = rep
+            .verdicts
+            .iter()
+            .map(|v| v.reviewed_sha.as_str())
+            .collect();
+        assert!(shas.contains(&"head-1") && shas.contains(&"head-2"), "{:?}", shas);
     }
 
     #[test]

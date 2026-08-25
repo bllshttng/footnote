@@ -39,6 +39,51 @@ class GraphqlPurpose(str, enum.Enum):
     discretionary = "discretionary"
 
 
+attestation_app = typer.Typer(
+    name="attestation",
+    help="Retraction for review attestations (the event, not the identity).",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+@attestation_app.command(
+    "retract",
+    hidden=True,
+    help=(
+        "Revoke a passing review_attestation by naming the pair that passed: "
+        "--reviewer, --attester (the session that emitted the pass), --head. "
+        "Writes a fail verdict carrying retracts_attester and records the "
+        "RETRACTING process's own identity. Refuses when no matching pass "
+        "exists, so a revocation never lands for a pair that never passed."
+    ),
+)
+def attestation_retract(
+    reviewer: str = typer.Option(..., "--reviewer", help="Reviewer name of the pass being revoked."),
+    attester: str = typer.Option(..., "--attester", help="The session id that emitted the pass."),
+    head: str = typer.Option(..., "--head", help="The head sha the pass pinned."),
+    reason: str = typer.Option(..., "--reason", help="Why the pass is revoked (recorded)."),
+    events: Optional[str] = typer.Option(
+        None, "--events", help="Path to events.jsonl (default: the repo project log)."
+    ),
+) -> None:
+    from pathlib import Path
+
+    from fno.pr import _attestation
+
+    rc = _attestation.retract(
+        reviewer,
+        attester,
+        head,
+        reason,
+        events=Path(events) if events else None,
+    )
+    raise typer.Exit(code=rc)
+
+
+pr_app.add_typer(attestation_app, name="attestation", hidden=True)
+
+
 @pr_app.command(
     "merge",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
