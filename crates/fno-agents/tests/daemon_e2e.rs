@@ -38,20 +38,76 @@ fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+/// A daemon started by a test, killed and reaped when the test's binding goes
+/// out of scope.
+///
+/// Every daemon here runs with `FNO_AGENTS_IDLE_EXIT_SECS=3600`, so one that is
+/// spawned and never waited on outlives the whole binary. Measured 2026-08-25:
+/// a single run of this file left two live daemons behind, and the stress
+/// harness runs the file twenty times in a row, so one CI job ended with about
+/// forty of them alive at once. That is the pid-exhaustion shape this suite
+/// exists to close, and per-test discipline had already missed it three times.
+/// Reaping in `Drop` makes the obligation structural: a test added later cannot
+/// forget.
+///
+/// The reap asserts the POSITIVE marker. `wait` returns the child's exit
+/// status, so a returning `Drop` means the daemon was collected, not merely
+/// signalled. A test that has already waited leaves an `ESRCH` kill and an
+/// error from the second wait, both harmless.
+struct DaemonChild(std::process::Child);
+
+impl std::ops::Deref for DaemonChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for DaemonChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for DaemonChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Kill a daemon this test spawned but does not hold as a `Child`.
+///
+/// `restart_daemon` spawns the successor from inside the test process, so there
+/// is no `Child` to hand to [`DaemonChild`]. The obvious teardown -- SIGTERM,
+/// then poll `kill(pid, 0)` until it stops answering -- measures the wrong
+/// thing twice. The daemon's graceful drain runs a bounded wind-down that costs
+/// seconds, and once it does exit the pid still answers as a zombie until
+/// something reaps it, so the poll reads "alive" for a process that is already
+/// gone and spends its whole budget every time (measured 10004ms, 10019ms and
+/// 10026ms across three runs: that is the budget, not the daemon).
+///
+/// Teardown does not need the graceful path. Every assertion has already run
+/// and the probe marker was written before the exec, so SIGKILL ends it at
+/// once and the reap belongs to whoever owns the handle.
+fn terminate_untracked(pid: u32) {
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+}
+
 /// Spawn the daemon as a tracked child (so the test holds its PID) and wait for
 /// the socket. The worker-bin override is passed through the env.
-fn start_daemon(home: &AgentsHome) -> std::process::Child {
+fn start_daemon(home: &AgentsHome) -> DaemonChild {
     start_daemon_env(home, &[])
 }
 
-fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> std::process::Child {
+fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
     let mut cmd = Command::new(daemon_bin);
     cmd.env("FNO_AGENTS_HOME", home.root())
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
     let child = cmd.spawn().expect("daemon spawns");
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
     wait_for_event(home, "daemon_started", Duration::from_secs(10));
-    child
+    DaemonChild(child)
 }
 
 /// Like [`start_daemon`] but with extra env on the daemon process. Used by tests
@@ -59,7 +115,7 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> std::process::
 /// B) would otherwise settle -- e.g. `FNO_AGENTS_NO_STARTUP_RECONCILE=1` to keep
 /// an artificially-seeded mid-flight source row intact for a promote-admission
 /// assertion.
-fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> std::process::Child {
+fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
     let mut cmd = Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
@@ -70,7 +126,7 @@ fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> std::process::
     let child = cmd.spawn().expect("daemon spawns");
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
     wait_for_event(home, "daemon_started", Duration::from_secs(10));
-    child
+    DaemonChild(child)
 }
 
 /// Wait for `needle` to appear in the daemon's event log.
@@ -723,11 +779,9 @@ async fn daemon_child_env_isolated_probe() {
     let mut sibling = start_daemon_with_bin(&sibling_home, &sibling_bin);
     let outcome = restart.await.unwrap().expect("probe restart succeeds");
     let _ = incumbent.wait();
-    unsafe {
-        libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
-        libc::kill(sibling.id() as libc::pid_t, libc::SIGTERM);
-    }
+    terminate_untracked(outcome.new_pid);
     let sibling_pid = sibling.id();
+    unsafe { libc::kill(sibling_pid as libc::pid_t, libc::SIGTERM) };
     let _ = sibling.wait();
 
     let probe = std::fs::read_to_string(&marker).expect("daemon env probe marker");

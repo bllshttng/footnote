@@ -81,7 +81,24 @@ build_test_binary daemon_e2e crates/fno-agents/Cargo.toml daemon_e2e
 build_test_binary persistence crates/fno/Cargo.toml persistence
 build_test_binary workspace_persistence_e2e crates/fno/Cargo.toml workspace_persistence_e2e
 
-echo "stress_setup=ready sha=$head_sha parallel_binaries=3 per_binary_threads=1 trials=$trials logs=$log_root"
+# Count the daemons this checkout's binaries left running. A process-backed e2e
+# test that spawns a daemon and never reaps it leaves one alive with a 3600s
+# idle exit, so it outlives the whole run; twenty trials turn a two-process miss
+# into forty live daemons on one machine, which is the pid-exhaustion shape this
+# suite exists to close. The pattern is the built binary path, so an operator's
+# own installed daemon is never counted.
+#
+# Every trial line carries daemons_left, printed whether it is zero or not. That
+# number is the positive marker that the check ran: a trial line without the
+# field means the instrument is missing, which reads differently from a clean
+# zero.
+daemon_pattern="$repo_root/crates/fno-agents/target/debug/fno-agents-daemon"
+count_daemons() {
+    pgrep -f "$daemon_pattern" 2>/dev/null | wc -l | tr -d ' '
+}
+daemon_baseline="$(count_daemons)"
+
+echo "stress_setup=ready sha=$head_sha parallel_binaries=3 per_binary_threads=1 trials=$trials daemon_baseline=$daemon_baseline logs=$log_root"
 failures=0
 for ((trial = 1; trial <= trials; trial++)); do
     if [[ "$(git rev-parse HEAD)" != "$head_sha" ]]; then
@@ -120,10 +137,15 @@ for ((trial = 1; trial <= trials; trial++)); do
     [[ "$persistence_rc" == 0 ]] || persistence_verdict=fail
     [[ "$workspace_rc" == 0 ]] && grep -Eq 'old_server_reaped_before_rebind old_pid=' "$trial_dir/workspace_persistence_e2e.log" || workspace_verdict=fail
 
-    if [[ "$daemon_verdict" != pass || "$persistence_verdict" != pass || "$workspace_verdict" != pass ]]; then
+    daemons_left=$(($(count_daemons) - daemon_baseline))
+    ((daemons_left < 0)) && daemons_left=0
+    leak_verdict=pass
+    ((daemons_left > 0)) && leak_verdict=fail
+
+    if [[ "$daemon_verdict" != pass || "$persistence_verdict" != pass || "$workspace_verdict" != pass || "$leak_verdict" != pass ]]; then
         failures=$((failures + 1))
     fi
-    echo "stress_trial trial=$trial sha=$head_sha daemon_e2e=$daemon_verdict persistence=$persistence_verdict workspace_persistence_e2e=$workspace_verdict logs=$trial_dir"
+    echo "stress_trial trial=$trial sha=$head_sha daemon_e2e=$daemon_verdict persistence=$persistence_verdict workspace_persistence_e2e=$workspace_verdict daemons_left=$daemons_left logs=$trial_dir"
 done
 
 echo "stress_summary trials=$trials failures=$failures sha=$head_sha logs=$log_root"
