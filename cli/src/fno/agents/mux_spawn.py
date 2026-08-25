@@ -1467,6 +1467,8 @@ def _mesh_env_wrapper(
             incoherent_model_env_notice,
             incoherent_model_env_unset_args,
             overlay_restores_model_env,
+            unrouted_model_clear_notice,
+            unrouted_model_keys,
         )
 
         _flags = incoherent_model_env_unset_args()
@@ -1481,6 +1483,16 @@ def _mesh_env_wrapper(
                 ),
                 file=sys.stderr,
             )
+        # An unrouted pane child carries no model claim either - coherent or
+        # not, the launching shell's pin is not a selection anyone made for
+        # this worker. `env -u` renders before `pairs`, so a composed route's
+        # own model vars still win where the two overlap.
+        if not overlay_restores_model_env(account_env, resolved_route):
+            _claimed = list(unrouted_model_keys())
+            for _k in _claimed:
+                unset += ["-u", _k]
+            if _claimed:
+                print(unrouted_model_clear_notice(_claimed), file=sys.stderr)
     # Set-or-clear the whole triple, never merge. A pane spawned from a
     # node-bound worker inherits that worker's env, so adding only what this
     # spawn resolved would leave an ad-hoc pane carrying the parent's FNO_NODE

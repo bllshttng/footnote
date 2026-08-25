@@ -103,17 +103,68 @@ pub fn incoherent_model_env(get: &dyn Fn(&str) -> Option<String>) -> Vec<(String
         .collect()
 }
 
+/// Every `MODEL_ENV_KEYS` name carrying a value - the model claims the
+/// environment is making, coherent or not - but only while the endpoint is
+/// Anthropic's own. Mirror of Python's `unrouted_model_keys`: a child's model
+/// claim may come from a composed route or an account overlay that pins one,
+/// never from the launching shell. The endpoint guard matches
+/// `incoherent_model_env` for the same reason: a foreign base serving foreign
+/// ids is a hand-composed route the operator built in their shell, and
+/// stripping it would break a working lane; Bedrock/Vertex pins are deliberate.
+pub fn unrouted_model_keys(get: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    if env_truthy(get("CLAUDE_CODE_USE_BEDROCK").as_deref())
+        || env_truthy(get("CLAUDE_CODE_USE_VERTEX").as_deref())
+    {
+        return Vec::new();
+    }
+    if !base_url_is_anthropic(get) {
+        return Vec::new();
+    }
+    MODEL_ENV_KEYS
+        .iter()
+        .filter(|key| matches!(get(key).map(|v| v.trim().to_string()), Some(v) if !v.is_empty()))
+        .map(|key| (*key).to_string())
+        .collect()
+}
+
+/// The stderr line for the unrouted clear - its own sentence, because the
+/// incoherence notice's cause is false for a coherent claim. Mirror of
+/// Python's `unrouted_model_clear_notice`.
+fn unrouted_model_clear_notice(cleared: &[String]) -> String {
+    format!(
+        "fno: cleared {} from this child's env: an unrouted child carries no \
+         model claim, so it runs on its account's own default rather than a \
+         model inherited from the launching shell. Select one with --model or \
+         a config.agents.profiles entry to route it.",
+        cleared.join(", ")
+    )
+}
+
 /// Scrub the incoherent model vars off a child `Command` and emit the one
 /// stderr line naming them. Called BEFORE any overlay env is set on the same
 /// command, so a route or account that re-supplies a var still wins
 /// (`Command::env` after `env_remove` is last-wins). `overlay` is that
 /// about-to-be-applied env: an overlay re-supplying a model var changes the
 /// notice's fallback sentence (Python's `routed=` kwarg), because "falls back
-/// to its account's own default" is false for that child.
+/// to its account's own default" is false for that child. When no overlay
+/// re-supplies a model var, the same call clears every inherited model claim
+/// (see `unrouted_model_keys`) and prints the unrouted-claim line - nothing
+/// puts those vars back, so leaving them hands the child a model nobody
+/// selected for it.
 pub fn scrub_onto(cmd: &mut std::process::Command, overlay: &[(&str, &str)]) {
     let dropped = incoherent_model_env(&|k| std::env::var(k).ok());
     for (key, _) in &dropped {
         cmd.env_remove(key);
+    }
+    let routed = overlay.iter().any(|(k, _)| MODEL_ENV_KEYS.contains(k));
+    if !routed {
+        let claimed = unrouted_model_keys(&|k| std::env::var(k).ok());
+        for key in &claimed {
+            cmd.env_remove(key);
+        }
+        if !claimed.is_empty() {
+            eprintln!("{}", unrouted_model_clear_notice(&claimed));
+        }
     }
     if !dropped.is_empty() {
         let names = dropped
@@ -121,7 +172,6 @@ pub fn scrub_onto(cmd: &mut std::process::Command, overlay: &[(&str, &str)]) {
             .map(|(k, _)| k.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        let routed = overlay.iter().any(|(k, _)| MODEL_ENV_KEYS.contains(k));
         let fallback = if routed {
             "The child receives that route's own model instead."
         } else {
@@ -277,6 +327,103 @@ mod tests {
             ("ANTHROPIC_BASE_URL", "https://notanthropic.com/api"),
         ]);
         assert!(incoherent_model_env(&get).is_empty());
+    }
+
+    #[test]
+    fn unrouted_keys_name_every_claim_coherent_or_not() {
+        let get = env_of(&[
+            ("ANTHROPIC_MODEL", "claude-opus-4-8"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "  "),
+        ]);
+        // The coherent claim and only it: whitespace-only is no claim.
+        assert_eq!(
+            unrouted_model_keys(&get),
+            vec!["ANTHROPIC_MODEL".to_string()]
+        );
+    }
+
+    #[test]
+    fn scrub_onto_clears_a_coherent_claim_when_no_overlay_restores_it() {
+        // The env lock because scrub_onto reads std::env directly. The base is
+        // pinned EMPTY (Anthropic's endpoint): a routed test shell exports a
+        // foreign base, which is the hand-composed-route case and stands the
+        // clear down on purpose.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prior_base = std::env::var("ANTHROPIC_BASE_URL").ok();
+        std::env::set_var("ANTHROPIC_BASE_URL", "");
+        std::env::set_var("ANTHROPIC_MODEL", "claude-opus-4-8");
+        let mut cmd = std::process::Command::new("claude");
+        scrub_onto(&mut cmd, &[]);
+        // get_envs reports env_remove as a (key, None) pair - assert the
+        // POSITIVE marker: the key is present as explicitly removed.
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        std::env::remove_var("ANTHROPIC_MODEL");
+        match prior_base {
+            Some(v) => std::env::set_var("ANTHROPIC_BASE_URL", v),
+            None => std::env::remove_var("ANTHROPIC_BASE_URL"),
+        }
+        assert!(removed.contains(&"ANTHROPIC_MODEL".to_string()));
+    }
+
+    #[test]
+    fn a_hand_composed_foreign_route_is_never_cleared() {
+        // The inverse, positive: over a foreign base the ambient tier remap is
+        // a working route the operator built in their shell (the headless
+        // receipt resolves it as the spawn's real model), so the unrouted
+        // clear stands down - no removal on the model key.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prior_base = std::env::var("ANTHROPIC_BASE_URL").ok();
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic");
+        std::env::set_var("ANTHROPIC_DEFAULT_OPUS_MODEL", "glm-5.2");
+        let mut cmd = std::process::Command::new("claude");
+        scrub_onto(&mut cmd, &[]);
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        std::env::remove_var("ANTHROPIC_DEFAULT_OPUS_MODEL");
+        match prior_base {
+            Some(v) => std::env::set_var("ANTHROPIC_BASE_URL", v),
+            None => std::env::remove_var("ANTHROPIC_BASE_URL"),
+        }
+        assert!(
+            !removed.iter().any(|k| k.contains("MODEL")),
+            "a hand-composed route must not be stripped, got removals {removed:?}"
+        );
+    }
+
+    #[test]
+    fn scrub_onto_keeps_a_routed_overlay_in_charge() {
+        // With an overlay re-supplying the model var, the unrouted clear
+        // stands down entirely - no env_remove may fire on the routed key.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("ANTHROPIC_MODEL", "glm-5.3[1m]");
+        let mut cmd = std::process::Command::new("claude");
+        scrub_onto(
+            &mut cmd,
+            &[("ANTHROPIC_MODEL", "glm-5.3[1m]")],
+        );
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        std::env::remove_var("ANTHROPIC_MODEL");
+        assert!(
+            !removed.contains(&"ANTHROPIC_MODEL".to_string()),
+            "a routed overlay must own the key, got removals {removed:?}"
+        );
     }
 
     #[test]

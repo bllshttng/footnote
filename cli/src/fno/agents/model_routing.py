@@ -526,6 +526,53 @@ def scrub_incoherent_model_env(
     return tuple(key for key, _value in found)
 
 
+def unrouted_model_keys(env: Optional[Mapping[str, str]] = None) -> tuple[str, ...]:
+    """:data:`MODEL_ENV_KEYS` names carrying a value in ``env`` - every model
+    claim the environment is making, coherent or not - but ONLY while the
+    endpoint is Anthropic's own.
+
+    A child's model claim may come from a composed route, an account overlay
+    that pins one, or an explicit ``--model``; never from the launching shell.
+    A spawn that composes none of those still inherits whatever the shell (or a
+    daemon carrying its first shell's env) exported, so the child runs on a
+    model nobody selected for it while every receipt names the default. The
+    ``FNO_ROUTE_PROVIDER`` stamp is already set-or-clear on the same reasoning;
+    the model keys are the rest of that route.
+
+    The endpoint guard is the same one :func:`incoherent_model_env` uses, for
+    the same reason: a foreign ``ANTHROPIC_BASE_URL`` serving foreign model ids
+    is a hand-composed route the operator built in their shell, and stripping
+    it would break a working lane (the headless receipt resolves an ambient
+    tier remap over a foreign base as that spawn's real model). Bedrock and
+    Vertex lanes carry deliberate Anthropic-model pins and stay untouched too.
+    """
+    if env is None:
+        env = os.environ
+    for lane_flag in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
+        if (env.get(lane_flag) or "").strip().lower() not in ENV_FALSY_WORDS:
+            return ()
+    if not base_url_is_anthropic(env):
+        return ()
+    return tuple(
+        key for key in MODEL_ENV_KEYS if (env.get(key) or "").strip()
+    )
+
+
+def unrouted_model_clear_notice(cleared: Sequence[str]) -> str:
+    """The stderr line for :func:`unrouted_model_keys` clears - its own sentence,
+    because the incoherence notice's cause ("names a non-Anthropic model") is
+    false for a coherent claim.
+    """
+    return (
+        "fno: cleared "
+        + ", ".join(cleared)
+        + " from this child's env: an unrouted child carries no model claim, so "
+        "it runs on its account's own default rather than a model inherited "
+        "from the launching shell. Select one with --model or a "
+        "config.agents.profiles entry to route it."
+    )
+
+
 def scrub_incoherent_model_env_and_notify(
     environ: Optional[MutableMapping[str, str]] = None,
     *,
@@ -536,6 +583,11 @@ def scrub_incoherent_model_env_and_notify(
     hand-rolling "scrub, check dropped, print" at every site (headless_create,
     bg_create, resume_cli's wake, the Rust exec seam each did this
     independently before this helper existed).
+
+    With ``routed`` false the same call also clears every remaining
+    :func:`unrouted_model_keys` entry and prints the unrouted-claim notice:
+    nothing re-supplies those vars after this scrub, so leaving them would be
+    the half-compose this module refuses, applied to inherited state.
     """
     import sys
 
@@ -543,20 +595,41 @@ def scrub_incoherent_model_env_and_notify(
     dropped = scrub_incoherent_model_env(target)
     if dropped:
         print(incoherent_model_env_notice(dropped, routed=routed), file=sys.stderr)
+    if not routed:
+        cleared = [key for key in unrouted_model_keys(target)]
+        for key in cleared:
+            target.pop(key, None)
+        if cleared:
+            print(unrouted_model_clear_notice(cleared), file=sys.stderr)
     return dropped
 
 
-def incoherent_model_env_unset_args(env: Optional[Mapping[str, str]] = None) -> list[str]:
+def incoherent_model_env_unset_args(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    unrouted: bool = False,
+) -> list[str]:
     """``env -u`` flag pairs that strip every incoherent model var, for a child
     launched through an ``env`` argv (the pane substrate).
 
     Same source as :func:`scrub_incoherent_model_env`, so the dict and argv
     substrates cannot drift on which names count. ``env -u`` on an unset var is
-    a harmless no-op, so the argv is stable when the env is clean.
+    a harmless no-op, so the argv is stable when the env is clean. With
+    ``unrouted`` set the pairs also strip every inherited model claim, matching
+    :func:`scrub_incoherent_model_env_and_notify`'s unrouted clear; the caller
+    prints each notice itself because the argv carries no cause information.
     """
     flags: list[str] = []
     for key, _value in incoherent_model_env(env):
         flags += ["-u", key]
+    if unrouted:
+        seen = {flags[i + 1] for i in range(0, len(flags), 2)}
+        flags += [
+            flag
+            for key in unrouted_model_keys(env)
+            if key not in seen
+            for flag in ("-u", key)
+        ]
     return flags
 
 

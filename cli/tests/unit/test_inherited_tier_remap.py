@@ -28,6 +28,8 @@ from fno.agents.model_routing import (
     incoherent_model_env_unset_args,
     overlay_restores_model_env,
     scrub_incoherent_model_env,
+    scrub_incoherent_model_env_and_notify,
+    unrouted_model_keys,
 )
 from fno.agents.rust_runtime import (
     _refuse_inherited_tier_remap,
@@ -460,6 +462,93 @@ def test_dict_scrub_and_argv_args_drop_the_same_names():
     # A coherent env scrubs nothing and builds a stable empty argv.
     assert scrub_incoherent_model_env(dict(ZAI_ENV)) == ()
     assert incoherent_model_env_unset_args(ZAI_ENV) == []
+
+
+def test_unrouted_keys_name_every_claim_coherent_or_not():
+    # The unrouted clear is not the incoherence predicate: a coherent pin is
+    # still a claim the launching shell made, and an unrouted child must carry
+    # no claim at all. Whitespace-only is no claim.
+    env = {
+        "ANTHROPIC_MODEL": "claude-opus-4-8",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "  ",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
+    }
+    assert unrouted_model_keys(env) == (
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    )
+
+
+def test_a_hand_composed_foreign_route_is_never_cleared(capsys):
+    # Over a foreign base the ambient tier remap is a working route the
+    # operator built in their shell - the headless receipt resolves it as the
+    # spawn's real model - so the unrouted clear stands down entirely.
+    env = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2",
+    }
+    assert unrouted_model_keys(env) == ()
+    untouched = dict(env)
+    scrub_incoherent_model_env_and_notify(untouched, routed=False)
+    assert untouched == env
+    assert capsys.readouterr().err == ""
+
+
+def test_an_unrouted_scrub_clears_a_coherent_claim_and_says_so(capsys):
+    # A spawn composing no route inherits the shell's pin otherwise; the
+    # clear names the ONE remedy chain that selects a model deliberately.
+    env = {"ANTHROPIC_MODEL": "claude-opus-4-8"}
+    dropped = scrub_incoherent_model_env_and_notify(env, routed=False)
+    assert dropped == ()
+    assert "ANTHROPIC_MODEL" not in env
+    notice = capsys.readouterr().err
+    assert "fno: cleared ANTHROPIC_MODEL" in notice
+    assert "config.agents.profiles" in notice
+
+
+def test_a_routed_scrub_leaves_ambient_claims_to_the_overlay(capsys):
+    # routed=True means an overlay re-supplies the tier right after; clearing
+    # first would be harmless but the notice would lie ("falls back"), so the
+    # unrouted clear stands down entirely.
+    env = {"ANTHROPIC_MODEL": "claude-opus-4-8"}
+    scrub_incoherent_model_env_and_notify(env, routed=True)
+    assert env["ANTHROPIC_MODEL"] == "claude-opus-4-8"
+    assert capsys.readouterr().err == ""
+
+
+def test_unset_args_extend_to_coherent_claims_only_when_unrouted():
+    env = {"ANTHROPIC_MODEL": "claude-opus-4-8", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air"}
+    argv = incoherent_model_env_unset_args(env, unrouted=True)
+    names = {name for i, name in enumerate(argv) if i % 2 == 1}
+    # Both causes in one argv, no duplicate pairs, coherent claim included.
+    assert names == {"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"}
+    assert argv.count("-u") == 2
+    # Default behavior is unchanged: only the incoherent var.
+    names_default = {
+        name for i, name in enumerate(incoherent_model_env_unset_args(env))
+        if i % 2 == 1
+    }
+    assert names_default == {"ANTHROPIC_DEFAULT_HAIKU_MODEL"}
+
+
+def test_a_full_route_reaches_the_child_over_an_ambient_pin():
+    # The other direction, positive: a composed route's model keys survive a
+    # scrubbed ambient env unchanged - the clear removes claims, never routes.
+    from fno.agents.account_env import compose_worker_credentials
+
+    route = {
+        "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "sk-test",
+        **{k: "glm-5.3[1m]" for k in MODEL_ENV_KEYS},
+    }
+    ambient = {
+        "ANTHROPIC_MODEL": "claude-opus-4-8",
+        "PATH": "/usr/bin",
+    }
+    composed, _ = compose_worker_credentials(None, route, ambient)
+    for key in MODEL_ENV_KEYS:
+        assert composed[key] == "glm-5.3[1m]"
+    assert composed["PATH"] == "/usr/bin"
 
 
 def test_the_notice_names_each_dropped_var():
