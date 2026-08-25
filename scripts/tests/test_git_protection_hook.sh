@@ -84,20 +84,41 @@ run_hook() {
 result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 1: no state file -> deny" "$result"
 
-# ---- Case 2: fresh state file, approved + external skipped -> allowed ----
-# Two-factor: auto_merge_approved (factor 1) + external_review_passed: skipped
-# (factor 2a, the --no-external path) authorizes without an artifact.
+# ---- Case 2: fresh state file, spawn-time grant + external skipped -> allowed ----
+# Two-factor: the run's env-grant stamp satisfies the live-switch arm (it
+# needs no resolver call, so this stays deterministic under the sandbox's
+# system python3 and temp HOME) + external_review_passed: skipped (factor 2a,
+# the --no-external path) authorizes without an artifact.
 
 cat > "$REPO/.fno/target-state.md" <<'STATE'
 ---
 status: IN_PROGRESS
 auto_merge_approved: true
+auto_merge_source: env-target-auto-merge
 external_review_passed: skipped
 ---
 STATE
 
 result=$(run_hook "gh pr merge 42 --merge")
-assert_allow "case 2: approved + external skipped -> allow" "$result"
+assert_allow "case 2: env-grant + external skipped -> allow" "$result"
+
+# ---- Case 2b: config-sourced approval, no readable live switch -> denied ----
+# x-3855: the manifest alone does not arm the raw path. This sandbox has no
+# config the resolver could read (and maybe no resolver on PATH at all), so
+# a grant that mirrored config fails closed here - exactly the posture an
+# operator disarm produces on a real machine.
+
+cat > "$REPO/.fno/target-state.md" <<'STATE'
+---
+status: IN_PROGRESS
+auto_merge_approved: true
+auto_merge_source: config
+external_review_passed: skipped
+---
+STATE
+
+result=$(run_hook "gh pr merge 42 --merge")
+assert_deny "case 2b: config-sourced approval, live switch unreadable -> deny" "$result"
 
 # ---- Case 3: state file with auto_merge_approved: false -> denied ----
 
@@ -233,18 +254,22 @@ result=$(run_hook "gh pr merge 42 --merge")
 assert_deny "case 9: corrupt state file -> deny (no crash)" "$result"
 rm -f "$REPO/.fno/target-state.md"
 
-# ---- Case 10: approved + external skipped + IN_PROGRESS -> allowed ----
+# ---- Case 10: env-grant + external skipped + IN_PROGRESS -> allowed ----
+# Same authorize shape as case 2, holding the spawn-time grant stamp: the
+# sandbox cannot read a live config switch, so the stamp is the deterministic
+# arm.
 
 cat > "$REPO/.fno/target-state.md" <<'STATE'
 ---
 status: IN_PROGRESS
 auto_merge_approved: true
+auto_merge_source: env-target-auto-merge
 external_review_passed: skipped
 ---
 STATE
 
 result=$(run_hook "gh pr merge 42 --merge")
-assert_allow "case 10: IN_PROGRESS + approved + external skipped -> allow" "$result"
+assert_allow "case 10: IN_PROGRESS + env-grant + external skipped -> allow" "$result"
 rm -f "$REPO/.fno/target-state.md"
 
 # ---- Summary ----

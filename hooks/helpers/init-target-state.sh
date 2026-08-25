@@ -353,10 +353,30 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
     AUTO_MERGE_ENABLED="false"
   }
 fi
+# The env grant is the OPERATOR's lever (x-3855, codex P1 on PR 1131):
+# TARGET_AUTO_MERGE reaches a child only by inheritance, and a mesh-spawned
+# worker can export it before init to mint merge authority no config
+# granted. The bar here is the crown's own (cli/src/fno/agents/crown.py:
+# no FNO_AGENT_SELF = an attended human) plus the unattended derivation,
+# so spawned and unattended runs cannot stamp the grant. The autonomous
+# grant is auto_merge.grant = dispatch, never this variable. Residual,
+# named rather than solved: an interactive session the OPERATOR launched
+# carries no mesh identity either, and sits inside the operator's trust
+# boundary - the documented carrier of this grant, with the stamp
+# (auto_merge_source) keeping every use auditable. Provenance an env test
+# cannot establish is the x-f3d0 class.
+_AUTO_MERGE_ENV_GRANT="false"
+if [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
+  if [[ -z "${FNO_AGENT_SELF:-}" && "$_attended" == "true" ]]; then
+    _AUTO_MERGE_ENV_GRANT="true"
+  else
+    echo "[init-target-state] note: TARGET_AUTO_MERGE=1 ignored on an agent-origin or unattended run; config decides (autonomous grant: auto_merge.grant = dispatch)" >&2
+  fi
+fi
 if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="false"
   AUTO_MERGE_SOURCE="flag-no-merge"
-elif [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
+elif [[ "$_AUTO_MERGE_ENV_GRANT" == "true" ]]; then
   AUTO_MERGE_APPROVED="true"
   AUTO_MERGE_SOURCE="env-target-auto-merge"
 elif _is_true "$AUTO_MERGE_ENABLED"; then
@@ -999,7 +1019,10 @@ EOF
     if [[ -n "$local_sid_entropy" ]]; then
       local_session_id="$(date -u +%Y%m%dT%H%M%SZ)-${_prov_infix}${local_owner_pid}-${local_sid_entropy}"
     else
-      local_session_id="$(date -u +%Y%m%dT%H%M%SZ)-${_prov_infix}${local_owner_pid}-${RANDOM:-0}${RANDOM:-0}"
+      local_sid_random_a="${RANDOM:-0}"
+      local_sid_random_b="${RANDOM:-0}"
+      local_sid_entropy="$(printf '%06x' "$(( ((local_sid_random_a << 15) | local_sid_random_b) % 16777216 ))")"
+      local_session_id="$(date -u +%Y%m%dT%H%M%SZ)-${_prov_infix}${local_owner_pid}-${local_sid_entropy}"
     fi
   fi
   if [[ -n "${TARGET_SESSION_ID:-}" ]]; then
@@ -1245,6 +1268,16 @@ PYEOF
   # keeps its meaning for those two, and only what the claim block does with it
   # changes. Single-node resolution above is untouched.
   _EXTRA_CLAIMED=""
+  # The worktree in every node claim's metadata, so a reaper with no roster
+  # row can still find the session's transcript (death proven from evidence
+  # outside the claim). Quotes, backslashes, and control characters are
+  # stripped from the value: a real worktree path carries none of them, and
+  # an exotic one degrades to a transcript lookup that finds nothing (which
+  # keeps the claim) rather than a JSON parse failure that aborts the
+  # acquire. Defined before both claim blocks (multi-node below, single-node
+  # further down).
+  _wt_meta=$(printf '%s' "$PWD" | tr -d '"\\\000-\037\177')
+  _CLAIM_METADATA=$(printf '{"worktree":"%s"}' "$_wt_meta")
   if [[ "$_GUARD_AMBIGUOUS" -eq 1 && -z "$_NODE_ID" && -n "$claim_owner_id" ]] \
      && command -v fno >/dev/null 2>&1; then
     _MULTI_HOLDER="target-session:${claim_owner_id}"
@@ -1293,6 +1326,7 @@ PYEOF
       if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "node:${_mnode}" \
             --holder "$_MULTI_HOLDER" --ttl "$_MULTI_TTL" $_MULTI_PID_FLAGS \
             $_MULTI_HANDOVER_FLAGS ${_CLAIM_HARNESS_FLAG:-} \
+            --metadata "$_CLAIM_METADATA" \
             --reason "target dispatch (multi-node payload)" >/dev/null 2>&1; then
         _EXTRA_CLAIMED="${_EXTRA_CLAIMED:+$_EXTRA_CLAIMED }$_mnode"
       else
@@ -1375,7 +1409,8 @@ PYEOF
       if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
             $_HANDOVER_FLAGS \
-            $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+            $_CLAIM_HARNESS_FLAG --metadata "$_CLAIM_METADATA" \
+            --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
         # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
         # below so a refusal leaves no claim fields behind. Every containment
         # gate above runs before this claim, so adoption committing in that
@@ -1515,7 +1550,8 @@ PYEOF
               _waited=$((_waited + (_WAIT_INTERVAL > 0 ? _WAIT_INTERVAL : 1)))
               if FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "$_CLAIM_KEY" \
                     --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
-                    $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+                    $_CLAIM_HARNESS_FLAG --metadata "$_CLAIM_METADATA" \
+                    --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
                 _claim_acquired=1
                 break
               fi

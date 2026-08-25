@@ -25,6 +25,8 @@ Codex pane spawn waits for rollout binding for 60 seconds. A bound receipt inclu
 
 agy pane spawns trust the exact cwd before launch. The shared gate clears remaining trust prompts. It submits seeds after the composer paints.
 
+Known limitation: the agy seed receipt is unverified. Until action confirmation lands, `seed: submitted`, `readiness: live`, and `pane_observation: painted` do not prove that the worker consumed its seed. After spawning, run `fno agents peek <name>` and require a first worker action. If the exact pane stays idle, read its composer before you type anything. When the composer is EMPTY, recover once with `fno mux pane send <pane> --text '<prompt>' --raw --submit`, then peek again. When the composer already holds the seed, do NOT retype it, because a second `--text` write concatenates onto the buffer that is already there. The obvious remedy for that case does not work. Measured 2026-08-24 on a live agy pane, neither `--text '' --raw --submit` nor a bare carriage return submitted staged text. The cause is `submit_pane`, which sends one carriage return for every provider. Report a stranded composer rather than retyping into it. Do not re-seed a pane that is already working because that can queue a duplicate target.
+
 ## The opencode bg serve lane
 
 `spawn --harness opencode --substrate bg` is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted:
@@ -200,6 +202,9 @@ The verb reaches the same destination with none of that exposure.
 - **claude** is the only harness with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
 - **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no bg lane and no attach.
 - A **codex** pane's full thread ID is the shared identity in the registry, mux `fno_id`, discovery handles, requested-name resolution, and any session-keyed node claim.
+- Codex recovery uses that full thread ID as its only join.
+- `fno agents watchdog --only recoverable --since 24h --cwd PATH` subtracts registered Codex rows from recent exact-cwd rollouts.
+- `--apply` restores an `origin=adopted` row and addressable handle. It never spawns or resumes the thread. Repeated scans converge to `recoverable=0`.
 - **agy** emits plain text with no parseable session ID, so it is **stateless**: the live pane works while attached, but there is nothing to re-enter after it settles. `ask`-by-name is refused; use a fresh `--once`.
 - **opencode** is pane-hostable with a readiness detector and badge manifest. Its `ses_` session id is captured at spawn (a best-effort store lookup; an ambiguous or missed capture leaves the row live-only), probed for store membership, and resumable via `opencode --session <id>`. The fno plugin exposes the footnote verbs in opencode's command palette AND headlessly, so dispatch renders the native `/fno:verb` (not a prose brief). The headless spawn routes it through `opencode run --command fno:verb <args>` (a bare `run <message>` treats a leading slash as prose - verified against opencode v1.14.50), so a rendered slash command actually invokes the plugin command.
 

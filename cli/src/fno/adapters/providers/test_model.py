@@ -53,6 +53,22 @@ class TestProviderRecordValid:
         assert record.env == {"ANTHROPIC_API_KEY": "${KEYCHAIN:anthropic-api-key}"}
         assert record.tags == ["api-credits"]
 
+    def test_valid_route_backed_api_key_record(self):
+        """AC1-HP: an explicit route can supply an api_key account credential."""
+        from fno.adapters.providers.model import ProviderRecord
+
+        record = ProviderRecord(
+            id="zai",
+            name="Z.AI",
+            harness="claude",
+            auth="api_key",
+            route="zai/glm-5.3[1m]",
+        )
+
+        assert record.route == "zai/glm-5.3[1m]"
+        assert record.env is None
+        assert "route" in record.model_dump(exclude_none=True)
+
     def test_account_id_explicit(self):
         """account_id can be set explicitly and is preserved."""
         from fno.adapters.providers.model import ProviderRecord
@@ -158,6 +174,44 @@ class TestProviderRecordAuthValidation:
             )
         error_str = str(exc_info.value)
         assert "auth_strategy_mismatch" in error_str
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            (
+                {"env": {"ANTHROPIC_API_KEY": "key"}, "route": "zai/glm-5.3"},
+                "auth_strategy_mismatch",
+            ),
+            ({"route": "zai"}, "provider/model"),
+        ],
+    )
+    def test_route_credential_strategy_is_exclusive(self, kwargs, message):
+        """AC2-ERR: route-backed api_key records have one valid credential path."""
+        from fno.adapters.providers.model import ProviderRecord
+
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            ProviderRecord(
+                id="zai-invalid",
+                name="Z.AI invalid",
+                harness="claude",
+                auth="api_key",
+                **kwargs,
+            )
+
+        error_str = str(exc_info.value)
+        assert message in error_str
+
+    def test_api_key_without_env_or_route_raises(self):
+        """AC2-ERR: an api_key record cannot omit both credential strategies."""
+        from fno.adapters.providers.model import ProviderRecord
+
+        with pytest.raises(pydantic.ValidationError, match="auth_strategy_mismatch"):
+            ProviderRecord(
+                id="zai-missing",
+                name="Z.AI missing",
+                harness="claude",
+                auth="api_key",
+            )
 
     def test_api_key_with_unrecognized_key_raises(self):
         """AC01.4-EDGE: api_key with env but no recognized API key name raises auth_strategy_mismatch."""
@@ -286,19 +340,20 @@ class TestProvidersConfig:
         assert cfg.active is None
         assert cfg.by_id == {}
 
-    def test_extra_fields_forbidden(self):
-        """extra='forbid' is enforced on ProviderRecord."""
+    def test_extra_fields_are_retained(self):
+        """Unknown provider metadata survives model validation for round trips."""
         from fno.adapters.providers.model import ProviderRecord
 
-        with pytest.raises(pydantic.ValidationError):
-            ProviderRecord(
-                id="claude-extra",
-                name="Extra",
-                harness="claude",
-                auth="oauth_dir",
-                credentials_source=Path("~/.claude"),
-                unknown_field="bad",
-            )
+        record = ProviderRecord(
+            id="claude-extra",
+            name="Extra",
+            harness="claude",
+            auth="oauth_dir",
+            credentials_source=Path("~/.claude"),
+            unknown_field="bad",
+        )
+
+        assert record.model_extra == {"unknown_field": "bad"}
 
 
 # ---------------------------------------------------------------------------

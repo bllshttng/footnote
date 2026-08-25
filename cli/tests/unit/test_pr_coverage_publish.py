@@ -43,6 +43,13 @@ def _fields(call: list[str]) -> dict:
     return out
 
 
+def _fields_by_context(runner: RecordingRunner) -> dict[str, dict]:
+    return {
+        fields["context"]: fields
+        for fields in (_fields(call) for call in _posts(runner))
+    }
+
+
 @pytest.fixture
 def hermetic(monkeypatch):
     """Every spawn and verdict steered off the network: a recording runner, a
@@ -84,21 +91,24 @@ def test_a_covered_row_posts_success_on_the_head_the_row_pins(hermetic, monkeypa
     posted, note = _reviews.publish_coverage_status(42)
     assert (posted, note) == (True, "")
     posts = _posts(runner)
-    assert len(posts) == 1
-    assert ROW_HEAD in posts[0][4]
-    fields = _fields(posts[0])
+    assert len(posts) == 2
+    fields_by_context = _fields_by_context(runner)
+    fields = fields_by_context[_reviews.COVERAGE_STATUS_CONTEXT]
+    assert ROW_HEAD in next(call for call in posts if ROW_HEAD in call[4])[4]
     assert fields["state"] == "success"
-    assert fields["context"] == _reviews.COVERAGE_STATUS_CONTEXT
     assert fields["description"] == f"covered: 2 reviewed at {ROW_HEAD[:8]}"
+    assert fields_by_context[_reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT]["state"] == "success"
 
 
 def test_a_covered_row_with_an_unreadable_count_still_names_the_sha(hermetic):
     runner, _box = hermetic
     posted, _note = _reviews.publish_coverage_status(42)
     assert posted is True
-    fields = _fields(_posts(runner)[0])
+    fields_by_context = _fields_by_context(runner)
+    fields = fields_by_context[_reviews.COVERAGE_STATUS_CONTEXT]
     assert fields["state"] == "success"
     assert fields["description"] == f"covered at {ROW_HEAD[:8]}"
+    assert fields_by_context[_reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT]["state"] == "success"
 
 
 def test_no_review_lane_posts_an_explicit_ungated_success(hermetic):
@@ -109,9 +119,10 @@ def test_no_review_lane_posts_an_explicit_ungated_success(hermetic):
     posted, _note = _reviews.publish_coverage_status(42)
     assert posted is True
     posts = _posts(runner)
-    # No row head to pin: the POST lands on the resolved PR head.
-    assert HEAD in posts[0][4]
-    fields = _fields(posts[0])
+    # No row head to pin: both POSTs land on the resolved PR head.
+    assert len(posts) == 2
+    assert all(HEAD in call[4] for call in posts)
+    fields = _fields_by_context(runner)[_reviews.COVERAGE_STATUS_CONTEXT]
     assert fields["state"] == "success"
     assert fields["description"] == "no review lane configured; merge ungated"
 
@@ -128,7 +139,7 @@ def test_a_covered_row_with_no_head_sha_is_not_reported_as_ungated(hermetic):
     verdict_box["return"] = (_coverage_gate.COVERED, "", "", "")
     posted, _note = _reviews.publish_coverage_status(42)
     assert posted is True
-    fields = _fields(_posts(runner)[0])
+    fields = _fields_by_context(runner)[_reviews.COVERAGE_STATUS_CONTEXT]
     assert fields["state"] == "success"
     assert fields["description"].startswith("covered")
     assert "no review lane" not in fields["description"]
@@ -144,7 +155,7 @@ def test_a_refusal_posts_the_gate_refusal_text_truncated(hermetic):
     )
     posted, _note = _reviews.publish_coverage_status(42)
     assert posted is True
-    fields = _fields(_posts(runner)[0])
+    fields = _fields_by_context(runner)[_reviews.COVERAGE_STATUS_CONTEXT]
     assert fields["state"] == "failure"
     # The exact sentence the merge gate renders (reason, bracket-appended
     # note), head-kept under GitHub's description cap.
@@ -152,14 +163,60 @@ def test_a_refusal_posts_the_gate_refusal_text_truncated(hermetic):
     assert len(fields["description"]) <= _reviews._GH_DESCRIPTION_LIMIT
 
 
-def test_an_unanswered_probe_posts_the_note_as_failure(hermetic):
+def test_a_failed_required_post_still_posts_the_diagnostic(hermetic, monkeypatch):
+    """A failed required-context POST must not strand a stale diagnostic: the
+    publisher attempts BOTH contexts and reports the failure, so a gate-covered
+    PR does not keep wearing an "instrument down" stamp from an earlier
+    unknown-read publish until some other writer happens to run."""
+    _base_runner, verdict_box = hermetic
+    verdict_box["return"] = (_coverage_gate.COVERED, "", ROW_HEAD, "")
+
+    class FailRequiredRunner(RecordingRunner):
+        def __call__(self, cmd, *, cwd=None, timeout=None):
+            fields = _fields(cmd) if cmd[:4] == ["gh", "api", "--method", "POST"] else {}
+            if fields.get("context") == _reviews.COVERAGE_STATUS_CONTEXT:
+                self.calls.append(list(cmd))
+                return Result(1, "", "boom")
+            return super().__call__(cmd, cwd=cwd, timeout=timeout)
+
+    runner = FailRequiredRunner()
+    monkeypatch.setattr(_reviews, "run", runner)
+    posted, note = _reviews.publish_coverage_status(42)
+    assert posted is False
+    assert _reviews.COVERAGE_STATUS_CONTEXT in note
+    unavailable = _fields_by_context(runner)[_reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT]
+    assert unavailable["state"] == "success"
+
+
+def test_an_unanswered_probe_posts_pending_required_and_unavailable(hermetic):
     runner, verdict_box = hermetic
     verdict_box["return"] = (_coverage_gate.UNANSWERED, "", "", "pr head fetch failed")
     posted, _note = _reviews.publish_coverage_status(42)
     assert posted is True
-    fields = _fields(_posts(runner)[0])
-    assert fields["state"] == "failure"
-    assert fields["description"] == "pr head fetch failed"
+    fields_by_context = _fields_by_context(runner)
+    assert len(fields_by_context) == 2
+    assert fields_by_context[_reviews.COVERAGE_STATUS_CONTEXT]["state"] == "pending"
+    unavailable = fields_by_context[_reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT]
+    assert unavailable["state"] == "pending"
+    assert "coverage read unavailable" in unavailable["description"]
+    assert "retry the review verb" in unavailable["description"]
+    assert all(fields["state"] != "failure" for fields in fields_by_context.values())
+
+
+def test_an_answered_verdict_clears_a_prior_instrument_failure(hermetic):
+    runner, verdict_box = hermetic
+    verdict_box["return"] = (
+        _coverage_gate.REFUSED,
+        f"no covered review at {HEAD[:8]}; run the review verb at HEAD",
+        HEAD,
+        "",
+    )
+    posted, _note = _reviews.publish_coverage_status(42, head=HEAD)
+    assert posted is True
+    fields_by_context = _fields_by_context(runner)
+    assert fields_by_context[_reviews.COVERAGE_STATUS_CONTEXT]["state"] == "failure"
+    assert fields_by_context[_reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT]["state"] == "success"
+    assert "healthy" in fields_by_context[_reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT]["description"]
 
 
 def test_an_uncovered_verdict_overwrites_a_contradicting_green(hermetic):
@@ -175,8 +232,8 @@ def test_an_uncovered_verdict_overwrites_a_contradicting_green(hermetic):
 
     assert (posted, note) == (True, "")
     posts = _posts(runner)
-    assert len(posts) == 1
-    fields = _fields(posts[0])
+    assert len(posts) == 2
+    fields = _fields_by_context(runner)[_reviews.COVERAGE_STATUS_CONTEXT]
     assert fields["state"] == "failure"
     assert fields["context"] == _reviews.COVERAGE_STATUS_CONTEXT
     assert fields["description"].startswith("no covered review at")

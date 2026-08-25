@@ -191,12 +191,26 @@ def test_genuine_latest_cancel_stays_red():
 # (a result that was taken away) can never read as decided.
 
 
+def _no_floor(monkeypatch):
+    """Isolate from the x-129b fail-closed self-review floor.
+
+    A hermetic (markerless, manifestless) env is an UNATTRIBUTABLE caller and
+    now floors, so status tests that are not about the floor pin the
+    required-conjunct off; tests about it override this with their own patch."""
+    from fno.pr import _merge
+
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+
+
 def _run_status_on(monkeypatch, capsys, rollup):
     """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr)."""
 
     def _patch(name, value):
         monkeypatch.setattr(_status, name, value)
 
+    _no_floor(monkeypatch)
     _patch("_fetch", lambda pr, cwd: ({"state": "OPEN", "statusCheckRollup": rollup}, ""))
     _patch(
         "read_optional_review_state",
@@ -212,6 +226,25 @@ def _run_status_on(monkeypatch, capsys, rollup):
     code = _status.run_status("42")
     cap = capsys.readouterr()
     return code, _json.loads(cap.out), cap.err
+
+
+def test_unknown_coverage_statuses_block_ready_without_code_red(monkeypatch, capsys):
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"context": "fno/review-coverage", "state": "PENDING"},
+        {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+    ]
+    monkeypatch.setattr(
+        "fno.pr._reviews.publish_coverage_status",
+        lambda *args, **kwargs: (True, ""),
+    )
+    code, out, _err = _run_status_on(monkeypatch, capsys, rollup)
+    assert code == 0
+    assert out["green"] is True
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["review_coverage_unknown"]
+    assert "ci_red" not in out["ready_blockers"]
+    assert "commit_status_red" not in out["ready_blockers"]
 
 
 def test_ac1_cancelled_latest_is_red_and_unsettled(monkeypatch, capsys):
@@ -344,6 +377,27 @@ def test_pending_and_cancelled_get_their_own_distinct_notes(monkeypatch, capsys)
     cancelled_note, pending_note = notes.split("\n", 1)
     assert "ci" in cancelled_note and "smoke" not in cancelled_note
     assert "smoke" in pending_note and "ci" not in pending_note
+
+
+def test_pending_note_skips_coverage_contexts(monkeypatch, capsys):
+    """codex P2: coverage StatusContexts are filtered out of the
+    generic CI verdict, so the pending-check guidance must not resurrect them
+    from the unfiltered rollup. A pending coverage context means "retry the
+    review verb", never "wait for the run" - naming it in the wait note sent
+    the operator to sleep on a read that needed a retry."""
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [
+            {"name": "ci", "status": "QUEUED", "conclusion": None},
+            {"context": "fno/review-coverage", "state": "PENDING"},
+            {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+        ],
+    )
+    assert code == 2
+    assert out["checks"]["unsettled"] == 1
+    assert "still queued or running" in err
+    assert "fno/review-coverage" not in err
 
 
 def test_latest_in_progress_over_earlier_success_is_pending():
@@ -518,6 +572,7 @@ def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, caps
 
 def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
     """The hint is advice, not decoration: silent when there is nothing to do."""
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status, "_fetch",
         lambda pr, cwd: ({
@@ -651,6 +706,7 @@ def test_run_status_keeps_stdout_a_pure_json_contract(monkeypatch, capsys):
     """AC2-HP: stdout carries exactly one JSON object with the pre-change
     keys, and the human line lands on stderr - the fleet's watcher greps
     stdout with stderr discarded, so the two streams must never trade."""
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status, "_fetch",
         lambda pr, cwd: ({
@@ -694,6 +750,7 @@ def test_run_status_keeps_stdout_a_pure_json_contract(monkeypatch, capsys):
 
 
 def test_run_status_emits_json_and_code(monkeypatch, capsys):
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
@@ -767,6 +824,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
 
 
 def test_dispatch_hold_removes_green_pr_from_ready_set(monkeypatch, capsys):
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
@@ -1380,7 +1438,7 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
     events.write_text(json.dumps(covered_row) + "\n", encoding="utf-8")
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
     monkeypatch.setattr(
-        _reviews, "_reviewed_sha_is_ancestor", lambda reviewed, head, cwd: True
+        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True
     )
     _status.run_status("42", cwd=str(tmp_path))
     out = json.loads(capsys.readouterr().out)
@@ -1601,6 +1659,43 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
     ]
 
 
+def test_fresh_reviewer_verdict_supersedes_its_stale_history():
+    event = {
+        "coverage": "covered",
+        "review_state": "reviewed",
+        "reviewed_count": 1,
+        "verdicts": [
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "stale",
+                "reviewed_sha": "old-head",
+                "freshness": "stale",
+            },
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "reviewed_sha": "current-head",
+                "freshness": "fresh",
+            },
+        ],
+    }
+
+    shaped = _reviews._shape_review_coverage(event, "current-head", None)
+
+    assert shaped["coverage"] == "covered"
+    assert shaped["reviewed_count"] == 1
+    assert shaped["stale_verdicts"] == [
+        {
+            "name": "code-review",
+            "producer": "local_attestation",
+            "reviewed_sha": "old-head",
+            "freshness": "stale",
+        }
+    ]
+
+
 def test_refused_verdict_without_freshness_is_not_reported_stale(tmp_path):
     from fno.pr._reviews import read_review_coverage
 
@@ -1813,7 +1908,12 @@ def test_read_review_coverage_rejects_verdict_without_freshness(tmp_path):
     assert got["stale_verdicts"][0]["reviewed_sha"] == head
 
 
-def test_read_review_coverage_preserves_ancestor_review(tmp_path):
+def test_read_review_coverage_expires_a_push_after_review(tmp_path):
+    """The Rust predicate has no ancestry arm: a commit pushed after the
+    review carries a strict superset of the reviewed delta, and ancestry alone
+    must not read it fresh. The old name of this test was 'preserves ancestor
+    review' - exactly the arm removed, because it let a merge accept an
+    increment the stop gate called stale."""
     from fno.pr._reviews import read_review_coverage
 
     reviewed_sha = _commit_reviewed_history(tmp_path)
@@ -1835,9 +1935,9 @@ def test_read_review_coverage_preserves_ancestor_review(tmp_path):
     )
 
     got = read_review_coverage(1005, cwd=str(tmp_path), head=head)
-    assert got["coverage"] == "covered"
-    assert got["verdicts"][0]["freshness"] == "fresh"
-    assert got["stale_verdicts"] == []
+    assert got["coverage"] == "uncovered"
+    assert got["verdicts"][0]["freshness"] == "stale"
+    assert got["stale_verdicts"][0]["reviewed_sha"] == reviewed_sha
 
 
 def test_error_verdict_carries_the_reason(monkeypatch, capsys):
@@ -2144,6 +2244,7 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
 
 def test_status_surfaces_resolved_unchanged_as_advisory(monkeypatch, capsys):
     """AC2-HP: the count is visible without changing readiness or exit code."""
+    _no_floor(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
@@ -2257,7 +2358,9 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
         return True, ""
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
-    monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: True)
+    monkeypatch.setattr(
+        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True
+    )
     # The status read resolves the project log from its cwd; point it at the
     # fixture. The lane is pinned on because recompute rides on it: a no-lane
     # repo must not fire the producer, and tmp_path resolves no real config.
@@ -2360,6 +2463,7 @@ def test_no_lane_repo_never_fires_the_recompute(monkeypatch, capsys, tmp_path):
     rows nobody acts on; status must not fire it either, now that ready
     ignores the conjunct there. A read that surfaces an EXISTING row is fine -
     only the producer spawn is the cost being gated."""
+    _no_floor(monkeypatch)
     import json
 
     from fno.pr import _reviews
@@ -2469,6 +2573,7 @@ def test_a_running_review_blocks_ready_even_with_no_lane_configured(monkeypatch,
 
 def test_the_verdict_and_exit_code_are_untouched_by_the_conjunct(monkeypatch, capsys):
     """`ready` tightens; the CI verdict is authoritative and stays green."""
+    _no_floor(monkeypatch)
     from fno.pr._review_hold import ReviewActivity
 
     code, out, _err, _seen = _run_status_with_activity(
@@ -2485,6 +2590,7 @@ def test_the_verdict_and_exit_code_are_untouched_by_the_conjunct(monkeypatch, ca
 def test_a_clear_reading_is_still_reported(monkeypatch, capsys):
     """An empty `ready_blockers` was the whole complaint: a reader must be able
     to see that both probes RAN, not just that nothing came back."""
+    _no_floor(monkeypatch)
     from fno.pr._review_hold import ReviewActivity
 
     _code, out, _err, _seen = _run_status_with_activity(
@@ -2535,3 +2641,93 @@ def test_a_missing_head_branch_is_a_missing_input_not_a_failed_probe(monkeypatch
     activity = _REAL_REVIEW_ACTIVITY("", "abc123", None)
     assert activity.blocked is False
     assert activity.worktree["note"] == "no head branch on the PR read"
+
+
+# --- x-c124: a red verdict names its failures (ruling d-bdb035b6) -----------
+
+
+def test_red_status_names_its_failures(monkeypatch, capsys):
+    """A check NAME is not a failure: the payload names the failing check, the
+    failing step, its first error, and the steps fail-fast never reached."""
+    from fno.pr import _failures
+
+    monkeypatch.setattr(
+        _failures,
+        "collect_failures",
+        lambda rows, cwd=None, runner=None: [
+            {
+                "check": "smoke-pytest",
+                "step": "Pytest (unit + integration)",
+                "first_error": "FAILED t.py::test_a - assert 1 == 2",
+                "unreached_steps": ["ruff + mypy (both repo-wide)"],
+            }
+        ],
+    )
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "smoke-pytest", "status": "COMPLETED", "conclusion": "FAILURE"}],
+    )
+    assert code == 1
+    assert out["failures"][0]["step"] == "Pytest (unit + integration)"
+    # The one-line verdict names check[step]; the notes carry the error and
+    # the unreached steps, on every path (live read AND cache serve).
+    assert "failing: smoke-pytest[Pytest (unit + integration)]" in err
+    assert "FAILED t.py::test_a" in err
+    assert "fail-fast never ran: ruff + mypy (both repo-wide)" in err
+    assert "An unreached step is not a pass" in err
+
+
+def test_green_status_carries_no_failures_field(monkeypatch, capsys):
+    code, out, _ = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    )
+    assert code == 0
+    assert "failures" not in out  # green reads stay byte-identical, zero extra cost
+
+
+def test_detail_failure_never_breaks_the_verdict(monkeypatch, capsys):
+    """The failure detail is additive: an exception in the detail path must
+    degrade to counts, never to a wrong or crashed verdict."""
+
+    def boom(rows, cwd=None, runner=None):
+        raise RuntimeError("detail path exploded")
+
+    from fno.pr import _failures
+
+    monkeypatch.setattr(_failures, "collect_failures", boom)
+    code, out, _ = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}],
+    )
+    assert code == 1
+    assert out["verdict"] == "red"
+    assert "failures" not in out
+
+
+def test_failures_note_reads_the_payload_not_locals(capsys):
+    """The note is payload-keyed so `_cache._serve` prints the same failure
+    detail the live read produced - the fleet shares one enrichment."""
+    _status.failures_note(
+        {
+            "failures": [
+                {"check": "smoke", "detail": "log unavailable: HTTP 403"},
+                {"check": "guard", "step": "Lint", "first_error": "E402 boom"},
+            ]
+        }
+    )
+    err = capsys.readouterr().err
+    assert "smoke: log unavailable: HTTP 403" in err
+    assert "guard failed at step 'Lint': E402 boom" in err
+
+
+def test_main_prints_the_gh_call_counter(monkeypatch, capsys):
+    """x-4eac: the spender sees its spend - one stderr line per invocation."""
+    from fno.pr import _cache
+
+    monkeypatch.setattr(_cache, "cached_status", lambda pr, refresh=False: 0)
+    assert _status.main(["42"]) == 0
+    assert "gh call(s) this invocation" in capsys.readouterr().err

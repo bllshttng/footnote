@@ -294,6 +294,14 @@ def validate(event: dict[str, Any]) -> None:
     if type_name == "phase_transition" and data.get("gate_bearing") and not data.get("gate"):
         raise ValidationError("phase_transition with gate_bearing=true must include data.gate")
 
+    if type_name == "failover_swapped":
+        if source != "daemon":
+            raise ValidationError("failover_swapped source must be daemon")
+        if not isinstance(data.get("short_id"), str) or not data["short_id"]:
+            raise ValidationError("failover_swapped short_id must be a non-empty string")
+        if type(data.get("redispatched")) is not bool:
+            raise ValidationError("failover_swapped redispatched must be boolean")
+
     if type_name == "context_snapshot":
         if source not in {"hook", "test"}:
             raise ValidationError(f"context_snapshot source must be hook or test (got {source!r})")
@@ -471,6 +479,24 @@ def validate(event: dict[str, Any]) -> None:
                 f"unknown {type_name} data.source: {data_source!r} "
                 f"(allowed: {allowed_data_sources})"
             )
+
+    if type_name == "termination":
+        allowed = type_spec["data"]["properties"]["reason"]["enum"]
+        reason = data.get("reason")
+        if reason not in allowed:
+            raise ValidationError(
+                f"unknown termination data.reason: {reason!r} (allowed: {allowed})"
+            )
+
+    if type_name == "transition_rejected":
+        type_props = type_spec["data"]["properties"]
+        for field in ("kind", "event", "from"):
+            allowed = type_props[field]["enum"]
+            if field in data and data[field] not in allowed:
+                raise ValidationError(
+                    f"unknown transition_rejected data.{field}: {data[field]!r} "
+                    f"(allowed: {allowed})"
+                )
 
     # Same chokepoint rationale as session_satisfied above: the generic emit
     # CLI is the only writer for two of the three human_touch emitters (the mux

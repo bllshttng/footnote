@@ -23,6 +23,7 @@ envelope around the character ``1`` is nonsense.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from typing import Callable, Optional
 
@@ -54,11 +55,21 @@ def _pane_entry(session: str, pane_id: int):
         entries = load_registry()
     except Exception:  # noqa: BLE001 - an unreadable registry is "unknown", not fatal
         return None
+    matches = []
+    seen = set()
     for entry in entries:
         mux = getattr(entry, "mux", None) or {}
         if str(mux.get("session")) == str(session) and str(mux.get("pane_id")) == str(pane_id):
-            return entry
-    return None
+            identity = (
+                getattr(entry, "fno_id", None)
+                or getattr(entry, "harness_session_id", None)
+                or getattr(entry, "session_id", None)
+            )
+            key = (getattr(entry, "name", None), identity)
+            if key not in seen:
+                seen.add(key)
+                matches.append(entry)
+    return matches[0] if len(matches) == 1 else None
 
 
 def resolve_pane_harness(session: str, pane_id: int) -> Optional[str]:
@@ -93,12 +104,85 @@ def resolve_pane_recipient(session: str, pane_id: int) -> Optional[str]:
     return canonical_handle(session_id) if session_id else None
 
 
+def _identity_receipt_refusal(
+    *,
+    session: str,
+    pane_id: int,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    check_identity: bool = True,
+    expected_name: Optional[str] = None,
+    expected_fno_id: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Read the target frame with its identity receipt when a row is known."""
+    from fno.agents.mux_spawn import DispatchAskError, _run_mux
+
+    if not check_identity:
+        return None, None
+    if expected_name is None or expected_fno_id is None:
+        entry = _pane_entry(session, pane_id)
+        if entry is None:
+            return None, None
+        expected_name = getattr(entry, "name", None)
+        expected_fno_id = (
+            getattr(entry, "fno_id", None)
+            or getattr(entry, "harness_session_id", None)
+            or getattr(entry, "session_id", None)
+        )
+    # Legacy pane rows can carry the durable worker name before a canonical
+    # fno_id is recorded. Keep their existing frame gate; the identity receipt
+    # requires the full address and is enforced for that addressable shape.
+    if not expected_name or not expected_fno_id:
+        return None, None
+    try:
+        receipt = _run_mux(
+            [
+                "mux",
+                "pane",
+                "read",
+                "--session",
+                str(session),
+                str(pane_id),
+                "--lines",
+                str(GATE_FRAME_LINES),
+                "--json",
+            ],
+            runner,
+        )
+    except (DispatchAskError, OSError) as exc:
+        return f"pane {pane_id} identity receipt unreadable ({exc})", None
+    if receipt.returncode != 0:
+        detail = (receipt.stderr or receipt.stdout or "").strip() or "no detail"
+        return f"pane {pane_id} identity receipt failed ({detail})", None
+    try:
+        payload = json.loads(receipt.stdout or "")
+    except (TypeError, ValueError) as exc:
+        return f"pane {pane_id} identity receipt is invalid JSON ({exc})", None
+    if not isinstance(payload, dict) or payload.get("pane_id") != pane_id:
+        return f"pane {pane_id} identity receipt names the wrong pane", None
+    actual_name = payload.get("pane_name")
+    actual_fno_id = payload.get("registry_fno_id")
+    if actual_name != expected_name or actual_fno_id != expected_fno_id:
+        return (
+            f"pane {pane_id} identity mismatch: addressed {expected_name} "
+            f"({expected_fno_id}) pane hosts {actual_name or '<unknown>'} "
+            f"({actual_fno_id or '<unknown>'})",
+            None,
+        )
+    frame_text = payload.get("text")
+    if not isinstance(frame_text, str):
+        return f"pane {pane_id} identity receipt has invalid text", None
+    return None, frame_text
+
+
 def prompt_refusal(
     *,
     session: str,
     pane_id: int,
     harness: str,
     runner: Optional[Callable[..., "subprocess.CompletedProcess[str]"]] = None,
+    check_identity: bool = True,
+    expected_name: Optional[str] = None,
+    expected_fno_id: Optional[str] = None,
 ) -> Optional[str]:
     """Read the pane and return a refusal reason when it is showing an option prompt.
 
@@ -125,31 +209,42 @@ def prompt_refusal(
     # to the replacement.
     runner = runner if runner is not None else subprocess.run
 
-    try:
-        frame = _run_mux(
-            [
-                "mux", "pane", "read", "--session", str(session), str(pane_id),
-                "--lines", str(GATE_FRAME_LINES),
-            ],
-            runner,
-        )
-    except (DispatchAskError, OSError) as exc:
-        # OSError too: `_run_mux` only translates FileNotFoundError and
-        # TimeoutExpired, so a PermissionError on a bad FNO_BIN (or ENOEXEC, or
-        # EMFILE) escapes it raw. The one caller catches PaneSendRefused alone,
-        # so an untranslated OSError killed the send with a traceback where an
-        # unreadable frame demotes to the durable bus. Both are the same fact:
-        # nothing looked at the pane.
-        return f"pane {pane_id} frame unreadable ({exc}); refusing to type blind"
-    if frame.returncode != 0:
-        detail = (frame.stderr or frame.stdout or "").strip() or "no detail"
-        return f"pane {pane_id} read failed ({detail}); refusing to type blind"
+    identity_refusal, receipt_text = _identity_receipt_refusal(
+        session=session,
+        pane_id=pane_id,
+        runner=runner,
+        check_identity=check_identity,
+        expected_name=expected_name,
+        expected_fno_id=expected_fno_id,
+    )
+    if identity_refusal:
+        return identity_refusal
+    if receipt_text is None:
+        try:
+            frame = _run_mux(
+                [
+                    "mux", "pane", "read", "--session", str(session), str(pane_id),
+                    "--lines", str(GATE_FRAME_LINES),
+                ],
+                runner,
+            )
+        except (DispatchAskError, OSError) as exc:
+            # OSError too: `_run_mux` only translates FileNotFoundError and
+            # TimeoutExpired, so a PermissionError on a bad FNO_BIN (or ENOEXEC,
+            # or EMFILE) escapes it raw. The one caller catches PaneSendRefused
+            # alone, so an untranslated OSError killed the send with a traceback
+            # where an unreadable frame demotes to the durable bus.
+            return f"pane {pane_id} frame unreadable ({exc}); refusing to type blind"
+        if frame.returncode != 0:
+            detail = (frame.stderr or frame.stdout or "").strip() or "no detail"
+            return f"pane {pane_id} read failed ({detail}); refusing to type blind"
+        receipt_text = frame.stdout or ""
 
     # allow_dev_binary: this caller only ever REFUSES on the verdict, so reading
     # a cargo dev build here can cost nothing worse than an accurate refusal.
     # Spawn readiness ACTS on its verdict and deliberately does not pass this.
     verdict = _evaluate_manifest_screen(
-        harness, frame.stdout or "", runner, allow_dev_binary=True
+        harness, receipt_text, runner, allow_dev_binary=True
     )
     error = verdict.get("error")
     if error:
@@ -247,6 +342,9 @@ def prepare(
     gate: bool = True,
     wrap_body: bool = True,
     runner: Optional[Callable[..., "subprocess.CompletedProcess[str]"]] = None,
+    check_identity: bool = True,
+    expected_name: Optional[str] = None,
+    expected_fno_id: Optional[str] = None,
 ) -> str:
     """Gate, then wrap. Returns the bytes an enveloped pane send should type.
 
@@ -269,7 +367,13 @@ def prepare(
         )
     if gate:
         refusal = prompt_refusal(
-            session=session, pane_id=pane_id, harness=resolved, runner=runner
+            session=session,
+            pane_id=pane_id,
+            harness=resolved,
+            runner=runner,
+            check_identity=check_identity,
+            expected_name=expected_name,
+            expected_fno_id=expected_fno_id,
         )
         if refusal:
             raise PaneSendRefused(refusal)

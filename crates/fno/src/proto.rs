@@ -2,9 +2,10 @@
 //!
 //! Length-prefixed (u32 big-endian) JSON messages over a Unix socket at
 //! `~/.fno/mux/<session>.sock`. The socket dir is 0700 - it accepts keystrokes
-//! into your shell, so it is a security boundary. There is no lockfile: the
-//! socket bind IS the lock, liveness is a connect-probe, and a stale socket is
-//! unlinked at bind time.
+//! into your shell, so it is a security boundary. The socket bind claims the
+//! name, and a short-lived startup marker protects the gap before the server
+//! can answer its liveness query. An unresponsive established holder is
+//! terminated before its stale socket is unlinked.
 //!
 //! Channel discipline (epic Locked Decision): client->server input/control is
 //! reliable and never dropped; only server->client render frames are
@@ -257,7 +258,20 @@ fn default_true() -> bool {
 /// flat; the bump names the skew so the handshake restarts an old server
 /// instead. (Numbered one past the x-5f7f resume-gesture v49 it rebases
 /// onto.)
-pub const PROTO_VERSION: u32 = 50;
+///
+/// v52 (x-588a): pane reads and sends carry the pane's captured identity and
+/// the registry identity used to address it. Additive fields remain defaulted,
+/// but the send identity is a safety contract, so the handshake must reject an
+/// older peer rather than let it type into an unverified pane.
+///
+/// v51 (x-1499, tab dictionary): `ControlVerb::TabWhere` +
+/// `ServerMsg::TabLocation`/`TabPaneOccupant` - the reverse location lookup
+/// (what lives at the tab the operator is looking at). `TabSel::Index`
+/// becomes the 1-based ordinal the UI shows, where it was a 0-based vector
+/// index, so a captured `--tab <n>` selector changes meaning across the
+/// bump; the handshake is what tells an old client to restart. New variants
+/// are not additive-tolerant either.
+pub const PROTO_VERSION: u32 = 52;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -466,16 +480,17 @@ pub enum PaneTarget {
 }
 
 /// Which tab a [`PanePlacement`] / [`LayoutScope`] addresses within a squad
-/// (v41, layout-api). `Index` is an ordinal convenience for interactive
-/// one-shots ONLY - ordinals renumber as tabs open and close, so a script that
-/// captured one earlier may hit a different tab; receipts return `Id`/`Name`,
-/// which are stable. `New` forces a fresh tab.
+/// (v41, layout-api). `Index` is the 1-based ORDINAL the UI shows (`·N`,
+/// x-1499): 1 is the first tab in display order and 0 is always refused. It
+/// is an interactive convenience ONLY - ordinals renumber as tabs open and
+/// close, so a script that captured one earlier may hit a different tab;
+/// receipts return `Id`/`Name`, which are stable. `New` forces a fresh tab.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum TabSel {
     /// The squad's currently active tab.
     #[default]
     Active,
-    /// The nth tab in display order (convenience only; ordinals renumber).
+    /// The tab at 1-based display ordinal `n` (the UI's `·N`; 0 is refused).
     Index(usize),
     /// A stable tab id (preferred in scripts).
     Id(TabId),
@@ -509,6 +524,13 @@ pub struct ResolvedPlacement {
     pub fallback: PlacementFallback,
     pub squad: u64,
     pub tab: TabId,
+    /// (v51, x-1499) The landed tab's name and 1-based ordinal, so the
+    /// human receipt can print `tab=<name-or-·N> tab_id=<id>` - the stable id
+    /// alone names something the operator cannot find on screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_ordinal: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -598,6 +620,11 @@ pub enum ControlVerb {
         bytes: Vec<u8>,
         #[serde(default)]
         guarded: bool,
+        /// (v51, x-588a) The addressed pane identity. When present, the server
+        /// refuses before typing unless the pane's captured name and registry
+        /// row agree with this value.
+        #[serde(default)]
+        expected_identity: Option<String>,
     },
     /// Block until the pane's output settles (`quiet_ms` with no new output),
     /// matches `pattern` (regex over the visible grid), the child exits, or
@@ -662,8 +689,17 @@ pub enum ControlVerb {
     },
     /// Dump a layout scope's nested tree + per-pane geometry ->
     /// [`ServerMsg::LayoutTree`] (structure + rects, so templates/reconcile can
-    /// diff topology - Locked Decision 5).
-    LayoutGet { scope: LayoutScope },
+    /// diff topology - Locked Decision 5). `workers` (v51, x-1499) additionally
+    /// joins each pane's registry worker into `TabLayout.workers` for the
+    /// human rendering; `false` (the default) keeps every `--json` reply
+    /// byte-shape identical to the pre-v51 output. A `workers: true` request
+    /// against an unreadable registry is its own refusal
+    /// ([`err_code::REGISTRY_UNAVAILABLE`]), never a silent all-empty join.
+    LayoutGet {
+        scope: LayoutScope,
+        #[serde(default)]
+        workers: bool,
+    },
     /// Resolve an `fno_id` to its live location -> [`ServerMsg::PaneLocation`],
     /// or one of three DISTINCT error codes ([`err_code::REGISTRY_UNAVAILABLE`] /
     /// [`err_code::NOT_FOUND`] / [`err_code::NOT_PANE_HOSTED`]); an empty
@@ -725,6 +761,18 @@ pub enum ControlVerb {
         spec: AnchoredLayoutSpec,
         #[serde(default)]
         focus: bool,
+    },
+    /// Resolve a tab LOCATION to what lives there (x-1499) ->
+    /// [`ServerMsg::TabLocation`]. `sel` is the location grammar:
+    /// `ordinal:<n>` | `id:<n>` | `name:<s>` | a bare number (ordinal or
+    /// stable id - refused when the two readings name different live tabs) |
+    /// any other bare word (a tab name). `squad` qualifies through the
+    /// existing [`PaneTarget`] grammar; an unqualified selector that
+    /// resolves in more than one workspace refuses with the candidates.
+    TabWhere {
+        #[serde(default)]
+        squad: PaneTarget,
+        sel: String,
     },
 }
 
@@ -1813,6 +1861,13 @@ pub enum ServerMsg {
         text: String,
         #[serde(default)]
         block: Option<BlockMeta>,
+        /// (v51, x-588a) Identity captured from the pane's spawn argv.
+        #[serde(default)]
+        pane_name: Option<String>,
+        /// (v51, x-588a) The registry identity joined to this pane ref, not a
+        /// fact owned by the pane itself.
+        #[serde(default)]
+        registry_fno_id: Option<String>,
     },
     /// Answer to [`ControlVerb::PaneRun`]: the fresh pane's id, machine-read
     /// by the CLI so scripts compose. `placement` (v44, x-6928) carries the
@@ -1883,11 +1938,22 @@ pub enum ServerMsg {
         squad_name: Option<String>,
         /// The tabs hosting this id's panes, each with its optional name.
         tabs: Vec<(TabId, Option<String>)>,
+        /// (v51, x-1499) Each hosting tab's current 1-based ordinal, parallel
+        /// to `tabs`, so the human receipt prints label and id together.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_ordinals: Option<Vec<usize>>,
         /// The pane ids hosting this id.
         panes: Vec<u64>,
     },
-    /// Answer to [`ControlVerb::PaneBreak`]: the id of the freshly created tab.
-    TabSpawned { tab_id: TabId },
+    /// Answer to [`ControlVerb::PaneBreak`]: the id of the freshly created
+    /// tab, plus (v51, x-1499) its label pair for the human receipt.
+    TabSpawned {
+        tab_id: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_ordinal: Option<usize>,
+    },
     /// Answer to [`ControlVerb::PaneFocus`]: where the pane was found, and how
     /// many viewers actually ended up looking at it.
     ///
@@ -1901,6 +1967,12 @@ pub enum ServerMsg {
         squad_id: u64,
         squad_name: Option<String>,
         tab_id: TabId,
+        /// (v51, x-1499) Label pair for the human receipt; see
+        /// [`ResolvedPlacement::tab_name`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_ordinal: Option<usize>,
         clients_moved: usize,
     },
     /// (v42, x-c4d4) Answer to [`ControlVerb::LayoutApply`]: one [`SlotResult`]
@@ -1916,8 +1988,39 @@ pub enum ServerMsg {
         anchor: u64,
         squad: u64,
         tab: TabId,
+        /// (v51, x-1499) Label pair for the human receipt; see
+        /// [`ResolvedPlacement::tab_name`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_ordinal: Option<usize>,
         results: Vec<GraftSlotResult>,
     },
+    /// (v51, x-1499) Answer to [`ControlVerb::TabWhere`]: what lives at a tab
+    /// location right now. `panes` is every pane in the tab in tree order,
+    /// each with its joined worker identity; an occupant with `fno_id: None`
+    /// is an EXPLICIT empty pane, never a failed lookup. A tab always holds
+    /// at least one pane, so this is never emitted empty.
+    TabLocation {
+        squad_id: u64,
+        squad_name: Option<String>,
+        tab_id: TabId,
+        name: Option<String>,
+        /// The tab's current 1-based ordinal (the UI's `·N`).
+        ordinal: usize,
+        /// The tab's focused pane - where `mux view` moves the operator.
+        focus: u64,
+        panes: Vec<TabPaneOccupant>,
+    },
+}
+
+/// One pane of a [`ServerMsg::TabLocation`] (v51, x-1499): the pane id plus
+/// the registry worker it hosts, if any. `fno_id: None` is the explicit
+/// empty marker for a pane nobody occupies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TabPaneOccupant {
+    pub pane_id: u64,
+    pub fno_id: Option<String>,
 }
 
 /// One named slot's outcome in a [`ServerMsg::LayoutGrafted`] receipt (v44,
@@ -1969,6 +2072,12 @@ pub struct TabLayout {
     pub focus: PaneId,
     pub root: Node,
     pub panes: Vec<(u64, Rect)>,
+    /// (v51, x-1499) Per-pane worker identities joined from the registry,
+    /// parallel to `panes`, filled on the control-verb path so the human
+    /// layout rendering can name occupants. `None` keeps the machine JSON
+    /// byte-shape unchanged for every existing consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<Vec<TabPaneOccupant>>,
 }
 
 /// One pane's metadata in a [`ServerMsg::PaneList`]. `cwd` is the squad's
@@ -1981,6 +2090,13 @@ pub struct PaneInfo {
     pub cwd: String,
     pub child_pid: Option<u32>,
     pub title: Option<String>,
+    /// (v51, x-1499) The pane's tab name and 1-based ordinal, so the human
+    /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` for a pane
+    /// mid-teardown (not in any tab) or on a pre-v51 reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_ordinal: Option<usize>,
     /// (v41, layout-api) The `fno_id` of the session hosting this pane, filled
     /// server-side from the registry join the mux already caches. `None` for a
     /// pane with no registry row (an ad-hoc shell). `#[serde(default)]` keeps a
@@ -1988,6 +2104,9 @@ pub struct PaneInfo {
     /// direction of `where` (Locked Decision 6).
     #[serde(default)]
     pub fno_id: Option<String>,
+    /// (v51, x-588a) The pane's spawn-captured `FNO_AGENT_SELF` identity.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Why a [`ControlVerb::PaneWait`] returned. The CLI maps each to a distinct
@@ -2075,6 +2194,9 @@ pub mod err_code {
     /// pane is gone" and "nobody is watching" are different problems, and
     /// collapsing them leaves the operator unable to tell which one they have.
     pub const NO_CLIENT: u32 = 13;
+    /// (v51, x-588a) The addressed identity disagrees with the pane's captured
+    /// identity or its unique registry occupant; no bytes were typed.
+    pub const TARGET_IDENTITY_MISMATCH: u32 = 14;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -2436,21 +2558,392 @@ thread_local! {
 }
 
 /// The mux socket directory: `$FNO_MUX_DIR` when set (tests point this at a
-/// tempdir), else `~/.fno/mux`.
+/// tempdir), else `<state_dir>/mux` off the EXPLICIT config tier
+/// (`FNO_CONFIG` sole candidate, else the global config; the cwd-anchored
+/// project tier is deliberately absent - see `resolved_state_root`), else
+/// `~/.fno/mux`. `FNO_CONFIG` therefore isolates the mux with everything else
+/// (x-f02b): a demo config's state root gets its own socket dir, and a pinned
+/// config that cannot be parsed lands the dir beside the pinned file rather
+/// than reaching back to the real fleet's `~/.fno/mux`.
+///
+/// Resolved once per process (`MUX_DIR`): the daemon binds at startup and
+/// one-shot clients ask once.
 pub fn mux_dir() -> PathBuf {
     #[cfg(test)]
     return TEST_MUX_DIR.with(|dir| dir.0.clone());
     #[cfg(not(test))]
+    return MUX_DIR.get_or_init(mux_dir_uncached).clone();
+}
+
+#[cfg(not(test))]
+static MUX_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The uncached resolution behind [`mux_dir`].
+#[cfg(not(test))]
+fn mux_dir_uncached() -> PathBuf {
     if let Some(dir) = std::env::var_os("FNO_MUX_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(dir);
     }
-    #[cfg(not(test))]
-    let home = std::env::var_os("HOME")
+    resolved_state_root().join("mux")
+}
+
+/// The state root the mux (and its non-socket sidecars, via
+/// [`mux_sidecar_root`]) resolve under, latched once per process like
+/// [`MUX_DIR`]: `<state_dir>` off the EXPLICIT config tier (`FNO_CONFIG` sole
+/// candidate, else global; see `digest_overlay::config_explicit_top_str` for
+/// why the project tier is deliberately absent).
+///
+/// Fail closed on an explicit `FNO_CONFIG` that yielded no state_dir at all
+/// (yaml-pinned, unreadable, missing key): isolation was requested, so the
+/// root stays the pinned file's own directory - standard layouts keep the
+/// config inside the state dir. Falling back to `~/.fno` here is the exact
+/// leak x-f02b closes. Note Python's own loader defaults an absent state_dir
+/// to `~/.fno/`, so a pinned config with no key leaves the mux MORE isolated
+/// than the graph; that asymmetry is deliberate and the warning names it.
+#[cfg(not(test))]
+fn resolved_state_root() -> PathBuf {
+    static STATE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    STATE_ROOT
+        .get_or_init(|| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            match config_state_root() {
+                Some(StateRoot::Root(root)) => root,
+                // A found-but-declined value already said why, once; it lands
+                // on the same fallback as a miss without a second,
+                // contradictory message.
+                Some(StateRoot::Declined) => fallback_state_root(&cwd, false),
+                None => fallback_state_root(&cwd, true),
+            }
+        })
+        .clone()
+}
+
+/// The root for mux sidecars that are not sockets (`mux-view.json`): the same
+/// resolved state root, so a pinned `FNO_CONFIG` isolates them with the
+/// sockets. `FNO_MUX_DIR` relocates the sockets alone by design and does not
+/// move sidecars.
+#[cfg(not(test))]
+pub(crate) fn mux_sidecar_root() -> PathBuf {
+    resolved_state_root()
+}
+
+/// The fallback root: a pinned `FNO_CONFIG`'s own directory when one is set
+/// (anchored against cwd so a bare relative pin resolves to one dir per
+/// invocation site), else the pre-config-chain global root. `warn` names the
+/// pin once, for the miss case where nothing else has spoken.
+#[cfg(not(test))]
+fn fallback_state_root(cwd: &std::path::Path, warn: bool) -> PathBuf {
+    if let Some(explicit) = std::env::var_os("FNO_CONFIG").filter(|d| !d.is_empty()) {
+        let path = cwd.join(PathBuf::from(&explicit));
+        if warn {
+            warn_once_pinned_without_state_dir(&path);
+        }
+        return path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| cwd.to_path_buf());
+    }
+    legacy_state_root()
+}
+
+/// The pre-config-chain global state root, the ONE source for the resolver's
+/// final fallback, `mux doctor`'s stranding check, and the sidecar root, so
+/// they can never drift apart.
+#[cfg(not(test))]
+fn legacy_state_root() -> PathBuf {
+    std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    #[cfg(not(test))]
-    home.join(".fno").join("mux")
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".fno")
+}
+
+/// The pre-config-chain global mux dir (`<legacy_state_root>/mux`), what
+/// `mux doctor` compares against when it looks for stranded sessions.
+#[cfg(not(test))]
+pub(crate) fn legacy_mux_root() -> PathBuf {
+    legacy_state_root().join("mux")
+}
+
+/// The pre-state-root sidecar path (squads.json, mux-view.json): a SIBLING of
+/// the legacy mux dir. The view and squad stores share this spelling so their
+/// fallback locations cannot drift apart.
+#[cfg(not(test))]
+pub(crate) fn legacy_sidecar_path(file: &str) -> PathBuf {
+    legacy_mux_root().with_file_name(file)
+}
+
+/// The pre-state-root sidecar read behind the one gate (see
+/// [`legacy_fallback_allowed`]). NotFound when absent or deliberately
+/// overridden; every caller treats that as "no fallback".
+#[cfg(not(test))]
+pub(crate) fn legacy_sidecar(file: &str) -> std::io::Result<String> {
+    if !legacy_fallback_allowed() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "legacy fallback disabled",
+        ));
+    }
+    std::fs::read_to_string(legacy_sidecar_path(file))
+}
+
+/// What the explicit config tier said about `state_dir`.
+#[cfg(not(test))]
+enum StateRoot {
+    /// The state root, resolved and expanded.
+    Root(PathBuf),
+    /// A value was found but this mirror cannot use it (`{vault}` templates,
+    /// `$VAR` references, `~user` prefixes, or a RELATIVE path - see
+    /// [`expand_state_dir`] for why relative anchors are refused). Python
+    /// expands the first three and anchors the fourth; this mirror declines
+    /// rather than fork the fleet across cwds, and has already warned once.
+    Declined,
+}
+
+/// The state root from the explicit config tier. `None` means no candidate
+/// carried the key at all; [`StateRoot::Declined`] means one carried a value
+/// this mirror cannot use, and the caller must not re-report that as a
+/// missing key.
+#[cfg(not(test))]
+fn config_state_root() -> Option<StateRoot> {
+    let Some(raw) = crate::digest_overlay::config_explicit_top_str("state_dir") else {
+        warn_once_legacy_yaml_state_dir();
+        return None;
+    };
+    match expand_state_dir(&raw) {
+        Some(root) => Some(StateRoot::Root(root)),
+        None => {
+            warn_once_unexpandable_state_dir(&raw);
+            Some(StateRoot::Declined)
+        }
+    }
+}
+
+/// A state_dir visible only to Python (legacy global yaml) while the mux
+/// resolves the default root. The divergence has no clean resolution here
+/// (this crate is TOML-only by convention), so it warns like the other
+/// decline cases instead of splitting silently.
+#[cfg(not(test))]
+fn warn_once_legacy_yaml_state_dir() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        if let Some(yaml) = legacy_global_yaml_state_dir_hint() {
+            record_config_warning(
+                format!(
+                    "fno: the global {} mentions a state_dir this mux cannot read \
+                     (TOML-only); every Python surface follows it while the mux \
+                     stays on the default root.",
+                    yaml.display()
+                ),
+                "move state_dir into the global config.toml, or unset it in the yaml".into(),
+            );
+        }
+    });
+}
+
+/// Expand a leading `~` for an otherwise-absolute value. `None` when the
+/// value is empty or RELATIVE: Python's own cross-project surfaces
+/// (`paths.ledger_json`, `operator_lane`) follow `state_dir` only when it is
+/// an absolute anchor, because a cwd-anchored root would fork shared
+/// per-machine state into whichever checkout a process started in - and the
+/// mux is the most cross-project surface there is. Also `None` for
+/// `{template}` variables and `$VAR` references (Python's expandvars pass
+/// runs first there; this mirror expands neither) and `~user` forms (Python
+/// resolves them through the passwd database; `$HOME/user` would be a
+/// different root).
+fn expand_state_dir(raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('{') || raw.contains('$') {
+        return None;
+    }
+    if let Some(rest) = raw.strip_prefix('~') {
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return None;
+        }
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+        // ALL leading slashes, not one: a sloppy "~//x" must join under HOME,
+        // and PathBuf::push of a still-absolute rest would REPLACE the home
+        // buffer outright (std semantics), landing the mux on /x.
+        let rest = rest.trim_start_matches('/');
+        let mut p = PathBuf::from(home);
+        if !rest.is_empty() {
+            p.push(rest);
+        }
+        return Some(p);
+    }
+    let path = PathBuf::from(raw);
+    path.is_absolute().then_some(path)
+}
+
+/// A pinned `$FNO_CONFIG` that yielded no usable state_dir (a yaml-pinned
+/// path Python parses by suffix but this reader cannot, an unreadable file,
+/// or a valid TOML with no top-level state_dir). The socket dir has already
+/// fallen back beside the file; say so once instead of diverging in silence
+/// (same shape as `fno_agents::agents_config::warn_once_if_yaml`).
+#[cfg(not(test))]
+fn warn_once_pinned_without_state_dir(path: &std::path::Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        let yaml = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("yaml" | "yml")
+        );
+        let why = if yaml {
+            "which the mux reads as TOML and cannot parse"
+        } else {
+            "which carries no usable top-level state_dir"
+        };
+        record_config_warning(
+            format!(
+                "fno: $FNO_CONFIG points at {}, {why}; the mux dir lands beside that \
+                 file instead of your state root.",
+                path.display()
+            ),
+            "point $FNO_CONFIG at a config.toml with a usable state_dir".into(),
+        );
+    });
+}
+
+/// A configured state_dir this mirror cannot expand was DECLINED, so the mux
+/// root falls back (beside a pinned config, or to the global default) while
+/// every Python surface expands it and moves elsewhere. Say so once instead
+/// of leaving the split silent.
+#[cfg(not(test))]
+fn warn_once_unexpandable_state_dir(raw: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        record_config_warning(
+            format!(
+                "fno: config state_dir {raw:?} is not a value the mux can follow (it \
+                 must be an absolute or ~ path, free of template variables, $VAR \
+                 references, and ~user forms); the mux dir falls back instead of \
+                 following it."
+            ),
+            "set state_dir to an absolute or ~ path".into(),
+        );
+    });
+}
+
+/// The legacy global settings.yaml sibling, when it exists and names a
+/// state_dir VALUE that diverges from the root this resolver would use.
+/// Python keeps BOTH global files as read candidates (`_prefer_toml`:
+/// config.toml wins per key, the yaml still loads), so a state_dir that
+/// lives only in the yaml moves every Python surface while this reader -
+/// and the mux - stay on the default root. A yaml whose value AGREES (the
+/// explicit pre-migration spelling of the default root) is not a
+/// divergence and never warns.
+#[cfg(not(test))]
+pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> {
+    if non_empty_env_is_set("FNO_CONFIG") {
+        return None;
+    }
+    let yaml = crate::digest_overlay::global_settings_yaml_sibling()?;
+    let body = std::fs::read_to_string(&yaml).ok()?;
+    // The top-level VALUE, not a substring: a trailing `# comment` is not
+    // part of the value yaml hands Python, and a nested mapping's key is not
+    // the global one. The one nested shape that IS canonical is the legacy
+    // `config:` wrapper Python unwraps, so a state_dir directly under a
+    // top-level `config:` key counts. Any other misread would warn on every
+    // verb forever over no divergence.
+    let mut under_config = false;
+    let value = body.lines().find_map(|l| {
+        let indented = l.starts_with(|c| c == ' ' || c == '\t');
+        let (key, val) = l.split_once(':')?;
+        let key = key.trim();
+        if !indented {
+            if key.eq_ignore_ascii_case("config") {
+                // The flow spelling `config: {state_dir: /x}` carries the
+                // wrapped key inline; Python unwraps it like the block form.
+                if let Some(inner) = extract_flow_state_dir(val) {
+                    return Some(inner);
+                }
+                under_config = val.trim().is_empty();
+                return None;
+            }
+            return key.eq_ignore_ascii_case("state_dir").then_some(val);
+        }
+        (under_config && key.eq_ignore_ascii_case("state_dir")).then_some(val)
+    })?;
+    let value = value
+        .split(" #")
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"');
+    if value.is_empty() {
+        return None;
+    }
+    match expand_state_dir(value) {
+        // Agreement with the root this resolver would use anyway.
+        Some(root) => (root != legacy_state_root()).then_some(yaml),
+        None => {
+            // A `$HOME`/`${HOME}` spelling is unexpandable by this mirror
+            // but Python's expandvars resolves it; compare it rather than
+            // warn when it names the same root. Any other unexpandable
+            // value (relative, template) leaves the warning standing:
+            // Python still follows it somewhere this mirror cannot look.
+            let rest = value
+                .strip_prefix("${HOME}")
+                .or_else(|| value.strip_prefix("$HOME"));
+            match (rest, std::env::var_os("HOME").map(PathBuf::from)) {
+                (Some(rest), Some(home)) => {
+                    let joined = home.join(rest.trim_start_matches('/'));
+                    (joined != legacy_state_root()).then_some(yaml)
+                }
+                _ => Some(yaml),
+            }
+        }
+    }
+}
+
+/// The `state_dir` value inside a flow mapping value (`{state_dir: /x}`),
+/// raw and untrimmed: the caller applies the same comment-strip and quote
+/// handling as the block form. None when the braces carry no such key.
+#[cfg(not(test))]
+fn extract_flow_state_dir(flow: &str) -> Option<&str> {
+    let inner = flow.trim().strip_prefix('{')?.strip_suffix('}')?;
+    inner.split(',').find_map(|pair| {
+        let (k, v) = pair.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case("state_dir")
+            .then(|| v.trim())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+fn non_empty_env_is_set(key: &str) -> bool {
+    crate::digest_overlay::non_empty_env_os(key).is_some()
+}
+
+/// Whether a legacy-location read fallback is allowed at all: only under
+/// fully AMBIENT state resolution, where no explicit override names where
+/// state lives. A pinned `FNO_CONFIG` (isolation requested) or a set
+/// `FNO_AGENTS_HOME` (an explicit agents-state override) both mean the
+/// operator pointed state elsewhere on purpose, so no fallback may reach the
+/// real root. This is the ONE spelling of the gate - hand-rolled variants in
+/// three files once drifted apart (head-review round eight), and one flipped
+/// gate would leak the operator's real prefs into an isolated env.
+pub fn legacy_fallback_allowed() -> bool {
+    !non_empty_env_is_set("FNO_CONFIG") && !non_empty_env_is_set("FNO_AGENTS_HOME")
+}
+
+/// The one config-resolution warning this process recorded, if any: a pinned
+/// `FNO_CONFIG` with no usable state_dir, a state_dir value this mirror had
+/// to decline, or a state_dir that lives only where this reader cannot look.
+/// Carries its own remedy so `mux doctor` never names the wrong fix. Emitted
+/// to stderr by the non-TUI verbs (`mux ls`) and as a `mux doctor` row; the
+/// TUI client appends it to its client log instead. proto itself never
+/// writes stderr: resolution runs before the client enters the alternate
+/// screen, and any pre-TUI stderr byte lands in the PTY the harness reads
+/// (client.rs, x-0296's NEVER-stderr rule).
+static CONFIG_WARNING: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+fn record_config_warning(msg: String, remedy: String) {
+    let _ = CONFIG_WARNING.set((msg, remedy));
+}
+
+pub fn pending_config_warning() -> Option<(&'static str, &'static str)> {
+    CONFIG_WARNING.get().map(|(m, r)| (m.as_str(), r.as_str()))
 }
 
 /// Create `dir` (and parents) born 0700, then force 0700 on a pre-existing
@@ -2646,6 +3139,93 @@ pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Marker held from socket bind until the server exits. It protects a freshly
+/// bound listener that cannot answer the query probe yet, so a concurrent
+/// starter cannot mistake that startup window for a stale socket.
+pub fn startup_sidecar_path(socket: &Path) -> PathBuf {
+    socket.with_extension("start")
+}
+
+pub fn remove_startup_guard(socket: &Path) {
+    let _ = std::fs::remove_file(startup_sidecar_path(socket));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupGuard {
+    Owned,
+    ExistingLive,
+}
+
+fn startup_guard_live(pid: i32, recorded_start: Option<u64>) -> bool {
+    if pid <= 1 || pid_confirmed_dead(pid) || pid_is_zombie(pid) {
+        return false;
+    }
+    recorded_start.is_none_or(|start| pid_start_time(pid as u32) == Some(start))
+}
+
+fn create_startup_marker(marker: &Path) -> std::io::Result<()> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = marker
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("mux-start"));
+    let tmp = marker.with_file_name(format!(".{name}.tmp.{}.{}", std::process::id(), stamp));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)?;
+        let pid = std::process::id();
+        let contents = match pid_start_time(pid) {
+            Some(start) => format!("{pid}:{start}"),
+            None => pid.to_string(),
+        };
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        std::fs::hard_link(&tmp, marker)
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGuard> {
+    let marker = startup_sidecar_path(socket);
+    loop {
+        match create_startup_marker(&marker) {
+            Ok(()) => return Ok(StartupGuard::Owned),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let raw = std::fs::read_to_string(&marker).map_err(|read| {
+                    std::io::Error::new(
+                        read.kind(),
+                        format!(
+                            "cannot read mux startup marker {}: {read}",
+                            marker.display()
+                        ),
+                    )
+                })?;
+                let Some((pid, recorded_start)) = parse_pid_sidecar(&raw) else {
+                    if !socket.exists() || matches!(probe_status(socket), ProbeOutcome::Dead) {
+                        std::fs::remove_file(&marker)?;
+                        continue;
+                    }
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid mux startup marker {}", marker.display()),
+                    ));
+                };
+                if startup_guard_live(pid, recorded_start) {
+                    return Ok(StartupGuard::ExistingLive);
+                }
+                std::fs::remove_file(&marker)?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 pub const DEFAULT_SESSION: &str = "main";
 
 /// Outcome of [`bind_or_probe`].
@@ -2656,13 +3236,24 @@ pub enum BindOutcome {
     AlreadyRunning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+const PROBE_HOLDER_TERM_GRACE: Duration = Duration::from_secs(3);
+const PROBE_HOLDER_KILL_GRACE: Duration = Duration::from_secs(1);
+
 /// Bind the session socket, treating the bind itself as the lock.
 ///
 /// - Fresh path: bind wins atomically.
-/// - `AddrInUse`: connect-probe. A successful connect means a live server
-///   (`AlreadyRunning`). Refused/failed connects (retried briefly, so a server
-///   between its bind and listen syscalls is not misread as dead) mean a stale
-///   socket from a dead server: unlink it and bind again.
+/// - `AddrInUse`: query-probe. A `ServerMsg::Info` response means a live server
+///   (`AlreadyRunning`). A refused connection is stale when no holder sidecar
+///   exists; when one does, it still coordinates with that holder. A
+///   markerless response is unknown: the pid sidecar must prove the old holder
+///   exited before the socket is unlinked and rebound.
 ///
 /// ponytail: unlink-then-rebind has a tiny two-racers-over-a-stale-socket
 /// window (both probe dead, both unlink+bind; the second unlink can orphan the
@@ -2671,26 +3262,83 @@ pub enum BindOutcome {
 /// stale+simultaneous case needs a dead server AND a photo-finish start. If it
 /// ever bites, the upgrade is an O_EXCL sidecar lock around the unlink.
 pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
+    let startup = acquire_startup_guard(path)?;
+    let mut owns_startup = startup == StartupGuard::Owned;
     match UnixListener::bind(path) {
         Ok(l) => Ok(BindOutcome::Bound(l)),
         Err(e) if socket_in_use(&e) => {
-            if probe_alive(path) {
-                return Ok(BindOutcome::AlreadyRunning);
+            let mut reclaimed_holder = false;
+            match probe_status(path) {
+                ProbeOutcome::Alive => {
+                    if owns_startup {
+                        remove_startup_guard(path);
+                    }
+                    return Ok(BindOutcome::AlreadyRunning);
+                }
+                ProbeOutcome::Unknown if !owns_startup => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("mux startup in progress at {}", path.display()),
+                    ));
+                }
+                ProbeOutcome::Unknown if pid_sidecar_path(path).exists() => {
+                    reclaim_unresponsive_holder(path)?;
+                    reclaimed_holder = true;
+                }
+                // A pre-sidecar server or a dead listener can leave one
+                // residual connection that has no positive marker. Preserve
+                // the legacy stale-socket recovery when there is no holder
+                // identity to coordinate with; current servers write `.pid`.
+                ProbeOutcome::Unknown => {}
+                ProbeOutcome::Dead if !owns_startup => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("mux startup owner still holds {}", path.display()),
+                    ));
+                }
+                ProbeOutcome::Dead if pid_sidecar_path(path).exists() => {
+                    reclaim_unresponsive_holder(path)?;
+                    reclaimed_holder = true;
+                }
+                ProbeOutcome::Dead => {}
             }
-            // Stale socket from a dead server: take the name over. Session
-            // files, not just the socket, so a dead holder's .pid cannot
-            // outlive the rebind and name an unrelated pid.
+            if reclaimed_holder && !owns_startup {
+                remove_startup_guard(path);
+                if acquire_startup_guard(path)? != StartupGuard::Owned {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("mux startup in progress at {}", path.display()),
+                    ));
+                }
+                owns_startup = true;
+            }
+            // The holder is dead or has been terminated. Session files, not
+            // just the socket, so a dead holder's .pid cannot outlive the
+            // rebind and name an unrelated pid.
             remove_session_files(path)?;
             match UnixListener::bind(path) {
                 Ok(l) => Ok(BindOutcome::Bound(l)),
                 Err(e) if socket_in_use(&e) => {
                     // Someone else won the rebind race; they are the server.
+                    if owns_startup {
+                        remove_startup_guard(path);
+                    }
                     Ok(BindOutcome::AlreadyRunning)
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    if owns_startup {
+                        remove_startup_guard(path);
+                    }
+                    Err(e)
+                }
             }
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            if owns_startup {
+                remove_startup_guard(path);
+            }
+            Err(e)
+        }
     }
 }
 
@@ -2704,10 +3352,8 @@ fn socket_in_use(e: &std::io::Error) -> bool {
     )
 }
 
-/// Connect bound for liveness probes at bind time. Generous next to a socket
-/// round-trip; a wedged predecessor times out in ~1s and reads as alive on the
-/// first attempt (the refused-connect retry loop below only re-tries a dead
-/// socket), so server startup never hangs forever on it.
+/// Query timeout for liveness probes at bind time. Generous next to a socket
+/// round-trip, but bounded so a markerless predecessor never blocks startup.
 const PROBE_ALIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Connect to an AF_UNIX SOCK_STREAM path with a bounded timeout. std's
@@ -2851,23 +3497,146 @@ pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> std::io::Result<U
     }
 }
 
-/// True if something accepts connections at `path`. Retries a few times so a
-/// server that has bound but not yet reached `listen` is not declared dead.
-/// A connect TIMEOUT counts as alive: only a refused connect proves the
-/// server is dead, and unlinking a wedged-but-live server's socket would
-/// orphan it (still running, unreachable by name, invisible to ls).
-fn probe_alive(path: &Path) -> bool {
+/// Probe the frozen pre-Attach query. A bare connect is not enough: a stale
+/// socket can still accept one residual connection after its listener dies. A
+/// timeout or a connected peer without `Info` is unknown, not proof of death.
+fn probe_status(path: &Path) -> ProbeOutcome {
+    let mut uncertain = false;
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(50));
         }
-        match connect_unix_timeout(path, PROBE_ALIVE_CONNECT_TIMEOUT) {
-            Ok(_) => return true,
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return true,
-            Err(_) => {}
+        let mut stream = match connect_unix_timeout(path, PROBE_ALIVE_CONNECT_TIMEOUT) {
+            Ok(stream) => stream,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                continue
+            }
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+        uncertain = true;
+        let _ = stream.set_read_timeout(Some(PROBE_ALIVE_CONNECT_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(PROBE_ALIVE_CONNECT_TIMEOUT));
+        if write_msg_sync(&mut stream, &ClientMsg::Query).is_err() {
+            continue;
+        }
+        if matches!(
+            read_msg_sync::<_, ServerMsg>(&mut stream),
+            Ok(ServerMsg::Info { .. })
+        ) {
+            return ProbeOutcome::Alive;
         }
     }
-    false
+    if uncertain {
+        ProbeOutcome::Unknown
+    } else {
+        ProbeOutcome::Dead
+    }
+}
+
+/// Stop an unresponsive holder before takeover. Without this coordination, its
+/// later `SocketGuard` can unlink the replacement server's socket and sidecars.
+/// The pid sidecar is identity-checked before each signal. An unreadable
+/// identity refuses takeover, while a positive start-time mismatch proves the
+/// recorded holder exited and its pid was reused, so takeover is safe.
+fn reclaim_unresponsive_holder(path: &Path) -> std::io::Result<()> {
+    let pid_path = pid_sidecar_path(path);
+    let raw = std::fs::read_to_string(&pid_path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "cannot take over unresponsive socket: read {}: {e}",
+                pid_path.display()
+            ),
+        )
+    })?;
+    let (pid, recorded_start) = parse_pid_sidecar(&raw).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "cannot take over unresponsive socket: invalid {}",
+                pid_path.display()
+            ),
+        )
+    })?;
+    if pid <= 1 || pid as u32 == std::process::id() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("cannot signal holder pid {pid} from {}", pid_path.display()),
+        ));
+    }
+
+    let identity_matches = || -> std::io::Result<bool> {
+        match recorded_start {
+            None => Ok(true),
+            Some(recorded) => pid_start_time(pid as u32)
+                .map(|observed| observed == recorded)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("cannot verify holder pid {pid} from {}", pid_path.display()),
+                    )
+                }),
+        }
+    };
+    let gone = || pid_confirmed_dead(pid) || pid_is_zombie(pid);
+    if gone() {
+        return Ok(());
+    }
+    if !identity_matches()? {
+        return Ok(());
+    }
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let term_deadline = Instant::now() + PROBE_HOLDER_TERM_GRACE;
+    while Instant::now() < term_deadline {
+        if gone() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if gone() {
+        return Ok(());
+    }
+    if !identity_matches()? {
+        // The recorded process exited and its pid was reused. That is safe for
+        // takeover: the old SocketGuard cannot run in the replacement process.
+        return Ok(());
+    }
+    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let kill_deadline = Instant::now() + PROBE_HOLDER_KILL_GRACE;
+    while Instant::now() < kill_deadline {
+        if gone() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if gone() {
+        Ok(())
+    } else if !identity_matches()? {
+        // As above, a changed start time proves the holder we needed to stop is
+        // gone, even if the OS has already reused its pid.
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("holder pid {pid} survived takeover signals"),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -3053,7 +3822,9 @@ mod tests {
         // clickable links (x-a2d0) bumped it 44 -> 45; pane focus (x-3e17) 45 ->
         // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47; the
         // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
-        // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50.
+        // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
+        // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
+        // receipts (x-588a) bumped it 51 -> 52.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3062,7 +3833,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 50);
+        assert_eq!(PROTO_VERSION, 52);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -3138,6 +3909,8 @@ mod tests {
             fallback: PlacementFallback::Refuse,
             squad: 1,
             tab: 10,
+            tab_name: Some("bee".into()),
+            tab_ordinal: Some(2),
         };
         let exact_receipt = ServerMsg::PaneSpawned {
             pane_id: 9,
@@ -3496,6 +4269,7 @@ mod tests {
                 pane: 5,
                 bytes: b"hello\r".to_vec(),
                 guarded: true,
+                expected_identity: None,
             },
             ControlVerb::PaneWait {
                 pane: 5,
@@ -3566,13 +4340,18 @@ mod tests {
                     cwd: "/code/footnote".into(),
                     child_pid: Some(4242),
                     title: None,
+                    tab_name: None,
+                    tab_ordinal: Some(1),
                     fno_id: None,
+                    name: None,
                 }],
             },
             ServerMsg::PaneText {
                 pane_id: 4,
                 text: "marker-42\n$ ".into(),
                 block: None,
+                pane_name: None,
+                registry_fno_id: None,
             },
             ServerMsg::PaneText {
                 pane_id: 4,
@@ -3584,6 +4363,8 @@ mod tests {
                     truncated: false,
                     implicit: false,
                 }),
+                pane_name: None,
+                registry_fno_id: None,
             },
             ServerMsg::PaneSpawned {
                 pane_id: 9,
@@ -3722,6 +4503,42 @@ mod tests {
         assert!(socket_path("../evil").is_err());
         assert!(socket_path("").is_err());
         assert!(socket_path("ok-name_1").is_ok());
+    }
+
+    #[test]
+    fn state_dir_values_expand_absolute_only() {
+        assert_eq!(
+            expand_state_dir("/demo/state"),
+            Some(PathBuf::from("/demo/state"))
+        );
+        assert_eq!(
+            expand_state_dir("  /demo/state  "),
+            Some(PathBuf::from("/demo/state"))
+        );
+        // `~` expands against HOME like Python's expanduser; trailing slashes
+        // and a bare `~` both land on HOME itself.
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(home) = home {
+            assert_eq!(expand_state_dir("~/.fno/"), Some(home.join(".fno")));
+            assert_eq!(expand_state_dir("~"), Some(home.clone()));
+            // A sloppy double slash joins under HOME; push() of an absolute
+            // rest would otherwise REPLACE the home buffer.
+            assert_eq!(expand_state_dir("~//fno-demo"), Some(home.join("fno-demo")));
+        }
+        // Relative values decline, matching Python's own cross-project
+        // surfaces (ledger, operator lane): a cwd-anchored root would fork
+        // the shared fleet into whichever checkout a process started in.
+        assert_eq!(expand_state_dir("rel/state"), None);
+        assert_eq!(expand_state_dir("state"), None);
+        // Template variables, $VAR references, and ~user forms decline too
+        // (Python resolves ~user through the passwd database, not
+        // $HOME/user).
+        assert_eq!(expand_state_dir("{vault}/.fno"), None);
+        assert_eq!(expand_state_dir("$HOME/demo"), None);
+        assert_eq!(expand_state_dir("${HOME}/demo"), None);
+        assert_eq!(expand_state_dir("~demo/.fno"), None);
+        assert_eq!(expand_state_dir(""), None);
+        assert_eq!(expand_state_dir("   "), None);
     }
 
     /// A peer that dribbles progress must NOT be able to extend the bound.
@@ -3943,6 +4760,7 @@ mod tests {
                     squad: PaneTarget::SquadId(1),
                     tab: TabSel::Index(2),
                 },
+                workers: false,
             },
         ];
         for v in verbs {
@@ -3972,6 +4790,7 @@ mod tests {
                             cols: 40,
                         },
                     )],
+                    workers: None,
                 }],
             }],
         };
@@ -3984,6 +4803,7 @@ mod tests {
             squad_id: 1,
             squad_name: None,
             tabs: vec![(10, Some("bee".into()))],
+            tab_ordinals: Some(vec![2]),
             panes: vec![4],
         };
         let bytes = serde_json::to_vec(&loc).unwrap();
@@ -3997,6 +4817,8 @@ mod tests {
             squad_id: 2,
             squad_name: Some("other".into()),
             tab_id: 3,
+            tab_name: None,
+            tab_ordinal: Some(3),
             clients_moved: 2,
         };
         let bytes = serde_json::to_vec(&focused).unwrap();

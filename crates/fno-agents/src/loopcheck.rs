@@ -1104,8 +1104,8 @@ struct PrInfo {
 /// for the merge guard. Two gates refuse the same uncovered head, so they must
 /// not teach two different remedies.
 const REVIEW_ORDER: &str = "close every finding, commit and push first, then \
-     attest at the final head (`bash skills/review/scripts/emit-attestation.sh \
-     <reviewer>`, which the claude attest hook runs for you on a clean pass)";
+     review and attest at the final head (`bash skills/review/scripts/emit-attestation.sh \
+     <reviewer>` is recovery if a confirmed clean native review hook failed)";
 
 /// The non-interactive invocation that satisfies each local reviewer, mirroring
 /// the `invocation` field of `_RESOLVABLE_REVIEWERS` in
@@ -1198,6 +1198,33 @@ fn is_documentation_path(path: &str) -> bool {
 /// so a unit test pins the set.
 fn harness_can_self_review(harness: Option<&str>) -> bool {
     matches!(harness, Some("claude") | Some("codex") | Some("opencode"))
+}
+
+/// The KNOWN harnesses with no native self-review verb. A set, not
+/// `!harness_can_self_review()`, so an UNRECOGNIZED spelling floors instead of
+/// passing through as verbless. Python derives this set from `KNOWN_HARNESSES`
+/// in `cli/src/fno/harness_names.py` minus the verb table in
+/// `cli/src/fno/review_capability.py`; the two are pinned to each other by
+/// `test_floor_verbless_set_stays_locked_to_the_rust_twin`, so a harness lands
+/// on both sides or the suite goes red.
+const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy"];
+
+/// The self-review FLOOR policy on the author harness (x-129b). Distinct from
+/// the capability question above: `None` answers "unattributable", not
+/// "verbless". A KNOWN harness with a native verb floors; a KNOWN verbless
+/// harness (gemini/agy) does not, because the floor would demand an
+/// attestation no native verb there produces. An UNRESOLVED harness (absent
+/// or ambiguous ambient markers - a claude session started from a codex
+/// shell) floors, because ambiguity about who authored the run is not
+/// permission to skip its review. The explicit `--author-harness none` pin is
+/// the hermetic opt-out and stays unfloored. Mirrors `_harness_can_self_review`
+/// in cli/src/fno/pr/_merge.py so the stop gate and the merge gate cannot
+/// disagree on the same PR.
+fn self_review_floor_applies(author_harness: Option<&str>, pinned_none: bool) -> bool {
+    match author_harness {
+        Some(h) => harness_can_self_review(Some(h)) || !KNOWN_VERBLESS_HARNESSES.contains(&h),
+        None => !pinned_none,
+    }
 }
 
 /// Pure payload classifier: CODE iff any changed path is not documentation.
@@ -1819,6 +1846,11 @@ fn read_pr_head_oid(
 struct GraphqlQuota {
     remaining: i64,
     reset_epoch: i64,
+    /// The CORE bucket from the same probe read. `refusal_is_secondary`
+    /// classifies a rate-limit refusal on it (a refusal with core still high
+    /// is the request-rate limit, not this bucket). Option because a payload
+    /// can name graphql and not core.
+    core_remaining: Option<i64>,
 }
 
 /// Below this GraphQL remaining count, a no-promise fire stands down entirely:
@@ -1845,19 +1877,53 @@ fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
     Some(GraphqlQuota {
         remaining: g.get("remaining").and_then(|x| x.as_i64())?,
         reset_epoch: g.get("reset").and_then(|x| x.as_i64())?,
+        core_remaining: v
+            .pointer("/resources/core/remaining")
+            .and_then(|x| x.as_i64()),
     })
 }
 
-/// GitHub's secondary (burst/concurrency) limit is a DIFFERENT thing from the
-/// primary hourly quota `probe_graphql_quota` reads: a 403 whose body names
-/// "secondary rate limit" can fire with both the core and graphql buckets
-/// reporting thousands remaining (measured live: core 4922/5000, graphql
-/// 1392/5000, a call refused anyway). `gh api rate_limit` cannot see it -
-/// there is no bucket for it - so it is detected only from a refusal's own
-/// stderr, never from advertised remaining. Mirrors `_SECONDARY` in
-/// `cli/src/fno/pr/_rest.py`; keep the two patterns in sync.
-fn is_secondary_limit_stderr(stderr: &str) -> bool {
-    stderr.to_lowercase().contains("secondary rate limit")
+/// Whether a refusal's stderr smells like ANY rate limit. This is the wide
+/// TRIGGER only, never the verdict: GitHub controls the wording, and its
+/// measured 2026-08-24 secondary body says only "API rate limit exceeded for
+/// user ID ... (HTTP 403)" - no "secondary" anywhere - so a phrase gate
+/// missed the real refusal and read it as an unclassified blip.
+fn stderr_smells_rate_limit(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("rate limit")
+}
+
+/// Whether a failed gh read's refusal is GitHub's SECONDARY (request-rate)
+/// limit, judged against the LIVE exempt bucket, never against wording.
+///
+/// `gh api rate_limit` is exempt from both limits and answered DURING the
+/// measured refusal with core 4980/5000, so the probe is the one signal
+/// GitHub cannot reword: a rate-limit refusal that no drained bucket
+/// explains IS the secondary limit. A drained bucket that does explain it
+/// (graphql at 0 on a graphql read, core at EXACTLY 0 - a low-but-positive
+/// core is not proof, a secondary refusal lands with core wherever it
+/// stood) is the primary quota, whose own reasons live elsewhere. No probe
+/// at all still says secondary: an unreadable instrument must not send the
+/// session to wait for a primary reset that never comes, while backing off
+/// is safe under either truth. Mirrors `fno.pr._rest`'s live-bucket
+/// classifier and its fail-safe. One deliberate difference: this fn also
+/// classifies GRAPHQL reads, so a drained graphql bucket on a graphql read
+/// names the primary quota here; the Python classifier sees REST reads only
+/// (whose primary quota is core) and needs no graphql arm.
+fn refusal_is_secondary(
+    stderr: &str,
+    probe: Option<&GraphqlQuota>,
+    failed_read_was_graphql: bool,
+) -> bool {
+    if !stderr_smells_rate_limit(stderr) {
+        return false;
+    }
+    let Some(q) = probe else {
+        return true;
+    };
+    if failed_read_was_graphql && q.remaining == 0 {
+        return false;
+    }
+    !matches!(q.core_remaining, Some(0))
 }
 
 fn internal_gh_adapter(gh_bin: &str) -> bool {
@@ -1907,6 +1973,11 @@ fn is_graphql_read(read: &str) -> bool {
 /// log (every session's `loop_check_gh_error` rows already land there via
 /// `emit_to_both`, so this reuses an existing write path rather than adding
 /// one) with no session filter, by design.
+/// A row counts on its `rate_limit_class` FIELD - the verdict the emitting
+/// session computed against the live exempt bucket - never on its
+/// `stderr_tail` prose: GitHub reworded the refusal body once already, and a
+/// prose match here would miss the real body again. Rows emitted before the
+/// field existed simply age out of the window.
 /// The primary-quota floor (`GRAPHQL_FLOOR`) is blind to this failure mode by
 /// construction - advertised remaining looks healthy while calls are being
 /// refused - so a fire must ALSO stand down on observed refusals, not only
@@ -1932,11 +2003,11 @@ fn recent_secondary_refusal(events_path: &Path, now: DateTime<Utc>, window_secs:
         if (now - ts).num_seconds() > window_secs {
             break;
         }
-        let tail = val
-            .pointer("/data/stderr_tail")
+        if val
+            .pointer("/data/rate_limit_class")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if is_secondary_limit_stderr(tail) {
+            == Some("secondary")
+        {
             return true;
         }
     }
@@ -2492,19 +2563,10 @@ fn read_pr_info(
 
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
             .map_err(|_| GhReadError::parse_failed(checks_parse))?;
-        // One dedup feeds every reader of this payload, so the conclusion, the
-        // failing-name set, and the pending flag can never answer off different
-        // rollups (a superseded run read as the current one is the exact lie
-        // this dedup exists to remove).
-        let checks = latest_per_name(&checks);
-
-        let failing = failing_check_names(&checks);
-        let has_pending = ci_has_pending_checks(&checks);
-        (
-            compute_ci_conclusion(&checks).map_err(|e| GhReadError::parse_failed(&e))?,
-            failing,
-            has_pending,
-        )
+        // One truth table for the payload (classify_checks_payload): the
+        // conclusion, the failing-name set, and the pending flag can never
+        // answer off different rollups.
+        classify_checks_payload(&checks).map_err(|e| GhReadError::parse_failed(&e))?
     };
 
     // Reads 3+4: reviews + inline findings. Skipped when the session declares
@@ -2553,12 +2615,21 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
+        // The GitHub axis was intentionally not queried. That is a known
+        // zero ONLY when nothing was configured to read: the skip is the
+        // inactive gate, with or without no_external. A `no_external` session
+        // on a repo with an ACTIVE login gate suppressed reads the config
+        // demanded, so the honest answer for that axis is Unknown with its
+        // retry remedy - reporting a healthy read of zero bots fabricated
+        // "uncovered" and an instrument-health receipt for reviews that were
+        // never queried. A fresh local pass still rescues it inside
+        // classify_coverage (positive evidence).
         let coverage = classify_coverage(
             &[],
             &[],
             &events_text,
             &[],
-            false,
+            !(no_external && login_gate_active),
             author_session,
             &freshness,
             &head_branch,
@@ -2906,6 +2977,46 @@ fn latest_per_name(checks: &Value) -> Value {
     Value::Array(kept)
 }
 
+fn without_coverage_statuses(checks: &Value) -> Value {
+    let Some(arr) = checks.as_array() else {
+        return checks.clone();
+    };
+    Value::Array(
+        arr.iter()
+            .filter(|check| {
+                let name = check.get("name").and_then(|v| v.as_str());
+                let context = check.get("context").and_then(|v| v.as_str());
+                let is_coverage = |value: Option<&str>| {
+                    value == Some(COVERAGE_STATUS_CONTEXT)
+                        || value == Some(COVERAGE_UNAVAILABLE_STATUS_CONTEXT)
+                };
+                !is_coverage(name) && !is_coverage(context)
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+/// One truth table for a `gh pr checks --json` payload: dedup to the latest
+/// run per name, drop the coverage projections, then derive the conclusion,
+/// the failing names, and the pending flag. A rollup the filter EMPTIED
+/// (only the two coverage contexts existed) reads Pending - "CI has not
+/// reported yet", never the declared-none None, matching the Python twin's
+/// unknown - and its pending flag is set too, so the wait stays watchable
+/// instead of a non-idlable re-invoke loop.
+fn classify_checks_payload(checks: &Value) -> Result<(CiConclusion, Vec<String>, bool), String> {
+    let deduped = latest_per_name(checks);
+    let had_rows = deduped.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    let filtered = without_coverage_statuses(&deduped);
+    let mut conclusion = compute_ci_conclusion(&filtered)?;
+    let emptied = had_rows && matches!(conclusion, CiConclusion::None);
+    if emptied {
+        conclusion = CiConclusion::Pending;
+    }
+    let pending = emptied || ci_has_pending_checks(&filtered);
+    Ok((conclusion, failing_check_names(&filtered), pending))
+}
+
 fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     let arr = match checks.as_array() {
         Some(a) => a,
@@ -3240,6 +3351,24 @@ fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
 /// and refresher workflow pin the same name from their own surfaces, and a
 /// context string that splits in two is a green marker on nothing.
 const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
+const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = "fno/review-coverage-unavailable";
+
+fn coverage_unavailable_description(head: &str) -> String {
+    format!(
+        "coverage read unavailable at {}; retry the review verb",
+        short_sha(head)
+    )
+}
+
+fn coverage_instrument_status(coverage: &Coverage, head: &str) -> (&'static str, String) {
+    match coverage {
+        Coverage::Unknown => ("pending", coverage_unavailable_description(head)),
+        Coverage::Covered(_) => (
+            "success",
+            format!("coverage read healthy at {}", short_sha(head)),
+        ),
+    }
+}
 
 /// Whether `name` is the local reviewer Python's gate demands a pass from,
 /// with the same leading-slash tolerance `_coverage_has_local_pass` applies.
@@ -3333,10 +3462,17 @@ fn current_coverage_description(gh_bin: &str, cwd: &Path, head: &str) -> Option<
 }
 
 /// The one POST shape every coverage-marker writer uses.
-fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, description: &str) {
+fn post_coverage_status(
+    gh_bin: &str,
+    cwd: &Path,
+    head: &str,
+    context: &str,
+    state: &str,
+    description: &str,
+) {
     let target = format!("repos/:owner/:repo/statuses/{head}");
     let state_arg = format!("state={state}");
-    let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
+    let context_arg = format!("context={context}");
     let description_arg = format!("description={description}");
     let result = bounded_read(
         gh_bin.as_ref(),
@@ -3423,8 +3559,21 @@ fn publish_coverage_status(
                 gh_bin,
                 cwd,
                 pr_head_oid,
+                COVERAGE_STATUS_CONTEXT,
                 "success",
                 "coverage-override label applied on the PR",
+            );
+            // The diagnostic mirrors the Python override arm, not the
+            // possibly-Unknown computed read: a waived review must not wear
+            // "retry the review verb" beside its override success, and the
+            // two writers of one context must post the same state.
+            post_coverage_status(
+                gh_bin,
+                cwd,
+                pr_head_oid,
+                COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+                "success",
+                &format!("coverage read healthy at {}", short_sha(pr_head_oid)),
             );
             return;
         }
@@ -3470,13 +3619,7 @@ fn publish_coverage_status(
             format!("covered: {} reviewed at {}", n, short_sha(pr_head_oid)),
         )
     } else if matches!(coverage.coverage, Coverage::Unknown) {
-        (
-            "failure",
-            format!(
-                "coverage unknown (gh read failed) at {}; retry the review verb",
-                short_sha(pr_head_oid)
-            ),
-        )
+        ("pending", coverage_unavailable_description(pr_head_oid))
     } else {
         // The sized invocation rides along when it fits: GitHub caps this
         // description at 140 chars and rejects an overflow whole, which would
@@ -3505,7 +3648,24 @@ fn publish_coverage_status(
         };
         ("failure", description)
     };
-    post_coverage_status(gh_bin, cwd, pr_head_oid, state, &description);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_STATUS_CONTEXT,
+        state,
+        &description,
+    );
+    let (diagnostic_state, diagnostic_description) =
+        coverage_instrument_status(&coverage.coverage, pr_head_oid);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+        diagnostic_state,
+        &diagnostic_description,
+    );
 }
 
 /// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
@@ -4658,11 +4818,14 @@ pub enum CoverageVerdict {
 /// honest). Collapsing an API error into 0 produces false refusals; collapsing
 /// it into a count reproduces the bug.
 ///
-/// NOTE (x-0eaf finding 4): `Unknown` is not currently reachable in production.
-/// When the GitHub reviews API call fails, `read_pr_info` returns `Err`, which
-/// the caller handles by block-retry (fail-safe: the session retries, it does
-/// not green or merge). The variant, its receipt, schema enum, and tests exist
-/// so that softening the error path to terminate (rather than block) is a
+/// NOTE (x-0eaf finding 4): a FAILED GitHub reviews read still never yields
+/// `Unknown` - `read_pr_info` returns `Err` and the caller block-retries
+/// (fail-safe: the session retries, it does not green or merge). `Unknown` IS
+/// reachable in production through the login_skipped arm: a `no_external`
+/// session on a repo with an active login gate suppressed the reads the
+/// config demanded, and the honest answer for that axis is Unknown with its
+/// retry remedy (pinned by the no_external-on-active-gate tests). The
+/// receipt, schema enum, and tests exist so softening the error path is a
 /// one-line change, not a redesign. Do not delete it as dead code without
 /// understanding this.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5930,6 +6093,89 @@ pub(crate) fn emit_to_both(
     }
 }
 
+pub(crate) fn observe_shadow_transition(
+    run_log: &Path,
+    session_id: &str,
+    event: crate::run_state::RunEvent,
+    project_events: &Path,
+    global_events: &Path,
+) -> bool {
+    if !is_full_run_id(session_id) {
+        emit_transition_rejection(
+            session_id,
+            event,
+            "invalid_run_id",
+            "manifest carries no valid full run id".to_string(),
+            None,
+            run_log,
+            project_events,
+            global_events,
+        );
+        return false;
+    }
+
+    let Err(error) = crate::run_state::append_transition(run_log, session_id, event) else {
+        return true;
+    };
+    let (kind, from) = match &error {
+        crate::run_state::RunStateError::InvalidTransition(invalid) => (
+            "invalid_transition",
+            Some(serde_json::to_value(invalid.from).unwrap_or(serde_json::Value::Null)),
+        ),
+        _ => ("observer_io", None),
+    };
+    emit_transition_rejection(
+        session_id,
+        event,
+        kind,
+        error.to_string(),
+        from,
+        run_log,
+        project_events,
+        global_events,
+    );
+    false
+}
+
+fn emit_transition_rejection(
+    session_id: &str,
+    event: crate::run_state::RunEvent,
+    kind: &str,
+    error: String,
+    from: Option<serde_json::Value>,
+    run_log: &Path,
+    project_events: &Path,
+    global_events: &Path,
+) {
+    let event_name = serde_json::to_value(event)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    let mut data = serde_json::json!({
+        "session_id": session_id,
+        "kind": kind,
+        "event": event_name,
+        "error": error,
+        "run_log": run_log.display().to_string(),
+    });
+    if let Some(from) = from {
+        data["from"] = from;
+    }
+    emit_to_both(project_events, global_events, "transition_rejected", data);
+}
+
+pub(crate) fn is_full_run_id(value: &str) -> bool {
+    static SESSION_ID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    SESSION_ID
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"^(?:\d{8}T\d{6}Z-[a-z]{0,2}\d+-[0-9a-f]{6}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+            )
+            .expect("full run id regex is valid")
+        })
+        .is_match(value)
+}
+
 // ── cancel sentinel ───────────────────────────────────────────────────────────
 
 fn check_cancel_sentinel(cwd: &Path, created_at: &Option<String>) -> bool {
@@ -6249,6 +6495,9 @@ pub(crate) struct ReviewInputs {
     pub(crate) settings: Settings,
     /// The ambient author harness (env markers, or the explicit override).
     pub(crate) author_harness: Option<String>,
+    /// Whether the caller explicitly pinned `--author-harness none` (the
+    /// hermetic opt-out). Distinct from an UNRESOLVED harness, which floors.
+    pub(crate) author_harness_pinned_none: bool,
     pub(crate) required_bots: Vec<String>,
     pub(crate) required_reviewers: Vec<String>,
     pub(crate) optional_bots: Vec<String>,
@@ -6403,6 +6652,10 @@ pub(crate) fn resolve_review_inputs(
     // the same-model peer guard (x-c2e7); None leaves the set unchanged.
     // `--author-harness none` pins the no-harness case, which an absent flag
     // cannot express, and an absent flag keeps reading the ambient markers.
+    // The pin is recorded separately: a PINNED none is the hermetic opt-out,
+    // while an UNRESOLVED None (absent or ambiguous markers) floors the
+    // self-review reviewer instead of dropping it (x-129b).
+    let author_harness_pinned_none = matches!(author_harness_override, Some("none") | Some(""));
     let author_harness = match author_harness_override {
         Some("none") | Some("") => None,
         Some(h) => Some(h.to_string()),
@@ -6424,6 +6677,7 @@ pub(crate) fn resolve_review_inputs(
         repo_slug,
         settings,
         author_harness,
+        author_harness_pinned_none,
         required_bots,
         required_reviewers,
         optional_bots,
@@ -6433,7 +6687,7 @@ pub(crate) fn resolve_review_inputs(
 
 /// Core decision logic. Returns (exit_code, json_output).
 /// Exit 0 always for allow/block; non-zero only for internal/CLI errors.
-pub fn decide(args: &[String]) -> (i32, String) {
+fn decide_inner(args: &[String]) -> (i32, String) {
     // Missing required flags are CLI misuse: exit 2 with the same JSON error
     // shape the pre-refactor inline checks emitted (AC5-ERR).
     let parsed = match parse_args(args) {
@@ -6583,15 +6837,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
     let lane_configured =
         !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
-    // The floor only applies where a session can satisfy it: a harness with a
+    // The floor applies where a session can satisfy it: a harness with a
     // self-review verb (claude /code-review, codex /review, opencode
-    // /review-changes). Flooring gemini/agy would demand an attestation no
+    // /review-changes), or a harness that could not be attributed at all -
+    // ambiguity is not permission (x-129b). A KNOWN verbless harness
+    // (gemini/agy) stays unfloored: the floor would demand an attestation no
     // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
     // those harnesses' path and is deferred. classify_payload forks git, so it
     // runs only when the floor could apply - a configured lane makes it moot,
     // and most fires have one.
-    let harness_can_self_review = harness_can_self_review(author_harness.as_deref());
-    let self_review_floor = if !lane_configured && self_review_required && harness_can_self_review {
+    let floor_applies =
+        self_review_floor_applies(author_harness.as_deref(), inputs.author_harness_pinned_none);
+    let self_review_floor = if !lane_configured && self_review_required && floor_applies {
         let payload = classify_payload(&parsed.git_bin, &cwd);
         floor_self_review(&required_reviewers, false, payload.0, true)
     } else {
@@ -6878,13 +7135,15 @@ pub fn decide(args: &[String]) -> (i32, String) {
     let quota_probe = probe_graphql_quota(gh_bin, &cwd);
     // The primary-quota floor is blind to GitHub's SECONDARY (burst/
     // concurrency) limit by construction: advertised `remaining` can read
-    // thousands healthy while a call is refused, because there is no bucket
-    // for it in `gh api rate_limit` (measured live: core 4922/5000, graphql
-    // 1392/5000, a 403 anyway). A floor keyed only on advertised remaining
-    // never fires when THAT is the limiter, so a fire also stands down on an
-    // observed secondary refusal in the last 5 minutes, independent of what
-    // the probe reports (and independent of whether the probe itself
-    // succeeded). Reads `global_events`, not `project_events`: the limit is
+    // thousands healthy while a call is refused (measured live: core
+    // 4922/5000, graphql 1392/5000, a 403 anyway). A floor keyed only on
+    // advertised remaining never fires when THAT is the limiter, so a fire
+    // also stands down on an observed secondary refusal in the last 5
+    // minutes, independent of what this fire's probe reports (and
+    // independent of whether the probe itself succeeded). The observed rows
+    // carry the refusing session's live-bucket verdict in
+    // `rate_limit_class`, which is what `recent_secondary_refusal` matches.
+    // Reads `global_events`, not `project_events`: the limit is
     // per-USER, shared by every session on the machine, so a refusal any one
     // of them observed must stand every fleet member down, not just the one
     // that hit it.
@@ -7077,10 +7336,15 @@ pub fn decide(args: &[String]) -> (i32, String) {
             ) {
                 Ok(co) if co.status.success() => {
                     let cv: Value = serde_json::from_slice(&co.stdout).unwrap_or(Value::Null);
-                    // Same dedup as the main CI read: the fingerprint's CI arm
-                    // must describe the latest run per name, not a superseded
-                    // one a newer push already replaced.
-                    compute_ci_conclusion(&latest_per_name(&cv)).unwrap_or(CiConclusion::None)
+                    // The same truth table as the main CI read (one helper,
+                    // not a second spelling of dedup-plus-filter): the
+                    // fingerprint's CI arm must describe the latest run per
+                    // name, not a superseded one a newer push replaced, and
+                    // must agree with the main read about a coverage-only
+                    // rollup.
+                    classify_checks_payload(&cv)
+                        .map(|(c, _, _)| c)
+                        .unwrap_or(CiConclusion::None)
                 }
                 Err(e) if e.kind == ReadErrorKind::TimedOut => {
                     fp_timeout = fp_timeout.or_else(|| Some(e.clone()));
@@ -8226,7 +8490,22 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // Reuse the fire-start probe; re-probe only if it failed, so a
                 // blip at the top still gets its one retry without a second
                 // `gh api rate_limit` on every error fire (request-rate cost).
+                //
+                // pulls_comments(_parse) and pr_commits share this error arm but
+                // are not all GraphQL: pulls_comments is a REST endpoint
+                // (`gh api .../pulls/N/comments`). A zero-remaining probe
+                // must not blame GraphQL for a REST read's own failure - that
+                // reads as "stop retrying gh pr view" advice for a call that was
+                // never gh pr view and might succeed on the very next fire.
+                let is_graphql_read = is_graphql_read(&failed_read);
                 let quota = quota_probe.or_else(|| probe_graphql_quota(gh_bin, &cwd));
+                // Classified against the LIVE exempt bucket, never wording
+                // (see `refusal_is_secondary`), and the verdict rides the
+                // event as a FIELD: `recent_secondary_refusal` matches the
+                // field, so a GitHub reword cannot blind the fleet-wide
+                // stand-down again.
+                let secondary =
+                    refusal_is_secondary(&failed_stderr, quota.as_ref(), is_graphql_read);
                 emit(
                     "loop_check_gh_error",
                     serde_json::json!({
@@ -8236,7 +8515,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "stderr_tail": failed_stderr,
                         "elapsed_s": read_err.elapsed.map(|d| d.as_secs_f64()),
                         "graphql_remaining": quota.as_ref().map(|q| q.remaining),
-                        "graphql_reset": quota.as_ref().map(|q| q.reset_epoch)
+                        "graphql_reset": quota.as_ref().map(|q| q.reset_epoch),
+                        "rate_limit_class": secondary.then_some("secondary")
                     }),
                 );
                 emit(
@@ -8256,29 +8536,24 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "fp_read_failed": true
                     }),
                 );
-                // pulls_comments(_parse) and pr_commits share this error arm but
-                // are not all GraphQL: pulls_comments is a REST endpoint
-                // (`gh api .../pulls/N/comments`). A zero-remaining probe
-                // must not blame GraphQL for a REST read's own failure - that
-                // reads as "stop retrying gh pr view" advice for a call that was
-                // never gh pr view and might succeed on the very next fire.
-                let is_graphql_read = is_graphql_read(&failed_read);
                 // Checked BEFORE the primary-quota branch and independent of
-                // it: a secondary (burst/concurrency) refusal has its OWN
-                // stderr signature and can fire with the primary quota
-                // reading thousands remaining (measured live: core 4922/5000,
-                // graphql 1392/5000, refused anyway). Naming it as primary
-                // exhaustion sends the caller to wait for a reset that can be
-                // 40 minutes away for a limit that actually clears in
-                // seconds - the exact "assert a positive marker, never an
-                // absence" trap this whole diagnosis exists to avoid.
+                // it: a secondary (burst/concurrency) refusal can fire with
+                // the primary quota reading thousands remaining (measured
+                // live: core 4922/5000, graphql 1392/5000, refused anyway).
+                // `secondary` above already classified it against the LIVE
+                // exempt bucket - wording alone missed GitHub's measured body
+                // - and naming it as primary exhaustion sends the caller to
+                // wait for a reset that can be 40 minutes away for a limit
+                // that actually clears in seconds - the exact "assert a
+                // positive marker, never an absence" trap this whole
+                // diagnosis exists to avoid.
                 // A killed timeout renders its own sentence and never falls
                 // through the ordinary failed-read wording: the two demand
                 // opposite operator responses, and the quota probe below must
                 // not label a killed child as a quota problem either.
                 let reason = if read_err.kind == ReadErrorKind::TimedOut {
                     read_err.render()
-                } else if is_secondary_limit_stderr(&failed_stderr) {
+                } else if secondary {
                     format!(
                         "gh read '{failed_read}' hit GitHub's SECONDARY rate limit (burst/\
                          concurrency, not the hourly quota - `gh api rate_limit` can read \
@@ -9841,14 +10116,15 @@ fn build_block_reason(
                             } else {
                                 inv
                             };
-                            // code-review is a native harness verb that emits
-                            // no attestation on its own; the session must also
-                            // run the emit helper or the gate never clears.
+                            // code-review is a native harness verb whose clean
+                            // result normally reaches the shared attester. The
+                            // helper remains the loud recovery path if that
+                            // confirmed clean result did not produce evidence.
                             // The fno-skill reviewers (sigma, declare) attest
                             // inside their own invocation.
                             let emit_step = if r.name == "code-review" {
                                 format!(
-                                    ", then `bash skills/review/scripts/emit-attestation.sh {}`",
+                                    ", if the confirmed clean review did not emit, recover with `bash skills/review/scripts/emit-attestation.sh {}`",
                                     r.name
                                 )
                             } else {
@@ -10026,6 +10302,15 @@ fn build_block_reason(
                 hint("review")
             );
         }
+        // Unknown AFTER the specific arms but BEFORE the config complaint:
+        // the unmet gate, the unaddressed finding, and the outstanding bot
+        // are all more actionable than the read remedy, but "no reviewer is
+        // outstanding" beside an unread coverage axis is the read remedy's
+        // exact case (the pinned test: Unknown names the read remedy, never
+        // a config lecture).
+        if matches!(pr.coverage.coverage, Coverage::Unknown) {
+            return coverage_unavailable_description(&pr.head_oid);
+        }
         // Reaching here means missing_bots is empty, which `async_wait_class`
         // treats as non-idlable, so this must not teach the arm-and-tag ritual
         // either (the two must never disagree about whether a wait is valid).
@@ -10036,6 +10321,12 @@ fn build_block_reason(
              Nothing here will arrive on its own.",
             pr.number
         );
+    }
+
+    // And the reviewed-but-Unknown case (a satisfied gate beside an unread
+    // axis) keeps the read remedy here, outside the block.
+    if matches!(pr.coverage.coverage, Coverage::Unknown) {
+        return coverage_unavailable_description(&pr.head_oid);
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
@@ -10564,6 +10855,86 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 
 // ── public entry points ───────────────────────────────────────────────────────
 
+fn observe_decision(args: &[String], output: &str) {
+    let Ok(parsed) = parse_args(args) else {
+        return;
+    };
+    if parsed.driver != "target" {
+        return;
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(output) else {
+        return;
+    };
+    let transition = if let Some(reason) = payload
+        .get("termination_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        let Ok(record) = crate::run_outcome::classify_legacy(reason) else {
+            return;
+        };
+        let projection = record.projection();
+        if projection.cancelled {
+            crate::run_state::RunEvent::Cancel
+        } else if projection.stuck {
+            crate::run_state::RunEvent::Abort
+        } else {
+            crate::run_state::RunEvent::TerminalDecided
+        }
+    } else if payload.get("decision").and_then(serde_json::Value::as_str) == Some("block") {
+        crate::run_state::RunEvent::DispatchClassified
+    } else {
+        return;
+    };
+    let Ok(manifest) = std::fs::read_to_string(&parsed.state_path) else {
+        return;
+    };
+    let Some(session_id) = parse_manifest(&manifest).and_then(|value| value.session_id) else {
+        return;
+    };
+    let project_events = parsed
+        .events_path
+        .unwrap_or_else(|| parsed.cwd.join(".fno/events.jsonl"));
+    let global_events = parsed.global_events_path.unwrap_or_else(|| {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            .join(".fno/events.jsonl")
+    });
+    let run_log = parsed.cwd.join(".fno/run-log.jsonl");
+    if transition == crate::run_state::RunEvent::TerminalDecided
+        && matches!(
+            crate::run_state::fold_run_state(&run_log, &session_id),
+            Ok(crate::run_state::RunState::Open)
+        )
+    {
+        // A plan-only/advisory/batched run can terminate on its first fire.
+        // Seed the observer's dispatch arm so the legacy terminal remains
+        // unchanged while the shadow journal records a legal path.
+        observe_shadow_transition(
+            &run_log,
+            &session_id,
+            crate::run_state::RunEvent::DispatchClassified,
+            &project_events,
+            &global_events,
+        );
+    }
+    observe_shadow_transition(
+        &run_log,
+        &session_id,
+        transition,
+        &project_events,
+        &global_events,
+    );
+}
+
+pub fn decide(args: &[String]) -> (i32, String) {
+    let result = decide_inner(args);
+    if result.0 == 0 {
+        observe_decision(args, &result.1);
+    }
+    result
+}
+
 /// Entry point called from `bin/client.rs` direct dispatch.
 /// Prints JSON to stdout, returns exit code.
 pub fn run_loop_check(args: &[String]) -> i32 {
@@ -10663,9 +11034,11 @@ fn insert_quota_diagnostic(out: &mut Value, quota: &Option<GraphqlQuota>) {
 
 /// The exit-4 reason for a secondary (burst) limit refusal. Shared by BOTH
 /// exit-4 arms so the stdout contract does not fork on whether `--pr` was
-/// passed: the refusal names itself in the failed read's stderr, the quota
-/// probe is skipped (one more spawn against a refusing gh is the doomed
-/// kind), and `graphql_*` read null because no probe ran.
+/// passed: the verdict came from the ONE exempt `gh api rate_limit` probe
+/// (`refusal_is_secondary` - the endpoint answers during a refusal and counts
+/// against no bucket), and `graphql_*` read null because the secondary
+/// verdict keeps the quota diagnostics out rather than blame a bucket that
+/// still reads healthy.
 fn secondary_limit_reason() -> &'static str {
     "GitHub secondary rate limit refused this gh read (a burst limit, distinct \
      from the hourly quota; advertised remaining stays healthy). Stop retrying \
@@ -10834,11 +11207,22 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     "review_coverage",
                     data.clone(),
                 );
-                let secondary = is_secondary_limit_stderr(&tail);
+                // One exempt probe when the failure smells like a rate limit
+                // (or is a graphql read needing quota diagnostics): the probe
+                // answers during a refusal and counts against no bucket, so
+                // it is the classifier (`refusal_is_secondary`), not a doomed
+                // extra call against the limiter.
+                let probed = if stderr_smells_rate_limit(&tail) || is_graphql_read(&read) {
+                    probe_graphql_quota(&gh_bin, &cwd)
+                } else {
+                    None
+                };
+                let secondary =
+                    refusal_is_secondary(&tail, probed.as_ref(), is_graphql_read(&read));
                 let quota = if secondary || !is_graphql_read(&read) {
                     None
                 } else {
-                    probe_graphql_quota(&gh_bin, &cwd)
+                    probed
                 };
                 let mut out = data;
                 insert_quota_diagnostic(&mut out, &quota);
@@ -10863,7 +11247,10 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         && required_reviewers.is_empty());
     if !lane_configured
         && inputs.settings.self_review_required.unwrap_or(true)
-        && harness_can_self_review(inputs.author_harness.as_deref())
+        && self_review_floor_applies(
+            inputs.author_harness.as_deref(),
+            inputs.author_harness_pinned_none,
+        )
     {
         let payload = classify_payload(&git_bin, &cwd);
         if let Some(floored) = floor_self_review(&required_reviewers, false, payload.0, true) {
@@ -10996,17 +11383,22 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 // the reader was told to re-review a PR whose only problem
                 // was an exhausted quota window.
                 //
-                // A secondary-limit refusal names itself in the failed read's
-                // own stderr (advertised remaining stays healthy - the case
-                // is_secondary_limit_stderr documents), so classify from
-                // `tail` and skip the probe: one more spawn against a
-                // refusing gh is the doomed kind. Quota exhaustion, the other
-                // cause, still probes for the reset time its reason names.
-                let secondary = is_secondary_limit_stderr(&tail);
+                // One exempt probe when the failure smells like a rate limit
+                // (or is a graphql read needing quota diagnostics): the probe
+                // answers during a refusal and counts against no bucket, so
+                // it is the classifier (`refusal_is_secondary`), not a doomed
+                // extra call against the limiter.
+                let probed = if stderr_smells_rate_limit(&tail) || is_graphql_read(&read) {
+                    probe_graphql_quota(&gh_bin, &cwd)
+                } else {
+                    None
+                };
+                let secondary =
+                    refusal_is_secondary(&tail, probed.as_ref(), is_graphql_read(&read));
                 let quota = if secondary || !is_graphql_read(&read) {
                     None
                 } else {
-                    probe_graphql_quota(&gh_bin, &cwd)
+                    probed
                 };
                 let mut out = data;
                 insert_quota_diagnostic(&mut out, &quota);
@@ -11018,13 +11410,18 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             // The emitted unknown row above is schema-gated, so the exhaustion
             // diagnosis rides this stdout-only branch (and the stop hook's own
             // block reason); it must not fork the event contract. The same
-            // secondary-limit classification as the --pr arm: a refusal with no
-            // PR number must not spawn the probe the other arm already skips.
-            let secondary = is_secondary_limit_stderr(&tail);
+            // exempt-probe classification as the --pr arm: a refusal with no
+            // PR number gets the same verdict, not a divergent wording gate.
+            let probed = if stderr_smells_rate_limit(&tail) || is_graphql_read(&read) {
+                probe_graphql_quota(&gh_bin, &cwd)
+            } else {
+                None
+            };
+            let secondary = refusal_is_secondary(&tail, probed.as_ref(), is_graphql_read(&read));
             let quota = if secondary || !is_graphql_read(&read) {
                 None
             } else {
-                probe_graphql_quota(&gh_bin, &cwd)
+                probed
             };
             let mut out = serde_json::json!({
                 "error": format!("gh read failed: {read}"),
@@ -11550,6 +11947,121 @@ mod tests {
             review_freshness("r", "h", &facts(Some("i"), None, None)),
             Freshness::Stale
         );
+    }
+
+    // ── x-e8db: the resolver against a REAL rebase ──────────────────────────
+    //
+    // The pure tests above pin the predicate over synthetic facts; this pair
+    // drives the git plumbing (identity computation, base-ref qualification)
+    // through an actual rebase. The Python merge gate's twin pair lives in
+    // cli/tests/unit/test_review_freshness_rebase.py; the two gates must
+    // agree on the same PR shape.
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn write(repo: &Path, name: &str, body: &str) {
+        std::fs::write(repo.join(name), body).unwrap();
+    }
+
+    /// One repo whose feature branch rebases onto a moved `origin/main`.
+    /// Returns `(repo, reviewed_sha, head_sha)`. `conflict` selects whether
+    /// the rebase stops on a conflict that the resolution CHANGES.
+    fn rebased_repo(conflict: bool) -> (tempfile::TempDir, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        write(&repo, "f.txt", "base\n");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        if conflict {
+            write(&repo, "f.txt", "feature says B\n");
+        } else {
+            write(&repo, "code.txt", "pr change\n");
+        }
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "pr"]);
+        let reviewed = git(&repo, &["rev-parse", "HEAD"]);
+
+        git(&repo, &["checkout", "-q", "main"]);
+        if conflict {
+            write(&repo, "f.txt", "main says C\n");
+        } else {
+            write(&repo, "other.txt", "base moved\n");
+        }
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "base moved"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]);
+        // The machine's pre-push hook protects even scratch `main`s, so move
+        // the remote-tracking ref directly.
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &tip]);
+
+        git(&repo, &["checkout", "-q", "feature"]);
+        let rebase = Command::new("git")
+            .args(["rebase", "origin/main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        if conflict {
+            assert!(!rebase.status.success(), "scenario requires a conflict");
+            write(&repo, "f.txt", "resolved differently\n");
+            git(&repo, &["add", "-A"]);
+            let cont = Command::new("git")
+                .args(["-c", "core.editor=true", "rebase", "--continue"])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(
+                cont.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cont.stderr)
+            );
+        } else {
+            assert!(
+                rebase.status.success(),
+                "{}",
+                String::from_utf8_lossy(&rebase.stderr)
+            );
+        }
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        (tmp, reviewed, head)
+    }
+
+    #[test]
+    fn resolver_carries_an_identical_rebase_and_expires_a_conflict() {
+        // The whole x-e8db contract on the resolver itself: a rebase that
+        // rewrote every commit but changed no content keeps the attestation
+        // (a Carried verdict counts), and a conflict resolution that changed
+        // the delta loses it. One test, both directions, so a regression in
+        // either can never leave the other green-looking.
+        let (tmp, reviewed, head) = rebased_repo(false);
+        let repo = tmp.path().join("r");
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let verdict = resolver.freshness(&reviewed);
+        assert!(verdict.counts(), "identical rebase must carry: {verdict:?}");
+
+        let (tmp, reviewed, head) = rebased_repo(true);
+        let repo = tmp.path().join("r");
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let verdict = resolver.freshness(&reviewed);
+        assert_eq!(verdict, Freshness::Stale, "conflict resolution must expire");
     }
 
     #[test]
@@ -12331,6 +12843,218 @@ mod tests {
     }
 
     #[test]
+    fn shadow_transition_accepts_without_emitting_a_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_log = dir.path().join("run-log.jsonl");
+        let events = dir.path().join("events.jsonl");
+        let run_id = "20260823T060900Z-cx73523-e04109";
+
+        observe_shadow_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::DispatchClassified,
+            &events,
+            &events,
+        );
+
+        assert_eq!(
+            crate::run_state::fold_run_state(&run_log, run_id).unwrap(),
+            crate::run_state::RunState::Working
+        );
+        assert!(!events.exists());
+    }
+
+    #[test]
+    fn shadow_transition_rejection_changes_no_legacy_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_log = dir.path().join("run-log.jsonl");
+        let events = dir.path().join("events.jsonl");
+        let run_id = "20260823T060900Z-cx73523-e04109";
+        crate::run_state::append_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::DispatchClassified,
+        )
+        .unwrap();
+        crate::run_state::append_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::PrepareHandoff,
+        )
+        .unwrap();
+        crate::run_state::append_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::SuccessorProven,
+        )
+        .unwrap();
+        let legacy = allow_output("block", None, "keep working", 2, None);
+
+        observe_shadow_transition(
+            &run_log,
+            run_id,
+            crate::run_state::RunEvent::DispatchClassified,
+            &events,
+            &events,
+        );
+
+        assert_eq!(legacy, allow_output("block", None, "keep working", 2, None));
+        let telemetry = std::fs::read_to_string(events).unwrap();
+        assert!(telemetry.contains("\"type\":\"transition_rejected\""));
+        assert!(telemetry.contains("invalid transition Closed + DispatchClassified"));
+    }
+
+    #[test]
+    fn decision_chokepoint_observes_block_then_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("target-state.md");
+        let events = dir.path().join("events.jsonl");
+        let run_id = "20260823T060900Z-cx73523-e04109";
+        std::fs::write(&state, format!("---\nsession_id: {run_id}\n---\n")).unwrap();
+        let args = vec![
+            "loop-check".to_string(),
+            "--state".to_string(),
+            state.display().to_string(),
+            "--transcript".to_string(),
+            dir.path().join("transcript.jsonl").display().to_string(),
+            "--cwd".to_string(),
+            dir.path().display().to_string(),
+            "--events".to_string(),
+            events.display().to_string(),
+            "--global-events".to_string(),
+            events.display().to_string(),
+        ];
+
+        let blocked = allow_output("block", None, "keep working", 1, None);
+        observe_decision(&args, &blocked);
+        assert_eq!(
+            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), run_id)
+                .unwrap(),
+            crate::run_state::RunState::Working
+        );
+
+        let terminal = allow_output(
+            "allow",
+            Some(TerminationReason::DonePRGreen),
+            "done",
+            2,
+            None,
+        );
+        observe_decision(&args, &terminal);
+        assert_eq!(
+            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), run_id)
+                .unwrap(),
+            crate::run_state::RunState::Sealing
+        );
+        assert!(!events.exists());
+    }
+
+    #[test]
+    fn immediate_terminal_seeds_dispatch_before_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("target-state.md");
+        let events = dir.path().join("events.jsonl");
+        let run_id = "20260823T060900Z-cx73523-e04109";
+        std::fs::write(&state, format!("---\nfno_id: {run_id}\n---\n")).unwrap();
+        let args = vec![
+            "loop-check".to_string(),
+            "--state".to_string(),
+            state.display().to_string(),
+            "--transcript".to_string(),
+            dir.path().join("transcript.jsonl").display().to_string(),
+            "--cwd".to_string(),
+            dir.path().display().to_string(),
+            "--events".to_string(),
+            events.display().to_string(),
+            "--global-events".to_string(),
+            events.display().to_string(),
+        ];
+
+        observe_decision(
+            &args,
+            &allow_output(
+                "allow",
+                Some(TerminationReason::DonePRGreen),
+                "done",
+                1,
+                None,
+            ),
+        );
+
+        let run_log = dir.path().join(".fno/run-log.jsonl");
+        assert_eq!(
+            crate::run_state::fold_run_state(&run_log, run_id).unwrap(),
+            crate::run_state::RunState::Sealing
+        );
+        let log = std::fs::read_to_string(run_log).unwrap();
+        assert!(log.contains("dispatch_classified"));
+        assert!(log.contains("terminal_decided"));
+        assert!(
+            !events.exists(),
+            "accepted shadow transitions emit no rejection"
+        );
+    }
+
+    #[test]
+    fn decision_chokepoint_prefers_canonical_fno_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("target-state.md");
+        let events = dir.path().join("events.jsonl");
+        let canonical = "20260823T060900Z-cx73523-e04109";
+        std::fs::write(
+            &state,
+            format!("---\nfno_id: {canonical}\nsession_id: legacy-run\n---\n"),
+        )
+        .unwrap();
+        let args = vec![
+            "loop-check".to_string(),
+            "--state".to_string(),
+            state.display().to_string(),
+            "--transcript".to_string(),
+            dir.path().join("transcript.jsonl").display().to_string(),
+            "--cwd".to_string(),
+            dir.path().display().to_string(),
+            "--events".to_string(),
+            events.display().to_string(),
+            "--global-events".to_string(),
+            events.display().to_string(),
+        ];
+
+        observe_decision(&args, &allow_output("block", None, "keep working", 1, None));
+
+        assert_eq!(
+            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), canonical)
+                .unwrap(),
+            crate::run_state::RunState::Working
+        );
+        assert_eq!(
+            crate::run_state::fold_run_state(&dir.path().join(".fno/run-log.jsonl"), "legacy-run")
+                .unwrap(),
+            crate::run_state::RunState::Open
+        );
+    }
+
+    #[test]
+    fn shadow_observer_rejects_short_run_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_log = dir.path().join("run-log.jsonl");
+        let events = dir.path().join("events.jsonl");
+
+        observe_shadow_transition(
+            &run_log,
+            "short-run",
+            crate::run_state::RunEvent::DispatchClassified,
+            &events,
+            &events,
+        );
+
+        assert!(!run_log.exists());
+        assert!(std::fs::read_to_string(events)
+            .unwrap()
+            .contains("manifest carries no valid full run id"));
+    }
+
+    #[test]
     fn target_stream_emit_waits_through_expected_maintenance_contention() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("events.jsonl");
@@ -13070,6 +13794,27 @@ mod tests {
             "pending CI must not read as red; got: {reason}"
         );
         assert!(!reason.contains("failed"), "got: {reason}");
+    }
+
+    #[test]
+    fn unknown_coverage_names_the_read_remedy_not_a_ci_failure() {
+        let mut pr = watch_pr();
+        pr.ci_conclusion = CiConclusion::Success;
+        pr.ci_has_pending = false;
+        pr.coverage = CoverageReport {
+            coverage: Coverage::Unknown,
+            verdicts: vec![],
+        };
+        let reason = build_block_reason(&pr, "abc", true, true);
+        assert!(
+            reason.contains("coverage read unavailable"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("retry the review verb"), "got: {reason}");
+        assert!(!reason.contains("CI red"), "got: {reason}");
+        assert!(!reason.contains("failed"), "got: {reason}");
+        assert!(!reason.contains("Read the failing log"), "got: {reason}");
+        assert!(!reason.contains("fno do pr logs"), "got: {reason}");
     }
 
     #[test]
@@ -14630,6 +15375,14 @@ git_bounded();";
         assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
         assert!(reason.contains("code-review"), "got: {reason}");
         assert!(reason.contains(&format!("`{expected}`")), "got: {reason}");
+        assert!(
+            reason.contains("skills/review/scripts/emit-attestation.sh code-review"),
+            "got: {reason}"
+        );
+        assert!(
+            reason.contains("local work to DO, not a wait"),
+            "got: {reason}"
+        );
     }
 
     #[test]
@@ -14666,12 +15419,31 @@ git_bounded();";
     }
 
     #[test]
+    fn unresolved_harness_floors_the_self_review_gate() {
+        // x-129b: `None` means UNATTRIBUTABLE, not verbless. A claude session
+        // started from a codex shell resolves no single family, and reading
+        // that ambiguity as "no floor" silently disengaged the only review a
+        // stock install demands. Ambiguity is not permission; the explicit
+        // `--author-harness none` pin stays the hermetic opt-out.
+        assert!(self_review_floor_applies(None, false));
+        assert!(!self_review_floor_applies(None, true));
+        assert!(self_review_floor_applies(Some("claude"), false));
+        assert!(self_review_floor_applies(Some("codex"), true));
+        assert!(!self_review_floor_applies(Some("gemini"), false));
+        assert!(!self_review_floor_applies(Some("agy"), false));
+        // An unrecognized spelling is an unattributed run: it floors rather
+        // than passing an unknown name through the verb table.
+        assert!(self_review_floor_applies(Some("hermes"), false));
+    }
+
+    #[test]
     fn graphql_exhausted_reason_names_reset_and_rest_lane() {
         // The message must make a session STOP retrying and say where the
         // answer still lives; "retrying next fire" is the advice it replaces.
         let q = GraphqlQuota {
             remaining: 0,
             reset_epoch: Utc::now().timestamp() + 40 * 60 + 5,
+            core_remaining: None,
         };
         let msg = graphql_exhausted_reason(&q);
         assert!(msg.contains("GraphQL quota exhausted"), "got: {msg}");
@@ -14685,6 +15457,7 @@ git_bounded();";
         let q = GraphqlQuota {
             remaining: 0,
             reset_epoch: Utc::now().timestamp() - 120,
+            core_remaining: None,
         };
         assert!(graphql_exhausted_reason(&q).contains("~0m"));
     }
@@ -14707,7 +15480,8 @@ git_bounded();";
             tmp.path(),
             "gh",
             "#!/bin/sh\n[ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
-             echo '{\"resources\":{\"graphql\":{\"remaining\":0,\"reset\":1750000000}}}' && exit 0\n\
+             echo '{\"resources\":{\"graphql\":{\"remaining\":0,\"reset\":1750000000},\
+             \"core\":{\"remaining\":4980,\"limit\":5000,\"reset\":1750000000}}}' && exit 0\n\
              exit 1\n",
         );
         // Retry the spawn a few times: under a loaded CI runner (this crate's
@@ -14727,6 +15501,9 @@ git_bounded();";
         let q = q.expect("gh spawn kept failing across 5 retries - a real regression, not a blip");
         assert_eq!(q.remaining, 0);
         assert_eq!(q.reset_epoch, 1750000000);
+        // The core bucket from the SAME probe read feeds the secondary-limit
+        // classifier; a payload without it must degrade to None, not to 0.
+        assert_eq!(q.core_remaining, Some(4980));
     }
 
     #[test]
@@ -14741,8 +15518,15 @@ git_bounded();";
     /// One stub gh for the pr_num > 0 failure-arm tests: `pr view` fails with a
     /// rate-limit stderr (NOT the "no pull requests found" no-PR wording, which
     /// would take the Ok(PrState::None) branch), `api rate_limit` answers the
-    /// given graphql bucket.
-    fn write_failing_pr_view_gh(dir: &Path, graphql_remaining: i64, reset_in_secs: i64) -> String {
+    /// given buckets. `core_remaining` Some(0) keeps the refusal explainable
+    /// by the primary quota (not classified secondary) when the test wants
+    /// the graphql-diagnosis arm.
+    fn write_failing_pr_view_gh(
+        dir: &Path,
+        graphql_remaining: i64,
+        reset_in_secs: i64,
+        core_remaining: i64,
+    ) -> String {
         let reset = Utc::now().timestamp() + reset_in_secs;
         write_exec(
             dir,
@@ -14752,10 +15536,12 @@ git_bounded();";
                  [ \"$1\" = pr ] && [ \"$2\" = view ] && \
                  echo 'GraphQL: API rate limit exceeded for user ID 1.' >&2 && exit 1\n\
                  [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
-                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":{remaining},\"reset\":{reset}}}}}}}' && exit 0\n\
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":{remaining},\"reset\":{reset}}},\
+                 \"core\":{{\"remaining\":{core},\"limit\":5000,\"reset\":{reset}}}}}}}' && exit 0\n\
                  exit 1\n",
                 remaining = graphql_remaining,
                 reset = reset,
+                core = core_remaining,
             ),
         )
         .to_str()
@@ -14794,7 +15580,7 @@ git_bounded();";
         // indistinguishable from "nobody reviewed this" and sent operators to
         // re-review PRs whose only problem was an exhausted quota window.
         let tmp = tempfile::tempdir().unwrap();
-        let gh = write_failing_pr_view_gh(tmp.path(), 0, 14 * 60);
+        let gh = write_failing_pr_view_gh(tmp.path(), 0, 14 * 60, 0);
         let events = tmp.path().join("ev.jsonl");
         let global = tmp.path().join("gev.jsonl");
         let args: Vec<String> = [
@@ -14845,7 +15631,7 @@ git_bounded();";
         // left is an outage, not exhaustion, and stdout saying exhausted=false
         // is what lets a reader stop guessing between the two.
         let tmp = tempfile::tempdir().unwrap();
-        let gh = write_failing_pr_view_gh(tmp.path(), 4890, 0);
+        let gh = write_failing_pr_view_gh(tmp.path(), 4890, 0, 0);
         let args: Vec<String> = [
             "review-coverage",
             "--cwd",
@@ -14873,14 +15659,13 @@ git_bounded();";
     }
 
     #[test]
-    fn review_coverage_pr_failure_secondary_limit_names_cause_and_skips_probe() {
-        // The other exit-4 cause: a secondary (burst) limit refusal fires with
-        // advertised quota healthy, so the quota probe cannot see it. The
-        // cause names itself in the failed read's stderr; stdout must carry
-        // it, and the probe must not even fire (its spawn is one more call
-        // against the limiter that just refused). The stub's rate_limit arm
-        // answers HEALTHY and drops a marker file - if the probe fired, the
-        // marker exists and graphql_remaining reads a number.
+    fn review_coverage_pr_failure_verbatim_403_classifies_secondary_via_the_exempt_probe() {
+        // The p0 shape on this verb: the failed read's stderr is the
+        // MEASURED 2026-08-24 body (no "secondary" anywhere) while the exempt
+        // rate_limit endpoint still answers healthy. The classifier is that
+        // one probe - it fires exactly once (the marker), never counts
+        // against a bucket, and the verdict keeps the graphql diagnostics
+        // null so the reason names the burst limit, not a healthy bucket.
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("probe-fired");
         let gh = write_exec(
@@ -14889,9 +15674,10 @@ git_bounded();";
             &format!(
                 "#!/bin/sh\n\
                  [ \"$1\" = pr ] && [ \"$2\" = view ] && \
-                 echo 'You have exceeded a secondary rate limit and have been temporarily blocked.' >&2 && exit 1\n\
+                 echo 'API rate limit exceeded for user ID 4994564. If you reach out to GitHub Support for help, please include the request ID FAEB:283161:6EF36:99B72:6A8B97DD ... (HTTP 403)' >&2 && exit 1\n\
                  [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
-                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4890,\"reset\":1750000000}}}}}}' && \
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4446,\"reset\":1750000000}},\
+                 \"core\":{{\"remaining\":4980,\"limit\":5000,\"reset\":1750000000}}}}}}' && \
                  echo probe > {marker} && exit 0\n\
                  exit 1\n",
                 marker = marker.display()
@@ -14936,21 +15722,23 @@ git_bounded();";
         );
         assert!(
             v["graphql_exhausted"].is_null(),
-            "probe skipped on secondary: exhausted reads null, got: {v}"
+            "secondary keeps the quota diagnostics null: exhausted reads null, got: {v}"
         );
+        // The exempt probe FIRED exactly as the classifier; the marker is the
+        // positive control that classification came from a live reading.
         assert!(
-            !marker.exists(),
-            "probe_graphql_quota spawned against a refusing gh"
+            marker.exists(),
+            "the exempt probe is the classifier - it must fire"
         );
         assert_eq!(v["coverage"], "unknown");
     }
 
     #[test]
-    fn review_coverage_no_pr_secondary_limit_also_skips_probe() {
-        // The pr_num == 0 arm (no --pr passed) shares the secondary
-        // classification: without it a refusal with no PR number would spawn
-        // the probe the --pr arm skips - one more call against the limiter
-        // that just refused - and emit no reason for the same failure.
+    fn review_coverage_no_pr_secondary_limit_classifies_the_same_way() {
+        // The pr_num == 0 arm (no --pr passed) shares the classification: a
+        // refusal with no PR number gets the same live-bucket verdict (here
+        // with the OLD phrase in the stderr - the bucket, not the wording,
+        // must stay the discriminator) and the same exempt-probe cost.
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("probe-fired");
         let gh = write_exec(
@@ -14961,7 +15749,8 @@ git_bounded();";
                  [ \"$1\" = pr ] && [ \"$2\" = view ] && \
                  echo 'You have exceeded a secondary rate limit and have been temporarily blocked.' >&2 && exit 1\n\
                  [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
-                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4890,\"reset\":1750000000}}}}}}' && \
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4890,\"reset\":1750000000}},\
+                 \"core\":{{\"remaining\":4922,\"limit\":5000,\"reset\":1750000000}}}}}}' && \
                  echo probe > {marker} && exit 0\n\
                  exit 1\n",
                 marker = marker.display()
@@ -15002,21 +15791,120 @@ git_bounded();";
             "reason must name the secondary limit, got: {v}"
         );
         assert!(
-            !marker.exists(),
-            "probe_graphql_quota spawned against a refusing gh on the no-PR arm"
+            marker.exists(),
+            "the no-PR arm must classify through the same exempt probe"
         );
     }
 
+    /// Verbatim as measured 2026-08-24T01:01:17Z during a live secondary
+    /// refusal: GitHub's own wording contains NO "secondary" - that absence is
+    /// the premise the live-bucket classifier exists for. The `...` gaps are
+    /// where the live capture was truncated, not paraphrase.
+    const VERBATIM_403: &str = "gh: API rate limit exceeded for user ID 4994564. If you reach \
+         out to GitHub Support for help, please include the request ID \
+         FAEB:283161:6EF36:99B72:6A8B97DD ... Terms of Service (...) (HTTP 403)";
+
+    fn quota_with(graphql_remaining: i64, core_remaining: Option<i64>) -> GraphqlQuota {
+        GraphqlQuota {
+            remaining: graphql_remaining,
+            reset_epoch: 1_750_000_000,
+            core_remaining,
+        }
+    }
+
     #[test]
-    fn is_secondary_limit_stderr_matches_ghs_real_wording_case_insensitively() {
-        assert!(is_secondary_limit_stderr(
-            "You have exceeded a secondary rate limit. Please wait a few minutes."
+    fn refusal_is_secondary_classifies_the_verbatim_body_by_the_live_bucket() {
+        // The p0 shape: the measured 403 says only "API rate limit exceeded"
+        // with both buckets healthy - that IS the secondary limit, whatever
+        // the prose says.
+        assert!(!VERBATIM_403.to_lowercase().contains("secondary"));
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(4980))),
+            true
         ));
-        assert!(is_secondary_limit_stderr("SECONDARY RATE LIMIT hit"));
-        assert!(!is_secondary_limit_stderr(
-            "API rate limit exceeded for user ID 1."
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(4980))),
+            false
         ));
-        assert!(!is_secondary_limit_stderr(""));
+    }
+
+    #[test]
+    fn refusal_is_secondary_names_the_drained_buckets_as_the_primary_quota() {
+        // A drained explaining bucket is primary exhaustion, not secondary -
+        // on either transport.
+        assert!(!refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(0, Some(4980))),
+            true
+        ));
+        assert!(!refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(0))),
+            true
+        ));
+    }
+
+    #[test]
+    fn refusal_is_secondary_low_but_positive_core_is_not_proof_of_the_quota() {
+        // A secondary refusal lands with core wherever it stood; only 0
+        // names the core quota. Mislabeling 1..=20 as the primary quota
+        // sends the session to wait for a reset instead of backing off -
+        // the exact harm this classifier exists to prevent.
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(3))),
+            false
+        ));
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, Some(20))),
+            true
+        ));
+    }
+
+    #[test]
+    fn refusal_is_secondary_fails_toward_back_off_on_an_unreadable_probe() {
+        // No probe (failed, or a caller with none), or a probe that names no
+        // core bucket: reading unknown as the primary quota sends the
+        // session to wait for a reset that never comes, so unknown still
+        // says secondary. This is the fail-safe the Python side ships.
+        assert!(refusal_is_secondary(VERBATIM_403, None, true));
+        assert!(refusal_is_secondary(
+            VERBATIM_403,
+            Some(&quota_with(4446, None)),
+            true
+        ));
+    }
+
+    #[test]
+    fn refusal_is_secondary_ignores_stderr_that_does_not_smell_of_a_rate_limit() {
+        // The wide wording is only the TRIGGER; without it there is nothing
+        // to classify and the transient wording stands.
+        assert!(!refusal_is_secondary(
+            "gh: Not Found (https://api.github.com/)",
+            Some(&quota_with(0, Some(0))),
+            true
+        ));
+        assert!(!refusal_is_secondary("", None, false));
+    }
+
+    #[test]
+    fn refusal_is_secondary_phrase_alone_does_not_classify_the_bucket_does() {
+        // Even stderr that DOES say "secondary rate limit" classifies by the
+        // bucket: wording is GitHub's to change, so it is never the verdict.
+        let phrase = "HTTP 403: You have exceeded a secondary rate limit";
+        assert!(!refusal_is_secondary(
+            phrase,
+            Some(&quota_with(0, Some(0))),
+            true
+        ));
+        assert!(refusal_is_secondary(
+            phrase,
+            Some(&quota_with(4890, Some(4922))),
+            true
+        ));
     }
 
     #[test]
@@ -15034,7 +15922,8 @@ git_bounded();";
                     "data": {
                         "session_id": "sess-sec",
                         "read": "pulls_comments",
-                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
+                        "rate_limit_class": "secondary"
                     }
                 })
             ),
@@ -15064,13 +15953,42 @@ git_bounded();";
                     "data": {
                         "session_id": "sess-a",
                         "read": "pulls_comments",
-                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit",
+                        "rate_limit_class": "secondary"
                     }
                 })
             ),
         )
         .unwrap();
         assert!(recent_secondary_refusal(&events, now, 300));
+    }
+
+    #[test]
+    fn recent_secondary_refusal_ignores_prose_without_the_verdict_field() {
+        // The pre-fix consumer matched the phrase; GitHub's measured body
+        // does not carry it, so the phrase was never load-bearing. A row
+        // with the phrase but no field (an emitter older than the field)
+        // must not count: the verdict is the field, never the wording.
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "loop_check_gh_error",
+                    "ts": "2026-06-05T00:28:00Z",
+                    "data": {
+                        "session_id": "sess-old",
+                        "read": "pulls_comments",
+                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        assert!(!recent_secondary_refusal(&events, now, 300));
     }
 
     #[test]
@@ -15298,6 +16216,35 @@ git_bounded();";
         assert!(failing_check_names(&checks).is_empty());
         // Malformed input never panics, yields empty.
         assert!(failing_check_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn coverage_statuses_are_not_generic_ci_checks() {
+        let checks = serde_json::json!([
+            {"name": "ci", "bucket": "pass"},
+            {"name": "fno/review-coverage", "bucket": "pending"},
+            {"name": "fno/review-coverage-unavailable", "bucket": "pending"}
+        ]);
+        let filtered = without_coverage_statuses(&checks);
+        assert_eq!(filtered.as_array().unwrap().len(), 1);
+        assert_eq!(
+            compute_ci_conclusion(&filtered).unwrap(),
+            CiConclusion::Success
+        );
+        assert!(failing_check_names(&filtered).is_empty());
+        assert!(!ci_has_pending_checks(&filtered));
+    }
+
+    #[test]
+    fn coverage_instrument_status_is_pending_only_when_the_read_is_unknown() {
+        let unknown = coverage_instrument_status(&Coverage::Unknown, "abc123456789");
+        assert_eq!(unknown.0, "pending");
+        assert!(unknown.1.contains("coverage read unavailable"));
+        assert!(unknown.1.contains("retry the review verb"));
+
+        let known = coverage_instrument_status(&Coverage::Covered(0), "abc123456789");
+        assert_eq!(known.0, "success");
+        assert!(known.1.contains("coverage read healthy"));
     }
 
     #[test]

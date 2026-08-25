@@ -122,7 +122,10 @@ def test_ambiguity_message_names_the_strip_set(monkeypatch):
         "CODEX_COMPANION_TRANSCRIPT_PATH",
         "CLAUDE_CODE_SESSION_ID",
     ):
-        monkeypatch.setenv(name, "poisoned")
+        monkeypatch.setenv(
+            name,
+            "claude-session" if name == "CLAUDE_CODE_SESSION_ID" else "codex-session",
+        )
     identity = self_stamp.resolve_self_identity()
     assert identity.disposition == "ambiguous"
 

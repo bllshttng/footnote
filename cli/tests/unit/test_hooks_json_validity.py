@@ -157,6 +157,29 @@ def test_codex_hooks_use_supported_event_names_and_existing_commands() -> None:
         pytest.fail("codex-hooks.json references missing files:\n  " + "\n  ".join(failures))
 
 
+def test_codex_stop_attester_precedes_target_loop() -> None:
+    data = json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))
+    stop_hooks = [
+        hook
+        for registration in data["hooks"]["Stop"]
+        for hook in registration.get("hooks", [])
+    ]
+    attesters = [
+        hook for hook in stop_hooks if "hooks/code-review-attest.sh" in hook["command"]
+    ]
+    assert len(attesters) == 1
+    assert attesters[0]["type"] == "command"
+    assert not attesters[0].get("async", False)
+    attester_index = stop_hooks.index(attesters[0])
+    target_indices = [
+        index
+        for index, hook in enumerate(stop_hooks)
+        if "hooks/target-stop-hook.sh" in hook["command"]
+    ]
+    assert len(target_indices) == 1
+    assert attester_index < target_indices[0]
+
+
 @pytest.mark.parametrize(
     ("config_path", "root_var"),
     [(HOOKS_JSON, "CLAUDE_PLUGIN_ROOT"), (CODEX_HOOKS_JSON, "PLUGIN_ROOT")],

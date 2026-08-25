@@ -265,18 +265,144 @@ def test_rest_failure_is_loud_with_transport_named():
     assert "secondary rate limit" in reason.lower()
 
 
-def test_rest_secondary_limit_reason_tells_the_caller_to_back_off():
-    res = Result(1, "", "HTTP 403: You have exceeded a secondary rate limit")
-    reason = _rest._rest_reason(res)
+# Verbatim as measured 2026-08-24T01:01:17Z during a live secondary refusal.
+# GitHub's own wording contains NO "secondary" - that absence is the premise
+# the live-bucket classifier exists for. The `...` gaps are where the live
+# capture was truncated, not paraphrase.
+_VERBATIM_403 = (
+    "gh: API rate limit exceeded for user ID 4994564. If you reach out to "
+    "GitHub Support for help, please include the request ID "
+    "FAEB:283161:6EF36:99B72:6A8B97DD ... Terms of Service (...) (HTTP 403)"
+)
+
+
+def _rate_limit_runner(core_remaining=None):
+    """Answer `gh api rate_limit` with the named core reading.
+
+    None means the instrument itself cannot answer (the endpoint is exempt,
+    but the read can still die), which the classifier must read as unknown.
+    """
+
+    def r(cmd, cwd=None, timeout=None):
+        assert cmd[:3] == ["gh", "api", "rate_limit"], f"unexpected: {cmd}"
+        if core_remaining is None:
+            return Result(1, "", "instrument unreadable")
+        return Result(
+            0,
+            json.dumps(
+                {
+                    "resources": {
+                        "core": {"remaining": core_remaining, "limit": 5000, "reset": 4102444800},
+                        "graphql": {"remaining": 4446, "limit": 5000, "reset": 4102444800},
+                    }
+                }
+            ),
+            "",
+        )
+
+    return r
+
+
+def test_verbatim_403_with_healthy_core_reads_secondary_and_carries_the_verdict():
+    """The p0 fixture: the measured 403 body says only `API rate limit
+    exceeded` (no `secondary` anywhere) while the exempt bucket answers
+    4980/5000 - that IS the secondary limit. The reason must carry the verdict
+    as data for the cache, and the prose must still say back off."""
+    assert "secondary" not in _VERBATIM_403.lower()
+    reason = _rest._rest_reason(
+        Result(1, "", _VERBATIM_403), runner=_rate_limit_runner(core_remaining=4980)
+    )
+    assert reason.rate_limit_class == "secondary"
     assert "SECONDARY" in reason
+    assert "4980" in reason
     assert "back off" in reason.lower()
 
 
-def test_rest_primary_limit_reason_names_core_bucket():
-    res = Result(1, "", "HTTP 403: API rate limit exceeded for 12:00:00Z")
-    reason = _rest._rest_reason(res)
+def test_drained_core_bucket_classifies_core_and_names_the_reading():
+    """Core quota: the same `rate limit` wording but the live bucket reads 0.
+    The bucket, not the wording, picks the branch."""
+    res = Result(1, "", "gh: API rate limit exceeded (HTTP 403)")
+    reason = _rest._rest_reason(res, runner=_rate_limit_runner(core_remaining=0))
+    assert reason.rate_limit_class == "core"
     assert "CORE" in reason
     assert "resources.core" in reason
+
+
+def test_low_but_positive_core_is_not_proof_of_the_core_quota():
+    """A secondary refusal lands with core wherever it stood; a low-but-
+    positive reading is not evidence the core quota refused. Only 0 is CORE
+    - mislabeling secondary as CORE sends the fleet to wait for a reset
+    instead of backing off, the exact harm this classifier exists to
+    prevent."""
+    res = Result(1, "", "gh: API rate limit exceeded (HTTP 403)")
+    reason = _rest._rest_reason(res, runner=_rate_limit_runner(core_remaining=5))
+    assert reason.rate_limit_class == "secondary"
+    assert "back off" in reason.lower()
+
+
+def test_the_phrase_does_not_classify_the_bucket_does():
+    """Even stderr that DOES say `secondary rate limit` classifies by the live
+    bucket: wording is GitHub's to change, so it is never the discriminator."""
+    res = Result(1, "", "HTTP 403: You have exceeded a secondary rate limit")
+    core = _rest._rest_reason(res, runner=_rate_limit_runner(core_remaining=0))
+    healthy = _rest._rest_reason(res, runner=_rate_limit_runner(core_remaining=4980))
+    assert core.rate_limit_class == "core"
+    assert healthy.rate_limit_class == "secondary"
+
+
+def test_unreadable_bucket_still_fails_toward_back_off():
+    """No instrument (no runner passed, or the rate_limit read died): reading
+    unknown as CORE sends the fleet to wait for a reset that never comes, so
+    the unknown case classifies secondary and tells the caller to back off."""
+    no_instrument = _rest._rest_reason(
+        Result(1, "", _VERBATIM_403), runner=_rate_limit_runner(core_remaining=None)
+    )
+    no_runner = _rest._rest_reason(Result(1, "", _VERBATIM_403))
+    for reason in (no_instrument, no_runner):
+        assert reason.rate_limit_class == "secondary"
+        assert "back off" in reason.lower()
+
+
+def test_wrapper_warning_on_line_1_is_not_the_quoted_cause():
+    """The gh-proxy shim's own startup lines ride the same captured stderr as
+    gh's error. The quoted evidence must be the MATCHED line, so fno's config
+    deprecation warning is never blamed for a rate-limit refusal (it was,
+    measured on `fno do pr info`)."""
+    stderr = (
+        "fno config: [agents] max_lanes is renamed provider_limits; the legacy"
+        " spelling still parses (x-3f84)\n" + _VERBATIM_403
+    )
+    reason = _rest._rest_reason(
+        Result(1, "", stderr), runner=_rate_limit_runner(core_remaining=4980)
+    )
+    assert "API rate limit exceeded for user ID 4994564" in reason
+    assert "max_lanes" not in reason
+    assert reason.rate_limit_class == "secondary"
+
+
+def test_matched_line_is_quoted_not_the_first_line():
+    """A multi-line stderr where the classifier matches line 2: the quoted
+    evidence is the matched line, not line 1 (the pre-fix code always quoted
+    lines[0])."""
+    stderr = "gh: warning: something unrelated happened\n" + _VERBATIM_403
+    reason = _rest._rest_reason(
+        Result(1, "", stderr), runner=_rate_limit_runner(core_remaining=4980)
+    )
+    assert reason.startswith("gh: API rate limit exceeded")
+    assert "something unrelated" not in reason
+
+
+def test_shim_only_stderr_keeps_the_shims_own_diagnostic_raw():
+    """Wrapper noise is excluded from the EVIDENCE only while real gh output
+    exists. When the shim's own fatal diagnostic is the whole message, it IS
+    the message: quoted verbatim, with no classification (the read died
+    before gh ran; binning it as a 404 mislabels a failure gh never
+    reported)."""
+    reason = _rest._rest_reason(
+        Result(1, "", "gh proxy: real gh executable not found")
+    )
+    assert reason == "gh proxy: real gh executable not found"
+    assert not hasattr(reason, "rate_limit_class") or not reason.rate_limit_class
 
 
 def test_rest_merged_state_maps():
@@ -335,3 +461,97 @@ def test_status_context_entries_map_through_classify():
     verdict, code, counts = _status.verdict_for(pr_json["statusCheckRollup"])
     assert (verdict, code) == ("pending", 2)
     assert counts["total"] == 2
+
+
+def test_rollup_rows_carry_the_actions_job_ref():
+    """x-c124: a failing row must carry its own log ref - `detailsUrl` under
+    the GraphQL-shape key `fno.pr._logs._job_ref` parses, so the failure
+    detail needs no second lookup."""
+    cr = {
+        "name": "smoke",
+        "status": "completed",
+        "conclusion": "failure",
+        "started_at": "2026-08-14T10:00:00Z",
+        "details_url": "https://github.com/Owner/Repo/actions/runs/32579190880/job/97045903772",
+    }
+    pr_json, reason = _rest.fetch_pr_rest("42", runner=_runner(check_runs=[cr]))
+    assert reason == ""
+    row = pr_json["statusCheckRollup"][0]
+    assert row["detailsUrl"].endswith("/job/97045903772")
+
+
+def test_status_rows_carry_their_target_url():
+    """A StatusContext's one affordance is its external link; dropping it on
+    the REST port would make a non-Actions red unexplainable."""
+    pr_json, _ = _rest.fetch_pr_rest(
+        "42",
+        runner=_runner(
+            statuses=[
+                {
+                    "context": "ext/check",
+                    "state": "failure",
+                    "created_at": "2026-08-14T10:00:00Z",
+                    "target_url": "https://ci.example.com/build/7",
+                }
+            ]
+        ),
+    )
+    row = pr_json["statusCheckRollup"][0]
+    assert row["targetUrl"] == "https://ci.example.com/build/7"
+
+
+def test_transport_failure_names_its_class_and_disclaims_blockers():
+    """x-4eac (the 2026-08-19 EOF incident): a transport death is a fact about
+    the READ. The reason must say so before a worker polls harder or edits
+    content that was never read."""
+
+    class Res:
+        stderr = 'Post "https://api.github.com/graphql": unexpected EOF'
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    assert "TRANSPORT" in reason
+    assert "not a verdict about this PR" in reason
+    assert "not content" in reason
+
+
+def test_auth_failure_names_its_class():
+    class Res:
+        stderr = "gh: HTTP 401: Bad credentials"
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    assert "AUTHENTICATION" in reason
+    assert "gh auth login" in reason
+
+
+def test_not_found_names_the_pr_number_as_the_thing_to_check() -> None:
+    class Res:
+        stderr = "gh: Not Found (https://api.github.com/repos/o/r/pulls/999)"
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    assert "not found" in reason.lower()
+    assert "Check the PR number" in reason
+
+
+def test_digits_containing_404_are_not_a_not_found() -> None:
+    class Res:
+        stderr = "gh: run 14045 failed with status 8"
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    # "1404" as a substring of "14045" must not read as the 404 status;
+    # this failure has no class, so it names the raw line and nothing more.
+    assert "not found" not in reason.lower()
+    assert "Check the PR number" not in reason
+
+
+def test_bare_404_status_is_a_not_found() -> None:
+    class Res:
+        stderr = "gh: HTTP 404 (https://api.github.com/repos/o/r/pulls/999)"
+        stdout = ""
+
+    reason = _rest._rest_reason(Res())
+    assert "not found" in reason.lower()
+    assert "Check the PR number" in reason

@@ -415,6 +415,14 @@ pub fn auto_merge_grant(cwd: &Path) -> bool {
 /// real TOML `true` grants consent. Missing candidates fall through according
 /// to normal precedence, but a present unreadable or malformed candidate is a
 /// veto: lower-precedence configuration cannot resurrect merge authority.
+///
+/// MIRROR NOTE (posture readers): the Python coercer
+/// (`AutoMergeBlock._coerce_enabled` via `_coerce_affirmative`) also accepts
+/// string spellings ("true"/"yes"/"1"/"on"), so `enabled = "true"` arms the
+/// merge verb and the git-protection hook (both resolve through that
+/// tolerant reader) but not this arm. Deliberately stricter here; any change
+/// to either spelling set must move all three readers or the gates split on
+/// that spelling.
 pub fn auto_merge_enabled(cwd: &Path) -> bool {
     for path in config_candidates(cwd) {
         let content = match std::fs::read_to_string(&path) {

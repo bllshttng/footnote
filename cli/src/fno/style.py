@@ -129,7 +129,9 @@ _QUOTE_RE = re.compile(r'"[^"]*"')
 _CODE_DOUBLE_RE = re.compile(r"``([^`]+)``")
 _CODE_SINGLE_RE = re.compile(r"`([^`]+)`")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
-_IDENT_RE = re.compile(r"\b[A-Za-z]\w*_\w+")
+# The lookahead proves an underscore exists; the atomic consuming branch then
+# takes the whole token without backtracking through a long plain word.
+_IDENT_RE = re.compile(r"\b(?=[A-Za-z]\w*_\w+)(?>[A-Za-z]\w*)")
 _COMMENT_SPAN_RE = re.compile(r"<!--.*?-->")
 
 
@@ -577,6 +579,11 @@ def _starts_table_run(raw_line: str, lines: "list[str]", index: int) -> bool:
 
 
 def _mask_inline(line: str) -> str:
+    # None of the masking patterns can match a line without punctuation or
+    # marker characters. The fast path keeps long plain-token bodies linear;
+    # the comment regex otherwise retries its lazy wildcard at every byte.
+    if not any(token in line for token in ("<!--", "`", "[", '"', "-", "/", ":", "_", ".")):
+        return line
     line = _COMMENT_SPAN_RE.sub("", line)
     line = _CODE_DOUBLE_RE.sub(_PLACEHOLDER, line)
     line = _CODE_SINGLE_RE.sub(_PLACEHOLDER, line)

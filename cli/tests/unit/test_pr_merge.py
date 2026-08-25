@@ -12,16 +12,26 @@ import json
 import pytest
 
 from fno.config import AutoMergeBlock
-from fno.pr import _coverage_gate, _merge
+from fno.pr import _coverage_gate, _hold, _merge
 from fno.pr._proc import Result, ToolMissing
 
 # Captured at import, before conftest's autouse hermetic stub replaces the
 # attribute: the tests that exercise the in-flight gate itself need the real one.
 _REAL_IN_FLIGHT_REFUSAL = _merge._in_flight_review_refusal
+# Same capture for the plan-hold reader: the hold-path test below restores it.
+_REAL_HOLD_FOR_PR = _hold.hold_for_pr
 
 
 class FakeRun:
-    """Dispatch canned Results by command, recording every call."""
+    """Dispatch canned Results by command, recording every call.
+
+    gh shapes are exhaustive by intent: a gh command no branch matches RAISES
+    echoing the argv, so the next gh call added to production code fails loud
+    here instead of silently passing a fabricated Result through (an unmatched
+    `gh pr view --json number,body,url,state,mergedAt,files` once fell through
+    to the view_url tail and a fail-closed reader blamed the PR body).
+    git and bash stay permissive; incidental git reads are noise, not the trap.
+    """
 
     def __init__(
         self,
@@ -29,7 +39,6 @@ class FakeRun:
         gh_merge: Result | None = None,
         merged_at: str = "null",
         view_url: str = "https://example/pr",
-        api_ok: bool = False,
         toplevel: str | None = None,
         behind_by: int = 0,
         view_fails: bool = False,
@@ -46,7 +55,6 @@ class FakeRun:
         self.view_fails = view_fails
         self.merged_at = merged_at
         self.view_url = view_url
-        self.api_ok = api_ok
         self.toplevel = toplevel
         self.behind_by = behind_by
         self.auto_merge_request = auto_merge_request
@@ -121,7 +129,38 @@ class FakeRun:
                         json.dumps({"baseRefName": "main", "headRefName": self.head_ref}) + "\n",
                         "",
                     )
-                return Result(0, self.view_url + "\n", "")
+                if cmd[-1] == ".url":
+                    # _pr_url's fetch (`--json url -q .url`), the one shape the
+                    # old permissive tail served deliberately.
+                    return Result(0, self.view_url + "\n", "")
+                if "number,body,url,state,mergedAt" in cmd[-1]:
+                    # fetch_pr_closure_context's one-shot read (hold lookup +
+                    # closure trailer binding). The field list is always the
+                    # last element. body empty => no trailer ids, so an unheld
+                    # lookup returns None and the merge proceeds.
+                    pr_no = next((a for a in cmd[3:] if a.isdigit()), "0")
+                    return Result(
+                        0,
+                        json.dumps(
+                            {
+                                "number": int(pr_no),
+                                "body": "",
+                                "url": self.view_url,
+                                "state": "OPEN",
+                                "mergedAt": (
+                                    json.loads(self.merged_at)
+                                    if self.merged_at.strip()
+                                    else None
+                                ),
+                                "files": [],
+                            }
+                        )
+                        + "\n",
+                        "",
+                    )
+                raise AssertionError(
+                    f"FakeRun: no canned response for gh pr view (add one, never a fall-through): {cmd!r}"
+                )
             if cmd[1] == "api":
                 endpoint = cmd[-1]
                 if any(a.startswith("repos/") and a.endswith("/files") for a in cmd):
@@ -215,7 +254,16 @@ class FakeRun:
                     # The post-merge branch delete (gh api against the verified
                     # base repo, never `git push origin`).
                     return Result(0, "", "")
-                return Result(0, "", "") if self.api_ok else Result(1, "", "api failed")
+                if "PUT" in cmd and any(a.endswith("/merge") for a in cmd):
+                    # The server-side REST fallback merge (worktree-held
+                    # branch); only api.ok is read, same bytes api_ok served.
+                    return Result(0, "", "")
+                raise AssertionError(
+                    f"FakeRun: no canned response for gh api (add one, never a fall-through): {cmd!r}"
+                )
+            raise AssertionError(
+                f"FakeRun: no canned response for gh (add one, never a fall-through): {cmd!r}"
+            )
         if tool == "bash":
             return Result(0, "", "")
         return Result(0, "", "")
@@ -239,6 +287,13 @@ def enabled(monkeypatch, tmp_path):
         lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1}, ""),
     )
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
+    # x-129b flipped the unattributable default to fail-closed, so a hermetic
+    # (markerless, manifestless) test env now floors the self-review
+    # attestation. Merge-behavior tests below are not about that gate; tests
+    # that exercise it override this with their own monkeypatch.
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
     # No 3am valve by default. The gate reads the override label on every
     # verdict, and an unstubbed read is a real `gh pr view` per merge case.
     monkeypatch.setattr(
@@ -443,6 +498,79 @@ def test_manifest_without_the_field_merges(enabled, monkeypatch, capsys, tmp_pat
     assert _last_json(capsys)["outcome"] == "merged"
 
 
+def test_env_grant_merges_despite_config_disabled(enabled, monkeypatch, capsys, tmp_path):
+    """x-01b9's positive marker: TARGET_AUTO_MERGE=1 is folded at init into
+    `auto_merge_approved: true` + `auto_merge_source: env-target-auto-merge`.
+    The docs (references/auto-merge.md, resolution order) promise that grant
+    allows merging on a config-disabled repo; the old config-first order
+    refused it before the manifest was ever read. A refusal alone could not
+    prove the fix (it refused for the wrong reason before), so this asserts
+    the merge HAPPENS."""
+    monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
+    _write_manifest(
+        tmp_path,
+        "session_id: s1\nauto_merge_approved: true\n"
+        "auto_merge_source: env-target-auto-merge\n",
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_config_withdrawal_refuses_a_config_sourced_manifest(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """x-2270 pin carried into the one-posture resolution: the manifest is a
+    snapshot; the live switch wins. A manifest whose `true` mirrored config
+    (source: config) must not outlive the operator flipping enabled off."""
+    monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
+    _write_manifest(
+        tmp_path,
+        "session_id: s1\nauto_merge_approved: true\nauto_merge_source: config\n",
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "skipped"
+    assert "auto_merge.enabled=false" in obj["reason"]
+
+
+def test_disabled_refusal_names_both_sanctioned_overrides(monkeypatch, capsys, tmp_path):
+    """x-3855: a refusal that names no sanctioned override is the one workers
+    improvised past (two inside sixty seconds). The config-disabled refusal
+    must name BOTH legitimate paths forward: arming the config key, and the
+    per-run spawn-time grant that touches no shared config."""
+    monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "skipped"
+    assert "sanctioned override" in obj["reason"]
+    assert "fno config set auto_merge.enabled true" in obj["reason"]
+    assert "TARGET_AUTO_MERGE=1" in obj["reason"]
+
+
+def test_per_run_refusal_names_the_override(enabled, monkeypatch, capsys, tmp_path):
+    """The per-run no-merge refusal names the source (x-9d11) AND the way
+    forward (x-3855): an out-of-band operator merge, or a re-dispatch without
+    the refusal flag."""
+    _write_manifest(
+        tmp_path,
+        "session_id: s1\nauto_merge_approved: false\n"
+        "auto_merge_source: flag-no-merge\n",
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "skipped"
+    assert "sanctioned override" in obj["reason"]
+    assert "out-of-band" in obj["reason"]
+    assert "without --no-merge" in obj["reason"]
+
+
 def test_merge_exit_0_with_queue_text_still_merged(enabled, monkeypatch, capsys, tmp_path):
     """x-9d11: the verb never queues, so gh output text cannot reclassify the
     outcome. A green exit is `merged` whatever the message says (the queued
@@ -487,7 +615,6 @@ def test_worktree_recovery_api_fallback(enabled, monkeypatch, capsys, tmp_path):
     fake = FakeRun(
         gh_merge=Result(1, "", "is already used by worktree"),
         merged_at="null",
-        api_ok=True,
         toplevel=str(tmp_path),
     )
     monkeypatch.setattr(_merge, "run", fake)
@@ -948,6 +1075,189 @@ def test_review_lane_configured_floors_a_code_payload(monkeypatch, tmp_path):
     assert _merge._review_lane_configured(str(tmp_path), 42) is False
 
 
+def test_review_lane_configured_answers_a_hypothetical_code_payload(
+    monkeypatch, tmp_path
+):
+    """code_payload=True answers the doctor pair check (x-0888): the floor for
+    a payload KNOWN to be code, with no PR to probe and no pr_number. The
+    incident shape (zero lanes + self_review_required=false) must read False so
+    doctor can warn; a verbful harness with the floor on must read True."""
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-test-session")
+    # Incident shape: no lane, floor opted out -> the gate demands no review.
+    _point_lane_read_at(monkeypatch, self_review_required=False)
+    assert _merge._review_lane_configured(str(tmp_path), code_payload=True) is False
+    # Floor on + verbful harness: a code payload is floored with no PR probe.
+    _point_lane_read_at(monkeypatch)
+    assert _merge._review_lane_configured(str(tmp_path), code_payload=True) is True
+    # A configured lane answers True regardless of the payload assumption.
+    _point_lane_read_at(monkeypatch, reviewers=["code-review"])
+    assert _merge._review_lane_configured(str(tmp_path), code_payload=True) is True
+    # Default off: with no pr_number the floor stays unengaged, as today.
+    _point_lane_read_at(monkeypatch)
+    assert _merge._review_lane_configured(str(tmp_path)) is False
+
+
+def test_review_lane_configured_refuses_pr_number_with_code_payload(tmp_path):
+    """code_payload=True answers a HYPOTHETICAL payload; combined with a real
+    pr_number it would silently skip the payload probe and floor a docs-only
+    PR. The ValueError sits outside the fail-closed try so misuse surfaces
+    instead of reading as 'review required'."""
+    with pytest.raises(ValueError):
+        _merge._review_lane_configured(str(tmp_path), 42, code_payload=True)
+
+
+def test_manifest_reader_ignores_keys_inside_a_multiline_input_scalar(
+    tmp_path,
+):
+    """A `harness:` line inside the target's free-text argument is not the
+    run's harness. The Rust manifest parser already skips input-scalar lines
+    for exactly this forgery (parse_manifest_identity); the Python reader
+    agrees, so the two gates cannot disagree on one manifest."""
+    state = tmp_path / ".fno"
+    state.mkdir(exist_ok=True)
+    # The scalar body carries a forged harness line before the real one.
+    (state / "target-state.md").write_text(
+        "---\n"
+        'input: "/target fix the floor\nharness: gemini\nsee docs"\n'
+        "harness: agy\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    assert _merge._manifest_harness(str(tmp_path)) == "agy"
+    # With no real harness line, the forged one is still not attribution:
+    # unattributable, so the floor engages.
+    (state / "target-state.md").write_text(
+        "---\n"
+        'input: "/target fix the floor\nharness: gemini\nsee docs"\n'
+        "cross_project: false\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    assert _merge._manifest_harness(str(tmp_path)) is None
+    # The lone-quote shape: `input: "` OPENS the scalar (the Rust parser's
+    # len >= 2 guard), so the forged line is still scalar body, not a field.
+    (state / "target-state.md").write_text(
+        "---\n" 'input: "\n' "harness: gemini\n" 'see docs"\n' "---\n",
+        encoding="utf-8",
+    )
+    assert _merge._manifest_harness(str(tmp_path)) is None
+
+
+def test_review_floor_is_caller_independent_across_env_shapes(
+    monkeypatch, tmp_path
+):
+    """x-129b: the same PR owes the same review whatever process asks.
+
+    Measured on PR 1108: a claude session started from a codex shell resolves
+    two harness families, and the pre-fix predicate read that ambiguity as
+    'no floor', silently disengaging the only review a stock install demands.
+    Ambiguity is not permission - every unattributable shape floors - and a
+    KNOWN verbless run whose manifest and ambient read agree is the only
+    stock-install release."""
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
+
+    def requires_review():
+        _point_lane_read_at(monkeypatch)
+        return (
+            _merge._review_lane_configured(str(tmp_path), 42),
+            _merge._code_review_attestation_required(str(tmp_path), 42),
+        )
+
+    # Clean env (a plain shell merging by hand): unattributable, floors.
+    assert requires_review() == (True, True)
+    # The defect's default state: claude session started from a codex shell.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "c1")
+    monkeypatch.setenv("CODEX_THREAD_ID", "t1")
+    monkeypatch.setenv("CODEX_SESSION_ID", "s1")
+    assert requires_review() == (True, True)
+    # A multi-marker exotic shape, and the manifest-less poisoned env.
+    monkeypatch.setenv("GEMINI_SESSION_ID", "g1")
+    assert requires_review() == (True, True)
+    monkeypatch.delenv("GEMINI_SESSION_ID")
+    assert requires_review() == (True, True)
+
+    # A verbless manifest cannot release alone: it is an init-time snapshot
+    # that outlives its run, and nothing ties it to the PR being merged, so
+    # under the poisoned multi-family ambient above it is an unattributable
+    # shape and floors.
+    state = tmp_path / ".fno"
+    state.mkdir(exist_ok=True)
+    (state / "target-state.md").write_text(
+        "---\nharness: agy\n---\n", encoding="utf-8"
+    )
+    assert requires_review() == (True, True)
+    (state / "target-state.md").write_text(
+        "---\nharness: claude\n---\n", encoding="utf-8"
+    )
+    assert requires_review() == (True, True)
+    # Same verdict for a verbless manifest under a poisoned claude ambient
+    # (ambiguous, so no agreeing second read).
+    (state / "target-state.md").write_text(
+        "---\nharness: gemini\n---\n", encoding="utf-8"
+    )
+    assert requires_review() == (True, True)
+    # Release needs agreement: the manifest's verbless family must match a
+    # clean single-family ambient read, the shape of the authoring session
+    # merging its own PR.
+    monkeypatch.delenv("CODEX_THREAD_ID")
+    monkeypatch.delenv("CODEX_SESSION_ID")
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    monkeypatch.setenv("GEMINI_SESSION_ID", "g1")
+    assert requires_review() == (False, False)
+    # But a verbless manifest that CONTRADICTS a clean verbful ambient read
+    # floors: the manifest is an init-time snapshot that outlives its run,
+    # and a dead run's verbless stamp must not disengage the floor for a
+    # verbful PR merged from that checkout.
+    monkeypatch.delenv("GEMINI_SESSION_ID")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "c1")
+    assert requires_review() == (True, True)
+    # The unknown sentinel is no attribution: ambient alone decides, and a
+    # poisoned ambient therefore floors.
+    (state / "target-state.md").write_text(
+        "---\nharness: unknown\n---\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_THREAD_ID", "t1")
+    monkeypatch.setenv("CODEX_SESSION_ID", "s1")
+    assert requires_review() == (True, True)
+
+
+def test_floor_verbless_set_stays_locked_to_the_rust_twin():
+    """The Rust floor policy carries a hardcoded KNOWN_VERBLESS_HARNESSES
+    snapshot; Python derives the set. A harness added on one side only makes
+    the stop gate and the merge gate floor different runs, so this pins the
+    two to each other by reading the Rust source."""
+    import re
+    from pathlib import Path
+
+    from fno.harness_names import KNOWN_HARNESSES
+    from fno.review_capability import harness_can_self_review
+
+    rust = (
+        Path(__file__).resolve().parents[3]
+        / "crates"
+        / "fno-agents"
+        / "src"
+        / "loopcheck.rs"
+    ).read_text(encoding="utf-8")
+    m = re.search(r"KNOWN_VERBLESS_HARNESSES: &\[&str\] = &\[([^\]]*)\]", rust)
+    assert m, "KNOWN_VERBLESS_HARNESSES not found in loopcheck.rs"
+    rust_set = {v.strip().strip('"') for v in m.group(1).split(",") if v.strip()}
+    derived = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
+    assert rust_set == derived, (
+        f"Rust floor releases {sorted(rust_set)}, Python releases "
+        f"{sorted(derived)}: update both together (loopcheck.rs "
+        "KNOWN_VERBLESS_HARNESSES and review_capability's verb table)"
+    )
+
+
 def test_stock_code_floor_skips_a_harness_without_a_self_review_verb(
     monkeypatch, tmp_path
 ):
@@ -967,7 +1277,9 @@ def test_stock_code_floor_skips_a_harness_without_a_self_review_verb(
 def test_stock_code_floor_does_not_guess_between_mixed_harness_markers(
     monkeypatch, tmp_path
 ):
-    """Match Rust: inherited markers from two harness families are ambiguous."""
+    """Match Rust: inherited markers from two harness families are ambiguous,
+    and ambiguity is not permission (x-129b) - the floor holds rather than
+    guessing which marker is the caller's own."""
     from fno.harness_identity import HARNESS_SESSION_MARKERS
 
     for marker, _harness in HARNESS_SESSION_MARKERS:
@@ -977,8 +1289,8 @@ def test_stock_code_floor_does_not_guess_between_mixed_harness_markers(
     _point_lane_read_at(monkeypatch)
     monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
 
-    assert _merge._review_lane_configured(str(tmp_path), 42) is False
-    assert _merge._code_review_attestation_required(str(tmp_path), 42) is False
+    assert _merge._review_lane_configured(str(tmp_path), 42) is True
+    assert _merge._code_review_attestation_required(str(tmp_path), 42) is True
 
 
 def test_pr_payload_classifier_is_documentation_aware_and_fail_closed(monkeypatch):
@@ -1175,6 +1487,37 @@ def test_checks_verdict_keeps_other_failing_contexts(monkeypatch):
     assert counts["fail"] == 1
 
 
+def test_covered_merge_ignores_the_pending_diagnostic_context(monkeypatch):
+    """A covered merge ignores BOTH coverage contexts, not just the required
+    one: the diagnostic context is a pending "retry the review verb" stamp an
+    earlier unknown-read publish left behind, and the clearing publish runs
+    AFTER the checks verdict - so counting it held a covered, CI-green merge,
+    and a bare merge retry held again the same way."""
+    rollup = {
+        "headRefOid": "abc123",
+        "statusCheckRollup": [
+            {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"context": "fno/review-coverage", "state": "SUCCESS"},
+            {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+        ],
+    }
+    monkeypatch.setattr(
+        "fno.pr._rest.fetch_pr_rest",
+        lambda pr, cwd=None, runner=None: (rollup, ""),
+    )
+
+    verdict, counts, _head = _merge._checks_verdict(
+        42,
+        "/repo",
+        ignore_contexts=(
+            "fno/review-coverage",
+            "fno/review-coverage-unavailable",
+        ),
+    )
+    assert verdict == "green"
+    assert counts["total"] == 1
+
+
 def test_green_checks_merge_in_one_call_without_auto(
     enabled, monkeypatch, capsys, tmp_path
 ):
@@ -1353,8 +1696,6 @@ class _WorktreeFallbackRun(_AutoMergeRejectingRun):
         if cmd[:2] == ["gh", "api"] and any("/merge" in a for a in cmd):
             self.api_cmds.append(cmd)
             return Result(0, '{"merged":true}', "")
-        if cmd[:3] == ["gh", "pr", "view"] and "mergedAt" in " ".join(cmd):
-            return Result(0, "null\n", "")
         if cmd[:3] == ["gh", "pr", "view"] and any("statusCheckRollup" in a for a in cmd):
             return Result(0, json.dumps(self.rollup) + "\n", "")
         return FakeRun.__call__(
@@ -1967,6 +2308,13 @@ def test_code_review_gate_rejects_unrelated_github_app_coverage(
     enabled, monkeypatch, capsys, tmp_path
 ):
     """A required local code-review cannot be replaced by an unrelated App review."""
+    # This test IS about the attestation gate, so restore the real predicate
+    # the `enabled` fixture defaults off (hermetic-env floor release).
+    monkeypatch.setattr(
+        _merge,
+        "_code_review_attestation_required",
+        lambda repo, pr_number=0: True,
+    )
     state = tmp_path / ".fno"
     state.mkdir()
     (state / "config.toml").write_text(
@@ -2074,6 +2422,70 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
     assert "--auto" not in merge_cmd, "the verb never queues (x-9d11)"
     i = merge_cmd.index("--match-head-commit")
     assert merge_cmd[i + 1] == "coveredSHA"
+
+
+def test_fake_run_raises_on_an_unmatched_gh_shape():
+    """The class fix: a gh shape no branch serves must RAISE, never fall
+    through to a fabricated Result. That fall-through is what let a fixture
+    gap masquerade as a held merge (CI job 96169117491)."""
+    fake = FakeRun()
+    with pytest.raises(AssertionError, match="gh pr view"):
+        fake(["gh", "pr", "view", "42", "--json", "title"])
+    with pytest.raises(AssertionError, match="gh api"):
+        fake(["gh", "api", "repos/o/r/some/unhandled"])
+    with pytest.raises(AssertionError, match="gh"):
+        fake(["gh", "auth", "status"])
+
+
+def test_populated_graph_closure_fetch_does_not_hold_the_merge(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """With a non-empty graph the hold pays its closure fetch over the
+    _merge.run seam, and the fake must serve that fetch a real JSON object -
+    an unmatched shape falling through to a fabricated Result is the
+    absence-as-success trap. In CI (job 96169117491) a per-worker sandbox graph
+    populated by an earlier test made exactly this call reach the fake's
+    view_url tail: `gh pr view --json number,body,url,state,mergedAt,files`
+    came back non-JSON, the closure parser failed closed, and the merge was
+    held before any merge command was recorded (the IndexError the job died
+    on). Deterministic form: restore the real reader (conftest's autouse
+    _hermetic_merge_hold_gate stubs it), one cwd-less graph entry makes it
+    fetch, an empty PR body carries no trailer ids, so nothing is held and the
+    merge lands pinned."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    monkeypatch.setattr(_hold, "hold_for_pr", _REAL_HOLD_FOR_PR)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1, "head_sha": "coveredSHA"}, ""),
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "coveredSHA")
+    # One cwd-less entry: _cwd_in_this_repo passes cwd-less entries, so by_id
+    # is non-empty and hold_for_pr pays the closure fetch instead of skipping.
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"entries": [{"id": "x-eeee", "status": "done"}]})
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", head="coveredSHA"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+    # Positive marker, pinned to the thing measured: hold_for_pr has two early
+    # None exits before the fetch (empty by_id, the cwd scan), and a green
+    # merge alone cannot tell "fetch paid and unheld" from "fetch never paid".
+    closure_calls = [
+        c
+        for c in fake.calls
+        if c[:3] == ["gh", "pr", "view"] and "number,body,url,state,mergedAt" in c[-1]
+    ]
+    assert closure_calls, "the hold reader must pay its closure fetch through the fake"
+    assert fake.merge_cmds, "the closure fetch must not hold the merge"
+    i = fake.merge_cmds[0].index("--match-head-commit")
+    assert fake.merge_cmds[0][i + 1] == "coveredSHA"
 
 
 # ── refusal reasons name the cause ───────────────────────────────────────────

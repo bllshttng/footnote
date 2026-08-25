@@ -16,6 +16,7 @@
 //! Every error surface while the compositor owns the terminal goes through
 //! the rendered UI (tab-bar notice + BEL), never stderr (x-0175 pitfall).
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -38,7 +39,9 @@ use crate::proto::{
 };
 use crate::theme::Theme;
 use crate::tree::{Axis, Dir, Rect, TabId};
-use crate::view_store::{self, next_view, AgentSort, Density, SectionKey, SectionView};
+use crate::view_store::{
+    self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
+};
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -66,56 +69,98 @@ const MIN_SLIM_PANEL_W: u16 = 8;
 /// Below this many content columns the sideline auto-hides (AC6-EDGE).
 const MIN_CONTENT_COLS: u16 = 40;
 
-/// (x-b186) Extended-table column widths in display columns, render order:
-/// status glyph, name, message tail, PR, relative last-update. Each includes
-/// its trailing separator space, so the table width is their sum.
-const COL_STATUS: u16 = 2;
-const COL_NAME: u16 = 20;
-const COL_TAIL: u16 = 34;
+/// Extended-table column widths in display columns, render order: status glyph,
+/// agent, last message, PR, and relative last-update age. The first and last
+/// three cells are fixed; the agent and message cells share the remainder.
+const COL_STATUS: u16 = 4;
 const COL_PR: u16 = 7;
 const COL_TIME: u16 = 6;
+const COL_MIN_NAME: u16 = 12;
+const COL_MAX_NAME: u16 = 24;
+const COL_MIN_TAIL: u16 = 8;
 
-/// (x-b186) Which extended-table columns fit a given panel width.
-///
-/// Dropping is by PRIORITY, not by truncation: the tail goes first, then the
-/// last-update time (Discretion 4). Status, name, and PR always render - a
-/// table that cannot show which agent a row is would be worse than no table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TableCols {
-    tail: bool,
-    time: bool,
+struct ColumnSpan {
+    start: u16,
+    width: u16,
 }
 
-impl TableCols {
-    /// The widest column set that fits `text_w` display columns.
-    fn fitting(text_w: u16) -> TableCols {
-        let base = COL_STATUS + COL_NAME + COL_PR;
-        if text_w >= base + COL_TAIL + COL_TIME {
-            TableCols {
-                tail: true,
-                time: true,
-            }
-        } else if text_w >= base + COL_TIME {
-            TableCols {
-                tail: false,
-                time: true,
-            }
-        } else {
-            TableCols {
-                tail: false,
-                time: false,
-            }
+impl ColumnSpan {
+    fn contains(self, col: u16) -> bool {
+        col >= self.start && col < self.start + self.width
+    }
+}
+
+/// The one geometry authority for the extended table. Header text, row text,
+/// and header hit testing all consume these spans, so age stays right-anchored
+/// when the panel width changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TableLayout {
+    text_w: u16,
+    status: ColumnSpan,
+    agent: ColumnSpan,
+    tail: Option<ColumnSpan>,
+    pr: ColumnSpan,
+    age: ColumnSpan,
+}
+
+impl TableLayout {
+    fn fitting(text_w: u16) -> Option<Self> {
+        let fixed = COL_STATUS + COL_PR + COL_TIME;
+        let flexible = text_w.checked_sub(fixed)?;
+        if flexible < COL_MIN_NAME {
+            return None;
         }
+
+        let requested_name = (flexible / 3).clamp(COL_MIN_NAME, COL_MAX_NAME);
+        let (name_w, tail_w) = if flexible.saturating_sub(requested_name) >= COL_MIN_TAIL {
+            (requested_name, Some(flexible - requested_name))
+        } else {
+            (flexible, None)
+        };
+        let status = ColumnSpan {
+            start: 0,
+            width: COL_STATUS,
+        };
+        let agent = ColumnSpan {
+            start: status.start + status.width,
+            width: name_w,
+        };
+        let tail = tail_w.map(|width| ColumnSpan {
+            start: agent.start + agent.width,
+            width,
+        });
+        let pr_start = tail
+            .map(|span| span.start + span.width)
+            .unwrap_or(agent.start + agent.width);
+        let pr = ColumnSpan {
+            start: pr_start,
+            width: COL_PR,
+        };
+        let age = ColumnSpan {
+            start: text_w - COL_TIME,
+            width: COL_TIME,
+        };
+        debug_assert_eq!(age.start, pr.start + pr.width);
+        debug_assert_eq!(age.start + age.width, text_w);
+        Some(Self {
+            text_w,
+            status,
+            agent,
+            tail,
+            pr,
+            age,
+        })
     }
 }
 
 /// (x-b186) The full extended-table panel width (every column plus the divider),
 /// what entering `Extended` widens to before any clamp.
-const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_TAIL + COL_PR + COL_TIME + 1;
-/// (x-b186) The narrowest useful extended panel: status + name + PR, every
-/// droppable column gone, plus the divider. Below this the panel hides rather
-/// than rendering a table with no room for a name.
-const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_NAME + COL_PR + 1;
+const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 1;
+/// The narrowest useful extended panel: fixed status/PR/age cells, a readable
+/// agent cell, and the divider. The message cell is omitted only below its
+/// eight-column floor; age is never dropped from an admitted table.
+const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_MIN_NAME + COL_PR + COL_TIME + 1;
 
 /// (x-b186) Columns the top-right density button reserves on the sideline's
 /// first row: the state glyph plus a trailing pad (x-2e86) so it does not sit
@@ -136,7 +181,7 @@ fn canonical_width(d: Density) -> u16 {
 /// (x-2e86) The narrowest width at which a density still renders its structure.
 /// A drag below this demotes the density (Locked 5). Only `Extended` has a
 /// floor above [`MIN_SLIM_PANEL_W`]: the tree and the rail truncate gracefully
-/// down to the slim floor, but the table needs room for status + name + PR.
+/// down to the slim floor, but the table needs room for status + agent + PR + age.
 fn min_render_width(d: Density) -> u16 {
     match d {
         Density::Slim | Density::Regular => MIN_SLIM_PANEL_W,
@@ -266,6 +311,19 @@ pub fn run(session: &str) -> i32 {
 }
 
 fn run_inner(session: &str) -> Result<i32, String> {
+    // Resolve + record the config warning BEFORE any early exit below (the
+    // nested-session guard, an invalid session name): a pinned config whose
+    // dir diverged must say so on every path, not only the happy attach. The
+    // write rides the client log, never stderr - we are pre-alternate-screen,
+    // and any stderr byte lands in the PTY the harness is about to read as
+    // the TUI (the x-0296 NEVER-stderr rule). The mux dir is ensured first:
+    // on a fresh state root nothing creates it until connect_or_spawn, and an
+    // append to a missing parent silently drops the warning.
+    let _ = proto::mux_dir();
+    if let Some((w, _remedy)) = proto::pending_config_warning() {
+        let _ = proto::ensure_mux_dir();
+        client_log_append(&proto::mux_dir().join("client-warnings.log"), w);
+    }
     // Nested same-session guard (AC3-UI/EDGE): BEFORE any socket, spawn, or
     // terminal mode change. `FNO_SESSION` is set in every pane the server
     // spawns, so target == env means "attaching to the session I am already
@@ -279,10 +337,25 @@ fn run_inner(session: &str) -> Result<i32, String> {
         ));
     }
     let path = proto::socket_path(session)?;
+
     let stream = connect_or_spawn(&path)?;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
     runtime.block_on(attach_and_run(stream, &path))
+}
+
+/// Append one line to a log file under the mux dir, best-effort. The shared
+/// write behind both the e2e breadcrumbs and the config-warning log: one
+/// append mechanism, never stderr (see [`e2e_client_log`] for the rule).
+fn client_log_append(path: &Path, msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{msg}");
+    }
 }
 
 /// Connect to a live server, or spawn one and connect. AC3-ERR: a dead
@@ -352,19 +425,15 @@ fn e2e_client_log(msg: std::fmt::Arguments<'_>) {
     if std::env::var_os("FNO_E2E").is_none() {
         return;
     }
-    let path = proto::mux_dir().join(format!("client-{}.log", std::process::id()));
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        use std::io::Write as _;
-        let _ = writeln!(f, "[{ms} pid {}] {msg}", std::process::id());
-    }
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!("[{ms} pid {}] {msg}", std::process::id());
+    client_log_append(
+        &proto::mux_dir().join(format!("client-{}.log", std::process::id())),
+        &line,
+    );
 }
 
 /// Spawn `fno --server <socket>` detached: its own session (setsid) so the
@@ -963,6 +1032,9 @@ struct View {
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
     confirm: Option<ConfirmAction>,
+    /// A left-button release paired with a click on a modal's close chip must
+    /// stay swallowed after that click closes the modal.
+    modal_release_swallow: bool,
     /// (x-9e5e) The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to [`create_keys`]: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
@@ -2251,6 +2323,7 @@ impl View {
             row_drag: None,
             press_hold: None,
             confirm: None,
+            modal_release_swallow: false,
             create: None,
             create_esc: Vec::new(),
             rename: None,
@@ -3510,6 +3583,51 @@ impl View {
         })
     }
 
+    fn active_overlay_layout(&self) -> Option<OverlayLayout> {
+        let rows = self.term.0 as usize;
+        if let Some(action) = &self.confirm {
+            return Some(self.confirm_overlay_layout(rows, action));
+        }
+        if let Some(name) = &self.create {
+            return Some(self.name_modal_layout("new workspace", name, None));
+        }
+        if let Some((target, name)) = &self.rename {
+            let noun = match target {
+                RenameTarget::Tab(_) => "tab",
+                RenameTarget::Squad(_) => "workspace",
+            };
+            return Some(self.name_modal_layout(
+                &format!("rename {noun}"),
+                name,
+                Some("empty resets to auto"),
+            ));
+        }
+        self.recruit.as_ref().map(|name| {
+            self.name_modal_layout(
+                &format!("recruit {} into", self.marks.len()),
+                name,
+                Some("create-if-absent"),
+            )
+        })
+    }
+
+    fn cancel_active_overlay(&mut self) {
+        if self.confirm.take().is_some() {
+            return;
+        }
+        if self.create.take().is_some() {
+            self.create_esc.clear();
+            return;
+        }
+        if self.rename.take().is_some() {
+            self.rename_esc.clear();
+            return;
+        }
+        if self.recruit.take().is_some() {
+            self.recruit_esc.clear();
+        }
+    }
+
     /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
     /// only when peek is open AND `seq` is the current request. Returns whether
     /// it applied (the caller redraws on true). A stale body (any other seq) is
@@ -4534,6 +4652,9 @@ impl View {
         // the sideline owns row 0), so invert with the offset - else a click on a
         // scrolled row activates the wrong row. Mirrors sideline_row_at.
         let i = row as usize + self.sideline_offset;
+        if let Some(hit) = self.table_header_hit(i, col) {
+            return Some(hit);
+        }
         // x-8ccf US4: a click on the footer's `☰ menu` region opens the sideline
         // MENU popup; the rest of the footer row keeps its `+ new` create action.
         if matches!(self.display_rows().get(i), Some(DisplayRow::NewSquad)) {
@@ -4544,6 +4665,28 @@ impl View {
             }
         }
         self.row_action(i)
+    }
+
+    fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
+        if self.density != Density::Extended
+            || !matches!(self.display_rows().get(row), Some(DisplayRow::TableHead))
+        {
+            return None;
+        }
+        let layout = TableLayout::fitting(self.panel_w().saturating_sub(1))?;
+        if layout.status.contains(col) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::Status))
+        } else if layout.agent.contains(col) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
+        } else if layout.tail.is_some_and(|span| span.contains(col)) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::LastMessage))
+        } else if layout.pr.contains(col) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::Pr))
+        } else if layout.age.contains(col) {
+            Some(ChromeHit::SortColumn(AgentSortColumn::Age))
+        } else {
+            None
+        }
     }
 
     /// What acting on sideline display row `i` does - the single resolver both
@@ -4946,8 +5089,7 @@ impl View {
         // a scrape tick that flips one badge RE-ORDERS the rows, so preserving
         // only the numeric index would silently move the cursor onto a different
         // agent and point the next Enter / lifecycle key at the wrong worker.
-        let agent_prev = (self.density == Density::Extended
-            && self.agent_sort == AgentSort::Attention)
+        let agent_prev = (self.density == Density::Extended)
             .then(|| self.selected_agent_name())
             .flatten();
         // (x-4374) Capture the focused pane before the swap so a focus CHANGE can
@@ -5206,11 +5348,22 @@ impl View {
         self.clamp_sideline_offset();
     }
 
+    fn set_agent_sort_column(&mut self, column: AgentSortColumn) {
+        let held = self.selected_agent_name();
+        self.agent_sort = if self.agent_sort.column == column {
+            self.agent_sort.toggle_direction()
+        } else {
+            AgentSort::default_for(column)
+        };
+        view_store::save_prefs(self.density, self.agent_sort);
+        self.reanchor_selector(held);
+    }
+
     /// (x-b186) One press of the sort control. Persisted even outside Extended
     /// so the choice survives a round trip through another density.
     fn toggle_agent_sort(&mut self) {
         let held = self.selected_agent_name();
-        self.agent_sort = self.agent_sort.toggle();
+        self.agent_sort = self.agent_sort.advance();
         view_store::save_prefs(self.density, self.agent_sort);
         self.reanchor_selector(held);
     }
@@ -6150,18 +6303,7 @@ impl View {
     /// and no esc chip, which under a named theme read as a different
     /// application dropped into the middle of the screen. That was the last
     /// modal still inventing its own look.
-    fn draw_name_modal(
-        &self,
-        cells: &mut [Cell],
-        rows: usize,
-        cols: usize,
-        label: &str,
-        name: &str,
-        hint: Option<&str>,
-    ) {
-        for c in 0..cols {
-            cells[(rows - 1) * cols + c] = Cell::default();
-        }
+    fn name_modal_layout(&self, label: &str, name: &str, hint: Option<&str>) -> OverlayLayout {
         let (origin, dims) = self.overlay_viewport();
         // The typed name plus its cursor IS the body; the target and the
         // blank-clears rule move into the chrome, where every other modal puts
@@ -6187,17 +6329,25 @@ impl View {
         } else {
             text
         };
-        draw_lines_overlay(
-            cells,
-            rows,
-            cols,
-            origin,
-            dims,
-            &chrome,
-            &[text],
-            &self.theme,
-            None,
-        );
+        layout_lines_overlay(origin, dims, &chrome, &[text], None, OverlayAnchor::Center)
+    }
+
+    fn draw_name_modal(
+        &self,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        label: &str,
+        name: &str,
+        hint: Option<&str>,
+    ) {
+        if rows > 0 {
+            for c in 0..cols {
+                cells[(rows - 1) * cols + c] = Cell::default();
+            }
+        }
+        let layout = self.name_modal_layout(label, name, hint);
+        draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
     }
 
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
@@ -6387,40 +6537,30 @@ impl View {
             })
     }
 
-    fn draw_confirm_line(
-        &self,
-        cells: &mut [Cell],
-        rows: usize,
-        cols: usize,
-        action: &ConfirmAction,
-    ) {
-        let r = self.confirm_anchor_row(rows, action);
-        for c in 0..cols {
-            cells[r * cols + c] = Cell::default();
-        }
+    fn confirm_text(&self, action: &ConfirmAction) -> String {
         let label = &action.label;
         let text = match &action.action {
-            ConfirmKind::Dispatch { .. } => format!(" start session on {label}? ⏎/esc"),
+            ConfirmKind::Dispatch { .. } => format!("start session on {label}?"),
             ConfirmKind::RemoveSquad {
                 panes, last: true, ..
             } => format!(
-                " close workspace {label} ({panes} panes) - last workspace, ends the session? ⏎/esc"
+                "close workspace {label} ({panes} panes) - last workspace, ends the session?"
             ),
             ConfirmKind::RemoveSquad {
                 panes, last: false, ..
             } => {
-                format!(" close workspace {label} ({panes} panes)? ⏎/esc")
+                format!("close workspace {label} ({panes} panes)?")
             }
-            ConfirmKind::StopAgent { .. } => format!(" stop {label}? ⏎/esc"),
-            ConfirmKind::RemoveAgent { .. } => format!(" remove {label}? ⏎/esc"),
-            ConfirmKind::ReapAgents => " reap all exited fno agents? ⏎/esc".to_string(),
-            ConfirmKind::StopExternal { .. } => format!(" stop {label}? ⏎/esc"),
+            ConfirmKind::StopAgent { .. } => format!("stop {label}?"),
+            ConfirmKind::RemoveAgent { .. } => format!("remove {label}?"),
+            ConfirmKind::ReapAgents => "reap all exited fno agents?".to_string(),
+            ConfirmKind::StopExternal { .. } => format!("stop {label}?"),
             ConfirmKind::RemoveExternal { .. } => {
-                format!(" remove {label} and worktree? ⏎/esc")
+                format!("remove {label} and worktree?")
             }
-            ConfirmKind::DismissMember { .. } => format!(" dismiss {label}? ⏎/esc"),
+            ConfirmKind::DismissMember { .. } => format!("dismiss {label}?"),
             ConfirmKind::ClearDead { dead, .. } => {
-                format!(" clear {dead} dead row(s) in {label}? ⏎/esc")
+                format!("clear {dead} dead row(s) in {label}?")
             }
             // A tab close is a GROUP close on the wire: the server reaps every
             // leaf in the tab, not the focused pane. Say the count when there is
@@ -6430,19 +6570,47 @@ impl View {
             // commit re-resolves the tab for exactly the same reason.
             ConfirmKind::CloseTab { tab } => match self.find_tab(*tab) {
                 Some((_, _, t)) if t.panes.len() > 1 => {
-                    format!(" close tab {label} and its {} panes? ⏎/esc", t.panes.len())
+                    format!("close tab {label} and its {} panes?", t.panes.len())
                 }
-                _ => format!(" close tab {label}? ⏎/esc"),
+                _ => format!("close tab {label}?"),
             },
         };
-        for (i, ch) in text.chars().take(cols).enumerate() {
-            cells[r * cols + i] = Cell {
-                c: ch,
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: cell_flags::BOLD,
-            };
+        text
+    }
+
+    fn confirm_overlay_layout(&self, rows: usize, action: &ConfirmAction) -> OverlayLayout {
+        let (origin, dims) = self.overlay_viewport();
+        let chrome = chrome::Chrome::new("confirm", Anchor::Center)
+            .footer("enter confirm · esc cancel")
+            .fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
+        let lines = [self.confirm_text(action)];
+        layout_lines_overlay(
+            origin,
+            dims,
+            &chrome,
+            &lines,
+            None,
+            OverlayAnchor::At {
+                row: self.confirm_anchor_row(rows, action),
+                col: origin.1,
+            },
+        )
+    }
+
+    fn draw_confirm_line(
+        &self,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        action: &ConfirmAction,
+    ) {
+        if rows > 0 {
+            for c in 0..cols {
+                cells[(rows - 1) * cols + c] = Cell::default();
+            }
         }
+        let layout = self.confirm_overlay_layout(rows, action);
+        draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
     }
 
     /// Build the move-tab picker overlay lines (x-96e8): a header plus one
@@ -6826,8 +6994,8 @@ impl View {
     ///
     /// Slim is a FILTER over the regular rows rather than a second builder, so
     /// it inherits section keys, rollup folding, and ordering for free and
-    /// cannot drift from the tree it is a summary of. Extended is its own
-    /// construction: a flat table has no tree to filter down to.
+    /// cannot drift from the tree it is a summary of. Extended keeps the same
+    /// structural rows and changes only agent-row composition and ordering.
     fn display_rows(&self) -> Vec<DisplayRow<'_>> {
         match self.density {
             Density::Regular => self.tree_rows(),
@@ -6842,7 +7010,7 @@ impl View {
                         || matches!(r, DisplayRow::Header { .. })
                 })
                 .collect(),
-            Density::Extended => self.table_rows(),
+            Density::Extended => self.table_rows_with_depths().0,
         }
     }
 
@@ -6852,8 +7020,8 @@ impl View {
     /// an idle parent the fold removed, or an exited parent a LiveOnly section
     /// hides, is ABSENT, and its child roots instead of indenting under a row
     /// that never rendered. Non-agent rows (headers, sublines, spacers) carry
-    /// 0. Slim filters the pair exactly as it filters rows; Extended's flat
-    /// table indents nothing.
+    /// 0. Slim filters the pair exactly as it filters rows; Extended retains
+    /// the same lineage depths inside its agent-name cells.
     fn display_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
         match self.density {
             Density::Regular => self.tree_rows_with_depths(),
@@ -6871,65 +7039,55 @@ impl View {
                 }
                 (kept_rows, kept_depths)
             }
-            Density::Extended => {
-                let rows = self.table_rows();
-                let depths = vec![0usize; rows.len()];
-                (rows, depths)
-            }
+            Density::Extended => self.table_rows_with_depths(),
         }
     }
 
-    /// (x-b186) The extended density's rows: an inert column header, then one
-    /// row per agent in the chosen order.
-    ///
-    /// Flat by design - this is the agents view, not the tree. By-squad keeps
-    /// the tree's own order; by-status re-bands it worst-first. Cards, spacers,
-    /// sublines, and the create-workspace footer are tree furniture and have no
-    /// place in a table, so they are suppressed; the density cycle is one press
-    /// away from all of them.
-    fn table_rows(&self) -> Vec<DisplayRow<'_>> {
-        // Built from the full agent catalog, NOT from `tree_rows` - the table's
-        // job is to list every agent, so it must not inherit the tree's section
-        // state. Filtering tree rows made a collapsed squad (the normal resting
-        // state for an inactive workspace) and a LiveOnly section drop their
-        // agents from the very view that exists to show them.
-        //
-        // By-squad still means the tree's ORDER: squads in layout order, their
-        // agents in catalog order, squadless rows last. Only the visibility
-        // gating is dropped, not the ordering.
-        let mut agents: Vec<&AgentRow> = Vec::with_capacity(self.layout.agents.len());
-        for s in &self.layout.squads {
-            agents.extend(self.layout.agents.iter().filter(|a| a.squad == Some(s.id)));
+    /// The extended density keeps the regular structural enumeration. Agent
+    /// rows are grouped with their optional sublines and sorted only within
+    /// the contiguous group beneath one section header.
+    fn table_rows_with_depths(&self) -> (Vec<DisplayRow<'_>>, Vec<usize>) {
+        let (rows, depths) = self.tree_rows_with_depths();
+        let needs = self.attention_needs();
+        let now = crate::digest_overlay::now_secs();
+        let mut out: Vec<(DisplayRow<'_>, usize)> = Vec::with_capacity(rows.len() + 1);
+        let mut group = Vec::new();
+        let mut iter = rows.into_iter().zip(depths).peekable();
+
+        while let Some((row, depth)) = iter.next() {
+            match row {
+                DisplayRow::Agent(agent) => {
+                    let mut item = vec![(DisplayRow::Agent(agent), depth)];
+                    while matches!(iter.peek(), Some((DisplayRow::Sub(_), _))) {
+                        item.push(iter.next().expect("peeked subline"));
+                    }
+                    group.push((item, agent));
+                    if !matches!(iter.peek(), Some((DisplayRow::Agent(_), _))) {
+                        append_sorted_agent_group(
+                            &mut out,
+                            &mut group,
+                            self.agent_sort,
+                            &needs,
+                            now,
+                        );
+                    }
+                }
+                row => {
+                    append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
+                    out.push((row, depth));
+                }
+            }
         }
-        let known: HashSet<u64> = self.layout.squads.iter().map(|s| s.id).collect();
-        agents.extend(
-            self.layout
-                .agents
-                .iter()
-                .filter(|a| a.squad.is_none_or(|id| !known.contains(&id))),
-        );
-        if self.agent_sort == AgentSort::Attention {
-            // ONE ordering authority: the attention key (needs fold rank, then
-            // evidence of neglect, then oldest-silent, then name). The previous
-            // key banded on the in-TTL badge - a scraped report that reads
-            // healthy for a worker dead under two hours, which is how a
-            // stale-live row could sit below every row that mattered. The
-            // status word and the reachability verdict are barred from this
-            // key for the same reason: both answer a different question than
-            // "who needs the operator". `sort_by_key` is stable, so rows
-            // inside a band keep their tree order.
-            let needs = self.attention_needs();
-            agents.sort_by_key(|a| attention_key(a, needs.get(a.name.as_str()).copied()));
+        append_sorted_agent_group(&mut out, &mut group, self.agent_sort, &needs, now);
+
+        let has_agent = out
+            .iter()
+            .any(|(row, _)| matches!(row, DisplayRow::Agent(_)));
+        out.insert(0, (DisplayRow::TableHead, 0));
+        if !has_agent {
+            out.insert(1, (DisplayRow::TableEmpty, 0));
         }
-        let mut out = Vec::with_capacity(agents.len() + 1);
-        out.push(DisplayRow::TableHead);
-        if agents.is_empty() {
-            // A bare column header reads as a stalled or broken table. Say so.
-            out.push(DisplayRow::TableEmpty);
-            return out;
-        }
-        out.extend(agents.into_iter().map(DisplayRow::Agent));
-        out
+        out.into_iter().unzip()
     }
 
     // (x-c5ee) The sideline tree, with the top-K idle cap applied. A PURE
@@ -7225,7 +7383,7 @@ impl View {
         // row's age is relative to the same instant, so a mid-paint tick cannot
         // make one row read older than the row above it.
         let now = crate::digest_overlay::now_secs();
-        let table_cols = TableCols::fitting(text_w as u16);
+        let table_layout = TableLayout::fitting(text_w as u16);
         // Composition width for the top row: text_w minus the density button.
         let btn_reserved = match self.density_button_range(panel_w) {
             Some(r) => r.start,
@@ -7338,13 +7496,16 @@ impl View {
                 // (x-b186) In Extended an agent row IS a table row: same lattice
                 // style and external DIM modifier, different text composition.
                 DisplayRow::Agent(a) if self.density == Density::Extended => {
+                    let layout =
+                        table_layout.expect("extended density has an admitted table layout");
+                    let depth = row_depths.get(i).copied().unwrap_or(0);
                     let st = agent_lattice_state(a);
                     let style = lattice_style(st, self.theme.accent);
                     let mut flags = style.flags;
                     if a.external && st != LatticeState::Blocked {
                         flags |= cell_flags::DIM;
                     }
-                    (table_row_text(a, table_cols, now), flags, style.fg)
+                    (table_row_text(a, layout, depth, now), flags, style.fg)
                 }
                 DisplayRow::Agent(a) => {
                     // The unified icon lattice (x-df4c): exit beats badge beats
@@ -7510,7 +7671,10 @@ impl View {
                 // (x-b186) The extended table's column header: DIM like the
                 // other inert labels, so it reads as chrome rather than a row.
                 DisplayRow::TableHead => (
-                    table_head_text(table_cols, self.agent_sort),
+                    table_head_text(
+                        table_layout.expect("extended density has an admitted table layout"),
+                        self.agent_sort,
+                    ),
                     cell_flags::DIM,
                     Color::Default,
                 ),
@@ -7892,6 +8056,109 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
     )
 }
 
+fn append_sorted_agent_group<'a>(
+    out: &mut Vec<(DisplayRow<'a>, usize)>,
+    group: &mut Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
+    sort: AgentSort,
+    needs: &HashMap<String, NeedKind>,
+    now_secs: u64,
+) {
+    let mut subtrees: Vec<(
+        Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
+        &'a AgentRow,
+    )> = Vec::new();
+    for item in group.drain(..) {
+        let depth = item.0.first().map(|(_, depth)| *depth).unwrap_or_default();
+        if depth == 0 || subtrees.is_empty() {
+            let root = item.1;
+            subtrees.push((vec![item], root));
+        } else {
+            subtrees.last_mut().unwrap().0.push(item);
+        }
+    }
+    subtrees.sort_by(|(_, a), (_, b)| {
+        compare_agent_rows(
+            a,
+            b,
+            sort,
+            needs.get(a.name.as_str()).copied(),
+            needs.get(b.name.as_str()).copied(),
+            now_secs,
+        )
+    });
+    for (items, _) in subtrees {
+        for (rows, _) in items {
+            out.extend(rows);
+        }
+    }
+}
+
+fn compare_agent_rows(
+    a: &AgentRow,
+    b: &AgentRow,
+    sort: AgentSort,
+    need_a: Option<NeedKind>,
+    need_b: Option<NeedKind>,
+    now_secs: u64,
+) -> Ordering {
+    let order = match sort.column {
+        AgentSortColumn::Status => {
+            let a_key = attention_key(a, need_a);
+            let b_key = attention_key(b, need_b);
+            let a_state = if a.exited {
+                u8::MAX
+            } else {
+                pane_state(a.badge, a.seen) as u8
+            };
+            let b_state = if b.exited {
+                u8::MAX
+            } else {
+                pane_state(b.badge, b.seen) as u8
+            };
+            apply_direction(
+                a_state
+                    .cmp(&b_state)
+                    .then_with(|| a_key.0.cmp(&b_key.0))
+                    .then_with(|| a_key.1.cmp(&b_key.1))
+                    .then_with(|| a_key.2.cmp(&b_key.2)),
+                sort.direction,
+            )
+        }
+        AgentSortColumn::Agent => apply_direction(a.name.cmp(&b.name), sort.direction),
+        AgentSortColumn::LastMessage => cmp_optional(
+            a.tail.as_deref().filter(|value| !value.is_empty()),
+            b.tail.as_deref().filter(|value| !value.is_empty()),
+            sort.direction,
+        ),
+        AgentSortColumn::Pr => cmp_optional(a.pr, b.pr, sort.direction),
+        AgentSortColumn::Age => {
+            cmp_optional(row_age(a, now_secs), row_age(b, now_secs), sort.direction)
+        }
+    };
+    order
+}
+
+fn cmp_optional<T: Ord>(a: Option<T>, b: Option<T>, direction: SortDirection) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a), Some(b)) => apply_direction(a.cmp(&b), direction),
+    }
+}
+
+fn apply_direction(order: Ordering, direction: SortDirection) -> Ordering {
+    match direction {
+        SortDirection::Ascending => order,
+        SortDirection::Descending => order.reverse(),
+    }
+}
+
+fn row_age(a: &AgentRow, now_secs: u64) -> Option<u64> {
+    a.last_activity_age_s
+        .or_else(|| a.updated_at.map(|updated| now_secs.saturating_sub(updated)))
+}
+
 /// (x-6851 US3) The project basename a section is keyed by (the squad's
 /// canonical repo root), for the foreign-cwd subline comparison. `None` for a
 /// squad whose canonical cwd has no final component (degenerate; no subline).
@@ -8091,6 +8358,8 @@ enum ChromeHit {
     /// Flip the active squad row's caret locally (x-2f99); no socket write.
     /// (x-975a) Advance one sideline section through the view cycle.
     CycleSection(SectionKey),
+    /// Sort the extended table by the clicked header column.
+    SortColumn(AgentSortColumn),
     /// (x-c5ee) Toggle a squad's top-K idle expansion - the idle sibling of
     /// `CycleSection`. A pure local set flip, no socket write.
     ToggleIdle(SectionKey),
@@ -8628,29 +8897,65 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
     p.to_string()
 }
 
-/// Draw overlay lines centered in the content viewport (right of the sideline,
-/// above any splits), framed with `chrome` and colored by `theme`. The seven
-/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
-/// peek, navigator) all route through here, so framing them all is this one
-/// change - the point of chrome being a frame function rather than a field on
-/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
-///
-/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
-/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
-/// on its FRAMED dimensions (x-e9c3 placement; x-9f75 policy).
-#[allow(clippy::too_many_arguments)] // one shared framer for all family-B overlays; see doc above
-fn draw_lines_overlay<S: AsRef<str>>(
-    cells: &mut [Cell],
-    rows: usize,
-    cols: usize,
+#[derive(Debug, Clone, Copy)]
+enum OverlayAnchor {
+    Center,
+    At { row: usize, col: usize },
+}
+
+/// One family-B overlay layout. Drawing and mouse hit-testing consume this same
+/// framed block and origin, so a close chip cannot drift away from the glyph it
+/// paints.
+#[derive(Debug, Clone)]
+struct OverlayLayout {
+    origin: (usize, usize),
+    framed: chrome::Framed,
+}
+
+impl OverlayLayout {
+    fn hit_at(&self, row: u16, col: u16) -> Option<usize> {
+        chrome::framed_hit_at(&self.framed, self.origin, row as usize, col as usize)
+    }
+}
+
+fn family_b_origin(
+    anchor: OverlayAnchor,
+    block_w: usize,
+    block_h: usize,
+    content_origin: (usize, usize),
+    content_dims: (usize, usize),
+) -> (usize, usize) {
+    let (base_r, base_c) = content_origin;
+    let (content_rows, content_cols) = content_dims;
+    let max_r = base_r + content_rows.saturating_sub(block_h);
+    let max_c = base_c + content_cols.saturating_sub(block_w);
+    match anchor {
+        OverlayAnchor::Center => (
+            base_r + content_rows.saturating_sub(block_h) / 2,
+            base_c + content_cols.saturating_sub(block_w) / 2,
+        ),
+        OverlayAnchor::At { row, col } => {
+            let origin_r = if row.saturating_add(block_h) <= base_r + content_rows {
+                row.max(base_r).min(max_r)
+            } else {
+                row.saturating_sub(block_h).max(base_r).min(max_r)
+            };
+            (origin_r, col.max(base_c).min(max_c))
+        }
+    }
+}
+
+/// Lay out family-B overlay lines in the content viewport. The body window,
+/// frame, origin, and hit spans are calculated once for both drawing and input.
+#[allow(clippy::too_many_arguments)]
+fn layout_lines_overlay<S: AsRef<str>>(
     content_origin: (usize, usize),
     content_dims: (usize, usize),
     chrome: &chrome::Chrome,
     lines: &[S],
-    theme: &Theme,
     follow: Option<usize>,
-) {
-    let (base_r, base_c) = content_origin;
+    anchor: OverlayAnchor,
+) -> OverlayLayout {
     let (content_rows, content_cols) = content_dims;
     // Body width: the widest line (across the whole body, windowed-out rows
     // included), capped to the viewport minus the side borders.
@@ -8705,14 +9010,24 @@ fn draw_lines_overlay<S: AsRef<str>>(
     let framed = chrome::frame(&body, chrome, body_w, scroll);
     let box_h = framed.lines.len().min(content_rows);
     let box_w = framed.width.min(content_cols);
-    let origin_r = base_r + content_rows.saturating_sub(box_h) / 2;
-    let origin_c = base_c + content_cols.saturating_sub(box_w) / 2;
+    let origin = family_b_origin(anchor, box_w, box_h, content_origin, content_dims);
+    OverlayLayout { origin, framed }
+}
+
+fn draw_overlay_layout(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    layout: &OverlayLayout,
+    theme: &Theme,
+) {
+    let (origin_r, origin_c) = layout.origin;
     // (x-b465) A framed block stamps a SUB-RANGE of each row, so a double-width
     // glyph in the pane content underneath can straddle either edge, leaving one
     // half painted and the row corrupted. The name modal carried this guard when
     // it hand-painted its own block; every family-B overlay needs it for the same
     // reason, so it lives here, once, rather than travelling with one caller.
-    for i in 0..framed.lines.len() {
+    for i in 0..layout.framed.lines.len() {
         let r = origin_r + i;
         if r >= rows {
             break;
@@ -8727,10 +9042,43 @@ fn draw_lines_overlay<S: AsRef<str>>(
             cols,
             r,
             origin_c,
-            (origin_c + framed.width).min(cols),
+            (origin_c + layout.framed.width).min(cols),
         );
     }
-    chrome::blit(cells, rows, cols, (origin_r, origin_c), &framed, theme);
+    chrome::blit(cells, rows, cols, layout.origin, &layout.framed, theme);
+}
+
+/// Draw overlay lines centered in the content viewport (right of the sideline,
+/// above any splits), framed with `chrome` and colored by `theme`. The seven
+/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
+/// peek, navigator) all route through here, so framing them all is this one
+/// change - the point of chrome being a frame function rather than a field on
+/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
+///
+/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
+/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
+/// on its FRAMED dimensions (x-e9c3 placement; x-9f75 policy).
+#[allow(clippy::too_many_arguments)]
+fn draw_lines_overlay<S: AsRef<str>>(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    content_origin: (usize, usize),
+    content_dims: (usize, usize),
+    chrome: &chrome::Chrome,
+    lines: &[S],
+    theme: &Theme,
+    follow: Option<usize>,
+) {
+    let layout = layout_lines_overlay(
+        content_origin,
+        content_dims,
+        chrome,
+        lines,
+        follow,
+        OverlayAnchor::Center,
+    );
+    draw_overlay_layout(cells, rows, cols, &layout, theme);
 }
 
 /// The answer-overlay content width; lines truncate to it (AC3-UI: a long
@@ -9314,42 +9662,39 @@ fn humanize_age(secs: Option<u64>) -> String {
     format!("{body:>4}")
 }
 
-/// (x-b186) One extended-table row: status glyph, name, message tail, PR, and a
-/// relative last-update, each padded to its column so the table aligns.
+/// One extended-table row: status glyph, agent, last message, PR, and relative
+/// last-update age. Every cell is padded and truncated to its shared layout span
+/// so a long name or message stays on one display row.
 ///
-/// EMPTY CELLS ARE THE POINT (AC4-ERR). A row with no PR, no activity stamp, or
-/// no readable transcript renders blank in that cell - never a dash placeholder,
-/// an inferred PR, or a synthesized time. An external/roster row has none of the
-/// three by construction, so its right-hand cells are simply empty, which is the
-/// honest rendering of "fno does not know", not a rendering bug.
-///
-/// `cols` decides which columns survive a narrow panel; every cell is padded and
-/// truncated (via `pad_to`) so a long tail ellipsizes on one line rather than
-/// wrapping - a wrapped cell would paint two lines for one display row and break
-/// the x-260a single-enumeration invariant.
-fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
+/// Missing PR is rendered as an explicit neutral value; missing message and age
+/// remain empty because no honest value exists for those cells.
+fn table_row_text(a: &AgentRow, layout: TableLayout, depth: usize, now_secs: u64) -> String {
     let glyph = lattice_glyph(agent_lattice_state(a)).0;
-    let mut out = format!("{glyph} {}", pad_cols(&a.name, COL_NAME as usize - 1));
-    if cols.tail {
-        let tail = a.tail.as_deref().unwrap_or("");
-        out.push_str(&pad_cols(tail, COL_TAIL as usize - 1));
-        out.push(' ');
+    let name = if depth == 0 {
+        a.name.clone()
+    } else {
+        format!("{}{name}", "  ".repeat(depth), name = a.name)
+    };
+    let mut out = pad_cols(&format!("{glyph} "), layout.status.width as usize);
+    out.push_str(&pad_cols(&name, layout.agent.width as usize));
+    if let Some(tail) = layout.tail {
+        out.push_str(&pad_cols(
+            a.tail.as_deref().unwrap_or(""),
+            tail.width as usize,
+        ));
     }
-    let pr = a.pr.map(|n| format!("#{n}")).unwrap_or_default();
-    out.push_str(&pad_cols(&pr, COL_PR as usize - 1));
-    out.push(' ');
-    if cols.time {
-        // The probe's transcript age is the honest reading; `updated_at` is a
-        // registry stamp that reconciliation can refresh with no worker
-        // activity behind it, so it is only the fallback for a server too old
-        // to send the triple. Fixed-width so the column never reflows.
-        let age = match (a.last_activity_age_s, a.updated_at) {
-            (Some(s), _) => humanize_age(Some(s)),
-            (None, Some(u)) => humanize_age(Some(now_secs.saturating_sub(u))),
-            (None, None) => humanize_age(None),
-        };
-        out.push_str(&pad_cols(&age, COL_TIME as usize - 1));
-    }
+    let pr = a.pr.map(|n| format!("#{n}")).unwrap_or_else(|| "—".into());
+    out.push_str(&pad_cols(&pr, layout.pr.width as usize));
+    let age = match (a.last_activity_age_s, a.updated_at) {
+        (Some(s), _) => humanize_age(Some(s)),
+        (None, Some(u)) => humanize_age(Some(now_secs.saturating_sub(u))),
+        (None, None) => humanize_age(None),
+    };
+    out.push_str(&pad_cols(&age, layout.age.width as usize));
+    debug_assert_eq!(
+        out.chars().map(glyph_cols).sum::<usize>(),
+        layout.text_w as usize
+    );
     out
 }
 
@@ -9358,32 +9703,53 @@ fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
 /// Carries the active sort label, which is what makes the sort toggle visible
 /// even when the two orders coincide (one agent, or every row in one band): the
 /// rows may not move, but this line always changes, so no press is inert.
-fn table_head_text(cols: TableCols, sort: AgentSort) -> String {
-    let (long, short) = match sort {
-        AgentSort::Squad => ("sort: workspace", "·wksp"),
-        AgentSort::Attention => ("sort: attention", "·attn"),
+fn table_head_text(layout: TableLayout, sort: AgentSort) -> String {
+    let marker = |column| {
+        if sort.column == column {
+            match sort.direction {
+                SortDirection::Ascending => " ↑",
+                SortDirection::Descending => " ↓",
+            }
+        } else {
+            ""
+        }
     };
-    // With the tail column dropped the label has no column of its own, so it
-    // rides the NAME header instead of being appended past the end of the row.
-    // Appending overflowed the panel by 12 columns and the painter simply cut
-    // it, which left the toggle invisible at exactly the widths where the table
-    // is hardest to read - and a press with no visible effect reads as a dead
-    // control. The name column always renders, so the marker always survives.
-    let name = if cols.tail {
-        "agent".to_string()
-    } else {
-        format!("agent {short}")
-    };
-    let mut out = format!("  {}", pad_cols(&name, COL_NAME as usize - 1));
-    if cols.tail {
-        out.push_str(&pad_cols(long, COL_TAIL as usize - 1));
-        out.push(' ');
+    let mut out = pad_cols(
+        &format!("st{}", marker(AgentSortColumn::Status)),
+        layout.status.width as usize,
+    );
+    out.push_str(&pad_cols(
+        &format!("agent{}", marker(AgentSortColumn::Agent)),
+        layout.agent.width as usize,
+    ));
+    if let Some(tail) = layout.tail {
+        out.push_str(&pad_cols(
+            &format!("last msg{}", marker(AgentSortColumn::LastMessage)),
+            tail.width as usize,
+        ));
     }
-    out.push_str(&pad_cols("pr", COL_PR as usize - 1));
-    out.push(' ');
-    if cols.time {
-        out.push_str(&pad_cols("age", COL_TIME as usize - 1));
-    }
+    out.push_str(&pad_cols(
+        &format!("pr{}", marker(AgentSortColumn::Pr)),
+        layout.pr.width as usize,
+    ));
+    out.push_str(&pad_cols(
+        &format!(
+            "age{}",
+            if sort.column == AgentSortColumn::Age {
+                match sort.direction {
+                    SortDirection::Ascending => "↑",
+                    SortDirection::Descending => "↓",
+                }
+            } else {
+                ""
+            }
+        ),
+        layout.age.width as usize,
+    ));
+    debug_assert_eq!(
+        out.chars().map(glyph_cols).sum::<usize>(),
+        layout.text_w as usize
+    );
     out
 }
 
@@ -9737,7 +10103,8 @@ async fn attach_and_run(
                 | ServerMsg::TabSpawned { .. }
                 | ServerMsg::PaneFocused { .. }
                 | ServerMsg::LayoutApplied { .. }
-                | ServerMsg::LayoutGrafted { .. },
+                | ServerMsg::LayoutGrafted { .. }
+                | ServerMsg::TabLocation { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -10123,7 +10490,8 @@ async fn attach_and_run(
                     | ServerMsg::TabSpawned { .. }
                     | ServerMsg::PaneFocused { .. }
                     | ServerMsg::LayoutApplied { .. }
-                    | ServerMsg::LayoutGrafted { .. }) => {}
+                    | ServerMsg::LayoutGrafted { .. }
+                    | ServerMsg::TabLocation { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback
@@ -10594,6 +10962,35 @@ enum StdinFlow {
     Detach,
 }
 
+fn consume_modal_close_gesture(view: &mut View, kind: MouseKind) -> bool {
+    if view.modal_release_swallow {
+        if matches!(kind, MouseKind::Release(MouseButton::Left)) {
+            view.modal_release_swallow = false;
+        }
+        return true;
+    }
+    false
+}
+
+/// Family-B name and confirmation overlays own every pointer event while open.
+/// Only the shared Chrome esc hit cancels; outside clicks are swallowed so they
+/// cannot dismiss the modal or reach a pane underneath it.
+fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
+    if consume_modal_close_gesture(view, rep.kind) {
+        return true;
+    }
+    let Some(layout) = view.active_overlay_layout() else {
+        return false;
+    };
+    if matches!(rep.kind, MouseKind::Press(MouseButton::Left))
+        && layout.hit_at(rep.row, rep.col) == Some(crate::chrome::ESC_CLOSE_HIT)
+    {
+        view.cancel_active_overlay();
+        view.modal_release_swallow = true;
+    }
+    true
+}
+
 /// Route one stdin chunk: the selector consumes keys while open (AC6-FR
 /// validates against the CURRENT layout before sending); otherwise the
 /// prefix scanner splits it into forwards and commands.
@@ -10640,7 +11037,12 @@ async fn handle_stdin(
                 || view.tab_drag.is_some()
                 || view.row_drag.is_some()
                 || view.press_hold.is_some());
-        if rep.shift && !ends_a_drag {
+        // A close-chip gesture is also release-owned state. Let every event in
+        // it reach `modal_mouse`, even when the terminal marks it as Shift.
+        if rep.shift && !ends_a_drag && !view.modal_release_swallow {
+            continue;
+        }
+        if consume_modal_close_gesture(view, rep.kind) {
             continue;
         }
         // A pointer action - click/press/wheel/drag, anything but passive hover
@@ -11011,24 +11413,9 @@ async fn handle_stdin(
                 _ => view.end_sideline_drag(rep.row, rep.col),
             }
         }
-        // A card-dispatch confirm is modal (x-a496): while it is open, any mouse
-        // PRESS / scroll cancels it and is SWALLOWED - it must never leak to a
-        // pane underneath (the confirm prompt spans the full-width bottom row) nor
-        // silently open a second card's confirm (codex peer review). Hover (Move)
-        // still falls through to update the highlight beneath the prompt.
-        //
-        // A Release is swallowed like the rest but does NOT cancel. Every real
-        // dismissal starts with a press, which this arm already ate, so the only
-        // release that can reach here is the tail of the click that ARMED the
-        // confirm - and cancelling on that made every menu entry ending in a
-        // confirm dead to the mouse: the prompt opened and vanished inside one
-        // click, which reads as "the menu item does nothing". Swallowing it
-        // still matters: a release forwarded to the inner app would arrive with
-        // no press before it.
-        if view.confirm.is_some() && !matches!(rep.kind, MouseKind::Move) {
-            if !matches!(rep.kind, MouseKind::Release(_)) {
-                view.confirm = None;
-            }
+        // Name and confirmation overlays share the same framed layout and own
+        // every pointer event, including clicks outside their block.
+        if modal_mouse(view, rep) {
             continue;
         }
         // Bare motion is hover (x-a496): record the sideline highlight + the
@@ -11642,6 +12029,7 @@ async fn apply_hit(
         // Pure state flip, no I/O - usable even when the socket write path
         // is failing (x-2f99, AC1-FR).
         ChromeHit::CycleSection(key) => view.cycle_section(key),
+        ChromeHit::SortColumn(column) => view.set_agent_sort_column(column),
         // (x-c5ee) Pure local set flip, like CycleSection - no I/O.
         ChromeHit::ToggleIdle(key) => view.toggle_idle(key),
         // (x-b186) The density button. The panel width moved with the density,
@@ -16332,10 +16720,23 @@ mod tests {
 
         let frame = view.compose();
         let cols = frame.cols as usize;
-        let row2: String = (0..cols).map(|c| frame.cells[2 * cols + c].c).collect();
+        let screen: String = (0..frame.rows as usize)
+            .map(|r| {
+                (0..cols)
+                    .map(|c| frame.cells[r * cols + c].c)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let layout = view.confirm_overlay_layout(rows, view.confirm.as_ref().unwrap());
         assert!(
-            row2.contains("close workspace"),
-            "the confirm prompt paints at the target row: {row2:?}"
+            layout.origin.0 == anchor,
+            "the framed confirm starts at the target row: {:?}",
+            layout.origin
+        );
+        assert!(
+            screen.contains("close workspace"),
+            "the confirm prompt paints at the target row: {screen}"
         );
     }
 
@@ -17720,6 +18121,7 @@ mod tests {
             Some(ChromeHit::Confirm(_)) => "Confirm",
             Some(ChromeHit::OpenCreate) => "OpenCreate",
             Some(ChromeHit::CycleSection(_)) => "CycleSection",
+            Some(ChromeHit::SortColumn(_)) => "SortColumn",
             Some(ChromeHit::ToggleIdle(_)) => "ToggleIdle",
             Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
             Some(ChromeHit::OpenAttachPlace { .. }) => "OpenAttachPlace",
@@ -19643,6 +20045,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keys_modal_esc_click_and_escape_both_close() {
+        use crate::mouse::MouseReport;
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        v.open_keys_modal();
+        let (row, col) = {
+            let rendered = v.keys_modal.as_ref().unwrap().popup.render(v.term);
+            let (line, hits) = rendered
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(_, line)| {
+                    line.hits
+                        .iter()
+                        .any(|(tag, _, _)| *tag == crate::chrome::ESC_CLOSE_HIT)
+                })
+                .expect("which-key modal exposes a clickable esc target");
+            let (offset, len) = hits
+                .hits
+                .iter()
+                .find(|(tag, _, _)| *tag == crate::chrome::ESC_CLOSE_HIT)
+                .map(|(_, offset, len)| (*offset, *len))
+                .unwrap();
+            (
+                rendered.origin.0 + line,
+                rendered.origin.1 + offset + len / 2,
+            )
+        };
+        let click = MouseReport {
+            row: row as u16,
+            col: col as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        let mut buf = Vec::new();
+        keys_modal_mouse(&mut v, &mut Scanner::default(), click, &mut buf)
+            .await
+            .unwrap();
+        assert!(v.keys_modal.is_none());
+        assert!(buf.is_empty());
+
+        v.open_keys_modal();
+        keys_modal_keys(&mut v, &mut Scanner::default(), b"\x1b", &mut buf)
+            .await
+            .unwrap();
+        keys_modal_keys(&mut v, &mut Scanner::default(), b"z", &mut buf)
+            .await
+            .unwrap();
+        assert!(v.keys_modal.is_none());
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
     async fn keys_modal_wheel_scrolls_and_click_off_dismisses() {
         use crate::mouse::MouseReport;
         let mut v = two_pane_view();
@@ -20331,6 +20786,435 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_confirm_variant_renders_shared_chrome_and_controls() {
+        let variants = vec![
+            (ConfirmKind::Dispatch { node: "x-1".into() }, "dispatch"),
+            (
+                ConfirmKind::RemoveSquad {
+                    squad: 1,
+                    panes: 2,
+                    last: false,
+                },
+                "remove squad",
+            ),
+            (
+                ConfirmKind::StopAgent {
+                    name: "agent".into(),
+                },
+                "stop agent",
+            ),
+            (
+                ConfirmKind::RemoveAgent {
+                    name: "agent".into(),
+                },
+                "remove agent",
+            ),
+            (ConfirmKind::ReapAgents, "reap"),
+            (
+                ConfirmKind::StopExternal {
+                    attach_id: "a-1".into(),
+                    name: "external".into(),
+                },
+                "stop external",
+            ),
+            (
+                ConfirmKind::RemoveExternal {
+                    attach_id: "a-1".into(),
+                    name: "external".into(),
+                },
+                "remove external",
+            ),
+            (
+                ConfirmKind::DismissMember {
+                    squad: 1,
+                    attach_id: "a-1".into(),
+                },
+                "dismiss member",
+            ),
+            (
+                ConfirmKind::ClearDead {
+                    key: crate::view_store::SectionKey::Missions,
+                    squad: None,
+                    dead: 3,
+                },
+                "clear dead",
+            ),
+            (ConfirmKind::CloseTab { tab: 1 }, "close tab"),
+        ];
+
+        for (action, label) in variants {
+            let mut view = two_pane_view();
+            view.confirm = Some(ConfirmAction {
+                action,
+                label: label.into(),
+            });
+            let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
+            let mut cells = vec![Cell::default(); rows * cols];
+            view.draw_bottom_row(&mut cells, rows, cols);
+            let screen: String = (0..rows)
+                .map(|r| {
+                    cells[r * cols..(r + 1) * cols]
+                        .iter()
+                        .map(|cell| cell.c)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert!(
+                screen.contains('┌'),
+                "{label} has no shared top border: {screen}"
+            );
+            assert!(
+                screen.contains("enter confirm · esc cancel"),
+                "{label} has no actual controls footer: {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn modal_esc_chips_cancel_name_and_confirm_states_without_outside_dismissal() {
+        let close_cell = |view: &View| {
+            let layout = view
+                .active_overlay_layout()
+                .expect("an active modal has a family-B layout");
+            let (line, offset, len) = layout
+                .framed
+                .lines
+                .iter()
+                .enumerate()
+                .find_map(|(line, row)| {
+                    row.hits
+                        .iter()
+                        .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                        .map(|(_, offset, len)| (line, *offset, *len))
+                })
+                .expect("the modal exposes a shared esc chip");
+            (
+                (layout.origin.0 + line) as u16,
+                (layout.origin.1 + offset + len / 2) as u16,
+            )
+        };
+        let click = |view: &mut View| {
+            let (row, col) = close_cell(view);
+            let press = crate::mouse::MouseReport {
+                row,
+                col,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            };
+            assert!(modal_mouse(view, press));
+            assert!(modal_mouse(
+                view,
+                crate::mouse::MouseReport {
+                    kind: MouseKind::Release(MouseButton::Left),
+                    ..press
+                },
+            ));
+        };
+
+        let mut view = two_pane_view();
+        view.open_create();
+        click(&mut view);
+        assert!(
+            view.create.is_none(),
+            "create closes from the shared esc chip"
+        );
+
+        view.open_rename(RenameTarget::Tab(1));
+        click(&mut view);
+        assert!(
+            view.rename.is_none(),
+            "rename closes from the shared esc chip"
+        );
+
+        view.marks.insert("a-1".into());
+        view.open_recruit();
+        click(&mut view);
+        assert!(
+            view.recruit.is_none(),
+            "recruit closes from the shared esc chip"
+        );
+        assert!(view.marks.contains("a-1"), "recruit cancel keeps its marks");
+
+        view.confirm = Some(ConfirmAction {
+            action: ConfirmKind::Dispatch { node: "x-1".into() },
+            label: "dispatch".into(),
+        });
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                row: 0,
+                col: 0,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            },
+        ));
+        assert!(
+            view.confirm.is_some(),
+            "an outside click is swallowed without dismissing the confirm"
+        );
+        click(&mut view);
+        assert!(
+            view.confirm.is_none(),
+            "confirm closes from the shared esc chip"
+        );
+    }
+
+    #[test]
+    fn esc_chip_close_swallows_its_matching_left_release() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let click = crate::mouse::MouseReport {
+            row: (layout.origin.0 + line) as u16,
+            col: (layout.origin.1 + offset + len / 2) as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        assert!(modal_mouse(&mut view, click));
+        assert!(view.create.is_none(), "the chip press closes the modal");
+        assert!(
+            modal_mouse(
+                &mut view,
+                crate::mouse::MouseReport {
+                    kind: MouseKind::Release(MouseButton::Left),
+                    ..click
+                },
+            ),
+            "the release paired with the closing click stays swallowed"
+        );
+        assert!(
+            !modal_mouse(
+                &mut view,
+                crate::mouse::MouseReport {
+                    kind: MouseKind::Release(MouseButton::Left),
+                    ..click
+                },
+            ),
+            "only the matching release is consumed"
+        );
+    }
+
+    #[test]
+    fn name_modal_clears_the_reserved_bottom_row() {
+        let mut view = two_pane_view();
+        view.rename = Some((RenameTarget::Tab(1), "typed".into()));
+        let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        for cell in &mut cells[(rows - 1) * cols..rows * cols] {
+            *cell = Cell {
+                c: 'x',
+                ..Cell::default()
+            };
+        }
+
+        view.draw_bottom_row(&mut cells, rows, cols);
+
+        assert!(
+            cells[(rows - 1) * cols..rows * cols]
+                .iter()
+                .all(|cell| *cell == Cell::default()),
+            "the reserved bottom row is blank beneath a name modal"
+        );
+    }
+
+    #[tokio::test]
+    async fn shifted_release_after_esc_chip_close_is_consumed_before_prefilter() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let row = (layout.origin.0 + line) as u16;
+        let col = (layout.origin.1 + offset + len / 2) as u16;
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                row,
+                col,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            },
+        ));
+
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf = Vec::new();
+        let shifted_release = format!("\x1b[<4;{};{}m", col + 1, row + 1);
+        handle_stdin(
+            &mut view,
+            &mut scanner,
+            &mut carry,
+            shifted_release.as_bytes(),
+            &mut buf,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !view.modal_release_swallow,
+            "the shifted release clears the latch"
+        );
+        assert!(buf.is_empty(), "the shifted release never reaches the pane");
+    }
+
+    #[test]
+    fn esc_chip_close_swallows_drag_until_left_release() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let click = crate::mouse::MouseReport {
+            row: (layout.origin.0 + line) as u16,
+            col: (layout.origin.1 + offset + len / 2) as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        assert!(modal_mouse(&mut view, click));
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                kind: MouseKind::Drag(MouseButton::Left),
+                ..click
+            },
+        ));
+        assert!(
+            view.modal_release_swallow,
+            "drag keeps the closing gesture armed"
+        );
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                kind: MouseKind::Release(MouseButton::Left),
+                ..click
+            },
+        ));
+        assert!(
+            !view.modal_release_swallow,
+            "left release ends the closing gesture"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_latch_consumes_release_before_an_intervening_modal_router() {
+        let mut view = two_pane_view();
+        view.open_create();
+        let layout = view.active_overlay_layout().expect("create layout");
+        let (line, offset, len) = layout
+            .framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == crate::chrome::ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, *offset, *len))
+            })
+            .expect("create exposes an esc chip");
+        let row = (layout.origin.0 + line) as u16;
+        let col = (layout.origin.1 + offset + len / 2) as u16;
+        assert!(modal_mouse(
+            &mut view,
+            crate::mouse::MouseReport {
+                row,
+                col,
+                kind: MouseKind::Press(MouseButton::Left),
+                shift: false,
+            },
+        ));
+        view.open_keys_modal();
+        assert!(
+            view.modal_release_swallow,
+            "the close gesture remains armed"
+        );
+
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf = Vec::new();
+        let release = format!("\x1b[<0;{};{}m", col + 1, row + 1);
+        handle_stdin(
+            &mut view,
+            &mut scanner,
+            &mut carry,
+            release.as_bytes(),
+            &mut buf,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !view.modal_release_swallow,
+            "the release clears the latch first"
+        );
+        assert!(
+            view.keys_modal.is_some(),
+            "the release does not dismiss the new modal"
+        );
+        assert!(buf.is_empty(), "the release never reaches the pane");
+    }
+
+    #[test]
+    fn confirm_clears_the_reserved_bottom_row_on_fallback() {
+        let mut view = two_pane_view();
+        view.confirm = Some(ConfirmAction {
+            action: ConfirmKind::ReapAgents,
+            label: "all agents".into(),
+        });
+        let (rows, cols) = (view.term.0 as usize, view.term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        for cell in &mut cells[(rows - 1) * cols..rows * cols] {
+            *cell = Cell {
+                c: 'x',
+                ..Cell::default()
+            };
+        }
+
+        view.draw_bottom_row(&mut cells, rows, cols);
+
+        assert!(
+            cells[(rows - 1) * cols..rows * cols]
+                .iter()
+                .all(|cell| *cell == Cell::default()),
+            "the reserved bottom row is blank beneath a fallback confirm"
+        );
+    }
+
     #[tokio::test]
     async fn clear_dead_refolds_the_set_at_commit_not_at_open() {
         // Concurrency: the confirm pins the SECTION, not the row list. A row
@@ -20930,10 +21814,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_press_still_cancels_an_armed_confirm() {
-        // The narrowing is release-only: a genuine dismissal starts with a
-        // PRESS, and that still cancels and is still swallowed (no leak to the
-        // pane underneath).
+    async fn an_outside_press_does_not_dismiss_an_armed_confirm() {
+        // The confirm owns every pointer event. An outside press is swallowed,
+        // while only its rendered shared Chrome esc chip cancels it.
         let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
         let row = agent_row_at(&v, |a| a.name == "w");
         assert!(v.open_row_menu(row, Anchor::Center));
@@ -20944,10 +21827,10 @@ mod tests {
 
         let mut scanner = Scanner::default();
         let mut carry = Vec::new();
-        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<0;31;6M", &mut buf)
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<0;1;1M", &mut buf)
             .await
             .unwrap();
-        assert!(v.confirm.is_none(), "a press cancels");
+        assert!(v.confirm.is_some(), "an outside press does not cancel");
         assert!(buf.is_empty(), "and is swallowed, never reaching the pane");
     }
 
@@ -21640,11 +22523,10 @@ mod tests {
             .unwrap();
         assert!(v.row_menu.is_none(), "no menu under an open overlay");
         assert!(v.rename.is_some(), "the overlay survives untouched");
-        let mut cur = std::io::Cursor::new(buf);
-        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-            ClientMsg::Mouse { pane, .. } => assert_eq!(pane, 10),
-            other => panic!("expected the pane forward, got {other:?}"),
-        }
+        assert!(
+            buf.is_empty(),
+            "a name modal swallows outside pointer input instead of leaking to a pane"
+        );
     }
 
     #[test]
@@ -27214,8 +28096,8 @@ mod tests {
         );
     }
 
-    // AC2-HP: an fno-owned row shows every column. AC4-ERR: a row with no PR,
-    // stamp, or transcript shows EMPTY cells - never a placeholder.
+    // An fno-owned row shows every column. Unknown PR is explicit neutral
+    // state; missing message and age remain empty rather than fabricated.
     #[test]
     fn extended_table_renders_columns_and_leaves_unknown_cells_empty() {
         let mut owned = agent_row("owned", 4, Some(AgentBadge::Working), false);
@@ -27243,21 +28125,23 @@ mod tests {
 
         let ext_line = line("stranger");
         assert!(!ext_line.contains('#'), "no fabricated PR: {ext_line:?}");
-        // Nothing that reads as a value: no dash placeholder, no zero age.
-        for fake in ["-", "n/a", "0s", "?"] {
+        assert!(
+            ext_line.contains('—'),
+            "unknown PR is explicit: {ext_line:?}"
+        );
+        // No fabricated message or age.
+        for fake in ["n/a", "0s", "?"] {
             assert!(
                 !ext_line.contains(fake),
-                "external row must render EMPTY, not {fake:?}: {ext_line:?}"
+                "external row must not fabricate {fake:?}: {ext_line:?}"
             );
         }
     }
 
-    // (codex P1) The extended table must show EVERY agent, not just the ones the
-    // tree happens to be showing. Deriving it from tree_rows() inherited the
-    // section view state, so a collapsed squad or a LiveOnly section silently
-    // dropped its rows from a view whose whole purpose is to list them all.
+    // Expanded density retains the regular section visibility policy while
+    // changing only the composition of agent rows.
     #[test]
-    fn extended_table_lists_agents_from_collapsed_and_live_only_sections() {
+    fn extended_table_preserves_collapsed_and_live_only_section_state() {
         let mut exited = agent_row("dead", 6, None, false);
         exited.exited = true;
         let mut v = wide_view(vec![
@@ -27285,11 +28169,21 @@ mod tests {
             })
             .collect();
         assert!(
-            names.contains(&"alive".to_string()) && names.contains(&"dead".to_string()),
-            "the table lists every agent regardless of section state: {names:?}"
+            names.is_empty(),
+            "collapsed section stays hidden: {names:?}"
         );
 
-        // LiveOnly hides exited rows in the tree; the table still lists them.
+        v.set_section_view(key.clone(), SectionView::Expanded);
+        let names: Vec<String> = v
+            .display_rows()
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["alive", "dead"]);
+
         v.set_section_view(key, SectionView::LiveOnly);
         let names: Vec<String> = v
             .display_rows()
@@ -27299,7 +28193,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(names.contains(&"dead".to_string()), "{names:?}");
+        assert_eq!(names, ["alive"]);
     }
 
     // AC3-UI: the sort toggle re-orders rows AND relabels the header, so the
@@ -27342,16 +28236,113 @@ mod tests {
             ["fresh-live", "gone", "stale-live"],
             "by-squad keeps the tree's own order"
         );
-        assert!(frame_text(&v.compose()).contains("sort: workspace"));
+        assert!(frame_text(&v.compose()).contains("agent ↑"));
 
         v.toggle_agent_sort();
         assert_eq!(
             names(&v),
-            ["stale-live", "fresh-live", "gone"],
-            "by-attention floats the stale-live worker above the fresh one \
-             and sinks the confirmed-gone row last, regardless of badges"
+            ["stale-live", "gone", "fresh-live"],
+            "the next prefix+o state reverses the agent-name order"
         );
-        assert!(frame_text(&v.compose()).contains("sort: attention"));
+        assert!(frame_text(&v.compose()).contains("agent ↓"));
+    }
+
+    #[test]
+    fn missing_sort_values_stay_after_known_values_in_both_directions() {
+        let mut message = agent_row("message", 4, Some(AgentBadge::Working), false);
+        message.tail = Some("hello".into());
+        let mut pr = agent_row("pr", 5, Some(AgentBadge::Working), false);
+        pr.pr = Some(482);
+        let mut age = agent_row("age", 6, Some(AgentBadge::Working), false);
+        age.last_activity_age_s = Some(30);
+        let mut v = wide_view(vec![message, pr, age]);
+        set_density(&mut v, Density::Extended);
+
+        let names = |v: &View| {
+            v.display_rows()
+                .iter()
+                .filter_map(|row| match row {
+                    DisplayRow::Agent(agent) => Some(agent.name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for column in [
+            AgentSortColumn::LastMessage,
+            AgentSortColumn::Pr,
+            AgentSortColumn::Age,
+        ] {
+            v.agent_sort = AgentSort {
+                column,
+                direction: SortDirection::Ascending,
+            };
+            let ascending = names(&v);
+            v.agent_sort.direction = SortDirection::Descending;
+            let descending = names(&v);
+            if column == AgentSortColumn::Age {
+                assert_eq!(ascending.first().unwrap(), "age");
+                assert_eq!(descending.first().unwrap(), "age");
+            } else {
+                assert_eq!(ascending.last().unwrap(), "age");
+                assert_eq!(descending.last().unwrap(), "age");
+            }
+        }
+    }
+
+    #[test]
+    fn extended_sort_keeps_lineage_subtrees_together() {
+        let mut v = wide_view(vec![
+            lineage_row("zeta", 4, None),
+            lineage_row("alpha", 5, Some("sid-zeta")),
+            lineage_row("aardvark", 6, None),
+        ]);
+        set_density(&mut v, Density::Extended);
+        v.agent_sort = AgentSort::Squad;
+        let names = agent_order(&v);
+        assert_eq!(names, ["aardvark", "zeta", "alpha"]);
+        assert_eq!(rendered_depth(&v, "zeta"), 0);
+        assert_eq!(rendered_depth(&v, "alpha"), 1);
+    }
+
+    #[test]
+    fn status_sort_arrow_fits_inside_the_status_header_span() {
+        let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        let header = table_head_text(layout, AgentSort::Attention);
+        let status: String = header.chars().take(layout.status.width as usize).collect();
+        assert!(
+            status.contains('↑'),
+            "status header must show direction: {status:?}"
+        );
+    }
+
+    #[test]
+    fn age_sort_arrow_survives_the_density_button_on_header_row() {
+        let mut v = wide_view(vec![agent_row(
+            "agent",
+            4,
+            Some(AgentBadge::Working),
+            false,
+        )]);
+        set_density(&mut v, Density::Extended);
+        v.agent_sort = AgentSort {
+            column: AgentSortColumn::Age,
+            direction: SortDirection::Ascending,
+        };
+        let first_line = frame_text(&v.compose()).lines().next().unwrap().to_string();
+        assert!(
+            first_line.contains("age↑"),
+            "age header must remain visible: {first_line:?}"
+        );
+    }
+
+    #[test]
+    fn extended_pr_cell_shows_number_or_neutral_value() {
+        let mut known = agent_row("known", 4, Some(AgentBadge::Working), false);
+        known.pr = Some(482);
+        let unknown = agent_row("unknown", 5, Some(AgentBadge::Working), false);
+        let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        assert!(table_row_text(&known, layout, 0, 0).contains("#482"));
+        assert!(table_row_text(&unknown, layout, 0, 0).contains('—'));
     }
 
     // The mux ranker's attention order, pinned to the shared fixture: the
@@ -27509,13 +28500,12 @@ mod tests {
         let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
         set_density(&mut v, Density::Extended);
         assert_eq!(v.panel_w(), EXTENDED_PANEL_W, "wide terminal: every column");
-        assert_eq!(
-            TableCols::fitting(EXTENDED_PANEL_W - 1),
-            TableCols {
-                tail: true,
-                time: true
-            }
+        let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        assert!(
+            layout.tail.is_some(),
+            "wide table includes the message cell"
         );
+        assert_eq!(layout.age.start + layout.age.width, layout.text_w);
 
         // Narrow enough that the full table cannot fit beside a usable pane.
         v.term = (24, MIN_EXTENDED_PANEL_W + MIN_CONTENT_COLS + 3);
@@ -27526,13 +28516,149 @@ mod tests {
             "the work pane keeps its minimum: term {} panel {w}",
             v.term.1
         );
-        // Tail goes first, then the age - status/name/pr always survive.
-        assert!(!TableCols::fitting(w - 1).tail, "tail drops first");
+        // The message cell gives its space to the agent name, while age stays
+        // visible and right-anchored.
+        let layout = TableLayout::fitting(w - 1).unwrap();
+        assert!(layout.tail.is_none(), "message cell drops below its floor");
+        assert_eq!(layout.age.start + layout.age.width, layout.text_w);
 
         // Narrower still: the panel hides rather than rendering a nameless table.
         v.term = (24, MIN_CONTENT_COLS + 4);
         assert_eq!(v.panel_w(), 0);
         assert!(v.content_dims().1 >= 1, "never a zero-width content area");
+    }
+
+    #[test]
+    fn responsive_table_layout_anchors_age_and_shares_flexible_space() {
+        let narrow = TableLayout::fitting(MIN_EXTENDED_PANEL_W - 1).unwrap();
+        assert_eq!(narrow.agent.width, COL_MIN_NAME);
+        assert!(narrow.tail.is_none(), "message is omitted below its floor");
+        assert_eq!(narrow.age.start + narrow.age.width, narrow.text_w);
+
+        let wide = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        let tail = wide.tail.unwrap();
+        assert_eq!(wide.agent.width + tail.width, 54);
+        assert!(wide.agent.width > COL_MIN_NAME);
+        assert!(tail.width > COL_MIN_TAIL);
+    }
+
+    #[test]
+    fn extended_preserves_section_hierarchy_and_sorts_within_groups() {
+        let mut notes = agent_row("notes-agent", 6, Some(AgentBadge::Working), false);
+        notes.squad = Some(2);
+        let mut orphan = agent_row("orphan-agent", 7, Some(AgentBadge::Working), false);
+        orphan.squad = None;
+        let mut v = view_with_agents(vec![
+            agent_row("zeta", 4, Some(AgentBadge::Blocked), false),
+            agent_row("alpha", 5, Some(AgentBadge::Blocked), false),
+            notes,
+            orphan,
+        ]);
+        let mut layout = two_squad_layout(1);
+        layout.agents = v.layout.agents.clone();
+        layout.backlog = vec![bcard("x-ready", CardState::Ready)];
+        v.set_layout(layout);
+        v.section_view.insert(
+            SectionKey::Squad("/code/notes".into()),
+            SectionView::Expanded,
+        );
+        v.section_view
+            .insert(SectionKey::Elsewhere, SectionView::Expanded);
+        v.section_view
+            .insert(SectionKey::WorkQueue, SectionView::Expanded);
+        v.agent_sort = AgentSort::Squad;
+        set_density(&mut v, Density::Extended);
+
+        let rows = v.display_rows();
+        let first_squad = rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    DisplayRow::Sel(SelRow {
+                        squad: 1,
+                        tab: None
+                    })
+                )
+            })
+            .unwrap();
+        let second_squad = rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    DisplayRow::Sel(SelRow {
+                        squad: 2,
+                        tab: None
+                    })
+                )
+            })
+            .unwrap();
+        let elsewhere = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ elsewhere"))
+            .unwrap();
+        let backlog = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ backlog"))
+            .unwrap();
+        assert!(first_squad < second_squad && second_squad < elsewhere && elsewhere < backlog);
+        let squad_names: Vec<_> = rows[first_squad..second_squad]
+            .iter()
+            .filter_map(|r| match r {
+                DisplayRow::Agent(a) => Some(a.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(squad_names, ["alpha", "zeta"]);
+        assert!(rows[second_squad..elsewhere]
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Agent(a) if a.name == "notes-agent")));
+        assert!(rows[elsewhere..backlog]
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Agent(a) if a.name == "orphan-agent")));
+        assert!(rows[backlog..]
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Card(c) if c.id == "x-ready")));
+    }
+
+    #[test]
+    fn extended_table_preserves_lineage_depth_in_rendered_agent_names() {
+        let mut v = wide_view(vec![
+            lineage_row("parent", 4, None),
+            lineage_row("child", 5, Some("sid-parent")),
+        ]);
+        set_density(&mut v, Density::Extended);
+        let rendered = frame_text(&v.compose());
+        let child_line = rendered
+            .lines()
+            .find(|line| line.contains("child"))
+            .unwrap();
+        assert!(
+            child_line.contains("  child"),
+            "child keeps lineage indent: {child_line:?}"
+        );
+    }
+
+    #[test]
+    fn table_header_click_sets_one_column_and_toggles_direction() {
+        let mut v = wide_view(vec![agent_row(
+            "agent",
+            4,
+            Some(AgentBadge::Working),
+            false,
+        )]);
+        set_density(&mut v, Density::Extended);
+        let layout = TableLayout::fitting(v.panel_w() - 1).unwrap();
+        assert!(matches!(
+            v.chrome_hit(0, layout.agent.start),
+            Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
+        ));
+        v.set_agent_sort_column(AgentSortColumn::Agent);
+        assert_eq!(v.agent_sort.column, AgentSortColumn::Agent);
+        assert_eq!(v.agent_sort.direction, SortDirection::Ascending);
+        v.set_agent_sort_column(AgentSortColumn::Agent);
+        assert_eq!(v.agent_sort.direction, SortDirection::Descending);
     }
 
     // AC5-EDGE at startup: a persisted Extended restored onto a now-narrow
@@ -27612,49 +28738,10 @@ mod tests {
     // looked like a dead control exactly where the table is hardest to read.
     #[test]
     fn sort_label_survives_every_column_configuration() {
-        for cols in [
-            TableCols {
-                tail: true,
-                time: true,
-            },
-            TableCols {
-                tail: false,
-                time: true,
-            },
-            TableCols {
-                tail: false,
-                time: false,
-            },
-        ] {
-            let by_squad = table_head_text(cols, AgentSort::Squad);
-            let by_attention = table_head_text(cols, AgentSort::Attention);
-            assert_ne!(
-                by_squad, by_attention,
-                "{cols:?}: the header must change when the sort does"
-            );
-            // The header must FIT: anything past the panel width is painted away,
-            // which is how the label went missing in the first place.
-            let panel_text_w = match cols {
-                TableCols { tail: true, .. } => EXTENDED_PANEL_W - 1,
-                TableCols { time: true, .. } => COL_STATUS + COL_NAME + COL_PR + COL_TIME - 1,
-                _ => MIN_EXTENDED_PANEL_W - 1,
-            };
-            let squad_label = if cols.tail { "workspace" } else { "·wksp" };
-            for (label, head) in [(squad_label, &by_squad), ("att", &by_attention)] {
-                assert!(
-                    head.chars().count() <= panel_text_w as usize,
-                    "{cols:?}: header overflows {panel_text_w} cols: {head:?}"
-                );
-                // And the surviving text still names the order.
-                let visible: String = head.chars().take(panel_text_w as usize).collect();
-                assert!(
-                    visible.contains(label),
-                    "{cols:?}: {label:?} not visible in {visible:?}"
-                );
-            }
-            if !cols.tail {
-                assert!(by_squad.contains("agent ·wksp"), "{cols:?}: {by_squad:?}");
-            }
+        for text_w in [EXTENDED_PANEL_W - 1, MIN_EXTENDED_PANEL_W - 1] {
+            let layout = TableLayout::fitting(text_w).unwrap();
+            let head = table_head_text(layout, AgentSort::Squad);
+            assert_eq!(head.chars().map(glyph_cols).sum::<usize>(), text_w as usize);
         }
     }
 
@@ -27708,12 +28795,9 @@ mod tests {
         let mut wide_name = agent_row("☰☰☰ menu", 4, Some(AgentBadge::Working), false);
         wide_name.pr = Some(7);
         let plain = agent_row("ascii", 5, Some(AgentBadge::Working), false);
-        let cols = TableCols {
-            tail: true,
-            time: false,
-        };
-        let a = table_row_text(&wide_name, cols, 0);
-        let b = table_row_text(&plain, cols, 0);
+        let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
+        let a = table_row_text(&wide_name, layout, 0, 0);
+        let b = table_row_text(&plain, layout, 0, 0);
         let width = |s: &str| s.chars().map(glyph_cols).sum::<usize>();
         assert_eq!(
             width(&a),

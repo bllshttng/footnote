@@ -1234,7 +1234,10 @@ def refresh_usage_detailed(
         return UsageRefresh(None, "config-unreadable")
     if record is None:
         return UsageRefresh(None, "record-missing")
-    snapshot, reason = probe_usage_detail(record, now=now)
+    if repo_root is None:
+        snapshot, reason = probe_usage_detail(record, now=now)
+    else:
+        snapshot, reason = probe_usage_detail(record, now=now, repo_root=repo_root)
     if snapshot is None:
         return UsageRefresh(None, reason)
     # Persist, then report the SNAPSHOT regardless of how the write went.

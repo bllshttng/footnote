@@ -24,6 +24,7 @@ import datetime as _dt
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -363,6 +364,182 @@ def _safe_rollout_mtime(path: Path) -> float:
         return path.stat().st_mtime
     except OSError:
         return 0.0
+
+
+@dataclass(frozen=True)
+class RecoverableCodexRollout:
+    """One recent Codex rollout absent from the canonical registry snapshot."""
+
+    session_id: str
+    cwd: str
+    rollout_path: Path
+    mtime: float
+
+
+@dataclass(frozen=True)
+class CodexRecoveryScan:
+    """Strict recovery candidates plus evidence that the scan covered its inputs."""
+
+    recoverable: tuple[RecoverableCodexRollout, ...]
+    complete: bool
+    scanned_count: int
+    malformed_count: int
+    unreadable_count: int
+    failures: tuple[str, ...]
+
+
+def scan_recoverable_codex_rollouts(
+    cwd: Path,
+    recency_seconds: float,
+    *,
+    sessions_dir: Optional[Path] = None,
+    registry_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> CodexRecoveryScan:
+    """Return recent exact-cwd Codex rollouts missing from one registry snapshot.
+
+    Unlike live discovery, this scanner never collapses damaged evidence into a
+    clean zero. Readable candidates remain available on an incomplete result so
+    dry output can identify them, while a writing caller can refuse the batch.
+    """
+    from fno.agents.registry import RegistryVersionError, load_registry
+
+    root = sessions_dir if sessions_dir is not None else default_codex_sessions_dir()
+    target_cwd = str(cwd)
+    cutoff = (now if now is not None else time.time()) - recency_seconds
+    failures: list[str] = []
+    malformed_count = 0
+    unreadable_count = 0
+
+    registered_ids: set[str] = set()
+    try:
+        entries = load_registry(registry_path)
+    except (OSError, RegistryVersionError) as exc:
+        registry = registry_path if registry_path is not None else paths.agents_registry_path()
+        failures.append(f"registry load failed: {registry}: {exc}")
+    else:
+        if getattr(entries, "complete", True) is not True:
+            registry = registry_path if registry_path is not None else paths.agents_registry_path()
+            failures.append(f"registry load incomplete: {registry}")
+        registered_ids = {
+            entry.harness_session_id
+            for entry in entries
+            if entry.harness == "codex"
+            and isinstance(entry.harness_session_id, str)
+            and entry.harness_session_id
+        }
+
+    try:
+        root_mode = root.stat().st_mode
+    except OSError:
+        failures.append(f"sessions root unreadable: {root}")
+        unreadable_count += 1
+        return CodexRecoveryScan(
+            recoverable=(),
+            complete=False,
+            scanned_count=0,
+            malformed_count=malformed_count,
+            unreadable_count=unreadable_count,
+            failures=tuple(failures),
+        )
+    if not stat.S_ISDIR(root_mode):
+        failures.append(f"sessions root unreadable: {root}")
+        unreadable_count += 1
+        return CodexRecoveryScan(
+            recoverable=(),
+            complete=False,
+            scanned_count=0,
+            malformed_count=malformed_count,
+            unreadable_count=unreadable_count,
+            failures=tuple(failures),
+        )
+
+    try:
+        rollout_paths = list(root.rglob("rollout-*.jsonl"))
+    except OSError as exc:
+        failures.append(f"sessions root enumeration failed: {root}: {exc}")
+        unreadable_count += 1
+        return CodexRecoveryScan(
+            recoverable=(),
+            complete=False,
+            scanned_count=0,
+            malformed_count=malformed_count,
+            unreadable_count=unreadable_count,
+            failures=tuple(failures),
+        )
+
+    dated: list[tuple[float, Path]] = []
+    for rollout_path in rollout_paths:
+        try:
+            mtime = rollout_path.stat().st_mtime
+        except OSError as exc:
+            failures.append(f"rollout stat failed: {rollout_path}: {exc}")
+            unreadable_count += 1
+            continue
+        if mtime >= cutoff:
+            dated.append((mtime, rollout_path))
+
+    recoverable: list[RecoverableCodexRollout] = []
+    seen: set[str] = set()
+    for mtime, rollout_path in sorted(dated, key=lambda item: item[0], reverse=True):
+        try:
+            with open(rollout_path, encoding="utf-8") as fh:
+                first_line = fh.readline()
+        except UnicodeDecodeError as exc:
+            failures.append(f"rollout decode failed: {rollout_path}: {exc}")
+            malformed_count += 1
+            continue
+        except OSError as exc:
+            failures.append(f"rollout read failed: {rollout_path}: {exc}")
+            unreadable_count += 1
+            continue
+        try:
+            record = json.loads(first_line)
+        except ValueError as exc:
+            failures.append(f"rollout JSON failed: {rollout_path}: {exc}")
+            malformed_count += 1
+            continue
+        if not isinstance(record, dict) or record.get("type") != "session_meta":
+            failures.append(f"rollout schema failed: {rollout_path}: missing session_meta")
+            malformed_count += 1
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            failures.append(f"rollout schema failed: {rollout_path}: payload is not an object")
+            malformed_count += 1
+            continue
+        session_id = payload.get("id")
+        rollout_cwd = payload.get("cwd")
+        if not isinstance(session_id, str) or not session_id:
+            failures.append(f"rollout schema failed: {rollout_path}: id is not a string")
+            malformed_count += 1
+            continue
+        if not isinstance(rollout_cwd, str):
+            failures.append(f"rollout schema failed: {rollout_path}: cwd is not a string")
+            malformed_count += 1
+            continue
+        if session_id in seen:
+            continue
+        seen.add(session_id)
+        if rollout_cwd != target_cwd or session_id in registered_ids:
+            continue
+        recoverable.append(
+            RecoverableCodexRollout(
+                session_id=session_id,
+                cwd=rollout_cwd,
+                rollout_path=rollout_path,
+                mtime=mtime,
+            )
+        )
+
+    return CodexRecoveryScan(
+        recoverable=tuple(recoverable),
+        complete=not failures,
+        scanned_count=len(rollout_paths),
+        malformed_count=malformed_count,
+        unreadable_count=unreadable_count,
+        failures=tuple(failures),
+    )
 
 
 def _discover_from_codex(
@@ -1414,6 +1591,23 @@ def _default_alias(project: Optional[str], short_id: str) -> str:
     return f"project-{alias}" if LEGACY_HANDLE_RE.fullmatch(alias) else alias
 
 
+def _fit_sid_alias(candidate: str, sid: str) -> str:
+    """Shorten ``candidate`` from the head so it fits the stored-alias cap.
+
+    Both disambiguation rungs end in ``-{sid}``, so cutting the leading stem
+    keeps the session id tail - the uniqueness carrier - intact. Two chars of
+    headroom are reserved for a numbered rung; a stem long enough to need the
+    cut would otherwise regrow past the cap the moment the exhausted fallback
+    appended ``-2``, and the persistence pass would re-discard the result on
+    every pass after that.
+    """
+    if len(candidate) + 2 <= _MAX_STORED_ALIAS_LEN:
+        return candidate
+    keep = max(_MAX_STORED_ALIAS_LEN - 2 - len(sid) - 1, 0)
+    head = candidate[: len(candidate) - len(sid) - 1]
+    return f"{head[:keep]}-{sid}"
+
+
 def _load_name_map(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1513,47 +1707,55 @@ def _resolve_aliases(live: list[dict], name_map_path: Path) -> dict[str, str]:
 def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
     """Guarantee aliases are unique within a render (Invariant).
 
-    The loser of a collision gets a suffix appended deterministically (sorted by
+    The loser of a collision is rebuilt deterministically (sorted by
     session_id, never silently dropped).
 
-    The suffix is TRIED, not trusted. This used to append ``short_id``
-    unconditionally on the reasoning that default aliases embed a unique hex -
-    but ``short_id`` is only unique when whatever wrote it honored that, and
-    when it did not, the appended token was the SAME string for every colliding
-    session. The name then still collided, gained another copy on the next
-    render, and grew without bound: observed at 13 repetitions of one 16-char
-    token in a 224-char alias, on 20 of 194 entries. The guard meant to catch a
-    non-unique short_id was the thing amplifying it.
-
-    So each candidate is checked before it is accepted, ending at the full
-    session id, which is the map's own key and therefore unique by
-    construction. A non-unique ``short_id`` upstream is still a bug; this only
-    stops it from compounding here.
+    Every candidate embeds the full session id - the map's own key, unique by
+    construction - because the shorter rungs of the old ladder were the bug.
+    ``short_id`` and ``canonical_handle`` are both head-8 material, and a
+    default alias already carries the short_id: appending it produced
+    ``fno-01a034f3-01a034f3``, which the persistence pass classifies as
+    accretion damage, discards with a user-visible warning, and regenerates
+    into the same shape - a heal loop firing on every mail send and peek, not
+    bounded growth. So a colliding default is rebuilt as
+    ``<basename>-<full session id>`` from scratch rather than stacked on the
+    colliding name, a duplicate hand-edited stem keeps the stem and gains the
+    full session id, and every candidate is checked against ``_is_accreted``
+    before it is accepted: this function must never emit a name the next pass
+    will discard.
     """
     seen: set[str] = set()
-    short_by_sid = {r["session_id"]: r["short_id"] for r in live}
+    row_by_sid = {r["session_id"]: r for r in live}
     out: dict[str, str] = {}
     for sid in sorted(aliases):
         name = aliases[sid]
         if name in seen:
-            for suffix in (short_by_sid.get(sid), canonical_handle(sid), sid):
-                if not suffix:
-                    continue
-                candidate = f"{name}-{suffix}"
-                if candidate not in seen:
-                    name = candidate
-                    break
+            row = row_by_sid.get(sid) or {}
+            project = row.get("project")
+            candidates: list[str] = []
+            if name == _default_alias(project, row.get("short_id") or ""):
+                candidates.append(_fit_sid_alias(_default_alias(project, sid), sid))
+            candidates.append(_fit_sid_alias(f"{name}-{sid}", sid))
+            rebuilt = next(
+                (c for c in candidates if c not in seen and not _is_accreted(c)),
+                None,
+            )
+            if rebuilt is not None:
+                name = rebuilt
             else:
                 # Every candidate taken. Only a hand-edited map aliasing another
                 # session to exactly `<name>-<sid>` gets here, but falling
                 # through would emit a DUPLICATE - the one thing this function
                 # promises not to do, and a duplicate alias resolves to two
                 # holders on the send path. Counting terminates because `seen`
-                # is finite.
+                # is finite; the candidates are pre-fit to the stored cap, so
+                # the numbered rung stays inside it too. The accreted check is
+                # deliberately NOT applied here: an adjacency hit among fixed
+                # candidate tokens would not resolve as n increments.
                 n = 2
-                while f"{name}-{sid}-{n}" in seen:
+                while f"{candidates[-1]}-{n}" in seen:
                     n += 1
-                name = f"{name}-{sid}-{n}"
+                name = f"{candidates[-1]}-{n}"
         out[sid] = name
         seen.add(name)
     return out

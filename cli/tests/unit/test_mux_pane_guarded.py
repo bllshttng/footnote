@@ -248,7 +248,64 @@ def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
     monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
     _install_fake_run(monkeypatch, [0, 0, 0, 0])
 
-    assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
+    failure: list[str] = []
+    assert (
+        dispatch._mux_pane_send(
+            _entry(), "hi", guarded=False, confirm=True, failure_out=failure
+        )
+        is False
+    )
+    assert failure == ["unconfirmed"]
+
+
+def test_mail_delivery_timeout_after_paste_does_not_retry(monkeypatch):
+    calls = _install_fake_run(monkeypatch, [])
+
+    def _timeout(argv, **_kwargs):
+        calls.append(list(argv))
+        if "--stdin" in argv:
+            raise dispatch.subprocess.TimeoutExpired(argv, 20)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _timeout)
+    failure: list[str] = []
+
+    assert (
+        dispatch._mux_pane_send(
+            _entry(), "hi", guarded=False, raw=True, failure_out=failure
+        )
+        is False
+    )
+    assert failure == ["unconfirmed"]
+    assert sum("--stdin" in call for call in calls) == 1
+
+
+def test_mail_delivery_claim_timeout_releases_and_does_not_type(monkeypatch):
+    calls: list[list[str]] = []
+    claim_attempts = 0
+
+    def _timeout(argv, **_kwargs):
+        nonlocal claim_attempts
+        calls.append(list(argv))
+        if argv[3] == "claim":
+            claim_attempts += 1
+            if claim_attempts > 1:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            raise dispatch.subprocess.TimeoutExpired(argv, 20)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _timeout)
+    failure: list[str] = []
+
+    assert (
+        dispatch._mux_pane_send(
+            _entry(), "hi", guarded=False, raw=True, failure_out=failure
+        )
+        is False
+    )
+    assert failure == ["pre-submit"]
+    mux_verbs = [call[3] for call in calls if len(call) > 3 and call[1:3] == ["mux", "pane"]]
+    assert mux_verbs == ["claim", "claim", "release"]
 
 
 def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
@@ -259,6 +316,60 @@ def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
     _install_fake_run(monkeypatch, [0, 0, 0, 0])
 
     assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
+
+
+def test_mail_delivery_refuses_when_pane_ls_names_a_different_occupant(monkeypatch):
+    entry = _entry(session_id="addressed-id")
+    entry.name = "addressed"
+    calls: list[list[str]] = []
+
+    def _run(argv, **_kwargs):
+        calls.append(list(argv))
+        if argv[1:4] == ["mux", "pane", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{
+                    "pane_id": 3,
+                    "name": "different",
+                    "fno_id": "different-id",
+                }]),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _run)
+    assert dispatch._mux_pane_send(entry, "hi", guarded=False, raw=True) is False
+    assert [call[3] for call in calls if len(call) > 3 and call[1:3] == ["mux", "pane"]] == ["ls"]
+
+
+def test_mail_delivery_uses_fno_id_for_sessionless_harness(monkeypatch):
+    entry = _entry(session_id=None)
+    entry.name = "addressed"
+    entry.fno_id = "addressed-id"
+    calls: list[list[str]] = []
+
+    def _run(argv, **_kwargs):
+        calls.append(list(argv))
+        if argv[1:4] == ["mux", "pane", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{
+                    "pane_id": 3,
+                    "name": "addressed",
+                    "fno_id": "addressed-id",
+                }]),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _run)
+    assert dispatch._mux_pane_send(entry, "hi", guarded=False, raw=True) is True
+    sends = [call for call in calls if len(call) > 3 and call[1:3] == ["mux", "pane"] and call[3] == "send"]
+    assert sends
+    assert all(
+        "--fno-id" in call and call[call.index("--fno-id") + 1] == "addressed-id"
+        for call in sends
+    )
 
 
 @pytest.mark.parametrize("harness", ["gemini", "opencode"])

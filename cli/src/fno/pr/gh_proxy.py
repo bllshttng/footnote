@@ -34,29 +34,8 @@ class Action(str, Enum):
     BROKER = "broker"
 
 
-def command_args(args: Sequence[str]) -> list[str]:
-    """Drop gh-wide options so equivalent command spellings share one policy."""
-    def strip(tokens: list[str]) -> list[str]:
-        while tokens:
-            token = tokens[0]
-            if token in {"-R", "--repo", "--hostname"}:
-                if len(tokens) < 2:
-                    return []
-                tokens = tokens[2:]
-            elif (
-                (token.startswith("-R") and token != "-R")
-                or token.startswith("--repo=")
-                or token.startswith("--hostname=")
-            ):
-                tokens = tokens[1:]
-            else:
-                break
-        return tokens
-
-    normalized = strip(list(args))
-    if normalized[:1] == ["pr"]:
-        normalized = ["pr", *strip(normalized[1:])]
-    return normalized
+# Shared with the broker's argv guard so both judge the same command word.
+command_args = _quota.command_args
 
 
 def classify(args: Sequence[str]) -> Action:

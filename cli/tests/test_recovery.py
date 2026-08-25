@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from fno import recovery
+from fno.events import validate
 
 
 def _now() -> datetime:
@@ -776,6 +777,12 @@ class TestFailoverSweep:
         # positive finding before anything acts on it.
         assert h.event_types() == ["worker_refused", "failover_swapped"]
         assert h.events[1][1]["redispatched"] is True   # honest: worker started
+        validate({
+            "ts": "2026-06-29T20:00:00Z",
+            "type": "failover_swapped",
+            "source": "daemon",
+            "data": h.events[1][1],
+        })
 
     def test_rotated_no_worker_emits_swapped_then_held(self, tmp_path):
         # codex P1: the swap rotated the provider but no replacement worker

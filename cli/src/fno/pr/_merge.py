@@ -111,10 +111,45 @@ def _load_auto_merge():
     return load_settings().auto_merge
 
 
+# A checkout's toplevel never moves within a process, so the rev-parse
+# answer memoizes forever. This is what keeps the floor predicate off the
+# per-fire subprocess path without ever keying a VERDICT on file metadata
+# (the deleted mtime-keyed floor cache; see git history).
+_REPO_ROOT_CACHE: dict[str, str] = {}
+
+
 def _repo_state_dir(cwd: str) -> str:
-    res = _git(["rev-parse", "--show-toplevel"], cwd)
-    root = res.stdout.strip() if res.ok and res.stdout.strip() else cwd
+    root = _REPO_ROOT_CACHE.get(cwd)
+    if root is None:
+        res = _git(["rev-parse", "--show-toplevel"], cwd)
+        root = res.stdout.strip() if res.ok and res.stdout.strip() else cwd
+        _REPO_ROOT_CACHE[cwd] = root
     return os.path.join(root, ".fno")
+
+
+def _closes_quoted_scalar(raw: str) -> bool:
+    """Whether the text after ``key:`` ends its quoted scalar on this line.
+
+    Mirrors ``line_closes_quoted_scalar`` in client_verbs.rs: a trailing
+    quote with no preceding backslash closes, because init prepends exactly
+    one backslash to every user quote.
+    """
+    if not raw.endswith('"'):
+        return False
+    return not raw[:-1].endswith("\\")
+
+
+def _approved_true(value: Optional[str]) -> bool:
+    """The truthy spellings this verb accepts for ``auto_merge_approved``.
+    One helper, not a re-typed literal per read inside ``run_merge``. The
+    posture predicate is mirrored, not shared: ``finalize.rs`` accepts only
+    the literal ``true`` and the git-protection hook carries its own copy of
+    this set (a standalone script cannot import it). Init never writes
+    another spelling, so the wider set here is tolerance for hand-edited
+    manifests, and any widening must be replicated in all three or the gates
+    split on exactly that spelling.
+    """
+    return value is not None and value.strip().lower() in ("true", "yes", "1")
 
 
 def _read_state_field(state_file: str, field: str) -> str:
@@ -122,19 +157,44 @@ def _read_state_field(state_file: str, field: str) -> str:
 
     Strips only a MATCHED surrounding quote pair (not a naive unbalanced
     strip that could mangle a value starting/ending with a quote; gemini on
-    PR #524).
+    PR #524). Lines inside a multi-line quoted scalar are VALUE, not fields:
+    a target description containing a `harness:` line must not read as the
+    run's harness - the forgery parse_manifest_identity in client_verbs.rs
+    already guards on the Rust side.
     """
     try:
         with open(state_file, "r", encoding="utf-8") as fh:
+            in_scalar = False
             for ln in fh:
-                if ln.startswith(field + ":"):
-                    val = ln[len(field) + 1:].strip()
-                    if len(val) >= 2 and (
-                        (val[0] == '"' and val[-1] == '"')
-                        or (val[0] == "'" and val[-1] == "'")
+                untrusted = in_scalar
+                if in_scalar and _closes_quoted_scalar(ln.strip()):
+                    in_scalar = False
+                if untrusted:
+                    continue
+                if not ln.startswith(field + ":"):
+                    # Any key opening an unclosed quote starts a multi-line
+                    # scalar; its body lines are not fields. Like the Rust
+                    # scan, blank, comment, and marker lines never open one,
+                    # and a lone opening quote is not its own terminator
+                    # (the len >= 2 guard, so `input: "` opens the scalar).
+                    _k, sep, raw = ln.partition(":")
+                    raw = raw.strip()
+                    if (
+                        sep
+                        and not ln.startswith("#")
+                        and ln.strip() != "---"
+                        and raw.startswith('"')
+                        and not (len(raw) >= 2 and _closes_quoted_scalar(raw))
                     ):
-                        return val[1:-1]
-                    return val
+                        in_scalar = True
+                    continue
+                val = ln[len(field) + 1:].strip()
+                if len(val) >= 2 and (
+                    (val[0] == '"' and val[-1] == '"')
+                    or (val[0] == "'" and val[-1] == "'")
+                ):
+                    return val[1:-1]
+                return val
     except OSError:
         pass
     return ""
@@ -438,6 +498,18 @@ def _is_documentation_path(path: str) -> bool:
     return p.endswith(".md") or p.startswith("docs/")
 
 
+# Short-lived memo for the PR files probe: the floored lane predicate runs on
+# every status/merge fire, and `gh pr view --json files` spends the per-USER
+# GraphQL quota this repo is documented to be sensitive to. A file list cannot
+# change within one PR head, and 120s bounds staleness across pushes. Every
+# CLI invocation is a fresh process, so the window only opens in a long-lived
+# in-process surface (MCP): such a caller that classifies a docs-only head and
+# then sees code pushed must evict or wait out the TTL before merging. Move to
+# a head-keyed cache if a long-lived surface ever needs cross-push exactness.
+_PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
+_PAYLOAD_CACHE_TTL = 120.0
+_CACHE_BOUND = 256
+
 def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     """Whether the PR's diff carries a code payload.
 
@@ -447,7 +519,22 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     surfaced) is not code: nothing to review, no gate."""
     if not shutil.which("gh"):
         return True
-    names = _pr_file_paths(pr_number, repo)
+    key = (repo, pr_number)
+    now = time.monotonic()
+    hit = _PAYLOAD_CACHE.get(key)
+    if hit is not None and now - hit[0] < _PAYLOAD_CACHE_TTL:
+        names = hit[1]
+    else:
+        names = _pr_file_paths(pr_number, repo)
+        if names is None or any(not _is_documentation_path(p) for p in names):
+            # Only a CODE answer (or a failed read, which fails closed to
+            # code) memoizes: the cached key is (repo, pr), not the head, so
+            # a cached docs-only answer could suppress the floor for up to
+            # the TTL after new code lands on the PR. A stale code answer
+            # only demands a review that a fresh read would also demand.
+            if len(_PAYLOAD_CACHE) >= _CACHE_BOUND:
+                _PAYLOAD_CACHE.pop(next(iter(_PAYLOAD_CACHE)))
+            _PAYLOAD_CACHE[key] = (now, names)
     if names is None:
         return True
     if not names:
@@ -455,16 +542,95 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     return any(not _is_documentation_path(p) for p in names)
 
 
-def _harness_can_self_review() -> bool:
-    """Mirror loop-check's floor boundary for the ambient harness."""
+def _manifest_harness(repo: str) -> Optional[str]:
+    """The harness stamped on this run's target manifest, or None.
+
+    `fno do target init` writes it from the process-tree identity resolver, so
+    it names the run being judged even when the merging process carries
+    inherited foreign markers. Reads through _read_state_field (one manifest
+    parser per file); the explicit `unknown` sentinel resolves to None, never
+    to a harness name."""
+    from pathlib import Path
+
+    try:
+        manifest = Path(_repo_state_dir(repo)) / "target-state.md"
+    except Exception:  # noqa: BLE001 - an unreadable manifest is no attribution
+        return None
+    value = _read_state_field(str(manifest), "harness").strip()
+    if not value or value.lower() in {"unknown", "none"}:
+        return None
+    return value.lower()
+
+
+def _ambient_harness() -> Optional[str]:
+    """The single-family ambient harness, or None (absent or ambiguous).
+
+    Ambient markers describe the process ASKING, never the run being judged,
+    so this is only a FALLBACK input to the floor - the manifest names the
+    run, and where it speaks the ambient answer is not consulted."""
     from fno.harness_identity import present_harness_markers
-    from fno.review_capability import harness_can_self_review
 
     families = {harness for _marker, harness, _value in present_harness_markers()}
-    return len(families) == 1 and harness_can_self_review(next(iter(families)))
+    return next(iter(families)) if len(families) == 1 else None
 
 
-def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
+def _harness_can_self_review(repo: str) -> bool:
+    """Whether the self-review floor engages for this run (x-129b).
+
+    The run's harness decides, alone: the target manifest's `harness:` field
+    when it carries one, else the single-family ambient resolve (the merging
+    caller is usually the authoring session). One input, not a vote - the
+    stop gate reads the authoring session's harness, init stamps that same
+    answer onto the manifest, and OR-ing a second input here is how the two
+    gates come to disagree on one PR. A harness with a native self-review
+    verb floors; a KNOWN verbless harness (gemini/agy) does not - but only
+    when the ambient read agrees on that family, because the manifest alone
+    cannot vouch for the PR being merged and the floor would otherwise
+    demand an attestation no native verb there produces.
+    Unattributable - no manifest, ambiguous or absent markers, or an
+    unrecognized spelling - floors: ambiguity about who authored the change
+    is not permission to skip its review. The pre-x-129b shape read ONLY
+    ambient markers and treated multi-family ambiguity as 'no floor', which
+    silently disengaged review on any claude session started from a codex
+    shell. Mirrors self_review_floor_applies in loopcheck.rs: the two gates
+    agree wherever both read the same run. One residual divergence is
+    deliberate and safe - a stale VERBFUL manifest floors a merge performed
+    by a verbless session whose own stop gate would not floor, because the
+    manifest names the run the PR belongs to; that direction only demands a
+    review, never drops one."""
+    from fno.harness_names import KNOWN_HARNESSES
+    from fno.review_capability import harness_can_self_review
+
+    harness = _manifest_harness(repo)
+    ambient = _ambient_harness()
+    if harness is None:
+        harness = ambient
+    if harness is None:
+        applies = True
+    elif harness_can_self_review(harness):
+        applies = True
+    else:
+        # A KNOWN verbless harness releases the floor only when the ambient
+        # read AGREES on the same verbless family. The manifest is an
+        # init-time snapshot that outlives its session and belongs to
+        # whichever root the merging process stands in, so it cannot release
+        # alone: a dead run's `harness: gemini` must not disengage the floor
+        # for an unrelated PR merged from that checkout by a bare or poisoned
+        # shell. An absent, ambiguous, contradicting, or verbful ambient is
+        # not agreement - floor. The safe disagreement costs one review, the
+        # unsafe one costs the review.
+        verbless = {h for h in KNOWN_HARNESSES if not harness_can_self_review(h)}
+        if harness not in verbless:
+            # An unrecognized spelling is still an unattributed run: floors.
+            applies = True
+        else:
+            applies = ambient != harness
+    return applies
+
+
+def _review_lane_configured(
+    repo: str, pr_number: int = 0, *, code_payload: bool = False
+) -> bool:
     """Whether review is required for this PR: a configured lane, OR a code
     payload on a stock install (the self-review floor).
 
@@ -480,7 +646,20 @@ def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
     merge gate and the loop-check gate agree on whether a lane exists for one
     PR - otherwise the loop ships DonePRGreen (no lane) while merge refuses as
     unreviewed (lane), wedging the pipeline on the same config.
+
+    code_payload=True answers a HYPOTHETICAL code payload (no PR to probe, no
+    pr_number): the doctor pair check (x-0888) asks this gate whether auto_merge
+    is armed with zero lanes, instead of a second lane implementation that can
+    drift from this one. The lane logic is untouched, so the loopcheck.rs
+    mirror still holds; the stop gate always has a real PR and never passes it.
     """
+    # Outside the try on purpose: this is caller misuse, not a degraded read,
+    # and the try's fail-closed True would misread it as "review required".
+    if code_payload and pr_number:
+        raise ValueError(
+            "code_payload=True answers a hypothetical payload; pass it with "
+            "no pr_number, or probe a real PR with code_payload=False"
+        )
     try:
         from pathlib import Path
 
@@ -504,12 +683,13 @@ def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
         # No configured lane: a code payload still requires review (the
         # self-review floor), unless the install opted out with
         # config.review.self_review_required = false. Mirrors the loop-check
-        # floor so the merge gate and the stop gate cannot disagree.
+        # floor so a stock install cannot merge a code PR the stop gate
+        # would have demanded review for.
         if (
             getattr(r, "self_review_required", True)
-            and pr_number
-            and _harness_can_self_review()
-            and _pr_payload_is_code(repo, pr_number)
+            and (pr_number or code_payload)
+            and _harness_can_self_review(repo)
+            and (code_payload or _pr_payload_is_code(repo, pr_number))
         ):
             return True
         return False
@@ -547,7 +727,7 @@ def _code_review_attestation_required(repo: str, pr_number: int = 0) -> bool:
             not lane_configured
             and getattr(review, "self_review_required", True)
             and pr_number
-            and _harness_can_self_review()
+            and _harness_can_self_review(repo)
             and _pr_payload_is_code(repo, pr_number)
         )
     except Exception:
@@ -1485,48 +1665,86 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         )
         return 2
 
-    # (1) Short-circuit if auto-merge is disabled. The who-may-merge gate
+    # (1) One authoritative posture (x-3855, x-01b9), resolved in the same
+    # order init folds it: granted = (live `auto_merge.enabled` OR an explicit
+    # per-run env grant) AND NOT a per-run refusal. The who-may-merge gate
     # (--invoker + allowed_invokers) was removed (x-04ab): auto-merge is gated
-    # by `enabled` plus the CI-green / external-review / stub-manifest guards.
+    # by posture plus the CI-green / external-review / stub-manifest guards.
+    #
+    # The manifest's `auto_merge_approved` is init's fold of the documented
+    # chain (hooks/helpers/init-target-state.sh, references/auto-merge.md). A
+    # `false` is a per-run REFUSAL (--no-merge, the `/target bg` injected
+    # default via harness_map._AUTONOMOUS_COMMAND, TARGET_NO_MERGE) and
+    # outranks every grant: without this the sanctioned verb is a WEAKER gate
+    # than raw `gh pr merge`, which the git-protection hook already guards on
+    # this same field. A `true` with `auto_merge_source: env-target-auto-merge`
+    # is an explicit per-run GRANT (TARGET_AUTO_MERGE=1 at spawn) that
+    # satisfies the standing arm on its own - the sanctioned path the docs
+    # promise and that a config-first order made unreachable: consulting
+    # `enabled` before the manifest let the config leaf refuse a run init had
+    # granted (x-01b9: two workers read this seam the same night).
+    #
+    # `enabled` is still re-read LIVE, so a manifest whose `true` merely
+    # mirrored config (source: config) does not outlive an operator flipping
+    # the switch off mid-flight (x-2270: the manifest is a snapshot; the live
+    # switch wins). Absent manifest or absent field -> live config decides: a
+    # manual `fno do pr merge` outside a target session is legitimate and must
+    # not start refusing. TARGET_AUTO_MERGE is never read HERE - a grant is
+    # folded at spawn where it is attributable, never exported on a merge
+    # command line by the very worker that wants the merge.
+    #
+    # Every refusal names the sanctioned override in its own text (x-3855): a
+    # refusal that closes a door without pointing at the key is the one that
+    # had two workers improvising config mutations inside sixty seconds.
     auto_merge = _load_auto_merge()
-    if not auto_merge.enabled:
-        _emit(
-            pr_number,
-            "skipped",
-            "auto_merge disabled",
-            "none",
-            err=False,
-        )
-        return 2
-
-    # (1b) Honor THIS run's resolved decision, not just the project policy.
-    # `auto_merge.enabled` is standing policy; the manifest's
-    # `auto_merge_approved` is what init resolved after folding in the per-run
-    # modifiers, and a per-run `no-merge` (which `/target bg` injects by
-    # default, via harness_map._AUTONOMOUS_COMMAND) sets it false while
-    # `enabled` stays true. That fold is one-directional by design: the
-    # `auto-merge` token grants nothing on its own. Without this the
-    # sanctioned verb is a WEAKER gate than raw `gh pr merge`, which the
-    # git-protection hook already guards on this same field.
-    # Absent manifest or absent field -> proceed: a manual `fno do pr merge`
-    # outside a target session is legitimate and must not start refusing.
-    approved = _read_state_field(
-        os.path.join(_repo_state_dir(repo), "target-state.md"),
-        "auto_merge_approved",
-    )
-    if approved and approved.strip().lower() not in ("true", "yes", "1"):
+    state_file = os.path.join(_repo_state_dir(repo), "target-state.md")
+    approved = _read_state_field(state_file, "auto_merge_approved")
+    if approved and not _approved_true(approved):
         # Name WHICH input set the posture (x-9d11): the operator's first
         # question on this refusal is "what layer said no". A pre-provenance
         # manifest carries no source; that reads as unknown, never a guess.
-        source = (_read_state_field(
-            os.path.join(_repo_state_dir(repo), "target-state.md"),
-            "auto_merge_source",
-        ) or "").strip() or "unknown (pre-provenance manifest)"
+        # The override names levers that exist for the source it names: a
+        # flag-no-merge run was refused by its dispatcher (the `/target bg`
+        # default), not by anything typed by hand, so "without --no-merge"
+        # alone would point at a door that is not there.
+        source = (
+            _read_state_field(state_file, "auto_merge_source") or ""
+        ).strip() or "unknown (pre-provenance manifest)"
         _emit(
             pr_number,
             "skipped",
             f"per-run no-merge (manifest auto_merge_approved is not true; "
-            f"auto_merge_source: {source})",
+            f"auto_merge_source: {source}); sanctioned override: an "
+            "out-of-band merge by the operator (any such merge satisfies "
+            "done()), or re-arm the run's dispatch (attended and without "
+            "--no-merge, or auto_merge.grant = dispatch); on a repo whose "
+            "standing switch is off, that alone is not enough - arm "
+            "auto_merge.enabled or spawn with TARGET_AUTO_MERGE=1 (the "
+            "config refusal names those levers)",
+            "none",
+            err=False,
+        )
+        return 2
+    if not auto_merge.enabled and not (
+        _approved_true(approved)
+        and (_read_state_field(state_file, "auto_merge_source") or "").strip()
+        == "env-target-auto-merge"
+    ):
+        # "resolves enabled=false", not "is set false": the same refusal fires
+        # on a stock install with no key and on a malformed block degraded to
+        # defaults, and prescribing `config set true` against a parse error
+        # masks it. The named levers are the OPERATOR's; a worker reading this
+        # escalates rather than pulling either one (skills/pr hard rule).
+        _emit(
+            pr_number,
+            "skipped",
+            "auto_merge disabled (live config resolves auto_merge.enabled="
+            "false); sanctioned override (operator levers): `fno config set "
+            "auto_merge.enabled true`, or start the run with "
+            "TARGET_AUTO_MERGE=1 from the operator's shell. The env grant "
+            "is folded into the manifest at init - mesh-spawned and "
+            "unattended runs scrub it, it is never a merge-time variable, "
+            "and never a synthesized config",
             "none",
             err=False,
         )
@@ -1750,9 +1968,14 @@ def _checks_verdict(
     rollup = data.get("statusCheckRollup") or []
     ignored = set(ignore_contexts)
     if ignored:
-        # StatusContexts use `context`; CheckRuns use `name`. Keep those
-        # namespaces distinct so a same-named real check is never discarded.
-        rollup = [entry for entry in rollup if entry.get("context") not in ignored]
+        # The shared filter, parameterized on the ignore set - one spelling of
+        # the both-keys drop (StatusContexts use `context`, CheckRuns use
+        # `name`, and an internal-gh rollup spells a status row's name as its
+        # context), never a second inline copy that drifts from every other
+        # surface's generic-CI read.
+        from fno.pr._status import without_coverage_statuses
+
+        rollup = without_coverage_statuses(rollup, contexts=ignored)
     # Whole-rollup semantics: with require_checks_pass, every check must pass.
     # A required-vs-optional split would need branch-protection context that
     # `gh pr view` does not expose - its statusCheckRollup entries carry no
@@ -1831,7 +2054,15 @@ def _do_merge(
                 from fno.pr import _coverage_gate, _reviews
 
                 if gate_verdict[0] == _coverage_gate.COVERED:
-                    ignore_contexts = (_reviews.COVERAGE_STATUS_CONTEXT,)
+                    # Both coverage contexts are THIS merge's own projections,
+                    # not generic CI: the required context (covered verdict)
+                    # and the diagnostic (an unknown-read stamp that says
+                    # "retry the review verb", not "wait"). Ignoring only the
+                    # required one let a pending diagnostic hold a covered,
+                    # CI-green merge, and the clearing publish runs after this
+                    # verdict, so a bare retry held again. One shared
+                    # collection, not a third spelling of the filter.
+                    ignore_contexts = tuple(_reviews.COVERAGE_STATUS_CONTEXTS)
             verdict, counts, head_read = _checks_verdict(
                 pr_number, repo, ignore_contexts=ignore_contexts
             )

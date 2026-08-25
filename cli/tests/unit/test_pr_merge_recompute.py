@@ -57,8 +57,10 @@ def _stub_recompute(
         return True, why
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake)
+    # Hermetic: the describes-test is the one seam (no ancestry arm exists
+    # anymore); stub it so no real git/gh runs.
     monkeypatch.setattr(
-        _reviews, "_reviewed_sha_is_ancestor", lambda *args: ancestor
+        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: ancestor
     )
     # Route the gate through the REAL read (the `enabled` fixture's covered
     # stub would bypass the recompute entirely): the only seam is the verb.

@@ -305,6 +305,69 @@ def test_cell4_failed_wake_demotes_durably_with_lane_receipt(
     assert _drain_as(runner, monkeypatch, ASLEEP_SID), "durable copy is not drainable"
 
 
+def test_cell3_live_pane_miss_retries_once_and_names_both_attempts(monkeypatch):
+    from types import SimpleNamespace
+
+    import fno.agents.dispatch as dispatch_mod
+
+    entry = SimpleNamespace(
+        name="worker",
+        harness="claude",
+        mux={"session": "main", "pane_id": 7},
+        exited=False,
+    )
+    attempts: list[int] = []
+    reasons: list[str] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_mux_pane_send",
+        lambda *_args, **kwargs: (
+            attempts.append(1),
+            kwargs["failure_out"].append("pre-submit"),
+            False,
+        )[-1],
+    )
+
+    assert dispatch_mod._deliver_live(
+        entry,
+        "hi",
+        "sender",
+        reason_out=reasons,
+    ) is False
+    assert len(attempts) == 2
+    assert reasons == [
+        "mux-send-failed-attempt-1:pre-submit",
+        "mux-send-failed-attempt-2:pre-submit",
+    ]
+
+
+def test_cell3_unconfirmed_mux_failure_does_not_retry(monkeypatch):
+    from types import SimpleNamespace
+
+    import fno.agents.dispatch as dispatch_mod
+
+    entry = SimpleNamespace(
+        name="worker",
+        harness="claude",
+        mux={"session": "main", "pane_id": 7},
+        exited=False,
+    )
+    attempts: list[int] = []
+    reasons: list[str] = []
+
+    def _unconfirmed(*_args, **kwargs):
+        attempts.append(1)
+        kwargs["failure_out"].append("unconfirmed")
+        return False
+
+    monkeypatch.setattr(dispatch_mod, "_mux_pane_send", _unconfirmed)
+    assert dispatch_mod._deliver_live(
+        entry, "hi", "sender", reason_out=reasons
+    ) is False
+    assert len(attempts) == 1
+    assert reasons == ["mux-send-failed-attempt-1:unconfirmed"]
+
+
 def test_cell4_receipt_names_every_failed_lane(runner, mailbox, monkeypatch, tmp_path):
     """A delivery bug must be diagnosable from the sender's terminal alone."""
     _seed_asleep_transcript(monkeypatch, tmp_path)

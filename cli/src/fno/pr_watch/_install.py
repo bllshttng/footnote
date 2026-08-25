@@ -622,6 +622,13 @@ def status(
             bits.append(f"phase: {end['phase']}")
         detail = f" ({', '.join(bits)})" if bits else ""
         typer.echo(f"Last tick outcome: {end['outcome']}{detail}")
+    completed = marks.get("completed_tick")
+    if completed is None:
+        typer.echo("Completed tick: none")
+    else:
+        typer.echo(
+            f"Completed tick: {completed['ts']} swept={completed['swept_count']}"
+        )
 
     # Fleet watchdog freshness (x-55c3): a watchdog on a dead cadence never
     # fires, and its silence is indistinguishable from a healthy fleet. When
@@ -675,7 +682,12 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
     exits that never minted a tick. One read, three marks (AC11): the old
     per-watermark scans cost one full-log pass each.
     """
-    marks: dict = {"last_tick": None, "last_attempt": None, "last_end": None}
+    marks: dict = {
+        "last_tick": None,
+        "last_attempt": None,
+        "last_end": None,
+        "completed_tick": None,
+    }
     if events_path is None:
         try:
             from fno.paths import state_dir
@@ -687,6 +699,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
     if not events_path.exists():
         return marks
 
+    chunks_by_receipt: dict[str, list[dict]] = {}
     try:
         for line in events_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -699,8 +712,17 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
             except json.JSONDecodeError:
                 continue
             etype = ev.get("type")
-            if etype == "pr_watch_tick":
+            if etype == "pr_watch_sweep_chunk":
+                data = ev.get("data")
+                if isinstance(data, dict) and isinstance(data.get("receipt_id"), str):
+                    chunks_by_receipt.setdefault(data["receipt_id"], []).append(data)
+            elif etype == "pr_watch_tick":
                 marks["last_tick"] = ev.get("ts")
+                completed = _valid_completed_tick(
+                    ev.get("ts"), ev.get("data"), chunks_by_receipt
+                )
+                if completed is not None:
+                    marks["completed_tick"] = completed
             elif etype == "pr_watch_tick_attempt":
                 marks["last_attempt"] = ev.get("ts")
             elif etype == "pr_watch_tick_end":
@@ -716,6 +738,66 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
     except OSError:
         pass
     return marks
+
+
+def _valid_completed_tick(
+    ts: object,
+    data: object,
+    chunks_by_receipt: Optional[dict[str, list[dict]]] = None,
+) -> Optional[dict[str, object]]:
+    """Return the positive completion marker only for a coherent sweep receipt."""
+    if not isinstance(ts, str) or _parse_ts(ts) is None or not isinstance(data, dict):
+        return None
+    swept_count = data.get("swept_count")
+    swept = data.get("swept")
+    if type(swept_count) is not int or swept_count <= 0 or not isinstance(swept, dict):
+        return None
+
+    if not swept:
+        receipt_id = data.get("receipt_id")
+        expected_chunks = data.get("receipt_chunks")
+        if (
+            not isinstance(receipt_id, str)
+            or type(expected_chunks) is not int
+            or expected_chunks <= 0
+        ):
+            return None
+        chunks = (chunks_by_receipt or {}).get(receipt_id)
+        if not chunks or len(chunks) != expected_chunks:
+            return None
+        rebuilt: dict[str, list[int]] = {}
+        seen: set[tuple[str, int]] = set()
+        for chunk in sorted(chunks, key=lambda item: item.get("chunk_index", 0)):
+            items = chunk.get("items")
+            if not isinstance(items, list):
+                return None
+            for item in items:
+                if not isinstance(item, dict) or item.get("action") != "swept":
+                    continue
+                key = item.get("key")
+                if not isinstance(key, str) or "#" not in key:
+                    return None
+                repo, number_text = key.rsplit("#", 1)
+                if not repo or not number_text.isdigit() or int(number_text) <= 0:
+                    return None
+                number = int(number_text)
+                identity = (repo, number)
+                if identity in seen:
+                    return None
+                seen.add(identity)
+                rebuilt.setdefault(repo, []).append(number)
+        swept = rebuilt
+
+    identities: list[tuple[str, int]] = []
+    for repo, numbers in swept.items():
+        if not isinstance(repo, str) or not repo or not isinstance(numbers, list):
+            return None
+        if any(type(number) is not int or number <= 0 for number in numbers):
+            return None
+        identities.extend((repo, number) for number in numbers)
+    if len(identities) != swept_count or len(set(identities)) != swept_count:
+        return None
+    return {"ts": ts, "swept_count": swept_count}
 
 
 def _parked_prs(state_path: Optional[Path]) -> dict:
@@ -757,11 +839,13 @@ def _parked_prs(state_path: Optional[Path]) -> dict:
 
 
 def _parse_ts(ts: Optional[str]) -> Optional[float]:
-    """Parse the canonical envelope ts (``%Y-%m-%dT%H:%M:%SZ``) to epoch seconds."""
+    """Parse a canonical UTC envelope timestamp to epoch seconds."""
     if not ts:
         return None
     try:
-        dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None or dt.utcoffset() != timezone.utc.utcoffset(dt):
+            return None
         return dt.timestamp()
     except (ValueError, TypeError):
         return None

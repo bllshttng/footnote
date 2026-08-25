@@ -1422,9 +1422,11 @@ def cmd_spawn(
         None,
         "--tab",
         help=(
-            "Place a pane in a mux tab selector. A bare name is a pane group: "
-            "reuse the first numbered group tab with room, or create the next. "
-            "--substrate pane only."
+            "Place a pane in a mux tab selector. A bare number is the visible "
+            "1-based ordinal the tab bar shows; id:<n> is the stable tab id "
+            "for scripts; name:<s>/ordinal:<n>/active/new are explicit forms. "
+            "A bare name is a pane group: reuse the first numbered group tab "
+            "with room, or create the next. --substrate pane only."
         ),
     ),
     crown: list[str] = typer.Option(
@@ -3964,7 +3966,20 @@ def cmd_watchdog(
     ),
     only: Optional[str] = typer.Option(
         None, "--only",
-        help="Filter to one verdict: wake|reroute|reap|retire|ghost|stale|leave.",
+        help=(
+            "Filter to one verdict: wake|reroute|reap|retire|ghost|stale|leave|"
+            "recoverable."
+        ),
+    ),
+    since: str = typer.Option(
+        "24h",
+        "--since",
+        help="Codex recovery age for --only recoverable (1s through 30d).",
+    ),
+    cwd: Optional[str] = typer.Option(
+        None,
+        "--cwd",
+        help="Exact checkout scope for --only recoverable. Defaults to cwd.",
     ),
     mail_to: Optional[str] = typer.Option(
         None,
@@ -3993,6 +4008,94 @@ def cmd_watchdog(
         raise typer.Exit(code=2)
 
     now = _time.time()
+    if only == wd.RECOVERABLE:
+        try:
+            recency_seconds = wd.parse_recovery_since(since)
+            scope_cwd = wd.resolve_recovery_cwd(cwd)
+        except ValueError as exc:
+            print(f"fno agents watchdog: {exc}", file=sys.stderr)
+            raise typer.Exit(code=2) from exc
+
+        payload, rows, scan = wd.run_recoverable_sweep(
+            cwd=scope_cwd,
+            recency_seconds=recency_seconds,
+            now_s=now,
+        )
+        pairs = [
+            (wd.Verdict(**data), row)
+            for data, row in zip(payload["verdicts"], rows)
+        ]
+        if not scan.complete:
+            if apply or apply_all:
+                results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
+                if json_out:
+                    sys.stdout.write(
+                        json.dumps({**payload, "results": results}) + "\n"
+                    )
+                else:
+                    print(results[0]["detail"], file=sys.stderr)
+                raise typer.Exit(code=3)
+            if json_out:
+                sys.stdout.write(json.dumps(payload) + "\n")
+            else:
+                for verdict, row in pairs:
+                    typer.echo(
+                        f"{verdict.verdict:11} {verdict.row_id} "
+                        f"handle={verdict.name} cwd={row.cwd}"
+                    )
+                for warning in payload["warnings"]:
+                    print(f"warning: {warning}", file=sys.stderr)
+                typer.echo(
+                    f"recoverable=unknown complete=false "
+                    f"scanned={payload['scanned_count']}"
+                )
+            return
+
+        previous_events = wd._last_events_signature()
+        signature = wd.verdict_signature(payload)
+        wd.write_sweep_file(
+            "manual",
+            payload["counts"],
+            now,
+            signature,
+            events_signature=signature,
+            recoverable_count=payload["recoverable_count"],
+        )
+        for verdict, _row in pairs:
+            if verdict.row_id in wd.fresh_non_leave(payload, previous_events):
+                wd.emit_event(
+                    "watchdog_verdict",
+                    {
+                        "row_id": verdict.row_id,
+                        "name": verdict.name,
+                        "verdict": verdict.verdict,
+                        "basis": verdict.basis,
+                    },
+                )
+        if not apply and not apply_all:
+            if json_out:
+                sys.stdout.write(json.dumps(payload) + "\n")
+            else:
+                for verdict, row in pairs:
+                    typer.echo(
+                        f"{verdict.verdict:11} {verdict.row_id} "
+                        f"handle={verdict.name} cwd={row.cwd}"
+                    )
+                typer.echo(
+                    f"recoverable={payload['recoverable_count']} complete=true "
+                    f"scanned={payload['scanned_count']}"
+                )
+            return
+
+        results = wd.apply_recoverable(scan, scope_cwd=scope_cwd)
+        if json_out:
+            sys.stdout.write(json.dumps({**payload, "results": results}) + "\n")
+        else:
+            for result in results:
+                line = f"{result['outcome']:9} {result['detail']}"
+                print(line, file=sys.stderr if result["outcome"] != "applied" else sys.stdout)
+        return
+
     payload, rows = wd.run_sweep(now_s=now)
     if payload.get("refused"):
         # x-4c87: a zero-row roster is an unreadable instrument, not an empty

@@ -223,6 +223,30 @@ pub struct Framed {
     pub width: usize,
 }
 
+/// Whether a terminal cell falls inside the framed block at `origin`.
+pub fn framed_contains(framed: &Framed, origin: (usize, usize), row: usize, col: usize) -> bool {
+    let (r0, c0) = origin;
+    row >= r0 && row < r0 + framed.lines.len() && col >= c0 && col < c0 + framed.width
+}
+
+/// Resolve a terminal cell against the hit spans produced by [`frame`]. The
+/// spans include `ESC_CLOSE_HIT`, so callers use the same helper for body hits
+/// and the shared close affordance without re-deriving its placement.
+pub fn framed_hit_at(
+    framed: &Framed,
+    origin: (usize, usize),
+    row: usize,
+    col: usize,
+) -> Option<usize> {
+    let (r0, c0) = origin;
+    let line = framed.lines.get(row.checked_sub(r0)?)?;
+    let offset = col.checked_sub(c0)?;
+    line.hits
+        .iter()
+        .find(|(_, start, len)| offset >= *start && offset < start.saturating_add(*len))
+        .map(|(target, _, _)| *target)
+}
+
 /// Frame `body` (already windowed to the viewport, each line padded/truncated
 /// to `body_w`) with `chrome`. When `scroll` is `Some` and the body overflows, a
 /// scrollbar column is appended inside the right border. Pure: styles are
@@ -838,6 +862,40 @@ mod tests {
         let framed = frame(&[bl("body")], &c, 40, None);
         let footer_row = &framed.lines[framed.lines.len() - 2]; // above the bottom border
         assert!(footer_row.hits.iter().all(|(t, _, _)| *t != ESC_CLOSE_HIT));
+    }
+
+    #[test]
+    fn framed_hit_at_uses_screen_origin_for_close_chip() {
+        let chrome = Chrome::new("confirm", Anchor::Center).footer("enter · esc cancel");
+        let framed = frame(&[bl("action")], &chrome, 20, None);
+        let origin = (7, 11);
+        let (line, (offset, len)) = framed
+            .lines
+            .iter()
+            .enumerate()
+            .find_map(|(line, row)| {
+                row.hits
+                    .iter()
+                    .find(|(target, _, _)| *target == ESC_CLOSE_HIT)
+                    .map(|(_, offset, len)| (line, (*offset, *len)))
+            })
+            .expect("the framed close chip has a hit span");
+        assert_eq!(
+            framed_hit_at(
+                &framed,
+                origin,
+                origin.0 + line,
+                origin.1 + offset + len / 2,
+            ),
+            Some(ESC_CLOSE_HIT)
+        );
+        assert!(framed_contains(
+            &framed,
+            origin,
+            origin.0 + line,
+            origin.1 + offset + len / 2,
+        ));
+        assert_eq!(framed_hit_at(&framed, origin, origin.0, origin.1), None);
     }
 
     #[test]

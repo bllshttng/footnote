@@ -89,15 +89,16 @@ class ProviderRecord(BaseModel):
     """
 
     model_config = ConfigDict(
-        extra="forbid", str_strip_whitespace=True, populate_by_name=True
+        extra="allow", str_strip_whitespace=True, populate_by_name=True
     )
 
     # Required fields
     id: str = Field(..., pattern=_ID_PATTERN)
     name: str
     # Renamed from `cli`, which named the harness axis under a binary-ish word.
-    # The `cli` alias keeps a pre-rename config.toml loading; `extra="forbid"`
-    # means without it an unmigrated record would be rejected outright.
+    # The `cli` alias keeps pre-rename config.toml loading. Unknown record
+    # metadata is retained for forward-compatible round trips, while these
+    # known account fields remain strictly typed.
     harness: _HARNESS_LITERAL = Field(
         ..., validation_alias=AliasChoices("harness", "cli")
     )
@@ -107,6 +108,9 @@ class ProviderRecord(BaseModel):
     # Conditional fields (auth-strategy-dependent)
     credentials_source: Path | None = None
     env: dict[str, str] | None = None
+    # A route-backed api_key record names the provider/model owner without
+    # copying its resolved credential into account configuration.
+    route: str | None = None
 
     # The IANA timezone the provider quotes its reset stamps in. Only consulted
     # when a refusal body carries a NAIVE stamp: the z.ai stamps are Singapore
@@ -176,9 +180,27 @@ class ProviderRecord(BaseModel):
             )
         return expanded
 
+    @field_validator("route")
+    @classmethod
+    def _validate_route(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        from fno.agents.model_routing import _parse_target
+
+        if _parse_target(v) is None:
+            raise ValueError(
+                "route must use provider/model spelling with a non-empty model"
+            )
+        return v
+
     @model_validator(mode="after")
     def _check_auth_strategy(self) -> "ProviderRecord":
         """Validate that auth strategy is consistent with credentials fields."""
+        if self.route and self.auth != "api_key":
+            raise ValueError(
+                f"auth_strategy_mismatch: {self.id}: "
+                "route requires auth=api_key"
+            )
         if self.auth == "oauth_dir":
             if self.credentials_source is None:
                 raise ValueError(
@@ -186,18 +208,24 @@ class ProviderRecord(BaseModel):
                     "auth=oauth_dir requires credentials_source"
                 )
         elif self.auth == "api_key":
-            if not self.env:
+            if self.env and self.route:
                 raise ValueError(
                     f"auth_strategy_mismatch: {self.id}: "
-                    "auth=api_key requires non-empty env dict"
+                    "auth=api_key requires exactly one of env or route"
                 )
-            recognized = _RECOGNIZED_API_KEY_NAMES & set(self.env.keys())
-            if not recognized:
+            if not self.env and not self.route:
                 raise ValueError(
                     f"auth_strategy_mismatch: {self.id}: "
-                    f"auth=api_key env must contain at least one of "
-                    f"{sorted(_RECOGNIZED_API_KEY_NAMES)}, got {sorted(self.env.keys())}"
+                    "auth=api_key requires exactly one of non-empty env or route"
                 )
+            if self.env:
+                recognized = _RECOGNIZED_API_KEY_NAMES & set(self.env.keys())
+                if not recognized:
+                    raise ValueError(
+                        f"auth_strategy_mismatch: {self.id}: "
+                        f"auth=api_key env must contain at least one of "
+                        f"{sorted(_RECOGNIZED_API_KEY_NAMES)}, got {sorted(self.env.keys())}"
+                    )
         elif self.auth == "managed":
             # A managed account's credential lives in the store (~/.fno/providers/<id>/),
             # derived from id; it reads neither field. Reject them so a config typo

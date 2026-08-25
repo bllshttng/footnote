@@ -39,9 +39,10 @@ One file per install. These belong at the root.
 | `recovery-nudges.json` | `recovery.py` | permanent |
 | `watchdog-sweep.json` | `agents/watchdog.py` | permanent (rewritten per sweep) |
 | `git-protection.json` | `hooks/git-protection.py` | permanent |
-| `squads.json`, `.lock` | `crates/fno/src/squad_store.rs` | permanent |
+| `squads.json`, `.lock` | `crates/fno/src/squad_store.rs` (follows the mux state root; `FNO_AGENTS_HOME` overrides) | permanent |
 | `session-names.json`, `.lock` | `agents/discover.py` | grows per session |
-| `mux-view.json`, `.lock` | `crates/fno/src/view_store.rs` | permanent |
+| `mux/` (`<session>.sock`, `.ver`, `.pid`, `.detach`, `.log`) | `crates/fno/src/proto.rs::mux_dir()`, following `config.state_dir` (`FNO_MUX_DIR` overrides) | server-managed; `kill-server` owns socket removal |
+| `mux-view.json`, `.lock` | `crates/fno/src/view_store.rs` (follows the mux state root; `FNO_AGENTS_HOME` overrides) | permanent |
 | `installed-rev`, `installed-rust-rev`, `source-path` | `update.py`, `doctor.py` | permanent |
 | `my-priorities.md` | the operator, by hand or with their own `~/.fno/board.py` scratch script (not a repo file, and not `cli/src/fno/king/board.py`); read via `paths.operator_lane()` | permanent |
 | `plugin-root` | `hooks/session-start.sh` | permanent |
@@ -148,3 +149,9 @@ Not state-root writers, listed here because they are the other family of session
 Target state is write-once after init. King state is atomically refreshed at coronation and both gate a stop hook.
 
 A king runs in the canonical checkout. A target manifest can sit there too. So the king gets its own file rather than a `driver:` field on the target one. A manifest whose name says target and whose contents say king is how two sessions come to share one discriminator.
+
+## Project-relative run journal
+
+| Entry | Writer | Lifetime |
+|---|---|---|
+| `.fno/run-log.jsonl` | `crates/fno-agents/src/loopcheck.rs` through `run_state::append_transition` | append-only per checkout; retained as the lifecycle fold and deleted with a disposable worktree |

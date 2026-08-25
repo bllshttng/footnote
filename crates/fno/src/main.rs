@@ -74,11 +74,15 @@ enum Role {
     MuxTab(Vec<OsString>),
     /// (x-d865) `mux layout <get> ...`: dump the nested layout tree + geometry.
     MuxLayout(Vec<OsString>),
-    /// (x-d865) `mux where <fno_id>`: resolve an fno session id to its location.
+    /// (x-d865) `mux where <fno_id>`: resolve an fno session id to its
+    /// location; a selector naming no agent is retried as a tab location -
+    /// ordinal, stable id, or name (x-1499).
     MuxWhere(Vec<OsString>),
     /// (x-b80d) `mux view <selector> [--url] [--fzf] [--json]`: point the
     /// operator's view at the pane hosting an agent, selected by node id,
-    /// slug, or name. Same carry-verbatim shape; `mux_cli::view` parses.
+    /// slug, or name; a selector naming no agent focuses the tab at that
+    /// location instead (x-1499). Same carry-verbatim shape; `mux_cli::view`
+    /// parses.
     MuxView(Vec<OsString>),
     /// (x-a572) `mux workspace <verb> ...`: workspace-store maintenance
     /// (`workspace prune`). Same carry-verbatim shape as `mux pane`;
@@ -102,6 +106,17 @@ enum Role {
     MuxUsage,
     /// Any other args: the Python-CLI forwarding path.
     Forward,
+}
+
+/// Exit an `fno mux` verb, surfacing any config warning recorded while the
+/// verb resolved its socket dir. These roles are non-TUI, so stderr is safe
+/// here; the interactive client routes the same warning to its client log
+/// instead, and `mux doctor` carries it as a row.
+fn exit_mux(code: i32) -> ! {
+    if let Some((w, _remedy)) = fno::proto::pending_config_warning() {
+        eprintln!("{w}");
+    }
+    std::process::exit(code)
 }
 
 /// Split a mux verb's trailing args into positionals plus a `--json` flag (US6:
@@ -299,10 +314,13 @@ fn main() {
                  | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
                  | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
-                 | fno mux tab ls|create|rename|join ... \
+                 | fno mux tab ls|create|rename|join ... (--tab takes the visible \
+                   1-based ordinal, id:<n> for the stable id) \
                  | fno mux layout get|apply|graft ... \
-                 | fno mux where <fno_id> \
+                 | fno mux where <fno_id-or-tab> \
                  | fno mux view <selector> [--url] [--fzf] [--json] \
+                   (a tab ordinal/id/name resolves as a location; qualify \
+                   with --workspace when it repeats) \
                  | fno mux workspace prune [--dry-run] [--include-named] [--json]"
             );
             std::process::exit(2);
@@ -315,23 +333,33 @@ fn main() {
             std::process::exit(2);
         }
         Role::MuxVersion(json) => fno::version::print_version(json),
-        Role::MuxLs(json) => std::process::exit(mux_cli::ls(json)),
+        Role::MuxLs(json) => exit_mux(mux_cli::ls(json)),
         Role::MuxKill(name, json) => {
             let session = mux_cli::resolve_session(name.as_deref(), env_session.as_deref());
-            std::process::exit(mux_cli::kill_server(&session, json));
+            exit_mux(mux_cli::kill_server(&session, json));
         }
         Role::MuxShellInit(shell, json) => {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
         }
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
-        Role::MuxWeb(web_args) => std::process::exit(fno::web::serve(web_args)),
-        Role::MuxPane(rest) => std::process::exit(mux_cli::pane(&rest, env_session.as_deref())),
-        Role::MuxBlock(rest) => std::process::exit(mux_cli::block(&rest, env_session.as_deref())),
-        Role::MuxTab(rest) => std::process::exit(mux_cli::tab(&rest, env_session.as_deref())),
-        Role::MuxLayout(rest) => std::process::exit(mux_cli::layout(&rest, env_session.as_deref())),
-        Role::MuxWhere(rest) => std::process::exit(mux_cli::where_(&rest, env_session.as_deref())),
-        Role::MuxView(rest) => std::process::exit(mux_cli::view(&rest, env_session.as_deref())),
-        Role::MuxWorkspace(rest) => std::process::exit(mux_cli::workspace(&rest)),
+        Role::MuxWeb(web_args) => {
+            // The bridge serves for hours, so the warning its startup
+            // resolution recorded must surface NOW: exit_mux would print it
+            // only after the socket closes, and a signal kill never exits
+            // through it at all. The exit-time repeat is the cheap cost of
+            // the early word (run_server takes the same trade).
+            if let Some((warning, _)) = proto::pending_config_warning() {
+                eprintln!("{warning}");
+            }
+            exit_mux(fno::web::serve(web_args))
+        }
+        Role::MuxPane(rest) => exit_mux(mux_cli::pane(&rest, env_session.as_deref())),
+        Role::MuxBlock(rest) => exit_mux(mux_cli::block(&rest, env_session.as_deref())),
+        Role::MuxTab(rest) => exit_mux(mux_cli::tab(&rest, env_session.as_deref())),
+        Role::MuxLayout(rest) => exit_mux(mux_cli::layout(&rest, env_session.as_deref())),
+        Role::MuxWhere(rest) => exit_mux(mux_cli::where_(&rest, env_session.as_deref())),
+        Role::MuxView(rest) => exit_mux(mux_cli::view(&rest, env_session.as_deref())),
+        Role::MuxWorkspace(rest) => exit_mux(mux_cli::workspace(&rest)),
         Role::Client(flag) => {
             let env = env_session.as_deref().filter(|s| !s.is_empty());
             // Bare `fno` with nothing pinned: the pre-attach picker decides
@@ -363,6 +391,14 @@ fn run_client(session: &str) {
 }
 
 fn run_server(socket: PathBuf) {
+    // The one mux role that never returns through `exit_mux`: the daemon
+    // blocks until killed, so the config warning it recorded while resolving
+    // the socket dir would otherwise never surface. Server stderr is a log
+    // stream, not a PTY the harness scrapes, so printing here is safe (the
+    // NEVER-stderr rule governs the TUI client, x-0296).
+    if let Some((warning, _)) = proto::pending_config_warning() {
+        eprintln!("{warning}");
+    }
     std::process::exit(fno::server::run(socket));
 }
 

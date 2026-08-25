@@ -253,6 +253,36 @@ def test_a_clean_session_says_nothing(monkeypatch):
     assert _foreign_identity_line() is None
 
 
+def test_whoami_ignores_self_referential_foreign_name(monkeypatch):
+    from fno.agent.cli import _foreign_identity_line
+
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CLAUDE_SID)
+    monkeypatch.setenv("CODEX_COMPANION_SESSION_ID", CLAUDE_SID)
+    _walk(monkeypatch, "claude")
+
+    assert _foreign_identity_line() is None
+
+
+def test_whoami_reports_foreign_companion_name(monkeypatch):
+    from fno.agent.cli import _foreign_identity_line
+
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CLAUDE_SID)
+    monkeypatch.setenv("CODEX_COMPANION_SESSION_ID", "foreign-companion")
+    _walk(monkeypatch, "claude")
+
+    line = _foreign_identity_line()
+
+    assert line is not None
+    assert "inherited codex name" in line
+    assert "-u CODEX_COMPANION_SESSION_ID" in line
+
+
 def test_an_opencode_session_is_never_told_to_delete_its_own_marker(monkeypatch):
     """The keep-family must come from the resolver, not from `_detect_harness`.
 

@@ -43,7 +43,8 @@ from fno import paths
 from fno.agents.reachability import _ACTIVE_STATES as ACTIVE_STATES
 from fno.agents.session_truth import STALLED_AFTER_S
 from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
-from fno.pr._status import _classify, _latest_per_name
+from fno.pr import _reviews
+from fno.pr._status import _classify, _latest_per_name, without_coverage_statuses
 
 #: Priorities a king treats as its own work. Lower bands are the operator's to
 #: rank up; a king that dispatched p2 would spend the fleet on the wrong thing.
@@ -64,7 +65,7 @@ _DEAD_CLAIM_STATES = frozenset({"stale", "corrupted"})
 SRC_READY = "fno backlog ready --json"
 SRC_CLAIMS = "fno agents claim list -J --include-stale --prefix node:"
 SRC_PRS = (
-    "gh pr list --state open --json number,title,mergeable,statusCheckRollup"
+    "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url"
 )
 SRC_QUESTIONS = "fno inbox outstanding --json"
 SRC_NEEDS = "fno agents needs --json"
@@ -591,7 +592,7 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
             "--limit",
             str(max_pr_reads),
             "--json",
-            "number,title,mergeable,statusCheckRollup",
+            "number,title,mergeable,statusCheckRollup,headRefName,url",
         ],
         timeout=timeout,
     )
@@ -607,6 +608,20 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
             f"mergeable_pr: the open-PR listing hit its {max_pr_reads}-PR limit, "
             f"so more open PRs can exist; raise max_pr_reads to read further"
         )
+    try:
+        from fno.graph._reconcile import classify_open_pr_bindings
+        from fno.graph.store import read_graph_strict
+
+        bindings = classify_open_pr_bindings(rows, read_graph_strict(paths.graph_json()))
+    except Exception as exc:  # noqa: BLE001 - mergeability remains readable
+        warnings.append(f"pr_node_binding_unreadable: {exc}")
+    else:
+        for binding in bindings:
+            if binding.verdict == "missing":
+                warnings.append(
+                    f"pr_node_binding_missing: #{binding.pr_number} "
+                    f"{binding.head_ref} -> {binding.node_id}"
+                )
     # Every fetched row is judged. They cost the same one call whether read or
     # discarded, so dropping any of them buys nothing and loses real work.
     ready: list[dict] = []
@@ -620,7 +635,21 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         # conclusion into one flat set poisons that set with the stale result.
         # A body gate that re-ran green then still read red here, twice, the
         # night this was measured.
-        deduped = _latest_per_name(pr.get("statusCheckRollup") or [])
+        # Only the DIAGNOSTIC context is noise here. The required coverage
+        # context is a verdict this board must honor: its FAILURE means
+        # uncovered (the PR is not ready work no matter how green CI is), its
+        # PENDING means not-yet-known. Dropping both would admit an uncovered
+        # PR onto the ready list; keeping both would drop a covered one over a
+        # pending instrument stamp.
+        raw = _latest_per_name(pr.get("statusCheckRollup") or [])
+        deduped = without_coverage_statuses(
+            raw, contexts=frozenset({_reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT})
+        )
+        if raw and not deduped:
+            # Diagnostic-only rollup: CI has not reported. An empty class set
+            # is not green - the pre-filter rows kept this PR out and so does
+            # this.
+            continue
         classes = {_classify(c) for c in deduped}
         if "fail" in classes:
             continue

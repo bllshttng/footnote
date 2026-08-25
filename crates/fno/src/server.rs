@@ -42,7 +42,7 @@ use crate::proto::{
     LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
     PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement, ServerMsg,
     SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta,
-    TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -447,6 +447,9 @@ enum CoreMsg {
         lines: Option<u16>,
         /// (v6) Select an OSC 133 command block instead of a plain read.
         block: Option<BlockSel>,
+        /// Fresh registry snapshot used to label the read with the registry
+        /// identity joined to this pane.
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     /// `squad_key` was resolved OFF the core loop (like `Attach`); `cwd` is the
@@ -467,6 +470,7 @@ enum CoreMsg {
         pane: u64,
         bytes: Vec<u8>,
         guarded: bool,
+        expected_identity: Option<String>,
         /// Fresh registry snapshot for a guarded send, read off-loop in
         /// `handle_control`. `None` means either the read failed (guarded ->
         /// fail closed) or the send is unguarded (unused). `Some(rows)` is the
@@ -524,6 +528,13 @@ enum CoreMsg {
     },
     LayoutGet {
         scope: LayoutScope,
+        /// (x-1499) Whether the reply carries the per-pane worker join the
+        /// human layout rendering needs. `false` keeps the machine JSON
+        /// byte-shape unchanged, whatever the registry read says.
+        workers: bool,
+        /// (x-1499) Fresh registry rows for that join; `None` is a read
+        /// failure and, with `workers: true`, its own refusal.
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     PaneWhere {
@@ -559,6 +570,14 @@ enum CoreMsg {
         anchor: u64,
         spec: AnchoredLayoutSpec,
         focus: bool,
+        reply: ControlReply,
+    },
+    /// (v51, x-1499) Reverse location lookup: resolve a location selector to
+    /// the tab and its occupants.
+    TabWhere {
+        squad: PaneTarget,
+        sel: String,
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     /// A fresh registry-derived agent row set from the off-loop reader task
@@ -1178,6 +1197,40 @@ fn clean_tab_name(raw: Option<String>) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
+/// The location selector grammar for [`ControlVerb::TabWhere`] (x-1499): the
+/// identifier an operator can read off the screen, in explicit or bare form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocSel {
+    Ordinal(usize),
+    Id(TabId),
+    Name(String),
+    /// A bare number: an ordinal or a stable id. The resolver refuses when
+    /// the two readings name different live tabs (Locked Decision 5).
+    Bare(u64),
+}
+
+fn parse_loc_sel(s: &str) -> Result<LocSel, String> {
+    if let Some(n) = s.strip_prefix("ordinal:") {
+        return n
+            .parse::<usize>()
+            .map(LocSel::Ordinal)
+            .map_err(|_| format!("ordinal: needs a number, got {n:?}"));
+    }
+    if let Some(n) = s.strip_prefix("id:") {
+        return n
+            .parse::<u64>()
+            .map(LocSel::Id)
+            .map_err(|_| format!("id: needs a number, got {n:?}"));
+    }
+    if let Some(n) = s.strip_prefix("name:") {
+        return Ok(LocSel::Name(n.to_string()));
+    }
+    match s.parse::<u64>() {
+        Ok(n) => Ok(LocSel::Bare(n)),
+        Err(_) => Ok(LocSel::Name(s.to_string())),
+    }
+}
+
 /// Whether an event ended the session.
 #[derive(PartialEq)]
 enum Flow {
@@ -1195,6 +1248,7 @@ struct SocketGuard(PathBuf);
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         let _ = crate::proto::remove_session_files(&self.0);
+        crate::proto::remove_startup_guard(&self.0);
     }
 }
 
@@ -1250,6 +1304,7 @@ pub fn run(socket: PathBuf) -> i32 {
             return 1;
         }
     };
+    let _guard = SocketGuard(socket.clone());
     match crate::pty::raise_fd_limit() {
         Ok(Some((before, after))) => {
             eprintln!("fno mux: open-file limit raised from {before} to {after}");
@@ -1261,8 +1316,6 @@ pub fn run(socket: PathBuf) -> i32 {
             );
         }
     }
-    let _guard = SocketGuard(socket.clone());
-
     // Stamp this server's wire version next to its socket (x-1a85) so `fno mux
     // ls` can flag a stale-wire server after a binary upgrade. Best-effort: a
     // write failure only means `ls` reads no version and treats the server as
@@ -2483,7 +2536,7 @@ impl Core {
     /// every later squad's shell in the first client's directory). Empty /
     /// vanished dirs degrade to the server cwd inside `PtyShell::spawn`.
     fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
-        let id = self.next_pane_id;
+        let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn(
             &self.shells,
@@ -2519,7 +2572,7 @@ impl Core {
         let name = agent_self_from_argv(argv);
         let cmd = cmd_from_argv(argv);
         let account = account_from_argv(argv);
-        let id = self.next_pane_id;
+        let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn_cmd(
             argv,
@@ -2546,7 +2599,40 @@ impl Core {
         Ok(id)
     }
 
-    /// Record a freshly-spawned pane: bump the id, insert its VT grid, and
+    fn reserve_pane_id(&mut self) -> Result<u64, String> {
+        #[cfg(test)]
+        {
+            let id = self.next_pane_id;
+            self.next_pane_id = id.saturating_add(1);
+            return Ok(id);
+        }
+        #[cfg(not(test))]
+        {
+            match crate::squad_store::reserve_next_pane_id(self.next_pane_id) {
+                Ok(id) => {
+                    self.next_pane_id = id.saturating_add(1);
+                    Ok(id)
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::PermissionDenied
+                        && e.to_string().contains("build-tree binary") =>
+                {
+                    // A cargo build-tree binary is allowed to run against an
+                    // isolated mux without being allowed to write the user's
+                    // global squad store. Keep pane run usable with a clear,
+                    // process-local fallback; installed binaries still fail
+                    // closed on real persistence errors.
+                    eprintln!("fno mux: pane id persistence unavailable for build-tree binary; using process-local pane ids (set FNO_AGENTS_HOME for persistence)");
+                    let id = self.next_pane_id;
+                    self.next_pane_id = id.saturating_add(1);
+                    Ok(id)
+                }
+                Err(e) => Err(format!("pane id reservation failed: {e}")),
+            }
+        }
+    }
+
+    /// Record a freshly-spawned pane: advance the id floor, insert its VT grid, and
     /// arm its output watch (dropped receiver, so the watch costs nothing
     /// until a `PaneWait` subscribes).
     #[allow(clippy::too_many_arguments)]
@@ -2562,7 +2648,7 @@ impl Core {
         cmd: Option<String>,
         account: Option<String>,
     ) {
-        self.next_pane_id += 1;
+        self.next_pane_id = self.next_pane_id.max(id.saturating_add(1));
         e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
         let stats = Arc::new(PaneCounters::default());
         self.panes.insert(
@@ -2666,13 +2752,21 @@ impl Core {
             .panes
             .iter()
             .map(|(&pid, entry)| {
-                let (squad_id, tab_id, cwd) = match self.session.find_pane(pid) {
-                    Some((sid, ti)) => {
-                        let sq = self.session.squad(sid).expect("find_pane live squad");
-                        (sid, sq.tabs[ti].id, sq.canonical_cwd().to_string())
-                    }
-                    None => (0, 0, String::new()),
-                };
+                let (squad_id, tab_id, cwd, tab_name, tab_ordinal) =
+                    match self.session.find_pane(pid) {
+                        Some((sid, ti)) => {
+                            let sq = self.session.squad(sid).expect("find_pane live squad");
+                            let dict = sq.tab_dict(ti);
+                            (
+                                sid,
+                                sq.tabs[ti].id,
+                                sq.canonical_cwd().to_string(),
+                                dict.as_ref().and_then(|d| d.name.clone()),
+                                dict.map(|d| d.ordinal),
+                            )
+                        }
+                        None => (0, 0, String::new(), None, None),
+                    };
                 PaneInfo {
                     pane_id: pid,
                     squad_id,
@@ -2680,6 +2774,9 @@ impl Core {
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
+                    name: entry.name.clone(),
+                    tab_name,
+                    tab_ordinal,
                     // (x-d865) The fno_id join: the registry row whose mux ref
                     // points at this pane in THIS session carries the durable
                     // identity. Server-owned (self.agents is the cached read).
@@ -2712,12 +2809,17 @@ impl Core {
     }
 
     fn fno_id_for_pane_with_agents(&self, pid: u64, agents: &[RegistryAgent]) -> Option<String> {
-        agents.iter().find_map(|a| match &a.mux {
-            Some((sess, pane)) if sess == &self.session_name && *pane == pid => {
-                a.effective_identity().map(str::to_owned)
+        let mut ids = std::collections::BTreeSet::new();
+        for a in agents {
+            if let Some((sess, pane)) = &a.mux {
+                if sess == &self.session_name && *pane == pid {
+                    if let Some(identity) = a.effective_identity() {
+                        ids.insert(identity.to_string());
+                    }
+                }
             }
-            _ => None,
-        })
+        }
+        (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
 
     fn resolve_placement_target(
@@ -2929,8 +3031,10 @@ impl Core {
 
     // ---- v41 (x-d865) layout script API ---------------------------------
 
-    /// Resolve a [`TabSel`] to a tab INDEX within `sid`. `New` is not a
-    /// selector here (callers that support creation handle it before calling).
+    /// Resolve a [`TabSel`] to a tab INDEX within `sid`, through the squad's
+    /// tab dictionary (x-1499): `Index(n)` is the 1-based ordinal the UI
+    /// shows, never a zero-based vector index. `New` is not a selector here
+    /// (callers that support creation handle it before calling).
     fn resolve_tab_index(&self, sid: u64, sel: &TabSel) -> Result<usize, String> {
         let sq = self
             .session
@@ -2939,30 +3043,7 @@ impl Core {
         if sq.tabs.is_empty() {
             return Err(format!("squad {sid} has no tabs"));
         }
-        match sel {
-            TabSel::Active => Ok(sq.active_tab.min(sq.tabs.len() - 1)),
-            TabSel::Index(i) => (*i < sq.tabs.len())
-                .then_some(*i)
-                .ok_or_else(|| format!("no tab at index {i}")),
-            TabSel::Id(id) => sq
-                .tabs
-                .iter()
-                .position(|t| t.id == *id)
-                .ok_or_else(|| format!("no tab with id {id}")),
-            TabSel::Name(n) => {
-                let mut hits = sq
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, t)| t.name.as_deref() == Some(n.as_str()));
-                match (hits.next(), hits.next()) {
-                    (Some((i, _)), None) => Ok(i),
-                    (Some(_), Some(_)) => Err(format!("ambiguous tab name: {n}")),
-                    (None, _) => Err(format!("no tab named {n}")),
-                }
-            }
-            TabSel::New => Err("cannot select the 'new' tab of an existing set".into()),
-        }
+        sq.resolve_tab(sel)
     }
 
     /// Placement that honors `placement.tab` / `placement.at` (v41), reaping
@@ -3332,7 +3413,9 @@ impl Core {
     }
 
     /// The nested tree + per-pane geometry of one tab (Locked Decision 5).
-    fn tab_layout(&self, tab: &Tab) -> TabLayout {
+    /// `agents` (Some) additionally fills the per-pane worker join for the
+    /// control-verb path (x-1499); `None` keeps the machine shape unchanged.
+    fn tab_layout(&self, tab: &Tab, agents: Option<&[RegistryAgent]>) -> TabLayout {
         let vp = self.tab_rect(tab.id);
         TabLayout {
             tab_id: tab.id,
@@ -3340,25 +3423,38 @@ impl Core {
             focus: tab.focus,
             root: tab.root.clone(),
             panes: tree::layout(&tab.root, vp),
+            workers: agents.map(|rows| {
+                tree::leaves(&tab.root)
+                    .into_iter()
+                    .map(|pid| TabPaneOccupant {
+                        pane_id: pid,
+                        fno_id: self.fno_id_for_pane_with_agents(pid, rows),
+                    })
+                    .collect()
+            }),
         }
     }
 
-    fn squad_layout(&self, sq: &Squad) -> SquadLayout {
+    fn squad_layout(&self, sq: &Squad, agents: Option<&[RegistryAgent]>) -> SquadLayout {
         SquadLayout {
             squad_id: sq.id,
             squad_name: sq.name.clone(),
-            tabs: sq.tabs.iter().map(|t| self.tab_layout(t)).collect(),
+            tabs: sq.tabs.iter().map(|t| self.tab_layout(t, agents)).collect(),
         }
     }
 
     /// Dump a [`LayoutScope`] for [`ControlVerb::LayoutGet`].
-    fn layout_get(&self, scope: &LayoutScope) -> Result<Vec<SquadLayout>, (u32, String)> {
+    fn layout_get(
+        &self,
+        scope: &LayoutScope,
+        agents: Option<&[RegistryAgent]>,
+    ) -> Result<Vec<SquadLayout>, (u32, String)> {
         match scope {
             LayoutScope::Session => Ok(self
                 .session
                 .squads
                 .iter()
-                .map(|s| self.squad_layout(s))
+                .map(|s| self.squad_layout(s, agents))
                 .collect()),
             LayoutScope::Squad(t) => {
                 let sid = self.resolve_squad(t)?;
@@ -3366,7 +3462,7 @@ impl Core {
                     .session
                     .squad(sid)
                     .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?;
-                Ok(vec![self.squad_layout(sq)])
+                Ok(vec![self.squad_layout(sq, agents)])
             }
             LayoutScope::Tab { squad, tab } => {
                 let sid = self.resolve_squad(squad)?;
@@ -3377,7 +3473,7 @@ impl Core {
                 Ok(vec![SquadLayout {
                     squad_id: sq.id,
                     squad_name: sq.name.clone(),
-                    tabs: vec![self.tab_layout(&sq.tabs[ti])],
+                    tabs: vec![self.tab_layout(&sq.tabs[ti], agents)],
                 }])
             }
         }
@@ -3408,6 +3504,7 @@ impl Core {
             };
         };
         let sq = self.session.squad(sid).expect("find_pane live");
+        let dict = sq.tab_dict(ti);
         let (tab_id, squad_name) = (sq.tabs[ti].id, sq.name.clone());
         // A passive (observer) client is read-only at the server and has no
         // viewport to move, so it is not a candidate and never inflates the
@@ -3446,6 +3543,8 @@ impl Core {
             squad_id: sid,
             squad_name,
             tab_id,
+            tab_name: dict.as_ref().and_then(|d| d.name.clone()),
+            tab_ordinal: dict.map(|d| d.ordinal),
             clients_moved,
         }
     }
@@ -3703,6 +3802,7 @@ impl Core {
         }
         let mut panes: Vec<u64> = Vec::new();
         let mut tabs: Vec<(TabId, Option<String>)> = Vec::new();
+        let mut tab_ordinals: Vec<usize> = Vec::new();
         let mut squad_id: Option<u64> = None;
         let mut squad_name: Option<String> = None;
         for a in &matched {
@@ -3720,6 +3820,7 @@ impl Core {
                 let t = &sq.tabs[ti];
                 if !tabs.iter().any(|(tid, _)| *tid == t.id) {
                     tabs.push((t.id, t.name.clone()));
+                    tab_ordinals.push(ti + 1);
                 }
             }
         }
@@ -3729,6 +3830,7 @@ impl Core {
                 squad_id,
                 squad_name,
                 tabs,
+                tab_ordinals: Some(tab_ordinals),
                 panes,
             }),
             None => Err(err_code::NOT_PANE_HOSTED),
@@ -3753,6 +3855,218 @@ impl Core {
                 msg: format!("fno_id not located: {fno_id}"),
             },
         }
+    }
+
+    /// (x-1499) The reverse location lookup: resolve a location selector to
+    /// the tab living there and join every pane's worker from the registry.
+    /// Builds on the same ordered workspace tabs and
+    /// [`Self::fno_id_for_pane_with_agents`] join `PaneList`/`PaneWhere`
+    /// already use - never a second identity source. Errors are
+    /// `(code, one refusal message)`; the ambiguity refusals print every
+    /// candidate with workspace, label, and `tab_id` so the operator can
+    /// qualify and retry.
+    fn tab_where(
+        &self,
+        sel: &str,
+        target: &PaneTarget,
+        agents: &[RegistryAgent],
+    ) -> Result<ServerMsg, (u32, String)> {
+        let parsed = parse_loc_sel(sel).map_err(|e| (err_code::BAD_REQUEST, e))?;
+        // Candidate workspaces: a qualified target names one; the default is
+        // UNQUALIFIED and searches every squad.
+        let squads: Vec<&Squad> = match target {
+            PaneTarget::CurrentRoute => self.session.squads.iter().collect(),
+            t => {
+                let sid = self.resolve_squad(t)?;
+                vec![self
+                    .session
+                    .squad(sid)
+                    .ok_or((err_code::BAD_REQUEST, format!("no such squad id: {sid}")))?]
+            }
+        };
+        // Resolve one dictionary form across the candidates. An absent form
+        // is a miss in that workspace; any other refusal (a repeated name,
+        // ordinal 0) is a hard error.
+        let resolve_form = |form: &TabSel| -> Result<Vec<(&Squad, usize)>, (u32, String)> {
+            let mut hits = Vec::new();
+            for sq in &squads {
+                match sq.resolve_tab(form) {
+                    Ok(ti) => hits.push((*sq, ti)),
+                    Err(e) if e.starts_with("no tab ") => {}
+                    Err(e) => return Err((err_code::BAD_REQUEST, e)),
+                }
+            }
+            Ok(hits)
+        };
+        let hits = match &parsed {
+            LocSel::Ordinal(n) => {
+                let hits = resolve_form(&TabSel::Index(*n))?;
+                if hits.is_empty() {
+                    return Err((err_code::NOT_FOUND, format!("no tab at ordinal {n}")));
+                }
+                hits
+            }
+            LocSel::Id(id) => {
+                let hits = resolve_form(&TabSel::Id(*id))?;
+                if hits.is_empty() {
+                    return Err((err_code::NOT_FOUND, format!("no tab with id {id}")));
+                }
+                hits
+            }
+            LocSel::Name(n) => {
+                let hits = resolve_form(&TabSel::Name(n.clone()))?;
+                if hits.is_empty() {
+                    return Err((err_code::NOT_FOUND, format!("no tab named {n}")));
+                }
+                hits
+            }
+            LocSel::Bare(n) => {
+                let ordinal = usize::try_from(*n)
+                    .map(|n| resolve_form(&TabSel::Index(n)))
+                    .unwrap_or_else(|_| Ok(Vec::new()))?;
+                let by_id = resolve_form(&TabSel::Id(*n))?;
+                // Only a reading that ACTUALLY hit more than one tab can make
+                // the bare number ambiguous by form; a one-sided miss falls
+                // through to the generic handling below, so the refusal the
+                // operator gets is one whose remediation works (qualify a
+                // multi-workspace ordinal, or accept a single unambiguous
+                // reading) instead of advice naming a form that matches
+                // nothing.
+                if ordinal.len() > 1 && by_id.is_empty() {
+                    ordinal
+                } else if ordinal.is_empty() && by_id.len() == 1 {
+                    by_id
+                } else {
+                    let mut distinct: Vec<(&Squad, usize)> = ordinal.clone();
+                    for h in &by_id {
+                        if !distinct
+                            .iter()
+                            .any(|(s, ti)| s.tabs[*ti].id == h.0.tabs[h.1].id)
+                        {
+                            distinct.push(*h);
+                        }
+                    }
+                    match distinct.len() {
+                        0 => {
+                            return Err((
+                                err_code::NOT_FOUND,
+                                format!("no tab at ordinal {n} and no tab with id {n}"),
+                            ))
+                        }
+                        1 => distinct,
+                        _ => {
+                            let ord = ordinal
+                                .first()
+                                .map(|(s, ti)| self.hit_line(s, *ti))
+                                .unwrap_or_default();
+                            let id = by_id
+                                .first()
+                                .map(|(s, ti)| self.hit_line(s, *ti))
+                                .unwrap_or_default();
+                            return Err((
+                                err_code::BAD_REQUEST,
+                                format!(
+                                    "bare number {n} is ambiguous: {ord} as an ordinal, {id} as \
+                                     an id; use ordinal:{n} or id:{n}"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        };
+        if hits.len() > 1 {
+            let listed = hits
+                .iter()
+                .map(|(s, ti)| format!("  {}", self.hit_line(s, *ti)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err((
+                err_code::BAD_REQUEST,
+                format!(
+                    "selector {sel:?} matches {} workspaces:\n{listed}",
+                    hits.len()
+                ),
+            ));
+        }
+        let (sq, ti) = hits[0];
+        let Some(tab) = sq.tabs.get(ti) else {
+            return Err((err_code::BAD_REQUEST, "selected tab vanished".into()));
+        };
+        let dict = sq
+            .tab_dict(ti)
+            .ok_or((err_code::BAD_REQUEST, "selected tab vanished".to_string()))?;
+        let panes = tree::leaves(&tab.root)
+            .into_iter()
+            .map(|pid| TabPaneOccupant {
+                pane_id: pid,
+                fno_id: self.fno_id_for_pane_with_agents(pid, agents),
+            })
+            .collect();
+        Ok(ServerMsg::TabLocation {
+            squad_id: sq.id,
+            squad_name: sq.name.clone(),
+            tab_id: dict.tab_id,
+            name: dict.name,
+            ordinal: dict.ordinal,
+            focus: tab.focus,
+            panes,
+        })
+    }
+
+    /// (x-1499) The fresh-registry wrapper for [`CoreMsg::TabWhere`]: an
+    /// unreadable registry is its OWN exit class, distinct from a successful
+    /// answer whose panes hold no workers.
+    fn tab_where_from_fresh_agents(
+        &self,
+        sel: &str,
+        target: &PaneTarget,
+        agents: Option<&[RegistryAgent]>,
+    ) -> ServerMsg {
+        let Some(rows) = agents else {
+            return ServerMsg::Err {
+                code: err_code::REGISTRY_UNAVAILABLE,
+                msg: "agent registry unavailable".into(),
+            };
+        };
+        match self.tab_where(sel, target, rows) {
+            Ok(msg) => msg,
+            Err((code, msg)) => ServerMsg::Err { code, msg },
+        }
+    }
+
+    /// One candidate line for a location refusal (x-1499): workspace,
+    /// name-or-ordinal label, stable id - everything the operator needs to
+    /// qualify and retry.
+    fn hit_line(&self, sq: &Squad, ti: usize) -> String {
+        let tid = sq.tabs.get(ti).map(|t| t.id).unwrap_or(0);
+        format!(
+            "workspace={} tab={} tab_id={tid}",
+            self.squad_display_label(sq),
+            sq.tab_label(ti)
+        )
+    }
+
+    /// The workspace's sideline label (x-1499): its explicit name, else the
+    /// display name derived from its origins (the same label
+    /// `resolve_placement_target` matches squad names against).
+    fn squad_display_label(&self, sq: &Squad) -> String {
+        if let Some(n) = &sq.name {
+            return n.clone();
+        }
+        let cwds: Vec<String> = self
+            .session
+            .squads
+            .iter()
+            .map(|s| s.canonical_cwd().to_string())
+            .collect();
+        let derived = squad::display_names(&cwds);
+        self.session
+            .squads
+            .iter()
+            .position(|s| s.id == sq.id)
+            .and_then(|i| derived.get(i).cloned())
+            .unwrap_or_default()
     }
 
     /// Resolve an fno session id to a single live pane it hosts in THIS session,
@@ -4063,10 +4377,13 @@ impl Core {
                 .position(|s| s.name == r.slot)
                 .unwrap_or(usize::MAX)
         });
+        let dict = self.session.squad(sid).and_then(|s| s.tab_dict(ti));
         Ok(ServerMsg::LayoutGrafted {
             anchor,
             squad: sid,
             tab: tid,
+            tab_name: dict.as_ref().and_then(|d| d.name.clone()),
+            tab_ordinal: dict.map(|d| d.ordinal),
             results,
         })
     }
@@ -7201,11 +7518,66 @@ impl Core {
         pane: u64,
         bytes: &[u8],
         guarded: bool,
+        expected_identity: Option<&str>,
         agents: Option<Vec<RegistryAgent>>,
     ) -> ServerMsg {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
         };
+        if let Some(expected) = expected_identity {
+            let host = entry.name.as_deref().unwrap_or("<unknown>");
+            let Some(rows) = agents.as_deref() else {
+                return ServerMsg::Err {
+                    code: err_code::TARGET_IDENTITY_MISMATCH,
+                    msg: format!(
+                        "addressed {expected}, pane hosts {host}; agent registry unreadable"
+                    ),
+                };
+            };
+            let matches: Vec<&RegistryAgent> = rows
+                .iter()
+                .filter(|a| {
+                    a.mux.as_ref().is_some_and(|(session, pane_id)| {
+                        session == &self.session_name && *pane_id == pane
+                    })
+                })
+                .collect();
+            let mut occupants: Vec<&RegistryAgent> = Vec::new();
+            for row in matches {
+                let equivalent = occupants.iter().any(|existing| {
+                    existing.name == row.name
+                        && existing.effective_identity() == row.effective_identity()
+                });
+                if !equivalent {
+                    occupants.push(row);
+                }
+            }
+            let registry_identity = occupants
+                .first()
+                .and_then(|row| row.effective_identity())
+                .unwrap_or("<unknown>");
+            if occupants.len() != 1
+                || registry_identity != expected
+                || occupants.first().is_some_and(|row| row.name != host)
+            {
+                let registry = occupants
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return ServerMsg::Err {
+                    code: err_code::TARGET_IDENTITY_MISMATCH,
+                    msg: format!(
+                        "addressed {expected}, pane hosts {host}; registry fno_id {registry_identity}; occupants: {}",
+                        if registry.is_empty() {
+                            "<none>"
+                        } else {
+                            &registry
+                        }
+                    ),
+                };
+            }
+        }
         if guarded {
             let Some(rows) = agents.as_deref() else {
                 return ServerMsg::Err {
@@ -9459,37 +9831,47 @@ impl Core {
                 pane,
                 lines,
                 block,
+                agents,
                 reply,
             } => {
                 let msg = match self.panes.get(&pane) {
-                    Some(entry) => match block {
-                        // Block mode: `lines` is ignored; an unanswerable block
-                        // is BLOCK_UNAVAILABLE, never empty/stale text.
-                        Some(sel) => match entry.vt.read_block(sel) {
-                            Ok(read) => ServerMsg::PaneText {
-                                pane_id: pane,
-                                text: read.text.clone(),
-                                block: Some(read.meta()),
+                    Some(entry) => {
+                        let pane_name = entry.name.clone();
+                        let registry_fno_id = self
+                            .fno_id_for_pane_with_agents(pane, agents.as_deref().unwrap_or(&[]));
+                        match block {
+                            // Block mode: `lines` is ignored; an unanswerable block
+                            // is BLOCK_UNAVAILABLE, never empty/stale text.
+                            Some(sel) => match entry.vt.read_block(sel) {
+                                Ok(read) => ServerMsg::PaneText {
+                                    pane_id: pane,
+                                    text: read.text.clone(),
+                                    block: Some(read.meta()),
+                                    pane_name,
+                                    registry_fno_id,
+                                },
+                                Err(()) => ServerMsg::Err {
+                                    code: err_code::BLOCK_UNAVAILABLE,
+                                    msg: format!("pane {pane}: no such block"),
+                                },
                             },
-                            Err(()) => ServerMsg::Err {
-                                code: err_code::BLOCK_UNAVAILABLE,
-                                msg: format!("pane {pane}: no such block"),
-                            },
-                        },
-                        // Plain read: `lines` reaches into history (v6, US5);
-                        // no `--lines` keeps the visible-grid behavior (AC5-UI).
-                        None => {
-                            let text = match lines {
-                                Some(n) => entry.vt.read_tail(n),
-                                None => frame_text(&entry.vt.frame()),
-                            };
-                            ServerMsg::PaneText {
-                                pane_id: pane,
-                                text,
-                                block: None,
+                            // Plain read: `lines` reaches into history (v6, US5);
+                            // no `--lines` keeps the visible-grid behavior (AC5-UI).
+                            None => {
+                                let text = match lines {
+                                    Some(n) => entry.vt.read_tail(n),
+                                    None => frame_text(&entry.vt.frame()),
+                                };
+                                ServerMsg::PaneText {
+                                    pane_id: pane,
+                                    text,
+                                    block: None,
+                                    pane_name,
+                                    registry_fno_id,
+                                }
                             }
                         }
-                    },
+                    }
                     None => dead_pane(pane),
                 };
                 let _ = reply.send(msg);
@@ -9520,21 +9902,24 @@ impl Core {
                         let resolved = if exact {
                             // The new pane now sits beside the anchor in the
                             // anchor's squad+tab; read its real location back.
-                            let (sid, tid) = self
+                            let (sid, tid, tab_name, tab_ordinal) = self
                                 .session
                                 .find_pane(pane_id)
                                 .and_then(|(sid, ti)| {
                                     self.session
                                         .squad(sid)
-                                        .and_then(|s| s.tabs.get(ti).map(|t| (sid, t.id)))
+                                        .and_then(|s| s.tab_dict(ti))
+                                        .map(|d| (sid, d.tab_id, d.name, Some(d.ordinal)))
                                 })
-                                .unwrap_or((0, 0));
+                                .unwrap_or((0, 0, None, None));
                             Some(ResolvedPlacement {
                                 anchor: anchor.unwrap(),
                                 direction: direction.unwrap_or(Dir::Down),
                                 fallback: PlacementFallback::Refuse,
                                 squad: sid,
                                 tab: tid,
+                                tab_name,
+                                tab_ordinal,
                             })
                         } else {
                             None
@@ -9553,10 +9938,12 @@ impl Core {
                 pane,
                 bytes,
                 guarded,
+                expected_identity,
                 agents,
                 reply,
             } => {
-                let msg = self.pane_send(pane, &bytes, guarded, agents);
+                let msg =
+                    self.pane_send(pane, &bytes, guarded, expected_identity.as_deref(), agents);
                 let _ = reply.send(msg);
                 Flow::Continue
             }
@@ -9710,10 +10097,27 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
-            CoreMsg::LayoutGet { scope, reply } => {
-                let msg = match self.layout_get(&scope) {
-                    Ok(squads) => ServerMsg::LayoutTree { squads },
-                    Err((code, msg)) => ServerMsg::Err { code, msg },
+            CoreMsg::LayoutGet {
+                scope,
+                workers,
+                agents,
+                reply,
+            } => {
+                // A worker join the caller asked for cannot silently degrade
+                // to "every pane empty" when the registry read failed: that
+                // would print the same receipt as a session full of idle
+                // panes (the absence-versus-answer trap). Refuse instead.
+                let msg = if workers && agents.is_none() {
+                    ServerMsg::Err {
+                        code: err_code::REGISTRY_UNAVAILABLE,
+                        msg: "agent registry unavailable".into(),
+                    }
+                } else {
+                    let agents = if workers { agents.as_deref() } else { None };
+                    match self.layout_get(&scope, agents) {
+                        Ok(squads) => ServerMsg::LayoutTree { squads },
+                        Err((code, msg)) => ServerMsg::Err { code, msg },
+                    }
                 };
                 let _ = reply.send(msg);
                 Flow::Continue
@@ -9727,9 +10131,28 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
+            CoreMsg::TabWhere {
+                squad,
+                sel,
+                agents,
+                reply,
+            } => {
+                let msg = self.tab_where_from_fresh_agents(&sel, &squad, agents.as_deref());
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
             CoreMsg::PaneBreak { pane, name, reply } => {
                 let msg = match self.pane_break(pane, name) {
-                    Ok(tab_id) => ServerMsg::TabSpawned { tab_id },
+                    Ok(tab_id) => {
+                        let dict = self.session.find_tab(tab_id).and_then(|(sid, ti)| {
+                            self.session.squad(sid).and_then(|s| s.tab_dict(ti))
+                        });
+                        ServerMsg::TabSpawned {
+                            tab_id,
+                            tab_name: dict.as_ref().and_then(|d| d.name.clone()),
+                            tab_ordinal: dict.map(|d| d.ordinal),
+                        }
+                    }
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
                 let _ = reply.send(msg);
@@ -10079,6 +10502,8 @@ async fn serve(
     // Attached-client count for the periodic readers (x-4e30): Core owns the
     // sender; each reader holds a receiver as its work gate + 0->1 wakeup.
     let (client_count_tx, client_count_rx) = watch::channel(0usize);
+    let persisted_pane_floor = crate::squad_store::load().next_pane_id;
+    let initial_agents = read_guard_agents().await;
 
     let mut core = Core {
         session: Session::default(),
@@ -10087,7 +10512,10 @@ async fn serve(
         pane_stats: Arc::new(RwLock::new(HashMap::new())),
         pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
         clients: Vec::new(),
-        next_pane_id: 1,
+        next_pane_id: pane_id_floor(
+            persisted_pane_floor,
+            initial_agents.as_deref().unwrap_or(&[]),
+        ),
         next_squad_id: 1,
         tab_areas: HashMap::new(),
         session_name,
@@ -10812,6 +11240,15 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
     }
 }
 
+fn pane_id_floor(persisted: u64, agents: &[RegistryAgent]) -> u64 {
+    let registry_floor = agents
+        .iter()
+        .filter_map(|agent| agent.mux.as_ref().map(|(_, pane)| pane.saturating_add(1)))
+        .max()
+        .unwrap_or(1);
+    persisted.max(registry_floor).max(1)
+}
+
 /// Does registry row `a` carry `id` as a FULL `session_id` or `harness_session_id`?
 fn identity_exact(a: &RegistryAgent, id: &str) -> bool {
     a.session_id.as_deref() == Some(id) || a.harness_session_id.as_deref() == Some(id)
@@ -10900,11 +11337,13 @@ async fn handle_control(
                 .await
         }
         ControlVerb::PaneRead { pane, lines, block } => {
+            let agents = read_guard_agents().await;
             core_tx
                 .send(CoreMsg::PaneRead {
                     pane,
                     lines,
                     block,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -10938,6 +11377,7 @@ async fn handle_control(
             pane,
             bytes,
             guarded,
+            expected_identity,
         } => {
             // A guarded send reads the agents registry FRESH here, off the core
             // loop: the server's own overlay cache (`self.agents`) is parked
@@ -10946,7 +11386,7 @@ async fn handle_control(
             // into a busy agent. Reading on the server (its own registry path)
             // is what closes the client/server HOME-divergence gap; passing the
             // snapshot into the core loop keeps the check + inject atomic.
-            let agents = if guarded {
+            let agents = if guarded || expected_identity.is_some() {
                 read_guard_agents().await
             } else {
                 None
@@ -10956,6 +11396,7 @@ async fn handle_control(
                     pane,
                     bytes,
                     guarded,
+                    expected_identity,
                     agents,
                     reply: reply_tx,
                 })
@@ -11064,10 +11505,13 @@ async fn handle_control(
                 })
                 .await
         }
-        ControlVerb::LayoutGet { scope } => {
+        ControlVerb::LayoutGet { scope, workers } => {
+            let agents = read_guard_agents().await;
             core_tx
                 .send(CoreMsg::LayoutGet {
                     scope,
+                    workers,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -11077,6 +11521,17 @@ async fn handle_control(
             core_tx
                 .send(CoreMsg::PaneWhere {
                     fno_id,
+                    agents,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::TabWhere { squad, sel } => {
+            let agents = read_guard_agents().await;
+            core_tx
+                .send(CoreMsg::TabWhere {
+                    squad,
+                    sel,
                     agents,
                     reply: reply_tx,
                 })
@@ -12052,8 +12507,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pane_id_floor_seeds_from_legacy_registry_refs() {
+        let row = agent_in("old", 41, Some(AgentBadge::Done), true);
+
+        assert_eq!(pane_id_floor(0, &[row]), 42);
+    }
+
     fn agent(pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         agent_in("main", pane, badge, exited)
+    }
+
+    #[test]
+    fn pane_send_refuses_when_registry_name_disagrees_with_pane_identity() {
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
+        let mut addressed = agent_in("sess", pane, Some(AgentBadge::Done), false);
+        addressed.name = "addressed".into();
+        addressed.harness_session_id = Some("target-id".into());
+
+        match core.pane_send(
+            pane,
+            b"payload",
+            false,
+            Some("target-id"),
+            Some(vec![addressed]),
+        ) {
+            ServerMsg::Err { msg, .. } => {
+                assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
+                assert!(msg.contains("hosted"), "refusal names pane host: {msg}");
+            }
+            other => panic!("expected identity refusal before typing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_send_deduplicates_equivalent_registry_occupants() {
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("worker".into());
+        let mut first = agent_in("sess", pane, Some(AgentBadge::Done), false);
+        first.name = "worker".into();
+        first.harness_session_id = Some("target-id".into());
+        let duplicate = first.clone();
+
+        assert!(matches!(
+            core.pane_send(
+                pane,
+                b"payload",
+                false,
+                Some("target-id"),
+                Some(vec![first, duplicate]),
+            ),
+            ServerMsg::Ok
+        ));
     }
 
     #[test]
@@ -13383,6 +13891,139 @@ mod tests {
         assert_eq!(core.pane_where("G"), Err(err_code::NOT_PANE_HOSTED));
     }
 
+    // -- x-1499 reverse location lookup -----------------------------------
+
+    #[test]
+    fn tab_location_resolves_all_forms_and_joins_occupants() {
+        // AC3-HP: the receipt names the workspace, both identifier forms,
+        // every pane id, and every joined worker.
+        let mut core = two_tab_core();
+        core.session_name = "sess".into();
+        let mut w1 = agent_in("sess", 1, None, false);
+        w1.session_id = Some("W1".into());
+        let mut w2 = agent_in("sess", 2, None, false);
+        w2.session_id = Some("W2".into());
+        core.agents = vec![w1, w2];
+
+        let loc = core.tab_where("id:10", &PaneTarget::CurrentRoute, &core.agents);
+        match loc {
+            Ok(ServerMsg::TabLocation {
+                squad_id,
+                squad_name,
+                tab_id,
+                name,
+                ordinal,
+                focus,
+                panes,
+            }) => {
+                assert_eq!((squad_id, tab_id, ordinal, focus), (1, 10, 1, 1));
+                assert_eq!(squad_name, None);
+                assert_eq!(name, None);
+                let joined: Vec<_> = panes
+                    .iter()
+                    .map(|o| (o.pane_id, o.fno_id.as_deref()))
+                    .collect();
+                assert_eq!(joined, vec![(1, Some("W1")), (2, Some("W2"))]);
+            }
+            other => panic!("id:10 should resolve, got {other:?}"),
+        }
+
+        // ordinal: and name: land on the same tabs as id:.
+        let by_ord = core.tab_where("ordinal:1", &PaneTarget::CurrentRoute, &core.agents);
+        assert!(matches!(
+            &by_ord,
+            Ok(ServerMsg::TabLocation { tab_id: 10, .. })
+        ));
+        let by_name = core.tab_where("name:bee", &PaneTarget::CurrentRoute, &core.agents);
+        assert!(matches!(
+            &by_name,
+            Ok(ServerMsg::TabLocation {
+                tab_id: 20,
+                ordinal: 2,
+                name: Some(n),
+                ..
+            }) if n == "bee"
+        ));
+
+        // AC3-ERR: a pane with no registry worker is an EXPLICIT empty
+        // occupant in a successful reply, never a failed resolution.
+        assert!(matches!(
+            &by_name,
+            Ok(ServerMsg::TabLocation { panes, .. })
+                if panes.iter().all(|o| o.pane_id == 3 && o.fno_id.is_none())
+        ));
+
+        // AC1-ERR: 0 and beyond-count ordinals refuse with the named errors.
+        assert_eq!(
+            core.tab_where("ordinal:0", &PaneTarget::CurrentRoute, &[])
+                .unwrap_err()
+                .1,
+            "tab ordinal starts at 1"
+        );
+        assert_eq!(
+            core.tab_where("ordinal:9", &PaneTarget::CurrentRoute, &[])
+                .unwrap_err()
+                .1,
+            "no tab at ordinal 9"
+        );
+        assert_eq!(
+            core.tab_where("id:99", &PaneTarget::CurrentRoute, &[])
+                .unwrap_err()
+                .1,
+            "no tab with id 99"
+        );
+    }
+
+    #[test]
+    fn tab_location_refuses_workspace_and_bare_number_ambiguity() {
+        let mut core = two_tab_core(); // squad 1: tabs 10, 20; squad 2: tabs 30, 2
+        core.session
+            .add_squad(2, vec!["/b".into()], None, leaf_tab(30, 7));
+        core.session.squad_mut(2).unwrap().tabs.push(leaf_tab(2, 8));
+
+        // An unqualified ordinal repeating across workspaces refuses and
+        // prints every candidate with workspace, label, and tab_id.
+        let (code, msg) = core
+            .tab_where("ordinal:2", &PaneTarget::CurrentRoute, &[])
+            .unwrap_err();
+        assert_eq!(code, err_code::BAD_REQUEST);
+        assert!(msg.contains("tab=bee tab_id=20"), "msg: {msg}");
+        assert!(msg.contains("tab=·2 tab_id=2"), "msg: {msg}");
+        assert!(msg.contains("workspace="), "msg: {msg}");
+
+        // Qualification resolves it.
+        assert!(matches!(
+            core.tab_where("ordinal:2", &PaneTarget::SquadId(2), &[]),
+            Ok(ServerMsg::TabLocation { tab_id: 2, .. })
+        ));
+
+        // AC4-ERR: a bare number that names DIFFERENT live tabs as an ordinal
+        // and as a stable id refuses with both explicit forms, never a
+        // first-pick by iteration order.
+        let (code, msg) = core
+            .tab_where("2", &PaneTarget::CurrentRoute, &[])
+            .unwrap_err();
+        assert_eq!(code, err_code::BAD_REQUEST);
+        assert!(msg.contains("ordinal:2"), "msg: {msg}");
+        assert!(msg.contains("id:2"), "msg: {msg}");
+
+        // A bare number whose ordinal reading alone spans workspaces gets the
+        // USABLE refusal (qualify the workspace), never bare-number advice
+        // naming an id form that matches nothing.
+        let (code, msg) = core
+            .tab_where("1", &PaneTarget::CurrentRoute, &[])
+            .unwrap_err();
+        assert_eq!(code, err_code::BAD_REQUEST);
+        assert!(msg.contains("matches 2 workspaces"), "msg: {msg}");
+        assert!(!msg.contains("as an id"), "msg: {msg}");
+
+        // A bare number with only one live reading resolves that reading.
+        assert!(matches!(
+            core.tab_where("1", &PaneTarget::SquadId(1), &[]),
+            Ok(ServerMsg::TabLocation { tab_id: 10, .. })
+        ));
+    }
+
     #[test]
     fn fno_id_for_pane_forward_join() {
         // AC3-HP reverse direction: pane -> fno_id via the registry join.
@@ -13413,7 +14054,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tab_index_by_id_name_and_index() {
+    fn resolve_tab_index_by_id_name_and_ordinal() {
         let core = two_tab_core();
         assert_eq!(core.resolve_tab_index(1, &TabSel::Id(20)).unwrap(), 1);
         assert_eq!(
@@ -13421,18 +14062,28 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(core.resolve_tab_index(1, &TabSel::Index(0)).unwrap(), 0);
+        // `Index` is the 1-based ordinal the UI shows: 1 names the first tab,
+        // 0 is a refusal, never a silent zero-based vector index (x-1499).
+        assert_eq!(core.resolve_tab_index(1, &TabSel::Index(1)).unwrap(), 0);
+        assert_eq!(core.resolve_tab_index(1, &TabSel::Index(2)).unwrap(), 1);
+        assert_eq!(
+            core.resolve_tab_index(1, &TabSel::Index(0)).unwrap_err(),
+            "tab ordinal starts at 1"
+        );
         assert!(core
             .resolve_tab_index(1, &TabSel::Name("nope".into()))
             .is_err());
-        assert!(core.resolve_tab_index(1, &TabSel::Index(9)).is_err());
+        assert_eq!(
+            core.resolve_tab_index(1, &TabSel::Index(9)).unwrap_err(),
+            "no tab at ordinal 9"
+        );
     }
 
     #[test]
     fn layout_get_carries_nested_tree_and_geometry() {
         // Locked Decision 5: structure AND rects.
         let core = two_tab_core();
-        let squads = core.layout_get(&LayoutScope::Session).unwrap();
+        let squads = core.layout_get(&LayoutScope::Session, None).unwrap();
         assert_eq!(squads.len(), 1);
         let tab10 = squads[0].tabs.iter().find(|t| t.tab_id == 10).unwrap();
         assert!(
@@ -13441,6 +14092,30 @@ mod tests {
         );
         assert_eq!(tab10.panes.len(), 2, "both panes are tiled with rects");
         assert!(tab10.panes.iter().all(|(_, r)| r.cols > 0 && r.rows > 0));
+        // (x-1499) The worker join is OPT-IN: absent (None) unless the caller
+        // asked, so the machine JSON shape never grows a key on a healthy
+        // reply; asked for, it joins the registry rows by pane.
+        assert!(
+            squads[0].tabs.iter().all(|t| t.workers.is_none()),
+            "no workers key without the request"
+        );
+        let mut core = two_tab_core();
+        core.session_name = "sess".into();
+        let mut w = agent_in("sess", 1, None, false);
+        w.session_id = Some("W1".into());
+        core.agents = vec![w];
+        let squads = core
+            .layout_get(&LayoutScope::Session, Some(&core.agents.clone()))
+            .unwrap();
+        let tab10 = squads[0].tabs.iter().find(|t| t.tab_id == 10).unwrap();
+        assert_eq!(
+            tab10.workers.as_ref().map(|ws| ws.first().cloned()),
+            Some(Some(TabPaneOccupant {
+                pane_id: 1,
+                fno_id: Some("W1".into())
+            })),
+            "the requested join names the pane's worker"
+        );
     }
 
     #[test]
@@ -14284,8 +14959,10 @@ mod tests {
     fn pane_ls_can_join_a_fresh_registry_snapshot_without_viewers() {
         let (mut core, pane_id) = template_core();
         core.session_name = "sess".into();
+        core.panes.get_mut(&pane_id).unwrap().name = Some("worker".into());
         let mut fresh = agent_in("sess", pane_id, None, false);
         fresh.harness_session_id = Some("019fb024-fresh".into());
+        fresh.name = "worker".into();
         core.panes
             .get_mut(&pane_id)
             .unwrap()
@@ -14302,6 +14979,8 @@ mod tests {
             ServerMsg::PaneList { panes } => {
                 let pane = panes.iter().find(|pane| pane.pane_id == pane_id).unwrap();
                 assert_eq!(pane.title.as_deref(), Some("⠋ Working"));
+                assert_eq!(pane.name.as_deref(), Some("worker"));
+                assert_eq!(pane.fno_id.as_deref(), Some("019fb024-fresh"));
             }
             other => panic!("pane ls should carry OSC title, got {other:?}"),
         }
@@ -20172,10 +20851,13 @@ mod tests {
                 squad_id,
                 squad_name,
                 tab_id,
+                tab_name,
+                tab_ordinal,
                 clients_moved,
             } => {
                 assert_eq!((pane, squad_id, tab_id), (p3, 2, t3));
                 assert_eq!(squad_name.as_deref(), Some("other"));
+                assert_eq!((tab_name.as_deref(), tab_ordinal), (None, Some(1)));
                 // The count is the anti-lie field: it must reflect a client that
                 // actually ended up looking at the pane.
                 assert_eq!(clients_moved, 1);

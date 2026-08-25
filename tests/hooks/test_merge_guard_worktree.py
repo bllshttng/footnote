@@ -35,7 +35,8 @@ def _git(cwd, *args):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _write_state(repo, *, status, sid, auto_merge="true", ext="true"):
+def _write_state(repo, *, status, sid, auto_merge="true", ext="true",
+                 switch="true"):
     d = repo / ".fno"
     d.mkdir(parents=True, exist_ok=True)
     (d / "target-state.md").write_text(
@@ -46,6 +47,10 @@ def _write_state(repo, *, status, sid, auto_merge="true", ext="true"):
         f"external_review_passed: {ext}\n"
         "---\n"
     )
+    # x-3855: raw `gh pr merge` also needs the live switch armed. The state
+    # file alone is a snapshot; without an armed config the two-factor path
+    # declines (a disarm must stop a run started under the old setting).
+    (d / "config.toml").write_text(f"[auto_merge]\nenabled = {switch}\n")
 
 
 def _write_external_artifact(repo, sid, pr_number=356):
@@ -197,6 +202,48 @@ def test_multi_worktree_prefer_pr_selects_matching():
         reason = _call_in(canonical, git_protection._check_pr_merge_allowed,
                           "gh pr merge 356 --merge")
         assert reason, "PR 356 should authorize via the matching worktree session"
+
+
+def test_live_switch_off_declines_raw_merge():
+    """x-2270 at the raw path (x-3855): an active session whose manifest says
+    approved and a fresh artifact still declines when the live config switch
+    is off - the snapshot must not outlive the operator's disarm, or raw gh
+    merges past what the sanctioned verb refuses."""
+    with tempfile.TemporaryDirectory() as td:
+        canonical, wt = _setup_canonical_plus_worktree(td)
+        sid = "disarmed-sid"
+        _write_state(wt, status="IN_PROGRESS", sid=sid, switch="false")
+        _write_external_artifact(wt, sid)
+
+        reason = _call_in(canonical, git_protection._check_pr_merge_allowed,
+                          "gh pr merge 356 --merge")
+        assert reason is None, "disarmed config must decline the raw merge"
+
+
+def test_env_grant_stamp_arms_without_live_config():
+    """x-01b9 at the raw path: a run granted at spawn
+    (auto_merge_source: env-target-auto-merge) authorizes on its own, without
+    the standing config switch."""
+    with tempfile.TemporaryDirectory() as td:
+        canonical, wt = _setup_canonical_plus_worktree(td)
+        sid = "env-grant-sid"
+        d = wt / ".fno"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "target-state.md").write_text(
+            "---\n"
+            "status: IN_PROGRESS\n"
+            f"session_id: {sid}\n"
+            "auto_merge_approved: true\n"
+            "auto_merge_source: env-target-auto-merge\n"
+            "external_review_passed: true\n"
+            "---\n"
+        )
+        (d / "config.toml").write_text("[auto_merge]\nenabled = false\n")
+        _write_external_artifact(wt, sid)
+
+        reason = _call_in(canonical, git_protection._check_pr_merge_allowed,
+                          "gh pr merge 356 --merge")
+        assert reason, "the spawn-time env grant must authorize on its own"
 
 
 def test_multi_worktree_no_pr_blocks():

@@ -34,8 +34,11 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
+from fno.adapters.providers.dispatch import dispatch_env
 from fno.adapters.providers.model import ProviderRecord
+from fno.agents.model_routing import _parse_target
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,11 @@ _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"  # macOS Keychain item (orc
 # seven_day* object) so a maxed Opus weekly binds headroom instead of being
 # dropped, letting Opus work dispatch until the reactive 429 (x-6bcf review).
 _CLAUDE_KNOWN_LABELS = {"five_hour": "5h", "seven_day": "weekly"}
+
+_ZAI_UNIT_MINUTES = {1: 1440, 3: 60, 5: 1, 6: 10080}
+_ZAI_UNIT_SUFFIX = {1: "d", 3: "h", 5: "m", 6: "w"}
+_ZAI_LIMIT_TYPES = frozenset({"TOKENS_LIMIT", "TIME_LIMIT", "CREDIT_LIMIT"})
+_ZAI_HOSTS = frozenset({"api.z.ai", "open.bigmodel.cn"})
 
 
 def _clamp_pct(value: float) -> float:
@@ -639,20 +647,144 @@ def _probe_codex(
     return None, "probe-failed"
 
 
+def _zai_integer(value: Any) -> int | None:
+    """Return an actual JSON integer, excluding booleans and float coercion."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _zai_window_label(unit: int, number: int, window_minutes: int) -> str:
+    if window_minutes == 300:
+        return "5h"
+    if window_minutes == 10080:
+        return "weekly"
+    return f"{number}{_ZAI_UNIT_SUFFIX[unit]}"
+
+
+def _parse_zai_windows(payload: Any) -> tuple[UsageWindow, ...]:
+    """Parse Z.AI's quota/limit response into reset-bearing usage windows.
+
+    The endpoint's percentage is a fallback only. A window is usable only
+    when its limit, unit, and millisecond reset are all valid; this prevents a
+    percentage-only response from becoming a false green headroom reading.
+    """
+    if (
+        not isinstance(payload, dict)
+        or payload.get("success") is not True
+        or payload.get("code") != 200
+    ):
+        return ()
+    data = payload.get("data")
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(limits, list):
+        return ()
+
+    windows: list[UsageWindow] = []
+    for raw in limits:
+        if not isinstance(raw, dict) or raw.get("type") not in _ZAI_LIMIT_TYPES:
+            continue
+        unit = _zai_integer(raw.get("unit"))
+        number = _zai_integer(raw.get("number"))
+        percentage = _zai_integer(raw.get("percentage"))
+        reset_millis = _zai_integer(raw.get("nextResetTime"))
+        if (
+            unit not in _ZAI_UNIT_MINUTES
+            or number is None
+            or number <= 0
+            or percentage is None
+            or reset_millis is None
+            or reset_millis <= 0
+        ):
+            continue
+        optional_values = {
+            name: _zai_integer(raw.get(name))
+            for name in ("usage", "currentValue", "remaining")
+        }
+        if any(
+            name in raw and raw[name] is not None and value is None
+            for name, value in optional_values.items()
+        ):
+            continue
+        window_minutes = number * _ZAI_UNIT_MINUTES[unit]
+        used_pct = float(percentage)
+        usage = optional_values["usage"]
+        current = optional_values["currentValue"]
+        remaining = optional_values["remaining"]
+        if usage is not None and usage > 0:
+            if remaining is not None:
+                used = max(usage - remaining, current if current is not None else usage - remaining)
+                used_pct = 100.0 * used / usage
+            elif current is not None:
+                used_pct = 100.0 * current / usage
+        windows.append(
+            UsageWindow(
+                label=_zai_window_label(unit, number, window_minutes),
+                used_pct=used_pct,
+                resets_at=reset_millis / 1000.0,
+            )
+        )
+    return tuple(windows)
+
+
+def _probe_zai(
+    record: ProviderRecord, now: float, *, repo_root: Path | None = None
+) -> tuple[UsageSnapshot | None, str | None]:
+    """Probe the configured Z.AI route's quota endpoint without logging secrets."""
+    try:
+        route_env = dispatch_env(record.id, repo_root=repo_root)
+    except Exception:  # noqa: BLE001 - route resolution is advisory
+        return None, "probe-failed"
+    bearer = route_env.get("ANTHROPIC_AUTH_TOKEN") or route_env.get("ANTHROPIC_API_KEY")
+    base_url = route_env.get("ANTHROPIC_BASE_URL") or ""
+    parsed = urlparse(base_url)
+    if not bearer or parsed.scheme != "https" or parsed.hostname not in _ZAI_HOSTS:
+        return None, "probe-failed"
+    endpoint = f"{parsed.scheme}://{parsed.hostname}/api/monitor/usage/quota/limit"
+    request = urllib.request.Request(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "User-Agent": "fno-provider-usage/1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
+            body = response.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
+        return None, "probe-failed"
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return None, "probe-failed"
+    windows = _parse_zai_windows(payload)
+    if not windows:
+        return None, "probe-failed"
+    return UsageSnapshot(
+        provider_id=record.id,
+        windows=windows,
+        probed_at=now,
+        source="quota-endpoint",
+    ), None
+
+
 # Each probe returns ``(snapshot, unknown_reason)``: the reason is decided where
 # the failure happens, because only the probe knows whether it ever issued a
 # request. Deriving it afterwards from a bare None is what mislabels a rejected
 # credential as an endpoint failure.
 _PROBES: dict[
-    str, Callable[[ProviderRecord, float], "tuple[UsageSnapshot | None, str | None]"]
+    str, Callable[..., "tuple[UsageSnapshot | None, str | None]"]
 ] = {
     "claude": _probe_claude,
     "codex": _probe_codex,
+    "zai": _probe_zai,
 }
 
 
 def probe_usage_detail(
-    record: ProviderRecord, now: float | None = None
+    record: ProviderRecord,
+    now: float | None = None,
+    repo_root: Path | None = None,
 ) -> tuple[UsageSnapshot | None, str | None]:
     """``(snapshot, unknown_reason)`` - the probe plus WHY it came back unknown.
 
@@ -682,15 +814,20 @@ def probe_usage_detail(
     """
     if now is None:
         now = time.time()
-    probe = _PROBES.get(record.harness)
+    route_provider = None
+    if record.route:
+        parsed_route = _parse_target(record.route)
+        route_provider = parsed_route[0] if parsed_route is not None else None
+    probe_key = route_provider or record.harness
+    probe = _PROBES.get(probe_key)
     if probe is None:
         return None, "harness-unsupported"
-    if record.auth == "api_key":
+    if record.auth == "api_key" and route_provider is None:
         # Record-scoped by construction (the key rides `env`), so attribution is
         # not the missing piece: every probe reads an OAuth bearer, and this
         # record has none. v1 leaves api_key usage unknown.
         return None, "auth-unsupported"
-    if not _attributed_credential_dir(record)[0]:
+    if route_provider is None and not _attributed_credential_dir(record)[0]:
         # A tainted slot may be a FALSE taint (the five-day outage). Ask once
         # whether identity can be proven, then re-read attribution - a proven
         # slot may well belong to a different record than this one, in which
@@ -701,7 +838,10 @@ def probe_usage_detail(
         if not _attributed_credential_dir(record)[0]:
             return None, "unattributed"
     try:
-        snapshot, reason = probe(record, now)
+        if probe_key == "zai" and repo_root is not None:
+            snapshot, reason = probe(record, now, repo_root=repo_root)
+        else:
+            snapshot, reason = probe(record, now)
     except Exception as exc:  # noqa: BLE001 - crash containment boundary (AC1-FR)
         logger.debug("usage probe crashed for %r: %s", record.id, exc)
         return None, "probe-error"
@@ -710,7 +850,9 @@ def probe_usage_detail(
     return snapshot, None
 
 
-def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapshot | None:
+def probe_usage(
+    record: ProviderRecord, now: float | None = None, repo_root: Path | None = None
+) -> UsageSnapshot | None:
     """Return a fresh usage snapshot for ``record``, or None if unknown.
 
     Compatibility wrapper over :func:`probe_usage_detail` for callers that only
@@ -726,4 +868,4 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
     ``fno config accounts usage`` printed ``unknown`` at exit 0 while the endpoint,
     the bearer discovery, and the parser all worked.
     """
-    return probe_usage_detail(record, now)[0]
+    return probe_usage_detail(record, now, repo_root=repo_root)[0]

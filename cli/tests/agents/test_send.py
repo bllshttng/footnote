@@ -1837,10 +1837,10 @@ def test_us2_unknown_handle_errors_with_suggestions(runner, tmp_path, monkeypatc
     assert "fno-think001" in res.output
 
 
-def test_dispatch_send_durable_stamps_wake_daemon_owner(tmp_path: Path, monkeypatch) -> None:
-    """US6: a registered-agent send whose live inject misses writes its durable
-    fallback stamped owner=wake-daemon on the bus, so the sweep classifies it by
-    the terminal model instead of blanket age semantics."""
+def test_dispatch_send_durable_stamps_live_drain_owner(tmp_path: Path, monkeypatch) -> None:
+    """US6: a live registered-agent send whose inject misses writes a durable
+    recovery copy stamped owner=live-drain, naming the owner that can surface it
+    at the recipient's next turn boundary."""
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
@@ -1873,7 +1873,7 @@ def test_dispatch_send_durable_stamps_wake_daemon_owner(tmp_path: Path, monkeypa
     assert result.delivery == "durable"
     envs = [m for m in iter_messages(warn=False) if m.id == result.msg_id]
     assert len(envs) == 1
-    assert envs[0].meta.get("owner") == "wake-daemon"
+    assert envs[0].meta.get("owner") == "live-drain"
     assert envs[0].meta.get("ttl_at")  # derived from the owner class
 
 

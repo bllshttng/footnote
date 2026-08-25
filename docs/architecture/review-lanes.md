@@ -17,6 +17,8 @@ The obligation to use one of these lanes on a code payload is enforced at the st
 This doc is the lane menu; the gate is the authority.
 Opt out with `config.review.self_review_required = false`.
 
+Who the floor applies to: a harness with a native review verb floors. A run that cannot be attributed also floors. That covers absent markers, ambiguous markers, no target manifest, and an unrecognized spelling. Ambiguity about who authored the change is not permission to skip its review. A KNOWN verbless harness (gemini/agy) does not floor, because no native verb there can satisfy it. The Python merge gate attributes the run from the target manifest's `harness:` field first. When no manifest carries a harness, a single-family ambient resolve is the fallback. The stop gate attributes from its ambient markers, and `--author-harness none` is the explicit hermetic opt-out. A verbless manifest alone never releases the floor. Release needs a clean ambient read that agrees on the same verbless family. An absent, ambiguous, or contradicting ambient read is not agreement and floors. One divergence stays, on purpose. A stale verbful manifest floors a merge by a verbless session whose own stop gate does not floor. That direction demands a review and never drops one, and the manifest names the run the PR belongs to. The manifest is an init-time snapshot that outlives its session, and nothing ties it to the PR being merged. A dead run's verbless stamp must not disengage the floor for an unrelated PR merged from that checkout. Before this rule the Python half read only ambient markers. Two families meant "no floor", so a claude session started from a codex shell merged code PRs with zero review. That is the default state of any session under a multi-CLI shell.
+
 ## Lane 0: the provider budget decides the route before any lane runs
 
 A lane is how a review is triggered. This is about how WIDE it is allowed to be, and it is decided before any of the lanes below.
@@ -294,6 +296,8 @@ Four separate places ask "has this reviewer reviewed this code".
 
 All four go through the predicate: the coverage count, the attestation scan, the presence check behind `missing_bots`, and `finalize`'s arming check.
 
+The Python merge gate's recheck (`_verdicts_with_current_freshness` in `cli/src/fno/pr/_reviews.py`) is the fifth. It used to answer with ancestry alone, and that cut both ways. It killed every `carried_*` verdict the predicate had minted the moment a rebase rewrote the sha: the operator's daily rebase treadmill. It also read a push-after-review head as fresh, because the reviewed commit remained an ancestor. Its freshness test is now the predicate's own rule with no extra arms. Exact-head equality is fresh. The recheck builds the same code-diff identity `pr_code_diff_identity` builds: `git diff --raw --no-abbrev --no-renames base...sha`, documentation paths dropped. Identity equality carries, with the tree-paths read readable, like the Rust carry's auditability requirement. When the base absorbed paths on the rebase, a strict subset also carries. A push of new unreviewed code, a sibling edit, a reindent, or an unreadable identity is a new review. The base is the PR's own `baseRefName`, remote-qualified. A base that does not resolve, or a base read that fails, leaves the question unanswerable, and both gates expire the verdict. Only a read with no PR number to ask defaults to `origin/main`/`origin/master`. Base, identity, and tree-path reads memoize on sha-keyed module caches. Because the identity is the same construction rather than an approximation, the two gates expire the same changes.
+
 Fix one and leave the others on a bare equality, and the gate stays exactly as tight as before.
 The softening is then purely decorative.
 
@@ -401,13 +405,13 @@ It proves a commit was pinned. It does not prove a review happened.
 
 Every producer bottoms out in the same script, `skills/review/scripts/emit-attestation.sh`. It records the reviewer name and the verdict PASSED.
 
-sigma calls the script itself, from inside its own skill, on a clean pass. On Claude Code, `hooks/code-review-attest.sh` calls it for `/code-review` too.
+sigma calls the script itself, from inside its own skill, on a clean pass. `hooks/code-review-attest.sh` calls it for native code review on Claude and Codex too.
 
-That hook is wired on two events, because `/code-review` reaches a clean pass two different ways. A `PostToolUse(ReportFindings)` pass fires the hook directly. A Skill-tool self-invocation runs `/code-review` as a forked subagent, whose verdict never reaches ReportFindings, only its final text. A `SubagentStop` trigger reads that text instead, so the second path also fires the hook.
+Claude's hook is wired on two events, because `/code-review` reaches a clean pass two different ways. A `PostToolUse(ReportFindings)` pass fires the hook directly. A Skill-tool self-invocation runs `/code-review` as a forked subagent, whose verdict never reaches ReportFindings, only its final text. A `SubagentStop` trigger reads that text instead, so the second path also fires the hook.
 
-Either trigger fires the moment the verb reports an empty findings array. The caller runs no second command.
+Codex's hook is wired first on `Stop`, before `target-stop-hook.sh`. It reads the exact `turn_id` and the complete transcript, then accepts one and only one same-turn structured completion in either the direct `exited_review_mode` form or the `item_completed` form containing an `ExitedReviewMode` item. Both require a present object-valued `findings: []`. Dirty, interrupted, malformed, duplicate, wrong-turn, unreadable, or prose-only shapes stay silent. The final assistant message is not verdict evidence.
 
-When neither hook can fire - codex `/review`, or the registered-reviewer case - the script still gets called directly. `/target` runs the review verb, then runs the helper by hand.
+Each native clean pass reaches the shared emitter without a second command. If a clean review is confirmed but its hook was unavailable or failed, the operator can recover with `bash skills/review/scripts/emit-attestation.sh code-review`; that command is not a normal Codex step and never authorizes attestation over findings.
 
 Nothing in the producer can tell a real review from a caller that typed the arguments.
 The freshness half of the protocol is sound and is only half.

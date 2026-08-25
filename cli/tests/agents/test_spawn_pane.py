@@ -287,7 +287,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         lambda *_args, **_kwargs: [
             "/bin/sh",
             "-c",
-            'exec 3<"$1"; sleep 60',
+            'exec 3<"$1"; (sleep 3; printf "seed accepted\\n") & read submitted; printf "%s\\n" "$submitted"; sleep 60',
             "sh",
             str(rollout),
         ],
@@ -2119,6 +2119,45 @@ def test_explicit_tab_selector_rides_the_placement_path_untouched(
     )
     assert run_call[run_call.index("--tab") + 1] == selector
     assert not runner.tab_ls_scopes
+
+
+# -- x-1499: the visible ordinal contract -------------------------------------
+
+
+@pytest.mark.parametrize("ordinal", ["6", "ordinal:6"])
+def test_tab_ordinal_forwards_unchanged_with_no_tab_list_prediction(
+    ordinal: str, tmp_path: Path, monkeypatch
+) -> None:
+    """AC7-HP: a bare/explicit ordinal reaches ``mux pane run --tab 6``
+    VERBATIM. Python never converts it to a stable id and never pre-reads
+    ``tab ls`` to predict one - the Rust tab dictionary resolves it against
+    the live tab order, so it names the live sixth tab before an earlier tab
+    closes and the live fifth after (the Rust close-tab regression pins that
+    half; this test pins the forwarding half).
+    """
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
+    _result, runner = _spawn(monkeypatch, tmp_path, tab=ordinal, runner=_squad_fake())
+    run_call = next(
+        call for call in runner.calls if call[1:4] == ["mux", "pane", "run"]
+    )
+    assert run_call[run_call.index("--tab") + 1] == ordinal
+    assert not [c for c in runner.calls if c[1:4] == ["mux", "tab", "ls"]], (
+        "a numeric --tab is an explicit selector; predicting its target with "
+        "a tab read is exactly what x-1499 removed"
+    )
+
+
+def test_tab_ordinal_explicit_forms_split_against_bare_names() -> None:
+    """The selector/group split: every explicit form (id:, name:, ordinal:,
+    digits, active, new) is a placement selector; only a bare name is a pane
+    group, so ``ordinal:6`` never becomes a group named ``ordinal:6``."""
+    from fno.agents.mux_spawn import _resolve_group_tab
+
+    for selector in ("6", "ordinal:6", "id:6", "name:targets", "active", "new"):
+        assert _resolve_group_tab(selector) == (selector, None)
+    assert _resolve_group_tab("targets") == (None, "targets")
 
 
 def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:

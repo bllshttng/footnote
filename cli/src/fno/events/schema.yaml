@@ -2180,7 +2180,7 @@ event_types:
           description: "Target session identifier."
         reason:
           type: string
-          enum: [DonePRGreen, DoneUnreviewed, DoneAdvisory, DoneDelivery, DoneBatched, NoWork, Budget, NoProgress, Interrupted, Aborted]
+          enum: [DonePRGreen, DoneUnreviewed, DoneAdvisory, DoneDelivery, DoneBatched, DoneAwaitingMerge, DoneAwaitingReview, DonePlanned, NoWork, Budget, NoProgress, Interrupted, Aborted]
           description: "TerminationReason enum value."
         axis:
           type: string
@@ -2194,6 +2194,35 @@ event_types:
           enum: [target, king]
           description: "Which driver's done() produced this terminal. Absent on a target fire (the historical default); 'king' on a board-empty fire, which is also what the king freshness probe reads."
     consumers: [operator, megawalk]
+
+  - name: transition_rejected
+    description: "Emitted by the shadow run-state observer when the transition table rejects a decision that the legacy loop still follows. The event is diagnostic only until the table is promoted after real shadow traffic."
+    sources: [hook]
+    data:
+      required: [session_id, kind, event, error]
+      properties:
+        session_id:
+          type: string
+          description: "Full target run identifier used as the run-log key."
+        kind:
+          type: string
+          enum: [invalid_run_id, invalid_transition, observer_io]
+          description: "Whether the observer rejected a transition, could not identify the run, or could not write the log."
+        from:
+          type: string
+          enum: [open, working, delegating, sealing, closed, aborted]
+          description: "Folded state when it was available."
+        event:
+          type: string
+          enum: [dispatch_classified, prepare_handoff, successor_proven, successor_unproven, terminal_decided, finalize_done, cancel, abort, release_claim]
+          description: "Candidate transition event rejected by the shadow table."
+        error:
+          type: string
+          description: "Run-log read or invalid-transition diagnostic."
+        run_log:
+          type: string
+          description: "Observer run-log path."
+    consumers: [operator]
 
   - name: mail_escalation
     description: "Send-time human escalation for mail that needs a human now: a --kind question (unconditional, Locked Decision 7) or a live-miss to an operator-attended recipient (declared at registration). Surfaces in the needs-me mux overlay so a human at the mux sees the nudge even when the OS notification was missed, debounced, or unavailable. Emitted from the shared escalation helper under the same per-(sender,recipient) debounce as the notifier; one event per non-debounced escalation."
@@ -3538,6 +3567,20 @@ event_types:
         reason:
           type: string
           description: "chain-empty (config named no chain), all-tried, all-exhausted (every remaining link's own provider reads EXHAUSTED), or chain-malformed:<detail> (the chain refused validation and nothing was spawned)."
+
+  - name: failover_swapped
+    description: "A recovery sweep rotated the provider for a refused worker and records whether a replacement worker was actually redispatched."
+    sources: [daemon]
+    data:
+      required: [short_id, redispatched]
+      properties:
+        short_id:
+          type: string
+          description: "The refusing worker's 8-hex jobId."
+        redispatched:
+          type: boolean
+          description: "True only when a replacement worker actually started."
+    consumers: [operator]
 
   - name: provider_window_closing
     description: "A provider record's PROJECTED usage window is within the configured warning threshold of closing. A projection from a recorded window open plus a configured length, never a utilization measurement - a record with no probe still reads UNKNOWN for headroom. Emitted once per window so a long tick loop does not re-warn."

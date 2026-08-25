@@ -1468,6 +1468,15 @@ _LIVE_LANE_FAILURE_REASONS = frozenset(
 )
 
 
+def _is_live_lane_failure(reason: Optional[str]) -> bool:
+    if not reason:
+        return False
+    return any(
+        token in _LIVE_LANE_FAILURE_REASONS or token.startswith("mux-send-failed-")
+        for token in reason.split(";")
+    )
+
+
 def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] = None) -> None:
     """Fail loud on a dead-letter miss: the envelope hit only the durable floor
     with no live inject path, so the sender learns delivery deferred instead of
@@ -1526,7 +1535,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "  the message is telling you it LANDED. Stop there: re-sending on\n"
             "  top of that is the double delivery this ladder exists to avoid."
         )
-    elif reason in _LIVE_LANE_FAILURE_REASONS:
+    elif _is_live_lane_failure(reason):
         msg = (
             f"mail: live delivery to {target} not confirmed ({reason}); queued "
             "durably as recovery only - the recipient was live and reachable, so "

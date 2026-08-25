@@ -419,13 +419,6 @@ def _cargo_installed_mux() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-def _mux_dir() -> Path:
-    """The mux socket dir, matching the Rust `proto::mux_dir()`: `$FNO_MUX_DIR`
-    when set (tests point it at a tempdir), else `~/.fno/mux`."""
-    override = os.environ.get("FNO_MUX_DIR")
-    return Path(override) if override else Path.home() / ".fno" / "mux"
-
-
 def _live_mux_sessions(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> list[str]:

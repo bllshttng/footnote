@@ -64,17 +64,32 @@ def _mux_entry(name: str = "muxed", provider: str = "claude"):
 
 
 class FakeMux:
-    """Record `fno mux pane <verb> ...` calls; script per-verb exit codes."""
+    """Record `fno mux pane <verb> ...` calls; script per-verb exit codes.
 
-    def __init__(self, fail_verbs: set[str] | None = None) -> None:
+    ``fail_stderr`` overrides the refusal text for a verb (the pane-claim gate
+    reads it); ``fail_times`` fails a verb for the first N calls (a held claim
+    that clears after a retry)."""
+
+    def __init__(
+        self,
+        fail_verbs: set[str] | None = None,
+        fail_stderr: dict[str, str] | None = None,
+        fail_times: dict[str, int] | None = None,
+    ) -> None:
         self.calls: list[tuple[list[str], str | None]] = []
         self.fail_verbs = fail_verbs or set()
+        self.fail_stderr = fail_stderr or {}
+        self.fail_times = fail_times or {}
 
     def __call__(self, argv, input=None, **kwargs):
         verb = argv[3]
         self.calls.append((list(argv), input))
-        rc = 1 if verb in self.fail_verbs else 0
-        return subprocess.CompletedProcess(argv, rc, "", "boom" if rc else "")
+        times = self.fail_times.get(verb)
+        if times is not None and times > 0:
+            self.fail_times[verb] = times - 1
+        rc = 1 if verb in self.fail_verbs or (times is not None and times > 0) else 0
+        stderr = (self.fail_stderr.get(verb) or "boom") if rc else ""
+        return subprocess.CompletedProcess(argv, rc, "", stderr)
 
 
 @pytest.fixture(autouse=True)
@@ -147,6 +162,56 @@ def test_unguarded_claim_refusal_is_fail_open(monkeypatch) -> None:
     assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is True
     verbs = [c[0][3] for c in fake.calls]
     assert verbs == ["claim", "send", "send"]
+
+
+def test_held_writer_claim_is_waited_out_then_proceeds(monkeypatch) -> None:
+    # x-4b0b review: a HELD claim means another writer is mid-burst on this
+    # pane. The send waits for the burst to clear instead of pasting a second
+    # envelope under the holder's (the settle window between paste and CR is
+    # a single-writer window).
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux(
+        fail_times={"claim": 2},
+        fail_stderr={"claim": "pane 7 writer claim held by pid 999"},
+    )
+    _patch_mux(monkeypatch, fake)
+    assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is True
+    verbs = [c[0][3] for c in fake.calls]
+    assert verbs == ["claim", "claim", "claim", "send", "send", "release"]
+
+
+def test_held_writer_claim_past_the_wait_demotes_without_pasting(monkeypatch) -> None:
+    # A claim still held past the wait demotes to durable: no paste, no CR,
+    # no interleaved envelopes.
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux(
+        fail_verbs={"claim"},
+        fail_stderr={"claim": "pane 7 writer claim held by pid 999"},
+    )
+    _patch_mux(monkeypatch, fake)
+    monkeypatch.setattr(dispatch_mod, "_MUX_PANE_CLAIM_WAIT_S", 0.0)
+    assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is False
+    verbs = [c[0][3] for c in fake.calls]
+    assert verbs == ["claim"]
+
+
+def test_held_claim_marker_is_pinned_on_both_sides_of_the_contract() -> None:
+    """The pane-claim gate greps the server's refusal stderr for a phrase. Pin
+    the phrase at BOTH ends so a wording change on either side fails a test
+    instead of silently degrading the gate back to fail-open (the fakes in the
+    tests above hardcode the same string, so they alone cannot detect drift).
+    If the refusal messages ever localize, replace this grep with a dedicated
+    held-claim exit code and branch on that."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    server = (root / "crates/fno/src/server.rs").read_text(encoding="utf-8")
+    python = (root / "cli/src/fno/agents/dispatch.py").read_text(encoding="utf-8")
+    assert "writer claim held by pid" in server
+    assert '_MUX_CLAIM_HELD_MARKER = "held by pid"' in python
 
 
 def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None:
@@ -237,6 +302,8 @@ def test_control_socket_inject_passes_the_same_contract_delay(monkeypatch) -> No
     from fno.agents import harness_map
 
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/bin/fno-agents"))
+    # Hermetic + the unresolved-recipient case: no roster row for "session".
+    monkeypatch.setattr(dispatch_mod, "_roster_entry_for_session", lambda session: None)
     original = harness_map.capabilities
 
     def caps(harness):
@@ -255,6 +322,54 @@ def test_control_socket_inject_passes_the_same_contract_delay(monkeypatch) -> No
     assert dispatch_mod._mail_inject_claude("session", "<fno_mail>hi</fno_mail>")
     argv = next(argv for argv in seen if "mail-inject" in argv)
     assert argv[argv.index("--enter-delay-ms") + 1] == "321"
+
+
+def test_control_socket_inject_delay_follows_the_recipient_harness(monkeypatch) -> None:
+    """x-4b0b: the ``--enter-delay-ms`` argv value is the RECIPIENT's table row,
+    not a claude constant. Three resolution paths, one expected value: the
+    caller-held row (``harness=`` kwarg), the roster lookup by session id, and
+    - patched to None by the sibling test above - the claude fallback."""
+    import json
+    from types import SimpleNamespace
+
+    from fno import rust_binary
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import harness_map
+
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/bin/fno-agents"))
+    original = harness_map.capabilities
+
+    def caps(harness):
+        value = dict(original(harness))
+        value["send_keys_enter_delay_ms"] = 321 if harness == "claude" else 654
+        return value
+
+    monkeypatch.setattr(harness_map, "capabilities", caps)
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_roster_entry_for_session",
+        lambda session: SimpleNamespace(harness="codex"),
+    )
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"delivered": True}), "")
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", run)
+
+    def _delay_of(call) -> str:
+        seen.clear()
+        assert dispatch_mod._mail_inject_claude("session", "<fno_mail>hi</fno_mail>", **call)
+        argv = next(argv for argv in seen if "mail-inject" in argv)
+        return argv[argv.index("--enter-delay-ms") + 1]
+
+    # Roster lookup resolves the codex row.
+    assert _delay_of({}) == "654"
+    # The caller-held row wins without touching the roster.
+    assert _delay_of({"harness": "codex"}) == "654"
+    # An explicit claude row is honored, not overridden by the roster patch.
+    assert _delay_of({"harness": "claude"}) == "321"
 
 
 def _capture_audits(monkeypatch) -> list[tuple[dict, object]]:

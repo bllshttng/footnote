@@ -77,6 +77,16 @@ def _snap(provider_id: str, *windows: UsageWindow, probed_at: float = 1000.0) ->
     )
 
 
+def _zai_record() -> ProviderRecord:
+    return ProviderRecord(
+        id="zai",
+        name="Z.AI",
+        harness="claude",
+        auth="api_key",
+        route="zai/glm-5.3[1m]",
+    )
+
+
 # ---------------------------------------------------------------------------
 # UsageWindow clamp invariant (Boundaries: 0, 100, >100, <0)
 # ---------------------------------------------------------------------------
@@ -387,6 +397,235 @@ class TestProbeFailOpen:
         assert got == {"5h": (4.0, 1783807404.0), "weekly": (5.0, 1784372823.0)}
 
 
+class TestZaiProbe:
+    def test_zai_probe_is_registered_by_route_provider(self) -> None:
+        """AC4-HP: the registry owns Z.AI beside Claude and Codex."""
+        import fno.adapters.providers.usage as usage_mod
+
+        assert usage_mod._PROBES.get("zai") is usage_mod._probe_zai
+
+    def test_zai_parser_maps_live_shaped_five_hour_limit(self) -> None:
+        """AC3-HP: Z.AI's integer quota fields become a reset-bearing 5h window."""
+        import fno.adapters.providers.usage as usage_mod
+
+        parse = getattr(usage_mod, "_parse_zai_windows", None)
+        if parse is None:
+            pytest.fail("Z.AI parser is not implemented")
+
+        payload = {
+            "success": True,
+            "code": 200,
+            "data": {
+                "limits": [
+                    {
+                        "type": "TOKENS_LIMIT",
+                        "unit": 3,
+                        "number": 5,
+                        "usage": 1000,
+                        "currentValue": 150,
+                        "remaining": 850,
+                        "percentage": 99,
+                        "nextResetTime": 1783807404000,
+                    }
+                ]
+            },
+        }
+
+        windows = parse(payload)
+
+        assert len(windows) == 1
+        assert windows[0].label == "5h"
+        assert windows[0].used_pct == 15.0
+        assert windows[0].resets_at == 1783807404.0
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"success": False, "code": 200, "data": {"limits": []}},
+            {"success": True, "code": 200, "data": {"limits": []}},
+            {
+                "success": True,
+                "code": 200,
+                "data": {
+                    "limits": [
+                        {
+                            "type": "TOKENS_LIMIT",
+                            "unit": 3,
+                            "number": 5,
+                            "percentage": 20,
+                            "nextResetTime": None,
+                        }
+                    ]
+                },
+            },
+            {
+                "success": True,
+                "code": 200,
+                "data": {
+                    "limits": [
+                        {
+                            "type": "TOKENS_LIMIT",
+                            "unit": 3,
+                            "number": 5,
+                            "usage": "1000",
+                            "percentage": 20,
+                            "nextResetTime": 1783807404000,
+                        }
+                    ]
+                },
+            },
+        ],
+    )
+    def test_zai_parser_never_emits_percentage_only_success(self, payload) -> None:
+        """AC3-ERR: unknown/malformed Z.AI payloads have no positive window marker."""
+        import fno.adapters.providers.usage as usage_mod
+
+        parse = getattr(usage_mod, "_parse_zai_windows", None)
+        if parse is None:
+            pytest.fail("Z.AI parser is not implemented")
+        assert parse(payload) == ()
+
+    def test_zai_probe_uses_route_bearer_and_returns_quota_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import urllib.request
+
+        import fno.adapters.providers.usage as usage_mod
+
+        class _Response:
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(self, *args):  # noqa: ANN001
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "success": True,
+                    "code": 200,
+                    "data": {"limits": [{
+                        "type": "TOKENS_LIMIT",
+                        "unit": 3,
+                        "number": 5,
+                        "percentage": 12,
+                        "nextResetTime": 1783807404000,
+                    }]},
+                }).encode()
+
+        seen: list[tuple[urllib.request.Request, float]] = []
+
+        def fake_urlopen(
+            request: urllib.request.Request, timeout: float
+        ) -> _Response:
+            seen.append((request, timeout))
+            return _Response()
+
+        dispatch_roots: list[Path | None] = []
+
+        def fake_dispatch(_provider_id: str, repo_root: Path | None = None) -> dict[str, str]:
+            dispatch_roots.append(repo_root)
+            return {
+                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "live-token",
+            }
+
+        monkeypatch.setattr(usage_mod, "dispatch_env", fake_dispatch)
+        monkeypatch.setattr(
+            usage_mod.urllib.request,
+            "urlopen",
+            fake_urlopen,
+        )
+
+        probe = getattr(usage_mod, "_probe_zai", None)
+        if probe is None:
+            pytest.fail("Z.AI probe is not implemented")
+        repo_root = Path("/project")
+        snapshot, reason = probe(_zai_record(), now=1000.0, repo_root=repo_root)
+
+        assert reason is None
+        assert snapshot is not None
+        assert snapshot.source == "quota-endpoint"
+        assert snapshot.windows[0] == UsageWindow("5h", 12.0, 1783807404.0)
+        request, timeout = seen[0]
+        assert request.full_url == "https://api.z.ai/api/monitor/usage/quota/limit"
+        assert request.headers["Authorization"] == "Bearer live-token"
+        assert timeout == 10
+        assert dispatch_roots == [repo_root]
+
+    def test_zai_probe_http_failure_is_explicit_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from email.message import Message
+        import urllib.error
+
+        import fno.adapters.providers.usage as usage_mod
+
+        monkeypatch.setattr(
+            usage_mod,
+            "dispatch_env",
+            lambda _provider_id, **_kwargs: {
+                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "live-token",
+            },
+        )
+        monkeypatch.setattr(
+            usage_mod.urllib.request,
+            "urlopen",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                urllib.error.HTTPError("https://api.z.ai", 429, "limited", Message(), None)
+            ),
+        )
+
+        probe = getattr(usage_mod, "_probe_zai", None)
+        if probe is None:
+            pytest.fail("Z.AI probe is not implemented")
+        snapshot, reason = probe(_zai_record(), now=1000.0)
+
+        assert snapshot is None
+        assert reason == "probe-failed"
+
+    def test_route_backed_api_key_selects_zai_probe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC5-HP: route provider selects the existing probe pipeline."""
+        import fno.adapters.providers.usage as usage_mod
+
+        expected = UsageSnapshot(
+            provider_id="zai",
+            windows=(UsageWindow("5h", 12.0, 1783807404.0),),
+            probed_at=1000.0,
+            source="quota-endpoint",
+        )
+        monkeypatch.setitem(
+            usage_mod._PROBES,
+            "zai",
+            lambda _record, _now: (expected, None),
+        )
+
+        snapshot, reason = probe_usage_detail(_zai_record(), now=1000.0)
+
+        assert snapshot == expected
+        assert reason is None
+
+    def test_route_probe_failure_stays_advisory_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4-ERR: an unavailable route probe never blocks or becomes success."""
+        import fno.adapters.providers.usage as usage_mod
+
+        monkeypatch.setitem(
+            usage_mod._PROBES,
+            "zai",
+            lambda _record, _now: (None, "probe-failed"),
+        )
+
+        snapshot, reason = probe_usage_detail(_zai_record(), now=1000.0)
+
+        assert snapshot is None
+        assert reason == "probe-failed"
+
+
 # ---------------------------------------------------------------------------
 # Snapshot storage: round-trip, TTL, carry-through under the shared lock
 # ---------------------------------------------------------------------------
@@ -509,6 +748,36 @@ class TestProbeUnknownReason:
 
 
 class TestRefreshObservation:
+    def test_refresh_passes_repo_root_to_probe(
+        self, state_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cross-project refresh probes the route using its record's repository."""
+        from fno.adapters.providers import runtime_state as rs
+
+        repo_root = tmp_path / "foreign-repo"
+        repo_root.mkdir()
+        snap = _snap("p1", UsageWindow("5h", 12.0, 9000.0))
+        seen_roots: list[Path | None] = []
+        monkeypatch.setattr(
+            "fno.adapters.providers.loader.load_providers",
+            lambda *a, **k: type(
+                "C", (), {"by_id": {"p1": _claude_record(repo_root)}}
+            )(),
+        )
+
+        def fake_probe(record, now=None, repo_root=None):  # noqa: ANN001
+            seen_roots.append(repo_root)
+            return snap, None
+
+        monkeypatch.setattr("fno.adapters.providers.usage.probe_usage_detail", fake_probe)
+
+        obs = rs.refresh_usage_detailed(
+            "p1", ttl_seconds=0, now=2000.0, repo_root=repo_root
+        )
+
+        assert obs.snapshot is snap
+        assert seen_roots == [repo_root]
+
     def test_a_probed_snapshot_survives_a_failed_cache_write(
         self, state_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

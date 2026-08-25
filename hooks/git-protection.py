@@ -821,11 +821,66 @@ def _review_hold_refusal(command=""):
     )
 
 
+def _live_merge_switch_armed(repo_root, fm):
+    """One authoritative posture for raw `gh pr merge` (x-3855): the same
+    resolution the sanctioned verb (`fno do pr merge`) and `fno-agents
+    finalize` apply. Live config.auto_merge.enabled arms, or the run's
+    explicit spawn-time grant (auto_merge_source: env-target-auto-merge) arms
+    on its own.
+
+    The manifest alone does NOT arm. It is a snapshot, and a snapshot whose
+    `true` merely mirrored config must not outlive an operator flipping the
+    live switch off mid-flight (x-2270) - without this read, the raw path was
+    the weaker gate, merging past a disarm the sanctioned verb refuses.
+
+    The config answer comes from the shared resolver, never a local TOML
+    parse: layer precedence and the legacy dispatch.auto_merge ->
+    auto_merge.grant fold live there (x-93ff), and a second parser here is
+    how the hook drifts from every other reader. In-process first (the hook
+    interpreter often carries the package); the resolver CLI as the fallback
+    when it does not, budgeted at 5s because the lineage and coverage probes
+    elsewhere in this hook can each approach 25s of the 60s PreToolUse
+    budget - a fresh independent wait here can push the hook past it, and a
+    hook killed mid-run emits NO verdict, letting the raw merge proceed.
+    Either resolver unavailable, slow, or unreadable ->
+    fail closed (decline to authorize); the sanctioned verb remains available.
+    """
+    if (
+        str(fm.get("auto_merge_approved", "")).lower() in ("true", "yes", "1")
+        and str(fm.get("auto_merge_source", "")).strip() == "env-target-auto-merge"
+    ):
+        return True
+    try:
+        from fno.config import load_settings_for_repo
+    except ImportError:
+        try:
+            proc = subprocess.run(
+                ["fno", "config", "get", "auto_merge.enabled"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(repo_root),
+            )
+        except Exception:  # noqa: BLE001 - fail closed on any resolver failure
+            return False
+        return proc.returncode == 0 and proc.stdout.strip().lower() in (
+            "true",
+            "yes",
+            "1",
+        )
+    try:
+        return bool(load_settings_for_repo(repo_root).auto_merge.enabled)
+    except Exception:  # noqa: BLE001 - a config the resolver cannot read never arms
+        return False
+
+
 def _check_pr_merge_allowed(command=""):
     """Return a reason string if gh pr merge is authorized, else None.
 
     Two-factor authorization required:
-    1. Active target session with auto_merge_approved: true
+    1. Active target session with auto_merge_approved: true, AND the live
+       merge switch armed (_live_merge_switch_armed: config enabled, or the
+       run's spawn-time env grant)
     2. External review evidence:
        a. State flag external_review_passed: skipped (explicit --no-external), OR
        b. External review artifact file exists at
@@ -855,6 +910,8 @@ def _check_pr_merge_allowed(command=""):
     if state_file is None:
         return None
     if fm.get("auto_merge_approved", "").lower() not in ("true", "yes", "1"):
+        return None
+    if not _live_merge_switch_armed(repo_root, fm):
         return None
 
     # Factor 2a: external review explicitly skipped via --no-external / config
@@ -1905,7 +1962,9 @@ primitive is `fno do pr merge`, which runs its own footnote-canonical guards
 and is not blocked by this hook.
 
 Auto-merge directly from Claude Code requires ALL of:
-  1. Top-level `config.auto_merge.enabled: true` in settings.yaml
+  1. The live merge switch armed: `fno config get auto_merge.enabled`
+     answers true, OR the state file carries `auto_merge_source:
+     env-target-auto-merge` (the run's spawn-time grant)
   2. Active target state file with `auto_merge_approved: true`
      (megawalk-state.md does NOT authorize merge - target owns shipping)
   3. Either:
@@ -2065,7 +2124,9 @@ def main():
         else:
             reason = (
                 "[fno GraphQL reserve] direct `gh api graphql` is discretionary; route it "
-                "through `fno do pr graphql-exec --purpose discretionary -- ...`. This "
+                "through `fno do pr graphql-exec --purpose discretionary -- api graphql "
+                "-f query=...`. Everything after -- is gh's argv, command words first, "
+                "so repeat the refused command's flags after the endpoint tokens. This "
                 "refusal is unconditional, so waiting for a quota reset changes nothing."
             )
         _emit("deny", reason)
