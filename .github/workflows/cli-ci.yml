@@ -236,6 +236,8 @@ jobs:
 
       - name: "Smoke shard: everything except pytest"
         # Same trap, same reason as the pytest shard above.
+        env:
+          STRESS_TRIALS: "3"
         run: |
           start=$SECONDS
           trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest "$(( SECONDS - start ))" 30 || true' EXIT
