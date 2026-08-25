@@ -6055,8 +6055,10 @@ def _mux_pane_send(
     a composer showing ``tab to queue message`` plus the exact payload gets one
     literal Tab and a second frame must positively show a queued marker plus
     that same payload; a positive active-review marker returns ``started`` and
-    sends no control key. Any unreadable or unmatched frame returns
-    ``unconfirmed``. Other payloads keep the ordinary boolean contract.
+    sends no control key. Markers count only within a few lines of the echoed
+    payload - the same word deep in scrollback does not classify this frame.
+    Any unreadable or unmatched frame returns ``unconfirmed``. Other payloads
+    keep the ordinary boolean contract.
 
     ``raw`` (default False) is the keystroke opt-out. By default the text is
     gated and enveloped through :func:`fno.mail.pane_transport.prepare`, so an
@@ -6396,14 +6398,45 @@ def _mux_pane_send(
         expected = re.sub(r"\s+", " ", text).strip()
         return bool(expected) and expected in compact
 
+    def _payload_signature() -> str:
+        # One distinctive token of the payload, used to bind status markers to
+        # the composer region that echoed THIS request. The same words anywhere
+        # else in scrollback (a "queued" from an earlier turn) must not
+        # classify this frame. Empty for payloads too short to be distinctive,
+        # which fails the caller closed (unconfirmed).
+        import re
+
+        words = re.sub(r"\s+", " ", text).strip().lower().split(" ")
+        longest = max(words, key=len) if words else ""
+        return longest if len(longest) >= 4 else ""
+
+    def _marker_near_payload(screen: str, marker: str, window: int = 2) -> bool:
+        # The marker counts only within a few lines of a line carrying the
+        # payload signature: the composer and its status render adjacent, while
+        # scrollback can carry the bare word arbitrarily far away.
+        import re
+
+        sig = _payload_signature()
+        if not sig:
+            return False
+        lines = [
+            re.sub(r"\s+", " ", ln).strip().lower() for ln in screen.splitlines()
+        ]
+        for i, ln in enumerate(lines):
+            if marker not in ln:
+                continue
+            near = lines[max(0, i - window) : i + window + 1]
+            if any(sig in other for other in near):
+                return True
+        return False
+
     def _review_outcome() -> str:
         if (getattr(entry, "harness", "") or "") != "codex":
             return "started"
         screen = _read_screen()
         if screen is None or not _contains_payload(screen):
             return "unconfirmed"
-        lowered = screen.lower()
-        if _CODEX_QUEUE_MARKER in lowered:
+        if _marker_near_payload(screen, _CODEX_QUEUE_MARKER):
             tab_args = ["send", pane, "--text", "\t", "--raw"]
             if expected_fno_id:
                 tab_args.extend(["--fno-id", str(expected_fno_id)])
@@ -6413,13 +6446,16 @@ def _mux_pane_send(
             queued_screen = _read_screen()
             if queued_screen is None:
                 return "unconfirmed"
-            queued_lower = queued_screen.lower()
             if _contains_payload(queued_screen) and any(
-                marker in queued_lower for marker in _CODEX_QUEUED_MARKERS
+                _marker_near_payload(queued_screen, marker)
+                for marker in _CODEX_QUEUED_MARKERS
             ):
                 return "queued"
             return "unconfirmed"
-        if any(marker in lowered for marker in _CODEX_ACTIVE_REVIEW_MARKERS):
+        if any(
+            _marker_near_payload(screen, marker)
+            for marker in _CODEX_ACTIVE_REVIEW_MARKERS
+        ):
             return "started"
         return "unconfirmed"
 

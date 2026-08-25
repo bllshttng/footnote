@@ -386,6 +386,44 @@ def test_codex_review_request_stays_unconfirmed_without_a_positive_frame(monkeyp
     )
 
 
+def test_codex_review_request_ignores_markers_deep_in_scrollback(monkeypatch):
+    from fno.agents.dispatch import _mux_pane_send
+
+    class StaleMarkerMux(FakeMux):
+        def __call__(self, argv, input=None, **kwargs):
+            if argv[3] == "read":
+                self.calls.append((list(argv), input))
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    "review in progress\nold turn finished\nfiller\nfiller\n"
+                    "filler\nfiller\nfiller\n"
+                    "/review HEAD abc1234 of PR 123 against origin/main",
+                    "",
+                )
+            return super().__call__(argv, input=input, **kwargs)
+
+    fake = StaleMarkerMux()
+    _patch_mux(monkeypatch, fake)
+
+    result = _mux_pane_send(
+        _mux_entry("muxed", "codex"),
+        "/review HEAD abc1234 of PR 123 against origin/main",
+        guarded=False,
+        raw=True,
+        review=True,
+    )
+
+    # The marker line sits far above the echoed payload, so it is scrollback
+    # from an earlier turn, not the composer region of this request.
+    assert result == "unconfirmed"
+    assert not any(
+        "--text" in call[0]
+        and call[0][call[0].index("--text") + 1] in {"\t", "\x1b"}
+        for call in fake.calls
+    )
+
+
 def test_mux_pane_send_delivers_to_an_agy_pane(monkeypatch) -> None:
     """Measured agy pane behavior uses an Enter submit after the pasted text."""
     from fno.agents.dispatch import _mux_pane_send
