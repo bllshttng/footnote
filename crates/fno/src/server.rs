@@ -2969,7 +2969,9 @@ impl Core {
     }
 
     fn placement_pane_count(&self, dest: Option<u64>, placement: &PanePlacement) -> usize {
-        if matches!(placement.tab, Some(TabSel::New)) {
+        if matches!(placement.tab, Some(TabSel::New))
+            || (placement.split.is_none() && placement.at.is_none() && placement.tab.is_none())
+        {
             return 0;
         }
         let Some(sid) = dest else {

@@ -3,7 +3,10 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 
 /// The process budget that a launch consumes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,6 +124,7 @@ pub struct AdmissionPermit {
     scope: Scope,
     count: usize,
     ceiling: usize,
+    track_children: bool,
 }
 
 impl AdmissionPermit {
@@ -137,11 +141,21 @@ impl AdmissionPermit {
     }
 
     pub(crate) fn record_child(&self, pid: u32) -> io::Result<()> {
-        let dir = crate::proto::mux_dir();
-        crate::proto::ensure_private_dir(&dir)?;
-        let path = dir.join(CHILD_MARKERS_FILE);
-        let mut markers = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(markers, "{pid}")
+        #[cfg(test)]
+        if !self.track_children {
+            return Ok(());
+        }
+        let path = admission_marker_path()?;
+        let start = crate::proto::pid_start_time(pid).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("process start time unavailable for child pid {pid}"),
+            )
+        })?;
+        let mut markers = OpenOptions::new().create(true).append(true).open(&path)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        writeln!(markers, "{pid}:{start}")
     }
 }
 
@@ -207,8 +221,8 @@ pub fn decide(census: &Census, limits: AdmissionLimits) -> AdmissionDecision {
 
 pub const DEFAULT_MAX_LIVE: usize = 3;
 pub const DEFAULT_PANE_GROUP_MAX: usize = 4;
-const LOCK_FILE: &str = ".process-admission.lock";
-const CHILD_MARKERS_FILE: &str = ".process-admission.children";
+const LOCK_FILE: &str = "fno-process-admission.lock";
+const CHILD_MARKERS_FILE: &str = "fno-process-admission.children";
 
 /// Read the already-resolved fleet cap carried by the Python launcher. A
 /// direct Rust client uses the same conservative default as Python.
@@ -276,6 +290,7 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
             scope: Scope::Fleet,
             count: census.count().expect("admitted census has a count"),
             ceiling,
+            track_children: true,
         }),
         decision => Err(AdmissionFailure {
             decision,
@@ -313,6 +328,7 @@ pub fn admit_tab(
             scope: Scope::Tab,
             count: pane_count,
             ceiling,
+            track_children: true,
         }),
         decision => Err(AdmissionFailure {
             decision,
@@ -380,6 +396,7 @@ pub fn admit_pane(
         scope: Scope::Fleet,
         count: fleet.count().expect("admitted census has a count"),
         ceiling: fleet_ceiling,
+        track_children: true,
     })
 }
 
@@ -391,6 +408,7 @@ fn test_permit(scope: Scope, count: usize, ceiling: usize) -> AdmissionPermit {
         scope,
         count,
         ceiling,
+        track_children: false,
     }
 }
 
@@ -470,16 +488,16 @@ pub async fn tokio_status(
 }
 
 fn acquire_lock() -> Result<File, String> {
-    let dir = crate::proto::mux_dir();
-    crate::proto::ensure_private_dir(&dir)
-        .map_err(|e| format!("cannot prepare admission state: {e}"))?;
-    let path = dir.join(LOCK_FILE);
+    let path = admission_lock_path().map_err(|e| format!("cannot prepare admission state: {e}"))?;
     let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .open(&path)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("cannot secure {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
         let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
@@ -497,6 +515,45 @@ fn acquire_lock() -> Result<File, String> {
         }
     }
     Ok(file)
+}
+
+fn admission_state_dir() -> io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        let dir = std::env::temp_dir().join(format!(
+            "fno-process-admission-{}-{}",
+            unsafe { libc::geteuid() },
+            admission_state_suffix()
+        ));
+        crate::proto::ensure_private_dir(&dir)?;
+        return Ok(dir);
+    }
+    #[allow(unreachable_code)]
+    Ok(std::env::temp_dir().join("fno-process-admission"))
+}
+
+fn admission_state_suffix() -> String {
+    if std::env::var("FNO_E2E").ok().as_deref() == Some("1") {
+        if let Some(namespace) = std::env::var_os("FNO_MUX_ADMISSION_NAMESPACE") {
+            let safe: String = namespace
+                .to_string_lossy()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            if !safe.is_empty() {
+                return format!("test-{safe}");
+            }
+        }
+    }
+    "global".into()
+}
+
+fn admission_lock_path() -> io::Result<PathBuf> {
+    Ok(admission_state_dir()?.join(LOCK_FILE))
+}
+
+fn admission_marker_path() -> io::Result<PathBuf> {
+    Ok(admission_state_dir()?.join(CHILD_MARKERS_FILE))
 }
 
 #[derive(Clone, Debug)]
@@ -535,7 +592,8 @@ fn process_census() -> Census {
 }
 
 fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize, String> {
-    let path = crate::proto::mux_dir().join(CHILD_MARKERS_FILE);
+    let path =
+        admission_marker_path().map_err(|e| format!("child marker state unavailable: {e}"))?;
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -546,22 +604,37 @@ fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize,
         .iter()
         .map(|row| (row.pid, row.name.as_str()))
         .collect();
-    let mut live = Vec::new();
+    let mut live: Vec<(u32, u64)> = Vec::new();
     let mut seen = HashSet::new();
     let mut unattributed_live = 0;
     for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-        let pid = line
+        let (pid, recorded_start) = line
             .trim()
+            .split_once(':')
+            .ok_or_else(|| "malformed child marker ledger: missing start time".to_string())?;
+        let pid = pid
             .parse::<u32>()
+            .map_err(|error| format!("malformed child marker ledger: {error}"))?;
+        let recorded_start = recorded_start
+            .parse::<u64>()
             .map_err(|error| format!("malformed child marker ledger: {error}"))?;
         if !seen.insert(pid) {
             continue;
         }
-        let dead = crate::proto::pid_confirmed_dead(pid as libc::pid_t);
-        if dead {
+        if crate::proto::pid_confirmed_dead(pid as libc::pid_t)
+            || crate::proto::pid_is_zombie(pid as libc::pid_t)
+        {
             continue;
         }
-        live.push(pid);
+        let Some(observed_start) = crate::proto::pid_start_time(pid) else {
+            return Err(format!(
+                "process start time unavailable for marker pid={pid}"
+            ));
+        };
+        if observed_start != recorded_start {
+            continue;
+        }
+        live.push((pid, recorded_start));
         let is_root = names.get(&pid).is_some_and(|name| roots.contains(*name));
         if !attributed.contains(&pid) && !is_root {
             unattributed_live += 1;
@@ -569,7 +642,7 @@ fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize,
     }
     let body = live
         .iter()
-        .map(u32::to_string)
+        .map(|(pid, start)| format!("{pid}:{start}"))
         .collect::<Vec<_>>()
         .join("\n");
     if body.is_empty() {

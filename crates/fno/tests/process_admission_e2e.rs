@@ -8,6 +8,14 @@ fn census(count: usize) -> Census {
     Census::complete(count)
 }
 
+fn isolate_admission_state() {
+    std::env::set_var("FNO_E2E", "1");
+    std::env::set_var(
+        "FNO_MUX_ADMISSION_NAMESPACE",
+        format!("process-admission-{}", std::process::id()),
+    );
+}
+
 #[test]
 fn ac1_hp_allows_complete_snapshot_below_fleet_ceiling() {
     let decision = decide(&census(1), AdmissionLimits::fleet(2));
@@ -17,6 +25,7 @@ fn ac1_hp_allows_complete_snapshot_below_fleet_ceiling() {
 
 #[test]
 fn ac1_hp_sync_output_preserves_implicit_capture() {
+    isolate_admission_state();
     let _env_lock = ADMISSION_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -32,6 +41,7 @@ fn ac1_hp_sync_output_preserves_implicit_capture() {
 
 #[tokio::test]
 async fn ac1_hp_async_output_preserves_implicit_capture() {
+    isolate_admission_state();
     let _env_lock = ADMISSION_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -83,6 +93,7 @@ fn ac9_edge_applies_tab_ceiling_as_a_separate_scope() {
 
 #[test]
 fn ac2_err_creation_path_emits_positive_refusal_marker() {
+    isolate_admission_state();
     let _env_lock = ADMISSION_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -123,6 +134,7 @@ fn ac2_err_creation_path_emits_positive_refusal_marker() {
 
 #[test]
 fn ac3_edge_concurrent_launchers_remeasure_after_the_first_spawn() {
+    isolate_admission_state();
     let _env_lock = ADMISSION_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
