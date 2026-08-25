@@ -3177,9 +3177,9 @@ def _raw_send(
     #     send here can do nothing and must refuse loud rather than silently
     #     not-deliver. Under --check this refusal is an ANSWER about the
     #     session, the same not-injectable shape as any other no-path verdict.
-    from fno.agents.dispatch import BUS_ONLY_POLICY
+    from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
 
-    if getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY:
+    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
         _refused(
             f"{name!r} has delivery-policy bus-only: prompt-line injection is "
             "forbidden for this recipient. Send wrapped mail instead - it "
@@ -4872,7 +4872,12 @@ def cmd_hold(
         "--minutes",
         "-m",
         help="Idle minutes before the hold lifts by itself (default 5). The "
-        "window restarts every time you submit a prompt.",
+        "quiet window restarts every prompt and ends at 2x the requested window.",
+    ),
+    for_minutes: int = typer.Option(
+        None,
+        "--for",
+        help="Wall-clock minutes before the hold lifts. The deadline never moves.",
     ),
     off: bool = typer.Option(
         False, "--off", help="Lift the hold now and deliver what it held."
@@ -4885,10 +4890,10 @@ def cmd_hold(
 
     While the hold is on, mail addressed to this session never pastes into the
     prompt line. It queues durable and the sender gets a receipt saying so.
-    The hold lifts by itself after ``--minutes`` of no prompt from you, and the
-    lift DELIVERS - it does not wait for you to type. That is the whole point:
-    a hold whose only drain trigger is the operator converts an interruption
-    into a stall.
+    ``--minutes`` runs the quiet-minutes idle clock and re-arms on every prompt,
+    with an absolute ceiling at twice the requested window. ``--for`` runs a
+    wall clock and never moves its deadline. Either lift DELIVERS without a new
+    prompt, so a hold whose only drain trigger is the operator cannot stall.
 
     The hold reuses the ``delivery_policy = "bus-only"`` flag that already
     exists on the agent row, so every injector lane refuses it before any
@@ -4900,6 +4905,10 @@ def cmd_hold(
     from fno.mail import hold as hold_mod
 
     handle, ident = _self_handle_or_exit()
+
+    if minutes is not None and for_minutes is not None:
+        sys.stderr.write("error: --minutes and --for are mutually exclusive\n")
+        raise typer.Exit(code=2)
 
     if status:
         # Ask the delivery gate, not the clock. A flag stamped by
@@ -4925,7 +4934,11 @@ def cmd_hold(
                 "delivery gate - run `fno agents mail hold --off` to clear it"
             )
         else:
-            print(f"{handle}: holding mail, lifts in {label.lstrip('~')}")
+            clock = hold_mod.read_any(handle)
+            print(
+                f"{handle}: holding mail, {hold_mod.clock_description(clock)}, "
+                f"lifts in {label.lstrip('~')}"
+            )
         return
 
     if off:
@@ -4950,9 +4963,15 @@ def cmd_hold(
             print("hold off: nothing was held")
         return
 
-    window = hold_mod.DEFAULT_MINUTES if minutes is None else minutes
+    wall_clock = for_minutes is not None
+    window = (
+        for_minutes
+        if wall_clock
+        else hold_mod.DEFAULT_MINUTES if minutes is None else minutes
+    )
     if window < 1:
-        sys.stderr.write("error: --minutes must be at least 1\n")
+        flag = "--for" if wall_clock else "--minutes"
+        sys.stderr.write(f"error: {flag} must be at least 1\n")
         raise typer.Exit(code=2)
 
     from fno.agents.registry import register_existing_session
@@ -4963,7 +4982,7 @@ def cmd_hold(
         cwd=os.getcwd(),
         delivery_policy="bus-only",
     )
-    clock = hold_mod.arm(handle, window)
+    clock = hold_mod.arm_wall(handle, window) if wall_clock else hold_mod.arm(handle, window)
 
     # The third drain trigger. Detached on purpose: it must outlive this CLI
     # invocation, because the whole contract is that the drain happens with no
@@ -4989,9 +5008,10 @@ def cmd_hold(
             armed = False
 
     until = clock.until or datetime.now(timezone.utc)
+    clock_text = hold_mod.clock_description(clock)
     print(
-        f"busy mode on for {handle}: mail holds until "
-        f"{until.strftime('%H:%M:%S')} UTC ({window}m idle), then delivers itself."
+        f"busy mode on for {handle}: {clock_text}, holds until "
+        f"{until.strftime('%H:%M:%S')} UTC ({window}m), then delivers itself."
     )
     if not armed:
         print(
@@ -5386,12 +5406,11 @@ def cmd_notify_self() -> None:
 
     handle = canonical_handle(ident.session_id)
 
-    # Busy mode (x-481e). This hook fires on every UserPromptSubmit, which is
-    # precisely the "the operator is not idle" signal the hold window resets
-    # on - so one hook is both the suppressor and the idle re-arm, and no new
-    # wiring is needed. A live timed hold renders nothing and pushes its own
-    # deadline out. A lapsed one is tidied here rather than on the send path,
-    # where the gate stays a pure read to avoid a re-entrant registry lock.
+    # Busy mode (x-481e). This hook fires on every UserPromptSubmit. For an idle
+    # hold that is the re-arm signal. For a wall hold it only keeps the policy
+    # live without moving its fixed deadline. A lapsed one is tidied here rather
+    # than on the send path, where the gate stays a pure read to avoid a
+    # re-entrant registry lock.
     # Both calls WRITE, so both are wrapped: a hold that cannot be extended or
     # tidied must degrade to rendering the mail, never to swallowing this
     # turn's delivery. Busy mode is a convenience layered over the bus, and it

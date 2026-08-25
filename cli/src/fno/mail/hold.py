@@ -20,8 +20,10 @@ Three sidecar states, and only one of them ever expires:
   lapses. See :func:`lapsed` for why lifting it instead was tried and reversed.
 - **``until: null``** - the same permanent policy, recorded explicitly so the
   DND column can say "held" rather than leaving the operator to guess.
-- **``until: <iso8601>``** - a timed busy-mode hold. Lapses at that instant,
-  and only this state lapses.
+- **``until: <iso8601>``** - a timed busy-mode hold. ``clock_kind`` is ``idle``
+  for the prompt-resetting clock or ``wall`` for a fixed deadline. Idle clocks
+  also carry an immutable ``ceiling``. Lapses at the effective deadline, and
+  only this state lapses.
 """
 from __future__ import annotations
 
@@ -37,15 +39,19 @@ from typing import Optional
 from fno import paths
 
 DEFAULT_MINUTES = 5
+CLOCK_IDLE = "idle"
+CLOCK_WALL = "wall"
 
 
 @dataclass(frozen=True)
 class Hold:
-    """One session's hold clock. ``until`` is None for a permanent policy."""
+    """One session's hold clock. ``clock_kind`` separates idle and wall time."""
 
     handle: str
     until: Optional[datetime]
     window_s: Optional[int]
+    clock_kind: str = CLOCK_IDLE
+    ceiling: Optional[datetime] = None
 
 
 def hold_dir() -> Path:
@@ -98,10 +104,19 @@ def read(handle: str) -> Optional[Hold]:
     if isinstance(until_raw, str) and until is None:
         return None
     window = raw.get("window_s")
+    clock_kind = raw.get("clock_kind", CLOCK_IDLE)
+    if clock_kind not in (CLOCK_IDLE, CLOCK_WALL):
+        return None
+    ceiling_raw = raw.get("ceiling")
+    ceiling = _parse(ceiling_raw) if isinstance(ceiling_raw, str) else None
+    if isinstance(ceiling_raw, str) and ceiling is None:
+        return None
     return Hold(
         handle=handle,
         until=until,
         window_s=window if isinstance(window, int) else None,
+        clock_kind=clock_kind,
+        ceiling=ceiling,
     )
 
 
@@ -113,6 +128,8 @@ def _write(hold: Hold) -> Hold:
         {
             "until": hold.until.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.until else None,
             "window_s": hold.window_s,
+            "clock_kind": hold.clock_kind,
+            "ceiling": hold.ceiling.strftime("%Y-%m-%dT%H:%M:%SZ") if hold.ceiling else None,
         }
     )
     fd, tmp = tempfile.mkstemp(dir=str(directory), suffix=".tmp")
@@ -132,8 +149,29 @@ def _write(hold: Hold) -> Hold:
 def arm(handle: str, minutes: int = DEFAULT_MINUTES) -> Hold:
     """Start (or restart) a timed hold of ``minutes`` for ``handle``."""
     window_s = max(1, int(minutes * 60))
+    now = _now()
     return _write(
-        Hold(handle=handle, until=_now() + timedelta(seconds=window_s), window_s=window_s)
+        Hold(
+            handle=handle,
+            until=now + timedelta(seconds=window_s),
+            window_s=window_s,
+            clock_kind=CLOCK_IDLE,
+            ceiling=now + timedelta(seconds=window_s * 2),
+        )
+    )
+
+
+def arm_wall(handle: str, minutes: int) -> Hold:
+    """Start a fixed wall-clock hold that never re-arms on activity."""
+    window_s = max(1, int(minutes * 60))
+    return _write(
+        Hold(
+            handle=handle,
+            until=_now() + timedelta(seconds=window_s),
+            window_s=window_s,
+            clock_kind=CLOCK_WALL,
+            ceiling=None,
+        )
     )
 
 
@@ -156,24 +194,31 @@ def clear(handle: str) -> None:
 
 
 def extend(handle: str) -> Optional[Hold]:
-    """Push a live timed hold out by its own window and return the new clock.
+    """Re-arm an idle hold, or return a live wall hold unchanged.
 
     Returns None when there is no live timed hold to extend (no clock, a
-    permanent policy, or one already lapsed). This is the idle re-arm: the
-    caller is ``fno agents mail notify-self``, which fires on every
-    ``UserPromptSubmit``, so "the operator typed" restarts the idle window
-    without any new hook.
+    permanent policy, or one already lapsed). The caller is ``fno agents mail
+    notify-self``, which fires on every ``UserPromptSubmit``. Wall-clock holds
+    return their existing deadline so the policy stays live without moving it.
     """
     hold = read(handle)
     if hold is None or hold.until is None or hold.window_s is None:
         return None
-    if hold.until <= _now():
+    now = _now()
+    if hold.until <= now:
+        return None
+    if hold.clock_kind == CLOCK_WALL:
+        return hold
+    ceiling = hold.ceiling or (hold.until + timedelta(seconds=hold.window_s))
+    if ceiling <= now:
         return None
     return _write(
         Hold(
             handle=handle,
-            until=_now() + timedelta(seconds=hold.window_s),
+            until=min(now + timedelta(seconds=hold.window_s), ceiling),
             window_s=hold.window_s,
+            clock_kind=CLOCK_IDLE,
+            ceiling=ceiling,
         )
     )
 
@@ -313,13 +358,26 @@ def bounce_reason(recipient) -> Optional[str]:
     lands. Returns None for a permanent hand-stamped policy, which really does
     surface at a turn boundary and already has an accurate receipt.
     """
+    hold = read_any(recipient)
     label = remaining_label(recipient)
     if label is None or label == "held":
         return None
+    clock = clock_description(hold)
     return (
-        f"held: {recipient} is in do-not-disturb, lifts in "
+        f"held: {recipient} is in do-not-disturb, {clock}, lifts in "
         f"{label.lstrip('~')} and delivers itself then"
     )
+
+
+def clock_description(hold: Optional[Hold]) -> str:
+    """Name the active clock and its fixed boundary for operator receipts."""
+    if hold is None or hold.until is None:
+        return "no expiry"
+    deadline = hold.until.strftime("%H:%M:%S UTC")
+    if hold.clock_kind == CLOCK_WALL:
+        return f"wall clock, fixed deadline {deadline}"
+    ceiling = hold.ceiling.strftime("%H:%M:%S UTC") if hold.ceiling else "legacy unbounded"
+    return f"quiet minutes idle clock, ceiling {ceiling}"
 
 
 def addresses(entry) -> tuple:
