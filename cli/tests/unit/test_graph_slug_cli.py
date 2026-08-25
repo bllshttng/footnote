@@ -336,7 +336,7 @@ def test_roadmap_includes_archive_only_shipped_row(tmp_graph, tmp_path):
 
 
 def test_view_refuses_named_when_canonical_loader_is_unreadable(tmp_graph, monkeypatch):
-    def _unreadable():
+    def _unreadable(*_args):
         raise RuntimeError("READ-FAIL-MARKER")
 
     monkeypatch.setattr("fno.graph.render_html.load_render_entries", _unreadable)
@@ -347,6 +347,57 @@ def test_view_refuses_named_when_canonical_loader_is_unreadable(tmp_graph, monke
     assert "canonical graph read failed: READ-FAIL-MARKER" in (
         result.stdout + (result.stderr or "")
     )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["backlog", "view"],
+        ["backlog", "roadmap", "--project", "fno"],
+    ],
+)
+def test_html_views_refuse_stale_local_graph_under_external_tracker(
+    tmp_graph, monkeypatch, argv
+):
+    _seed(tmp_graph, [
+        {"id": "ab-local001", "title": "STALE-LOCAL-MARKER", "status": "ready",
+         "priority": "p1", "project": "fno"},
+    ])
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 2
+    output = result.stdout + (result.stderr or "")
+    assert "stale local" in output.lower() or "external" in output.lower()
+    assert "STALE-LOCAL-MARKER" not in output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["backlog", "view"],
+        ["backlog", "roadmap", "--project", "fno"],
+    ],
+)
+def test_html_views_refuse_corrupt_live_graph_even_with_healthy_archive(
+    tmp_graph, tmp_path, argv
+):
+    tmp_graph.write_text("{broken", encoding="utf-8")
+    (tmp_path / "graph-archive.json").write_text(
+        json.dumps({"entries": [
+            {"id": "ab-archive1", "title": "ARCHIVE-ONLY-SUCCESS-MARKER",
+             "status": "done", "priority": "p2", "project": "fno"},
+        ]}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code != 0
+    output = result.stdout + (result.stderr or "")
+    assert "canonical graph read failed" in output
+    assert "ARCHIVE-ONLY-SUCCESS-MARKER" not in output
 
 
 def test_public_title_gate_reports_every_class_and_preserves_both_files(

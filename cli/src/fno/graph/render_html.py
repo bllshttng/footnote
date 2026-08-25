@@ -56,11 +56,11 @@ GROUPS = (
 )
 
 
-def load_render_entries() -> list[dict]:
-    """Load the working graph through its public seam and overlay the archive."""
-    from fno.graph.store import read_graph_with_archive
+def load_render_entries(entries: list[dict] | None = None) -> list[dict]:
+    """Overlay archive on a guarded display read or the canonical graph seam."""
+    from fno.graph.store import entries_with_archive, read_graph_with_archive
 
-    return read_graph_with_archive()
+    return read_graph_with_archive() if entries is None else entries_with_archive(entries)
 
 
 def group_for(entry: dict) -> str:
@@ -74,7 +74,7 @@ def group_for(entry: dict) -> str:
 def public_title_leaks(entries: list[dict]) -> list[tuple[str, str, tuple[str, ...]]]:
     """Return every public-title offender and every matched leak class."""
     patterns = (
-        ("pr-reference", re.compile(r"(?i)(?:\bPR\s*#?\s*\d+\b|#\d+\b)")),
+        ("pr-reference", re.compile(r"(?i)(?:\bPR(?:\s*#?\s*|-)\d+\b|#\d+\b)")),
         ("node-id", re.compile(r"\b[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\b", re.I)),
         ("home-path", re.compile(r"(?:~/(?:[^\s]+)|/(?:Users|home)/[^\s/]+(?:/[^\s]+)?)")),
         (

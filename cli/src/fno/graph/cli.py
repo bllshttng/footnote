@@ -207,7 +207,7 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
-def _display_entries(reader: str) -> list[dict]:
+def _display_entries(reader: str, *, strict: bool = False) -> list[dict]:
     """Entries for read-only display/search surfaces (view, find, roadmap,
     relatedness, provenance walks, the status summary).
 
@@ -222,7 +222,7 @@ def _display_entries(reader: str) -> list[dict]:
     from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
 
     try:
-        return read_entries(reader)
+        return read_entries(reader, strict=strict)
     except ExternalMetadataUnavailable as exc:
         typer.echo(f"fno backlog: {exc}", err=True)
         raise typer.Exit(code=2)
@@ -6043,7 +6043,9 @@ def cmd_view() -> None:
     from fno.graph.render_html import load_render_entries, render_graph_html
 
     try:
-        entries = load_render_entries()
+        entries = load_render_entries(_display_entries("view", strict=True))
+    except typer.Exit:
+        raise
     except Exception as exc:
         typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -6149,7 +6151,9 @@ def cmd_roadmap(
         raise typer.Exit(code=1)
 
     try:
-        entries = load_render_entries()
+        entries = load_render_entries(_display_entries("roadmap", strict=True))
+    except typer.Exit:
+        raise
     except Exception as exc:
         typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc

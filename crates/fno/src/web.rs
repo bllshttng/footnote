@@ -106,6 +106,22 @@ struct AppState {
     shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
+fn graph_html_path_from_state_root(state_root: &Path) -> PathBuf {
+    state_root.join("graph.html")
+}
+
+fn graph_html_path() -> PathBuf {
+    #[cfg(not(test))]
+    {
+        return graph_html_path_from_state_root(&crate::proto::mux_sidecar_root());
+    }
+    #[cfg(test)]
+    {
+        let graph = crate::backlog_view::graph_path();
+        return graph_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")));
+    }
+}
+
 /// The bridge's live-state marker (x-b80d): `web-<session>.json` beside the
 /// session socket, holding the bind/port/token the bind-time print showed
 /// once. Written 0600 (the token is the only URL guard); removed by `Drop`
@@ -258,7 +274,7 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         tx,
         snap,
         token,
-        graph_html: crate::backlog_view::graph_path().with_file_name("graph.html"),
+        graph_html: graph_html_path(),
         shutdown: shutdown_rx,
     };
     let app = Router::new()
@@ -947,6 +963,15 @@ console.log("evictedRowCount: 18 cases ok");
     fn page_preserves_the_token_in_the_backlog_link() {
         assert!(PAGE.contains("id=\"backlog-link\""));
         assert!(PAGE.contains("/backlog?t=${encodeURIComponent(token)}"));
+    }
+
+    #[test]
+    fn backlog_html_follows_state_root_not_graph_json_override() {
+        let state = Path::new("/configured/state");
+        assert_eq!(
+            graph_html_path_from_state_root(state),
+            PathBuf::from("/configured/state/graph.html")
+        );
     }
 
     fn tiny_frame() -> proto::Frame {

@@ -55,7 +55,7 @@ def _graph_store_path() -> Path:
         return _state_dir() / "graph.json"
 
 
-def read_entries(reader: str) -> list[dict]:
+def read_entries(reader: str, *, strict: bool = False) -> list[dict]:
     """Raw default-backend entries, for the guarded metadata reader class.
 
     ``reader`` names the calling module (diagnostics read better than a bare
@@ -66,6 +66,7 @@ def read_entries(reader: str) -> list[dict]:
 
     if active_backend_name() != "graph":
         raise ExternalMetadataUnavailable(reader)
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph, read_graph_strict
 
-    return read_graph(_graph_store_path())
+    path = _graph_store_path()
+    return read_graph_strict(path) if strict else read_graph(path)

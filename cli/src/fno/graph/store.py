@@ -758,7 +758,7 @@ def read_graph_with_archive(path: Path | None = None) -> list[dict]:
         from fno.paths import graph_json
 
         path = graph_json()
-    return entries_with_archive(read_graph(path))
+    return entries_with_archive(read_graph_strict(path))
 
 
 def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:

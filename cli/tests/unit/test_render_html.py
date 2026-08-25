@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fno.graph.render_html import (
     UNSCOPED_LABEL,
     _project_color,
@@ -744,3 +746,12 @@ def test_renderer_modules_do_not_open_or_parse_graph_json_directly():
             and node.func.id == "open"
             for node in ast.walk(tree)
         )
+
+
+@pytest.mark.parametrize("title", ["PR-657 renderer fix", "PR-48 guard repair"])
+def test_public_title_gate_catches_hyphenated_pr_references(title):
+    from fno.graph.render_html import public_title_leaks
+
+    offenders = public_title_leaks([{"id": "x-test", "title": title}])
+
+    assert offenders == [("x-test", title, ("pr-reference",))]
