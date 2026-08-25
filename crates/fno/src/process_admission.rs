@@ -24,26 +24,59 @@ impl Scope {
     }
 }
 
-/// The already-resolved ceiling for one admission decision.
+/// A measured number of fno-attributed OS processes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AdmissionLimits {
-    pub scope: Scope,
-    pub ceiling: usize,
-}
+pub struct ProcessCount(usize);
 
-impl AdmissionLimits {
-    pub const fn fleet(ceiling: usize) -> Self {
-        Self {
-            scope: Scope::Fleet,
-            ceiling,
-        }
+impl ProcessCount {
+    pub const fn new(value: usize) -> Self {
+        Self(value)
     }
 
-    pub const fn tab(ceiling: usize) -> Self {
-        Self {
-            scope: Scope::Tab,
-            ceiling,
-        }
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A ceiling expressed only in fno-attributed OS processes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaxProcesses(usize);
+
+impl MaxProcesses {
+    pub const fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A measured number of panes in one target tab.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneCount(usize);
+
+impl PaneCount {
+    pub const fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A ceiling expressed only in panes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaxPanes(usize);
+
+impl MaxPanes {
+    pub const fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
     }
 }
 
@@ -52,13 +85,15 @@ impl AdmissionLimits {
 /// headroom.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Census {
-    Complete { count: usize },
+    Complete { count: ProcessCount },
     Unavailable { reason: String },
 }
 
 impl Census {
     pub const fn complete(count: usize) -> Self {
-        Self::Complete { count }
+        Self::Complete {
+            count: ProcessCount::new(count),
+        }
     }
 
     pub fn unavailable(reason: impl Into<String>) -> Self {
@@ -202,40 +237,56 @@ impl fmt::Display for AdmissionDecision {
     }
 }
 
-pub fn decide(census: &Census, limits: AdmissionLimits) -> AdmissionDecision {
+pub fn decide_processes(census: &Census, ceiling: MaxProcesses) -> AdmissionDecision {
     match census {
-        Census::Complete { count } if *count < limits.ceiling => AdmissionDecision::Admit,
+        Census::Complete { count } if count.get() < ceiling.get() => AdmissionDecision::Admit,
         Census::Complete { count } => AdmissionDecision::Refuse {
-            count: Some(*count),
-            ceiling: limits.ceiling,
-            scope: limits.scope,
+            count: Some(count.get()),
+            ceiling: ceiling.get(),
+            scope: Scope::Fleet,
             reason: AdmissionReason::OverLimit,
         },
         Census::Unavailable { .. } => AdmissionDecision::Refuse {
             count: None,
-            ceiling: limits.ceiling,
-            scope: limits.scope,
+            ceiling: ceiling.get(),
+            scope: Scope::Fleet,
             reason: AdmissionReason::MeasurementUnavailable,
         },
     }
 }
 
-pub const DEFAULT_MAX_LIVE: usize = 3;
+pub fn decide_panes(count: PaneCount, ceiling: MaxPanes) -> AdmissionDecision {
+    if count.get() < ceiling.get() {
+        AdmissionDecision::Admit
+    } else {
+        AdmissionDecision::Refuse {
+            count: Some(count.get()),
+            ceiling: ceiling.get(),
+            scope: Scope::Tab,
+            reason: AdmissionReason::OverLimit,
+        }
+    }
+}
+
+pub const DEFAULT_MAX_PROCESSES: usize = 400;
 pub const DEFAULT_PANE_GROUP_MAX: usize = 4;
 const LOCK_FILE: &str = "fno-process-admission.lock";
 const CHILD_MARKERS_FILE: &str = "fno-process-admission.children";
 
-/// Read the already-resolved fleet cap carried by the Python launcher. A
-/// direct Rust client uses the same conservative default as Python.
-pub fn configured_max_live() -> Result<usize, String> {
-    match std::env::var("FNO_MUX_MAX_LIVE") {
+/// Read the already-resolved process cap carried by the Python launcher. A
+/// direct Rust client uses the same process-unit default as Python.
+pub fn configured_max_processes() -> Result<MaxProcesses, String> {
+    match std::env::var("FNO_PROCESS_ADMISSION_MAX") {
         Ok(raw) => raw
             .parse::<usize>()
             .ok()
             .filter(|value| *value > 0)
-            .ok_or_else(|| "agents.max_live is missing or invalid".into()),
-        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_MAX_LIVE),
-        Err(std::env::VarError::NotUnicode(_)) => Err("agents.max_live is not valid UTF-8".into()),
+            .map(MaxProcesses::new)
+            .ok_or_else(|| "process_admission.max_processes is missing or invalid".into()),
+        Err(std::env::VarError::NotPresent) => Ok(MaxProcesses::new(DEFAULT_MAX_PROCESSES)),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("process_admission.max_processes is not valid UTF-8".into())
+        }
     }
 }
 
@@ -255,15 +306,15 @@ pub fn configured_pane_group_max(requested: Option<usize>) -> usize {
 /// Acquire the machine-global admission lock, measure the relevant process
 /// tree, and return a permit that must remain alive through the spawn syscall.
 pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
-    let (ceiling, config_error) = match configured_max_live() {
+    let (ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
-        Err(error) => (DEFAULT_MAX_LIVE, Some(error)),
+        Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
     };
     if let Some(detail) = config_error {
         return Err(AdmissionFailure {
             decision: AdmissionDecision::Refuse {
                 count: None,
-                ceiling,
+                ceiling: ceiling.get(),
                 scope: Scope::Fleet,
                 reason: AdmissionReason::MeasurementUnavailable,
             },
@@ -272,25 +323,25 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
     }
     #[cfg(test)]
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
-        return Ok(test_permit(Scope::Fleet, 0, ceiling));
+        return Ok(test_permit(Scope::Fleet, 0, ceiling.get()));
     }
     let lock = acquire_lock().map_err(|detail| AdmissionFailure {
         decision: AdmissionDecision::Refuse {
             count: None,
-            ceiling,
+            ceiling: ceiling.get(),
             scope: Scope::Fleet,
             reason: AdmissionReason::LockUnavailable,
         },
         detail,
     })?;
     let census = process_census();
-    let decision = decide(&census, AdmissionLimits::fleet(ceiling));
+    let decision = decide_processes(&census, ceiling);
     match decision {
         AdmissionDecision::Admit => Ok(AdmissionPermit {
             _lock: lock,
             scope: Scope::Fleet,
             count: census.count().expect("admitted census has a count"),
-            ceiling,
+            ceiling: ceiling.get(),
             #[cfg(test)]
             track_children: true,
         }),
@@ -308,28 +359,27 @@ pub fn admit_tab(
     pane_count: usize,
     requested_cap: Option<usize>,
 ) -> Result<AdmissionPermit, AdmissionFailure> {
-    let ceiling = configured_pane_group_max(requested_cap);
+    let ceiling = MaxPanes::new(configured_pane_group_max(requested_cap));
     #[cfg(test)]
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
-        return Ok(test_permit(Scope::Tab, pane_count, ceiling));
+        return Ok(test_permit(Scope::Tab, pane_count, ceiling.get()));
     }
     let lock = acquire_lock().map_err(|detail| AdmissionFailure {
         decision: AdmissionDecision::Refuse {
             count: None,
-            ceiling,
+            ceiling: ceiling.get(),
             scope: Scope::Tab,
             reason: AdmissionReason::LockUnavailable,
         },
         detail,
     })?;
-    let census = Census::complete(pane_count);
-    let decision = decide(&census, AdmissionLimits::tab(ceiling));
+    let decision = decide_panes(PaneCount::new(pane_count), ceiling);
     match decision {
         AdmissionDecision::Admit => Ok(AdmissionPermit {
             _lock: lock,
             scope: Scope::Tab,
             count: pane_count,
-            ceiling,
+            ceiling: ceiling.get(),
             #[cfg(test)]
             track_children: true,
         }),
@@ -347,16 +397,16 @@ pub fn admit_pane(
     pane_count: usize,
     requested_cap: Option<usize>,
 ) -> Result<AdmissionPermit, AdmissionFailure> {
-    let (fleet_ceiling, config_error) = match configured_max_live() {
+    let (fleet_ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
-        Err(error) => (DEFAULT_MAX_LIVE, Some(error)),
+        Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
     };
-    let tab_ceiling = configured_pane_group_max(requested_cap);
+    let tab_ceiling = MaxPanes::new(configured_pane_group_max(requested_cap));
     if let Some(detail) = config_error {
         return Err(AdmissionFailure {
             decision: AdmissionDecision::Refuse {
                 count: None,
-                ceiling: fleet_ceiling,
+                ceiling: fleet_ceiling.get(),
                 scope: Scope::Fleet,
                 reason: AdmissionReason::MeasurementUnavailable,
             },
@@ -365,29 +415,26 @@ pub fn admit_pane(
     }
     #[cfg(test)]
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
-        return Ok(test_permit(Scope::Fleet, 0, fleet_ceiling));
+        return Ok(test_permit(Scope::Fleet, 0, fleet_ceiling.get()));
     }
     let lock = acquire_lock().map_err(|detail| AdmissionFailure {
         decision: AdmissionDecision::Refuse {
             count: None,
-            ceiling: fleet_ceiling,
+            ceiling: fleet_ceiling.get(),
             scope: Scope::Fleet,
             reason: AdmissionReason::LockUnavailable,
         },
         detail,
     })?;
     let fleet = process_census();
-    let fleet_decision = decide(&fleet, AdmissionLimits::fleet(fleet_ceiling));
+    let fleet_decision = decide_processes(&fleet, fleet_ceiling);
     if !matches!(fleet_decision, AdmissionDecision::Admit) {
         return Err(AdmissionFailure {
             decision: fleet_decision,
             detail: fleet.reason().unwrap_or_default().to_string(),
         });
     }
-    let tab = decide(
-        &Census::complete(pane_count),
-        AdmissionLimits::tab(tab_ceiling),
-    );
+    let tab = decide_panes(PaneCount::new(pane_count), tab_ceiling);
     if !matches!(tab, AdmissionDecision::Admit) {
         return Err(AdmissionFailure {
             decision: tab,
@@ -398,7 +445,7 @@ pub fn admit_pane(
         _lock: lock,
         scope: Scope::Fleet,
         count: fleet.count().expect("admitted census has a count"),
-        ceiling: fleet_ceiling,
+        ceiling: fleet_ceiling.get(),
         #[cfg(test)]
         track_children: true,
     })
@@ -580,7 +627,7 @@ struct ProcessRow {
 impl Census {
     fn count(&self) -> Option<usize> {
         match self {
-            Self::Complete { count } => Some(*count),
+            Self::Complete { count } => Some(count.get()),
             Self::Unavailable { .. } => None,
         }
     }
