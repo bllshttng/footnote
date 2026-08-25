@@ -954,34 +954,26 @@ def review_invocation_cmd(
 
 
 def _read_pr_metadata(pr_number: int, cwd: Path) -> dict[str, Any]:
-    """Read the PR identity required before a native self-review can fire."""
-    try:
-        result = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                str(pr_number),
-                "--json",
-                "number,headRefOid,baseRefName",
-            ],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=30,
+    """Read the PR identity required before a native self-review can fire.
+
+    The REST lane (`fetch_pr_info_rest`), never `gh pr view`: the fno gh
+    proxy routes that spelling through the GraphQL broker, which refuses
+    discretionary reads once the shared quota hits its reserve - exactly
+    when a fleet is busiest - and the ship step would stall on a read the
+    REST endpoint serves freely.
+    """
+    from fno.pr._rest import fetch_pr_info_rest
+
+    info, reason = fetch_pr_info_rest(str(pr_number), cwd=str(cwd))
+    if info is None:
+        raise RuntimeError(
+            f"cannot read PR {pr_number}: {(reason or 'REST read failed')[:240]}"
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"cannot read PR {pr_number}: {exc}") from exc
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "gh pr view failed").strip()
-        raise RuntimeError(f"cannot read PR {pr_number}: {detail[:240]}")
-    try:
-        metadata = json.loads(result.stdout)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"PR {pr_number} returned invalid JSON") from exc
-    if not isinstance(metadata, dict):
-        raise RuntimeError(f"PR {pr_number} returned a non-object identity")
-    return metadata
+    return {
+        "number": info.get("pr", pr_number),
+        "headRefOid": info.get("head_sha") or "",
+        "baseRefName": info.get("base_ref") or "",
+    }
 
 
 def _resolve_self_review_identity() -> tuple[str, str]:

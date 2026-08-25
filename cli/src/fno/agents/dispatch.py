@@ -5912,7 +5912,9 @@ _MUX_CONFIRM_ATTEMPTS = 40
 _MUX_CONFIRM_INTERVAL_S = 0.25
 
 _CODEX_QUEUE_MARKER = "tab to queue message"
-_CODEX_QUEUED_MARKERS = ("queued review", "review queued", "queued")
+# Substring match, so the bare word subsumes every longer spelling that
+# contains it ("queued review", "review queued"); listing those adds nothing.
+_CODEX_QUEUED_MARKERS = ("queued",)
 _CODEX_ACTIVE_REVIEW_MARKERS = (
     "review in progress",
     "reviewing",
@@ -6427,6 +6429,10 @@ def _mux_pane_send(
     def _review_outcome() -> str:
         if (getattr(entry, "harness", "") or "") != "codex":
             return "started"
+        # Same settle the Tab gets: classifying before the TUI absorbed the
+        # submit CR reads a pre-submit composer and fires a stray Tab at a
+        # pane whose review already started.
+        time.sleep(enter_delay_s)
         screen = _read_screen()
         if screen is None or not _contains_payload(screen):
             return "unconfirmed"

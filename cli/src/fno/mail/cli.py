@@ -2251,9 +2251,12 @@ def _name_lane_send(
                 if entry.status == "live":
                     # The mail lane holds the boolean contract; only the review
                     # lane consumes the widened "started"/"queued"/"unconfirmed".
-                    injected = bool(
-                        _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
+                    # Name the failure values, never bool(): bool("unconfirmed")
+                    # would read an unclassified frame as delivered.
+                    delivered = _mux_pane_send(
+                        entry, wrapped, guarded=False, confirm=True
                     )
+                    injected = delivered not in (False, "unconfirmed")
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""

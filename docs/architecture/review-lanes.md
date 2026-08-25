@@ -182,6 +182,7 @@ The king's reply injects as user-shaped text and the worker's own
 harness serves the verb in response, or the king can fire the verb
 into the worker's live session directly via
 `fno agents mail send <worker> '<verb>' --raw` (Lane 2).
+
 With no live king, run the native verb by hand. This fallback is not the target ship act path. Target uses its raw self-request and worker Stop hook. A live king is never a dependency for default code review.
 
 ## Why (wrapped) mail cannot carry a verb
@@ -420,6 +421,7 @@ Nothing in the producer can tell a real review from a caller that typed the argu
 The freshness half of the protocol is sound and is only half.
 
 Two consequences are recorded rather than gated.
+
 `self_attested_count` on the coverage event says how many of `reviewed_count` are the author attesting its own diff.
 
 It is recorded rather than gated because the native final-head review is the DEFAULT path, and refusing its attestation wedges every single-session PR.
@@ -469,8 +471,7 @@ Each local `review_attestation` can carry `reviewer_context`. When the harness r
 
 The origin is recorded, not gating.
 
-`reviewed_count` never consults it: every `reviewed` verdict counts toward
-coverage regardless of its origin, `self_attested` included.
+`reviewed_count` never consults it: every `reviewed` verdict counts toward coverage regardless of its origin, `self_attested` included.
 
 What the coverage event now adds is `self_attested_count`.
 

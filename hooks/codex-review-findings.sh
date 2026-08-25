@@ -14,6 +14,13 @@ transcript="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/nu
 transcript="${transcript/#\~/$HOME}"
 [[ -r "$transcript" ]] || exit 0
 
+# The marker belongs to the session's checkout, and a hook process does not
+# reliably start there (the sibling attest hook cds for the same reason).
+cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
+if [[ -n "$cwd" ]]; then
+  cd "$cwd" 2>/dev/null || true
+fi
+
 review_outputs="$(jq -s --arg turn "$turn_id" '
   [
     .[]
