@@ -477,6 +477,18 @@ FIELD_META: dict[str, Meta] = {
     # --- config.king.* (the king loop; both default false) ---
     "king.enabled": Meta("advanced", "Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false."),
     "king.autonomous_merge": Meta("advanced", "Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work."),
+    # --- config.accounts.* (account rotation; managed by `fno config accounts`) ---
+    "accounts.active": Meta("never", "Name of the account record currently active for provider rotation."),
+    "accounts.auto_switch": Meta("never", "Swap to a failover account automatically when the active one is locked out."),
+    "accounts.active_combo": Meta("never", "Name of the combo currently driving provider rotation."),
+    "accounts.records": Meta("never", "Account records for rotation: list of {name, provider, model, ...} entries."),
+    "accounts.combos": Meta("never", "Named provider combos, each {strategy (fallback or round_robin), sticky_limit, providers}."),
+    "accounts.quota.defer_dispatch": Meta("never", "Hold dispatch while the active account's quota use sits above the threshold."),
+    "accounts.quota.defer_threshold_pct": Meta("never", "Quota-use percentage at or above which dispatch defers."),
+    "accounts.quota.probe_ttl_seconds": Meta("never", "Seconds a quota probe result stays fresh before re-probing."),
+    "accounts.quota.defer_horizon_minutes": Meta("never", "How far ahead a quota-window reset is still worth deferring for."),
+    "accounts.quota.pick_on_launch": Meta("never", "Pick the least-loaded account at spawn time instead of pinning one."),
+    "accounts.failover": Meta("never", "Provider-rotation failover: {max_swaps_per_phase}."),
 }
 
 

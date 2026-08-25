@@ -205,15 +205,15 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `status_fanout.retries` | int | `2` | advanced | Retry budget per webhook dispatch before drop/short-circuit. |
 | `king.enabled` | bool | `false` | advanced | Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false. |
 | `king.autonomous_merge` | bool | `false` | advanced | Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work. |
-| `accounts.active` | str (optional) | _(none)_ | never |  |
-| `accounts.auto_switch` | bool | `false` | never |  |
-| `accounts.active_combo` | str (optional) | _(none)_ | never |  |
-| `accounts.records` | list[dict[str, Any]] | `[]` | never |  |
-| `accounts.combos` | dict[str, ComboBlock] | `{}` | never |  |
-| `accounts.quota.defer_dispatch` | bool | `false` | never |  |
-| `accounts.quota.defer_threshold_pct` | float | `90.0` | never |  |
-| `accounts.quota.probe_ttl_seconds` | int | `300` | never |  |
-| `accounts.quota.defer_horizon_minutes` | int | `60` | never |  |
-| `accounts.quota.pick_on_launch` | bool | `false` | never |  |
-| `accounts.failover` | FailoverBlock (optional) | _(none)_ | never |  |
+| `accounts.active` | str (optional) | _(none)_ | never | Name of the account record currently active for provider rotation. |
+| `accounts.auto_switch` | bool | `false` | never | Swap to a failover account automatically when the active one is locked out. |
+| `accounts.active_combo` | str (optional) | _(none)_ | never | Name of the combo currently driving provider rotation. |
+| `accounts.records` | list[dict[str, Any]] | `[]` | never | Account records for rotation: list of {name, provider, model, ...} entries. |
+| `accounts.combos` | dict[str, ComboBlock] | `{}` | never | Named provider combos, each {strategy (fallback or round_robin), sticky_limit, providers}. |
+| `accounts.quota.defer_dispatch` | bool | `false` | never | Hold dispatch while the active account's quota use sits above the threshold. |
+| `accounts.quota.defer_threshold_pct` | float | `90.0` | never | Quota-use percentage at or above which dispatch defers. |
+| `accounts.quota.probe_ttl_seconds` | int | `300` | never | Seconds a quota probe result stays fresh before re-probing. |
+| `accounts.quota.defer_horizon_minutes` | int | `60` | never | How far ahead a quota-window reset is still worth deferring for. |
+| `accounts.quota.pick_on_launch` | bool | `false` | never | Pick the least-loaded account at spawn time instead of pinning one. |
+| `accounts.failover` | FailoverBlock (optional) | _(none)_ | never | Provider-rotation failover: {max_swaps_per_phase}. |
 | `schema_version` | int | `1` | never | Settings schema version; managed by fno, not hand-set. |
