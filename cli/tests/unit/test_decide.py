@@ -910,10 +910,20 @@ def test_review_list_reports_multiple_live_rulings_without_picking_a_winner(
     result = runner.invoke(decide_app, ["list", "--review-list", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert [group["subject"] for group in payload["groups"]] == ["billing-policy"]
+    assert [group["subject"] for group in payload["groups"]] == [
+        "billing-policy",
+        "(unscoped)",
+    ]
     assert [
         row["decision_id"] for row in payload["groups"][0]["decisions"]
     ] == ["d-review002", "d-review001"]
+    unscoped = next(
+        group for group in payload["groups"] if group["subject"] == "(unscoped)"
+    )
+    assert [row["decision_id"] for row in unscoped["decisions"]] == [
+        "d-subjectless"
+    ]
+    assert unscoped["decisions"][0]["decision"] == "legacy answer"
     assert payload["data_quality"] == {
         "subjectless": 1,
         "invalid_authority": 1,
@@ -1090,6 +1100,28 @@ def test_list_of_a_subject_with_nothing_on_record_is_a_successful_read(
     # ("no decisions recorded") read as a fact about the store, and a reader
     # acted on it.
     assert "no decision is indexed under the subject 'x-nope'" in listed.output
+
+
+def test_lifecycle_filtered_empty_list_reports_all_state_recovery(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-21T00:00:00Z",
+            "decision_id": "d-history01",
+            "decision": "standing answer",
+            "subject": "x-history",
+            "authority_source": "operator",
+        },
+    )
+
+    listed = runner.invoke(
+        decide_app, ["list", "--subject", "x-history", "--state", "expired"]
+    )
+    assert listed.exit_code == 0, listed.output
+    assert "0 expired decisions" in listed.output
+    assert "fno backlog decisions 'x-history' --state all" in listed.output
 
 
 def test_record_without_a_resolvable_subject_still_writes_the_event(

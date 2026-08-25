@@ -1103,11 +1103,29 @@ def review_list() -> dict[str, Any]:
     except Exception:
         graph_entries = []
     subjectless = 0
+    subjectless_rows: list[dict[str, Any]] = []
     invalid_authority = 0
+
+    def review_row(row: dict) -> dict[str, Any]:
+        return {
+            key: row.get(key)
+            for key in (
+                "decision_id",
+                "lane",
+                "ts",
+                "decision",
+                "rationale",
+                "authority_source",
+                "lifecycle",
+            )
+            if row.get(key) is not None
+        }
+
     for row in rows:
         subject = str(row.get("subject") or "").strip()
         if not subject:
             subjectless += 1
+            subjectless_rows.append(review_row(row))
         authority = row.get("authority_source")
         if authority and authority not in AUTHORITY_SOURCES:
             invalid_authority += 1
@@ -1116,26 +1134,15 @@ def review_list() -> dict[str, Any]:
         node_id = _resolved_node(subject, graph_entries)
         group_key = f"node:{node_id}" if node_id else f"text:{subject.casefold()}"
         display_subjects.setdefault(group_key, subject)
-        grouped.setdefault(group_key, []).append(
-            {
-                key: row.get(key)
-                for key in (
-                    "decision_id",
-                    "lane",
-                    "ts",
-                    "decision",
-                    "rationale",
-                    "authority_source",
-                )
-                if row.get(key) is not None
-            }
-        )
+        grouped.setdefault(group_key, []).append(review_row(row))
 
     groups = [
         {"subject": display_subjects[group_key], "decisions": decisions}
         for group_key, decisions in sorted(grouped.items())
         if len(decisions) > 1
     ]
+    if subjectless_rows:
+        groups.append({"subject": "(unscoped)", "decisions": subjectless_rows})
     return {
         "groups": groups,
         "data_quality": {

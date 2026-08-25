@@ -695,10 +695,10 @@ def _list_decisions(
         # empty answer names the backfill whenever the index is missing.
         from fno.decide import _index_path
 
-        if lane is not None and _index_path().exists():
-            # The LANE emptied the answer, not the store. Saying nothing is
-            # indexed under this subject would be false, and the reader acts on
-            # it.
+        if (lane is not None or state is not None) and _index_path().exists():
+            # A lane or lifecycle filter emptied the answer, not the store.
+            # Saying nothing is indexed under this subject would be false, and
+            # the reader acts on it.
             #
             # ONE branch for every lane. `law` used to have its own, naming
             # only the pre-cutover rows, so a subject with 2 unattributed and 3
@@ -712,6 +712,8 @@ def _list_decisions(
                     key = str(d.get("lane") or "unattributed")
                     counts[key] = counts.get(key, 0) + 1
                 lanes = ", ".join(f"{n} {k}" for k, n in sorted(counts.items()))
+                filters = [value for value in (lane, state) if value is not None]
+                filter_label = " ".join(filters)
                 hint = ""
                 if lane == "law" and counts.get("unattributed"):
                     hint = (
@@ -719,9 +721,15 @@ def _list_decisions(
                         "before authority was an earned value."
                     )
                 typer.echo(
-                    f"backlog decisions: 0 {lane} decisions for '{label}', but "
+                    f"backlog decisions: 0 {filter_label} decisions for '{label}', but "
                     f"{len(unfiltered)} {noun} sit under it: {lanes}."
-                    f"{hint} Drop --lane to read them.",
+                    f"{hint} "
+                    + (
+                        f"Read all lifecycle states with: fno backlog decisions "
+                        f"'{label}' --state all."
+                        if state is not None
+                        else "Drop --lane to read them."
+                    ),
                     err=True,
                 )
                 return
