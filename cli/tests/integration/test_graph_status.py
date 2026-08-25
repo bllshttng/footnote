@@ -711,6 +711,26 @@ def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph)
     assert len(_read_entries(tmp_graph)) == 1
 
 
+def test_backlog_idea_offers_fold_before_minting_noninteractive(tmp_graph, monkeypatch, tmp_path):
+    """AC7-HP: a related live sibling produces a choice-required receipt."""
+    target = _invoke("--json", "backlog", "add", "Difficulty routing filing surface")
+    target_id = json.loads(target.stdout)["id"]
+    sidecar = tmp_path / "relatedness.json"
+    sidecar.write_text(json.dumps({target_id: []}))
+    monkeypatch.setattr("fno.graph.cli._relatedness_path", lambda: sidecar)
+    r = _invoke(
+        "--json", "backlog", "idea", "Difficulty routing filing surface estimate",
+        "--difficulty", "high",
+    )
+    assert r.exit_code == 0, r.output
+    receipt = json.loads(r.stdout)
+    assert receipt["outcome"] == "choice_required"
+    assert receipt["minted_id"] is None
+    assert receipt["candidates"][0]["id"] == target_id
+    assert "fold offered" in receipt["marker"]
+    assert len(_read_entries(tmp_graph)) == 1
+
+
 def test_backlog_idea_accepts_description(tmp_graph):
     """`backlog idea "X" --description "Y"` stores Y in details."""
     r = _invoke(

@@ -1358,6 +1358,75 @@ def cmd_add(
 
 # -- idea (sugar verb) --
 
+
+def _fold_candidates(
+    *, title: str, details: Optional[str], difficulty: str, entries: list[dict]
+) -> tuple[list[dict], str]:
+    """Find live filing siblings before the node-ID mint boundary."""
+    from fno.graph import relatedness
+
+    candidates, source = relatedness.filing_candidates(entries, _relatedness_path())
+    incoming = {
+        "id": "__incoming__",
+        "title": title,
+        "details": details,
+        "difficulty": difficulty,
+        "domain": "code",
+    }
+    ranked = relatedness.similar_nodes(incoming, candidates, k=5)
+    by_id = {entry.get("id"): entry for entry in candidates}
+    out: list[dict] = []
+    for node_id, score, reason in ranked:
+        node = by_id.get(node_id)
+        if node is None:
+            continue
+        out.append(
+            {
+                "id": node_id,
+                "title": node.get("title"),
+                "status": node.get("status"),
+                "holder": _live_worker(node_id),
+                "score": score,
+                "evidence": reason,
+            }
+        )
+    # A live plan surface is an independent fold signal when the filing names
+    # one of the same files. The claim holder comes from the lockfile, not the
+    # graph snapshot's stale locked_by field.
+    import re
+    from pathlib import Path
+    from fno.graph.collision import parse_files_to_modify
+
+    incoming_files = set(re.findall(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", details or ""))
+    if incoming_files:
+        known = {item["id"] for item in out}
+        for node in entries:
+            node_id = node.get("id")
+            plan_path = node.get("plan_path")
+            if (
+                node_id in known
+                or node.get("status") != "in_progress"
+                or not isinstance(plan_path, str)
+            ):
+                continue
+            try:
+                overlap = incoming_files & parse_files_to_modify(Path(plan_path))
+            except Exception:  # noqa: BLE001 - surface evidence is advisory
+                overlap = set()
+            if overlap:
+                out.append(
+                    {
+                        "id": node_id,
+                        "title": node.get("title"),
+                        "status": node.get("status"),
+                        "holder": _live_worker(node_id),
+                        "score": 1.0,
+                        "evidence": "file overlap: " + ", ".join(sorted(overlap)),
+                    }
+                )
+                known.add(node_id)
+    return out, source
+
 @cli.command(
     "idea",
     epilog="Paired verb: `fno backlog remove <id>` deletes it (hidden; run its own --help).",
@@ -1520,6 +1589,79 @@ def cmd_idea(
         else:
             typer.echo(f"folded as wave into {target_id}; minted_id: null")
         return
+
+    if difficulty is not None and not separate:
+        from fno.graph._constants import normalize_difficulty
+        from fno.graph.store import read_graph
+        import shlex
+
+        try:
+            normalized_difficulty = normalize_difficulty(difficulty)
+        except ValueError:
+            normalized_difficulty = None
+        if normalized_difficulty is not None:
+            entries = read_graph(_graph_path())
+            try:
+                candidates, candidate_source = _fold_candidates(
+                    title=title,
+                    details=details if details is not None else description,
+                    difficulty=normalized_difficulty,
+                    entries=entries,
+                )
+            except Exception as exc:  # noqa: BLE001 - filing fallback stays recall-safe
+                candidates, candidate_source = [], f"fallback:fold-check-error:{exc}"
+            if candidates:
+                top = candidates[0]
+                wave_command = (
+                    "fno backlog idea "
+                    f"{shlex.quote(title)} --wave-of {top['id']} "
+                    f"--difficulty {normalized_difficulty}"
+                )
+                marker = (
+                    f"fold offered: {top['title']} status={top['status']} "
+                    f"holder={top['holder'] or 'none'} evidence={top['evidence']}"
+                )
+                receipt = {
+                    "outcome": "choice_required",
+                    "marker": marker,
+                    "candidate_source": candidate_source,
+                    "candidates": candidates,
+                    "wave_command": wave_command,
+                    "separate_command": f"fno backlog idea {shlex.quote(title)} --separate --difficulty {normalized_difficulty}",
+                    "minted_id": None,
+                }
+                if not sys.stdin.isatty():
+                    if json_output or (ctx.obj and ctx.obj.get("json")):
+                        typer.echo(json.dumps(receipt, indent=2))
+                    else:
+                        typer.echo(marker)
+                        typer.echo(f"wave: {wave_command}")
+                        typer.echo(f"separate: {receipt['separate_command']}")
+                    return
+                if typer.confirm(f"{marker}. Fold into {top['id']}?", default=False):
+                    from fno.graph.store import append_wave_note
+
+                    note = {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "kind": "wave",
+                        "title": title,
+                        "details": details if details is not None else description,
+                        "difficulty": normalized_difficulty,
+                        "source": source_node or os.environ.get("FNO_NODE") or "fno backlog idea",
+                        "text": (details if details is not None else description) or title,
+                    }
+                    found, error = append_wave_note(_graph_path(), top["id"], note)
+                    if not found:
+                        typer.echo(f"Error: {error or 'wave append refused'}", err=True)
+                        raise typer.Exit(code=2)
+                    receipt["outcome"] = "wave"
+                    receipt["node_id"] = top["id"]
+                    receipt["note"] = note
+                    if json_output or (ctx.obj and ctx.obj.get("json")):
+                        typer.echo(json.dumps(receipt, indent=2))
+                    else:
+                        typer.echo(f"folded as wave into {top['id']}; minted_id: null")
+                    return
 
     _create_node_impl(
         title=title,
