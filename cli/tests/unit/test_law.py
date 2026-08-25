@@ -119,7 +119,7 @@ def test_valid_consent_records_once_and_replay_refuses_before_writes(
         rationale="Durable policy needs human approval.",
     )
     tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
-    law._arm_proposal_from_hook(
+    armed = law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
         session_id="human-session-1",
@@ -131,7 +131,7 @@ def test_valid_consent_records_once_and_replay_refuses_before_writes(
         content_hash=proposal["content_hash"],
         session_id="human-session-1",
         permission_mode="default",
-        tool_input=tool_input,
+        tool_input=armed["armed_tool_input"],
     )
 
     written = decide.record_decision(
@@ -155,6 +155,66 @@ def test_valid_consent_records_once_and_replay_refuses_before_writes(
         )
     rows = [line for line in index.read_text(encoding="utf-8").splitlines() if line]
     assert len(rows) == 1
+
+
+def test_enact_requires_a_hook_approval_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno import decide, law
+
+    proposal = law.prepare_proposal(
+        subject="x-12ba",
+        decision="Merges belong to the operator",
+        rationale="Durable policy needs human approval.",
+    )
+    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    law._arm_proposal_from_hook(
+        proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="human-session-1",
+        permission_mode="default",
+        tool_input=tool_input,
+    )
+    monkeypatch.setattr(decide, "record_decision", lambda **_: {"decision_id": "d-12345678"})
+
+    with pytest.raises(law.InvalidOperatorConsentError, match="approval receipt"):
+        law.enact_proposal(proposal["proposal_id"], proposal["content_hash"])
+
+
+def test_expired_consent_window_allows_rearming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno import law
+
+    proposal = law.prepare_proposal(
+        subject="x-12ba",
+        decision="Merges belong to the operator",
+        rationale="Durable policy needs human approval.",
+    )
+    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    law._arm_proposal_from_hook(
+        proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="abandoned-session",
+        permission_mode="default",
+        tool_input=tool_input,
+    )
+    stored = law.load_proposal(proposal["proposal_id"])
+    stored["consent_expires_at"] = "2000-01-01T00:00:00+00:00"
+    law.write_proposal(stored)
+
+    rearmed = law._arm_proposal_from_hook(
+        proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="new-session",
+        permission_mode="default",
+        tool_input=tool_input,
+    )
+
+    assert rearmed["status"] == "armed"
+    assert rearmed["armed_session_id"] == "new-session"
 
 
 @pytest.mark.parametrize(
@@ -184,7 +244,7 @@ def test_mismatched_consent_refuses_before_any_decision_store(
         rationale="Durable policy needs human approval.",
     )
     tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
-    law._arm_proposal_from_hook(
+    armed = law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
         session_id="human-session-1",
@@ -196,7 +256,7 @@ def test_mismatched_consent_refuses_before_any_decision_store(
         "content_hash": proposal["content_hash"],
         "session_id": "human-session-1",
         "permission_mode": "default",
-        "tool_input": tool_input,
+        "tool_input": armed["armed_tool_input"],
     }
     values[field] = value
     consent = decide.OperatorConsent(**values)
@@ -256,7 +316,7 @@ def test_event_failure_leaves_valid_consent_retryable(
         rationale="Durable policy needs human approval.",
     )
     tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
-    law._arm_proposal_from_hook(
+    armed = law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
         session_id="human-session-1",
@@ -268,7 +328,7 @@ def test_event_failure_leaves_valid_consent_retryable(
         content_hash=proposal["content_hash"],
         session_id="human-session-1",
         permission_mode="default",
-        tool_input=tool_input,
+        tool_input=armed["armed_tool_input"],
     )
 
     import fno.events

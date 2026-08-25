@@ -23,7 +23,7 @@ Type `/fno:law Merges belong to the operator` in chat.
 2. Classify the statement. A rule limited to this PR, node, target, change, or merge is coordination. Refuse to label it law and offer `/fno:mail` or an ordinary agent ruling.
 3. Read current law with `fno backlog decisions <subject> --lane law --json`. Treat an unreadable result as unknown. When the text conflicts, show existing decision ids. Ask whether the proposal supersedes one before staging it.
 4. Stage the normalized subject, decision, rationale, options, and supersedes value with `fno law prepare`. Render the returned proposal fields and content hash exactly. Do not edit the staged JSON.
-5. Invoke the exact returned proposal with `fno law enact --proposal <proposal-id> --hash <content-hash>`. The PreToolUse gate arms that proposal and returns one permission prompt. The gate must return `ask` or `deny`, never `allow`.
+5. Invoke the exact returned proposal with `fno law enact --proposal <proposal-id> --hash <content-hash>`. The PreToolUse gate arms that proposal, binds a one-shot receipt into the approved tool input, and returns one permission prompt. The gate must return `ask` or `deny`, never `allow`.
 
 ## Refusal and resume
 
@@ -33,7 +33,7 @@ If the enact command returns a real `d-...` receipt, report that id and the subj
 
 ## Safety boundary
 
-The only positive authority marker is the permission decision for the exact proposal-bound command. Arming is hook-only and is not exposed as a CLI command. The engine validates the proposal id, content hash, session id, permission posture, tool input, expiry, and single-use status. It does this before minting a decision id or writing any store. Direct operator-authority CLI calls keep their existing refusal behavior. Environment scrubbing is forbidden.
+The only positive authority marker is the permission decision for the exact proposal-bound command. Arming is hook-only and is not exposed as a CLI command. The hook binds a one-shot receipt into the command input, and the engine rejects enactment without that receipt before minting a decision id or writing any store. The engine also validates the proposal id, content hash, session id, permission posture, tool input, expiry, and single-use status. Direct operator-authority CLI calls keep their existing refusal behavior. Environment scrubbing is forbidden.
 
 ## Known Limitations and Deferred Work
 

@@ -77,6 +77,22 @@ def test_hooks_json_command_paths_resolve() -> None:
         pytest.fail("hooks.json references missing files:\n  " + "\n  ".join(failures))
 
 
+def test_law_authority_gate_uses_project_python_environment() -> None:
+    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+    commands = [
+        hook["command"]
+        for registration in data["hooks"]["PreToolUse"]
+        if registration.get("matcher") == "Bash"
+        for hook in registration.get("hooks", [])
+        if "law-authority-gate.py" in hook.get("command", "")
+    ]
+
+    assert commands == [
+        'uv run --project "${CLAUDE_PLUGIN_ROOT}/cli/pyproject.toml" python3 '
+        '"${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"'
+    ]
+
+
 def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
     manifest = json.loads(
         (REPO_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
@@ -237,7 +253,8 @@ def test_claude_registers_one_law_authority_gate_on_bash() -> None:
         if registration.get("matcher") == "Bash"
         and any(
             hook.get("command")
-            == "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"
+            == 'uv run --project "${CLAUDE_PLUGIN_ROOT}/cli/pyproject.toml" python3 '
+            '"${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"'
             for hook in registration.get("hooks", [])
         )
     ]
@@ -519,7 +536,8 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
         ]
         if path == HOOKS_JSON:
             expected.append(
-                "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"
+                'uv run --project "${CLAUDE_PLUGIN_ROOT}/cli/pyproject.toml" python3 '
+                '"${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"'
             )
         assert commands == expected, (
             f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"

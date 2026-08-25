@@ -19,13 +19,21 @@ CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
 RECOVERY = "/fno:law resume <proposal-id>"
 
 
-def _output(decision: str, reason: str) -> dict[str, Any]:
+def _output(
+    decision: str,
+    reason: str,
+    *,
+    updated_input: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    specific: dict[str, Any] = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+        "permissionDecisionReason": reason,
+    }
+    if updated_input is not None:
+        specific["updatedInput"] = updated_input
     return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": reason,
-        }
+        "hookSpecificOutput": specific
     }
 
 
@@ -129,7 +137,17 @@ def evaluate(
         return _deny(f"proposal arm failed: {exc}")
     if proposal.get("proposal_id") != proposal_id:
         return _deny("arm receipt does not name the requested proposal")
-    return _output("ask", _preview(proposal))
+    receipt = proposal.get("approval_receipt")
+    updated_tool_input = proposal.get("armed_tool_input")
+    if not isinstance(receipt, str) or not isinstance(updated_tool_input, str):
+        return _deny("arm receipt does not include an approval token")
+    if updated_tool_input != f"{command} --receipt {receipt}":
+        return _deny("arm receipt does not bind the approval token to this command")
+    return _output(
+        "ask",
+        _preview(proposal),
+        updated_input={"command": updated_tool_input},
+    )
 
 
 def main() -> int:

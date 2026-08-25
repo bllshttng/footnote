@@ -47,6 +47,8 @@ def test_exact_enact_command_asks_and_binds_preview_fields() -> None:
             "rationale": "Durable policy needs approval.",
             "options": ["operator", "agent"],
             "supersedes": None,
+            "approval_receipt": "receipt-1",
+            "armed_tool_input": f"{COMMAND} --receipt receipt-1",
         }
 
     result = gate.evaluate(_payload(), arm=arm)
@@ -55,6 +57,9 @@ def test_exact_enact_command_asks_and_binds_preview_fields() -> None:
     reason = result["hookSpecificOutput"]["permissionDecisionReason"]
     assert "x-12ba" in reason
     assert "Merges belong to the operator" in reason
+    assert result["hookSpecificOutput"]["updatedInput"] == {
+        "command": f"{COMMAND} --receipt receipt-1"
+    }
     assert seen == [
         {
             "proposal_id": PROPOSAL_ID,
@@ -83,7 +88,11 @@ def test_accept_edits_is_a_supported_prompting_mode() -> None:
     gate = _gate()
     result = gate.evaluate(
         _payload(permission_mode="acceptEdits"),
-        arm=lambda **kwargs: {"proposal_id": PROPOSAL_ID},
+        arm=lambda **kwargs: {
+            "proposal_id": PROPOSAL_ID,
+            "approval_receipt": "receipt-1",
+            "armed_tool_input": f"{COMMAND} --receipt receipt-1",
+        },
     )
 
     assert result["hookSpecificOutput"]["permissionDecision"] == "ask"

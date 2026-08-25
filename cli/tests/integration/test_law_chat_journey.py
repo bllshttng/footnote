@@ -79,7 +79,7 @@ def test_exact_approval_writes_two_stores_and_replay_is_refused(isolated) -> Non
         rationale="The operator owns durable policy.",
     )
     tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
-    law._arm_proposal_from_hook(
+    armed = law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
         session_id="human-session",
@@ -91,7 +91,7 @@ def test_exact_approval_writes_two_stores_and_replay_is_refused(isolated) -> Non
         content_hash=proposal["content_hash"],
         session_id="human-session",
         permission_mode="default",
-        tool_input=tool_input,
+        tool_input=armed["armed_tool_input"],
     )
     recorded = decide.record_decision(
         subject=proposal["subject"],

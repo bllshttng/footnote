@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -110,6 +111,10 @@ def _canonical_fields(
 def _content_hash(fields: dict[str, Any]) -> str:
     canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _receipt_hash(receipt: str) -> str:
+    return hashlib.sha256(receipt.encode("utf-8")).hexdigest()
 
 
 def proposal_path(proposal_id: str) -> Path:
@@ -239,15 +244,23 @@ def _arm_proposal_from_hook(
     if proposal.get("status") == "consumed":
         raise InvalidOperatorConsentError("proposal is consumed")
     if proposal.get("status") == "armed":
-        same_arm = (
-            content_hash == proposal.get("content_hash")
-            and session_id == proposal.get("armed_session_id")
-            and permission_mode == proposal.get("armed_permission_mode")
-            and tool_input == proposal.get("armed_tool_input")
-        )
-        if same_arm:
-            return proposal
-        raise InvalidOperatorConsentError("proposal is already armed")
+        consent_expires_at = proposal.get("consent_expires_at")
+        if consent_expires_at and _utc_now() >= _parse_time(str(consent_expires_at)):
+            reset = dict(proposal)
+            reset["status"] = "pending"
+            for key in (
+                "armed_at",
+                "consent_expires_at",
+                "armed_session_id",
+                "armed_permission_mode",
+                "armed_tool_input",
+                "approval_receipt_hash",
+            ):
+                reset.pop(key, None)
+            write_proposal(reset)
+            proposal = reset
+        else:
+            raise InvalidOperatorConsentError("proposal is already armed")
     if content_hash != proposal.get("content_hash"):
         raise InvalidOperatorConsentError("content hash mismatch")
     if not session_id:
@@ -257,6 +270,7 @@ def _arm_proposal_from_hook(
     expected_tool = f"fno law enact --proposal {proposal_id} --hash {content_hash}"
     if tool_input != expected_tool:
         raise InvalidOperatorConsentError("tool input is not the canonical enact command")
+    approval_receipt = secrets.token_urlsafe(32)
     armed = dict(proposal)
     armed.update(
         {
@@ -265,11 +279,12 @@ def _arm_proposal_from_hook(
             "consent_expires_at": _iso(_utc_now() + CONSENT_TTL),
             "armed_session_id": session_id,
             "armed_permission_mode": permission_mode,
-            "armed_tool_input": tool_input,
+            "armed_tool_input": f"{tool_input} --receipt {approval_receipt}",
+            "approval_receipt_hash": _receipt_hash(approval_receipt),
         }
     )
     write_proposal(armed)
-    return armed
+    return {**armed, "approval_receipt": approval_receipt}
 
 
 def _validate_operator_consent(
@@ -365,11 +380,13 @@ def consume_operator_consent(
     return consumed
 
 
-def enact_proposal(proposal_id: str, content_hash: str) -> dict[str, Any]:
+def enact_proposal(
+    proposal_id: str, content_hash: str, receipt: str | None = None
+) -> dict[str, Any]:
     proposal = load_proposal(proposal_id)
     if proposal.get("status") != "armed":
         raise InvalidOperatorConsentError("proposal is not armed")
-    consent = _consent_from_proposal(proposal, content_hash)
+    consent = _consent_from_proposal(proposal, content_hash, receipt)
     from fno.decide import record_decision
 
     result = record_decision(
@@ -384,17 +401,30 @@ def enact_proposal(proposal_id: str, content_hash: str) -> dict[str, Any]:
     return {"proposal_id": proposal_id, "status": "consumed", **result}
 
 
-def _consent_from_proposal(proposal: dict[str, Any], content_hash: str) -> Any:
+def _consent_from_proposal(
+    proposal: dict[str, Any], content_hash: str, receipt: str | None
+) -> Any:
     if content_hash != proposal.get("content_hash"):
         raise InvalidOperatorConsentError("content hash mismatch")
+    if not receipt:
+        raise InvalidOperatorConsentError("approval receipt is missing")
+    receipt_hash = proposal.get("approval_receipt_hash")
+    if not isinstance(receipt_hash, str) or not hmac.compare_digest(
+        _receipt_hash(receipt), receipt_hash
+    ):
+        raise InvalidOperatorConsentError("approval receipt is invalid")
     from fno.decide import OperatorConsent
+
+    tool_input = str(proposal.get("armed_tool_input") or "")
+    if not tool_input.endswith(f" --receipt {receipt}"):
+        raise InvalidOperatorConsentError("approval receipt does not match tool input")
 
     return OperatorConsent(
         proposal_id=str(proposal["proposal_id"]),
         content_hash=content_hash,
         session_id=str(proposal.get("armed_session_id") or ""),
         permission_mode=str(proposal.get("armed_permission_mode") or ""),
-        tool_input=str(proposal.get("armed_tool_input") or ""),
+        tool_input=tool_input,
     )
 
 
@@ -428,9 +458,10 @@ def prepare_command(
 def enact_command(
     proposal: str = typer.Option(..., "--proposal"),
     content_hash: str = typer.Option(..., "--hash"),
+    receipt: str = typer.Option(..., "--receipt"),
 ) -> None:
     try:
-        result = enact_proposal(proposal, content_hash)
+        result = enact_proposal(proposal, content_hash, receipt)
     except ProposalError as exc:
         typer.echo(f"fno law: refused: {exc}", err=True)
         raise typer.Exit(3) from exc
