@@ -4,7 +4,7 @@ Public API:
     render_graph_html(entries, path) -> None
 
 Sibling to render.py's render_graph_md. Same column semantics
-(Now/Next/Later/Done) and sort key, different output shape: one HTML
+(In Progress/Now/Next/Later/Triage/Done) and sort key, different output shape: one HTML
 document with a master kanban plus per-project collapsible sections,
 inline CSS+JS, no external assets. Done cards are hidden by default
 via CSS so the file is useful without JS; a Show done toggle adds the
@@ -237,7 +237,7 @@ def _bucket(
             # Intentional divergence from render_graph_md, which caps Done at 10
             # for Obsidian's flat list. Here Done is hidden by default via CSS,
             # so revealing it via the toggle should show the full history.
-            items.sort(key=lambda e: e.get("completed_at", ""), reverse=True)
+            items.sort(key=lambda e: e.get("completed_at") or "", reverse=True)
         else:
             items.sort(key=board_order)
     return cols
@@ -324,12 +324,14 @@ def _card_html(
             parts.append(f'<div class="meta plan">{html.escape(display_str)}</div>')
 
     blockers = [b for b in entry.get("blocked_by", []) if isinstance(b, str)]
-    is_done = bool(entry.get("completed_at"))
+    is_done = bool(entry.get("completed_at")) or entry.get("status") == "done"
     if blockers and not is_done:
         open_blockers = []
         for bid in blockers:
             blocker = id_to_entry.get(bid)
-            if blocker and not blocker.get("completed_at"):
+            if blocker and not (
+                blocker.get("completed_at") or blocker.get("status") == "done"
+            ):
                 btitle = (blocker.get("title") or "?")[:40]
                 open_blockers.append(f"{html.escape(bid)} ({html.escape(btitle)})")
         if open_blockers:
@@ -431,7 +433,7 @@ def _board_html(
 
     Each column is a <details> with its name + count as the <summary>,
     so the user can tap any column header to collapse/expand it. Done +
-    Triage ship closed-by-default; Now/Next/Later are open. The JS
+    Triage ship closed-by-default; In Progress/Now/Next/Later are open. The JS
     layer persists user-chosen state in localStorage keyed by column
     name so it survives backlog mutations + re-renders.
 
@@ -445,7 +447,7 @@ def _board_html(
     orphans = _orphan_ids(list(id_to_entry.values()))
     out: list[str] = ['<div class="cols">']
     for col in COLUMNS:
-        col_class = f"col col-{col.lower()}"
+        col_class = f"col col-{col.lower().replace(' ', '-')}"
         items = columns[col]
         count = len(items)
         # Done + Triage start closed (Triage is the large awaiting-ack pile -

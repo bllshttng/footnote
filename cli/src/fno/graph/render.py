@@ -21,9 +21,9 @@ from fno.graph._intake import (
 # Canonical Kanban column order, left to right. Single source of truth for both
 # renderers: render_graph_md (below) and render_html.COLUMNS import this, so the
 # column set + order can never drift between the markdown board and the HTML
-# board. Now leads (genuine today-work), Triage holds the awaiting-ack queue,
-# Done is terminal.
-KANBAN_COLUMNS = ("Now", "Next", "Later", "Triage", "Done")
+# board. In Progress leads, Now holds ready today-work, Triage holds the
+# awaiting-ack queue, and Done is terminal.
+KANBAN_COLUMNS = ("In Progress", "Now", "Next", "Later", "Triage", "Done")
 
 def _graph_sort_key(e: dict) -> tuple:
     """Sort key for graph entries: priority (p0 first), then creation time.
@@ -60,8 +60,8 @@ def in_progress_epic_ids(
 
     Sessions claim the leaf CHILDREN of an epic, never the container, so an
     in-progress epic carries no claim/session of its own and would otherwise sit
-    in its priority column. The board surfaces it in Now by id, derived from
-    the stored child status and completion fields.
+    in its priority column. The board surfaces it in In Progress by id,
+    derived from the child status and completion fields.
     """
     from fno.graph._intake import in_progress_epic_ids as _shared_epic_ids
 
@@ -79,10 +79,10 @@ def _kanban_column(
     Mapping (intent-based, with claimed override):
 
     - roadmap nodes -> excluded
-    - completed_at set -> Done
+    - completed_at set or effective status done -> Done
     - deferred / superseded -> excluded (off-board until reactivated)
-    - claimed (a session is on it) -> Now (overrides priority)
-    - queued (awaiting human ack) -> Triage (overrides priority, below claimed)
+    - effective status in_progress -> In Progress
+    - queued (awaiting human ack) -> Triage (overrides priority, below active)
     - else by priority:
         p0 / p1 -> Now    (today-ish)
         p2      -> Next   (this sprint / this week)
@@ -97,17 +97,19 @@ def _kanban_column(
     if entry.get("completed_at"):
         return "Done"
     status = entry.get("status", "ready")
+    if status == "done":
+        return "Done"
     if status in ("deferred", "superseded"):
         return None
     if status == "in_progress":
-        return "Now"
+        return "In Progress"
     entry_id = entry.get("id")
     # In-progress epic (x-33b2): a container with a done/claimed child has no
     # claim of its own (sessions claim the children) but is genuinely underway,
-    # so surface it in Now. The set is derived from children by the caller; the
-    # epic's `status` stays honest (never a claim without a session_id).
+    # so surface it in In Progress. The set is derived from children by the
+    # caller; the epic's `status` stays honest (never a claim without a session_id).
     if isinstance(entry_id, str) and entry_id in in_progress_epics:
-        return "Now"
+        return "In Progress"
     # Queued is orthogonal to status (the field stays set across blocked,
     # idea, etc.). It routes to the Triage lane - a queued node is "awaiting
     # human ack" (via `fno backlog pick`), not active work, so it must NOT
@@ -170,7 +172,7 @@ def _kanban_card(
     title = (entry.get("title") or "").replace("\n", " ").strip() or "(untitled)"
     eid = entry.get("id", "?")
     priority = entry.get("priority") or "p2"
-    is_done = bool(entry.get("completed_at"))
+    is_done = bool(entry.get("completed_at")) or entry.get("status") == "done"
     is_deferred = bool(entry.get("deferred_at")) and not is_done
     marker = "[x]" if is_done else "[ ]"
 
@@ -192,7 +194,9 @@ def _kanban_card(
         blocker_titles = []
         for bid in blockers:
             blocker = id_to_entry.get(bid)
-            if blocker and not blocker.get("completed_at"):
+            if blocker and not (
+                blocker.get("completed_at") or blocker.get("status") == "done"
+            ):
                 blocker_titles.append(f"{bid} ({(blocker.get('title') or '?')[:40]})")
         if blocker_titles:
             body_lines.append(f"  blocked by: {', '.join(blocker_titles)}")
@@ -237,8 +241,8 @@ def render_graph_md(
 ) -> None:
     """Render graph.json entries as a Kanban-style markdown board.
 
-    Columns: Now (claimed / p0-p1), Next (p2), Later (p3),
-    Triage (queued, awaiting human ack), Done (completed). Within each
+    Columns: In Progress (active), Now (ready p0-p1), Next (p2), Later (p3),
+    Triage (queued, awaiting human ack), Done (terminal). Within each
     non-Done column, cards use the same selection key as the walker with an
     added project-lane prefix, so per-project clusters are contiguous without
     maintaining a second work-order suffix. Done sorts by completed_at (capped
