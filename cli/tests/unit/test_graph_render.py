@@ -81,10 +81,10 @@ def test_column_ready_p3_goes_later():
     assert _kanban_column(e) == "Later"
 
 
-def test_column_claimed_overrides_priority():
-    """A claimed (in-session) node lands in Now even if it'd otherwise be Later."""
+def test_column_in_progress_has_distinct_lane():
+    """Active work lands in In Progress even if priority would put it in Later."""
     e = _entry("ab-22222222", status="in_progress", priority="p3")
-    assert _kanban_column(e) == "Now"
+    assert _kanban_column(e) == "In Progress"
 
 
 def test_column_queued_goes_triage():
@@ -97,16 +97,15 @@ def test_column_queued_goes_triage():
     assert _kanban_column(e_p1) == "Triage"
 
 
-def test_column_claimed_beats_queued():
-    """claimed wins over queued: an actively-worked node stays in Now even if
-    it also carries queued_at."""
+def test_column_in_progress_beats_queued():
+    """Active status wins over queued intent and keeps its distinct lane."""
     e = _entry(
         "ab-2222222b",
         status="in_progress",
         priority="p3",
         queued_at="2026-05-12T12:00:00Z",
     )
-    assert _kanban_column(e) == "Now"
+    assert _kanban_column(e) == "In Progress"
 
 
 def test_column_queued_does_not_override_deferred():
@@ -163,7 +162,7 @@ def test_ac1_hp_column_roadmap_excluded():
     assert _kanban_column(e) is None
 
 
-# -- in-progress epic -> Now (x-33b2) --
+# -- in-progress epic -> In Progress --
 
 
 def test_in_progress_epic_ids_detects_done_or_claimed_child():
@@ -216,11 +215,10 @@ def test_in_progress_epic_signal_requires_a_live_epic_parent():
     assert column_for(dead_epic) is None
 
 
-def test_column_in_progress_epic_goes_now():
-    """An in-progress epic (passed in the set) lands in Now even at p3, derived
-    from its children - its own status is left untouched (still `ready`)."""
+def test_column_in_progress_epic_has_distinct_lane():
+    """A derived active epic has a distinct lane without mutating its status."""
     epic = _entry("ab-epic0001", priority="p3")  # would be Later by priority
-    assert _kanban_column(epic, frozenset({"ab-epic0001"})) == "Now"
+    assert _kanban_column(epic, frozenset({"ab-epic0001"})) == "In Progress"
     # status was never mutated to a session-less "in_progress".
     assert epic["status"] == "ready"
 
@@ -407,8 +405,29 @@ def test_ac1_hp_render_columns_present(tmp_path):
     output = tmp_path / "graph.md"
     render_graph_md(entries, output)
     content = output.read_text()
-    for col in ("Now", "Next", "Later", "Triage", "Done"):
+    for col in ("In Progress", "Now", "Next", "Later", "Triage", "Done"):
         assert f"## {col}" in content
+
+
+def test_render_separates_active_ready_and_status_only_done(tmp_path):
+    entries = [
+        _entry("active", title="ActiveCard", status="in_progress", priority="p3"),
+        _entry("ready", title="ReadyCard", status="ready", priority="p1"),
+        _entry("done", title="DoneCard", status="done", priority="p1"),
+    ]
+    output = tmp_path / "graph.md"
+
+    render_graph_md(entries, output)
+
+    content = output.read_text()
+    active_body = content.split("## In Progress", 1)[1].split("\n## ", 1)[0]
+    now_body = content.split("## Now", 1)[1].split("\n## ", 1)[0]
+    done_body = content.split("## Done", 1)[1].split("\n***", 1)[0]
+    assert "ActiveCard" in active_body
+    assert "ReadyCard" in now_body
+    assert "- [x] **DoneCard**" in done_body
+    assert "DoneCard" not in active_body
+    assert "DoneCard" not in now_body
 
 
 def test_render_obsidian_false_omits_kanban_scaffolding(tmp_path):
@@ -559,7 +578,7 @@ def test_ac3_fr_md_headings_stay_clean(tmp_path):
     output = tmp_path / "graph.md"
     render_graph_md(entries, output)
     content = output.read_text()
-    for col in ("Now", "Next", "Later", "Triage", "Done"):
+    for col in ("In Progress", "Now", "Next", "Later", "Triage", "Done"):
         assert f"## {col}\n" in content        # heading line is bare
         assert f"## {col} " not in content      # no count/space-suffix on heading
 
@@ -596,12 +615,11 @@ def test_overlay_absent_for_unclaimed_node():
     assert _kanban_column(e, frozenset(), frozenset({"x-other"})) == "Next"
 
 
-def test_overlay_never_demotes_claimed():
-    """AC: a node whose status is already 'claimed' stays in Now regardless of
-    the overlay (additive, never demotes)."""
+def test_overlay_never_demotes_in_progress():
+    """An active node keeps its distinct lane regardless of claim overlay."""
     e = _entry("x-cccc", session_id="s1", status="in_progress")
-    assert _kanban_column(e, frozenset(), frozenset()) == "Now"
-    assert _kanban_column(e, frozenset(), frozenset({"x-cccc"})) == "Now"
+    assert _kanban_column(e, frozenset(), frozenset()) == "In Progress"
+    assert _kanban_column(e, frozenset(), frozenset({"x-cccc"})) == "In Progress"
 
 
 def test_overlay_does_not_resurrect_offboard():

@@ -958,7 +958,7 @@ def test_rank_uses_in_progress_epic_board_lane(tmp_graph):
         {"id": "ab-done001", "title": "Done child", "status": "done",
          "priority": "p2", "project": "fno", "parent": "ab-epic002",
          "completed_at": "2026-01-01T00:00:00Z"},
-        {"id": "ab-anchor2", "title": "Now anchor", "status": "ready",
+        {"id": "ab-anchor2", "title": "Active anchor", "status": "in_progress",
          "priority": "p1", "project": "fno", "rank": 5.0},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
@@ -966,7 +966,7 @@ def test_rank_uses_in_progress_epic_board_lane(tmp_graph):
     result = _invoke("backlog", "rank", "ab-epic002", "--before", "ab-anchor2")
 
     assert result.exit_code == 0, result.output
-    assert "Now/fno" in result.output
+    assert "In Progress/fno" in result.output
     assert _rank_of(tmp_graph, "ab-epic002") < _rank_of(tmp_graph, "ab-anchor2")
 
 

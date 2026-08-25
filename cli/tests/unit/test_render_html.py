@@ -108,17 +108,56 @@ def test_render_html_columns_are_collapsible_details(tmp_path: Path):
     out = tmp_path / "graph.html"
     render_graph_html(entries, out)
     text = out.read_text()
-    # All columns render as <details class="col col-...">, incl. Triage.
-    for col_lower in ("now", "next", "later", "triage", "done"):
-        assert f'class="col col-{col_lower}"' in text
-        assert f'data-col="{col_lower.capitalize()}"' in text
+    # All columns render as collapsible details with slugged CSS classes.
+    for col, col_class in (
+        ("In Progress", "in-progress"),
+        ("Now", "now"),
+        ("Next", "next"),
+        ("Later", "later"),
+        ("Triage", "triage"),
+        ("Done", "done"),
+    ):
+        assert f'class="col col-{col_class}"' in text
+        assert f'data-col="{col}"' in text
     # Done + Triage ship CLOSED by default; others ship OPEN.
     assert '<details class="col col-done" data-col="Done">' in text
     assert '<details class="col col-triage" data-col="Triage">' in text
+    assert '<details class="col col-in-progress" data-col="In Progress" open>' in text
     assert '<details class="col col-now" data-col="Now" open>' in text
     # localStorage persistence key + capture-phase toggle listener present.
     assert "fno-kanban-col-state" in text
     assert "addEventListener('toggle'" in text
+
+
+def test_render_html_separates_active_and_status_only_done(tmp_path: Path):
+    entries = [
+        _entry("active", title="ActiveCard", status="in_progress", priority="p3"),
+        _entry(
+            "done",
+            title="DoneCard",
+            status="done",
+            priority="p1",
+            pr_url="https://github.com/acme/widgets/pull/7",
+        ),
+        _entry(
+            "timestamped-done",
+            title="TimestampedDoneCard",
+            status="done",
+            completed_at="2026-08-25T00:00:00Z",
+        ),
+    ]
+    out = tmp_path / "graph.html"
+
+    render_graph_html(entries, out)
+
+    text = out.read_text()
+    active_body = text.split('data-col="In Progress"', 1)[1].split("</details>", 1)[0]
+    done_body = text.split('data-col="Done"', 1)[1].split("</details>", 1)[0]
+    assert 'class="col col-in-progress"' in text
+    assert "ActiveCard" in active_body
+    assert "DoneCard" in done_body
+    assert "https://github.com/acme/widgets/pull/7" in done_body
+    assert "DoneCard" not in active_body
 
 
 def test_render_html_basic(tmp_path: Path):
@@ -139,14 +178,12 @@ def test_render_html_basic(tmp_path: Path):
     assert "<html" in text
     assert "ab-aaaa1111" in text
     assert "ab-bbbb2222" in text
-    # 3 section-level <details> (master + 2 projects) + 5 column-level
-    # <details> inside each (Now/Next/Later/Triage/Done) = 3 + 3*5 = 18 total.
-    assert text.count("<details ") == 18
+    # 3 section-level details plus 6 columns inside each section.
+    assert text.count("<details ") == 21
     assert ">alpha<" in text and ">beta<" in text
     # Master section is a <details> with id="master" so JS can collapse on mobile.
     assert 'id="master"' in text
-    # All four columns rendered in the master board.
-    for col in ("Now", "Next", "Later", "Done"):
+    for col in ("In Progress", "Now", "Next", "Later", "Triage", "Done"):
         assert f">{col} <" in text
 
 
@@ -278,10 +315,10 @@ def test_render_html_mobile_viewport_and_breakpoint(tmp_path: Path):
     # Without the viewport meta tag, mobile browsers render at desktop width.
     assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in text
     # Mobile-first: cols default to one-column; desktop breakpoint upgrades to
-    # one track per column (len(COLUMNS), now 5 with Triage).
+    # one track per column (len(COLUMNS), now 6 with In Progress).
     assert ".cols { display: grid; grid-template-columns: 1fr;" in text
     assert "@media (min-width: 768px)" in text
-    assert "grid-template-columns: repeat(5, 1fr)" in text
+    assert "grid-template-columns: repeat(6, 1fr)" in text
     # The grid count is derived from COLUMNS, not hardcoded - no stale token.
     assert "__NCOLS__" not in text
 
@@ -296,7 +333,7 @@ def test_render_html_done_hidden_default(tmp_path: Path):
     text = out.read_text()
     # Done <details> rendered WITHOUT the `open` attribute so it starts collapsed.
     assert '<details class="col col-done" data-col="Done">' in text
-    # Other columns (Now/Next/Later) ship with `open`.
+    # Active and priority columns ship with `open`.
     assert '<details class="col col-now" data-col="Now" open>' in text
 
 

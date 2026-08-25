@@ -219,6 +219,67 @@ def test_locked_mutate_graph_overlays_blocked_on_the_entries_it_hands_to_render(
     assert rows["ab-rrrrrrrr"]["blocked_reason"] == "blocked-by:ab-qqqqqqqq"
 
 
+def test_board_renders_derived_blocked_status_outside_in_progress(tmp_path: Path):
+    from fno.graph.render import render_graph_md
+
+    p = _write(
+        tmp_path,
+        [
+            _entry("blocker"),
+            _entry(
+                "dependent",
+                title="BlockedCard",
+                status="ready",
+                priority="p1",
+                blocked_by=["blocker"],
+            ),
+        ],
+    )
+
+    entries = read_graph(p)
+    dependent = next(entry for entry in entries if entry["id"] == "dependent")
+    assert dependent["status"] == "blocked"
+
+    output = tmp_path / "graph.md"
+    render_graph_md(entries, output)
+    content = output.read_text()
+    active_body = content.split("## In Progress", 1)[1].split("\n## ", 1)[0]
+    now_body = content.split("## Now", 1)[1].split("\n## ", 1)[0]
+    assert "BlockedCard" in now_body
+    assert "BlockedCard" not in active_body
+
+
+def test_boards_name_status_only_done_blocker_until_completion(tmp_path: Path):
+    from fno.graph.render import render_graph_md
+    from fno.graph.render_html import render_graph_html
+
+    p = _write(
+        tmp_path,
+        [
+            _entry("blocker", title="StatusOnlyDoneBlocker", status="done"),
+            _entry(
+                "dependent",
+                title="BlockedCard",
+                status="ready",
+                priority="p1",
+                blocked_by=["blocker"],
+            ),
+        ],
+    )
+
+    entries = read_graph(p)
+    dependent = next(entry for entry in entries if entry["id"] == "dependent")
+    assert dependent["status"] == "blocked"
+
+    markdown = tmp_path / "graph.md"
+    html = tmp_path / "graph.html"
+    render_graph_md(entries, markdown)
+    render_graph_html(entries, html)
+    marker = "blocked by: blocker (StatusOnlyDoneBlocker)"
+    assert marker in markdown.read_text()
+    assert marker in html.read_text()
+
+
 # -- children summaries derive through the same overlay --
 
 # The parent's `children` array is the surface a king surveys an epic with.

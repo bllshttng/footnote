@@ -18,9 +18,8 @@ from fno.graph.render import (
     make_kanban_classifiers,
 )
 
-# Public-facing column set + labels. The internal Triage column (awaiting
-# human ack) is folded into Later for the public view; Done is relabeled
-# "Shipped".
+# Public-facing column set + labels. Active work is folded into Now and the
+# internal Triage column is folded into Later; Done is relabeled "Shipped".
 _PUBLIC_COLUMNS = (("Now", "Now"), ("Next", "Next"), ("Later", "Later"), ("Done", "Shipped"))
 
 
@@ -36,7 +35,9 @@ def _columns(entries: list[dict], project: str) -> dict[str, list[dict]]:
     board_order, column_for = make_kanban_classifiers(entries)
     for e in _public_entries(entries, project):
         col = column_for(e)
-        if col == "Triage":  # fold the internal triage pile into Later
+        if col == "In Progress":
+            col = "Now"
+        elif col == "Triage":  # fold the internal triage pile into Later
             col = "Later"
         if col in cols:
             cols[col].append(e)
