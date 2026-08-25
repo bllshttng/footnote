@@ -3917,7 +3917,10 @@ async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
         Ok(r) => r,
         Err(e) => return registry_read_failed(req.id, e),
     };
-    let entry = match registry.find(&name) {
+    // A full-session-id token resolves here too: the client pre-check accepts
+    // one, so a name-only lookup here would report a live agent as absent and,
+    // with --provider, auto-spawn a duplicate row for the same session.
+    let entry = match registry.find_name_or_full_session_id(&name) {
         Some(e) => e.clone(),
         None => {
             // First contact: auto-spawn if --provider supplied (create-on-first-contact,
@@ -14085,6 +14088,50 @@ done
                 );
             }
             _ => panic!("expected error for first-contact ask without provider"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A full-session-id token must resolve in handle_ask too: the client
+    /// pre-check accepts one, so a name-only lookup here read a live agent as
+    /// absent and, with --provider, would auto-spawn a duplicate row for the
+    /// same session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_ask_resolves_a_full_session_id_to_the_named_row() {
+        let home = tmp_home("ask-full-id");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let session_id = "12345678-1234-4234-8234-123456789abc";
+        let mut row = ask_row("alice", None);
+        row.harness = Some("claude".into());
+        row.harness_session_id = Some(session_id.into());
+        row.short_id = "abcd1234".into();
+        row.status = AgentStatus::Live;
+        state::update_registry(
+            &home.registry_json(),
+            |r| -> Result<(), std::convert::Infallible> {
+                r.entries.push(row);
+                Ok(())
+            },
+        )
+        .unwrap();
+        let req = Request::new(
+            1,
+            "agent.ask",
+            json!({
+                "name": session_id.to_ascii_uppercase(),
+                "message": "hello"
+            }),
+        );
+        let resp = handle_ask(&ctx, &req).await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Ok(_) => {}
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert!(
+                    !e.message.contains("pass --provider"),
+                    "a full-id token must resolve to the named row, not read as absent: {}",
+                    e.message
+                );
+            }
         }
         std::fs::remove_dir_all(home.root()).ok();
     }

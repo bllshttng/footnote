@@ -683,7 +683,9 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
 
     let provider_param = params.get("provider").and_then(|v| v.as_str());
     let registry = load_registry(&home.registry_json()).unwrap_or_default();
-    let existing_provider = registry.find(name).map(|e| e.harness_name().to_string());
+    let existing_provider = registry
+        .find_name_or_full_session_id(name)
+        .map(|e| e.harness_name().to_string());
 
     // Provider mismatch: an existing claude agent plus a conflicting --provider
     // flag. Python's select_provider rejects this as a mismatch; without the
