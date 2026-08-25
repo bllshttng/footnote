@@ -643,6 +643,152 @@ def resolve_owned_identity(
 
 
 
+# --- attester identity: bound to the emitting process -------------------------
+#
+# review_attestation.attester_session_id is the one field that varies with WHO
+# emitted, and it used to be read straight from the emitting process's own env.
+# One `CODEX_THREAD_ID=<other-session> bash emit-attestation.sh` on the command
+# line then wrote the attestation under any session id, refreshing that
+# session's stale verdict onto a head it never saw. The resolver below keeps
+# the env read (it is the only signal for WHICH marker) but corroborates it
+# against the process ancestry: an ancestor carrying a DIFFERENT value for the
+# same marker is the override shape and raises.
+
+_MAX_ANCESTRY_DEPTH = 25
+
+
+class AttesterIdentityConflict(Exception):
+    """An ancestor carries a DIFFERENT value for the winning session marker.
+
+    The signature of an identity override on the command line: the harness
+    process up the tree says one session and the emitting environment says
+    another.
+    """
+
+    def __init__(self, marker: str, ancestor_value: str, env_value: str) -> None:
+        self.marker = marker
+        self.ancestor_value = ancestor_value
+        self.env_value = env_value
+        super().__init__(
+            f"attester identity conflict on {marker}: process ancestry carries "
+            f"{ancestor_value!r}, the emitting environment carries {env_value!r}"
+        )
+
+
+def _read_ancestor_marker(pid: int, marker: str) -> Optional[str]:
+    """The value of MARKER in ancestor PID's environment, or None.
+
+    None covers both "not carried" and "unreadable" because the two never
+    change a caller decision: the conflict raise needs a readable DIFFERENT
+    value, the process witness needs a readable EQUAL one, and everything
+    else is env_only. Linux reads /proc exactly; darwin falls back to `ps
+    eww`, whose readability is PARTIAL by measurement: it exposed a live
+    harness chain's markers while showing nothing for other same-user
+    processes. A darwin walk therefore corroborates what it can and records
+    env_only for the rest - recorded, never gated on.
+    """
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        raw = None
+    if raw is not None:
+        prefix = marker.encode() + b"="
+        for entry in raw.split(b"\0"):
+            if entry.startswith(prefix):
+                return entry[len(prefix) :].decode("utf-8", "replace")
+        return None
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["ps", "eww", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    prefix = marker + "="
+    for token in out.stdout.split():
+        if token.startswith(prefix):
+            return token[len(prefix) :]
+    return None
+
+
+def _attester_witness(marker: str, session_id: str, chain: "list[Optional[str]]") -> str:
+    """The witness for a marker value from its ancestry (None = absent or
+    unreadable). Raises :class:`AttesterIdentityConflict` when any ancestor
+    carries a different value.
+
+    The raise outranks an equal match, and that ordering is the point: the
+    override case produces BOTH readings - the immediate shell carries the
+    override (equal to this env) while the harness above it still carries the
+    truth - so stopping at the first equal ancestor would certify the forgery.
+    """
+    witness = "env_only"
+    for value in chain:
+        if value is None:
+            continue
+        if value != session_id:
+            raise AttesterIdentityConflict(marker, value, session_id)
+        witness = "process"
+    return witness
+
+
+def resolve_attester_identity(
+    env: Optional[Mapping[str, str]] = None,
+) -> "tuple[str, str]":
+    """The attester for an event emitted by THIS process: ``(session_id,
+    witness)``.
+
+    The session id is the winning marker from the env on the shared
+    :data:`HARNESS_SESSION_MARKERS` precedence. The witness is ``process``
+    when a readable ancestor carries the same value (the harness that minted
+    the id is in this process's ancestry) and ``env_only`` when nothing
+    corroborates it - a bare shell, dead ancestry, or an OS that does not
+    expose ancestor environments. Witness is recorded, never gating: an
+    env_only attestation from such a lane is still a real review.
+
+    A mixed-family env (markers from two harnesses, one foreign and
+    inherited) resolves empty rather than by precedence, matching
+    :func:`resolve_harness_identity`'s refusal to launder. Raises
+    :class:`AttesterIdentityConflict` when a readable ancestor carries a
+    DIFFERENT value for the same marker - the command-line override shape.
+    """
+    environ = os.environ if env is None else env
+    marker_name: Optional[str] = None
+    session_id = ""
+    families: list[str] = []
+    for marker, family in HARNESS_SESSION_MARKERS:
+        value = (environ.get(marker) or "").strip()
+        if value:
+            if family not in families:
+                families.append(family)
+            if marker_name is None:
+                marker_name, session_id = marker, value
+    if len(families) > 1 or marker_name is None:
+        return ("", "env_only")
+    import psutil
+
+    chain: list[Optional[str]] = []
+    try:
+        proc: "Optional[psutil.Process]" = psutil.Process(os.getppid())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+        return (session_id, "env_only")
+    depth = 0
+    while proc is not None and depth < _MAX_ANCESTRY_DEPTH:
+        chain.append(_read_ancestor_marker(proc.pid, marker_name))
+        try:
+            proc = proc.parent()
+        except psutil.Error:
+            break
+        depth += 1
+    return (session_id, _attester_witness(marker_name, session_id, chain))
+
+
 def current_session_id(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
     """Return the canonical ambient session id, with legacy Claude fallback.
 

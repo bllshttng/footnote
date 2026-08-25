@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
 import pytest
 
 from fno.harness_identity import (
@@ -755,3 +759,159 @@ def test_strip_flags_keep_foreign_name_with_different_session_id():
         "-u",
         "CODEX_COMPANION_SESSION_ID",
     ]
+
+
+# --- attester identity: bound to the emitting process -------------------------
+
+
+def test_attester_witness_process_on_equal_ancestor():
+    from fno.harness_identity import _attester_witness
+
+    assert _attester_witness("CODEX_THREAD_ID", "sess-a", [None, "sess-a"]) == "process"
+
+
+def test_attester_witness_env_only_when_nothing_readable():
+    from fno.harness_identity import _attester_witness
+
+    assert _attester_witness("CODEX_THREAD_ID", "sess-a", [None, None]) == "env_only"
+    assert _attester_witness("CODEX_THREAD_ID", "sess-a", []) == "env_only"
+
+
+def test_attester_witness_raises_on_differing_ancestor():
+    from fno.harness_identity import AttesterIdentityConflict, _attester_witness
+
+    with pytest.raises(AttesterIdentityConflict) as exc:
+        _attester_witness("CODEX_THREAD_ID", "sess-forged", ["sess-true"])
+    # Both ids are named: the refusal is the one place a reader can see which
+    # session the harness says versus which the env claims.
+    assert "sess-true" in str(exc.value)
+    assert "sess-forged" in str(exc.value)
+
+
+def test_attester_witness_raise_outranks_the_equal_match():
+    """The override shape yields BOTH an equal ancestor (the shell carrying the
+    assignment) and a differing one (the harness above it). Stopping at the
+    first equal ancestor would certify the forgery, so the raise must win."""
+    from fno.harness_identity import AttesterIdentityConflict, _attester_witness
+
+    with pytest.raises(AttesterIdentityConflict):
+        _attester_witness("CODEX_THREAD_ID", "sess-forged", ["sess-forged", None, "sess-true"])
+
+
+def test_resolve_attester_identity_reads_winning_marker_and_empty_without_one():
+    from fno.harness_identity import resolve_attester_identity
+
+    assert resolve_attester_identity({"CODEX_SESSION_ID": "codex-sess"}) == (
+        "codex-sess",
+        "env_only",
+    )
+    assert resolve_attester_identity({}) == ("", "env_only")
+
+
+def test_resolve_attester_identity_refuses_mixed_family_env():
+    """Markers from two harness families: one is foreign and inherited. Empty
+    rather than by precedence - picking either would launder or ignore a
+    provably mixed env."""
+    from fno.harness_identity import resolve_attester_identity
+
+    env = {"CODEX_THREAD_ID": "codex-id", "CLAUDE_CODE_SESSION_ID": "claude-id"}
+    assert resolve_attester_identity(env) == ("", "env_only")
+
+
+def _proc_environ_strictly_readable() -> bool:
+    """Whether this OS GUARANTEES reading an ancestor's environment: linux
+    /proc does. darwin's `ps eww` is PARTIAL - it exposed the harness chain's
+    markers in a live session yet showed nothing for other processes - so the
+    darwin arms below accept the recorded outcome rather than demand one."""
+    return Path("/proc/self/environ").exists()
+
+
+def test_resolve_attester_identity_refuses_the_command_line_override():
+    """The verbatim reproduction: a command-scoped `CODEX_THREAD_ID=<foreign>`
+    assignment makes the emitting env disagree with the bash parent that
+    inherited the harness's own value. The resolver must raise, naming both
+    ids. Runs live where the OS exposes ancestor environments (linux CI); on
+    darwin the same chain honestly resolves env_only, which that arm pins."""
+    import subprocess
+    import sys
+
+    probe = (
+        "from fno.harness_identity import AttesterIdentityConflict, "
+        "resolve_attester_identity\n"
+        "try:\n"
+        "    print(resolve_attester_identity())\n"
+        "except AttesterIdentityConflict as exc:\n"
+        "    print('CONFLICT', exc)\n"
+        "    raise SystemExit(3)\n"
+    )
+    import fno as _fno
+
+    src_dir = str(Path(_fno.__file__).resolve().parents[1])
+    wrapped = (
+        f"CODEX_THREAD_ID=foreign-sess {sys.executable} -c "
+        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'"
+    )
+    r = subprocess.run(
+        ["bash", "-c", wrapped],
+        env={
+            **os.environ,
+            "CODEX_THREAD_ID": "true-sess",
+            "PYTHONPATH": src_dir,
+            "FNO_IDENTITY_PROBE": probe,
+        },
+        capture_output=True,
+        text=True,
+    )
+    if _proc_environ_strictly_readable():
+        # linux: /proc answers for every ancestor, so the refusal is required.
+        assert r.returncode == 3, r.stdout + r.stderr
+        assert "true-sess" in r.stdout and "foreign-sess" in r.stdout
+    elif "CONFLICT" in r.stdout:
+        # darwin with a readable ancestry (measured live): same refusal.
+        assert r.returncode == 3
+        assert "true-sess" in r.stdout and "foreign-sess" in r.stdout
+    else:
+        # darwin with an unreadable ancestry: nothing contradicts the
+        # override, so the resolver records env_only rather than guessing.
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "foreign-sess" in r.stdout
+        assert "env_only" in r.stdout
+
+
+def test_resolve_attester_identity_corroborates_the_own_id():
+    """The other direction, both positive: the same chain with the harness's
+    OWN id emits nothing conflicting - process witness on linux, env_only on
+    darwin - and never raises against a session's own marker."""
+    import subprocess
+    import sys
+
+    probe = (
+        "from fno.harness_identity import resolve_attester_identity\n"
+        "sid, witness = resolve_attester_identity()\n"
+        "print(sid, witness)\n"
+    )
+    import fno as _fno
+
+    src_dir = str(Path(_fno.__file__).resolve().parents[1])
+    wrapped = (
+        f"CODEX_THREAD_ID=sess-own {sys.executable} -c "
+        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'"
+    )
+    r = subprocess.run(
+        ["bash", "-c", wrapped],
+        env={
+            **os.environ,
+            "CODEX_THREAD_ID": "sess-own",
+            "PYTHONPATH": src_dir,
+            "FNO_IDENTITY_PROBE": probe,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    sid, witness = r.stdout.split()
+    assert sid == "sess-own"
+    if _proc_environ_strictly_readable():
+        assert witness == "process"
+    else:
+        assert witness in ("process", "env_only")

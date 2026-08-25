@@ -393,6 +393,37 @@ def emit(
         typer.echo("error: --data must be a JSON object", err=True)
         raise typer.Exit(code=1)
 
+    if type_ == "review_attestation":
+        # THE ATTESTER IS STAMPED HERE, FROM THE EMITTING PROCESS. The caller
+        # gets no vote: a producer reading its own env is one `VAR=value`
+        # assignment away from writing the attestation under any session id,
+        # which refreshes that session's stale verdict onto code it never saw.
+        # resolve_attester_identity corroborates the env value against the
+        # process ancestry and raises on the override shape; a supplied --data
+        # value that disagrees with the resolved one is refused too, never
+        # silently dropped.
+        from fno.harness_identity import AttesterIdentityConflict, resolve_attester_identity
+
+        supplied = str(data_dict.get("attester_session_id") or "").strip()
+        try:
+            resolved_id, witness = resolve_attester_identity()
+        except AttesterIdentityConflict as exc:
+            typer.echo(
+                f"error: {exc}. No event emitted under an identity the caller overrode.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if supplied and supplied != resolved_id:
+            typer.echo(
+                f"error: attester_session_id supplied as '{supplied}' but this process "
+                f"resolves to '{resolved_id}'. Drop the field; the emitter stamps it. "
+                "No event emitted.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        data_dict["attester_session_id"] = resolved_id
+        data_dict["attester_witness"] = witness
+
     # Anchor default state + events paths to the repo root so `fno doctor event emit`
     # produces consistent results regardless of which subdirectory the user
     # invokes from. Gemini review on PR #270 caught the previous relative-path

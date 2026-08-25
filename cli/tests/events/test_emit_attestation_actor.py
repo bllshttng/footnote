@@ -122,13 +122,16 @@ def test_attestation_model_is_empty_not_guessed_when_unrouted(tmp_path: Path) ->
 
 
 def test_attestation_attester_session_from_env_marker(tmp_path: Path) -> None:
-    """CLAUDE_CODE_SESSION_ID set -> attester_session_id carries it, and it is
-    NOT the manifest session_id. session_id is the worktree run id (grepped from
-    the manifest), so it equals manifest.session_id for every emitter including a
-    reviewer who is not the author; attester_session_id is the live process's
-    session and is the one field that varies with who emitted. Asserting the two
-    differ is the test that would have caught the tautology the join was built
-    on."""
+    """attester_session_id is the live process's session and NOT the manifest
+    session_id, and the emit chokepoint - not this script - stamps it.
+
+    Environment-adaptive by necessity: run under a live harness session whose
+    ancestry carries a DIFFERENT real CLAUDE_CODE_SESSION_ID (a developer
+    machine), the forged marker is the command-line override shape and the
+    emit must REFUSE naming both ids. Run where no ancestor carries the
+    marker (CI), the same command emits and the attester is the env marker.
+    Both outcomes are the mechanism working; asserting only one would make
+    the suite red on the other machine."""
     manifest = (
         "session_id: 20260806T225503Z-cl84104-d4f619\n"
         "harness: claude\n"
@@ -143,6 +146,11 @@ def test_attestation_attester_session_from_env_marker(tmp_path: Path) -> None:
         ["bash", str(_SCRIPT), "code-review", "pass"],
         cwd=repo, env=env, capture_output=True, text=True,
     )
+    if "attester identity conflict" in r.stderr:
+        assert r.returncode != 0
+        assert "3abddea3" in r.stderr
+        assert not (repo / ".fno" / "events.jsonl").exists()
+        return
     assert r.returncode == 0, r.stderr
     data = _last_event(repo)["data"]
     assert data["attester_session_id"] == "3abddea3-ad19-481f-b0c1-af19043c95fe"
@@ -186,14 +194,18 @@ def test_attestation_attester_session_empty_without_marker(tmp_path: Path) -> No
 
 
 def test_attestation_attester_session_marker_precedence(tmp_path: Path) -> None:
-    """The marker precedence matches init: CODEX_THREAD_ID > CLAUDE_CODE_SESSION_ID
-    > CODEX_SESSION_ID > GEMINI_SESSION_ID. First non-blank wins."""
-    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: claude\n")
+    """Precedence applies WITHIN one harness family: CODEX_THREAD_ID >
+    CODEX_SESSION_ID. The old cross-family reading (codex marker beating a
+    claude one) is gone - a mixed-family env is an inherited foreign marker,
+    and resolve_attester_identity refuses it rather than laundering the
+    foreign id into the attester (the same refusal resolve_harness_identity
+    makes)."""
+    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: codex\n")
     env = {
         **os.environ,
         "FNO": "fno-py",
         "CODEX_THREAD_ID": "codex-thread-wins",
-        "CLAUDE_CODE_SESSION_ID": "claude-loses",
+        "CODEX_SESSION_ID": "codex-legacy-loses",
     }
     r = subprocess.run(
         ["bash", str(_SCRIPT), "code-review", "pass"],
@@ -201,6 +213,30 @@ def test_attestation_attester_session_marker_precedence(tmp_path: Path) -> None:
     )
     assert r.returncode == 0, r.stderr
     assert _last_event(repo)["data"]["attester_session_id"] == "codex-thread-wins"
+
+
+def test_attestation_attester_empty_on_mixed_family_env(tmp_path: Path) -> None:
+    """Markers from TWO harness families means one is foreign and inherited (a
+    claude session carrying a codex parent's CODEX_THREAD_ID). The attester
+    resolves EMPTY rather than by precedence: picking the codex marker would
+    write a claude session's attestation under the codex id, and picking the
+    claude one would ignore that the env is provably mixed. Unmeasured, not
+    guessed."""
+    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: claude\n")
+    env = {
+        **os.environ,
+        "FNO": "fno-py",
+        "CODEX_THREAD_ID": "inherited-codex-id",
+        "CLAUDE_CODE_SESSION_ID": "own-claude-id",
+    }
+    r = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    data = _last_event(repo)["data"]
+    assert data["attester_session_id"] == ""
+    assert data["attester_witness"] == "env_only"
 
 
 def test_attestation_attester_session_reads_opencode_marker(tmp_path: Path) -> None:
