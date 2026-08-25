@@ -382,7 +382,8 @@ _KNOWN_RECORD_KEYS = frozenset(
 
 def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list[str]:
     problems: list[str] = []
-    config = raw_data.get("config") if isinstance(raw_data.get("config"), dict) else {}
+    raw_config = raw_data.get("config")
+    config = raw_config if isinstance(raw_config, dict) else {}
     for block_key in ("accounts", "providers"):
         for scope, prefix in ((raw_data, block_key), (config, f"config.{block_key}")):
             block = scope.get(block_key)
