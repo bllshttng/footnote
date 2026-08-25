@@ -645,6 +645,28 @@ def test_retraction_survives_reindex(root: Path, tmp_graph: Path, index: Path):
     assert json.loads(listed.stdout)["decisions"][0]["decision_id"] == decision_id
 
 
+def test_reindex_counts_decision_and_retraction_keys_once(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.decide import reindex
+    from fno.graph.cli import cli as backlog_app
+
+    recorded = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "temporary", "--authority", "crown"],
+    )
+    decision_id = recorded.stdout.strip().splitlines()[-1]
+    retracted = runner.invoke(
+        backlog_app,
+        ["decide-retract", decision_id, "--reason", "no longer applies", "--authority", "agent"],
+    )
+    assert retracted.exit_code == 0, retracted.output
+
+    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    assert counts["added"] == 0
+    assert counts["already"] == 2
+
+
 def test_review_list_reports_multiple_live_rulings_without_picking_a_winner(
     root: Path, tmp_graph: Path, index: Path
 ):
