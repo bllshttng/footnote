@@ -32,6 +32,7 @@ that produced the defect - see ``_unclaimed_node_basis``.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -144,12 +145,20 @@ def run_recoverable_sweep(
     recency_seconds: float,
     now_s: Optional[float] = None,
     scan_fn: Optional[Callable] = None,
+    session_id: Optional[str] = None,
 ) -> tuple[dict, list[Row], Any]:
     """Build a non-destructive watchdog payload for Codex store recoverables."""
     now_s = now_s if now_s is not None else time.time()
     scan = (scan_fn or scan_recoverable_codex_rollouts)(
         cwd, recency_seconds, now=now_s
     )
+    if session_id is not None:
+        scan = dataclasses.replace(
+            scan,
+            recoverable=tuple(
+                row for row in scan.recoverable if row.session_id == session_id
+            ),
+        )
     from fno.harness_identity import canonical_handle
 
     rows: list[Row] = []
@@ -190,6 +199,8 @@ def run_recoverable_sweep(
         "unreadable_count": scan.unreadable_count,
         "cwd": str(cwd),
     }
+    if session_id is not None:
+        payload["selected_session_id"] = session_id
     if complete:
         payload["recoverable_count"] = len(verdicts_out)
         payload["usable_recoverable_count"] = scan.usable_recoverable_count

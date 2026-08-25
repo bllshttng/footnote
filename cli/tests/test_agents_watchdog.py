@@ -1620,6 +1620,28 @@ def test_recoverable_sweep_reports_discovered_usable_and_unusable_counts(tmp_pat
     assert "no_readable_transcript_turn" in by_id[unusable.session_id]["basis"]
 
 
+def test_recoverable_sweep_filters_one_explicit_full_session_id(tmp_path):
+    from fno.agents.discover import CodexRecoveryScan
+
+    first = _recovery_candidate(tmp_path, 20)
+    selected = _recovery_candidate(tmp_path, 21)
+    scan = CodexRecoveryScan((first, selected), True, 2, 0, 0, ())
+
+    payload, rows, filtered = watchdog.run_recoverable_sweep(
+        cwd=tmp_path,
+        recency_seconds=24 * 3600,
+        now_s=NOW_1840,
+        scan_fn=lambda *args, **kwargs: scan,
+        session_id=selected.session_id,
+    )
+
+    assert [row.session_id for row in filtered.recoverable] == [selected.session_id]
+    assert [row.row_id for row in rows] == [selected.session_id]
+    assert payload["recoverable_count"] == 1
+    assert payload["usable_recoverable_count"] == 1
+    assert payload["selected_session_id"] == selected.session_id
+
+
 def test_recoverable_apply_refuses_unusable_candidate_without_writing(tmp_path):
     from fno.agents.discover import CodexRecoveryScan
 

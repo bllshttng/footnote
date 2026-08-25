@@ -209,8 +209,11 @@ The verb reaches the same destination with none of that exposure.
 
 ```bash
 repo=$(git rev-parse --show-toplevel)
-apply=$(uv run --project cli fno-py agents watchdog --only recoverable --since 24h --cwd "$repo" --apply --json)
-sid=$(jq -er '[.results[] | select(.outcome == "applied" and .transcript_usable == true) | .session_id] | if length == 1 then .[0] else error("expected exactly one usable applied orphan") end' <<<"$apply")
+sid="<full UUID from the disposable seed receipt>"
+probe=$(uv run --project cli fno-py agents watchdog --only recoverable --since 24h --cwd "$repo" --session-id "$sid" --json)
+jq -e '.complete == true and .recoverable_count == 1 and .usable_recoverable_count == 1' <<<"$probe"
+apply=$(uv run --project cli fno-py agents watchdog --only recoverable --since 24h --cwd "$repo" --session-id "$sid" --apply --json)
+jq -e --arg sid "$sid" '.results | length == 1 and .[0].session_id == $sid and .[0].outcome == "applied" and .[0].transcript_usable == true and .[0].registry_row_count == 1' <<<"$apply"
 marker="RECOVERY-RESUME-OK-$(uuidgen | tr -d '-')"
 reply=$(uv run --project cli fno-py agents ask "$sid" "Reply exactly $marker")
 test "$reply" = "$marker"

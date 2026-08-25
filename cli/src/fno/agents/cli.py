@@ -4048,6 +4048,14 @@ def cmd_watchdog(
         "--cwd",
         help="Exact checkout scope for --only recoverable. Defaults to cwd.",
     ),
+    session_id: Optional[str] = typer.Option(
+        None,
+        "--session-id",
+        help=(
+            "For --only recoverable, select one canonical full Codex UUID "
+            "before dry-run or apply."
+        ),
+    ),
     mail_to: Optional[str] = typer.Option(
         None,
         "--mail",
@@ -4076,6 +4084,16 @@ def cmd_watchdog(
 
     now = _time.time()
     if only == wd.RECOVERABLE:
+        selected_session_id = session_id if isinstance(session_id, str) else None
+        if selected_session_id:
+            from fno.agents.discover import _is_canonical_full_uuid
+
+            if not _is_canonical_full_uuid(selected_session_id):
+                print(
+                    "fno agents watchdog: --session-id requires one canonical full UUID",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2)
         try:
             recency_seconds = wd.parse_recovery_since(since)
             scope_cwd = wd.resolve_recovery_cwd(cwd)
@@ -4087,6 +4105,7 @@ def cmd_watchdog(
             cwd=scope_cwd,
             recency_seconds=recency_seconds,
             now_s=now,
+            session_id=selected_session_id,
         )
         pairs = [
             (wd.Verdict(**data), row)
@@ -4124,6 +4143,18 @@ def cmd_watchdog(
                     f"scanned={payload['scanned_count']}"
                 )
             return
+
+        if selected_session_id and not scan.recoverable:
+            payload["selection_error"] = "selected session is not recoverable"
+            if json_out:
+                sys.stdout.write(json.dumps(payload) + "\n")
+            else:
+                print(
+                    f"fno agents watchdog: session {selected_session_id} is not "
+                    "one recoverable candidate",
+                    file=sys.stderr,
+                )
+            raise typer.Exit(code=3)
 
         previous_events = wd._last_events_signature()
         signature = wd.verdict_signature(payload)
