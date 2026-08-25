@@ -84,6 +84,20 @@ def test_ac1_edge_shared_serve_is_not_a_direct_threshold_process() -> None:
     assert reading.fleet_cpu_cores == 0.3
 
 
+def test_ac3_edge_inspects_pid_one_as_an_attribution_root() -> None:
+    reading = parse_footprint(
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        1 0 01:00:00 20.0 1024 fno-agents-worker --run
+        2 1 01:00:00 80.0 1024 cargo test -p fno
+        """
+    )
+
+    assert reading.process_count == 2
+    assert reading.fleet_cpu_cores == 1.0
+    assert reading.descendant_process_count == 1
+
+
 def test_ac1_hp_counts_attributed_rows_and_sustained_cpu() -> None:
     reading = parse_footprint(
         """\

@@ -163,7 +163,7 @@ def parse_footprint(
         seen: set[int] = set()
         current: int | None = pid
         result = False
-        while current is not None and current not in (0, 1) and current not in seen:
+        while current is not None and current != 0 and current not in seen:
             if current in excluded:
                 result = True
                 break
@@ -187,7 +187,7 @@ def parse_footprint(
         seen: set[int] = set()
         current: int | None = pid
         result = False
-        while current is not None and current not in (0, 1) and current not in seen:
+        while current is not None and current != 0 and current not in seen:
             cached = attributed_cache.get(current)
             if cached is not None:
                 result = cached
