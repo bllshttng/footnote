@@ -310,6 +310,12 @@ class TestRunGate:
         monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
         monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
+        monkeypatch.setattr(
+            spawn_gate.os,
+            "sched_getaffinity",
+            lambda _pid: set(range(12)),
+            raising=False,
+        )
 
         evidence = spawn_gate._footprint_cause_evidence()
 
