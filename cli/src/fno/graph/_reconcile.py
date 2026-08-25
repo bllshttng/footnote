@@ -218,8 +218,15 @@ class ReconcileError(Exception):
             or "use `fno do pr info" in text
         ):
             return "routing_refusal"
-        if any(token in text for token in ("auth", "bad credentials", "401", "not logged in")):
+        if (
+            re.search(r"\b(?:auth|authentication|authenticated|credentials)\b", text)
+            or "bad credentials" in text
+            or "not logged in" in text
+            or re.search(r"\b(?:http|status)\s*401\b", text)
+        ):
             return "authentication"
+        if "could not resolve owner/repo" in text or "no repo context" in text:
+            return "repository_context"
         if (
             "not found" in text
             or "404" in text
@@ -268,6 +275,11 @@ class ReconcileError(Exception):
             )
         if self.kind == "reader_error":
             return "The REST reader raised an unexpected error; inspect the reader before retrying."
+        if self.kind == "repository_context":
+            return (
+                "Supply `--repo <owner/repo>` or repair the checkout's origin remote; "
+                "repository context is required and this is not retryable."
+            )
         if "rate limit" in str(self).lower() or "quota" in str(self).lower():
             return "Back off GitHub API requests and retry after the rate limit clears."
         return "Retry the GitHub read when availability returns; the node stays open."
@@ -1185,9 +1197,9 @@ def query_pr_merge_state(
 
     def rest_runner(cmd, *, cwd=None, timeout=None):
         effective_timeout = timeout if timeout is not None else timeout_s
-        if runner is None:
-            return _rest.run(cmd, cwd=cwd, timeout=effective_timeout)
         try:
+            if runner is None:
+                return _rest.run(cmd, cwd=cwd, timeout=effective_timeout)
             result = runner(
                 cmd,
                 capture_output=True,
@@ -1242,7 +1254,7 @@ def query_pr_merge_state(
             kind="malformed",
         )
     state = info["state"]
-    if state not in {"OPEN", "CLOSED", "MERGED", "UNKNOWN"}:
+    if state not in {"OPEN", "CLOSED", "MERGED"}:
         raise ReconcileError(
             f"REST PR info reader returned malformed state {state!r}",
             kind="malformed",

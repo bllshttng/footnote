@@ -331,6 +331,24 @@ def test_nonretryable_refusal_wins_over_an_open_sibling():
     assert evidence.remedy is not None
 
 
+def test_error_classifier_does_not_read_author_as_authentication():
+    from fno.graph._reconcile import ReconcileError
+
+    error = ReconcileError("repository author/repo returned HTTP 404 Not Found")
+
+    assert error.kind == "not_found"
+
+
+def test_missing_repository_context_is_not_retryable():
+    from fno.graph._reconcile import ReconcileError
+
+    error = ReconcileError("could not resolve owner/repo from git remote")
+
+    assert error.kind == "repository_context"
+    assert error.retryable is False
+    assert "--repo <owner/repo>" in error.remedy_for(pr_number=1, repo=None)
+
+
 # ---------------------------------------------------------------------------
 # AC2-HP: OPEN no longer closes, even with green CI (regression against the
 # removed behavior). Exit 5, node stays in_review, and no CI query is issued.

@@ -984,6 +984,43 @@ def test_query_rejects_missing_required_reader_metadata():
     assert raised.value.retryable is False
 
 
+def test_query_default_rest_timeout_stays_retryable(monkeypatch):
+    import subprocess
+
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+    from fno.pr import _rest
+
+    def timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout", 30))
+
+    monkeypatch.setattr(_rest, "run", timed_out)
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(5, repo="o/r")
+
+    assert raised.value.kind == "availability"
+    assert raised.value.retryable is True
+
+
+def test_query_unknown_rest_state_is_a_malformed_failure():
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(
+            5,
+            repo="o/r",
+            info_reader=lambda number, *, repo=None, cwd=None: ({
+                "pr": 5,
+                "state": "UNKNOWN",
+                "url": "u",
+            }, ""),
+            files_reader=lambda number, *, repo=None, cwd=None: ([], ""),
+        )
+
+    assert raised.value.kind == "malformed"
+    assert raised.value.retryable is False
+
+
 def test_manifest_node_id_beats_a_stale_branch():
     """A reused worktree's branch still names the PREVIOUS node; the manifest wins."""
     from fno.pr.closure import bind_created_pr
