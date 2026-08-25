@@ -10128,7 +10128,8 @@ async fn attach_and_run(
                 | ServerMsg::PaneFocused { .. }
                 | ServerMsg::LayoutApplied { .. }
                 | ServerMsg::LayoutGrafted { .. }
-                | ServerMsg::TabLocation { .. },
+                | ServerMsg::TabLocation { .. }
+                | ServerMsg::TabClosed { .. },
             ) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
@@ -10515,7 +10516,8 @@ async fn attach_and_run(
                     | ServerMsg::PaneFocused { .. }
                     | ServerMsg::LayoutApplied { .. }
                     | ServerMsg::LayoutGrafted { .. }
-                    | ServerMsg::TabLocation { .. }) => {}
+                    | ServerMsg::TabLocation { .. }
+                    | ServerMsg::TabClosed { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
                     // Land the server-extracted selection on the clipboard: local
                     // exec first, OSC 52 to the outer terminal as fallback

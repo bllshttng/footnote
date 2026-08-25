@@ -314,7 +314,7 @@ fn main() {
                  | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
                  | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
-                 | fno mux tab ls|create|rename|join ... (--tab takes the visible \
+                 | fno mux tab ls|create|rename|join|close ... (--tab takes the visible \
                    1-based ordinal, id:<n> for the stable id) \
                  | fno mux layout get|apply|graft ... \
                  | fno mux where <fno_id-or-tab> \

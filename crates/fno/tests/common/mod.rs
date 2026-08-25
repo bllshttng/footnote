@@ -759,7 +759,8 @@ impl FakeClient {
             | ServerMsg::TabSpawned { .. }
             | ServerMsg::LayoutApplied { .. }
             | ServerMsg::LayoutGrafted { .. }
-            | ServerMsg::TabLocation { .. } => {}
+            | ServerMsg::TabLocation { .. }
+            | ServerMsg::TabClosed { .. } => {}
             // (x-c376) Peek transcript body: a client-interactive reply covered
             // by client unit tests, not the e2e absorber - ignore here.
             ServerMsg::PeekBody { .. } => {}
