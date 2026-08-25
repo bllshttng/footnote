@@ -1061,7 +1061,14 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path, inde
     ).stdout.strip().splitlines()[-1]
     second = runner.invoke(
         decide_app,
-        ["--subject", "x-7d94", "--decision", "fold first", "--supersedes", first],
+        [
+            "--subject",
+            "x-7d94",
+            "--decision",
+            "fold first",
+            "--supersedes",
+            first.upper(),
+        ],
     )
     assert second.exit_code == 0, second.output
 
@@ -2999,6 +3006,7 @@ decisions:
             "rationale": "machine-local rationale",
             "authority_source": "agent",
             "decided_by": "king-session",
+            "supersedes": "d-deadbeef",
             "ts": "2026-08-25T17:00:00Z",
         },
     )
@@ -3009,6 +3017,7 @@ decisions:
     assert rows[0]["decision"] == "Shipped repository law."
     assert rows[0]["decided_by"] == "king-session"
     assert rows[0]["_source"] == "repository"
+    assert "supersedes" not in rows[0]
 
 
 def test_catalog_supersession_and_local_override_share_one_projection(

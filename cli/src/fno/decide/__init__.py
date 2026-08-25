@@ -482,7 +482,7 @@ _REPOSITORY_AUDIT_FIELDS = (
 
 def _merge_repository_row(local: dict, repository: dict) -> dict:
     """Use reviewed law content while retaining machine-local audit facts."""
-    merged = {**local, **repository}
+    merged = dict(repository)
     for key in _REPOSITORY_AUDIT_FIELDS:
         if key in local:
             merged[key] = local[key]
@@ -627,7 +627,11 @@ def _project(event: dict[str, Any]) -> str | None:
             sup = data.get("supersedes")
             if sup:
                 for d in e.setdefault("decisions", []):
-                    if isinstance(d, dict) and d.get("decision_id") == sup:
+                    if (
+                        isinstance(d, dict)
+                        and str(d.get("decision_id") or "").casefold()
+                        == str(sup).casefold()
+                    ):
                         d["superseded_by"] = data["decision_id"]
             e.setdefault("decisions", []).append(record)
             matched.append(match.id)
