@@ -1706,7 +1706,10 @@ def dispatch_lanes(
                 slug,
                 model=lane_grid_model or resolved_model,
                 provider=lane_grid_harness or eff_provider,
-                harness=lane_grid_harness or lane_placement_harness,
+                # The placement value unconditionally: a grid pick is always a
+                # fixed point of _lane_harness today, and if that ever stops
+                # holding, the raw pick would reopen the split this pins shut.
+                harness=lane_placement_harness,
                 verb=node.get("dispatch_verb"),
                 brief=_brief,
                 node=node,
