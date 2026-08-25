@@ -878,13 +878,22 @@ def set_cmd(
 
     # A dangling accounts.active bricks every loader call (and every accounts
     # verb loads first), so the pointer is validated against declared record
-    # ids here rather than repaired after the fact.
+    # ids here rather than repaired after the fact. Scope-aware: a GLOBAL
+    # pointer must name a globally declared record (a local-only id would
+    # brick every other project), while a project pointer may name anything
+    # the merged view resolves.
     for k, v in items:
         normalized = k[len("config."):] if k.startswith("config.") else k
         if normalized in ("accounts.active", "providers.active"):
-            from fno.adapters.providers.loader import known_account_ids
+            from fno.adapters.providers.loader import (
+                known_account_ids,
+                load_scope_config,
+            )
 
-            ids = known_account_ids()
+            if scope == "global":
+                ids = {r.id for r in load_scope_config("global").records}
+            else:
+                ids = known_account_ids()
             if v not in ids:
                 known = ", ".join(sorted(ids)) if ids else "(no records configured)"
                 typer.echo(

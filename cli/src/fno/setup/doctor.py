@@ -372,32 +372,8 @@ _KNOWN_FAILOVER_KEYS = frozenset({"max_swaps_per_phase"})
 _KNOWN_COMBO_KEYS = frozenset({"strategy", "sticky_limit", "providers"})
 
 
-def _known_record_keys() -> frozenset[str]:
-    """Real config keys of an account record, derived from the model.
-
-    A hand-copied list flags real ProviderRecord fields (env, route,
-    config_dir, pricing, ...) as unknown the moment the model grows; the
-    model is the one source of truth for what a record accepts. Validation
-    aliases (harness is storable as `cli`) count as known too.
-    """
-    from pydantic import AliasChoices
-
-    from fno.adapters.providers.model import ProviderRecord
-
-    keys = set(ProviderRecord.model_fields)
-    for field in ProviderRecord.model_fields.values():
-        if isinstance(field.validation_alias, AliasChoices):
-            keys.update(
-                choice
-                for choice in field.validation_alias.choices
-                if isinstance(choice, str)
-            )
-    return frozenset(keys)
-
-
 def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list[str]:
     problems: list[str] = []
-    known_record_keys = _known_record_keys()
     raw_config = raw_data.get("config")
     config = raw_config if isinstance(raw_config, dict) else {}
     for block_key in ("accounts", "providers"):
@@ -443,26 +419,24 @@ def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list
                                 problems.append(
                                     f"{source_label}: {prefix}.combos.{combo_name} has unknown key {k!r}; it will be ignored"
                                 )
-            records = block.get("records")
-            if isinstance(records, list):
-                for idx, record in enumerate(records):
-                    if isinstance(record, dict):
-                        rec_id = record.get("id") or f"records[{idx}]"
-                        for k in record:
-                            if k not in known_record_keys:
-                                problems.append(
-                                    f"{source_label}: {prefix}.records[{rec_id!r}] has unknown key {k!r}; it will be ignored"
-                                )
+            # Record ENTRIES are deliberately not key-scanned:
+            # ProviderRecord is extra="allow", so unknown record metadata is
+            # retained and round-trips by design; flagging it made doctor
+            # exit 1 on legal config. Structural record errors surface
+            # through the load_providers() call in check_accounts.
     return problems
 
 
 def check_accounts() -> list[str]:
-    """Validate configured accounts / providers and combos (x-e90a)."""
+    """Validate configured accounts / providers and combos."""
     import tomllib
     import yaml
-    from fno.adapters.providers.loader import load_combos, load_providers
+    from fno.adapters.providers.loader import (
+        _provider_candidates,
+        load_combos,
+        load_providers,
+    )
     from fno.adapters.providers.model import ProviderConfigError
-    from fno.config import _candidate_paths
 
     problems: list[str] = []
     try:
@@ -479,8 +453,11 @@ def check_accounts() -> list[str]:
     except Exception as exc:
         problems.append(f"combos load error: {exc}")
 
+    # Scan the SAME file set the loads above merge: a different candidate
+    # walk reports problems for files that have no effect and misses the
+    # ones that do.
     seen_paths: set[Path] = set()
-    for candidate in _candidate_paths():
+    for candidate in _provider_candidates():
         if not candidate.is_file() or candidate in seen_paths:
             continue
         seen_paths.add(candidate)

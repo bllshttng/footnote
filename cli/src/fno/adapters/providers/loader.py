@@ -501,6 +501,8 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
     merged_combos: dict[str, Any] = {}
     merged_records: list[Any] = []
     found_any = False
+    declared_dict = False
+    malformed_combos: tuple[Path, Any] | None = None
 
     for path in reversed(candidates):
         data = _read_parsed(path)
@@ -509,17 +511,28 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
             continue
         combos_raw = block.get("combos")
         if combos_raw is not None:
-            if not isinstance(combos_raw, dict):
-                raise ProviderConfigError(
-                    "config.providers.combos must be a mapping of name -> spec, "
-                    f"got {type(combos_raw).__name__}"
-                )
             found_any = True
-            merged_combos.update(combos_raw)
+            if isinstance(combos_raw, dict):
+                declared_dict = True
+                merged_combos.update(combos_raw)
+            elif malformed_combos is None:
+                # Remember, do not raise: a higher layer's dict overrides this
+                # value entirely, and only the EFFECTIVE shape is worth
+                # failing on (single-file contract unchanged).
+                malformed_combos = (path, combos_raw)
         records_raw = block.get("records")
         if isinstance(records_raw, list) and records_raw:
             merged_records = _overlay_records(merged_records, records_raw)
 
+    if malformed_combos is not None and not declared_dict:
+        # No layer declared a usable mapping (even an empty one), so the
+        # malformed value IS the effective shape; keep the single-file
+        # contract of failing on it.
+        raise ProviderConfigError(
+            "config.providers.combos must be a mapping of name -> spec, "
+            f"got {type(malformed_combos[1]).__name__} "
+            f"({malformed_combos[0]})"
+        )
     if not found_any or not merged_combos:
         return {}
 
@@ -586,6 +599,9 @@ def load_quota_config(repo_root: Path | None = None) -> QuotaConfig:
     opt-in blocks (ActiveBacklogConfig): a malformed block degrades to defaults
     rather than raising out of a dispatch decision - the dangerous direction
     for an opt-in autonomous feature is silently-enabled, and defaults are off.
+
+    One invalid LEAF degrades only that leaf: valid leaves from any layer
+    survive, so a bad global key never discards a healthy local setting.
     """
     candidates = _provider_candidates(repo_root)
     merged_quota: dict[str, Any] = {}
@@ -601,11 +617,28 @@ def load_quota_config(repo_root: Path | None = None) -> QuotaConfig:
         return QuotaConfig()
     try:
         return QuotaConfig.model_validate(merged_quota)
-    except pydantic.ValidationError as exc:
-        logger.warning(
-            "config.providers.quota malformed (%s); using defaults", exc
-        )
-        return QuotaConfig()
+    except pydantic.ValidationError:
+        salvage = {
+            k: v
+            for k, v in merged_quota.items()
+            if _quota_leaf_valid(k, v)
+        }
+        dropped = sorted(set(merged_quota) - set(salvage))
+        if dropped:
+            logger.warning(
+                "config.providers.quota keys %s invalid; dropped (rest kept)",
+                dropped,
+            )
+        return QuotaConfig.model_validate(salvage)
+
+
+def _quota_leaf_valid(key: str, value: Any) -> bool:
+    """Whether one quota leaf validates on its own (salvage probe)."""
+    try:
+        QuotaConfig.model_validate({key: value})
+    except pydantic.ValidationError:
+        return False
+    return True
 
 
 def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
@@ -639,12 +672,7 @@ def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
         if block is not None:
             found_any = True
             for k, v in block.items():
-                if k == "quota" and isinstance(v, dict):
-                    prior = merged_block.get("quota")
-                    merged_quota = dict(prior) if isinstance(prior, dict) else {}
-                    merged_quota.update(v)
-                    merged_block["quota"] = merged_quota
-                elif k == "records" and isinstance(v, list):
+                if k == "records" and isinstance(v, list):
                     # An empty local list is "nothing declared here", not
                     # "erase the global records" (the generated example config
                     # ships records = [] verbatim).
@@ -725,6 +753,25 @@ def effective_active(
     if record is None:
         return config.active
     return _active_id_for(record, config, root)
+
+
+def load_scope_config(scope: "Literal['project', 'global']") -> ProvidersConfig:
+    """The accounts config as stored in ONE scope's own file.
+
+    Read-modify-write verbs (add/register/use/pin) mutate one file's own
+    block; loading the merged view here copies other layers' records into
+    the target file, where the frozen copies shadow later edits by id.
+    Mirrors save_providers' target selection so the read and the write hit
+    the same file.
+    """
+    if scope == "project":
+        target = Path(os.environ.get("PWD", os.getcwd())) / ".fno" / "config.toml"
+    else:
+        target = Path.home() / ".fno" / "config.toml"
+    block = _extract_accounts_block(_read_parsed(target)) or {}
+    if not block:
+        return ProvidersConfig(records=[], active=None)
+    return _parse_providers_block(block)
 
 
 def save_providers(

@@ -1,4 +1,4 @@
-"""Tests for accounts configuration resolution (x-e90a).
+"""Tests for accounts configuration resolution.
 
 Tests that `fno config get`, `set`, `unset`, and `doctor` can see and manipulate
 the `[accounts]` namespace (including `accounts.quota.defer_dispatch`), and
