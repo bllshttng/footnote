@@ -238,6 +238,7 @@ do plan set-expected	T1	do plan set-expected	1
 do plan stamp	T1	do plan stamp	5
 do plan sync	T1	do plan sync	3
 do plan validate	T1	do plan validate	14
+do pr attestation retract	T1	do pr attestation retract	0
 do pr base-check	T1	do pr base-check	0
 do pr base-lineage-check	T1	do pr base-lineage-check	6
 do pr bind-created	T1	do pr bind-created	0
@@ -403,6 +404,7 @@ plugins deactivate	T1	plugins deactivate	1
 plugins inspect	T1	plugins inspect	1
 plugins ls	T1	plugins ls	2
 plugins verify	T1	plugins verify	4
+pr attestation retract	T1	pr attestation retract	0
 pr base-check	T1	pr base-check	0
 pr base-lineage-check	T1	pr base-lineage-check	6
 pr bind-created	T1	pr bind-created	0
