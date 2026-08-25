@@ -2562,19 +2562,10 @@ fn read_pr_info(
 
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
             .map_err(|_| (checks_parse.to_string(), String::new()))?;
-        // One dedup feeds every reader of this payload, so the conclusion, the
-        // failing-name set, and the pending flag can never answer off different
-        // rollups (a superseded run read as the current one is the exact lie
-        // this dedup exists to remove).
-        let checks = latest_per_name(&checks);
-
-        let failing = failing_check_names(&checks);
-        let has_pending = ci_has_pending_checks(&checks);
-        (
-            compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?,
-            failing,
-            has_pending,
-        )
+        // One truth table for the payload (classify_checks_payload): the
+        // conclusion, the failing-name set, and the pending flag can never
+        // answer off different rollups.
+        classify_checks_payload(&checks).map_err(|e| (e, String::new()))?
     };
 
     // Reads 3+4: reviews + inline findings. Skipped when the session declares
@@ -2623,12 +2614,21 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
+        // The GitHub axis was intentionally not queried. That is a known
+        // zero ONLY when nothing was configured to read: the skip is the
+        // inactive gate, with or without no_external. A `no_external` session
+        // on a repo with an ACTIVE login gate suppressed reads the config
+        // demanded, so the honest answer for that axis is Unknown with its
+        // retry remedy - reporting a healthy read of zero bots fabricated
+        // "uncovered" and an instrument-health receipt for reviews that were
+        // never queried. A fresh local pass still rescues it inside
+        // classify_coverage (positive evidence).
         let coverage = classify_coverage(
             &[],
             &[],
             &events_text,
             &[],
-            false,
+            !(no_external && login_gate_active),
             author_session,
             &freshness,
             &head_branch,
@@ -2965,6 +2965,46 @@ fn latest_per_name(checks: &Value) -> Value {
     Value::Array(kept)
 }
 
+fn without_coverage_statuses(checks: &Value) -> Value {
+    let Some(arr) = checks.as_array() else {
+        return checks.clone();
+    };
+    Value::Array(
+        arr.iter()
+            .filter(|check| {
+                let name = check.get("name").and_then(|v| v.as_str());
+                let context = check.get("context").and_then(|v| v.as_str());
+                let is_coverage = |value: Option<&str>| {
+                    value == Some(COVERAGE_STATUS_CONTEXT)
+                        || value == Some(COVERAGE_UNAVAILABLE_STATUS_CONTEXT)
+                };
+                !is_coverage(name) && !is_coverage(context)
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+/// One truth table for a `gh pr checks --json` payload: dedup to the latest
+/// run per name, drop the coverage projections, then derive the conclusion,
+/// the failing names, and the pending flag. A rollup the filter EMPTIED
+/// (only the two coverage contexts existed) reads Pending - "CI has not
+/// reported yet", never the declared-none None, matching the Python twin's
+/// unknown - and its pending flag is set too, so the wait stays watchable
+/// instead of a non-idlable re-invoke loop.
+fn classify_checks_payload(checks: &Value) -> Result<(CiConclusion, Vec<String>, bool), String> {
+    let deduped = latest_per_name(checks);
+    let had_rows = deduped.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    let filtered = without_coverage_statuses(&deduped);
+    let mut conclusion = compute_ci_conclusion(&filtered)?;
+    let emptied = had_rows && matches!(conclusion, CiConclusion::None);
+    if emptied {
+        conclusion = CiConclusion::Pending;
+    }
+    let pending = emptied || ci_has_pending_checks(&filtered);
+    Ok((conclusion, failing_check_names(&filtered), pending))
+}
+
 fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     let arr = match checks.as_array() {
         Some(a) => a,
@@ -3257,6 +3297,24 @@ fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
 /// and refresher workflow pin the same name from their own surfaces, and a
 /// context string that splits in two is a green marker on nothing.
 const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
+const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = "fno/review-coverage-unavailable";
+
+fn coverage_unavailable_description(head: &str) -> String {
+    format!(
+        "coverage read unavailable at {}; retry the review verb",
+        short_sha(head)
+    )
+}
+
+fn coverage_instrument_status(coverage: &Coverage, head: &str) -> (&'static str, String) {
+    match coverage {
+        Coverage::Unknown => ("pending", coverage_unavailable_description(head)),
+        Coverage::Covered(_) => (
+            "success",
+            format!("coverage read healthy at {}", short_sha(head)),
+        ),
+    }
+}
 
 /// Whether `name` is the local reviewer Python's gate demands a pass from,
 /// with the same leading-slash tolerance `_coverage_has_local_pass` applies.
@@ -3342,10 +3400,17 @@ fn current_coverage_description(gh_bin: &str, cwd: &Path, head: &str) -> Option<
 }
 
 /// The one POST shape every coverage-marker writer uses.
-fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, description: &str) {
+fn post_coverage_status(
+    gh_bin: &str,
+    cwd: &Path,
+    head: &str,
+    context: &str,
+    state: &str,
+    description: &str,
+) {
     let target = format!("repos/:owner/:repo/statuses/{head}");
     let state_arg = format!("state={state}");
-    let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
+    let context_arg = format!("context={context}");
     let description_arg = format!("description={description}");
     let _ = Command::new(gh_bin)
         .args([
@@ -3421,8 +3486,21 @@ fn publish_coverage_status(
                 gh_bin,
                 cwd,
                 pr_head_oid,
+                COVERAGE_STATUS_CONTEXT,
                 "success",
                 "coverage-override label applied on the PR",
+            );
+            // The diagnostic mirrors the Python override arm, not the
+            // possibly-Unknown computed read: a waived review must not wear
+            // "retry the review verb" beside its override success, and the
+            // two writers of one context must post the same state.
+            post_coverage_status(
+                gh_bin,
+                cwd,
+                pr_head_oid,
+                COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+                "success",
+                &format!("coverage read healthy at {}", short_sha(pr_head_oid)),
             );
             return;
         }
@@ -3468,13 +3546,7 @@ fn publish_coverage_status(
             format!("covered: {} reviewed at {}", n, short_sha(pr_head_oid)),
         )
     } else if matches!(coverage.coverage, Coverage::Unknown) {
-        (
-            "failure",
-            format!(
-                "coverage unknown (gh read failed) at {}; retry the review verb",
-                short_sha(pr_head_oid)
-            ),
-        )
+        ("pending", coverage_unavailable_description(pr_head_oid))
     } else {
         // The sized invocation rides along when it fits: GitHub caps this
         // description at 140 chars and rejects an overflow whole, which would
@@ -3503,7 +3575,24 @@ fn publish_coverage_status(
         };
         ("failure", description)
     };
-    post_coverage_status(gh_bin, cwd, pr_head_oid, state, &description);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_STATUS_CONTEXT,
+        state,
+        &description,
+    );
+    let (diagnostic_state, diagnostic_description) =
+        coverage_instrument_status(&coverage.coverage, pr_head_oid);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+        diagnostic_state,
+        &diagnostic_description,
+    );
 }
 
 /// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
@@ -4656,11 +4745,14 @@ pub enum CoverageVerdict {
 /// honest). Collapsing an API error into 0 produces false refusals; collapsing
 /// it into a count reproduces the bug.
 ///
-/// NOTE (x-0eaf finding 4): `Unknown` is not currently reachable in production.
-/// When the GitHub reviews API call fails, `read_pr_info` returns `Err`, which
-/// the caller handles by block-retry (fail-safe: the session retries, it does
-/// not green or merge). The variant, its receipt, schema enum, and tests exist
-/// so that softening the error path to terminate (rather than block) is a
+/// NOTE (x-0eaf finding 4): a FAILED GitHub reviews read still never yields
+/// `Unknown` - `read_pr_info` returns `Err` and the caller block-retries
+/// (fail-safe: the session retries, it does not green or merge). `Unknown` IS
+/// reachable in production through the login_skipped arm: a `no_external`
+/// session on a repo with an active login gate suppressed the reads the
+/// config demanded, and the honest answer for that axis is Unknown with its
+/// retry remedy (pinned by the no_external-on-active-gate tests). The
+/// receipt, schema enum, and tests exist so softening the error path is a
 /// one-line change, not a redesign. Do not delete it as dead code without
 /// understanding this.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7119,10 +7211,15 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             {
                 Ok(co) if co.status.success() => {
                     let cv: Value = serde_json::from_slice(&co.stdout).unwrap_or(Value::Null);
-                    // Same dedup as the main CI read: the fingerprint's CI arm
-                    // must describe the latest run per name, not a superseded
-                    // one a newer push already replaced.
-                    compute_ci_conclusion(&latest_per_name(&cv)).unwrap_or(CiConclusion::None)
+                    // The same truth table as the main CI read (one helper,
+                    // not a second spelling of dedup-plus-filter): the
+                    // fingerprint's CI arm must describe the latest run per
+                    // name, not a superseded one a newer push replaced, and
+                    // must agree with the main read about a coverage-only
+                    // rollup.
+                    classify_checks_payload(&cv)
+                        .map(|(c, _, _)| c)
+                        .unwrap_or(CiConclusion::None)
                 }
                 _ => CiConclusion::None,
             };
@@ -9745,6 +9842,15 @@ fn build_block_reason(
                 hint("review")
             );
         }
+        // Unknown AFTER the specific arms but BEFORE the config complaint:
+        // the unmet gate, the unaddressed finding, and the outstanding bot
+        // are all more actionable than the read remedy, but "no reviewer is
+        // outstanding" beside an unread coverage axis is the read remedy's
+        // exact case (the pinned test: Unknown names the read remedy, never
+        // a config lecture).
+        if matches!(pr.coverage.coverage, Coverage::Unknown) {
+            return coverage_unavailable_description(&pr.head_oid);
+        }
         // Reaching here means missing_bots is empty, which `async_wait_class`
         // treats as non-idlable, so this must not teach the arm-and-tag ritual
         // either (the two must never disagree about whether a wait is valid).
@@ -9755,6 +9861,12 @@ fn build_block_reason(
              Nothing here will arrive on its own.",
             pr.number
         );
+    }
+
+    // And the reviewed-but-Unknown case (a satisfied gate beside an unread
+    // axis) keeps the read remedy here, outside the block.
+    if matches!(pr.coverage.coverage, Coverage::Unknown) {
+        return coverage_unavailable_description(&pr.head_oid);
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
@@ -13019,6 +13131,27 @@ mod tests {
     }
 
     #[test]
+    fn unknown_coverage_names_the_read_remedy_not_a_ci_failure() {
+        let mut pr = watch_pr();
+        pr.ci_conclusion = CiConclusion::Success;
+        pr.ci_has_pending = false;
+        pr.coverage = CoverageReport {
+            coverage: Coverage::Unknown,
+            verdicts: vec![],
+        };
+        let reason = build_block_reason(&pr, "abc", true, true);
+        assert!(
+            reason.contains("coverage read unavailable"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("retry the review verb"), "got: {reason}");
+        assert!(!reason.contains("CI red"), "got: {reason}");
+        assert!(!reason.contains("failed"), "got: {reason}");
+        assert!(!reason.contains("Read the failing log"), "got: {reason}");
+        assert!(!reason.contains("fno do pr logs"), "got: {reason}");
+    }
+
+    #[test]
     fn unwatched_async_nudge_ci_pending_teaches_arm_and_tag() {
         // AC3-HP: the CI-pending block message must instruct arming a
         // harness-tracked watcher with a timeout and emitting <watching>,
@@ -15312,6 +15445,35 @@ mod tests {
         assert!(failing_check_names(&checks).is_empty());
         // Malformed input never panics, yields empty.
         assert!(failing_check_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn coverage_statuses_are_not_generic_ci_checks() {
+        let checks = serde_json::json!([
+            {"name": "ci", "bucket": "pass"},
+            {"name": "fno/review-coverage", "bucket": "pending"},
+            {"name": "fno/review-coverage-unavailable", "bucket": "pending"}
+        ]);
+        let filtered = without_coverage_statuses(&checks);
+        assert_eq!(filtered.as_array().unwrap().len(), 1);
+        assert_eq!(
+            compute_ci_conclusion(&filtered).unwrap(),
+            CiConclusion::Success
+        );
+        assert!(failing_check_names(&filtered).is_empty());
+        assert!(!ci_has_pending_checks(&filtered));
+    }
+
+    #[test]
+    fn coverage_instrument_status_is_pending_only_when_the_read_is_unknown() {
+        let unknown = coverage_instrument_status(&Coverage::Unknown, "abc123456789");
+        assert_eq!(unknown.0, "pending");
+        assert!(unknown.1.contains("coverage read unavailable"));
+        assert!(unknown.1.contains("retry the review verb"));
+
+        let known = coverage_instrument_status(&Coverage::Covered(0), "abc123456789");
+        assert_eq!(known.0, "success");
+        assert!(known.1.contains("coverage read healthy"));
     }
 
     #[test]

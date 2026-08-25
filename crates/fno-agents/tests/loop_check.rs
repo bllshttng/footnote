@@ -2880,6 +2880,119 @@ fn ac3_edge_no_external_orthogonal_to_required_bots() {
     assert_eq!(d.termination_reason.as_deref(), Some("DoneUnreviewed"));
 }
 
+/// A no_external session on a repo with an ACTIVE login gate suppressed reads
+/// the config demanded, so the coverage axis must serialize as "unknown"
+/// (retry remedy intact) - never a definitive "uncovered" for bots that were
+/// never queried. The inactive-gate skip (nothing configured) stays a known
+/// zero; see ac3_hp_empty_required_bots_skips_review_reads.
+#[test]
+fn no_external_on_active_gate_serializes_unknown_coverage_not_uncovered() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(
+        &settings_path,
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let manifest = "---\nsession_id: sess-noext2\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_external: true\n---\n";
+    fs::write(&manifest_path, manifest).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = green_reviews_unreachable();
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(
+        d.decision, "allow",
+        "no_external must not block: {}",
+        d.message
+    );
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"coverage\":\"unknown\""),
+        "no_external on an active gate must read unknown, not a fabricated zero: {events}"
+    );
+    assert!(
+        !events.contains("\"coverage\":\"uncovered\""),
+        "an unqueried GitHub axis must never serialize as a definitive uncovered: {events}"
+    );
+}
+
+/// The other skip cause: no_external on a repo with an INACTIVE login gate.
+/// Nothing was configured to read, so the axis is a known zero and the event
+/// serializes uncovered. The retry remedy belongs to suppressed reads of an
+/// ACTIVE gate, not to a session that opted out of a gate that does not
+/// exist - else every no_external fire on an ungated repo reads
+/// review_coverage_unknown with no writer that can ever clear it.
+#[test]
+fn no_external_on_inactive_gate_serializes_the_known_zero() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(
+        &settings_path,
+        "[review]\nrequired_bots = []\nself_review_required = false\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let manifest = "---\nsession_id: sess-noext3\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_external: true\n---\n";
+    fs::write(&manifest_path, manifest).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = green_reviews_unreachable();
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(
+        d.decision, "allow",
+        "an ungated repo must not block: {}",
+        d.message
+    );
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"coverage\":\"uncovered\""),
+        "nothing configured to read is a known zero, never an unknown: {events}"
+    );
+}
+
 // ── x-e703: config.review.reviewers local-attestation gate ──────────────────
 
 /// The green() git+gh mock's HEAD (== headRefOid, so head_shipped passes). An
@@ -3055,6 +3168,14 @@ fn no_external_still_honors_reviewers_gate() {
     assert_eq!(
         d.decision, "block",
         "no_external must NOT bypass the local reviewers gate: {}",
+        d.message
+    );
+    // The remedy must name the unmet gate, not the instrument: this session
+    // lands with a known-zero GitHub axis, and a generic "coverage read
+    // unavailable; retry" cannot clear an unattested reviewer.
+    assert!(
+        d.message.contains("reviewers gate unmet"),
+        "block must name the unmet reviewer gate, not the instrument retry: {}",
         d.message
     );
     assert!(d.termination_reason.is_none());
@@ -7242,8 +7363,8 @@ fn status_posts(record: &Path) -> Vec<String> {
 
 const BOT_LANE: &str = "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n";
 
-/// Covered fixture: BOTH emitters post one status each, to the same PR head
-/// sha, under the one context string, green because the review is at HEAD.
+/// Covered fixture: BOTH emitters post the required verdict and the diagnostic
+/// instrument-health status to the same PR head sha.
 #[test]
 fn coverage_status_publish_fires_from_both_emitters_to_the_pr_head() {
     let tmp = TempDir::new().unwrap();
@@ -7290,21 +7411,42 @@ fn coverage_status_publish_fires_from_both_emitters_to_the_pr_head() {
     assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
 
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 2, "one POST per emitter, got: {posts:?}");
+    assert_eq!(posts.len(), 4, "two POSTs per emitter, got: {posts:?}");
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| post.contains("context=fno/review-coverage "))
+            .count(),
+        2,
+        "required context must be posted by both emitters: {posts:?}"
+    );
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| post.contains("context=fno/review-coverage-unavailable "))
+            .count(),
+        2,
+        "diagnostic context must be posted by both emitters: {posts:?}"
+    );
     for post in &posts {
         assert!(
             post.contains(&format!("statuses/{PUB_HEAD}")),
             "posted to the wrong sha: {post}"
         );
-        assert!(
-            post.contains("context=fno/review-coverage"),
-            "posted under the wrong context: {post}"
-        );
-        assert!(
-            post.contains("state=success")
-                && post.contains(&format!("reviewed at {}", &PUB_HEAD[..8])),
-            "covered fixture must post a success naming count+sha: {post}"
-        );
+        if post.contains("context=fno/review-coverage ") {
+            assert!(
+                post.contains("state=success")
+                    && post.contains(&format!("reviewed at {}", &PUB_HEAD[..8])),
+                "covered fixture must post a success naming count+sha: {post}"
+            );
+        } else {
+            assert!(
+                post.contains("context=fno/review-coverage-unavailable ")
+                    && post.contains("state=success")
+                    && post.contains("coverage read healthy"),
+                "covered fixture must clear instrument unavailability: {post}"
+            );
+        }
     }
 }
 
@@ -7327,9 +7469,17 @@ fn coverage_status_publish_posts_failure_when_unreviewed() {
     assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
 
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "verb arm posts exactly once: {posts:?}");
-    assert!(posts[0].contains("state=failure"), "got: {}", posts[0]);
-    assert!(posts[0].contains("context=fno/review-coverage"));
+    assert_eq!(posts.len(), 2, "verb arm posts both contexts: {posts:?}");
+    let required = posts
+        .iter()
+        .find(|post| post.contains("context=fno/review-coverage "))
+        .unwrap();
+    let diagnostic = posts
+        .iter()
+        .find(|post| post.contains("context=fno/review-coverage-unavailable "))
+        .unwrap();
+    assert!(required.contains("state=failure"), "got: {required}");
+    assert!(diagnostic.contains("state=success"), "got: {diagnostic}");
 }
 
 /// A configured local `code-review` reviewer with no head-pinned local pass:
@@ -7352,11 +7502,20 @@ fn coverage_status_publish_requires_local_code_review_pass_when_configured() {
     assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
 
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "verb arm posts exactly once: {posts:?}");
+    assert_eq!(posts.len(), 2, "verb arm posts both contexts: {posts:?}");
     assert!(
-        posts[0].contains("state=failure"),
-        "a bot review must not satisfy the local code-review lane: {}",
-        posts[0]
+        posts
+            .iter()
+            .any(|post| post.contains("context=fno/review-coverage ")
+                && post.contains("state=failure")),
+        "a bot review must not satisfy the local code-review lane: {posts:?}"
+    );
+    assert!(
+        posts.iter().any(
+            |post| post.contains("context=fno/review-coverage-unavailable ")
+                && post.contains("state=success")
+        ),
+        "the diagnostic context must clear for a known uncovered result: {posts:?}"
     );
 }
 
@@ -7411,9 +7570,20 @@ fn coverage_status_posts_covered_after_refused_label_reads_find_no_override() {
     let recorded = fs::read_to_string(&record).unwrap();
     assert_eq!(recorded.matches("label-read-").count(), 3, "{recorded}");
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "{recorded}");
-    assert!(posts[0].contains("state=success"), "{}", posts[0]);
-    assert!(posts[0].contains("covered: 1 reviewed at"), "{}", posts[0]);
+    assert_eq!(posts.len(), 2, "{recorded}");
+    assert!(
+        posts
+            .iter()
+            .any(|post| post.contains("state=success") && post.contains("covered: 1 reviewed at")),
+        "{posts:?}"
+    );
+    assert!(
+        posts.iter().any(
+            |post| post.contains("context=fno/review-coverage-unavailable ")
+                && post.contains("coverage read healthy")
+        ),
+        "{posts:?}"
+    );
 }
 
 #[test]
@@ -7434,8 +7604,14 @@ fn coverage_status_posts_failure_after_refused_label_reads_find_no_status() {
     let recorded = fs::read_to_string(&record).unwrap();
     assert_eq!(recorded.matches("label-read-").count(), 3, "{recorded}");
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "{recorded}");
-    assert!(posts[0].contains("state=failure"), "{}", posts[0]);
+    assert_eq!(posts.len(), 2, "{recorded}");
+    assert!(
+        posts
+            .iter()
+            .any(|post| post.contains("context=fno/review-coverage ")
+                && post.contains("state=failure")),
+        "{posts:?}"
+    );
 }
 
 #[test]
@@ -7457,9 +7633,22 @@ fn coverage_status_retries_a_label_read_then_honors_the_override() {
     assert_eq!(recorded.matches("label-read-").count(), 2, "{recorded}");
     assert!(!recorded.contains("status-description-read"), "{recorded}");
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "{recorded}");
-    assert!(posts[0].contains("state=success"), "{}", posts[0]);
-    assert!(posts[0].contains("coverage-override"), "{}", posts[0]);
+    assert_eq!(posts.len(), 2, "{recorded}");
+    assert!(
+        posts
+            .iter()
+            .any(|post| post.contains("context=fno/review-coverage ")
+                && post.contains("state=success")
+                && post.contains("coverage-override")),
+        "{posts:?}"
+    );
+    assert!(
+        posts.iter().any(
+            |post| post.contains("context=fno/review-coverage-unavailable ")
+                && post.contains("state=success")
+        ),
+        "{posts:?}"
+    );
 }
 
 // ── the king driver arm ───────────────────────────────────────────────────────

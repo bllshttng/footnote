@@ -43,7 +43,8 @@ from fno import paths
 from fno.agents.reachability import _ACTIVE_STATES as ACTIVE_STATES
 from fno.agents.session_truth import STALLED_AFTER_S
 from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
-from fno.pr._status import _classify, _latest_per_name
+from fno.pr import _reviews
+from fno.pr._status import _classify, _latest_per_name, without_coverage_statuses
 
 #: Priorities a king treats as its own work. Lower bands are the operator's to
 #: rank up; a king that dispatched p2 would spend the fleet on the wrong thing.
@@ -634,7 +635,21 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         # conclusion into one flat set poisons that set with the stale result.
         # A body gate that re-ran green then still read red here, twice, the
         # night this was measured.
-        deduped = _latest_per_name(pr.get("statusCheckRollup") or [])
+        # Only the DIAGNOSTIC context is noise here. The required coverage
+        # context is a verdict this board must honor: its FAILURE means
+        # uncovered (the PR is not ready work no matter how green CI is), its
+        # PENDING means not-yet-known. Dropping both would admit an uncovered
+        # PR onto the ready list; keeping both would drop a covered one over a
+        # pending instrument stamp.
+        raw = _latest_per_name(pr.get("statusCheckRollup") or [])
+        deduped = without_coverage_statuses(
+            raw, contexts=frozenset({_reviews.COVERAGE_UNAVAILABLE_STATUS_CONTEXT})
+        )
+        if raw and not deduped:
+            # Diagnostic-only rollup: CI has not reported. An empty class set
+            # is not green - the pre-filter rows kept this PR out and so does
+            # this.
+            continue
         classes = {_classify(c) for c in deduped}
         if "fail" in classes:
             continue

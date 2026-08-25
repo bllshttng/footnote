@@ -291,11 +291,11 @@ The reachable merge paths it governs:
 | `fno do pr status` | reports the `review_coverage` field (advisory) |
 | `gh pr merge`, the web button, raw REST, the auto-merge queue | the server refuses an uncovered head once the merge ruleset is applied; the verdict is published as the `fno/review-coverage` status from the same source |
 
-The verdict is also published where GitHub can see it. The stop hook, the standalone review-coverage verb, and a covered `fno do pr merge` all publish it. Each posts the `fno/review-coverage` commit status on the PR head. The status carries the same predicate the merge gate enforces.
+The verdict is published where GitHub can see it as two contexts on the PR head. `fno/review-coverage` is the required merge predicate. `fno/review-coverage-unavailable` is diagnostic instrument health and is never required by the ruleset. An unknown read sets both contexts to pending and tells the operator to retry the review verb. A computed covered or uncovered result preserves the required success/failure verdict and clears the diagnostic context to success.
 
 `review-coverage-gate.yml` refreshes the status on the events only GitHub sees. A push invalidates the head. The `coverage-override` label arms or withdraws the release valve, naming its actor.
 
-`apply-merge-ruleset.sh` makes `fno/review-coverage` and `stacked-base-guard` required on the default branch. The bypass list is empty, so every client path is refused by GitHub itself rather than by advice.
+`apply-merge-ruleset.sh` makes only `fno/review-coverage` and `stacked-base-guard` required on the default branch. The bypass list is empty, so every client path is refused by GitHub itself rather than by advice. The diagnostic context remains outside the required ruleset so an instrument outage cannot be rendered as a code verdict.
 
 One source also has to mean one *location*.
 
@@ -345,7 +345,7 @@ It also already gated `gh pr merge` with its own two-factor check, so omitting l
 
 The residual hole was a human typing gh in a terminal. The required status context closes it, and the ruleset now commits that requirement as data.
 
-The repo commits the ruleset as data: `scripts/ci/merge-ruleset.json` plus `scripts/ci/apply-merge-ruleset.sh`. The applier makes `stacked-base-guard` and `fno/review-coverage` required on the default branch. The bypass list is empty, and the applier refuses to apply a file where it is not.
+The repo commits the ruleset as data: `scripts/ci/merge-ruleset.json` plus `scripts/ci/apply-merge-ruleset.sh`. The applier makes `stacked-base-guard` and only `fno/review-coverage` required on the default branch. The bypass list is empty, and the applier refuses to apply a file where it is not.
 
 Applying it is an operator step: run `--apply` once, after a PR proves a green status on its own head.
 One precondition before taking it: a `pull_request` event from a fork gets a read-only `GITHUB_TOKEN` regardless of the workflow's `permissions:` block, so the status POST fails and the context is never created for that PR.

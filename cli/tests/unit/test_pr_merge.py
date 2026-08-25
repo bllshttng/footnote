@@ -1487,6 +1487,37 @@ def test_checks_verdict_keeps_other_failing_contexts(monkeypatch):
     assert counts["fail"] == 1
 
 
+def test_covered_merge_ignores_the_pending_diagnostic_context(monkeypatch):
+    """A covered merge ignores BOTH coverage contexts, not just the required
+    one: the diagnostic context is a pending "retry the review verb" stamp an
+    earlier unknown-read publish left behind, and the clearing publish runs
+    AFTER the checks verdict - so counting it held a covered, CI-green merge,
+    and a bare merge retry held again the same way."""
+    rollup = {
+        "headRefOid": "abc123",
+        "statusCheckRollup": [
+            {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"context": "fno/review-coverage", "state": "SUCCESS"},
+            {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+        ],
+    }
+    monkeypatch.setattr(
+        "fno.pr._rest.fetch_pr_rest",
+        lambda pr, cwd=None, runner=None: (rollup, ""),
+    )
+
+    verdict, counts, _head = _merge._checks_verdict(
+        42,
+        "/repo",
+        ignore_contexts=(
+            "fno/review-coverage",
+            "fno/review-coverage-unavailable",
+        ),
+    )
+    assert verdict == "green"
+    assert counts["total"] == 1
+
+
 def test_green_checks_merge_in_one_call_without_auto(
     enabled, monkeypatch, capsys, tmp_path
 ):

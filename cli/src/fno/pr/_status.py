@@ -24,12 +24,13 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Optional, Sequence
+from typing import Any, Collection, Optional, Sequence
 
 from fno.pr._proc import ToolMissing
 from fno.pr._reviews import (
     _NOT_ASKED_COVERAGE,
     _UNKNOWN_COVERAGE,
+    COVERAGE_STATUS_CONTEXTS,
     read_optional_review_state,
     read_review_coverage,
 )
@@ -51,6 +52,25 @@ _FAIL_STATES = {
 # reached a verdict, so the answer to "wait or act" is still "wait for, or
 # trigger, a newer run". They stay in _FAIL_STATES because the verdict is red.
 _SETTLED_STATES = _PASS_STATES | (_FAIL_STATES - {"CANCELLED", "STALE"})
+
+# The canonical collection lives in _reviews (the publisher); the parity
+# script pins its consts against the Rust twin, so this is a name, not a
+# second spelling.
+
+
+def without_coverage_statuses(
+    rollup: Sequence[dict], contexts: Collection[str] = COVERAGE_STATUS_CONTEXTS
+) -> list[dict]:
+    """Remove review-coverage projections before classifying generic CI.
+
+    `contexts` parameterizes the drop so the merge verdict's ignore set reuses
+    this one filter instead of re-spelling it inline.
+    """
+    return [
+        check
+        for check in rollup
+        if check.get("context") not in contexts and check.get("name") not in contexts
+    ]
 
 
 def _alt(*vals: Any) -> Any:
@@ -187,8 +207,10 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     `counts["statuses"]` split that total, because a reader who compares
     `total` against `gh api .../check-runs` sees a phantom gap otherwise: that
     endpoint never returns statuses. Measured 2026-08-20 - the tally said 15,
-    the check-runs endpoint named 13 jobs, and the 2-row gap was
-    fno's own statuses (stacked-base-guard, fno/review-coverage). The two
+    the check-runs endpoint named 13 jobs, and the gap was fno's own statuses.
+    The coverage-context filter (`without_coverage_statuses`) feeds this
+    function, so the two review-coverage StatusContexts are already absent
+    from every count here. The two
     sub-counts need not sum to `total`: a rollup row carrying neither key is
     counted in neither (it is also never deduped).
 
@@ -601,7 +623,8 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         return 4
 
     rollup = pr_json.get("statusCheckRollup") or []
-    verdict, code, counts = verdict_for(rollup)
+    generic_rollup = without_coverage_statuses(rollup)
+    verdict, code, counts = verdict_for(generic_rollup)
     green = verdict == "green"
 
     # x-c124 / d-bdb035b6: a red verdict must name WHICH check failed and, so
@@ -622,7 +645,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             # read as a diagnosed defect that does not exist.
             failing_rows = [
                 c
-                for c in _latest_per_name(rollup)
+                for c in _latest_per_name(generic_rollup)
                 if _classify(c) == "fail" and _has_settled_marker(c)
             ]
             failures = collect_failures(failing_rows, cwd)
@@ -757,20 +780,50 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     if not is_terminal and review_lane:
         from fno.pr import _reviews
 
-        posted_state = next(
-            (
-                check.get("state")
-                for check in _latest_per_name(rollup)
-                if check.get("context") == _reviews.COVERAGE_STATUS_CONTEXT
-            ),
-            None,
-        )
-        wanted_state = (
+        posted_states = {
+            check.get("context"): str(check.get("state") or "").upper()
+            for check in _latest_per_name(rollup)
+            if check.get("context") in COVERAGE_STATUS_CONTEXTS
+        }
+        # The wanted states below read a KNOWN coverage word only; the
+        # known_word guard on the trigger keeps that honest.
+        required_state = (
             "FAILURE"
             if any(blocker.startswith("review_coverage_") for blocker in blockers)
             else "SUCCESS"
         )
-        if posted_state is not None and str(posted_state).upper() != wanted_state:
+        unavailable_state = "SUCCESS"
+        wanted_states = {
+            context: (
+                required_state
+                if context == _reviews.COVERAGE_STATUS_CONTEXT
+                else unavailable_state
+            )
+            for context in COVERAGE_STATUS_CONTEXTS
+        }
+        # The publisher stamps the head the coverage row pins, so when that is
+        # a DIFFERENT head than this one, comparing this head's posted states
+        # can never converge - each republish lands on the pinned head and the
+        # next run reads the same absent rows here. The moved head gets its
+        # stamp from the refresher invalidate arm or the next review at it.
+        covered_head = str(coverage.get("head_sha") or "")
+        read_head = str(pr_json.get("headRefOid") or "")
+        converges_here = not (covered_head and read_head and covered_head != read_head)
+        # An unknown coverage word has no derivable wanted state: the publisher
+        # answers a missing row REFUSED (posts FAILURE) and a dead head fetch
+        # UNANSWERED (posts PENDING), and this read cannot tell which - a
+        # guessed PENDING against a posted FAILURE republishes forever. The
+        # stamp for an unknown read comes from the publisher's own arms.
+        known_word = coverage.get("coverage") != "unknown"
+        if known_word and converges_here and any(
+            # Absent stays absent: the status read is deliberately not the
+            # FIRST coverage-status writer (a PR no publisher has touched gets
+            # its contexts from a publisher, not from a read). Only a POSTED
+            # state that disagrees with the wanted one triggers the republish.
+            posted_states.get(context) is not None
+            and posted_states.get(context) != wanted
+            for context, wanted in wanted_states.items()
+        ):
             posted, note = _reviews.publish_coverage_status(
                 int(pr), head=pr_json.get("headRefOid"), cwd=cwd
             )
@@ -843,7 +896,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # unsettled entries that are all still-running settles as `pending`, not
     # `red`, and the note must not claim otherwise.
     if counts.get("unsettled"):
-        unsettled_now = [c for c in _latest_per_name(rollup) if not _has_settled_marker(c)]
+        unsettled_now = [
+            c for c in _latest_per_name(generic_rollup) if not _has_settled_marker(c)
+        ]
         absent = [
             c for c in unsettled_now if str(c.get("status") or "").upper() in ("", "COMPLETED")
         ]
