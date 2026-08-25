@@ -55,7 +55,3 @@ Exception: `/speculate` keeps its own `.claude/worktrees/<name>` placement even 
 ## Override semantics
 
 An explicit in-conversation user request for a different path outranks this rule; note that `.fno/` state links will not exist there. Do not solicit overrides.
-
-## Removing a worktree
-
-Use `fno workspace worktree archive <name|path>` for public archival. It delegates to `scripts/setup/archive-worktree.sh`, which checks clean state, unpushed commits, and live sessions before removal. The optional `--force` prints exact dirty paths, unpushed commits, and live-session evidence before removal. Use `--yes` to skip process-kill confirmation. Use `--delete-branch` to remove the branch after archival. Never use a direct force-remove or `rm -rf` path.

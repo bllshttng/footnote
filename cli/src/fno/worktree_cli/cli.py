@@ -184,6 +184,7 @@ def archive(
     force: bool = typer.Option(
         False,
         "--force",
+        "-F",
         help="Override strict data-loss checks and disclose the state discarded.",
     ),
     yes: bool = typer.Option(
