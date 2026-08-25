@@ -62,7 +62,7 @@ def attestation_retract(
     reviewer: str = typer.Option(..., "--reviewer", help="Reviewer name of the pass being revoked."),
     attester: str = typer.Option(..., "--attester", help="The session id that emitted the pass."),
     head: str = typer.Option(..., "--head", help="The head sha the pass pinned."),
-    reason: str = typer.Option(..., "--reason", help="Why the pass is revoked (recorded)."),
+    reason: str = typer.Option(..., "--reason", "-R", help="Why the pass is revoked (recorded)."),
     events: Optional[str] = typer.Option(
         None, "--events", help="Path to events.jsonl (default: the repo project log)."
     ),
