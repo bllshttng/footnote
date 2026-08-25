@@ -1606,8 +1606,9 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
         encoding="utf-8",
     )
     got = read_review_coverage(826, cwd=str(tmp_path))
-    assert got["coverage"] == "uncovered"
+    assert got["coverage"] == "covered"
     assert got["head_sha"] == "89bc0b91"
+    assert got["reviewed_count"] == 1
     assert got["self_attested_count"] == 1
     assert got["stale_verdicts"] == [
         {
@@ -1617,6 +1618,73 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
             "freshness": "stale",
         }
     ]
+
+
+def test_status_distinguishes_current_review_from_stale_history(
+    monkeypatch, capsys, tmp_path
+):
+    head = _commit_reviewed_history(tmp_path)
+    _lane_fetch(monkeypatch, head=head)
+    monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_event(verdicts):
+        events.write_text(
+            _json.dumps(
+                {
+                    "type": "review_coverage",
+                    "data": {
+                        "pr": 826,
+                        "coverage": "covered",
+                        "review_state": "reviewed",
+                        "reviewed_count": 1,
+                        "head_sha": head,
+                        "verdicts": verdicts,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    stale = {
+        "producer": "github_app",
+        "name": "chatgpt-codex-connector",
+        "verdict": "stale",
+        "reviewed_sha": "dead-session-head",
+        "freshness": "stale",
+    }
+    fresh = {
+        "producer": "local_attestation",
+        "name": "code-review",
+        "verdict": "reviewed",
+        "reviewed_sha": head,
+        "freshness": "fresh",
+    }
+
+    write_event([stale, fresh])
+    _status.run_status("826", cwd=str(tmp_path))
+    mixed = _json.loads(capsys.readouterr().out)
+    assert mixed["ready"] is True
+    assert mixed["review_coverage"]["coverage"] == "covered"
+    assert mixed["review_coverage"]["reviewed_count"] == 1
+    assert mixed["review_coverage"]["stale_verdicts"] == [
+        {
+            "name": "chatgpt-codex-connector",
+            "producer": "github_app",
+            "reviewed_sha": "dead-session-head",
+            "freshness": "stale",
+        }
+    ]
+
+    write_event([stale])
+    _status.run_status("826", cwd=str(tmp_path))
+    stale_only = _json.loads(capsys.readouterr().out)
+    assert stale_only["ready"] is False
+    assert stale_only["review_coverage"]["coverage"] == "uncovered"
+    assert stale_only["review_coverage"]["reviewed_count"] == 0
+    assert "review_coverage_uncovered" in stale_only["ready_blockers"]
 
 
 def test_fresh_reviewer_verdict_supersedes_its_stale_history():
