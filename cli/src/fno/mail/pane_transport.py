@@ -359,8 +359,8 @@ def wrap(
         return wrap_fno_mail(
             text,
             from_=stamp_from(sender),
-            # "cli" is the honest no-harness value: harness_for_provider defaults
-            # a MISSING provider to claude-code, a guess this path avoids.
+            # "cli" is the honest no-harness value: harness_for_provider renders
+            # a MISSING provider as "unknown", never a vendor guess.
             harness=harness_for_provider(sender_harness) if sender_harness else "cli",
             model=resolve_self_model(),
             to=to,

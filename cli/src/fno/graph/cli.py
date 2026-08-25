@@ -5754,10 +5754,14 @@ def cmd_session_close(
         raise typer.Exit(code=2)
     node_id = match.candidates[0]["id"]
     ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    found, added = append_session_record(
-        _graph_path(), node_id, phase="blueprint", harness=eff_harness,
-        session_id=eff_session, ended_at=ended_at, started_at=started_at,
-    )
+    try:
+        found, added = append_session_record(
+            _graph_path(), node_id, phase="blueprint", harness=eff_harness,
+            session_id=eff_session, ended_at=ended_at, started_at=started_at,
+        )
+    except ValueError as exc:
+        typer.echo(f"session close: {exc}", err=True)
+        raise typer.Exit(code=2)
     if not found:
         typer.echo(f"session close: node {node_id} disappeared before close.", err=True)
         raise typer.Exit(code=2)

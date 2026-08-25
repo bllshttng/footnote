@@ -350,6 +350,63 @@ def test_run_retask_converts_mux_timeout_to_structured_refusal(monkeypatch):
     assert receipt["target_submit_confirmed"] is False
 
 
+def test_run_retask_timeout_mid_transaction_reports_the_true_pane_state(monkeypatch):
+    """A transport death after /clear + restamp + rename must not claim the
+    pane is untouched: the receipt names the cleared, renamed pane."""
+    import fno.agents.retask as retask
+
+    row = _row(screen_state={"state": "idle", "rule": "idle_prompt"})
+    target = retask.RetaskCoordinate(
+        harness="codex", provider=None, model="gpt-5.6-sol", effort="high",
+        substrate="pane", permission_mode=None, route=None, account=None,
+    )
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(
+        retask,
+        "load_registry",
+        lambda **_kwargs: [SimpleNamespace(name=row.name, harness_session_id="new-session")],
+    )
+    monkeypatch.setattr(
+        retask,
+        "rename_agent",
+        lambda *_args, **_kwargs: SimpleNamespace(name="target-x-bdb9"),
+    )
+    # Readiness normally shells to the Rust manifest engine; pin its verdict
+    # so the only subprocess traffic is the pane reads/sends under test.
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._evaluate_manifest_screen",
+        lambda *_args, **_kwargs: {"matched": True, "rule_id": "idle_prompt", "state": "idle"},
+    )
+
+    calls = {"n": 0}
+
+    def timeout_after_two(*_args, **_kwargs):
+        # 1: initial frame read, 2: /clear send; die on the /status send.
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise retask.subprocess.TimeoutExpired("fno mux", 15)
+        return SimpleNamespace(returncode=0, stdout="frame")
+
+    monkeypatch.setattr(retask.subprocess, "run", timeout_after_two)
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "pane_send_timeout"
+    assert receipt["cleared"] is True
+    assert receipt["session_restamped"] is True
+    assert receipt["registry_name"] == "target-x-bdb9"
+
+
+def test_menu_delta_exact_match_beats_substring_and_shortest_wins():
+    from fno.agents.retask import _menu_delta
+
+    frame = "› 1. gpt-5.6-sol-mini\n  3. gpt-5.6-sol\n"
+    assert _menu_delta(frame, "gpt-5.6-sol") == 2
+    assert _menu_delta(frame, "sol") == 2
+    assert _menu_delta(frame, "luna") is None
+
+
 def test_execute_retask_refuses_missing_positive_menu_row_before_target():
     from fno.agents.retask import execute_retask, resolve_target_coordinate
 

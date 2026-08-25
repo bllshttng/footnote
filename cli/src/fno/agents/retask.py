@@ -173,7 +173,19 @@ def _menu_delta(frame: str, target: str) -> Optional[int]:
         if match:
             rows.append((int(match.group("row")), bool(match.group("cursor")), match.group("label")))
     current = next((row for row, cursor, _label in rows if cursor), None)
-    desired = next((row for row, _cursor, label in rows if target in label), None)
+    # Exact (case-insensitive) match first: bare substring containment picks
+    # "gpt-5.6-sol-mini" when the target is "gpt-5.6-sol". Fallback to the
+    # most specific containing label (shortest wins), so an alias like "sol"
+    # still lands on "gpt-5.6-sol" over "gpt-5.6-sol-mini".
+    key = target.strip().lower()
+    containing = [(row, label) for row, _cursor, label in rows if key and key in label.lower()]
+    exact = [row for row, label in containing if label.strip().lower() == key]
+    if len(exact) == 1:
+        desired = exact[0]
+    elif containing:
+        desired = min(containing, key=lambda pair: len(pair[1]))[0]
+    else:
+        desired = None
     if current is None or desired is None:
         return None
     return desired - current
@@ -185,6 +197,7 @@ def _walk_menu(
     target: str,
     send: Callable[[str, bool], bool],
     read_frame: Callable[[], str],
+    settle: Callable[[], None] = lambda: None,
 ) -> bool:
     delta = _menu_delta(frame, target)
     if delta is None:
@@ -193,6 +206,7 @@ def _walk_menu(
     for _ in range(abs(delta)):
         if not send(arrow, False):
             return False
+    settle()
     verified = read_frame()
     if _menu_delta(verified, target) != 0:
         return False
@@ -210,8 +224,20 @@ def execute_retask(
     rename: Callable[[str], Optional[str]],
     project_tier: Callable[[str, str], None] = lambda _model, _effort: None,
     ready_frame: Optional[Callable[[str], bool]] = None,
+    settle: Callable[[], None] = lambda: None,
 ) -> dict:
-    """Run the bounded retask transaction through injected pane seams."""
+    """Run the bounded retask transaction through injected pane seams.
+
+    ``settle`` runs after each mutating send, before the read that consumes
+    its result: a TUI redraws asynchronously, so a bare read can beat the
+    redraw and see the pre-send frame (the race behind intermittent
+    status_unreadable / model_row_missing refusals).
+    """
+
+    def settled_read() -> str:
+        settle()
+        return read_frame()
+
     refusal = {
         "status": "refused",
         "cleared": False,
@@ -250,14 +276,6 @@ def execute_retask(
             "session_restamped": True,
             "reason": "registry_rename_refused",
         }
-    if strategy["kind"] == "unsupported":
-        return {
-            **refusal,
-            "cleared": True,
-            "session_restamped": True,
-            "registry_name": renamed,
-            "reason": "unsupported_switch_strategy",
-        }
     status_command = strategy["status_command"]
     if not send(status_command, True):
         return {
@@ -267,7 +285,7 @@ def execute_retask(
             "registry_name": renamed,
             "reason": "status_not_confirmed",
         }
-    cleared_tier = _status_tier(entry.harness, read_frame())
+    cleared_tier = _status_tier(entry.harness, settled_read())
     if cleared_tier is None:
         return {
             **refusal,
@@ -316,7 +334,8 @@ def execute_retask(
                 "reason": "switch_not_confirmed",
             }
         if not _walk_menu(
-            read_frame(), target=desired_model or "", send=send, read_frame=read_frame
+            settled_read(), target=desired_model or "", send=send,
+            read_frame=read_frame, settle=settle,
         ):
             return {
                 **refusal,
@@ -335,7 +354,8 @@ def execute_retask(
                 "reason": "effort_label_missing",
             }
         if not _walk_menu(
-            read_frame(), target=effort_label, send=send, read_frame=read_frame
+            settled_read(), target=effort_label, send=send,
+            read_frame=read_frame, settle=settle,
         ):
             return {
                 **refusal,
@@ -355,7 +375,7 @@ def execute_retask(
                 "switch": switch,
                 "reason": "post_switch_status_not_confirmed",
             }
-        verified = _status_tier(entry.harness, read_frame())
+        verified = _status_tier(entry.harness, settled_read())
         if verified != {"model": desired_model, "effort": desired_effort}:
             return {
                 **refusal,
@@ -437,6 +457,24 @@ def run_retask(
             raise RetaskTransportError("pane_read_timeout") from exc
         return result.stdout if result.returncode == 0 else ""
 
+    def settle() -> None:
+        # Wait out the TUI redraw after a mutating send: quiet until no new
+        # frame for 400ms, bounded at 8s, so the following read sees the
+        # post-send screen instead of racing it.
+        try:
+            subprocess.run(
+                [
+                    "fno", "mux", "pane", "wait", "--session", session, pane,
+                    "--quiet-ms", "400", "--timeout", "8",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RetaskTransportError("pane_wait_timeout") from exc
+
     def send(text: str, submit: bool) -> bool:
         command = [
             "fno", "mux", "pane", "send", "--session", session, pane,
@@ -505,17 +543,25 @@ def run_retask(
             rename=rename,
             project_tier=project_tier,
             ready_frame=ready_frame,
+            settle=settle,
         )
     except RetaskTransportError as exc:
-        return {
+        # A timeout mid-transaction must not claim the pane is untouched: the
+        # trackers hold what actually happened, so the receipt names a cleared
+        # pane as cleared even though the transport died after the clear.
+        restamped = restamped_session[0] != entry.harness_session_id
+        receipt = {
             "status": "refused",
-            "cleared": False,
-            "session_restamped": False,
+            "cleared": restamped,
+            "session_restamped": restamped,
             "switch": "not_started",
             "switch_verified": False,
             "target_submit_confirmed": False,
             "reason": str(exc),
         }
+        if renamed_name[0] != entry.name:
+            receipt["registry_name"] = renamed_name[0]
+        return receipt
 
 
 def plan_retask(

@@ -2702,6 +2702,9 @@ def cmd_retask(
     if json_out:
         typer.echo(json.dumps(receipt))
     else:
+        # Same JSON either way (sorted keys are the only difference): the
+        # receipt is machine-parsed by the king loop, so there is no human
+        # rendering to switch to.
         typer.echo(json.dumps(receipt, sort_keys=True))
     if receipt.get("status") != "retasked":
         raise typer.Exit(code=1)
