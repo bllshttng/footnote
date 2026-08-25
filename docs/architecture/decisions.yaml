@@ -6,7 +6,7 @@ decisions:
       - handoff
       - target self-handoff
     decision: "Context pressure is not a handoff trigger. A harness self-determines when to compact, and compaction preserves the claim, worktree, branch, and PR. Keep handoff only for capability escalation to a stronger model after a stuck signal."
-    rationale: "The percentage trigger handed off a live x-d6ee worker while its parent still held the claim and later opened the PR. The successor duplicated the same work."
+    rationale: "A percentage-based trigger handed off a live worker while its parent still held the claim and later opened the PR. The successor duplicated the same work."
   - decision_id: d-19e37308
     subject: target-provider-selection
     aliases:
