@@ -76,22 +76,42 @@ impl Drop for DaemonChild {
     }
 }
 
-/// Kill a daemon this test spawned but does not hold as a `Child`.
+/// Kill a daemon this test spawned but does not hold as a `Child`, then REAP it.
 ///
-/// `restart_daemon` spawns the successor from inside the test process, so there
-/// is no `Child` to hand to [`DaemonChild`]. The obvious teardown -- SIGTERM,
-/// then poll `kill(pid, 0)` until it stops answering -- measures the wrong
-/// thing twice. The daemon's graceful drain runs a bounded wind-down that costs
-/// seconds, and once it does exit the pid still answers as a zombie until
-/// something reaps it, so the poll reads "alive" for a process that is already
-/// gone and spends its whole budget every time (measured 10004ms, 10019ms and
-/// 10026ms across three runs: that is the budget, not the daemon).
+/// `restart_daemon` spawns the successor from inside this process, so it IS our
+/// child and there is simply no `Child` handle to give [`DaemonChild`]. Killing
+/// without reaping leaves a zombie, and a zombie is invisible to the leak
+/// counter the stress harness runs: `pgrep -f` matches on a command line, and a
+/// zombie's is `<defunct>`. So `daemons_left=0` would have read clean over
+/// exactly the defunct-process exhaustion this suite exists to prevent.
 ///
-/// Teardown does not need the graceful path. Every assertion has already run
-/// and the probe marker was written before the exec, so SIGKILL ends it at
-/// once and the reap belongs to whoever owns the handle.
+/// The first attempt here polled `kill(pid, 0)` after a SIGTERM, which cannot
+/// work for the same reason from the other side: a zombie still answers signal
+/// zero, so the poll read "alive" for a process that had already exited and
+/// spent its whole budget every time (10004ms, 10019ms, 10026ms across three
+/// runs). `waitpid` is the operation that actually settles it.
 fn terminate_untracked(pid: u32) {
+    // Teardown, not a shutdown test: every assertion has already run and the
+    // probe marker was written before the exec, so the graceful path buys
+    // nothing but seconds.
     unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut status: libc::c_int = 0;
+        // WNOHANG so a child tokio's process driver already collected returns
+        // -1/ECHILD immediately rather than blocking forever on a wait that
+        // can never be satisfied. Reaped by us or reaped by tokio are the same
+        // outcome here; only "still there" is a failure.
+        let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if reaped != 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon {pid} was still unreaped 10s after SIGKILL"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Spawn the daemon as a tracked child (so the test holds its PID) and wait for
@@ -264,11 +284,12 @@ fn fake_daemon_bin(home: &AgentsHome) -> PathBuf {
 
 /// Quote `value` as one single-quoted shell word.
 ///
-/// The escape is `'\''` (close, escaped quote, reopen). The double-quoted
-/// variant `'"'"'` that stood here is the idiom for a DOUBLE-quoted context and
-/// leaves the word unbalanced here, so a path or value containing an apostrophe
-/// produced a wrapper `/bin/sh` could not parse - surfacing much later as a 10s
-/// socket timeout that named nothing.
+/// The escape is `'\''`: close, escaped quote, reopen. What stood here emitted
+/// `'\"'\"'` - the `'"'"'` idiom, which is itself perfectly valid, but with two
+/// stray BACKSLASHES in the Rust literal that produced it. Those turn the
+/// rewritten apostrophe into a double quote, so a path or value containing one
+/// produced a wrapper whose meaning had quietly changed, surfacing much later
+/// as a 10s socket timeout that named nothing.
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1786,6 +1807,20 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "pre-break list failed: {stdout}");
     assert!(stdout.contains("worker-alpha"), "row missing: {stdout}");
+
+    // Wait for the startup sweep to LAND before breaking anything. The sweep
+    // runs concurrently with the accept loop and it WRITES the registry under
+    // the same advisory lock readers take (daemon.rs, `reconcile_on_start`), so
+    // a break written while it is still in flight is simply overwritten and the
+    // list that follows succeeds over a registry that is no longer broken.
+    //
+    // That is not hypothetical. This test failed 4 of 20 stress trials on a CI
+    // runner, always this test and always with a successful payload, while the
+    // same 20 trials passed on a developer machine: the race is lost only when
+    // the suite runs fast enough to reach the write before the sweep. Its
+    // sibling `registry_lookup_distinguishes_unreadable_from_absent` already
+    // waits for this event, which is why the same shape is stable there.
+    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
 
     // Break the registered lane out from under the running daemon.
     write_divergent_registry(&home);

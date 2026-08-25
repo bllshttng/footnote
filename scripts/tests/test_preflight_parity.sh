@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
-# Two lists in this repo are written by hand in more than one file, and both
-# have already drifted silently once.
+# The preflight receipt scope is written by hand in three files, and it has
+# already drifted once, silently.
 #
-# 1. The integration-test targets. `cargo test --all-targets` used to name them
-#    for us. The serialized legs replaced it with explicit `--test` lists in
-#    scripts/ci/preflight.sh and .github/workflows/rust-ci.yml, and a target
-#    absent from a list runs NOWHERE while every job stays green. Three had
-#    already fallen out when this guard was written.
+# scripts/ci/preflight.sh declares the legs a full run must record;
+# cli/src/fno/pr/_preflight.py and crates/fno-agents/src/verify_evidence.rs
+# each decide whether a receipt is trustworthy by comparing against their own
+# copy. The check is "every required leg present, nothing unknown added", so a
+# rename on one side fails it in BOTH directions: the receipt is DISCARDED
+# rather than rejected, and with preflight.required = true a green preflight can
+# never clear the gate. preflight.sh itself carries the array twice, so all
+# copies are compared, not the first one a search happens to land on.
 #
-# 2. The preflight receipt scope. scripts/ci/preflight.sh declares the legs a
-#    full run must record; cli/src/fno/pr/_preflight.py and
-#    crates/fno-agents/src/verify_evidence.rs each decide whether a receipt is
-#    trustworthy by comparing against their own copy. A rename on one side makes
-#    every green preflight untrusted, and the discard is SILENT.
+# The integration-target lists this also used to guard are gone: both callers
+# now pass `--test '*'`, and a glob cannot drop a file the way the hand-written
+# enumeration dropped three.
 #
-# Both checks report the size of the set they compared. A count is the positive
-# marker that the parse found anything at all: a regex that matches nothing
-# reports "0 targets" rather than passing quietly.
+# The check reports the size of every set it compared. A count is the positive
+# marker that the parse found anything: a regex that matches nothing reports
+# "0 legs" rather than passing quietly.
 set -uo pipefail
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -26,7 +27,6 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 cd "$repo_root" || exit 2
 
 python3 - <<'PY'
-import os
 import re
 import sys
 
@@ -40,54 +40,8 @@ def die(msg):
 
 
 preflight = open("scripts/ci/preflight.sh").read()
-workflow = open(".github/workflows/rust-ci.yml").read()
 
 
-def var(name):
-    m = re.search(rf'{name}="([^"]*)"', preflight)
-    if not m:
-        die(f"{name} not found in scripts/ci/preflight.sh")
-        return set()
-    return set(re.findall(r"--test (\w+)", m.group(1)))
-
-
-def on_disk(crate):
-    d = f"crates/{crate}/tests"
-    return {f[:-3] for f in os.listdir(d) if f.endswith(".rs")}
-
-
-print("== every integration target is named by preflight and by rust-ci ==")
-blocks = re.findall(r"run: >-\n((?:\s+cargo test\n)(?:\s+--test \w+\n)+)", workflow)
-if len(blocks) != 2:
-    die(f"expected 2 explicit --test blocks in rust-ci.yml, found {len(blocks)}")
-    blocks = ["", ""]
-workflow_sets = [set(re.findall(r"--test (\w+)", b)) for b in blocks]
-
-for crate, pf_var in (("fno-agents", "FNO_AGENTS_INTEGRATION_TARGETS"),
-                      ("fno", "FNO_INTEGRATION_TARGETS")):
-    disk = on_disk(crate)
-    if not disk:
-        die(f"{crate}: read 0 integration targets from disk")
-        continue
-    listed = var(pf_var)
-    # Pick the workflow block that names this crate's targets. Matching by
-    # overlap, not by position, so reordering the jobs cannot silently compare
-    # one crate's list against the other's.
-    yml = max(workflow_sets, key=lambda s: len(s & disk))
-    crate_ok = True
-    for label, names in (("preflight", listed), ("rust-ci", yml)):
-        missing = sorted(disk - names)
-        stale = sorted(names - disk)
-        if missing:
-            die(f"{crate}: {label} never runs {', '.join(missing)}")
-            crate_ok = False
-        if stale:
-            die(f"{crate}: {label} names a target that does not exist: {', '.join(stale)}")
-            crate_ok = False
-    if crate_ok:
-        print(f"  ok: {crate} - {len(disk)} targets, all named by preflight and rust-ci")
-
-print("")
 print("== the preflight receipt scope reads the same in all three files ==")
 # EVERY copy, not the first one a search happens to land on. preflight.sh
 # carries the array twice - the void path and the verdict-bearing path - and

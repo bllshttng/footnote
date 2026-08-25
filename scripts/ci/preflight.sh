@@ -1177,8 +1177,19 @@ fi
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
 have_pinned_fmt() { rustup toolchain list 2>/dev/null | grep "^$PINNED_FMT" >/dev/null; }
 
-FNO_AGENTS_INTEGRATION_TARGETS="--test active_backlog_drain --test agy_ask_unit --test claude_ask_dispatch --test claude_ask_parity --test claude_bg_create --test codex_ask_dispatch --test codex_ask_parity --test codex_ask_sigint --test codex_ask_unit --test daemon_e2e --test finalize_e2e --test flock_interop --test gemini_ask_sigint --test gemini_ask_unit --test generic_completion --test kill_criteria_parity --test loop_check --test loop_runtime --test loop_target --test loopcheck_decisions --test loopcheck_hook_payload --test loopcheck_missing_manifest --test opencode_serve_journey --test provider_contract --test review_coverage_paths --test review_coverage_verb --test run_outcome --test run_state --test spawn_routing --test verify_evidence_parity"
-FNO_INTEGRATION_TARGETS="--test agent_edge_e2e --test client_e2e --test idle_reaper_e2e --test keymap_e2e --test layout_e2e --test mouse_e2e --test multiclient_e2e --test mux_config_e2e --test persistence --test proto_socket --test script_api_e2e --test search_e2e --test server_spine --test squad_prune --test squad_prune_live_pane --test workspace_persistence_e2e"
+# `--test '*'` selects every integration target in tests/, and NOTHING else:
+# verified 2026-08-25, the glob resolves to exactly the 30 fno-agents and 16 fno
+# targets on disk, with no lib or bin unittests (`--tests` would pull those four
+# in and re-run the unit suite serially). The enumeration these replaced was
+# hand-maintained in four places - here twice and in rust-ci.yml twice - and had
+# already dropped run_outcome, run_state and mux_config_e2e, 18 tests that ran
+# nowhere while every job stayed green. A glob cannot drop a file.
+#
+# The quotes are load-bearing: run_rust_leg evaluates this through `bash -c`
+# with the crate as cwd, so an unquoted `*` would glob against the crate's own
+# directory listing.
+FNO_AGENTS_INTEGRATION_TARGETS="--test '*'"
+FNO_INTEGRATION_TARGETS="--test '*'"
 
 run_rust_leg() { # scope  name  cwd  cmd...
     local scope="$1" name="$2" cwd="$3"; shift 3

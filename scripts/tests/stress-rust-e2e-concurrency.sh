@@ -102,7 +102,21 @@ build_test_binary workspace_persistence_e2e crates/fno/Cargo.toml workspace_pers
 # number is the positive marker that the check ran: a trial line without the
 # field means the instrument is missing, which reads differently from a clean
 # zero.
-daemon_pattern="$repo_root/crates/fno-agents/target/debug/fno-agents-daemon"
+# Derived from the built binary, never assumed. A hardcoded target/debug path
+# reads 0 under --release or any CARGO_TARGET_DIR override, and "the instrument
+# found nothing" would then be indistinguishable from "nothing leaked" - the
+# absence-is-not-evidence failure this field exists to avoid. So the path is
+# resolved and its existence is REQUIRED: a missing binary refuses the run
+# rather than reporting a clean zero.
+# daemon_bin is the compiled TEST binary, which cargo puts in deps/; the
+# daemon it spawns sits one level up beside it.
+daemon_bin_path="$(dirname "$(dirname "$daemon_bin")")/fno-agents-daemon"
+if [[ ! -x "$daemon_bin_path" ]]; then
+    echo "stress_setup=unavailable reason=daemon-binary-not-found path=$daemon_bin_path" >&2
+    echo "stress_setup_note=the leak counter cannot report a trustworthy zero without it" >&2
+    exit 2
+fi
+daemon_pattern="$daemon_bin_path"
 count_daemons() {
     pgrep -f "$daemon_pattern" 2>/dev/null | wc -l | tr -d ' '
 }

@@ -151,69 +151,19 @@ jobs:
         working-directory: crates/fno-agents
         run: cargo test --lib --bins
 
-      - name: cargo test --tests --test-threads=1 (fno-agents real-process integration)
+      - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
         working-directory: crates/fno-agents
-        run: >-
-          cargo test
-          --test active_backlog_drain
-          --test agy_ask_unit
-          --test claude_ask_dispatch
-          --test claude_ask_parity
-          --test claude_bg_create
-          --test codex_ask_dispatch
-          --test codex_ask_parity
-          --test codex_ask_sigint
-          --test codex_ask_unit
-          --test daemon_e2e
-          --test finalize_e2e
-          --test flock_interop
-          --test gemini_ask_sigint
-          --test gemini_ask_unit
-          --test generic_completion
-          --test kill_criteria_parity
-          --test loop_check
-          --test loop_runtime
-          --test loop_target
-          --test loopcheck_decisions
-          --test loopcheck_hook_payload
-          --test loopcheck_missing_manifest
-          --test opencode_serve_journey
-          --test provider_contract
-          --test review_coverage_paths
-          --test review_coverage_verb
-          --test run_outcome
-          --test run_state
-          --test spawn_routing
-          --test verify_evidence_parity
-          -- --test-threads=1
+        run: cargo test --test '*' -- --test-threads=1
 
       - name: cargo test --lib --bins (fno mux)
         working-directory: crates/fno
         run: cargo test --lib --bins
 
-      - name: cargo test --tests --test-threads=1 (fno mux real-process integration)
+      - name: cargo test --test '*' --test-threads=1 (fno mux real-process integration)
         # The mux e2e tests spawn real PTYs and Unix sockets; both work on
         # the ubuntu-latest runner (the harness needs no TTY of its own).
         working-directory: crates/fno
-        run: >-
-          cargo test
-          --test agent_edge_e2e
-          --test client_e2e
-          --test idle_reaper_e2e
-          --test keymap_e2e
-          --test layout_e2e
-          --test mouse_e2e
-          --test multiclient_e2e
-          --test mux_config_e2e
-          --test persistence
-          --test proto_socket
-          --test script_api_e2e
-          --test search_e2e
-          --test server_spine
-          --test squad_prune
-          --test squad_prune_live_pane
-          --test workspace_persistence_e2e
-          -- --test-threads=1
+        run: cargo test --test '*' -- --test-threads=1
 
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
@@ -239,6 +189,14 @@ jobs:
           echo "parity-diag: resolved fno-agents = $(command -v fno-agents || echo NONE)"
           echo "parity-diag: emits newest kind (inside_leg_completed) = $(fno-agents --emit-schema 2>/dev/null | grep -c inside_leg_completed) (fresh=1, stale=0)"
           bash scripts/check-event-schema-parity.sh
+
+      - name: Preflight receipt-scope parity
+        # Runs HERE, not only in the smoke registry. The guard's own subject is
+        # a Rust file (verify_evidence.rs), and cli-ci's paths filter carries no
+        # crates/**, so a crates-only PR that renamed a scope name would ship
+        # with both checks green and every receipt it produced untrusted. This
+        # workflow is the one that triggers on crates/**.
+        run: bash scripts/tests/test_preflight_parity.sh
 
       - name: Reviewer descriptor parity check
         # The reviewer table is declared in Python (config validator + init
@@ -304,8 +262,11 @@ jobs:
     # binaries across two jobs; do not raise it.
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    # REPORTS, does not gate. Graduate by deleting this line, and only once the
-    # comparison below says something.
+    # REPORTS, does not gate. The step publishes its trial count to the run
+    # summary and exits 0; graduate by making the step assert failures=0, and
+    # only once the comparison below says something. `continue-on-error` stays
+    # as a second belt: without it a genuine harness breakage (no summary line
+    # at all, which the step DOES fail on) would red the PR.
     #
     # WHAT THIS HARNESS HAS AND HAS NOT SHOWN, measured 2026-08-25 on this
     # runner. Read this before citing a trial count as evidence of anything.
@@ -368,8 +329,24 @@ jobs:
           STRESS_TRIALS: "20"
         run: |
           set -o pipefail
-          bash scripts/tests/stress-rust-e2e-concurrency.sh | tee stress.log
-          grep -q "^stress_summary trials=20 failures=0" stress.log
+          bash scripts/tests/stress-rust-e2e-concurrency.sh 2>&1 | tee stress.log || true
+          # PUBLISH the number, do not fail on it. `continue-on-error` alone was
+          # not enough: it keeps the workflow green but the job's own check run
+          # still reports `failure`, which reads as a red PR to every
+          # merge-readiness verb. Reporting means the number reaches a reader
+          # without gating, so it goes to the run summary.
+          #
+          # The summary line itself is the positive marker. A run that produced
+          # none did not measure anything, and that DOES fail, because a silent
+          # stand-down must never read as a clean twenty trials.
+          summary="$(grep '^stress_summary ' stress.log || true)"
+          if [ -z "$summary" ]; then
+            echo "no stress_summary line: the harness did not run 20 trials" >&2
+            exit 1
+          fi
+          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+          grep '^stress_trial .*=fail' stress.log >> "$GITHUB_STEP_SUMMARY" || true
+          echo "$summary"
 
   audit:
     name: cargo audit (RUSTSEC advisories)
