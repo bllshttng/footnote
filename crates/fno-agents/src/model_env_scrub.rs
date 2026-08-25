@@ -23,6 +23,24 @@ pub const MODEL_ENV_KEYS: [&str; 5] = [
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
 ];
 
+/// Whether a spawn overlay proves a route/account owns the model slot: the
+/// keys such a settings file writes (model vars, plus the endpoint and the
+/// two credential carriers). This is the Rust mirror of Python's
+/// route_settings_path_for test, which keys on the SETTINGS FILE a route or
+/// account wrote, never on the overlay being merely non-empty: the bg lane's
+/// only extra_env is the TARGET_NO_MERGE bookkeeping carrier, and a carrier
+/// owns no slot, so the unrouted floor still applies under it (main's
+/// behavior, which an any-overlay stand-down regressed).
+pub fn overlay_is_route(extra_env: &[(&str, &str)]) -> bool {
+    extra_env.iter().any(|(k, _)| {
+        MODEL_ENV_KEYS.contains(k)
+            || matches!(
+                *k,
+                "ANTHROPIC_BASE_URL" | "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY"
+            )
+    })
+}
+
 /// Bare tier aliases resolve to Anthropic models; ids start with `claude-`.
 const TIER_ALIASES: [&str; 4] = ["opus", "sonnet", "haiku", "fable"];
 
@@ -340,6 +358,27 @@ mod tests {
             unrouted_model_keys(&get),
             vec!["ANTHROPIC_MODEL".to_string()]
         );
+    }
+
+    #[test]
+    fn overlay_is_route_keys_on_provenance_not_bookkeeping() {
+        // The bg lane's no-merge carrier owns no settings slot: the unrouted
+        // floor still applies under it (main's behavior, which an
+        // any-overlay stand-down regressed on the /target bg default lane).
+        assert!(!overlay_is_route(&[]));
+        assert!(!overlay_is_route(&[("TARGET_NO_MERGE", "1")]));
+        // Model, endpoint and credential carriers are provenance: the slot
+        // is owned and the floor stands down, even beside a carrier.
+        assert!(overlay_is_route(&[
+            ("TARGET_NO_MERGE", "1"),
+            ("ANTHROPIC_MODEL", "glm-5.3")
+        ]));
+        assert!(overlay_is_route(&[(
+            "ANTHROPIC_BASE_URL",
+            "https://api.z.ai"
+        )]));
+        assert!(overlay_is_route(&[("ANTHROPIC_AUTH_TOKEN", "t")]));
+        assert!(overlay_is_route(&[("ANTHROPIC_API_KEY", "k")]));
     }
 
     #[test]

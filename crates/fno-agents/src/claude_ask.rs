@@ -1788,12 +1788,13 @@ pub fn bg_create(
     // COHERENT inherited claims too (Python's bg_create does the same): the
     // daemon fork keeps the launching shell's env, and an unrouted child on a
     // model the shell happened to export is the same unselected-model defect.
-    // Python's rule, mirrored: ANY overlay means the settings slot is owned
-    // (route_settings_path_for writes a file for a route OR an account), so
-    // the unrouted floor stands down entirely - not only when the overlay
-    // happens to carry model keys, which left a base-plus-auth overlay
-    // floored here while Python preserved it (round 2).
-    let overlay_routes = !extra_env.is_empty();
+    // Python's rule, mirrored: the settings slot is owned when the overlay
+    // carries ROUTE PROVENANCE (a model var, the endpoint, or a credential -
+    // what route_settings_path_for writes a file for), so the unrouted floor
+    // stands down under it. Not "any overlay": the bg lane's only extra_env
+    // is the TARGET_NO_MERGE bookkeeping carrier, and standing down under it
+    // left the /target bg default lane unfloored (round 3 regression).
+    let overlay_routes = crate::model_env_scrub::overlay_is_route(extra_env);
     // The floor stands down ENTIRELY under a route overlay, matching the gate
     // it replaced: the route owns the settings slot, and flooring keys the
     // route sets would fight it (the wrong-model defect in the other
