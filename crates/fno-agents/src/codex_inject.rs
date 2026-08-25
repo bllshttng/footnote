@@ -65,14 +65,20 @@ pub fn codex_app_server_socket_path() -> PathBuf {
 /// owned, so a pid without `processStartTime` is unreadable rather than a
 /// positive liveness signal.
 pub struct CodexDaemonAdapter {
+    provider_state_path: PathBuf,
     state_path: PathBuf,
     lock_path: PathBuf,
     socket_path: PathBuf,
 }
 
 impl CodexDaemonAdapter {
-    pub fn new(state_path: PathBuf, lock_path: PathBuf, socket_path: PathBuf) -> Self {
+    pub fn new(provider_state_path: PathBuf, lock_path: PathBuf, socket_path: PathBuf) -> Self {
+        let state_path = provider_state_path
+            .parent()
+            .map(|parent| parent.join("fno-harness-daemon.json"))
+            .unwrap_or_else(|| PathBuf::from("fno-harness-daemon.json"));
         Self {
+            provider_state_path,
             state_path,
             lock_path,
             socket_path,
@@ -87,10 +93,16 @@ impl CodexDaemonAdapter {
         Self::new(
             home.join("app-server-daemon").join("app-server.pid"),
             home.join("app-server-daemon")
-                .join("app-server-startup.lock"),
+                .join("fno-harness-daemon.lock"),
             home.join("app-server-control")
                 .join("app-server-control.sock"),
         )
+    }
+
+    fn provider_state(&self) -> Result<crate::harness_daemon::DaemonState, String> {
+        let raw = std::fs::read_to_string(&self.provider_state_path)
+            .map_err(|error| format!("read Codex daemon state: {error}"))?;
+        <Self as crate::harness_daemon::HarnessDaemonAdapter>::parse_state(self, &raw)
     }
 }
 
@@ -108,18 +120,36 @@ impl crate::harness_daemon::HarnessDaemonAdapter for CodexDaemonAdapter {
     }
 
     fn parse_state(&self, raw: &str) -> Result<crate::harness_daemon::DaemonState, String> {
-        let value: serde_json::Value =
+        let mut value: serde_json::Value =
             serde_json::from_str(raw).map_err(|error| error.to_string())?;
         let pid = value
             .get("pid")
             .and_then(serde_json::Value::as_u64)
             .filter(|pid| *pid > 0)
             .ok_or_else(|| "missing pid".to_string())? as u32;
-        let process_start_time = ["processStartTime", "process_start_time", "startTime"]
+        let process_start_time = ["processStartToken", "process_start_time", "startTime"]
             .into_iter()
             .find_map(|key| value.get(key).and_then(json_u64))
+            .or_else(|| {
+                value
+                    .get("processStartTime")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .or_else(|| {
+                value
+                    .get("processStartTime")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|start| !start.is_empty())
+                    .and_then(|_| crate::daemon::process_start_time(pid))
+            })
             .filter(|start| *start > 0)
             .ok_or_else(|| "missing process start time".to_string())?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "processStartToken".to_string(),
+                serde_json::Value::from(process_start_time),
+            );
+        }
         crate::harness_daemon::DaemonState::new(
             value,
             pid,
@@ -129,11 +159,31 @@ impl crate::harness_daemon::HarnessDaemonAdapter for CodexDaemonAdapter {
         )
     }
 
-    fn is_healthy(&self, _state: &crate::harness_daemon::DaemonState) -> bool {
-        self.socket_path.exists() && probe_codex_app_server(&self.socket_path)
+    fn is_healthy(&self, state: &crate::harness_daemon::DaemonState) -> bool {
+        let process_is_current = state
+            .pid
+            .is_some_and(|pid| crate::daemon::pid_is_ours(pid, state.process_start_time));
+        process_is_current && self.socket_path.exists() && probe_codex_app_server(&self.socket_path)
+    }
+
+    fn may_replace(&self) -> bool {
+        false
+    }
+
+    fn may_refresh_unhealthy(&self) -> bool {
+        true
+    }
+
+    fn unreadable_state_may_boot(&self) -> bool {
+        true
     }
 
     fn boot(&self) -> Result<crate::harness_daemon::DaemonState, String> {
+        if let Ok(state) = self.provider_state() {
+            if self.is_healthy(&state) {
+                return Ok(state);
+            }
+        }
         let status = std::process::Command::new("codex")
             .args(["app-server", "daemon", "start"])
             .status()
@@ -146,11 +196,9 @@ impl crate::harness_daemon::HarnessDaemonAdapter for CodexDaemonAdapter {
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
-            if let Ok(raw) = std::fs::read_to_string(&self.state_path) {
-                if let Ok(state) = self.parse_state(&raw) {
-                    if self.is_healthy(&state) {
-                        return Ok(state);
-                    }
+            if let Ok(state) = self.provider_state() {
+                if self.is_healthy(&state) {
+                    return Ok(state);
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -187,7 +235,21 @@ pub fn probe_codex_app_server(socket_path: &Path) -> bool {
         Ok(runtime) => runtime,
         Err(_) => return false,
     };
-    runtime.block_on(async { codex_initialize_handshake(socket_path).await.is_ok() })
+    runtime.block_on(async {
+        codex_initialize_handshake_with_timeout(socket_path, HANDSHAKE_TIMEOUT)
+            .await
+            .is_ok()
+    })
+}
+
+async fn codex_initialize_handshake_with_timeout(
+    socket_path: &Path,
+    timeout: Duration,
+) -> Result<(), &'static str> {
+    match tokio::time::timeout(timeout, codex_initialize_handshake(socket_path)).await {
+        Ok(result) => result,
+        Err(_) => Err("timeout"),
+    }
 }
 
 async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static str> {
@@ -1280,6 +1342,39 @@ mod tests {
     }
 
     #[test]
+    fn codex_daemon_state_accepts_provider_date_string() {
+        let adapter = CodexDaemonAdapter::new(
+            PathBuf::from("/tmp/codex.pid"),
+            PathBuf::from("/tmp/codex.lock"),
+            PathBuf::from("/tmp/codex.sock"),
+        );
+        let pid = std::process::id();
+        let state = adapter
+            .parse_state(&format!(
+                r#"{{"pid":{pid},"processStartTime":"Tue Aug 25 05:29:46 2026"}}"#
+            ))
+            .expect("the provider's live date-string format is readable");
+        assert_eq!(state.pid, Some(pid));
+        assert_eq!(
+            state.process_start_time,
+            crate::daemon::process_start_time(pid)
+        );
+    }
+
+    #[test]
+    fn codex_uses_an_fno_sidecar_and_never_replaces_the_provider_process() {
+        use crate::harness_daemon::HarnessDaemonAdapter;
+        let provider_state = PathBuf::from("/tmp/app-server.pid");
+        let adapter = CodexDaemonAdapter::new(
+            provider_state.clone(),
+            PathBuf::from("/tmp/codex.lock"),
+            PathBuf::from("/tmp/codex.sock"),
+        );
+        assert_ne!(adapter.state_path(), provider_state.as_path());
+        assert!(!adapter.may_replace());
+    }
+
+    #[test]
     fn codex_socket_without_initialize_handshake_is_not_healthy() {
         let temp = tempfile::tempdir().unwrap();
         let socket = temp.path().join("codex.sock");
@@ -1288,5 +1383,24 @@ mod tests {
             let _ = listener.accept();
         });
         assert!(!probe_codex_app_server(&socket));
+    }
+
+    #[tokio::test]
+    async fn codex_health_handshake_times_out_when_the_server_stops_replying() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("codex.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _initialize = ws.next().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let result =
+            codex_initialize_handshake_with_timeout(&socket, Duration::from_millis(20)).await;
+
+        assert_eq!(result, Err("timeout"));
+        server.abort();
     }
 }

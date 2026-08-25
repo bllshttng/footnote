@@ -22,11 +22,30 @@ impl DaemonState {
         endpoint: impl Into<String>,
         incarnation: impl Into<String>,
     ) -> Result<Self, String> {
-        if pid == 0 {
+        Self::with_optional_process_identity(
+            raw,
+            Some(pid),
+            Some(process_start_time),
+            endpoint,
+            incarnation,
+        )
+    }
+
+    pub fn with_optional_process_identity(
+        raw: serde_json::Value,
+        pid: Option<u32>,
+        process_start_time: Option<u64>,
+        endpoint: impl Into<String>,
+        incarnation: impl Into<String>,
+    ) -> Result<Self, String> {
+        if pid == Some(0) {
             return Err("missing daemon pid".to_string());
         }
-        if process_start_time == 0 {
+        if process_start_time == Some(0) {
             return Err("missing daemon process start time".to_string());
+        }
+        if pid.is_none() && process_start_time.is_some() {
+            return Err("daemon start time has no pid".to_string());
         }
         let endpoint = endpoint.into();
         if endpoint.is_empty() {
@@ -38,8 +57,8 @@ impl DaemonState {
         }
         Ok(Self {
             raw,
-            pid: Some(pid),
-            process_start_time: Some(process_start_time),
+            pid,
+            process_start_time,
             endpoint,
             incarnation,
         })
@@ -106,8 +125,20 @@ pub trait HarnessDaemonAdapter {
     fn is_healthy(&self, state: &DaemonState) -> bool;
     fn boot(&self) -> Result<DaemonState, String>;
 
+    fn healthy_state(&self, state: &DaemonState) -> Option<DaemonState> {
+        self.is_healthy(state).then(|| state.clone())
+    }
+
     fn may_replace(&self) -> bool {
         true
+    }
+
+    fn may_refresh_unhealthy(&self) -> bool {
+        false
+    }
+
+    fn unreadable_state_may_boot(&self) -> bool {
+        false
     }
 
     fn serialize_state(&self, state: &DaemonState) -> Result<String, String> {
@@ -131,27 +162,34 @@ pub fn ensure_harness_daemon<A: HarnessDaemonAdapter>(
     })?;
 
     match std::fs::read_to_string(adapter.state_path()) {
-        Ok(raw) => {
-            let state = adapter.parse_state(&raw).map_err(|reason| {
-                EnsureError::new(format!(
+        Ok(raw) => match adapter.parse_state(&raw) {
+            Ok(state) => {
+                if let Some(healthy) = adapter.healthy_state(&state) {
+                    if healthy != state {
+                        persist_state(adapter, &healthy)?;
+                    }
+                    return Ok(success(adapter.harness(), healthy, true));
+                }
+                if adapter.may_replace() {
+                    reap_owned_process(&state);
+                } else if !adapter.may_refresh_unhealthy() {
+                    return Err(EnsureError::new(format!(
+                        "harness={} observed={} remedy=restart the provider supervisor explicitly",
+                        adapter.harness(),
+                        Liveness::Dead.as_str()
+                    )));
+                }
+            }
+            Err(_reason) if adapter.unreadable_state_may_boot() => {}
+            Err(reason) => {
+                return Err(EnsureError::new(format!(
                     "harness={} observed={} state={} reason={reason}",
                     adapter.harness(),
                     Liveness::Unreadable.as_str(),
                     adapter.state_path().display()
-                ))
-            })?;
-            if adapter.is_healthy(&state) {
-                return Ok(success(adapter.harness(), state, true));
-            }
-            if !adapter.may_replace() {
-                return Err(EnsureError::new(format!(
-                    "harness={} observed={} remedy=restart the provider supervisor explicitly",
-                    adapter.harness(),
-                    Liveness::Dead.as_str()
                 )));
             }
-            reap_owned_process(&state);
-        }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(EnsureError::new(format!(
@@ -170,13 +208,21 @@ pub fn ensure_harness_daemon<A: HarnessDaemonAdapter>(
             Liveness::Dead.as_str()
         ))
     })?;
-    if !adapter.is_healthy(&state) {
+    let Some(state) = adapter.healthy_state(&state) else {
         return Err(EnsureError::new(format!(
             "harness={} observed={} remedy=daemon boot did not pass the health probe",
             adapter.harness(),
             Liveness::Dead.as_str()
         )));
-    }
+    };
+    persist_state(adapter, &state)?;
+    Ok(success(adapter.harness(), state, false))
+}
+
+fn persist_state<A: HarnessDaemonAdapter>(
+    adapter: &A,
+    state: &DaemonState,
+) -> Result<(), EnsureError> {
     let serialized = adapter.serialize_state(&state).map_err(|reason| {
         EnsureError::new(format!(
             "harness={} observed=unreadable reason=state serialization failed: {reason}",
@@ -189,7 +235,7 @@ pub fn ensure_harness_daemon<A: HarnessDaemonAdapter>(
             adapter.harness()
         ))
     })?;
-    Ok(success(adapter.harness(), state, false))
+    Ok(())
 }
 
 fn success(harness: &str, state: DaemonState, reused: bool) -> EnsureResult {

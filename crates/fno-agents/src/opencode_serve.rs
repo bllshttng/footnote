@@ -285,33 +285,40 @@ impl crate::harness_daemon::HarnessDaemonAdapter for OpenCodeDaemonAdapter<'_> {
     fn parse_state(&self, raw: &str) -> Result<crate::harness_daemon::DaemonState, String> {
         let value: serde_json::Value =
             serde_json::from_str(raw).map_err(|error| error.to_string())?;
-        let _token = value
+        let token = value
             .get("token")
             .and_then(|value| value.as_str())
-            .filter(|token| !token.is_empty())
-            .ok_or_else(|| "missing serve token".to_string())?;
+            .unwrap_or_default();
         let base_url = value
             .get("base_url")
             .and_then(|value| value.as_str())
-            .filter(|url| !url.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| "missing serve base_url".to_string())?;
+            .unwrap_or_default()
+            .to_string();
         let pid = value
             .get("pid")
             .and_then(|value| value.as_u64())
             .filter(|pid| *pid > 0)
-            .ok_or_else(|| "missing serve pid".to_string())? as u32;
+            .map(|pid| pid as u32);
         let pid_start = value
             .get("pid_start")
             .and_then(|value| value.as_u64())
-            .filter(|start| *start > 0)
-            .ok_or_else(|| "missing serve process start time".to_string())?;
-        crate::harness_daemon::DaemonState::new(
+            .filter(|start| *start > 0);
+        let endpoint = if base_url.is_empty() {
+            "unresolved://opencode".to_string()
+        } else {
+            base_url
+        };
+        let incarnation = match (pid, pid_start) {
+            (Some(pid), Some(start)) => format!("{pid}:{start}"),
+            _ if !token.is_empty() && endpoint != "unresolved://opencode" => endpoint.clone(),
+            _ => "opencode-unresolved".to_string(),
+        };
+        crate::harness_daemon::DaemonState::with_optional_process_identity(
             value,
             pid,
             pid_start,
-            base_url,
-            format!("{pid}:{pid_start}"),
+            endpoint,
+            incarnation,
         )
     }
 
@@ -321,7 +328,9 @@ impl crate::harness_daemon::HarnessDaemonAdapter for OpenCodeDaemonAdapter<'_> {
             .get("token")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
-        serve_healthy(&state.endpoint, token)
+        !token.is_empty()
+            && state.endpoint != "unresolved://opencode"
+            && serve_healthy(&state.endpoint, token)
     }
 
     fn boot(&self) -> Result<crate::harness_daemon::DaemonState, String> {
@@ -390,15 +399,15 @@ impl crate::harness_daemon::HarnessDaemonAdapter for OpenCodeDaemonAdapter<'_> {
                             "pid_start": pid_start,
                             "token": token,
                         });
-                        let pid_start = pid_start.ok_or_else(|| {
-                            "opencode serve did not expose a process start time".to_string()
-                        })?;
-                        return crate::harness_daemon::DaemonState::new(
+                        let incarnation = pid_start
+                            .map(|start| format!("{pid}:{start}"))
+                            .unwrap_or_else(|| base_url.clone());
+                        return crate::harness_daemon::DaemonState::with_optional_process_identity(
                             record,
-                            pid,
+                            Some(pid),
                             pid_start,
                             base_url,
-                            format!("{pid}:{pid_start}"),
+                            incarnation,
                         );
                     }
                 }
@@ -1179,6 +1188,38 @@ mod tests {
         assert!(fake.requests.lock().unwrap()[1].starts_with("POST /session?directory=/w"));
         // Every authenticated request carried the Basic header.
         assert!(fake.auth_seen.lock().unwrap().iter().all(|s| *s));
+    }
+
+    #[test]
+    fn healthy_legacy_state_without_pid_start_is_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = home(dir.path());
+        let fake = FakeServe::start("ses_legacy_state1");
+        let record = serde_json::json!({
+            "base_url": fake.base_url(),
+            "pid": 4242,
+            "pid_start": null,
+            "token": "test-token",
+        });
+        std::fs::write(serve_state_path(&h), record.to_string()).unwrap();
+
+        let serve =
+            ensure_serve(&h).expect("a positive health probe outranks a missing reap token");
+
+        assert_eq!(serve.base_url, fake.base_url());
+        assert_eq!(serve.token, "test-token");
+        assert_eq!(serve.pid_start, None);
+    }
+
+    #[test]
+    fn unreadable_opencode_state_does_not_authorize_a_replacement() {
+        use crate::harness_daemon::HarnessDaemonAdapter;
+
+        let dir = tempfile::tempdir().unwrap();
+        let h = home(dir.path());
+        let adapter = OpenCodeDaemonAdapter::new(&h);
+
+        assert!(!adapter.unreadable_state_may_boot());
     }
 
     #[test]

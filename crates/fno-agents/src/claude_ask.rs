@@ -1044,6 +1044,19 @@ impl ClaudeDaemonAdapter {
             format!("{supervisor_pid}:{process_start_time}"),
         )
     }
+
+    fn needs_bootstrap(&self) -> Result<bool, String> {
+        let roster = match crate::claude_roster::ClaudeRoster::load(&self.roster_path) {
+            Ok(roster) => roster,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(format!("Claude daemon roster unreadable: {error}")),
+        };
+        Ok(roster.supervisor_pid.is_none()
+            || !roster
+                .workers_deduped()
+                .into_iter()
+                .any(|worker| worker.resolve_control_sock().is_some()))
+    }
 }
 
 impl crate::harness_daemon::HarnessDaemonAdapter for ClaudeDaemonAdapter {
@@ -1114,8 +1127,24 @@ impl crate::harness_daemon::HarnessDaemonAdapter for ClaudeDaemonAdapter {
         .is_ok()
     }
 
+    fn healthy_state(
+        &self,
+        _state: &crate::harness_daemon::DaemonState,
+    ) -> Option<crate::harness_daemon::DaemonState> {
+        let current = self.roster_state().ok()?;
+        self.is_healthy(&current).then_some(current)
+    }
+
     fn may_replace(&self) -> bool {
         false
+    }
+
+    fn may_refresh_unhealthy(&self) -> bool {
+        true
+    }
+
+    fn unreadable_state_may_boot(&self) -> bool {
+        true
     }
 
     fn boot(&self) -> Result<crate::harness_daemon::DaemonState, String> {
@@ -1126,6 +1155,26 @@ impl crate::harness_daemon::HarnessDaemonAdapter for ClaudeDaemonAdapter {
             .roster_state()
             .map_err(|error| format!("{error}; start `claude --bg` once, then retry"))?;
         Ok(state)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeDaemonPreflight {
+    Ready(crate::harness_daemon::DaemonReceipt),
+    NeedsBootstrap,
+}
+
+pub fn preflight_claude_daemon(claude_home: &ClaudeHome) -> Result<ClaudeDaemonPreflight, String> {
+    let adapter = ClaudeDaemonAdapter::new(claude_home.daemon_roster_path());
+    match crate::harness_daemon::ensure_harness_daemon(&adapter) {
+        Ok(result) => Ok(ClaudeDaemonPreflight::Ready(result.receipt)),
+        Err(error) => {
+            if adapter.needs_bootstrap()? {
+                Ok(ClaudeDaemonPreflight::NeedsBootstrap)
+            } else {
+                Err(error.to_string())
+            }
+        }
     }
 }
 

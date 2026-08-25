@@ -1150,11 +1150,13 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // agents`; attach/peek/reply; NOT a grid pane). claude-only by nature.
         ("claude", "bg") => {
             let claude_home = ClaudeHome::from_env();
-            let daemon_receipt = match fno_agents::claude_ask::ensure_claude_daemon(&claude_home) {
-                Ok(receipt) => receipt,
+            let daemon_receipt = match fno_agents::claude_ask::preflight_claude_daemon(&claude_home)
+            {
+                Ok(fno_agents::claude_ask::ClaudeDaemonPreflight::Ready(receipt)) => Some(receipt),
+                Ok(fno_agents::claude_ask::ClaudeDaemonPreflight::NeedsBootstrap) => None,
                 Err(error) => {
                     eprintln!(
-                        "claude spawn refused: harness=claude observed=unreadable remedy=start `claude --bg` once: {error}"
+                        "claude spawn refused: harness=claude observed=unreadable remedy=repair the Claude daemon roster: {error}"
                     );
                     if let Some(g) = gate_guard.as_mut() {
                         g.release();
@@ -1186,7 +1188,24 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 claude_flags,
                 surface_cwd,
             );
-            fno_agents::claude_ask::stamp_daemon_receipt(&mut outcome, &daemon_receipt);
+            if outcome.exit_code == 0 {
+                let daemon_receipt = match daemon_receipt {
+                    Some(receipt) => Ok(receipt),
+                    None => fno_agents::claude_ask::ensure_claude_daemon(&claude_home),
+                };
+                match daemon_receipt {
+                    Ok(receipt) => {
+                        fno_agents::claude_ask::stamp_daemon_receipt(&mut outcome, &receipt)
+                    }
+                    Err(error) => {
+                        outcome.exit_code = 13;
+                        outcome.stdout.clear();
+                        outcome.stderr.push_str(&format!(
+                            "claude spawn refused after create: harness=claude observed=unreadable remedy=inspect the Claude daemon roster: {error}\n"
+                        ));
+                    }
+                }
+            }
             if !outcome.stderr.is_empty() {
                 eprint!("{}", outcome.stderr);
             }

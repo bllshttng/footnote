@@ -60,6 +60,10 @@ if [ -n "$FAKE_CLAUDE_SESSIONS" ]; then
   mkdir -p "$FAKE_CLAUDE_SESSIONS"
   printf '%s\n' '{"jobId":"7c5dcf5d","kind":"bg","messagingSocketPath":"/tmp/fake-claude.sock","sessionId":"12345678-1234-4234-8234-123456789abc"}' > "$FAKE_CLAUDE_SESSIONS/999.json"
 fi
+if [ -n "$FAKE_CLAUDE_DAEMON_DIR" ]; then
+  mkdir -p "$FAKE_CLAUDE_DAEMON_DIR" "$FAKE_CLAUDE_CONTROL_DIR/spare"
+  printf '{"proto":1,"supervisorPid":%s,"updatedAt":1,"workers":{"12345678":{"sessionId":"12345678-1234-4234-8234-123456789abc","pid":%s,"procStart":1,"ptySock":"%s/spare/12345678.pty.sock","cwd":"/tmp"}}}\n' "$FAKE_CLAUDE_SUPERVISOR_PID" "$FAKE_CLAUDE_SUPERVISOR_PID" "$FAKE_CLAUDE_CONTROL_DIR" > "$FAKE_CLAUDE_DAEMON_DIR/roster.json"
+fi
 printf 'backgrounded · 7c5dcf5d · %s\n' "$name"
 exit 0
 "#;
@@ -106,6 +110,23 @@ fn install_fake_claude_daemon(daemon_dir: &Path) {
         }
     });
     fs::write(daemon_dir.join("roster.json"), roster.to_string()).unwrap();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let _ = reader.read_line(&mut request);
+            let mut stream = stream;
+            let _ = stream.write_all(b"{\"ok\":true,\"op\":\"attach\"}\n");
+        }
+    });
+}
+
+fn install_fake_claude_control_socket(control_dir: &Path) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    fs::create_dir_all(control_dir.join("spare")).unwrap();
+    let listener = UnixListener::bind(control_dir.join("control.sock")).unwrap();
     std::thread::spawn(move || {
         if let Ok((stream, _)) = listener.accept() {
             let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -1326,6 +1347,17 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
     let daemon_dir = claude_home.join("daemon");
     fs::create_dir_all(&daemon_dir).unwrap();
     install_fake_claude_daemon(&daemon_dir);
+    fs::write(
+        daemon_dir.join("fno-harness-daemon.json"),
+        serde_json::json!({
+            "supervisorPid": std::process::id(),
+            "processStartTime": fno_agents::daemon::process_start_time(std::process::id()),
+            "controlSocket": "/tmp/reaped-worker/control.sock",
+            "shortId": "deadbeef",
+        })
+        .to_string(),
+    )
+    .unwrap();
     let sessions = claude_home.join(".claude").join("sessions");
     let bin_dir = tmpdir("cli-spawn-claude-hp-bin");
     let cwd = tmpdir("cli-spawn-claude-hp-cwd");
@@ -1387,6 +1419,73 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
     assert_eq!(row["name"], "hp-agent");
     assert_eq!(row["short_id"], "7c5dcf5d");
     assert_eq!(row["harness_session_id"], CLAUDE_SESSION_ID);
+}
+
+#[test]
+fn client_spawn_bg_claude_bootstraps_the_first_daemon_worker() {
+    let _path_guard = PATH_MUTEX.lock().unwrap();
+    let home_dir = tmpdir("cli-spawn-claude-bootstrap-home");
+    let claude_home = tmpdir("cli-spawn-claude-bootstrap-claude");
+    let daemon_dir = claude_home.join("daemon");
+    fs::create_dir_all(&daemon_dir).unwrap();
+    let control_dir = PathBuf::from(format!(
+        "/tmp/fno-cb-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    install_fake_claude_control_socket(&control_dir);
+    let sessions = claude_home.join(".claude").join("sessions");
+    let bin_dir = tmpdir("cli-spawn-claude-bootstrap-bin");
+    let cwd = tmpdir("cli-spawn-claude-bootstrap-cwd");
+    install_fake_claude(&bin_dir);
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!(
+            "skipping client_spawn_bg_claude_bootstraps_the_first_daemon_worker: binary not found at {:?}",
+            bin
+        );
+        return;
+    }
+
+    let out = std::process::Command::new(&bin)
+        .args([
+            "spawn",
+            "bootstrap-agent",
+            "hello there",
+            "--harness",
+            "claude",
+            "--substrate",
+            "bg",
+        ])
+        .env("FNO_SPAWN_GATE", "0")
+        .env("FNO_E2E", "1")
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .env("HOME", &claude_home)
+        .env("FNO_CLAUDE_DAEMON_DIR", &daemon_dir)
+        .env("FAKE_CLAUDE_SESSIONS", &sessions)
+        .env("FAKE_CLAUDE_DAEMON_DIR", &daemon_dir)
+        .env("FAKE_CLAUDE_CONTROL_DIR", &control_dir)
+        .env("FAKE_CLAUDE_SUPERVISOR_PID", std::process::id().to_string())
+        .env("PATH", path_with(&bin_dir))
+        .current_dir(&cwd)
+        .output()
+        .expect("failed to run fno-agents");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "first claude bg spawn must bootstrap its supervisor; stderr: {stderr}"
+    );
+    let receipt: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(receipt["durability"], "daemon-owned");
+    assert!(receipt["endpoint"]
+        .as_str()
+        .is_some_and(|value| value.ends_with("control.sock")));
 }
 
 /// AC5-EDGE (x-f54c): `host` was retired at G4 (interactive daemon PTY hosting
