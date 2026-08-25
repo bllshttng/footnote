@@ -3157,3 +3157,84 @@ def test_a_terminal_pr_is_exempt(monkeypatch, tmp_path):
         lambda *a, **kw: pytest.fail("a terminal PR must not be probed"),
     )
     assert _REAL_IN_FLIGHT_REFUSAL(42, str(tmp_path)) is None
+
+
+# --- W4: terminal exemption on the coverage gate; optional-list parity -------
+
+
+def test_a_merged_pr_answers_already_merged_not_unreviewed(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """The coverage gate protects what WOULD merge; a merged or closed PR has no
+    would-merge left. Retrying `fno do pr merge` after a landed merge used to
+    answer `unreviewed merge refused`, a receipt that sent a lane hunting a
+    coverage defect blocking nothing."""
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge,
+        "_pr_head_ref_and_oid",
+        lambda pr, repo: ("feature/x-a089", "abc123", "MERGED"),
+    )
+
+    def _gate_must_not_run(*a, **kw):
+        pytest.fail("the coverage gate must not evaluate a terminal PR")
+
+    monkeypatch.setattr(_coverage_gate, "coverage_verdict", _gate_must_not_run)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "skipped"
+    assert "already merged" in obj["reason"]
+    assert "unreviewed" not in obj["reason"]
+
+
+def test_a_closed_pr_takes_the_same_terminal_exemption(enabled, monkeypatch, capsys, tmp_path):
+    fake = FakeRun(gh_merge=Result(0, "closed", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123", "CLOSED")
+    )
+    monkeypatch.setattr(
+        _coverage_gate, "coverage_verdict", lambda *a, **kw: pytest.fail("gate ran on CLOSED")
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "skipped"
+    assert "already closed" in obj["reason"]
+
+
+def test_an_open_pr_still_faces_the_coverage_gate(enabled, monkeypatch, capsys, tmp_path):
+    """The exemption must not become a hole: an OPEN uncovered PR still refuses
+    as unreviewed."""
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge, "_pr_head_ref_and_oid", lambda pr, repo: ("feature/x-a089", "abc123", "OPEN")
+    )
+    monkeypatch.setattr(
+        _coverage_gate,
+        "coverage_verdict",
+        lambda *a, **kw: (_coverage_gate.REFUSED, "no review row describes this head", "", ""),
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "blocked"
+    assert "unreviewed merge refused" in obj["reason"]
+
+
+def test_optional_apps_resolves_the_shared_default(tmp_path):
+    """One oracle, two readers: this resolver and the Rust gate's
+    resolved_optional_bots both answer these rows against the SAME golden file,
+    so the two sides cannot drift silently - which is what a hardcoded tuple on
+    one side (the status view) and an empty-vec default on the other (the loop
+    gate) was."""
+    from pathlib import Path
+
+    from fno.config import ReviewBlock, resolved_optional_apps
+
+    golden = json.loads(
+        (Path(__file__).resolve().parents[1] / "config" / "optional_apps_default.json").read_text()
+    )
+    assert resolved_optional_apps(ReviewBlock()) == golden["unset"]
+    assert resolved_optional_apps(ReviewBlock(optional_apps=[])) == golden["explicit_empty"]
+    assert resolved_optional_apps(ReviewBlock(optional_apps=["my-app"])) == ["my-app"]

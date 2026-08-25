@@ -801,6 +801,24 @@ class ApprovalsBlock(BaseModel):
     authorized_principals: dict[str, list[str]] = Field(default_factory=dict)
 
 
+#: The optional-reviewer logins an UNSET `review.optional_apps` resolves to.
+#: One default, read by both sides that measure optional lanes - Python
+#: (`fno.pr._reviews.optional_reviewer_names`) and the Rust gate
+#: (`resolved_optional_bots`) - so `fno do pr status` and the loop gate cannot
+#: measure different lanes on one PR, which is what a remedy printed by one and
+#: refused by the other looked like. Parity is pinned against the shared golden
+#: file cli/tests/config/optional_apps_default.json.
+DEFAULT_OPTIONAL_APPS: tuple[str, ...] = ("gemini-code-assist", "chatgpt-codex-connector")
+
+
+def resolved_optional_apps(review: "ReviewBlock") -> list[str]:
+    """The effective optional-login list: the raw value when set (including an
+    explicit ``[]`` opt-out), the built-in default when the key was never set."""
+    if review.optional_apps is not None:
+        return list(review.optional_apps)
+    return list(DEFAULT_OPTIONAL_APPS)
+
+
 class ReviewBlock(BaseModel):
     """External-review gate settings (nested under 'config.review').
 
@@ -849,7 +867,11 @@ class ReviewBlock(BaseModel):
     # Reviewer logins honored-if-present but NOT required (x-4baa): the gate
     # never waits for them (their absence never blocks - kills the App-bot
     # usage-limit wedge), but a blocking finding from one still holds the gate.
-    optional_apps: list[str] = Field(default_factory=list)
+    # None (unset) resolves to DEFAULT_OPTIONAL_APPS via resolved_optional_apps;
+    # an explicit [] is a real opt-out and wins over the default. The RAW field
+    # stays None-vs-list because truthiness of it doubles as the "is a review
+    # lane configured" probe in the merge path, which the default must not flip.
+    optional_apps: Optional[list[str]] = None
     # Per-login bot-review nudge overrides, as `[review.nudge.<login>]` tables
     # ({review_handle, wait_minutes, ceiling, enabled}). Consumed by the Rust
     # stop gate (loop-check), which resolves it against its built-in bot
@@ -946,10 +968,11 @@ class ReviewBlock(BaseModel):
         A bare string (`optional_apps: chatgpt-codex-connector`) coerces to a
         one-item list. Unlike the required gate, degrading a malformed optional
         list to [] is safe: it only drops honored-if-present reviewers, never
-        weakens a REQUIRED gate.
+        weakens a REQUIRED gate. `None` stays None: it means the key was never
+        set, which resolves to the built-in default rather than to empty.
         """
         if v is None:
-            return []
+            return None
         if isinstance(v, list):
             return v
         # A scalar login coerces to a one-item list (parity with the Rust text

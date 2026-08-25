@@ -1,0 +1,5 @@
+{
+  "comment": "The shared oracle for the review.optional_apps built-in default. The Python test (cli/tests/unit/test_pr_merge.py) and the Rust test (loopcheck.rs resolved_optional_bots) both assert their resolver output equals these values, so the two sides cannot drift apart silently - which is what a hardcoded tuple on one side and an empty-vec default on the other was.",
+  "unset": ["gemini-code-assist", "chatgpt-codex-connector"],
+  "explicit_empty": []
+}

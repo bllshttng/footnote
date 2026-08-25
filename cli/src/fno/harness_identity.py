@@ -687,6 +687,7 @@ def _read_ancestor_marker(pid: int, marker: str) -> Optional[str]:
     processes. A darwin walk therefore corroborates what it can and records
     env_only for the rest - recorded, never gated on.
     """
+    raw: Optional[bytes]
     try:
         with open(f"/proc/{pid}/environ", "rb") as fh:
             raw = fh.read()
@@ -711,10 +712,10 @@ def _read_ancestor_marker(pid: int, marker: str) -> Optional[str]:
         return None
     if out.returncode != 0:
         return None
-    prefix = marker + "="
+    text_prefix = marker + "="
     for token in out.stdout.split():
-        if token.startswith(prefix):
-            return token[len(prefix) :]
+        if token.startswith(text_prefix):
+            return token[len(text_prefix) :]
     return None
 
 

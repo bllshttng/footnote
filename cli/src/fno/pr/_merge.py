@@ -1755,6 +1755,28 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
 
+    # (2a-pre) Terminal exemption, the same one the in-flight review guard at
+    # _in_flight_review_refusal takes: this gate protects what WOULD merge, and
+    # a merged or closed PR has no would-merge left. Without it, retrying
+    # `fno do pr merge` on a PR that already landed answers `unreviewed merge
+    # refused` instead of `already merged` - a receipt that sent a competent
+    # lane hunting a coverage defect that was blocking nothing. An unreadable
+    # state falls through to the gate (fail closed), never past it.
+    try:
+        _refs = _pr_head_ref_and_oid(pr_number, repo)
+    except Exception:
+        _refs = None
+    if _refs is not None and _refs[2] in ("MERGED", "CLOSED"):
+        _emit(
+            pr_number,
+            "skipped",
+            f"PR already {_refs[2].lower()}; nothing to merge "
+            "(the coverage gate protects what would merge)",
+            "none",
+            err=False,
+        )
+        return 2
+
     # (2a) Coverage guard (x-0eaf): the sanctioned merge must not land a PR
     # nothing reviewed. The predicate lives in _coverage_gate - one copy,
     # shared with the hook-facing `fno do pr coverage-check` verb - and this path

@@ -2670,8 +2670,11 @@ fn read_pr_info(
             .map_err(|_| GhReadError::parse_failed("pr_reviews_parse"))?;
 
         // PRESENCE is required-only: an optional login's absence must never
-        // create a missing_bot (never wait for it). FINDINGS honor the union:
-        // an optional login's blocking P1 still holds the gate ("honor if
+        // create a missing_bot (never wait for it), and its STALENESS must
+        // never reach stale_bots either - an optional bot reading an older
+        // commit is not a property any reviewer owes, so it may neither block
+        // nor disqualify local-review recovery. FINDINGS honor the union: an
+        // optional login's blocking P1 still holds the gate ("honor if
         // present"). A dedup keeps a login that is in both lists counted once.
         let info = compute_review_info(&reviews_json, required_bots, &freshness);
         // Per-outstanding-bot nudge classification (x-b167), computed AFTER the
@@ -2858,13 +2861,12 @@ fn read_pr_info(
             &head_branch,
             head_sha,
         );
-        let local_recovery = !info.reviewer_refused.is_empty()
-            && info.missing_bots.is_empty()
-            && info.stale_bots.is_empty()
-            && coverage.verdicts.iter().any(|verdict| {
-                verdict.producer == CoverageProducer::LocalAttestation
-                    && verdict.verdict == CoverageVerdict::Reviewed
-            });
+        let local_recovery = local_recovery_from_refusal(
+            &info.reviewer_refused,
+            &info.missing_bots,
+            &info.stale_bots,
+            &coverage,
+        );
         let reviewed = (info.all_required_passed() || local_recovery)
             && unaddressed.is_empty()
             && reviewers_ok;
@@ -3061,6 +3063,34 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
         return Ok(CiConclusion::Pending);
     }
     Ok(CiConclusion::Success)
+}
+
+/// The local-review recovery from refusal: a REQUIRED bot explicitly refused
+/// (not merely absent - that is a wait), nothing else required is missing or
+/// stale, and a fresh local attestation at HEAD exists.
+///
+/// Optional staleness deliberately plays no part: an optional bot reading an
+/// older commit is not a property any reviewer owes, and letting it disqualify
+/// recovery wedges exactly the lanes the recovery exists to unwedge (PR 1151:
+/// attestation minted, reviewed_count 1, gate still uncovered until the bot
+/// was re-triggered and waited out). The three bot inputs are REQUIRED-only by
+/// construction (`compute_review_info` walks `required_bots` alone), and that
+/// is the invariant this split exists to state. Required staleness still
+/// disqualifies: a stale REQUIRED verdict is one re-read from counting, and
+/// recovery must not skip past it.
+fn local_recovery_from_refusal(
+    reviewer_refused: &[String],
+    missing_bots: &[String],
+    stale_bots: &[(String, String)],
+    coverage: &CoverageReport,
+) -> bool {
+    !reviewer_refused.is_empty()
+        && missing_bots.is_empty()
+        && stale_bots.is_empty()
+        && coverage.verdicts.iter().any(|verdict| {
+            verdict.producer == CoverageProducer::LocalAttestation
+                && verdict.verdict == CoverageVerdict::Reviewed
+        })
 }
 
 /// True when explicit reviewer refusal is the only remaining review obstacle.
@@ -4218,11 +4248,23 @@ fn apply_same_model_guard(
     }
 }
 
+/// The built-in optional logins an UNSET `review.optional_apps` resolves to -
+/// the same default the Python side resolves (`DEFAULT_OPTIONAL_APPS` in
+/// fno.config, pinned with it against the shared golden file
+/// cli/tests/config/optional_apps_default.json). Without a shared default, this
+/// side resolved empty while `fno do pr status` matched two hardcoded logins,
+/// so a worker following the remedy one printed was refused by the other.
+const DEFAULT_OPTIONAL_APPS: [&str; 2] = ["gemini-code-assist", "chatgpt-codex-connector"];
+
 /// The OPTIONAL reviewer logins (config.review.optional_apps): honored-if-
 /// present but never required. Their blocking findings hold the gate, but their
-/// absence never does (x-4baa "honor if present"). Empty when unset.
+/// absence never does (x-4baa "honor if present"). Unset resolves to the
+/// built-in default; an explicit `[]` is a real opt-out and wins over it.
 fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
-    settings.optional_apps.clone().unwrap_or_default()
+    settings
+        .optional_apps
+        .clone()
+        .unwrap_or_else(|| DEFAULT_OPTIONAL_APPS.iter().map(|s| s.to_string()).collect())
 }
 
 /// Case-insensitive substring match so a configured short name ("codex") or a
@@ -12825,6 +12867,95 @@ mod tests {
             .map(|v| v.reviewed_sha.as_str())
             .collect();
         assert!(shas.contains(&"head-1") && shas.contains(&"head-2"), "{:?}", shas);
+    }
+
+    #[test]
+    fn optional_staleness_never_disqualifies_local_recovery() {
+        // The PR-1151 shape: a REQUIRED bot refused, a fresh local attestation
+        // at HEAD, and an OPTIONAL bot whose verdict read an older commit.
+        // Recovery must hold - an optional bot going stale is not a property
+        // any reviewer owes. The stale optional verdict rides in COVERAGE (the
+        // union axis), never in the required-only bot sets.
+        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+        let refused = vec!["some-required-bot".to_string()];
+        assert!(local_recovery_from_refusal(
+            &refused,
+            &[],
+            &[],
+            &rep
+        ));
+    }
+
+    #[test]
+    fn required_staleness_still_blocks_local_recovery() {
+        // Unchanged, pinned: a stale REQUIRED verdict is one re-read from
+        // counting, so recovery must not skip past it.
+        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        let refused = vec!["some-required-bot".to_string()];
+        let stale = vec![("some-required-bot".to_string(), "oldsha".to_string())];
+        assert!(!local_recovery_from_refusal(
+            &refused,
+            &[],
+            &stale,
+            &rep
+        ));
+        // And no refusal means no recovery at all: absence is a wait.
+        assert!(!local_recovery_from_refusal(&[], &[], &[], &rep));
+    }
+
+    #[test]
+    fn resolved_optional_bots_default_matches_the_shared_python_default() {
+        // One oracle, two readers: this resolver and fno.config's
+        // DEFAULT_OPTIONAL_APPS both answer these rows, so a drift on either
+        // side fails its own test against the SAME file.
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/tests/config/optional_apps_default.json");
+        let text = std::fs::read_to_string(&golden)
+            .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let unset = v["unset"].as_array().unwrap();
+        let unset: Vec<String> = unset
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        // Unset (None) -> the built-in default.
+        let settings = Settings::default();
+        assert_eq!(resolved_optional_bots(&settings), unset);
+        // An explicit [] is a real opt-out and wins over the default.
+        let empty = Settings {
+            optional_apps: Some(Vec::new()),
+            ..Settings::default()
+        };
+        assert!(resolved_optional_bots(&empty).is_empty());
+        // An explicit list is honored verbatim.
+        let mine = Settings {
+            optional_apps: Some(vec!["my-app".to_string()]),
+            ..Settings::default()
+        };
+        assert_eq!(resolved_optional_bots(&mine), vec!["my-app".to_string()]);
     }
 
     #[test]
