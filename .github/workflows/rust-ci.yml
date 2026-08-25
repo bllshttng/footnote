@@ -280,6 +280,51 @@ jobs:
           bash tests/ci/test_spawn_lineage_parity.sh
           bash scripts/ci/check-spawn-lineage-parity.sh
 
+  stress:
+    name: rust e2e concurrency stress (20 trials)
+    # The determinism claim this workflow's --test-threads=1 steps make is a
+    # claim about REPEATED runs, so something has to repeat them. That used to
+    # ride the cli-ci smoke shard, where the 20-trial default cost 756s of a
+    # 1800s cap and killed the shard at 30 minutes. The denominator belongs
+    # here instead: this workflow is path-triggered on crates/**, on
+    # preflight.sh and on the harness itself, so the trials run exactly when
+    # the thing they measure can have changed, and they run beside the other
+    # jobs rather than serially inside someone else's budget.
+    #
+    # Measured 2026-08-25: 38s to build the three test binaries, then a flat
+    # 35.9s per trial. 20 trials is about 13 minutes, so 25 is the same
+    # headroom the test job carries. If this job ever approaches its cap, cut
+    # trials or split the binaries; do not raise it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/fno-agents/target
+            crates/fno/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Stress the process-backed e2e binaries
+        # The script refuses a dirty working tree, so it must see the checkout
+        # untouched: no build artifacts written into tracked paths, no
+        # generated files. It reads STRESS_TRIALS but 20 is already its
+        # default; naming it here is what makes the contract greppable.
+        env:
+          STRESS_TRIALS: "20"
+        run: bash scripts/tests/stress-rust-e2e-concurrency.sh
+
   audit:
     name: cargo audit (RUSTSEC advisories)
     # Scans Cargo.lock against the RustSec advisory DB. Vulnerabilities fail

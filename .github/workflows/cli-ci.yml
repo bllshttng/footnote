@@ -240,6 +240,19 @@ jobs:
 
       - name: "Smoke shard: everything except pytest"
         # Same trap, same reason as the pytest shard above.
+        #
+        # Measured on the 1750s run that hit the cap, not guessed: of 1733s of
+        # reported step time, the stress harness alone was 756s. It builds the
+        # three test binaries once (38s) and then costs a flat 35.9s per trial,
+        # so 20 trials is 718s of the shard on their own. Three trials is 146s
+        # and puts the shard back near 20 minutes.
+        #
+        # The 20-trial contract did not move to a smaller number, it moved to
+        # rust-ci's `stress` job, which is path-triggered on the crates and on
+        # the harness itself. A local `fno doctor test smoke` still defaults to
+        # 20, because the script's default is what a developer gets.
+        env:
+          STRESS_TRIALS: "3"
         run: |
           start=$SECONDS
           trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest "$(( SECONDS - start ))" 30 || true' EXIT
