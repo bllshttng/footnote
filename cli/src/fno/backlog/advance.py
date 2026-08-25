@@ -141,6 +141,7 @@ EVENT_FAILED = "advance_failed"
 EVENT_FAILOVER = "dispatch_failover"
 EVENT_CLAIM_OBSERVED = "dispatch_claim_observed"
 EVENT_DEAD_FAILURE_LIMIT = "dispatch_dead_failure_limit"
+EVENT_SELECTION_DIVERGED = "dispatch_selection_diverged"
 _EVENT_SOURCE = "backlog"
 
 
@@ -507,7 +508,41 @@ def _high_collision(node: dict, inflight: list[dict]):
     return None
 
 
-def _ready_nodes(project: Optional[str], mission: Optional[str] = None) -> list[dict]:
+def _undispatched_nodes(
+    project: Optional[str], mission: Optional[str] = None
+) -> dict:
+    """Read the independent planned-unclaimed observer receipt."""
+    cmd = [*_subprocess_util.fno_py_cmd(), "backlog", "undispatched", "--json"]
+    if project:
+        cmd += ["--project", project]
+    if mission:
+        cmd += ["--mission", mission]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"fno backlog undispatched exited {proc.returncode}: {proc.stderr.strip()[:200]}"
+        )
+    out = (proc.stdout or "").strip()
+    try:
+        receipt = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"fno backlog undispatched returned invalid JSON: {out[:200]}") from exc
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("status") != "ok"
+        or not isinstance(receipt.get("entries_scanned"), int)
+        or not isinstance(receipt.get("rows"), list)
+    ):
+        raise RuntimeError("fno backlog undispatched returned an unreadable receipt")
+    return receipt
+
+
+def _ready_nodes(
+    project: Optional[str],
+    mission: Optional[str] = None,
+    *,
+    events_path: Optional[Path] = None,
+) -> list[dict]:
     """Ordered ready-node summaries via ``fno backlog ready`` (JSON list).
 
     Reuses the SAME selection surface as ``fno backlog next``: claim-filtered,
@@ -529,11 +564,35 @@ def _ready_nodes(project: Optional[str], mission: Optional[str] = None) -> list[
         )
     out = (proc.stdout or "").strip()
     if not out or out == "null":
-        return []
-    nodes = json.loads(out)
-    if not isinstance(nodes, list):
-        raise RuntimeError(f"fno backlog ready returned an unexpected shape: {out[:200]}")
-    return [n for n in nodes if isinstance(n, dict) and n.get("id")]
+        normal = []
+    else:
+        nodes = json.loads(out)
+        if not isinstance(nodes, list):
+            raise RuntimeError(f"fno backlog ready returned an unexpected shape: {out[:200]}")
+        normal = [n for n in nodes if isinstance(n, dict) and n.get("id")]
+    observer = _undispatched_nodes(project, mission)
+    from fno.backlog.undispatched import prepend_missed_rows
+
+    merged, missed = prepend_missed_rows(normal, observer)
+    if missed:
+        scope = f"project={project or '*'}"
+        if mission:
+            scope += f",mission={mission}"
+        ev_path = events_path if events_path is not None else _events_path()
+        for row in missed:
+            _emit(
+                EVENT_SELECTION_DIVERGED,
+                {
+                    "node_id": row["id"],
+                    "selector_command": "fno backlog ready --json",
+                    "observer_command": "fno backlog undispatched --json",
+                    "scope": scope,
+                    "selector_entries_scanned": len(normal),
+                    "observer_entries_scanned": observer["entries_scanned"],
+                },
+                ev_path,
+            )
+    return merged
 
 
 def select_lane_fill(

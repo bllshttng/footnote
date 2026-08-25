@@ -930,6 +930,39 @@ def test_advance_result_rejects_invalid_pair():
         adv.AdvanceResult("dispatched", "advance_skipped")
 
 
+def test_lane_ready_frontier_recovers_observer_miss_and_records_divergence(
+    tmp_path, monkeypatch
+):
+    event_path = tmp_path / "events.jsonl"
+    normal = {"id": "x-p2-normal", "priority": "p2", "domain": "code"}
+    observer = {
+        "source": "fno backlog undispatched --json",
+        "entries_scanned": 2,
+        "claims_scanned": 0,
+        "rows": [
+            {
+                "id": "x-p0-missed",
+                "priority": "p0",
+                "domain": "code",
+                "plan_path": "/plans/p0.md",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        adv.subprocess,
+        "run",
+        lambda *args, **kwargs: _FakeProc(0, json.dumps([normal])),
+    )
+    monkeypatch.setattr(adv, "_undispatched_nodes", lambda project, mission: observer, raising=False)
+
+    rows = adv._ready_nodes("fno", events_path=event_path)
+
+    assert [row["id"] for row in rows] == ["x-p0-missed", "x-p2-normal"]
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    assert events[0]["type"] == "dispatch_selection_diverged"
+    assert events[0]["data"]["node_id"] == "x-p0-missed"
+
+
 # ---------------------------------------------------------------------------
 # _next_node: _resolved_cwd enrichment (codex P2 - launch from mapped root)
 # ---------------------------------------------------------------------------
