@@ -938,6 +938,9 @@ pub fn menu_bindings() -> Vec<MenuKeyBinding> {
         mb(b'r', "rename-workspace"),
         mb(b'x', "close-tab"),
         mb(b'x', "remove-row"),
+        mb(b'n', "new-tab"),
+        mb(b'<', "move-tab-left"),
+        mb(b'>', "move-tab-right"),
     ]
 }
 
@@ -1781,12 +1784,11 @@ mod tests {
             );
             assert_eq!(menu_byte_for(mb.action), Some(mb.key), "{}", mb.action);
         }
+        // The tab verbs read as this app in both scopes (menu n and angle
+        // brackets beside the prefix chords); Diff stays prefix-only - a
+        // row-menu action with no settled menu meaning renders no key.
         assert!(
-            menu_key_for("new-tab").is_none(),
-            "prefix-only: no menu key"
-        );
-        assert!(
-            menu_key_for("move-tab-left").is_none(),
+            menu_key_for("diff-pane").is_none(),
             "prefix-only: no menu key"
         );
         let rows = key_bindings();
@@ -1797,6 +1799,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("prefix table lost {action}"))
         };
         assert_eq!(byte_of("close-pane"), b'x', "prefix+x still kills a pane");
+        assert_eq!(byte_of("new-tab"), b'c', "prefix+c still opens a tab");
         assert_eq!(byte_of("rename-tab"), b',');
         assert_eq!(byte_of("close-tab"), b'&');
         assert_eq!(byte_of("move-tab-left"), b'<');

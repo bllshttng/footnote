@@ -1741,14 +1741,20 @@ impl MenuAction {
     /// (x-91a1) The stable id this action's in-menu accelerator is registered
     /// under in `keys::menu_bindings`, when it has one. The drawn hint and the
     /// dispatched byte both resolve through this id, so the key the menu
-    /// advertises and the key it answers cannot drift. Only actions the
-    /// d-a5e7569d ruling settled carry one; everything else is Enter/click
-    /// only and renders no key.
+    /// advertises and the key it answers cannot drift. The tab verbs and the
+    /// settled rename/close/remove pair carry one; everything else is
+    /// Enter/click only and renders no key.
     fn accelerator_id(&self) -> Option<&'static str> {
         match self {
+            MenuAction::TabNew => Some("new-tab"),
             MenuAction::TabRename => Some("rename-tab"),
             MenuAction::Rename => Some("rename-workspace"),
             MenuAction::TabClose => Some("close-tab"),
+            MenuAction::TabReorder(delta) => Some(if *delta < 0 {
+                "move-tab-left"
+            } else {
+                "move-tab-right"
+            }),
             MenuAction::Remove => Some("remove-row"),
             _ => None,
         }
@@ -2109,17 +2115,23 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
         &[],
     );
     add(PopupRow::Rule, &[]);
-    // (x-91a1) New tab and the reorder pair show no key: their prefix chords
-    // are tmux window vocabulary that the open menu does not answer, and the
-    // ruling reserves menu keys for the settled verbs until an app-native
-    // binding is chosen for them.
-    add(entry("▭", "New tab"), &[MenuAction::TabNew]);
+    // (x-91a1) Every tab verb answers a bare in-menu key from the same
+    // registry its hint reads: n for New tab, the angle brackets for the
+    // reorder pair - app vocabulary beside the prefix chords (prefix+c, and
+    // prefix+< / prefix+> mean the same moves from outside the menu).
+    add(entry_acc("▭", "New tab", "new-tab"), &[MenuAction::TabNew]);
     add(
         entry_acc("✎", "Rename", "rename-tab"),
         &[MenuAction::TabRename],
     );
-    add(entry("◧", "Move left"), &[MenuAction::TabReorder(-1)]);
-    add(entry("◨", "Move right"), &[MenuAction::TabReorder(1)]);
+    add(
+        entry_acc("◧", "Move left", "move-tab-left"),
+        &[MenuAction::TabReorder(-1)],
+    );
+    add(
+        entry_acc("◨", "Move right", "move-tab-right"),
+        &[MenuAction::TabReorder(1)],
+    );
     add(
         PopupRow::Grid(vec![cell("◧", "Join Left"), cell("◨", "Join Right")]),
         &[
@@ -22452,6 +22464,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn menu_accelerator_new_tab_and_reorder_send_their_commands() {
+        // The tab menu's other advertised keys are executable too, bytes read
+        // from the registry: n sends NewTab, `<` reorders the pinned tab one
+        // slot left. Positive markers on the decoded commands.
+        let mut v = view_with_agents(vec![]);
+        let want = squad_tabs(&v, 1)[0].id;
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+        let n = crate::keys::menu_byte_for("new-tab").expect("new-tab registered");
+        row_menu_keys(&mut v, &[n], &mut buf).await.unwrap();
+        assert_eq!(decode_cmds(buf), vec![Command::NewTab], "n opened a tab");
+
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(v.open_tab_menu(tr, tc, Anchor::Center));
+        let left = crate::keys::menu_byte_for("move-tab-left").expect("move-tab-left registered");
+        row_menu_keys(&mut v, &[left], &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::ReorderTab {
+                squad: 1,
+                tab: want,
+                delta: -1
+            }],
+            "the angle bracket moved the pinned tab left"
+        );
+    }
+
+    #[tokio::test]
     async fn menu_accelerator_close_arms_the_confirm_and_closes() {
         // AC2-EDGE: the registry byte for Close arms the SAME confirm the click
         // arms, and committing it selects then closes the captured tab.
@@ -23669,8 +23710,8 @@ mod tests {
         // AC8-EDGE, x-91a1: hints resolve from the LIVE menu-scope registry
         // (`menu_key_for`), never a literal and never a prefix-only chord - the
         // open menu does not run prefix chords, so advertising one is the LD9
-        // lie. Prefix-only actions (Diff, New tab, the reorder pair) and
-        // scope-less actions (peek, resume) render NO key.
+        // lie. Prefix-only actions (Diff) and scope-less actions (peek,
+        // resume) render NO key.
         let exited = {
             let mut r = pane_hosted_row("dead", 0);
             r.pane_id = None;
@@ -23696,23 +23737,22 @@ mod tests {
         for label in ["Diff", "Peek", "Resume"] {
             assert_eq!(hint_of(&row, label), "", "{label} has no menu key");
         }
-        // Tab menu: the settled verbs mirror their scoped glyphs; the rest show
-        // nothing; the join grid carries no hint slot at all, so nothing can
-        // hardcode a chord there either.
+        // Tab menu: every tab verb mirrors its scoped glyph; the join grid
+        // carries no hint slot at all, so nothing can hardcode a chord there
+        // either.
         let tabs = squad_tabs(&view_with_agents(vec![]), 1);
         let tab = super::build_tab_menu(0, &tabs[0], Anchor::Center);
-        for (label, id) in [("Rename", "rename-tab"), ("Close", "close-tab")] {
+        for (label, id) in [
+            ("New tab", "new-tab"),
+            ("Rename", "rename-tab"),
+            ("Move left", "move-tab-left"),
+            ("Move right", "move-tab-right"),
+            ("Close", "close-tab"),
+        ] {
             assert_eq!(
                 hint_of(&tab, label),
                 crate::keys::menu_key_for(id).unwrap_or_default(),
                 "{label} mirrors menu_key_for({id})"
-            );
-        }
-        for label in ["New tab", "Move left", "Move right"] {
-            assert_eq!(
-                hint_of(&tab, label),
-                "",
-                "{label} is prefix-only: no menu key"
             );
         }
         for r in tab.popup.rows.iter().chain(row.popup.rows.iter()) {
