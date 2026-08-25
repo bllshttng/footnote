@@ -401,6 +401,14 @@ pub struct RegistryEntry {
     /// remain lossless when a Python writer adds the axis fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// (x-d401) The basis for `model`: "requested" (stamped at spawn from the
+    /// flag or route the caller named) or "verified" (read back from a
+    /// verified pane status). A bare model is two facts in one field - the
+    /// x-aa8e shape - so the pair travels together; a row with a model and
+    /// no basis predates this field and reads as unmarked, never as verified.
+    /// Additive-optional like the field it qualifies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_basis: Option<String>,
     /// Reasoning-effort arm used by the lane, when one was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
@@ -1617,6 +1625,7 @@ mod tests {
             legacy_provider: String::new(),
             provider: None,
             model: None,
+            model_basis: None,
             effort: None,
             harness: Some("codex".into()),
             harness_session_id: None,

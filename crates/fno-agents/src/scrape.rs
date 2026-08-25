@@ -512,6 +512,7 @@ mod tests {
             legacy_provider: provider.into(),
             provider: None,
             model: None,
+            model_basis: None,
             effort: None,
             harness: None,
             harness_session_id: None,

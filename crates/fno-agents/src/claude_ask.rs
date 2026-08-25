@@ -2952,6 +2952,16 @@ pub fn dispatch_claude_spawn(
         ),
         None => String::new(),
     };
+    // (x-d401, seventh surface) The model the worker was launched with: an
+    // explicit --model reaches claude as its own flag, so it wins the receipt
+    // too - Python's `model or route_model` rule verbatim; this Rust lane is
+    // reached only without a route flag, so no route twin exists here.
+    // Absent when none was named: the honest absence, never a defaulted name
+    // that reads as a measurement.
+    let model_field = match model.filter(|m| !m.is_empty()) {
+        Some(m) => format!(r#", "model": "{}""#, m.replace('"', "\\\"")),
+        None => String::new(),
+    };
     // x-85fe: append the effective launch dir on the default canonical move
     // (surface_cwd, decided by the caller alongside the redirect note), so the
     // move is legible in the receipt too. LAST key, so an unmoved / explicit-cwd
@@ -2969,7 +2979,7 @@ pub fn dispatch_claude_spawn(
     };
     AskOutcome {
         stdout: format!(
-            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude", "status": "{receipt_status}"{perm_field}{cwd_field}}}"#
+            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude", "status": "{receipt_status}"{model_field}{perm_field}{cwd_field}}}"#
         ) + "\n",
         stderr: inner.stderr,
         exit_code: 0,
@@ -3558,7 +3568,15 @@ fn create(
         short_id: short_id.clone(),
         legacy_provider: String::new(),
         provider: Some("anthropic".to_string()),
-        model: None,
+        // (x-d401) The model the worker was launched with, and the basis
+        // marking it REQUESTED - this is the spawn's own claim, never an
+        // observed reading. The caller's model was in hand here and was
+        // dropped (receipt named it, row read None), the exact
+        // presence-discarded half of the predicate.
+        model: model.filter(|m| !m.is_empty()).map(str::to_string),
+        model_basis: model
+            .filter(|m| !m.is_empty())
+            .map(|_| "requested".to_string()),
         effort: None,
         // Canonical identity at birth (x-ec59); harness_session_id mirrors the
         // resolved uuid. A bounded miss stays a named spawning row below.

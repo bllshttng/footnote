@@ -1996,6 +1996,7 @@ done
                 legacy_provider: String::new(),
                 provider: None,
                 model: None,
+                model_basis: None,
                 effort: None,
                 harness: Some("claude".into()),
                 harness_session_id: None,

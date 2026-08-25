@@ -243,6 +243,14 @@ class AgentEntry:
     aliases: list[str] = field(default_factory=list)
     provider: Optional[str] = None
     model: Optional[str] = None
+    # (x-d401) The basis for `model`: "requested" (stamped at spawn from the
+    # flag or route the caller named) or "verified" (read back from a verified
+    # pane status). A bare model is two facts in one field - the x-aa8e
+    # shape - so the pair travels together. None on rows that predate the
+    # field or carry no model. Additive-optional; stays OUT of the list-row
+    # projection (model is a projection omission by standing ruling: intended
+    # configuration must not surface as observed runtime truth).
+    model_basis: Optional[str] = None
     effort: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
     status: AgentStatus = "live"
@@ -1503,6 +1511,7 @@ def register_existing_session(
                     entry.provider = provider
                 if model is not None:
                     entry.model = model
+                    entry.model_basis = "requested"
                 if effort is not None:
                     entry.effort = effort
                 return entries
@@ -1548,6 +1557,7 @@ def register_existing_session(
             harness=harness,
             provider=provider,
             model=model,
+            model_basis="requested" if model is not None else None,
             effort=effort,
             harness_session_id=session_id,
             cwd=cwd,
@@ -1771,6 +1781,7 @@ def project_verified_tier(
                 f"registry row {name!r} was not restamped to session {session_id!r}"
             )
         target.model = model
+        target.model_basis = "verified"
         target.effort = effort
         result.append(target)
         return entries

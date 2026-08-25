@@ -1728,6 +1728,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         legacy_provider: String::new(),
         provider: None,
         model: None,
+        model_basis: None,
         effort: None,
         harness: Some(harness),
         harness_session_id: Some(session.clone()),

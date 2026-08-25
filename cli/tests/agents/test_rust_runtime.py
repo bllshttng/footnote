@@ -783,6 +783,25 @@ def test_role_bearing_spawn_not_routed_in_forced_rust_mode(monkeypatch, tmp_path
     assert called == []
 
 
+def test_route_bearing_spawn_with_model_stays_python(monkeypatch, tmp_path) -> None:
+    """(x-d401 AC7-ERR) A route-bearing spawn (-P) keeps its --model on the
+    Python path even with a binary present; the routing decision is not what
+    the model-stamp change touches, and this pins that boundary."""
+    from fno.cli import app
+
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
+    called: list = []
+
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+    CliRunner().invoke(
+        app,
+        ["agents", "spawn", "-P", "zai", "--model", "glm-5.3[1m]", "--help"],
+    )
+    assert called == [], "a route-bearing spawn must not route to the Rust binary"
+
+
 def test_monitor_bearing_spawn_not_routed_in_forced_rust_mode(monkeypatch) -> None:
     """The public root CLI keeps monitor guards on the Python path."""
     from fno.cli import app

@@ -1212,6 +1212,7 @@ fn dispatch_create(
         legacy_provider: String::new(),
         provider: Some("openai".to_string()),
         model: None,
+        model_basis: None,
         effort: reasoning_effort.map(str::to_string),
         harness: Some("codex".to_string()),
         harness_session_id: Some(session_id.clone()),
