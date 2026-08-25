@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -73,16 +74,28 @@ def test_binds_via_the_fd_oracle_and_reports_it(monkeypatch) -> None:
     assert reaped == [("main", 7)]
 
 
-def test_canary_uses_isolated_trusted_cwd_and_nonempty_prompt(monkeypatch) -> None:
+def test_canary_uses_isolated_trusted_cwd_and_nonempty_prompt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    source_auth = source_home / "auth.json"
+    source_auth.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
     _patch_common(monkeypatch)
     monkeypatch.setattr(
         mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID
     )
     monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
     seen: list[str] = []
+    observed: dict[str, str] = {}
 
     def record_run(args, *_a, **_kw):
         seen.extend(args)
+        command = args[args.index("--") + 1 :]
+        home = Path(next(part.split("=", 1)[1] for part in command if part.startswith("CODEX_HOME=")))
+        observed["config"] = (home / "config.toml").read_text(encoding="utf-8")
+        observed["auth_target"] = str((home / "auth.json").resolve())
         return _proc(stdout="7\n")
 
     monkeypatch.setattr(mux_spawn, "_run_mux", record_run)
@@ -94,11 +107,12 @@ def test_canary_uses_isolated_trusted_cwd_and_nonempty_prompt(monkeypatch) -> No
     command = seen[seen.index("--") + 1 :]
     assert cwd != Path.cwd()
     assert not cwd.exists(), "the diagnostic owns and removes its scratch directory"
-    assert command[0] == "codex"
-    config_index = command.index("-c")
-    assert command[config_index + 1] == (
-        f"projects.{json.dumps(str(cwd))}.trust_level=\"trusted\""
+    assert command[0] == "env"
+    assert command[2] == "codex"
+    assert observed["config"] == (
+        f"[projects.{json.dumps(str(cwd))}]\ntrust_level = \"trusted\"\n"
     )
+    assert observed["auth_target"] == str(source_auth)
     prompt_fence = command.index("--")
     assert command[prompt_fence + 1].strip()
 
@@ -115,6 +129,47 @@ def test_binding_exception_still_reaps_the_canary_pane(monkeypatch) -> None:
         doctor._codex_bind_report()
 
     assert reaped == [("main", 7)]
+
+
+def test_canary_canonicalizes_scratch_path_for_trust_lookup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    real = tmp_path / "private" / "scratch"
+    real.mkdir(parents=True)
+    alias = tmp_path / "scratch-alias"
+    alias.symlink_to(real, target_is_directory=True)
+
+    class AliasDirectory:
+        def __enter__(self):
+            return str(alias)
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", lambda **_kw: AliasDirectory())
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID
+    )
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+    seen: list[str] = []
+    observed: dict[str, str] = {}
+
+    def record_run(args, *_a, **_kw):
+        seen.extend(args)
+        command = args[args.index("--") + 1 :]
+        home = Path(next(part.split("=", 1)[1] for part in command if part.startswith("CODEX_HOME=")))
+        observed["config"] = (home / "config.toml").read_text(encoding="utf-8")
+        return _proc(stdout="7\n")
+
+    monkeypatch.setattr(mux_spawn, "_run_mux", record_run)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is True
+    cwd = Path(seen[seen.index("--cwd") + 1])
+    assert cwd == real.resolve()
+    assert json.dumps(str(real.resolve())) in observed["config"]
 
 
 def test_binds_via_the_daemon_oracle_when_the_fd_probe_misses(monkeypatch) -> None:

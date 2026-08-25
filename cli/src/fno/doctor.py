@@ -2441,7 +2441,7 @@ def _codex_bind_report() -> dict[str, Any]:
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="fno-codex-bind-") as scratch:
-        return _run_codex_bind_canary(Path(scratch))
+        return _run_codex_bind_canary(Path(scratch).resolve())
 
 
 def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
@@ -2463,10 +2463,19 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
     version = _codex_version()
     session = resolve_mux_session()
     name = f"codex-bind-canary-{_uuid.uuid4().hex[:8]}"
+    codex_home = cwd / ".codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        f"[projects.{json.dumps(str(cwd))}]\ntrust_level = \"trusted\"\n",
+        encoding="utf-8",
+    )
+    source_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    source_auth = source_home / "auth.json"
+    if source_auth.is_file():
+        (codex_home / "auth.json").symlink_to(source_auth.resolve())
     prompt = "fno codex bind canary: reply READY and take no other action."
     argv = build_pane_argv("codex", prompt, cwd, True, None, name=name)
-    trust_override = f"projects.{json.dumps(str(cwd))}.trust_level=\"trusted\""
-    argv = [argv[0], "-c", trust_override, *argv[1:]]
+    argv = ["env", f"CODEX_HOME={codex_home}", *argv]
     # None (daemon unreachable at this instant) is passed through as-is; the
     # probe below refuses to correlate against a fabricated empty baseline.
     baseline_ids = _codex_session_ids_loaded(cwd)
@@ -2514,7 +2523,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
                     cwd=cwd,
                     spawn_started_ms=spawn_started_ms,
                     child_pid=child_pid,
-                    codex_sessions_dir=None,
+                    codex_sessions_dir=codex_home / "sessions",
                     daemon_baseline_ids=baseline_ids,
                     mux=mux,
                     runner=subprocess.run,
