@@ -1216,7 +1216,7 @@ def query_pr_merge_state(
     timeout_s: float = GH_QUERY_TIMEOUT_S,
     info_reader: Optional[Callable[..., tuple[Optional[dict], str]]] = None,
     files_reader: Optional[Callable[..., tuple[Optional[list[str]], str]]] = None,
-    include_files: bool = True,
+    include_files: bool = False,
 ) -> PrMergeState:
     """Read merge state and complete changed-file evidence through REST.
 
@@ -1334,6 +1334,12 @@ def query_pr_merge_state(
         changed_files=changed_files,
         files_truncated=False,
     )
+
+
+# Keep the production-reader identity stable when tests replace the module
+# symbol. Reconciliation opts into file evidence only for this reader, while
+# injected merge-state stubs keep their historical narrow signature.
+_DEFAULT_QUERY_PR_MERGE_STATE = query_pr_merge_state
 
 
 # W4 causal links: best-effort revert detection. A GitHub revert PR titles
@@ -1930,7 +1936,15 @@ def scan_merge_drift(
                     )
                 continue
             try:
-                state = query(number, repo=repo, cwd=cwd)
+                if query is _DEFAULT_QUERY_PR_MERGE_STATE:
+                    state = query(
+                        number,
+                        repo=repo,
+                        cwd=cwd,
+                        include_files=True,
+                    )
+                else:
+                    state = query(number, repo=repo, cwd=cwd)
             except ReconcileError as exc:
                 log.warning(
                     "reconcile scan read failed for node=%s PR #%s repo=%s kind=%s: %s",

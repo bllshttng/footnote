@@ -9408,6 +9408,7 @@ def cmd_reconcile(
     owed_evidence_failures: list[dict[str, str]] = []
     if _full_sweep and not dry_run:
         from fno.graph._reconcile import (
+            _DEFAULT_QUERY_PR_MERGE_STATE,
             query_pr_merge_state,
             successors_owing_verification,
         )
@@ -9416,11 +9417,19 @@ def cmd_reconcile(
             successor_repo = repo_slug_from_url(successor.get("pr_url"))
             successor_cwd = successor.get("cwd") if successor_repo is None else None
             try:
-                merged = query_pr_merge_state(
-                    successor["pr_number"],
-                    repo=successor_repo,
-                    cwd=successor_cwd,
-                )
+                if query_pr_merge_state is _DEFAULT_QUERY_PR_MERGE_STATE:
+                    merged = query_pr_merge_state(
+                        successor["pr_number"],
+                        repo=successor_repo,
+                        cwd=successor_cwd,
+                        include_files=True,
+                    )
+                else:
+                    merged = query_pr_merge_state(
+                        successor["pr_number"],
+                        repo=successor_repo,
+                        cwd=successor_cwd,
+                    )
             except ReconcileError as exc:
                 owed_evidence_failures.append(
                     {
@@ -10215,7 +10224,6 @@ def cmd_reconcile(
                 f"{failure['error']}\n    {failure['remedy']}",
                 err=True,
             )
-        raise typer.Exit(code=4)
 
     if reverted_stamped:
         verb = "Would stamp" if dry_run else "Stamped"
@@ -10230,6 +10238,9 @@ def cmd_reconcile(
             if r.remedy:
                 typer.echo(f"    {r.remedy}", err=True)
         # Partial reconcile: non-zero exit so callers can detect it.
+        raise typer.Exit(code=4)
+
+    if owed_evidence_failures:
         raise typer.Exit(code=4)
 
 

@@ -307,7 +307,7 @@ def test_backlog_done_closes_from_routed_rest_merge_evidence(tmp_graph, monkeypa
 
     assert result.exit_code == 0, result.output
     assert _read(tmp_graph)[0]["status"] == "done"
-    assert calls == [("info", 1140, "bllshttng/footnote"), ("files", 1140, "bllshttng/footnote")]
+    assert calls == [("info", 1140, "bllshttng/footnote")]
 
 
 def test_nonretryable_refusal_wins_over_an_open_sibling():

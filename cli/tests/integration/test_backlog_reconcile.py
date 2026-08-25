@@ -1420,6 +1420,55 @@ def test_reconcile_keeps_pending_supersession_when_files_do_not_cover_cause(cli_
     assert "supersession_unverified" in result.output
 
 
+def test_reconcile_reports_supersession_and_pr_failures_together(cli_env, monkeypatch, tmp_path):
+    from fno.graph._reconcile import MergeDriftRecord, ReconcileError
+
+    graph_path, _ = cli_env
+    successor = _node(
+        "ab-new003",
+        pr_number=903,
+        pr_url="https://github.com/test-owner/test-repo/pull/903",
+        cwd=str(tmp_path),
+    )
+    _make_graph(graph_path, [successor])
+
+    monkeypatch.setattr(
+        rec,
+        "scan_merge_drift",
+        lambda entries, **kwargs: [
+            MergeDriftRecord(
+                node_id="ab-pr-fail1",
+                plan_path=None,
+                pr_number=904,
+                pr_url="https://github.com/test-owner/test-repo/pull/904",
+                pr_state="UNKNOWN",
+                merged_at=None,
+                error="ordinary PR read failed",
+                error_kind="availability",
+                remedy="retry the ordinary PR read",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        rec,
+        "successors_owing_verification",
+        lambda entries: {"ab-new003": successor},
+    )
+
+    def fail_supersession_read(*args, **kwargs):
+        raise ReconcileError("supersession files read failed", kind="malformed")
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", fail_supersession_read)
+
+    result = runner.invoke(app, ["backlog", "reconcile"])
+
+    assert result.exit_code == 4
+    assert "Supersession evidence reads failed" in result.output
+    assert "ab-new003 PR #903" in result.output
+    assert "node(s) could not be resolved" in result.output
+    assert "ab-pr-fail1  PR #904: ordinary PR read failed" in result.output
+
+
 def test_reconcile_pr_number_dry_run_previews_the_trailer_only_node(cli_env, monkeypatch):
     """Review fix (x-59a6): --dry-run must not silently omit the trailer-only
     node from its preview - a real run right after would close both, so the

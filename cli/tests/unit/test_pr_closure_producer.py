@@ -844,6 +844,7 @@ def test_query_composes_injected_rest_readers_and_complete_files():
         repo="o/r",
         info_reader=info_reader,
         files_reader=files_reader,
+        include_files=True,
     )
 
     assert state.state == "MERGED"
@@ -853,6 +854,29 @@ def test_query_composes_injected_rest_readers_and_complete_files():
     assert state.changed_files == ["cli/a.py", "cli/b.py"]
     assert state.files_truncated is False
     assert calls == [("info", 5, "o/r"), ("files", 5, "o/r")]
+
+
+def test_query_skips_file_evidence_for_merge_only_callers():
+    from fno.graph._reconcile import query_pr_merge_state
+
+    def files_reader(*args, **kwargs):
+        raise AssertionError("merge-only query must not read changed files")
+
+    state = query_pr_merge_state(
+        5,
+        repo="o/r",
+        info_reader=lambda number, *, repo=None, cwd=None: ({
+            "pr": 5,
+            "state": "MERGED",
+            "url": "u",
+            "merged_at": "t",
+            "merge_sha": "sha",
+        }, ""),
+        files_reader=files_reader,
+    )
+
+    assert state.state == "MERGED"
+    assert state.changed_files == []
 
 
 def test_query_source_contains_no_graphql_view_read():
@@ -886,7 +910,7 @@ def test_query_runner_guard_sees_only_routed_rest_argv():
             return Result(0, '[{"filename":"cli/a.py"}]', "")
         return Result(0, json.dumps(pull), "")
 
-    state = query_pr_merge_state(5, repo="o/r", runner=runner)
+    state = query_pr_merge_state(5, repo="o/r", runner=runner, include_files=True)
 
     assert state.state == "MERGED"
     assert state.changed_files == ["cli/a.py"]
@@ -962,6 +986,7 @@ def test_query_file_cap_is_non_retryable_incomplete_evidence():
                 None,
                 "gh api pull files reached GitHub's 3,000-file cap without a short page",
             ),
+            include_files=True,
         )
 
     assert raised.value.kind == "evidence_incomplete"
