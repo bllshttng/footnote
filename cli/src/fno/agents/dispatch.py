@@ -6392,8 +6392,6 @@ def _mux_pane_send(
     def _contains_payload(screen: str) -> bool:
         # Codex may wrap a long slash request across visual lines. Compare the
         # positive content after collapsing whitespace, never on screen growth.
-        import re
-
         compact = re.sub(r"\s+", " ", screen).strip()
         expected = re.sub(r"\s+", " ", text).strip()
         return bool(expected) and expected in compact
@@ -6404,8 +6402,6 @@ def _mux_pane_send(
         # else in scrollback (a "queued" from an earlier turn) must not
         # classify this frame. Empty for payloads too short to be distinctive,
         # which fails the caller closed (unconfirmed).
-        import re
-
         words = re.sub(r"\s+", " ", text).strip().lower().split(" ")
         longest = max(words, key=len) if words else ""
         return longest if len(longest) >= 4 else ""
@@ -6414,8 +6410,6 @@ def _mux_pane_send(
         # The marker counts only within a few lines of a line carrying the
         # payload signature: the composer and its status render adjacent, while
         # scrollback can carry the bare word arbitrarily far away.
-        import re
-
         sig = _payload_signature()
         if not sig:
             return False
@@ -6443,6 +6437,9 @@ def _mux_pane_send(
             tab = _run(tab_args)
             if tab is None or tab == _MUX_SEND_UNKNOWN or tab.returncode != 0:
                 return "unconfirmed"
+            # Same settle the CR gets: reading before the TUI absorbed the Tab
+            # classifies a successfully queued request as unconfirmed.
+            time.sleep(enter_delay_s)
             queued_screen = _read_screen()
             if queued_screen is None:
                 return "unconfirmed"

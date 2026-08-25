@@ -1000,7 +1000,6 @@ def _send_self_review_payload(
     *, payload: str, harness: str, session_id: str
 ) -> dict[str, Any]:
     """Use the existing raw self-send router and normalize its receipt."""
-    from fno.harness_identity import canonical_handle
     from fno.mail.cli import _raw_send
 
     stdout = io.StringIO()
@@ -1008,8 +1007,12 @@ def _send_self_review_payload(
     exit_code = 0
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         try:
+            # The FULL session id, never canonical_handle's head-8: a codex id
+            # is UUIDv7, so its first eight are a 65.536-second timestamp
+            # bucket that every same-minute sibling shares, and resolution
+            # fails closed on the shared short exactly when a fleet is busy.
             _raw_send(
-                canonical_handle(session_id),
+                session_id,
                 payload,
                 self_ok=True,
                 review_request=True,
@@ -1027,6 +1030,9 @@ def _send_self_review_payload(
     elif receipt.startswith("queued"):
         transport = "mux-pane"
         outcome = "queued"
+    elif receipt.startswith("started"):
+        transport = "mux-pane"
+        outcome = "started"
     elif receipt.startswith("injected"):
         transport = "prompt-line"
         outcome = "started"
@@ -1051,7 +1057,7 @@ def _self_review_refusal(
 
 @target_app.command("request-self-review", hidden=True)
 def request_self_review_cmd(
-    pr_number: int = typer.Option(..., "--pr", help="PR number to review."),
+    pr_number: int = typer.Option(..., "--pr-number", "--pr", help="PR number to review."),
 ) -> None:
     """Request one explicit final-head native review through the raw self lane."""
     from fno.review_capability import (

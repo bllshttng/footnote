@@ -167,11 +167,11 @@ It is matched with `matches!` in `crates/fno-agents/src/bin/client.rs`, delibera
 So `fno agents mail --help`, `fno agents --help`, and a grep of the Python tree all report nothing, and a "does this exist?" probe against any of them answers false.
 
 When its explicit structured or STDIN contract is the point, use the hidden binary verb. Otherwise reach for `fno agents mail send --raw` for recipient-aware routing.
+Do not conclude the lane is absent from an empty `--help` or an empty Python-tree search; the binary verb is there.
 
 ## The target ship loop and findings
 
 The target ship step runs `fno do target request-self-review --pr <n>` after the PR exists. It resolves the PR head and base. It refuses a local-head mismatch. It sends one raw payload naming `HEAD <sha> of PR <n> against origin/<base>`. If a Codex mux pane shows the exact payload beside `tab to queue message`, machinery sends one Tab. The pane must then show the same payload with a queued marker. The receipt is `queued`, and the turn ends at that boundary. If the review is already active, the receipt is `started` and no control key is sent. The worker's own Stop hook reads structured findings from its transcript. It nudges the same context to act on P1/P2 findings. Fixes require a new-head request. It records one nudge per review turn. This act path uses no king, daemon stream, or external reader.
-Do not conclude the lane is absent from an empty `--help` or an empty Python-tree search; the binary verb is there.
 
 ## Lane 3: king-mediated mail (fallback)
 

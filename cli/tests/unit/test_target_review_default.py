@@ -94,6 +94,36 @@ def test_request_self_review_pins_pr_head_and_uses_the_raw_self_route(
     assert calls[0]["harness"] == "codex"
 
 
+def test_send_self_review_payload_maps_started_and_addresses_the_full_session(
+    monkeypatch,
+):
+    import fno.target_cli as target_cli
+    from fno.mail import cli as mail_cli
+
+    sends = []
+
+    def fake_raw_send(recipient, payload, **kwargs):
+        sends.append((recipient, payload, kwargs))
+        print("started")
+        import typer
+
+        raise typer.Exit(code=0)
+
+    monkeypatch.setattr(mail_cli, "_raw_send", fake_raw_send)
+    receipt = target_cli._send_self_review_payload(
+        payload="/review HEAD abc1234 of PR 123 against origin/main",
+        harness="codex",
+        session_id="0199abcdef0123456789abcdef012345",
+    )
+
+    assert receipt == {"outcome": "started", "transport": "mux-pane"}
+    # The self lane addresses the FULL session id: a codex head-8 is a
+    # timestamp bucket shared by every same-minute sibling, so resolution
+    # fails closed exactly when the fleet is busiest.
+    assert sends[0][0] == "0199abcdef0123456789abcdef012345"
+    assert sends[0][2]["review_request"] is True
+
+
 def test_request_self_review_refuses_when_local_head_does_not_match_pr(
     monkeypatch,
 ):
