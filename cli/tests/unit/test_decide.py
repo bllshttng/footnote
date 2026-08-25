@@ -1124,6 +1124,48 @@ def test_lifecycle_filtered_empty_list_reports_all_state_recovery(
     assert "fno backlog decisions 'x-history' --state all" in listed.output
 
 
+def test_empty_lane_filter_without_subject_builds_state_all_recovery(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-21T00:00:00Z",
+            "decision_id": "d-laneall1",
+            "decision": "standing answer",
+            "subject": "force-push",
+            "authority_source": "operator",
+        },
+    )
+
+    listed = runner.invoke(decide_app, ["list", "--lane", "coord"])
+    assert listed.exit_code == 0, listed.output
+    assert "0 coord decisions for '(all)'" in listed.output
+    assert "fno backlog decisions --lane coord --state all" in listed.output
+    assert "fno backlog decisions '(all)'" not in listed.output
+
+
+def test_empty_lane_filter_recovery_preserves_subject_and_lane(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-21T00:00:00Z",
+            "decision_id": "d-lanesub1",
+            "decision": "standing answer",
+            "subject": "force-push",
+            "authority_source": "operator",
+        },
+    )
+
+    listed = runner.invoke(
+        decide_app, ["list", "--subject", "force-push", "--lane", "coord"]
+    )
+    assert listed.exit_code == 0, listed.output
+    assert "fno backlog decisions 'force-push' --lane coord --state all" in listed.output
+
+
 def test_record_without_a_resolvable_subject_still_writes_the_event(
     root: Path, tmp_graph: Path, index: Path
 ):

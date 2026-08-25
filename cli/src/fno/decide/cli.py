@@ -720,16 +720,16 @@ def _list_decisions(
                         " The unattributed ones are pre-cutover, recorded "
                         "before authority was an earned value."
                     )
+                recovery_command = "fno backlog decisions"
+                if subject is not None:
+                    recovery_command += f" '{subject}'"
+                if lane is not None:
+                    recovery_command += f" --lane {lane}"
+                recovery_command += " --state all"
                 typer.echo(
                     f"backlog decisions: 0 {filter_label} decisions for '{label}', but "
                     f"{len(unfiltered)} {noun} sit under it: {lanes}."
-                    f"{hint} "
-                    + (
-                        f"Read all lifecycle states with: fno backlog decisions "
-                        f"'{label}' --state all."
-                        if state is not None
-                        else "Drop --lane to read them."
-                    ),
+                    f"{hint} Read all lifecycle states with: {recovery_command}.",
                     err=True,
                 )
                 return
