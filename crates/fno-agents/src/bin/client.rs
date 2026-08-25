@@ -2299,7 +2299,7 @@ fn format_success(
                             adopt_hint = Some(format!(
                                 "\nthe {harness} session record was the resume handle; \
                                  the transcript stays on disk.\nreverse it with: \
-                                 fno agents adopt {adopt_key}"
+                                 fno agents adopt {adopt_key} --cross-project"
                             ));
                         }
                     }
@@ -2860,8 +2860,8 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "drive-authority [--json]",
     "trace [options]",
     "ping",
-    "resume <name> [--print-command] [--message/-m <text>]",
-    "adopt <session-id>",
+    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>]",
+    "adopt <session-id> [--cross-project]",
     "attach <name>",
     "logs <name> [--follow] [options]",
     "loop run --driver target [options]",
@@ -3303,7 +3303,9 @@ mod tests {
         let out = format_success("rm", "bar-agent", &result, false, true, false)
             .expect("rm renders a receipt");
         assert!(
-            out.contains("fno agents adopt 01a02125-4eb4-7bf1-b74e-d238887eb092"),
+            out.contains(
+                "fno agents adopt 01a02125-4eb4-7bf1-b74e-d238887eb092 --cross-project"
+            ),
             "{out}"
         );
         assert!(!out.contains("adopt 01a02125\n"), "{out}");
@@ -3324,8 +3326,18 @@ mod tests {
             out.starts_with("removed: bar-agent (fno + claude)"),
             "{out}"
         );
-        assert!(out.contains("fno agents adopt 0a6e775f"), "{out}");
+        assert!(out.contains("fno agents adopt 0a6e775f --cross-project"), "{out}");
         assert!(out.contains("resume handle"), "{out}");
+    }
+
+    #[test]
+    fn resume_and_adopt_usage_advertise_recovery_flags() {
+        let resume = verb_usage("resume").expect("resume usage");
+        assert!(resume.contains("--cross-project"), "{resume}");
+        assert!(resume.contains("--cwd <existing-checkout>"), "{resume}");
+
+        let adopt = verb_usage("adopt").expect("adopt usage");
+        assert!(adopt.contains("--cross-project"), "{adopt}");
     }
 
     /// No row id means no handle to name, so the receipt stays exactly as it
