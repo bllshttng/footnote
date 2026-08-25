@@ -214,6 +214,26 @@ def test_live_root_pids_refuses_unavailable_pidless_worker_discovery(monkeypatch
     )
 
 
+def test_live_root_pids_refuses_pidless_live_pane(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="codex",
+        short_id="",
+        mux={"session": "main", "pane_id": 7},
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    assert doctor_footprint._live_root_pids() == (
+        set(),
+        "worker root discovery unavailable",
+    )
+
+
 def test_ac9_edge_cause_payload_is_bounded(monkeypatch) -> None:
     from fno import doctor_footprint
     from fno.footprint import parse_footprint
@@ -258,7 +278,12 @@ def test_ac5_edge_capacity_honors_cpu_quota(monkeypatch) -> None:
     from fno import doctor_footprint
 
     monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: 2.0)
-    monkeypatch.setattr(doctor_footprint.os, "process_cpu_count", lambda: 64)
+    monkeypatch.setattr(
+        doctor_footprint.os,
+        "process_cpu_count",
+        lambda: 64,
+        raising=False,
+    )
     monkeypatch.setattr(doctor_footprint.os, "cpu_count", lambda: 64)
     monkeypatch.setattr(
         doctor_footprint.os,

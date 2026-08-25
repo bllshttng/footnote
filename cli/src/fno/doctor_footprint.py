@@ -93,7 +93,7 @@ def _cgroup_mount_paths(fs_type: str) -> list[tuple[Path, str]]:
                 relative = path
         if relative is None:
             return []
-        mounts: list[Path] = []
+        mounts: list[tuple[Path, str]] = []
         for line in Path("/proc/self/mountinfo").read_text(
             encoding="utf-8"
         ).splitlines():
@@ -102,12 +102,21 @@ def _cgroup_mount_paths(fs_type: str) -> list[tuple[Path, str]]:
                 continue
             fields = before.split()
             if len(fields) > 4:
+                root = fields[3].replace("\\040", " ").replace("\\011", "\t")
                 mount = fields[4].replace("\\040", " ").replace("\\011", "\t")
                 if fs_type == "cgroup2" or "cpu" in after.split()[2].split(","):
-                    mounts.append(Path(mount))
+                    if root == "/":
+                        relative_mount_path = relative
+                    elif relative == root:
+                        relative_mount_path = "/"
+                    elif relative.startswith(root.rstrip("/") + "/"):
+                        relative_mount_path = relative[len(root) :]
+                    else:
+                        continue
+                    mounts.append((Path(mount), relative_mount_path))
         if not mounts:
-            mounts.append(Path("/sys/fs/cgroup"))
-        return [(mount, relative) for mount in mounts]
+            mounts.append((Path("/sys/fs/cgroup"), relative))
+        return mounts
     except (OSError, ValueError):
         return []
 
@@ -165,6 +174,17 @@ def _live_root_pids(
                 return roots, "worker root liveness unavailable"
             if root_live:
                 roots.add(row.pid)
+        unresolved_rows = [
+            row
+            for row in rows
+            if (
+                row.status in LIVE_STATUSES
+                and row.pid is None
+                and not (row.harness == "claude" and row.short_id)
+            )
+        ]
+        if unresolved_rows:
+            return roots, "worker root discovery unavailable"
         pidless_claude_rows = [
             row
             for row in rows
