@@ -490,6 +490,27 @@ def test_archive_force_refreshes_upstream_before_disclosure(repo: Path):
     assert not _git(repo, "branch", "--list", branch).stdout.strip()
 
 
+def test_archive_delete_branch_refuses_unverifiable_remote_state(repo: Path):
+    wt = repo / "wt-delete-unverifiable"
+    branch = "feature/delete-unverifiable"
+    _git(repo, "worktree", "add", str(wt), "-b", branch, "main")
+    _commit(wt, "unique.txt")
+    unique_sha = _git(wt, "rev-parse", "--short", "HEAD").stdout.strip()
+    _git(repo, "remote", "remove", "origin")
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), "--yes", "--delete-branch", str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    diag = f"stdout={r.stdout}\nstderr={r.stderr}"
+
+    assert r.returncode == 2, diag
+    assert "not verifiable" in r.stderr, diag
+    assert wt.exists(), diag
+    assert _git(repo, "rev-parse", "--short", branch).stdout.strip() == unique_sha
+
+
 def test_archive_refuses_unreadable_live_claim(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

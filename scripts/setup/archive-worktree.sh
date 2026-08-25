@@ -233,7 +233,7 @@ measure_strict_state() {
     fi
   fi
   if [[ -n "$FORCE_UNPUSHED_REASON" ]]; then
-    if [[ "$FORCE" -eq 1 || "$BRANCH" == "(detached)" || -n "$FORCE_UPSTREAM" ]]; then
+    if [[ "$FORCE" -eq 1 || "$DELETE_BRANCH" -eq 1 || "$BRANCH" == "(detached)" || -n "$FORCE_UPSTREAM" ]]; then
       echo "archive-worktree: unpushed state not verifiable at $TARGET: $FORCE_UNPUSHED_REASON" >&2
       echo "    Refusing removal until remote state is verifiable." >&2
       exit 2
