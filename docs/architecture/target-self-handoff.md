@@ -2,15 +2,15 @@
 
 ## Problem
 
-Target succession used to run automatically at blueprint/do and wave boundaries. The wave path interpreted context percentage as a reason to create a new session, while the universal context nudge prescribed compaction for the same condition. The two paths disagreed about identity: compaction preserves the session id, mail handle, claim, worktree, branch, and PR, while succession must transfer or reconstruct each one.
+Target succession used to run automatically at blueprint/do and wave boundaries. The wave path interpreted context percentage as a reason to create a new session, while the universal context nudge prescribed compaction for the same condition. The two paths disagreed about identity. Compaction preserves the session id, mail handle, claim, worktree, branch, and PR. Succession must transfer or reconstruct each one.
 
-The automatic path also collapsed five independent axes. It named the child from the parent harness, launched a hardcoded Claude process, omitted the selected model and account, treated registry liveness as readiness, released the parent claim before proving the child could work, and emitted `delegated` before proving the target command executed.
+The automatic path also collapsed five independent axes. It named the child from the parent harness. It launched a hardcoded Claude process, omitted the selected model and account, and treated registry liveness as readiness. It released the parent claim before proving the child can work. It emitted `delegated` before proving the target command executed.
 
 ## Trigger contract
 
 Context pressure triggers compaction. It never triggers capability escalation. Blueprint/do and wave boundaries continue in the current session.
 
-Capability escalation is explicit. An external operator or supervising king selects a stronger destination after reading evidence that the current worker cannot finish. The worker may signal that it is stuck; it may not select its own successor.
+Capability escalation is explicit. An external operator or supervising king selects a stronger destination after reading evidence that the current worker cannot finish. The worker signals that it is stuck. It must not select its own successor.
 
 Invoke the bundled transaction with an explicit destination:
 
@@ -21,7 +21,7 @@ bash skills/target/scripts/handoff.sh \
   --account makers
 ```
 
-Use `--dispatch-account <provider-record>` instead of `--account` for an autonomous destination record. The two flags are mutually exclusive. Raw `--settings` is not a public carrier; the spawn layer resolves account and route identity, then generates the correct settings file internally.
+Use `--dispatch-account <provider-record>` instead of `--account` for an autonomous destination record. The two flags are mutually exclusive. Raw `--settings` is not a public carrier. The spawn layer resolves account and route identity, then generates the correct settings file internally.
 
 ## Two-proof transaction
 
@@ -43,9 +43,9 @@ The helper owns the state-changing sequence. Its first proof happens while the p
 
 A failure before Step 6 stops and removes the uncommitted child while leaving the parent claim and manifest untouched. It emits `handoff_failed{reason=capability_probe}` and returns `parked`.
 
-A target-seed failure or missing child claim/manifest proof stops the child, releases any child claim held by the proven child identity, reacquires the parent claim, restores the archived manifest, releases the dispatch bridge, and emits the exact failed stage.
+A target-seed failure or a missing child proof stops the child. The unwind releases any child claim held by the proven child identity, reacquires the parent claim, restores the archived manifest, and releases the dispatch bridge. The failure event names the exact failed stage.
 
-If parent reacquisition fails, the manifest remains archived and the helper exits 12 with `handoff-claim-lost`; the parent must not continue. If manifest restoration fails after reacquisition, the helper exits 12 with `handoff-restore-failed`.
+If parent reacquisition fails, the manifest remains archived and the helper exits 12 with `handoff-claim-lost`. The parent must not continue. If manifest restoration fails after reacquisition, the helper exits 12 with `handoff-restore-failed`.
 
 | Exit | Meaning |
 |------|---------|
