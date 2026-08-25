@@ -3303,9 +3303,7 @@ mod tests {
         let out = format_success("rm", "bar-agent", &result, false, true, false)
             .expect("rm renders a receipt");
         assert!(
-            out.contains(
-                "fno agents adopt 01a02125-4eb4-7bf1-b74e-d238887eb092 --cross-project"
-            ),
+            out.contains("fno agents adopt 01a02125-4eb4-7bf1-b74e-d238887eb092 --cross-project"),
             "{out}"
         );
         assert!(!out.contains("adopt 01a02125\n"), "{out}");
@@ -3326,7 +3324,10 @@ mod tests {
             out.starts_with("removed: bar-agent (fno + claude)"),
             "{out}"
         );
-        assert!(out.contains("fno agents adopt 0a6e775f --cross-project"), "{out}");
+        assert!(
+            out.contains("fno agents adopt 0a6e775f --cross-project"),
+            "{out}"
+        );
         assert!(out.contains("resume handle"), "{out}");
     }
 

@@ -1203,6 +1203,7 @@ fn token_helper_output(
     token: &str,
     registry_path: &Path,
     cross_project: bool,
+    scope_cwd: Option<&Path>,
 ) -> std::io::Result<std::process::Output> {
     use std::process::Command;
 
@@ -1210,6 +1211,9 @@ fn token_helper_output(
     command
         .args(token_helper_args(token, registry_path, cross_project))
         .env("FNO_AGENTS_RUNTIME", "python");
+    if let Some(cwd) = scope_cwd {
+        command.current_dir(cwd);
+    }
     command.output()
 }
 
@@ -1223,8 +1227,9 @@ fn heal_token(
     token: &str,
     registry_path: &Path,
     cross_project: bool,
+    scope_cwd: Option<&Path>,
 ) -> Result<Option<Value>, String> {
-    let out = match token_helper_output(token, registry_path, cross_project) {
+    let out = match token_helper_output(token, registry_path, cross_project, scope_cwd) {
         Ok(o) => o,
         Err(exc) => {
             return Err(format!(
@@ -1339,7 +1344,7 @@ pub(crate) fn resolve_entry_with_heal(
     token: &str,
     registry_path: &Path,
 ) -> Result<Value, ResolveError> {
-    resolve_entry_with_heal_scoped(rows, token, registry_path, false)
+    resolve_entry_with_heal_scoped(rows, token, registry_path, false, None)
 }
 
 fn resolve_entry_with_heal_scoped(
@@ -1347,13 +1352,14 @@ fn resolve_entry_with_heal_scoped(
     token: &str,
     registry_path: &Path,
     cross_project: bool,
+    scope_cwd: Option<&Path>,
 ) -> Result<Value, ResolveError> {
     match find_agent_entry(rows, token) {
         Ok(e) => {
             if entry_session_tier(e, token) == Some(0) || !is_session_shaped(token) {
                 return Ok(e.clone());
             }
-            match heal_token(token, registry_path, cross_project) {
+            match heal_token(token, registry_path, cross_project, scope_cwd) {
                 Ok(Some(row)) => Ok(row),
                 Ok(None) => Err(ResolveError::Ambiguous(format!(
                     "cannot safely resolve token {} because the harness stores could not be checked. Use the full session id.",
@@ -1369,7 +1375,7 @@ fn resolve_entry_with_heal_scoped(
             if !is_session_shaped(token) {
                 return Err(err);
             }
-            match heal_token(token, registry_path, cross_project) {
+            match heal_token(token, registry_path, cross_project, scope_cwd) {
                 Ok(Some(row)) => Ok(row),
                 Ok(None) => Err(err),
                 Err(candidates) => Err(ResolveError::Ambiguous(candidates)),
@@ -1853,7 +1859,7 @@ fn synthesize_and_adopt(
         return Ok((value, fno_id, AdoptSource::Manifest));
     }
     // 3. Harness session stores (heal-token adopts best-effort and writes the row).
-    match heal_token(session_id, &registry_path, cross_project) {
+    match heal_token(session_id, &registry_path, cross_project, None) {
         Ok(Some(row)) => Ok((row, None, AdoptSource::HarnessStore)),
         Ok(None) => Err(AdoptError::NoEvidence),
         Err(msg) => Err(AdoptError::Io(msg)),
@@ -2501,6 +2507,17 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         Err(code) => return code,
     };
 
+    if let Some(path) = cwd_override.as_deref() {
+        if !Path::new(path).is_dir() {
+            eprintln!(
+                "fno agents resume: replacement cwd {} is not an existing directory.",
+                py_repr_str(path)
+            );
+            return 13;
+        }
+    }
+    let scope_cwd = cwd_override.as_deref().map(Path::new);
+
     let entries = match read_registry_entries(&home.registry_json()) {
         Ok(e) => e,
         Err(exc) => {
@@ -2513,6 +2530,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         &name,
         &home.registry_json(),
         cross_project,
+        scope_cwd,
     ) {
         Ok(e) => e,
         Err(err) => {
@@ -4599,6 +4617,50 @@ mod tests {
                 "--cross-project",
             ]
         );
+    }
+
+    #[test]
+    fn token_helper_runs_in_explicit_scope_cwd() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = cv_tmpdir();
+        let scope = dir.path().join("replacement");
+        fs::create_dir(&scope).unwrap();
+        let marker = dir.path().join("helper-cwd");
+        let fake_fno = dir.path().join("fno");
+        fs::write(
+            &fake_fno,
+            "#!/bin/sh\npwd > \"$FNO_TEST_HELPER_CWD\"\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_fno).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_fno, permissions).unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", dir.path());
+        std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
+        let output = token_helper_output(
+            "deadbeef",
+            &dir.path().join("registry.json"),
+            false,
+            Some(&scope),
+        )
+        .unwrap();
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        std::env::remove_var("FNO_TEST_HELPER_CWD");
+
+        assert!(output.status.success());
+        let observed = Path::new(fs::read_to_string(marker).unwrap().trim())
+            .canonicalize()
+            .unwrap();
+        assert_eq!(observed, scope.canonicalize().unwrap());
     }
 
     #[test]
