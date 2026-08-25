@@ -120,16 +120,28 @@ STUB
 run_init() {
   local _dir="$1"; shift
   (cd "$_dir" && env \
+    "${_SCRUB_ENV[@]}" \
     PATH="${_dir}/bin:${PATH}" \
     HOME="${_dir}/home" \
     TARGET_START=1 \
     TARGET_INPUT="x-261c" \
+    TARGET_SESSION_ID="contained-direct-worker" \
     "$@" \
     bash "$INIT") > "${_dir}/out.log" 2> "${_dir}/err.log"
 }
 
 calls() { wc -l < "$1/contained-calls.log" | tr -d ' '; }
 releases() { wc -l < "$1/release-calls.log" | tr -d ' '; }
+
+# Identity is injected, never inherited. The stub fno proves no harness session,
+# so the claim block requires the explicit TARGET_SESSION_ID below to run at all;
+# an ambient CLAUDE_CODE_SESSION_ID (a dev terminal inside a harness) would
+# fail-open as this run's identity and launder the scenarios green locally,
+# while CI, markerless, hits the unattributable-holder refusal and skips the
+# claim block these scenarios exist to reach.
+_SCRUB_ENV=(-u CLAUDE_CODE_SESSION_ID -u CLAUDECODE_SESSION_ID -u CODEX_THREAD_ID
+            -u CODEX_SESSION_ID -u GEMINI_SESSION_ID -u OPENCODE_SESSION_ID
+            -u TARGET_TRANSCRIPT_ID -u TARGET_SESSION_ID)
 
 # Assembled rather than written literally: the repo's forbidden-surface hook
 # blocks a shell redirect that mentions the manifest filename, and these
@@ -294,9 +306,11 @@ cat > "$TMP_PLAN/home/.fno/graph.json" <<GRAPH
 GRAPH
 
 (cd "$TMP_PLAN" && env \
+  "${_SCRUB_ENV[@]}" \
   PATH="${TMP_PLAN}/bin:${PATH}" \
   HOME="${TMP_PLAN}/home" \
   TARGET_START=1 \
+  TARGET_SESSION_ID="contained-direct-worker" \
   TARGET_PLAN_PATH="$PLAN_FILE" \
   bash "$INIT") > "${TMP_PLAN}/out.log" 2> "${TMP_PLAN}/err.log"
 _RC=$?
@@ -371,9 +385,11 @@ cat > "$TMP_AMB/home/.fno/graph.json" <<GRAPH
 GRAPH
 
 (cd "$TMP_AMB" && env \
+  "${_SCRUB_ENV[@]}" \
   PATH="${TMP_AMB}/bin:${PATH}" \
   HOME="${TMP_AMB}/home" \
   TARGET_START=1 \
+  TARGET_SESSION_ID="contained-direct-worker" \
   TARGET_PLAN_PATH="$AMB_PLAN" \
   bash "$INIT") > "${TMP_AMB}/out.log" 2> "${TMP_AMB}/err.log"
 

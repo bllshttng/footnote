@@ -2127,7 +2127,10 @@ fn acquire_named_session_claim(
             11,
             format!(
                 "fno agents resume: session {label} is held live by another writer \
-                 ({holder}, pid={pid}, host={host}); not opening a second writer on one transcript."
+                 ({holder}, pid={}, host={host}); not opening a second writer on one transcript.",
+                // The Python twins print the bare pid / `None`, never `Some(n)`.
+                pid.map(|p| p.to_string())
+                    .unwrap_or_else(|| "None".to_string())
             ),
         )),
         AcquireOutcome::Error(e) => Err((
@@ -3587,6 +3590,7 @@ pub fn run_claim(args: &[String]) -> i32 {
                 Some(p) => opts.pid = Some(p),
                 None => return 2,
             },
+            "--pid-unavailable" => opts.pid_unavailable = true,
             "--ttl-ms" => match take("--ttl-ms").and_then(|v| v.parse::<i64>().ok()) {
                 Some(t) => opts.ttl_ms = Some(t),
                 None => return 2,
@@ -3681,7 +3685,15 @@ pub fn run_claim(args: &[String]) -> i32 {
             out.insert("state".into(), Value::String(state.as_str().into()));
             if let Some(rec) = rec {
                 out.insert("holder".into(), Value::String(rec.holder));
-                out.insert("pid".into(), Value::Number(rec.pid.into()));
+                out.insert(
+                    "schema_version".into(),
+                    Value::Number(rec.schema_version.into()),
+                );
+                out.insert(
+                    "pid".into(),
+                    rec.pid.map(Value::from).unwrap_or(Value::Null),
+                );
+                out.insert("pid_unavailable".into(), Value::Bool(rec.pid_unavailable));
                 out.insert("host".into(), Value::String(rec.host));
                 // Liveness compares this, not host. Omitting it here would leave a
                 // caller that classifies ownership from status JSON on the mutable
