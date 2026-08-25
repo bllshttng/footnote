@@ -359,7 +359,7 @@ def test_pr270_gemini_default_paths_anchor_to_repo_root(
         f"anchored={anchored_events!r} subdir={subdir_events!r}"
     )
     assert not subdir_events.exists(), (
-        f"event leaked to subdir .fno; defaults are not anchored"
+        "event leaked to subdir .fno; defaults are not anchored"
     )
     # And source auto-detection found the repo-root state file -> "target".
     event = json.loads(anchored_events.read_text().splitlines()[0])
@@ -699,10 +699,10 @@ def test_hand_emitted_review_coverage_reaches_both_logs(
     )
     assert result.exit_code == 0, result.stderr
 
-    project_rows = [json.loads(l) for l in worktree_log.read_text().splitlines()]
+    project_rows = [json.loads(ln) for ln in worktree_log.read_text().splitlines()]
     assert len(project_rows) == 1
     assert project_rows[0]["type"] == "review_coverage"
-    global_rows = [json.loads(l) for l in global_journal.read_text().splitlines()]
+    global_rows = [json.loads(ln) for ln in global_journal.read_text().splitlines()]
     assert len(global_rows) == 1
     # The mirrored copy carries the repo scoping a cross-project reader needs;
     # the project copy needs none.
@@ -731,5 +731,5 @@ def test_mirror_does_not_double_when_the_project_log_is_the_global_one(
         ],
     )
     assert result.exit_code == 0, result.stderr
-    rows = [json.loads(l) for l in global_journal.read_text().splitlines()]
+    rows = [json.loads(ln) for ln in global_journal.read_text().splitlines()]
     assert len(rows) == 1
