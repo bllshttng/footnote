@@ -312,6 +312,8 @@ def apply_recoverable(
             )
             continue
         try:
+            from fno import paths
+
             hits = confine(
                 session_id,
                 [store_fallback.StoreHit("codex", session_id, candidate.cwd)],
@@ -320,7 +322,19 @@ def apply_recoverable(
             )
             if len(hits) != 1:
                 raise ValueError("project confinement did not return one verified hit")
-            adopt(hits[0], registry_path=registry_path, token=session_id)
+            # The follow-up path rides the adoption write itself: patching it
+            # in a second update afterward left a window where a failed patch
+            # refused the batch while the row - missing its resume path -
+            # stayed registered with no rollback.
+            recovery_log_path = (
+                paths.state_dir() / "agents" / session_id / "output.jsonl"
+            )
+            adopt(
+                hits[0],
+                registry_path=registry_path,
+                token=session_id,
+                log_path=str(recovery_log_path),
+            )
             entries = load(registry_path)
             exact = [
                 entry for entry in entries
@@ -333,40 +347,10 @@ def apply_recoverable(
                 raise ValueError(
                     "registry did not contain exactly one adopted Codex row"
                 )
-            if getattr(exact[0], "log_path", None) == "":
-                from fno import paths
-                recovery_log_path = (
-                    paths.state_dir()
-                    / "agents"
-                    / session_id
-                    / "output.jsonl"
+            if getattr(exact[0], "log_path", None) != str(recovery_log_path):
+                raise ValueError(
+                    "adopted Codex row is missing its full-ID follow-up path"
                 )
-
-                def fill_recovery_log_path(entries):
-                    for entry in entries:
-                        if (
-                            entry.harness == "codex"
-                            and entry.harness_session_id == session_id
-                            and entry.cwd == candidate.cwd
-                            and entry.origin == "adopted"
-                        ):
-                            entry.log_path = str(recovery_log_path)
-                    return entries
-
-                update(fill_recovery_log_path, path=registry_path)
-                entries = load(registry_path)
-                exact = [
-                    entry for entry in entries
-                    if getattr(entry, "harness", None) == "codex"
-                    and getattr(entry, "harness_session_id", None) == session_id
-                    and getattr(entry, "cwd", None) == candidate.cwd
-                    and getattr(entry, "origin", None) == "adopted"
-                    and getattr(entry, "log_path", None) == str(recovery_log_path)
-                ]
-                if len(exact) != 1:
-                    raise ValueError(
-                        "registry did not persist the adopted Codex follow-up path"
-                    )
             post_evidence, post_reason, post_detail = _recovery_transcript_readback(
                 candidate
             )

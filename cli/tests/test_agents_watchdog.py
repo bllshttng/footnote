@@ -1668,6 +1668,7 @@ def test_recoverable_apply_refuses_unusable_candidate_without_writing(tmp_path):
 
 def test_recoverable_apply_refuses_transcript_loss_after_adoption(tmp_path):
     from types import SimpleNamespace
+    from fno import paths
     from fno.agents.discover import CodexRecoveryScan
 
     candidate = _recovery_candidate(tmp_path, 4)
@@ -1681,7 +1682,9 @@ def test_recoverable_apply_refuses_transcript_loss_after_adoption(tmp_path):
                 cwd=candidate.cwd,
                 origin="adopted",
                 name="01a039bb",
-                log_path="/tmp/recovery-output.jsonl",
+                log_path=str(
+                    paths.state_dir() / "agents" / candidate.session_id / "output.jsonl"
+                ),
             )
         )
         candidate.rollout_path.write_text(
@@ -1846,15 +1849,18 @@ def test_cli_recoverable_json_apply_names_result_counts(monkeypatch, tmp_path, c
 
 def test_recoverable_apply_checks_the_exact_adopted_registry_row(tmp_path):
     from types import SimpleNamespace
+    from fno import paths
     from fno.agents.discover import CodexRecoveryScan
 
     candidate = _recovery_candidate(tmp_path, 5)
     session_id = candidate.session_id
     scan = CodexRecoveryScan((candidate,), True, 1, 0, 0, ())
     adopted = []
+    adopt_kwargs = {}
 
     def adopt(hit, **kwargs):
         adopted.append(hit)
+        adopt_kwargs.update(kwargs)
 
     results = watchdog.apply_recoverable(
         scan,
@@ -1867,7 +1873,15 @@ def test_recoverable_apply_checks_the_exact_adopted_registry_row(tmp_path):
             cwd=str(tmp_path),
             origin="adopted",
             name="019f48e1",
+            log_path=str(
+                paths.state_dir() / "agents" / session_id / "output.jsonl"
+            ),
         )],
+    )
+
+    # The follow-up path rides the adoption write, not a later patch.
+    assert adopt_kwargs["log_path"] == str(
+        paths.state_dir() / "agents" / session_id / "output.jsonl"
     )
 
     assert len(adopted) == 1
@@ -1882,6 +1896,33 @@ def test_recoverable_apply_checks_the_exact_adopted_registry_row(tmp_path):
             "detail": f"adopted {session_id} handle=019f48e1",
         }
     ]
+
+
+def test_recoverable_apply_refuses_a_row_without_the_follow_up_path(tmp_path):
+    from types import SimpleNamespace
+    from fno.agents.discover import CodexRecoveryScan
+
+    candidate = _recovery_candidate(tmp_path, 7)
+    session_id = candidate.session_id
+
+    results = watchdog.apply_recoverable(
+        CodexRecoveryScan((candidate,), True, 1, 0, 0, ()),
+        scope_cwd=tmp_path,
+        adopt_fn=lambda hit, **kwargs: None,
+        confine_fn=lambda token, hits, **kwargs: hits,
+        load_registry_fn=lambda path: [SimpleNamespace(
+            harness="codex",
+            harness_session_id=session_id,
+            cwd=candidate.cwd,
+            origin="adopted",
+            name="019f48e1",
+            log_path="",
+        )],
+    )
+
+    assert results[0]["outcome"] == "refused"
+    assert results[0]["reason"] == "adoption_failed"
+    assert "follow-up path" in results[0]["detail"]
 
 
 def test_recoverable_apply_names_a_vanished_candidate(tmp_path):
