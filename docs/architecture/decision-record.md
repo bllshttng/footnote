@@ -144,4 +144,4 @@ The standing query is law-only and lifecycle-filtered: `fno backlog decisions <t
 
 `--output PATH` writes the complete requested report, ignoring the display limit. `.json`, `.md`, and `.markdown` infer the format; `--format json|markdown` is explicit and conflicting or unknown formats are refused. The command prints a positive receipt with the exact path and byte count only after the file is written.
 
-`x-53c0` owns mail-origin classification, provenance carriage, and the law chokepoint. `x-12ba` owns `/fno-law`, human-origin proof, law recording, and coord-to-law promotion. This lifecycle node consumes those seams and owns expiry, retraction, review, export, and law-only reads. It does not add another origin classifier, law command, promotion path, or decision store.
+The upstream provenance seam owns mail-origin classification, stamped carriage, and the law chokepoint. The law command owns human-origin proof, law recording, and coord-to-law promotion. This lifecycle feature consumes those seams and owns expiry, retraction, review, export, and law-only reads. It does not add another origin classifier, law command, promotion path, or decision store.

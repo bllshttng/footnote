@@ -863,8 +863,9 @@ def _graph_node_for_pr(expiry_ref: dict[str, Any], entries: list[dict]) -> dict 
 
 def _coord_lifecycle(row: dict, entries: list[dict]) -> tuple[str, str | None]:
     """Return a coord row's lifecycle and positive closure evidence."""
-    ref = row.get("expiry_ref")
-    if not isinstance(ref, dict):
+    raw_ref = row.get("expiry_ref")
+    ref: dict[str, Any] | None = raw_ref if isinstance(raw_ref, dict) else None
+    if ref is None:
         ref = _derive_coord_expiry_ref(row.get("subject"), None)
     if not isinstance(ref, dict):
         return "unscoped", None
@@ -874,20 +875,20 @@ def _coord_lifecycle(row: dict, entries: list[dict]) -> tuple[str, str | None]:
         matches = [e for e in entries if isinstance(e, dict) and e.get("id") == node_id]
         if len(matches) != 1:
             return "unscoped", None
-        node = matches[0]
+        node_entry = matches[0]
         from fno.graph._reconcile import node_is_open
 
-        if node_is_open(node):
+        if node_is_open(node_entry):
             return "live", None
-        evidence = node.get("completed_at")
-        if not evidence and isinstance(node.get("supersession"), dict):
-            evidence = node["supersession"].get("verified_at")
+        evidence = node_entry.get("completed_at")
+        if not evidence and isinstance(node_entry.get("supersession"), dict):
+            evidence = node_entry["supersession"].get("verified_at")
         return "expired", f"node {node_id} closed at {evidence}"
     if kind == "pr":
-        node = _graph_node_for_pr(ref, entries)
-        if node is None:
+        pr_node = _graph_node_for_pr(ref, entries)
+        if pr_node is None:
             return "unscoped", None
-        if str(node.get("merge_status") or "").casefold() == "merged":
+        if str(pr_node.get("merge_status") or "").casefold() == "merged":
             return "expired", f"PR {ref.get('repository')}#{ref.get('number')} merged"
         return "live", None
     return "unscoped", None
@@ -989,12 +990,12 @@ def list_decisions(
     # recency once a backfill has interleaved journals and projections.
     superseded_by: "dict[str, tuple[str, str]]" = {}
     for row in decisions:
-        target = row.get("supersedes")
-        if not target:
+        superseded_target = row.get("supersedes")
+        if not isinstance(superseded_target, str) or not superseded_target:
             continue
         rank = (str(row.get("ts") or ""), str(row.get("decision_id") or ""))
-        if rank > superseded_by.get(str(target), ("", ""))[0:2]:
-            superseded_by[str(target)] = rank
+        if rank > superseded_by.get(superseded_target, ("", ""))[0:2]:
+            superseded_by[superseded_target] = rank
 
     # A d- token is a decision id before it is a subject. The id is the first
     # column of the row's own output, so answering "no decisions recorded" for
@@ -1267,7 +1268,7 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
         for row in _read_index(index, warn=False)[0]
     }
     preexisting = set(known)
-    counted: "set[str]" = set()
+    counted: "set[tuple[str, str]]" = set()
     already = 0
     invalid = 0
     unusable = 0
