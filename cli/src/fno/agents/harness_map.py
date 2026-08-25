@@ -143,6 +143,7 @@ _RESPONSE_ACTIONS = {"allow_once", "allow_always", "deny"}
 _SESSION_LANES = {
     "interactive_create",
     "interactive_resume",
+    "interactive_attach",
     "headless_create",
     "headless_resume",
 }
@@ -260,6 +261,12 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
                 raise _contract_error(harness, "resume_strategy", f"malformed {lane}")
             if kind == "unsupported" and tokens:
                 raise _contract_error(harness, "resume_strategy", f"unsupported {lane} has tokens")
+            if (
+                lane == "interactive_attach"
+                and kind != "unsupported"
+                and "{short_id}" not in tokens
+            ):
+                raise _contract_error(harness, "resume_strategy", f"{lane} drops short id")
             if lane.endswith("resume") and kind != "unsupported" and "{session_id}" not in tokens:
                 raise _contract_error(harness, "resume_strategy", f"{lane} drops session id")
         if caps["stop_strategy"] not in _STOP_STRATEGIES:
@@ -366,8 +373,14 @@ def capabilities(harness: str) -> dict:
     return caps
 
 
-def render_session_argv(harness: str, lane: str, session_id: Optional[str] = None) -> list[str]:
-    """Render the identity-bearing create/resume skeleton for one harness lane."""
+def render_session_argv(
+    harness: str,
+    lane: str,
+    session_id: Optional[str] = None,
+    *,
+    short_id: Optional[str] = None,
+) -> list[str]:
+    """Render one form with the identity type its contract declares."""
     form = capabilities(harness)["resume_strategy"]["forms"].get(lane)
     if form is None:
         raise DispatchResolveError(f"harness {harness!r} resume_strategy has no lane {lane!r}")
@@ -376,6 +389,20 @@ def render_session_argv(harness: str, lane: str, session_id: Optional[str] = Non
             f"harness {harness!r} lane {lane!r} is unsupported by resume_strategy"
         )
     tokens = list(form["tokens"])
+    if "{short_id}" in tokens:
+        if session_id:
+            raise DispatchResolveError(
+                f"harness {harness!r} lane {lane!r} needs a short_id, not a session_id"
+            )
+        if not short_id:
+            raise DispatchResolveError(
+                f"harness {harness!r} lane {lane!r} needs a non-empty short_id"
+            )
+        return [short_id if token == "{short_id}" else token for token in tokens]
+    if short_id:
+        raise DispatchResolveError(
+            f"harness {harness!r} lane {lane!r} accepts a session_id, not a short_id"
+        )
     if "{session_id}" not in tokens:
         return tokens
     if session_id:

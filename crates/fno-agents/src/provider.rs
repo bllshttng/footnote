@@ -183,18 +183,21 @@ pub struct ClaudeProvider;
 /// `--replay-user-messages` echoes injected turns back as delivery receipts
 /// (the frame parser discriminates the echo from the reply).
 pub fn claude_stream_json_resume_argv(session_uuid: &str) -> Vec<String> {
-    vec![
-        "claude".into(),
-        "-p".into(),
-        "--resume".into(),
-        session_uuid.into(),
+    let mut argv = crate::harness_capabilities::render_session_argv(
+        "claude",
+        "headless_resume",
+        Some(session_uuid),
+    )
+    .expect("embedded claude headless-resume capability");
+    argv.extend([
         "--input-format".into(),
         "stream-json".into(),
         "--output-format".into(),
         "stream-json".into(),
         "--include-partial-messages".into(),
         "--replay-user-messages".into(),
-    ]
+    ]);
+    argv
 }
 
 impl Provider for ClaudeProvider {
@@ -208,9 +211,12 @@ impl Provider for ClaudeProvider {
         // Agent-SDK-credit-billed and MUST NOT be used.
         // The seed rides behind `--` so a leading-flag seed is the prompt
         // positional, not a claude flag (verified against the real CLI).
-        let mut argv =
-            crate::harness_capabilities::render_session_argv("claude", "headless_create", None)
-                .expect("embedded claude headless-create capability");
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "claude",
+            "interactive_create",
+            ctx.session_id.as_deref(),
+        )
+        .expect("embedded claude interactive-create capability");
         argv.extend([
             "--bg".into(),
             "--name".into(),
@@ -222,18 +228,19 @@ impl Provider for ClaudeProvider {
     }
 
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
-        // Subprocess fallback form (`claude --resume <id> --print -- <msg>`). The
+        // Subprocess fallback form (`claude -p --resume <id> -- <msg>`). The
         // production daemon prefers the Phase 5 messaging-socket poke when a
         // `messaging_socket_path` is registered; this argv exists so the trait
         // is satisfiable without the socket (e.g. tests, socket-unavailable
-        // degradation). `--print` is non-streaming (Domain Pitfall).
+        // degradation). `-p` is the non-streaming headless marker (Domain
+        // Pitfall).
         let mut argv = crate::harness_capabilities::render_session_argv(
             "claude",
             "headless_resume",
             Some(&ctx.session_id),
         )
         .expect("embedded claude headless-resume capability");
-        argv.extend(["--print".into(), "--".into(), ctx.message.clone()]);
+        argv.extend(["--".into(), ctx.message.clone()]);
         argv
     }
 
@@ -313,11 +320,12 @@ impl ClaudeInteractiveProvider {
     /// `--session-id` at spawn so the transcript is discoverable and the
     /// `session:<uuid>` claim keys on it).
     fn interactive_argv(ctx: &CreateContext) -> Vec<String> {
-        let mut argv = vec!["claude".into()];
-        if let Some(sid) = ctx.session_id.as_deref().filter(|s| !s.is_empty()) {
-            argv.push("--session-id".into());
-            argv.push(sid.to_string());
-        }
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "claude",
+            "interactive_create",
+            ctx.session_id.as_deref(),
+        )
+        .expect("embedded claude interactive-create capability");
         // Sentinel-prompt seam (E4.1): a relay-targeted spawn steers replies via
         // `--append-system-prompt`; absent, the pane runs unsteered. Pushed before
         // the positional message (which must stay last).
@@ -354,7 +362,12 @@ impl Provider for ClaudeInteractiveProvider {
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
         // Interactive resume: `claude --resume <uuid>` reattaches the session's
         // TUI. The resume id IS the session, so no separate `--session-id` pin.
-        let mut argv = vec!["claude".into(), "--resume".into(), ctx.session_id.clone()];
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "claude",
+            "interactive_resume",
+            Some(&ctx.session_id),
+        )
+        .expect("embedded claude interactive-resume capability");
         if !ctx.message.is_empty() {
             // Behind `--`, same fence as interactive_argv.
             argv.push("--".into());
@@ -1496,7 +1509,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_resume_argv_is_resume_print() {
+    fn claude_resume_argv_is_headless_resume() {
         let ctx = ResumeContext {
             session_id: "7c5dcf5d".into(),
             message: "follow up".into(),
@@ -1506,14 +1519,7 @@ mod tests {
         };
         assert_eq!(
             ClaudeProvider.resume_argv(&ctx),
-            vec![
-                "claude",
-                "--resume",
-                "7c5dcf5d",
-                "--print",
-                "--",
-                "follow up"
-            ]
+            vec!["claude", "-p", "--resume", "7c5dcf5d", "--", "follow up"]
         );
     }
 

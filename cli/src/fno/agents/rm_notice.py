@@ -49,13 +49,28 @@ TEARDOWN_HARNESSES = frozenset({"claude", "codex"})
 def resume_handle_notice(name: str, harness: str, handle: str) -> str:
     """The stderr block warning that a reap forfeits a resume handle.
 
-    ``handle`` is whatever ``adopt`` accepts back: a claude row's 8-hex
-    ``short_id``, or a full harness session id.
+    A full harness session UUID is the durable recovery handle. A Claude
+    short-id remains a best-effort lookup only while the harness evidence that
+    resolves it still exists.
     """
+    is_short_id = len(handle) == 8 and all(
+        char in "0123456789abcdef" for char in handle
+    )
+    if is_short_id:
+        recovery_line = (
+            "      This short id is a best-effort lookup only while durable "
+            "harness evidence still resolves it.\n"
+        )
+    else:
+        recovery_line = (
+            "      Keep this full harness session UUID as the resume handle and "
+            "recovery handle.\n"
+        )
     return (
         f"WARN: removing the {harness} session record for {name} ({handle}).\n"
-        "      That record is the resume handle. The transcript stays on disk.\n"
-        f"      Reverse it with: {ADOPT_VERB} {handle}\n"
+        "      The transcript stays on disk.\n"
+        + recovery_line
+        + f"      Reverse it with: {ADOPT_VERB} {handle}\n"
     )
 
 
