@@ -167,7 +167,7 @@ def default_codex_sessions_dir() -> Path:
     return Path(os.path.expanduser("~")) / ".codex" / "sessions"
 
 
-def _codex_daemon_threads_raw() -> Optional[list[dict]]:
+def _codex_daemon_threads_raw(*, env: Optional[dict[str, str]] = None) -> Optional[list[dict]]:
     """Raw ``threads`` rows the app-server daemon reports, or None.
 
     None covers every failure mode (missing/stale binary, unavailable daemon,
@@ -188,6 +188,7 @@ def _codex_daemon_threads_raw() -> Optional[list[dict]]:
             capture_output=True,
             text=True,
             timeout=_CODEX_DAEMON_DISCOVERY_TIMEOUT_SECONDS,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return None

@@ -70,6 +70,7 @@ context
 cost
 decide list
 decide reindex
+decide retract !--origin
 delivery
 dispatch
 do

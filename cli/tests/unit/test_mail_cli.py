@@ -11,6 +11,8 @@ unrelated purpose (approvals/notify/outstanding/the king board); mail's old
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 
 import pytest
 from typer.testing import CliRunner
@@ -46,6 +48,202 @@ def mailbox(tmp_path, monkeypatch):
     """Co-isolate the md render (FNO_INBOX_ROOT), the bus log, and the roster under tmp."""
     isolate_mailbox(tmp_path, monkeypatch)
     return tmp_path
+
+
+@pytest.fixture
+def ruling_graph(mailbox, monkeypatch):
+    graph_path = mailbox / ".fno" / "graph.json"
+    graph_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "x-511a",
+                        "slug": "mailed-ruling",
+                        "title": "mailed ruling",
+                        "status": "ready",
+                        "type": "feature",
+                        "priority": "p2",
+                        "details": "Original node details.",
+                    }
+                ]
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    import fno.graph._constants as graph_constants
+    import fno.graph.store as graph_store
+
+    monkeypatch.setattr(graph_constants, "GRAPH_JSON", graph_path)
+    monkeypatch.setattr(graph_store, "GRAPH_JSON", graph_path)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
+    return graph_path
+
+
+def _graph_details(graph_path):
+    return json.loads(graph_path.read_text(encoding="utf-8"))["entries"][0]["details"]
+
+
+def _hosted_dispatch(monkeypatch, before_transport=None):
+    calls = []
+
+    def dispatch_send(**kwargs):
+        if before_transport is not None:
+            before_transport()
+        calls.append(kwargs)
+        from fno.agents.dispatch import DispatchSendResult
+
+        return DispatchSendResult(msg_id="msg-ruling1", delivery="hosted")
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_send", dispatch_send)
+    return calls
+
+
+def test_named_send_ruling_appends_dated_node_block_before_transport(
+    runner, ruling_graph, monkeypatch
+):
+    marker = "Ruling sentinel 511a must survive a fresh node read."
+    calls = _hosted_dispatch(
+        monkeypatch,
+        before_transport=lambda: marker in _graph_details(ruling_graph)
+        or pytest.fail("ruling was not projected before transport"),
+    )
+
+    sent = runner.invoke(
+        app,
+        [
+            "agents", "mail", "send", "worker-one", marker,
+            "--from-name", "king", "--ruling", "x-511a",
+        ],
+    )
+
+    assert sent.exit_code == 0, sent.output
+    assert sent.stdout == "msg-ruling1 delivered (hosted)\n"
+    assert len(calls) == 1
+    fresh = runner.invoke(app, ["backlog", "get", "x-511a"])
+    assert fresh.exit_code == 0, fresh.output
+    assert marker in fresh.stdout
+    assert re.search(r"### Ruling \(\d{4}-\d{2}-\d{2}\)", fresh.stdout)
+
+
+def test_named_send_ruling_uses_explicit_cwd_graph(
+    runner, ruling_graph, monkeypatch, tmp_path
+):
+    foreign_repo = tmp_path / "foreign-répo"
+    foreign_graph = foreign_repo / "state" / "graph.json"
+    foreign_graph.parent.mkdir(parents=True)
+    foreign_graph.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "x-511a",
+                        "slug": "foreign-mailed-ruling",
+                        "title": "foreign mailed ruling",
+                        "status": "ready",
+                        "type": "feature",
+                        "priority": "p2",
+                        "details": "Foreign node details.",
+                    }
+                ]
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    foreign_settings = foreign_repo / ".fno" / "settings.yaml"
+    foreign_settings.parent.mkdir(parents=True)
+    foreign_settings.write_text(
+        "schema_version: 1\nconfig:\n  paths:\n    graph_json: "
+        + json.dumps(str(foreign_graph))
+        + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "init", "-q", str(foreign_repo)],
+        check=True,
+    )
+    nested_workdir = foreign_repo / "nested" / "worker"
+    nested_workdir.mkdir(parents=True)
+    real_run = subprocess.run
+    probe_encodings = []
+
+    def capture_git_probe(*args, **kwargs):
+        command = args[0] if args else kwargs.get("args", [])
+        if command[:2] == ["git", "-C"]:
+            probe_encodings.append(kwargs.get("encoding"))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr("fno.mail.cli.subprocess.run", capture_git_probe)
+    marker = "Foreign ruling sentinel must land only in the requested cwd."
+    _hosted_dispatch(
+        monkeypatch,
+        before_transport=lambda: marker in _graph_details(foreign_graph)
+        or pytest.fail("ruling did not use the explicit cwd graph"),
+    )
+
+    sent = runner.invoke(
+        app,
+        [
+            "agents", "mail", "send", "worker-one", marker,
+            "--from-name", "king", "--cwd", str(nested_workdir),
+            "--ruling", "x-511a",
+        ],
+    )
+
+    assert sent.exit_code == 0, sent.output
+    assert probe_encodings == ["utf-8"]
+    assert marker in _graph_details(foreign_graph)
+    assert _graph_details(ruling_graph) == "Original node details."
+
+
+def test_send_ruling_unknown_node_refuses_before_mail(
+    runner, ruling_graph, monkeypatch
+):
+    calls = _hosted_dispatch(monkeypatch)
+
+    sent = runner.invoke(
+        app,
+        [
+            "agents", "mail", "send", "worker-one",
+            "This ruling names no real node.", "--from-name", "king",
+            "--ruling", "x-dead",
+        ],
+    )
+
+    assert sent.exit_code != 0
+    assert calls == []
+    assert _graph_details(ruling_graph) == "Original node details."
+    assert "ruling node not found" in sent.stderr
+
+
+@pytest.mark.parametrize(
+    "lane_args",
+    [
+        ["worker-one", "/review", "--raw"],
+        ["worker-one", "Ruling body.", "--kind", "heads-up"],
+        ["Ruling body.", "--to-project", "fno"],
+        ["Ruling body.", "--to-self"],
+    ],
+    ids=["raw", "kind", "project", "self"],
+)
+def test_send_ruling_refuses_non_named_worker_lanes_before_side_effects(
+    runner, ruling_graph, monkeypatch, lane_args
+):
+    calls = _hosted_dispatch(monkeypatch)
+
+    sent = runner.invoke(
+        app,
+        ["agents", "mail", "send", *lane_args, "--ruling", "x-511a"],
+    )
+
+    assert sent.exit_code != 0
+    assert calls == []
+    assert _graph_details(ruling_graph) == "Original node details."
+    assert "--ruling supports only send <worker> <message>" in sent.stderr
 
 
 # ---------------------------------------------------------------------------

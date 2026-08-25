@@ -596,7 +596,13 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
     raise AgentResolutionError(f"no agent matching {token!r}; {_ACCEPTED_FORMS}")
 
 
-def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
+def resolve_agent(
+    token: str,
+    *,
+    path: Optional[Path] = None,
+    scope_cwd: Optional[str] = None,
+    cross_project: bool = False,
+) -> ResolvedAgent:
     """Resolve ``token`` to one registry entry, loading the registry first.
 
     Wraps :func:`resolve_agent_in`; a malformed/unreadable registry becomes a
@@ -616,13 +622,29 @@ def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
             f"registry unreadable ({exc}); cannot resolve {token!r}",
             unavailable=True,
         ) from exc
-    return resolve_agent_across_sources(entries, token, path=path)
+    return resolve_agent_across_sources(
+        entries,
+        token,
+        path=path,
+        scope_cwd=scope_cwd,
+        cross_project=cross_project,
+    )
 
 
 def resolve_agent_across_sources(
-    entries: list, token: str, *, path: Optional[Path] = None
+    entries: list,
+    token: str,
+    *,
+    path: Optional[Path] = None,
+    scope_cwd: Optional[str] = None,
+    cross_project: bool = False,
 ) -> ResolvedAgent:
-    """Resolve one token against a registry snapshot and every harness store."""
+    """Resolve one token against a registry snapshot and every harness store.
+
+    ``scope_cwd`` and ``cross_project`` are selection inputs only. They flow to
+    the single store-healing owner so every caller keeps the same confinement
+    and complete-namespace rules.
+    """
     try:
         return resolve_registered_agent_across_sources(entries, token)
     except AgentResolutionError as exc:
@@ -631,7 +653,12 @@ def resolve_agent_across_sources(
         # the winner the registry deliberately refused to pick.
         if exc.ambiguous or exc.unavailable:
             raise
-        entry = resolve_from_harness_store(token, registry_path=path)
+        entry = resolve_from_harness_store(
+            token,
+            registry_path=path,
+            scope_cwd=scope_cwd,
+            cross_project=cross_project,
+        )
         if entry is None:
             raise
         return ResolvedAgent(entry=entry, matched_by="harness_store")

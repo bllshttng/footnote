@@ -805,24 +805,52 @@ case "${1:-status}" in
         ;;
 
     archive)
-        NAME="${2:-}"
+        shift
+        NAME=""
+        ARCHIVE_ARGS=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --force|--yes|-y|--delete-branch)
+                    ARCHIVE_ARGS+=("$1")
+                    shift
+                    ;;
+                --)
+                    shift
+                    if [[ $# -ne 1 ]]; then
+                        echo "Usage: worktree-lifecycle.sh archive [--force] [--yes] [--delete-branch] <name|path>" >&2
+                        exit 1
+                    fi
+                    NAME="$1"
+                    shift
+                    ;;
+                -*)
+                    echo "worktree archive: unknown flag: $1" >&2
+                    exit 1
+                    ;;
+                *)
+                    if [[ -n "$NAME" ]]; then
+                        echo "worktree archive: expected one worktree name or path" >&2
+                        exit 1
+                    fi
+                    NAME="$1"
+                    shift
+                    ;;
+            esac
+        done
         if [[ -z "$NAME" ]]; then
             echo "Usage: worktree-lifecycle.sh archive <worktree-name>"
             exit 1
         fi
 
-        WT=".claude/worktrees/$NAME"
-        if [[ -d "$WT" ]]; then
-            BRANCH=$(cd "$WT" && git branch --show-current)
-            if git worktree remove --force "$WT" 2>/dev/null; then
-                echo "Archived: directory removed, branch $BRANCH preserved in git"
-            else
-                echo "Archive FAILED: $WT could not be removed (try: git worktree prune)"
-                exit 1
-            fi
-        else
-            echo "Worktree not found: $WT"
+        ARCHIVE_SCRIPT="${_WT_LIFECYCLE_DIR}/../setup/archive-worktree.sh"
+        if [[ ! -f "$ARCHIVE_SCRIPT" ]]; then
+            echo "worktree archive: guarded script not found at $ARCHIVE_SCRIPT" >&2
             exit 1
+        fi
+        if [[ ${#ARCHIVE_ARGS[@]} -gt 0 ]]; then
+            exec bash "$ARCHIVE_SCRIPT" "${ARCHIVE_ARGS[@]}" "$NAME"
+        else
+            exec bash "$ARCHIVE_SCRIPT" "$NAME"
         fi
         ;;
 

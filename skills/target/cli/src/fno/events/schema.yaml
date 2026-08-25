@@ -292,6 +292,9 @@ event_types:
         self_attested_count:
           type: integer
           description: "How many of reviewed_count are the AUTHOR attesting its own diff (attestation_origin == self_attested). Recorded, never gating, and deliberately not named `independent_count` - the schema is explicit below that other_session is not independence, and this must not launder that. A self-attested pass counts, because self-review is the DEFAULT path (config.review.self_review_required floors the harness review verb onto the author's own head), so refusing one would wedge every single-session PR. What x-62a1 asked for is that the answer be visible in the verdict rather than asserted in prose: a gate that wants to demand a second reader is now one predicate over this number, not a redesign. Present alongside reviewed_count."
+        author_session_id:
+          type: string
+          description: "The authoring harness session used to classify each local verdict's attestation_origin. Persisted with the coverage snapshot so later status reads never substitute a newer live worktree manifest owner for the historical comparison. Omitted when authorship was unmeasured."
         verdicts:
           type: array
           description: "One entry per reviewer over one producer axis. Producer is named by axis so the chatgpt-codex-connector App and the local codex CLI are distinct."
@@ -2370,6 +2373,9 @@ event_types:
         subject:
           type: string
           description: "Optional. The node, file, or area the decision governs. The recovery key: `fno backlog decisions <subject>` and the graph projection read it."
+        expiry_ref:
+          type: object
+          description: "Optional exact coordination closure reference. Node refs name node_id. PR refs name repository and number, with an optional URL."
         options:
           type: array
           description: "Optional. What was on the table, so a later reader sees what was rejected."
@@ -2394,6 +2400,42 @@ event_types:
         supersedes:
           type: string
           description: "Optional. The decision_id this overturns, when it overturns one."
+    consumers: [operator, fno backlog decisions]
+
+  - name: decision_retracted
+    retention: durable
+    description: "An append-only retraction of one decision. The original operator_decision remains unchanged and readers fold the newest valid event into its lifecycle."
+    sources: [target, hook, subagent, test]
+    data:
+      required: [retraction_id, target_decision_id, subject, reason]
+      properties:
+        retraction_id:
+          type: string
+          description: "Unique id for this retraction event. Distinct retractions of one target remain independently recoverable."
+        target_decision_id:
+          type: string
+          description: "The decision_id being retracted."
+        subject:
+          type: string
+          description: "The target decision subject, copied into the audit event for safe recovery."
+        reason:
+          type: string
+          description: "Why this decision must stop counting."
+        retracted_by:
+          type: string
+          description: "Stamped caller identity when available."
+        attested_by:
+          type: string
+          description: "Optional attended-terminal attestation."
+        relayed_by:
+          type: string
+          description: "Optional caller-supplied name kept separate from the stamp."
+        origin:
+          type: string
+          description: "Optional mail-channel provenance."
+        authority_source:
+          type: string
+          description: "Optional authority lane used for the retraction."
     consumers: [operator, fno backlog decisions]
 
   - name: agent_raw_inject
@@ -2820,6 +2862,33 @@ event_types:
         transcript_path:
           type: string
           description: "Transcript path that was probed (best-effort; may be empty if manifest was unreadable)."
+    consumers: [operator]
+
+  - name: dispatch_selection_diverged
+    retention: durable
+    description: "An independent planned-unclaimed observer named a node absent from the normal dispatch selector. This is completeness evidence and the node is recovered only after normal dispatch safety gates run."
+    sources: [backlog]
+    data:
+      required: [node_id, selector_command, observer_command, scope, selector_entries_scanned, observer_entries_scanned]
+      properties:
+        node_id:
+          type: string
+          description: "The observer row omitted by the normal selector."
+        selector_command:
+          type: string
+          description: "The selector surface whose result omitted the node."
+        observer_command:
+          type: string
+          description: "The independent observer surface that named the node."
+        scope:
+          type: string
+          description: "Project, mission, roadmap, and parent scope used for the comparison."
+        selector_entries_scanned:
+          type: integer
+          description: "Number of rows returned by the selector read used in the comparison."
+        observer_entries_scanned:
+          type: integer
+          description: "Number of graph entries scanned by the independent observer."
     consumers: [operator]
 
   - name: advance_dispatched

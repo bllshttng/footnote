@@ -61,6 +61,12 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     # state `done` does and is corrected by the same verb.
     Pair("backlog", "reconcile", "reopen"),
     Pair("backlog", "archive", "unarchive"),
+    Pair(
+        "backlog",
+        "decide-retract",
+        None,
+        "retractions are append-only and have no inverse",
+    ),
     # -- existence transitions --
     Pair("backlog", "add", "remove"),
     Pair("backlog", "idea", "remove"),
@@ -89,14 +95,14 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
     "backlog": frozenset({
         "add", "advance", "album", "annotate", "archive", "archive-dedupe-ids",
         "bases", "batch", "board", "capture", "carveout", "collisions", "cost",
-        "decide", "decide-reindex", "decisions", "decompose", "defer",
+        "decide", "decide-reindex", "decide-retract", "decisions", "decompose", "defer",
         "dispatch-lanes", "done", "epic", "find", "get", "groom",
         "idea", "intake", "lane-fill", "lanes", "maintain", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
         "rank", "ready", "reconcile", "reconcile-findings", "rehash", "retro",
         "relatedness", "remove", "reopen", "reprioritize", "roadmap",
         "session", "status", "supersede", "triage",
-        "unarchive", "unclaim", "undefer", "unqueue", "unsupersede", "update",
+        "unarchive", "unclaim", "undefer", "undispatched", "unqueue", "unsupersede", "update",
         "view",
     }),
     "carveout": frozenset({"add", "list", "resolve", "update"}),

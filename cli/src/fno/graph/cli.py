@@ -68,12 +68,14 @@ cli.add_typer(_batch_cli, name="batch", hidden=True)
 # under backlog. The old top-level spelling remains a lazy shim.
 from fno.decide.cli import (  # noqa: E402
     backlog_decide,
+    backlog_decide_retract,
     backlog_decide_reindex,
     backlog_decisions,
 )
 
 cli.command("decide", hidden=True)(backlog_decide)
 cli.command("decisions", hidden=True)(backlog_decisions)
+cli.command("decide-retract", hidden=True)(backlog_decide_retract)
 cli.command("decide-reindex", hidden=True)(backlog_decide_reindex)
 
 
@@ -4204,6 +4206,101 @@ def cmd_next(
             "mission_from_msg_id": e.get("mission_from_msg_id"),
         }
 
+    from fno.backlog.undispatched import (
+        ObserverReadError,
+        build_selection_divergence_event,
+        classify_planned_unclaimed,
+        prepend_missed_rows,
+        read_claim_snapshot,
+        read_planned_unclaimed,
+        read_planned_unclaimed_from_entries,
+    )
+    try:
+        if _external:
+            assert pre_entries is not None
+            read_planned_unclaimed_from_entries(
+                pre_entries,
+                project=None if all_ else project_filter,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent_target_id,
+            )
+        else:
+            read_planned_unclaimed(
+                graph_path=_graph_path(),
+                project=None if all_ else project_filter,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent_target_id,
+            )
+    except ObserverReadError as exc:
+        typer.echo(f"Error: {exc}; selection refused", err=True)
+        raise typer.Exit(code=1) from exc
+
+    def _with_observer(candidates: list[dict], source_entries: list[dict]) -> list[dict]:
+        by_id = {entry.get("id"): entry for entry in source_entries}
+        try:
+            current_observer = classify_planned_unclaimed(
+                source_entries,
+                read_claim_snapshot(),
+                project=None if all_ else project_filter,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent_target_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown state refuses recovery
+            typer.echo(f"Error: observer revalidation failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        claimed = _require_live_claimed_node_ids("backlog next observer recovery")
+        container_ids = _container_ids(source_entries)
+        from fno.backlog.advance import _guard_staleness_days, selection_guards
+
+        guard_now = datetime.now(timezone.utc)
+        guard_stale = _guard_staleness_days()
+        safe_rows = []
+        for row in current_observer["rows"]:
+            entry = by_id.get(row.get("id"))
+            if entry is None or row.get("id") in claimed:
+                continue
+            if entry.get("completed_at") or _has_unmerged_open_pr(entry):
+                continue
+            if entry.get("id") in container_ids or _is_batched_member(entry):
+                continue
+            if selection_guards(
+                entry,
+                by_id,
+                guard_now,
+                staleness_days=guard_stale,
+            ):
+                continue
+            safe_rows.append(entry)
+        safe_observer = {**current_observer, "rows": safe_rows}
+        merged, missed = prepend_missed_rows(candidates, safe_observer)
+        if missed:
+            scope = f"project={(project_filter if not all_ else '*')}"
+            if mission:
+                scope += f",mission={mission}"
+            if roadmap_id:
+                scope += f",roadmap={roadmap_id}"
+            for row in missed:
+                try:
+                    from fno import paths
+                    from fno.events import append_event
+
+                    append_event(
+                        build_selection_divergence_event(
+                            node_id=row["id"],
+                            selector_command="fno backlog next",
+                            scope=scope,
+                            selector_entries_scanned=len(candidates),
+                            observer_entries_scanned=current_observer["entries_scanned"],
+                        ),
+                        paths.project_events_json(),
+                    )
+                except Exception as exc:  # noqa: BLE001 - receipt is non-gating
+                    typer.echo(f"warning: selection divergence event failed: {exc}", err=True)
+        return merged
+
     if claim:
         if _external:
             # External claims use the claims subsystem only: no graph
@@ -4215,7 +4312,8 @@ def cmd_next(
             from fno.claims.core import ClaimHeldByOther, acquire_claim
             from fno.claims.io import claims_root_for
 
-            candidates = _pick_ready(pre_entries)
+            assert pre_entries is not None
+            candidates = _with_observer(_pick_ready(pre_entries), pre_entries)
             for winner in candidates:
                 key = f"node:{winner['id']}"
                 # TWO things have to be true for this lock to protect anything,
@@ -4247,7 +4345,7 @@ def cmd_next(
                 break
         else:
             def mutator(entries):
-                candidates = _pick_ready(entries)
+                candidates = _with_observer(_pick_ready(entries), entries)
                 if candidates:
                     winner = candidates[0]
                     winner["locked_by"] = claim
@@ -4256,8 +4354,12 @@ def cmd_next(
                 return entries
             locked_mutate_graph(_graph_path(), mutator)
     else:
-        entries = pre_entries if _external else read_graph(_graph_path())
-        candidates = _pick_ready(entries)
+        if _external:
+            assert pre_entries is not None
+            entries = pre_entries
+        else:
+            entries = read_graph(_graph_path())
+        candidates = _with_observer(_pick_ready(entries), entries)
         if candidates:
             result[0] = _node_summary(candidates[0])
 
@@ -4291,6 +4393,53 @@ def cmd_next(
             typer.echo(f"warning: starvation receipts failed: {exc}", err=True)
 
     typer.echo(json.dumps(result[0], indent=2) if result[0] else "null")
+
+
+# -- undispatched --
+
+@cli.command("undispatched", hidden=True)
+def cmd_undispatched(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    all_: bool = typer.Option(False, "--all", "-A"),
+    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
+    parent: Optional[str] = typer.Option(None, "--parent"),
+    mission: Optional[str] = typer.Option(None, "--mission"),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Name finalized, ready leaf plans with no node claim."""
+    del all_, json_output  # the observer is JSON by contract and all-scoped by default
+    from fno.backlog.undispatched import (
+        ObserverReadError,
+        read_planned_unclaimed,
+        read_planned_unclaimed_from_entries,
+    )
+
+    try:
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            receipt = read_planned_unclaimed_from_entries(
+                _joined_open_candidates(),
+                project=project,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent,
+            )
+        else:
+            receipt = read_planned_unclaimed(
+                graph_path=_graph_path(),
+                project=project,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent,
+            )
+    except _ExternalSelectionError as exc:
+        typer.echo(f"Error: tracker unreadable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except ObserverReadError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(receipt, indent=2))
 
 
 # -- ready --
@@ -12730,7 +12879,7 @@ _TRACKER_OWNED_VERBS = frozenset({
     # footnote-owned DATA with a graph-resident write path (refused until the
     # write moves to the sidecar seam)
     "cost", "session add", "session close", "session reap-open", "decide", "decisions",
-    "decide-reindex",
+    "decide-retract", "decide-reindex",
     # sub-app mutations
     "triage apply", "capture promote",
     "batch join", "batch prepare", "batch ship", "batch ship-closeable",
@@ -12739,7 +12888,7 @@ _TRACKER_OWNED_VERBS = frozenset({
 _FOOTNOTE_OWNED_VERBS = frozenset({
     # seam reads / renders
     "get", "status", "view", "find", "next", "ready", "queued", "provenance",
-    "roadmap", "bases", "album", "project-root", "board",
+    "roadmap", "bases", "album", "project-root", "board", "undispatched",
     # completion works on any backend by design (task 4.1)
     "done",
     # footnote-owned sidecar files, no graph write

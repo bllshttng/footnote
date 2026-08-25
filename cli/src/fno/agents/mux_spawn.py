@@ -881,7 +881,9 @@ def _backfill_codex_session_id(
 _CODEX_DAEMON_PROBE_INTERVAL_S = 2.0
 
 
-def _codex_session_ids_loaded(cwd: Path) -> Optional[set[str]]:
+def _codex_session_ids_loaded(
+    cwd: Path, *, codex_home: Optional[Path] = None
+) -> Optional[set[str]]:
     """Session ids the app-server daemon reports as loaded for ``cwd``.
 
     None means the daemon could not answer (missing binary, dead socket,
@@ -899,7 +901,12 @@ def _codex_session_ids_loaded(cwd: Path) -> Optional[set[str]]:
     """
     from fno.agents.discover import _codex_daemon_threads_raw
 
-    threads = _codex_daemon_threads_raw()
+    if codex_home is None:
+        threads = _codex_daemon_threads_raw()
+    else:
+        daemon_env = dict(os.environ)
+        daemon_env["CODEX_HOME"] = str(codex_home)
+        threads = _codex_daemon_threads_raw(env=daemon_env)
     if threads is None:
         return None
     resolved_cwd = os.path.realpath(str(cwd))
@@ -919,7 +926,12 @@ def _codex_session_ids_loaded(cwd: Path) -> Optional[set[str]]:
     return ids
 
 
-def _codex_daemon_candidate(cwd: Path, baseline_ids: Optional[set[str]]) -> Optional[str]:
+def _codex_daemon_candidate(
+    cwd: Path,
+    baseline_ids: Optional[set[str]],
+    *,
+    codex_home: Optional[Path] = None,
+) -> Optional[str]:
     """The single session id the app-server daemon reports as new for ``cwd``.
 
     Codex 0.148's TUI hands session ownership to a detached ``codex
@@ -947,7 +959,11 @@ def _codex_daemon_candidate(cwd: Path, baseline_ids: Optional[set[str]]) -> Opti
     """
     if baseline_ids is None:
         return None
-    loaded = _codex_session_ids_loaded(cwd)
+    loaded = (
+        _codex_session_ids_loaded(cwd)
+        if codex_home is None
+        else _codex_session_ids_loaded(cwd, codex_home=codex_home)
+    )
     if loaded is None:
         return None
     new_ids = loaded - baseline_ids
@@ -966,6 +982,7 @@ def _make_codex_bind_probe(
     mux: dict,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
     oracle_used: Optional[list] = None,
+    daemon_codex_home: Optional[Path] = None,
 ) -> Callable[[], Optional[str]]:
     """Build the two-oracle ``bind_probe`` :func:`_await_pane_binding` polls.
 
@@ -1014,7 +1031,9 @@ def _make_codex_bind_probe(
         if now_s - last_probe_s[0] < _CODEX_DAEMON_PROBE_INTERVAL_S:
             return None
         last_probe_s[0] = now_s
-        candidate = _codex_daemon_candidate(cwd, daemon_baseline_ids)
+        candidate = _codex_daemon_candidate(
+            cwd, daemon_baseline_ids, codex_home=daemon_codex_home
+        )
         if candidate is None or candidate != prev_candidate[0]:
             prev_candidate[0] = candidate
             return None
@@ -1651,6 +1670,18 @@ def _pane_group_max() -> int:
         return max(1, int(load_settings().agents.pane_group_max))
     except Exception:
         return 4
+
+
+def _process_admission_max() -> int:
+    try:
+        explicit = os.environ.get("FNO_PROCESS_ADMISSION_MAX")
+        if explicit is not None:
+            return max(1, int(explicit))
+        from fno.config import load_settings
+
+        return max(1, int(load_settings().process_admission.max_processes))
+    except Exception:
+        return 400
 
 
 def _resolve_group_tab(requested: str) -> tuple[Optional[str], Optional[str]]:
@@ -2564,6 +2595,8 @@ def _await_interactive_readiness(
     manifest_evaluator: Optional[Callable[[str, str], dict]] = None,
     permission_action: Optional[str] = None,
     permission_sender: Optional[Callable[..., bool]] = None,
+    cwd: Optional[Path] = None,
+    codex_hook_trust_bypassed: bool = False,
 ) -> tuple[str, str]:
     """Interactive readiness gate (x-6928).
 
@@ -2609,6 +2642,14 @@ def _await_interactive_readiness(
     screen = painted.stdout or ""
     if not screen.strip():
         return "live", "ready marker not observed: screen is unpainted"
+    if provider == "codex":
+        trust_refusal = _codex_trust_refusal(
+            screen,
+            cwd=cwd,
+            hook_trust_bypassed=codex_hook_trust_bypassed,
+        )
+        if trust_refusal:
+            return "failed", trust_refusal
     from fno.agents.harness_map import capabilities
 
     expected = capabilities(provider)["ready_marker"]
@@ -2644,6 +2685,8 @@ def _await_interactive_readiness(
             pane_id,
             runner,
             manifest_evaluator=manifest_evaluator,
+            cwd=cwd,
+            codex_hook_trust_bypassed=codex_hook_trust_bypassed,
         )
     detail = f"expected {expected}; observed {observed or 'no matching manifest rule'}"
     if verdict.get("error"):
@@ -2747,6 +2790,30 @@ _ARGV_SEED_RECEIPT = (
     "seed rode in the harness argv; committed at exec time and not observable from the pane frame",
     "argv",
 )
+
+
+def _codex_trust_refusal(
+    frame: str,
+    *,
+    cwd: Optional[Path],
+    hook_trust_bypassed: bool,
+) -> Optional[str]:
+    """Name a Codex trust screen without answering its security decision."""
+    if re.search(
+        r"do you trust the contents of this (?:directory|folder)", frame, re.I
+    ):
+        worktree = str(cwd) if cwd is not None else "the requested worktree"
+        config_path = json.dumps(worktree)
+        return (
+            f"Codex project trust required for {worktree}. Review that worktree, "
+            f"then set projects.{config_path}.trust_level = \"trusted\" and spawn again"
+        )
+    if not hook_trust_bypassed and re.search(r"hooks need review", frame, re.I):
+        return (
+            "Codex hooks need review. Run /hooks in Codex, inspect the changed "
+            "hooks, trust them explicitly, and spawn again"
+        )
+    return None
 
 
 def _reprobe_pane_observation(
@@ -3399,7 +3466,7 @@ def dispatch_spawn_pane(
         # Placement directives ride the OUTER pane-run transport, before the `--`
         # that fences the provider argv (x-3e38). build_pane_argv stays
         # placement-blind so provider-native commands are never contaminated.
-        placement_args: list[str] = []
+        placement_args: list[str] = ["--max-panes", str(_pane_group_max())]
         if squad:
             placement_args += ["squad", squad]
         if split:
@@ -3413,7 +3480,6 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
-            placement_args += ["--max-panes", str(_pane_group_max())]
         # Same reasoning as the spawn-clock stamp below, snapshotted first: a
         # sibling pane starting during the lock-wait or argv-build above would
         # otherwise widen the daemon oracle's candidate set. Gated to codex
@@ -3473,6 +3539,8 @@ def dispatch_spawn_pane(
             k: v for k, v in os.environ.items() if k != WORKER_ADD_DIRS_ENV
         }
         pane_env["FNO_MUX_SHELL_INTEGRATION"] = _shell_integration()
+        pane_env["FNO_PROCESS_ADMISSION_MAX"] = str(_process_admission_max())
+        pane_env["FNO_MUX_PANE_GROUP_MAX"] = str(_pane_group_max())
         proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None
         recovered = False
@@ -3558,6 +3626,9 @@ def dispatch_spawn_pane(
 
         pid_start_time = _process_start_time(child_pid) if child_pid is not None else None
 
+        codex_hook_trust_bypassed = (
+            provider == "codex" and "--dangerously-bypass-hook-trust" in argv
+        )
         # Interactive readiness is per harness and runs on every pane spawn;
         # process liveness alone never earns a ready receipt.
         readiness, readiness_detail = _await_interactive_readiness(
@@ -3570,6 +3641,8 @@ def dispatch_spawn_pane(
                 if yolo or permission_mode in {"yolo", "bypassPermissions"}
                 else None
             ),
+            cwd=cwd,
+            codex_hook_trust_bypassed=codex_hook_trust_bypassed,
         )
         seed_state: Optional[str] = None
         seed_source: Optional[str] = None
@@ -3577,7 +3650,12 @@ def dispatch_spawn_pane(
         seed_in_argv = seed_rode_in_argv(message, argv)
         if message and readiness != "failed":
             seed_state, seed_detail, seed_source, seed_pane = _submit_spawn_seed(
-                provider, session, pane_id, message, runner, seed_in_argv=seed_in_argv
+                provider,
+                session,
+                pane_id,
+                message,
+                runner,
+                seed_in_argv=seed_in_argv,
             )
             if seed_state == "unattempted":
                 # One retry, and ONLY from `unattempted`. That state means no
@@ -3604,7 +3682,12 @@ def dispatch_spawn_pane(
                 # to recover.
                 time.sleep(_SEED_RETRY_DELAY_S)
                 seed_state, seed_detail, seed_source, seed_pane = _submit_spawn_seed(
-                    provider, session, pane_id, message, runner, seed_in_argv=seed_in_argv
+                    provider,
+                    session,
+                    pane_id,
+                    message,
+                    runner,
+                    seed_in_argv=seed_in_argv,
                 )
             if seed_state == "unconfirmed":
                 # A pane that REFUSED the payload is a worker that will never

@@ -319,7 +319,7 @@ def clear(
                 try:
                     recorded = record_decision(
                         decision=answer,
-                        subject=record.node,
+                        subject=record.node or f"question:{qid}",
                         question_id=qid,
                         question=record.question,
                         asked_by=record.asker or record.session_id,

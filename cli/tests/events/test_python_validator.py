@@ -123,6 +123,23 @@ def test_validate_unknown_type() -> None:
         validate(event)
 
 
+def test_validate_dispatch_selection_diverged() -> None:
+    event = {
+        "ts": "2026-08-25T09:30:42Z",
+        "type": "dispatch_selection_diverged",
+        "source": "backlog",
+        "data": {
+            "node_id": "x-known-undispatched",
+            "selector_command": "fno backlog ready --json",
+            "observer_command": "fno backlog undispatched --json",
+            "scope": "project=fno",
+            "selector_entries_scanned": 4,
+            "observer_entries_scanned": 7,
+        },
+    }
+    assert validate(event) is None
+
+
 def test_validate_failover_swapped_happy_path() -> None:
     event = {
         "ts": "2026-05-07T09:30:42Z",

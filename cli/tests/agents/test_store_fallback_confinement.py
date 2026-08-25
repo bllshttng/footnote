@@ -149,10 +149,63 @@ def test_heal_unresolvable_hit_named_honestly_not_cross_project(
         )
     msg = str(exc.value).lower()
     assert "could not be determined" in msg
+    assert "pass --cross-project" in msg
     # The REASON must not mislabel an undeterminable hit as cross-project. (The
     # trailing "pass cross-project" hint legitimately contains the substring, so
     # assert against the reason phrase, not the whole message.)
     assert "cross-project candidate" not in msg
+
+
+def test_registry_miss_threads_scope_and_cross_project_authority(
+    two_repos, monkeypatch, tmp_path
+):
+    """The registry resolver must carry recovery scope into its store healer."""
+    from fno.agents.registry import (
+        AgentEntry,
+        AgentResolutionError,
+        resolve_agent_across_sources,
+    )
+
+    main, _, _ = two_repos
+    entry = AgentEntry(
+        name="adopted",
+        harness="claude",
+        cwd=str(main),
+        log_path="",
+        harness_session_id="ab12cdef-0000-0000-0000-000000000003",
+    )
+    seen: dict[str, object] = {}
+
+    def miss(_entries, _token):
+        raise AgentResolutionError("no agent matching")
+
+    def heal(_token, *, registry_path=None, scope_cwd=None, cross_project=False):
+        seen.update(
+            registry_path=registry_path,
+            scope_cwd=scope_cwd,
+            cross_project=cross_project,
+        )
+        return entry
+
+    monkeypatch.setattr(
+        "fno.agents.registry.resolve_registered_agent_across_sources", miss
+    )
+    monkeypatch.setattr("fno.agents.registry.resolve_from_harness_store", heal)
+
+    resolved = resolve_agent_across_sources(
+        [],
+        "ab12cdef",
+        path=tmp_path / "registry.json",
+        scope_cwd=str(main),
+        cross_project=True,
+    )
+
+    assert resolved.entry is entry
+    assert seen == {
+        "registry_path": tmp_path / "registry.json",
+        "scope_cwd": str(main),
+        "cross_project": True,
+    }
 
 
 # ---------------------------------------------------------------------------

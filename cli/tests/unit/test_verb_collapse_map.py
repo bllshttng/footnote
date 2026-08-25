@@ -150,7 +150,7 @@ def test_live_baseline_matches_the_projected_allocation():
     # +4 for the hidden `law` proposal verbs (prepare, enact, resume,
     # inspect), each baselined in this PR.
     # Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 121
+    assert len(leaves) <= 122
     assert "fno-agents" in leaves
 
 

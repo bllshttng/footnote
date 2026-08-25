@@ -1749,6 +1749,30 @@ class ProviderBudget(BaseModel):
         return None
 
 
+class ProcessAdmissionBlock(BaseModel):
+    """Fail-closed native process admission, expressed only in OS processes."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    max_processes: int = 400
+
+    @field_validator("max_processes", mode="before")
+    @classmethod
+    def _coerce_max_processes(cls, v: object) -> int:
+        """Invalid values keep the measured process-unit default; never disable."""
+        if isinstance(v, bool):
+            return 400
+        if isinstance(v, int) and v >= 1:
+            return v
+        if isinstance(v, str):
+            try:
+                parsed = int(v.strip())
+            except ValueError:
+                return 400
+            return parsed if parsed >= 1 else 400
+        return 400
+
+
 class AgentsBlock(BaseModel):
     """Agent-runtime settings (nested under 'config.agents').
 
@@ -3765,6 +3789,9 @@ class ConfigBlock(BaseModel):
     done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
+    process_admission: ProcessAdmissionBlock = Field(
+        default_factory=ProcessAdmissionBlock
+    )
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
     autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)

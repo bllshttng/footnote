@@ -291,6 +291,38 @@ def _worktree_probe(
 
     reading["path"] = match["path"]
     reading["head"] = match.get("head") or None
+    state_dir = Path(match["path"]) / ".fno"
+    live_manifest = state_dir / "target-state.md"
+    archived = sorted(
+        state_dir.glob("target-state.terminal.*.md"), reverse=True
+    ) or sorted(state_dir.glob("target-state.md.archived.*.md"), reverse=True)
+    manifests = ([live_manifest] if live_manifest.is_file() else []) + archived[:1]
+    reading.update(
+        {
+            "manifest_path": None,
+            "harness_session_id": None,
+            "authority_note": "matched worktree; no readable target manifest",
+        }
+    )
+    if manifests:
+        from fno.pr._merge import _read_state_field
+
+        reading["manifest_path"] = str(manifests[0])
+        for manifest in manifests:
+            owner = _read_state_field(str(manifest), "harness_session_id")
+            if owner:
+                reading["manifest_path"] = str(manifest)
+                reading["harness_session_id"] = owner
+                reading["authority_note"] = (
+                    "live target manifest"
+                    if manifest == live_manifest
+                    else "newest archived target manifest"
+                )
+                break
+        else:
+            reading["authority_note"] = (
+                "matched worktree; target manifest missing harness_session_id"
+            )
     try:
         status = runner(
             ["git", "-C", match["path"], "status", "--porcelain", "--untracked-files=no"],

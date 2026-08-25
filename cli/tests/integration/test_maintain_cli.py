@@ -270,7 +270,7 @@ def test_maintain_wip_count_includes_live_epic_promoted_children(
     assert json.loads(result.output)["now_overflow"] == [2, 1]
 
 
-def test_maintain_wip_count_matches_in_progress_epic_overlay(
+def test_maintain_now_wip_excludes_in_progress_epic_overlay(
     tmp_graph, monkeypatch
 ):
     import fno.graph.render_html as render_html
@@ -292,10 +292,10 @@ def test_maintain_wip_count_matches_in_progress_epic_overlay(
     result = _invoke(["--json"])
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["now_overflow"] == [2, 1]
+    assert json.loads(result.output)["now_overflow"] is None
 
 
-def test_maintain_wip_count_matches_stored_progress(tmp_graph, monkeypatch):
+def test_maintain_now_wip_excludes_stored_progress(tmp_graph, monkeypatch):
     import fno.graph.render_html as render_html
 
     monkeypatch.setattr(render_html, "_load_wip_caps", lambda: {"now": 1})
@@ -327,7 +327,7 @@ def test_maintain_wip_count_matches_stored_progress(tmp_graph, monkeypatch):
     result = _invoke(["--json"])
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["now_overflow"] == [2, 1]
+    assert json.loads(result.output)["now_overflow"] is None
 
 
 # --- AC1-UI: per-leg counts printed (no-op vs active distinguishable) -------

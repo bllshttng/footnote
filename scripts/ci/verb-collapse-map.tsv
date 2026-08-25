@@ -130,6 +130,7 @@ backlog collisions check	T1	backlog collisions check	11
 backlog cost	T1	backlog cost	1
 backlog decide	T1	backlog decide	13
 backlog decide-reindex	T1	backlog decide-reindex	5
+backlog decide-retract	T1	backlog decide-retract	0
 backlog decisions	T1	backlog decisions	16
 backlog decompose	T1	backlog decompose	8
 backlog defer	T1	backlog defer	14
@@ -171,6 +172,7 @@ backlog session close	T1	backlog session close	3
 backlog session reap-open	T1	backlog session reap-open	3
 backlog status	T1	backlog status	1
 backlog supersede	T1	backlog supersede	10
+backlog undispatched	T1	backlog undispatched	0
 backlog triage apply	T1	backlog triage apply	3
 backlog triage consistency	T1	backlog triage consistency	2
 backlog triage context	T1	backlog triage context	7

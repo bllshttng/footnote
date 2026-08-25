@@ -96,14 +96,16 @@ pub struct FoldOutcome {
 /// failure (timeout, nonzero exit, unparseable JSON) - the caller shows the
 /// degraded notice; `Some(vec)` (possibly empty) is a clean fold.
 pub async fn fold_now(since_epoch: &str) -> Option<Vec<FoldItem>> {
-    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
         .args(["needs", "--since-epoch", since_epoch, "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         // Dropped on timeout; kill_on_drop reaps the child so a slow fold can't
         // orphan a process on each overlay open.
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
         .await
         .ok()?
@@ -117,12 +119,13 @@ pub async fn fold_now(since_epoch: &str) -> Option<Vec<FoldItem>> {
 /// Fold the operator-owned lane through the installed/current `fno` binary.
 /// It has the same timeout and kill-on-drop discipline as the needs fold.
 pub async fn mine_now() -> Option<Vec<MineItem>> {
-    let fut = tokio::process::Command::new(crate::server::fno_bin())
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    command
         .args(["inbox", "outstanding", "mine", "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
         .await
         .ok()?
@@ -138,12 +141,13 @@ pub async fn mine_now() -> Option<Vec<MineItem>> {
 /// liveness-resolved (a 50ms budget, well inside this leg's own timeout).
 /// Same bounded/fail-open shape as the other legs.
 pub async fn questions_now() -> Option<Vec<QuestionItem>> {
-    let fut = tokio::process::Command::new(crate::server::fno_bin())
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    command
         .args(["inbox", "outstanding", "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
         .await
         .ok()?
@@ -202,12 +206,13 @@ pub async fn mine_mutate(mutation: MineMutation) -> Result<(), String> {
             args.push(text);
         }
     }
-    let fut = tokio::process::Command::new(crate::server::fno_bin())
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
         .await
         .map_err(|_| "timed out".to_string())?
@@ -249,7 +254,8 @@ fn parse_questions(stdout: &[u8]) -> Option<Vec<QuestionItem>> {
 /// on a timeout, spawn failure, or a nonzero exit (stderr captured) - the
 /// operator sees WHY a write failed, never a silent no-op.
 pub async fn answer_question(question_id: &str, answer: &str) -> Result<(), String> {
-    let fut = tokio::process::Command::new(crate::server::fno_bin())
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    command
         .args([
             "inbox",
             "outstanding",
@@ -260,8 +266,8 @@ pub async fn answer_question(question_id: &str, answer: &str) -> Result<(), Stri
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
         .await
         .map_err(|_| "timed out".to_string())?

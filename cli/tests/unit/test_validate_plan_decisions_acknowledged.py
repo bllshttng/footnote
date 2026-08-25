@@ -3,10 +3,11 @@
 Change 3 of x-953b. `check_consolidation_file` cross-checks the plan's
 `decisions_acknowledged` list against the node's LIVE decision-index rulings
 (read directly, not through the shape model - `ConsolidationBlock` has no
-access to the index). Each fixture points a fresh subprocess at a hermetic
-decision index via `$FNO_CONFIG` (the only candidate when set, per
-`fno.config._candidate_paths`) naming a `config.state_dir` override, then
-seeds `decisions.jsonl` directly under it, in the envelope
+access to the index). Each fixture points a fresh subprocess at hermetic
+decision and graph stores via `$FNO_CONFIG` (the only candidate when set, per
+`fno.config._candidate_paths`) naming `config.state_dir` and
+`config.paths.graph_json` overrides, then seeds `decisions.jsonl` directly
+under it, in the envelope
 `fno.events.operator_decision` writes - so no graph or carveout root needs to
 exist for the node named in `claims:`.
 """
@@ -17,13 +18,19 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VALIDATOR = REPO_ROOT / "scripts" / "validate-plan.sh"
+_EXPIRY_REF_UNSET = object()
 
 
 def _run(plan: Path, state_dir: Path) -> subprocess.CompletedProcess[str]:
     settings = state_dir.parent / "settings.yaml"
-    settings.write_text(f"config:\n  state_dir: {state_dir}\n")
+    settings.write_text(
+        f"config:\n  state_dir: {state_dir}\n"
+        f"  paths:\n    graph_json: {state_dir / 'graph.json'}\n"
+    )
     env = dict(os.environ)
     env["FNO_CONFIG"] = str(settings)
     return subprocess.run(
@@ -45,7 +52,15 @@ def _plan(frontmatter: str) -> str:
     )
 
 
-def _seed_decision(state_dir: Path, *, decision_id: str, subject: str, supersedes: str | None = None) -> None:
+def _seed_decision(
+    state_dir: Path,
+    *,
+    decision_id: str,
+    subject: str,
+    supersedes: str | None = None,
+    expiry_ref: object = _EXPIRY_REF_UNSET,
+    authority_source: str = "beastmode",
+) -> None:
     """Append one decision-index row directly, bypassing record_decision.
 
     `record_decision` also writes a durable events journal and projects onto
@@ -55,13 +70,16 @@ def _seed_decision(state_dir: Path, *, decision_id: str, subject: str, supersede
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     index = state_dir / "decisions.jsonl"
-    data = {"decision_id": decision_id, "decision": "VERDICT", "subject": subject}
+    data = {
+        "decision_id": decision_id,
+        "decision": "VERDICT",
+        "subject": subject,
+        "authority_source": authority_source,
+    }
     if supersedes:
         data["supersedes"] = supersedes
-    # Predates every fixture plan's created: (the earliest is 2026-08-18) so
-    # a missing-acknowledgment test exercises the grandfather-by-plan-vintage
-    # branch, not the postdates-the-plan branch (that has its own dedicated
-    # test with an explicit later ts).
+    if expiry_ref is not _EXPIRY_REF_UNSET:
+        data["expiry_ref"] = expiry_ref
     row = {"ts": "2026-08-01T00:00:00.000000Z", "type": "operator_decision", "source": "target", "data": data}
     with index.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row) + "\n")
@@ -158,6 +176,53 @@ def test_node_with_no_decisions_passes_with_zero_count(tmp_path):
     assert "0/0 decision(s) acknowledged" in result.stdout
 
 
+def test_scoped_coord_without_graph_evidence_fails_closed(tmp_path):
+    state_dir = tmp_path / "fno-home"
+    _seed_decision(
+        state_dir,
+        decision_id="d-c0ffee12",
+        subject="x-c0ffee12",
+        expiry_ref={"kind": "node", "node_id": "x-c0ffee12"},
+        authority_source="agent",
+    )
+
+    plan = tmp_path / "missing-evidence.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\nclaims: x-c0ffee12\ncreated: 2026-08-23\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  proceed_alone_against: []\n"
+    ))
+    result = _run(plan, state_dir)
+    assert result.returncode == 1, result.stdout
+    assert "explicit expiry_ref but no positive closure evidence" in result.stdout
+    assert "0/0 decision(s) acknowledged" not in result.stdout
+
+
+@pytest.mark.parametrize("expiry_ref", [None, "bad"])
+def test_coord_with_invalid_expiry_ref_shape_fails_closed(tmp_path, expiry_ref):
+    state_dir = tmp_path / "fno-home"
+    _seed_decision(
+        state_dir,
+        decision_id="d-badref12",
+        subject="x-c0ffee12",
+        expiry_ref=expiry_ref,
+        authority_source="agent",
+    )
+
+    plan = tmp_path / "invalid-ref.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\nclaims: x-c0ffee12\ncreated: 2026-08-23\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  proceed_alone_against: []\n"
+    ))
+    result = _run(plan, state_dir)
+    assert result.returncode == 1, result.stdout
+    assert "invalid expiry_ref shape" in result.stdout
+    assert "0/0 decision(s) acknowledged" not in result.stdout
+
+
 def test_node_field_is_also_resolved_not_only_claims(tmp_path):
     """node: is the canonical link key; claims: alone missed it (finding #2)."""
     state_dir = tmp_path / "fno-home"
@@ -209,7 +274,12 @@ def test_ruling_recorded_after_the_plan_was_written_only_warns(tmp_path):
         "ts": "2026-08-24T00:00:00.000000Z",  # after the plan's created: below
         "type": "operator_decision",
         "source": "target",
-        "data": {"decision_id": "d-abcd1234", "decision": "VERDICT", "subject": "x-abcd"},
+        "data": {
+            "decision_id": "d-abcd1234",
+            "decision": "VERDICT",
+            "subject": "x-abcd",
+            "authority_source": "operator",
+        },
     }
     with index.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row) + "\n")

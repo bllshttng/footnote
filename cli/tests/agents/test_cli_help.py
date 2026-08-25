@@ -69,6 +69,18 @@ def test_agents_resume_help_shows_print_command(runner: CliRunner) -> None:
     code, out = _run(runner, "resume", "--help")
     assert code == 0
     assert "--print-command" in out
+    assert "--cwd" in out
+    assert "--cross-project" in out
+
+
+def test_heal_token_accepts_hidden_cross_project_recovery_flag(
+    runner: CliRunner, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "fno.agents.registry.resolve_from_harness_store", lambda *args, **kwargs: None
+    )
+    code, _out = _run(runner, "heal-token", "deadbeef", "--cross-project")
+    assert code == 13
 
 
 # x-71b6: the advertised `fno agents` menu (the In-N-Out verbs).

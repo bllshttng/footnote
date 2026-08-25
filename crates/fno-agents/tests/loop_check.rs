@@ -191,6 +191,41 @@ exit 1
         MockBins { _dir: dir, gh, git }
     }
 
+    /// CI is still pending on an otherwise shipped, reviewed PR.
+    fn ci_pending() -> Self {
+        let dir = TempDir::new().unwrap();
+        let gh = make_script(
+            dir.path(),
+            "gh",
+            r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{"state":"OPEN","number":17,"headRefName":"feat","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000017"}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{"name":"unit-tests","state":"IN_PROGRESS","bucket":"pending"}]'
+  exit 0
+fi
+if echo "$*" | grep -q "pulls/"; then
+  echo '[]'
+  exit 0
+fi
+if echo "$*" | grep -q "reviews"; then
+  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000017"}}],"comments":[]}'
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let git = make_script(
+            dir.path(),
+            "git",
+            r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000017""#,
+        );
+        MockBins { _dir: dir, gh, git }
+    }
+
     /// No PR: `gh pr view` exits 1 with gh's real no-PR stderr (distinct
     /// from an outage, which exits 1 with other stderr - see failing_gh).
     /// --version exits 0 so gh is detected as available.
@@ -348,6 +383,16 @@ fn transcript_empty() -> String {
     serde_json::to_string(&msg).unwrap() + "\n"
 }
 
+fn transcript_with_watching() -> String {
+    let msg = serde_json::json!({
+        "message": {
+            "role": "assistant",
+            "content": "<watching reason=\"ci\" timeout=\"30m\">"
+        }
+    });
+    serde_json::to_string(&msg).unwrap() + "\n"
+}
+
 /// Parse the stdout JSON decision from run_loop_check return value.
 #[derive(Debug, serde::Deserialize)]
 struct Decision {
@@ -398,6 +443,101 @@ fn fire(args: &[&str]) -> (i32, Decision) {
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn watching_ignored_codex_harness_is_audible() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-watching-codex", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_watching()).unwrap();
+
+    let mock = MockBins::ci_pending();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--author-harness",
+        "codex",
+    ]);
+
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message
+            .contains("watching ignored: harness codex cannot idle"),
+        "discarded watching tag must be named: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("CI still running on PR #17"),
+        "the actionable PR blocker must remain: {}",
+        d.message
+    );
+}
+
+#[test]
+fn watching_ignored_unaddressed_findings_are_audible() {
+    let tmp = findings_cwd("sess-watching-findings");
+    let cwd = tmp.path();
+    fs::write(cwd.join("transcript.jsonl"), transcript_with_watching()).unwrap();
+
+    let comments = r#"[
+  {"id":100,"in_reply_to_id":null,"user":{"login":"chatgpt-codex-connector[bot]"},"body":"![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat) First","path":"src/one.rs","line":11,"created_at":"2026-06-05T01:10:00Z"},
+  {"id":101,"in_reply_to_id":null,"user":{"login":"chatgpt-codex-connector[bot]"},"body":"![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat) Second","path":"src/two.rs","line":22,"created_at":"2026-06-05T01:11:00Z"},
+  {"id":102,"in_reply_to_id":null,"user":{"login":"chatgpt-codex-connector[bot]"},"body":"![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat) Third","path":"src/three.rs","line":33,"created_at":"2026-06-05T01:12:00Z"},
+  {"id":103,"in_reply_to_id":null,"user":{"login":"chatgpt-codex-connector[bot]"},"body":"![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat) Fourth","path":"src/four.rs","line":44,"created_at":"2026-06-05T01:13:00Z"}
+]"#;
+    let mock = findings_mock(comments, r#"{"commits":[]}"#);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T02:00:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--author-harness",
+        "claude",
+    ]);
+
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message
+            .contains("watching ignored: 4 unaddressed findings, this is not an async wait"),
+        "discarded watching tag must name the finding reason: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("src/one.rs:11"),
+        "the actionable first finding must remain: {}",
+        d.message
+    );
+}
 
 /// AC1-HP: promise with green PR -> DonePRGreen, exit 0, termination event.
 #[test]

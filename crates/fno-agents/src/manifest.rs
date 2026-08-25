@@ -1444,6 +1444,7 @@ mod tests {
             ("loading a 5000 byte banner of text", false),         // no glyph -> not ready
             ("Waiting for auth...\n\u{276f}", false),              // gemini false-ready trap
             ("Gemini ready\n\u{203a} ", true),                     // › idle glyph
+            ("Select Model\n\u{203a} 1. current\n  2. other", false),
             // "Working"/"Thinking" up in scrollback must NOT block (Codex P1).
             (
                 "I am Working on the Thinking task you asked about.\n\
@@ -2100,6 +2101,32 @@ mod tests {
         assert_eq!(result["matched"], true);
         assert_eq!(result["rule_id"], "idle_prompt");
         assert_eq!(result["state"], "idle");
+    }
+
+    #[test]
+    fn codex_idle_prompt_survives_a_status_bar_below_it() {
+        let screen = "model reply\n\n› Ask Codex to do anything\n\n  gpt-5.6-luna xhigh";
+        let idle = evaluate_screen_json("codex", screen).unwrap();
+        assert_eq!(idle["rule_id"], "idle_prompt");
+        assert_eq!(idle["state"], "idle");
+
+        let busy = evaluate_screen_json(
+            "codex",
+            "› Ask Codex to do anything\nWorking · esc to interrupt\nstatus",
+        )
+        .unwrap();
+        assert_eq!(busy["rule_id"], "busy");
+        assert_eq!(busy["state"], "working");
+
+        let menu = evaluate_screen_json(
+            "codex",
+            "Select Model and Effort\n› 1. gpt-5.6-sol\n  2. gpt-5.6-luna",
+        )
+        .unwrap();
+        assert_eq!(menu["matched"], false);
+
+        let quoted = evaluate_screen_json("codex", "answer\n› quoted text\nstatus").unwrap();
+        assert_eq!(quoted["matched"], false);
     }
 
     #[test]

@@ -288,6 +288,65 @@ def test_ac1_hp_graph_ready_returns_json_array(tmp_graph):
     assert data[0]["title"] == "Feature 1"
 
 
+def test_ac1_hp_undispatched_names_known_node_and_scans_entries(tmp_graph, monkeypatch):
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    tmp_graph.write_text(json.dumps({
+        "entries": [{
+            "id": "x-known-undispatched",
+            "title": "Known",
+            "status": "ready",
+            "plan_path": "/plans/known.md",
+            "priority": "p0",
+            "domain": "code",
+            "blocked_by": [],
+        }]
+    }) + "\n")
+
+    r = _invoke("backlog", "undispatched", "--all", "--json")
+
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["entries_scanned"] == 1
+    assert any(row["id"] == "x-known-undispatched" for row in data["rows"])
+
+
+def test_ac2_err_undispatched_names_unreadable_graph(tmp_graph, monkeypatch):
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    tmp_graph.write_text('{"nodes": []}\n')
+
+    r = _invoke("backlog", "undispatched", "--all", "--json")
+
+    assert r.exit_code != 0
+    assert "graph" in r.output.lower()
+    assert r.output.strip().splitlines()[-1] != "[]"
+
+
+def test_ac1_hp_undispatched_external_backend_uses_tracker_join(tmp_graph, monkeypatch):
+    import fno.graph.cli as graph_cli
+
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    tmp_graph.write_text('{"nodes": []}\n')
+    monkeypatch.setattr(
+        graph_cli,
+        "_joined_open_candidates",
+        lambda: [{
+            "id": "x-external-undispatched",
+            "status": "ready",
+            "plan_path": "/plans/external.md",
+            "priority": "p0",
+            "domain": "code",
+            "blocked_by": [],
+        }],
+    )
+
+    r = _invoke("backlog", "undispatched", "--all", "--json")
+
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert any(row["id"] == "x-external-undispatched" for row in data["rows"])
+
+
 # --- get ---
 
 def test_ac1_hp_graph_get_returns_node(tmp_graph):
@@ -899,7 +958,7 @@ def test_rank_uses_in_progress_epic_board_lane(tmp_graph):
         {"id": "ab-done001", "title": "Done child", "status": "done",
          "priority": "p2", "project": "fno", "parent": "ab-epic002",
          "completed_at": "2026-01-01T00:00:00Z"},
-        {"id": "ab-anchor2", "title": "Now anchor", "status": "ready",
+        {"id": "ab-anchor2", "title": "Active anchor", "status": "in_progress",
          "priority": "p1", "project": "fno", "rank": 5.0},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
@@ -907,7 +966,7 @@ def test_rank_uses_in_progress_epic_board_lane(tmp_graph):
     result = _invoke("backlog", "rank", "ab-epic002", "--before", "ab-anchor2")
 
     assert result.exit_code == 0, result.output
-    assert "Now/fno" in result.output
+    assert "In Progress/fno" in result.output
     assert _rank_of(tmp_graph, "ab-epic002") < _rank_of(tmp_graph, "ab-anchor2")
 
 

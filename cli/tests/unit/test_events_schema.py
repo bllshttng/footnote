@@ -7,7 +7,13 @@ from __future__ import annotations
 
 import pytest
 
-from fno.events import EVENT_TYPES, ValidationError, operator_decision, validate
+from fno.events import (
+    EVENT_TYPES,
+    ValidationError,
+    decision_retracted,
+    operator_decision,
+    validate,
+)
 
 
 def _require_schema_loaded() -> None:
@@ -65,3 +71,18 @@ def test_validate_rejects_missing_required_field() -> None:
     }
     with pytest.raises(ValidationError, match="decision"):
         validate(event)
+
+
+def test_decision_retracted_is_registered_and_carries_target() -> None:
+    _require_schema_loaded()
+    event = decision_retracted(
+        target_decision_id="d-ab12cd34",
+        subject="x-7d94",
+        reason="the coordination window ended",
+        retracted_by="worker-1",
+        authority_source="agent",
+    )
+    validate(event)
+    assert event["type"] == "decision_retracted"
+    assert event["data"]["target_decision_id"] == "d-ab12cd34"
+    assert event["data"]["reason"] == "the coordination window ended"

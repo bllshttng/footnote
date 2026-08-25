@@ -274,6 +274,32 @@ def test_resume_print_command_parity(tmp_path) -> None:
 
 
 @requires_rust
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--cross-project", "--cwd", "/replacement/checkout"],
+        ["--cwd=/replacement/checkout", "--cross-project"],
+    ],
+)
+def test_resume_recovery_flags_have_python_rust_parser_parity(tmp_path, flags) -> None:
+    """Both front doors accept split and equals-form recovery flags."""
+    from fno.agents import resume_cli
+
+    agents = tmp_path / "agents"
+    _seed_registry(agents, [])
+    py = resume_cli.resume_logic(
+        name="not-a-session",
+        cross_project=True,
+        cwd_override="/replacement/checkout",
+        print_command=True,
+        registry_loader=lambda: [],
+    )
+    rust = _run_rust(["resume", "not-a-session", *flags], agents)
+    assert rust.returncode == py.exit_code == 13
+    assert "unknown resume flag" not in rust.stderr
+
+
+@requires_rust
 def test_resume_gemini_print_command_parity(tmp_path) -> None:
     from fno.agents import resume_cli
 

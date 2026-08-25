@@ -29,6 +29,7 @@ import hashlib as _hashlib
 import json as _json
 import math as _math
 import re as _re
+import secrets as _secrets
 import sys as _sys
 from pathlib import Path
 from typing import Any, TypeGuard
@@ -969,6 +970,7 @@ def operator_decision(
     question: str | None = None,
     asked_by: str | None = None,
     asked_at: str | None = None,
+    expiry_ref: dict[str, Any] | None = None,
     options: "list[str] | None" = None,
     decided_by: str | None = None,
     attested_by: str | None = None,
@@ -993,6 +995,7 @@ def operator_decision(
         ("question", question[:QUESTION_CAP] if question else None),
         ("asked_by", asked_by),
         ("asked_at", asked_at),
+        ("expiry_ref", expiry_ref),
         ("options", options),
         ("decided_by", decided_by),
         ("attested_by", attested_by),
@@ -1005,6 +1008,38 @@ def operator_decision(
         if value is not None:
             data[key] = value
     return _build("operator_decision", source, data)
+
+
+def decision_retracted(
+    *,
+    retraction_id: str | None = None,
+    target_decision_id: str,
+    subject: str,
+    reason: str,
+    retracted_by: str | None = None,
+    attested_by: str | None = None,
+    relayed_by: str | None = None,
+    origin: str | None = None,
+    authority_source: str | None = None,
+    source: str = "target",
+) -> dict[str, Any]:
+    """Build an append-only event that retracts one decision."""
+    data: dict[str, Any] = {
+        "retraction_id": retraction_id or f"r-{_secrets.token_hex(4)}",
+        "target_decision_id": target_decision_id,
+        "subject": subject,
+        "reason": reason[:QUESTION_CAP],
+    }
+    for key, value in (
+        ("retracted_by", retracted_by),
+        ("attested_by", attested_by),
+        ("relayed_by", relayed_by),
+        ("origin", origin),
+        ("authority_source", authority_source),
+    ):
+        if value is not None:
+            data[key] = value
+    return _build("decision_retracted", source, data)
 
 
 def agent_raw_inject(
@@ -1418,6 +1453,7 @@ __all__ = [
     "operator_question",
     "operator_question_closed",
     "operator_decision",
+    "decision_retracted",
     "phase_0_decision",
     "phase_transition",
     "session_satisfied",

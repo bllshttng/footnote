@@ -123,13 +123,16 @@ target_is_active "$TMP/nokey/.fno/target-state.md" \
   && pass "target_is_active still fails open with no claim key" \
   || fail "target_is_active regressed to strict; a claimless live session now reads dead"
 
-# Wiring. Each teardown guard must actually call the helper; a guard that only
-# checks owner_pid is a guard that never fires.
-for guard in hooks/worktree-remove.sh scripts/setup/archive-worktree.sh scripts/lib/worktree-lifecycle.sh; do
+# Wiring. Each teardown guard must actually call its strict claim helper; a
+# guard that only checks owner_pid is a guard that never fires.
+for guard in hooks/worktree-remove.sh scripts/lib/worktree-lifecycle.sh; do
   grep -q 'target_claim_is_live' "$REPO_ROOT/$guard" \
     && pass "$guard consults the claim" \
     || fail "$guard still rests on owner_pid alone"
 done
+grep -q 'target_claim_probe' "$REPO_ROOT/scripts/setup/archive-worktree.sh" \
+  && pass "scripts/setup/archive-worktree.sh consults the claim" \
+  || fail "scripts/setup/archive-worktree.sh still rests on owner_pid alone"
 
 # And the PreCompact arm hook must not have regrown a bare owner_pid gate.
 grep -qE 'kill -0 .*OWNER_PID' "$REPO_ROOT/hooks/arm-handoff-precompact.sh" \

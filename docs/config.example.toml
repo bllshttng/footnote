@@ -290,6 +290,10 @@ headless_yolo = false
 # Use full-yolo (drop sandbox) for headless gemini workers.
 headless_yolo = false
 
+[process_admission]
+# Maximum fno-attributed OS processes admitted by the native pre-spawn gate; counts processes, not agents or panes (default 400).
+max_processes = 400
+
 [dispatch]
 # Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.
 harness = ""
