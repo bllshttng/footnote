@@ -610,7 +610,7 @@ def _ready_nodes(
         scope = f"project={project or '*'}"
         if mission:
             scope += f",mission={mission}"
-        ev_path = events_path if events_path is not None else _events_path()
+        ev_path = events_path if events_path is not None else _events_path(None)
         for row in missed:
             _emit(
                 EVENT_SELECTION_DIVERGED,

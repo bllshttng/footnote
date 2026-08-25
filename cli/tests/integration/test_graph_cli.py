@@ -321,6 +321,32 @@ def test_ac2_err_undispatched_names_unreadable_graph(tmp_graph, monkeypatch):
     assert r.output.strip().splitlines()[-1] != "[]"
 
 
+def test_ac1_hp_undispatched_external_backend_uses_tracker_join(tmp_graph, monkeypatch):
+    import fno.graph.cli as graph_cli
+
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_graph.parent / "claims"))
+    tmp_graph.write_text('{"nodes": []}\n')
+    monkeypatch.setattr(
+        graph_cli,
+        "_joined_open_candidates",
+        lambda: [{
+            "id": "x-external-undispatched",
+            "status": "ready",
+            "plan_path": "/plans/external.md",
+            "priority": "p0",
+            "domain": "code",
+            "blocked_by": [],
+        }],
+    )
+
+    r = _invoke("backlog", "undispatched", "--all", "--json")
+
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert any(row["id"] == "x-external-undispatched" for row in data["rows"])
+
+
 # --- get ---
 
 def test_ac1_hp_graph_get_returns_node(tmp_graph):

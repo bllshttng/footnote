@@ -144,7 +144,12 @@ def classify_planned_unclaimed(
             }
         )
 
-    rows.sort(key=lambda row: (_PRIORITY_ORDER.get(row.get("priority"), 99), row["id"]))
+    rows.sort(
+        key=lambda row: (
+            _PRIORITY_ORDER.get(str(row.get("priority")), 99),
+            str(row["id"]),
+        )
+    )
     return {
         "source": OBSERVER_COMMAND,
         "status": "ok",
@@ -176,24 +181,45 @@ def read_planned_unclaimed(
     parent: str | None = None,
 ) -> dict:
     """Read both independent inputs and return a positive observer receipt."""
-    from fno.claims.core import list_claims
-    from fno.claims.io import global_claims_root
     from fno.graph.store import read_graph_strict
 
     try:
         entries = read_graph_strict(graph_path) if graph_path is not None else read_graph_strict()
     except Exception as exc:  # noqa: BLE001 - identify the failed source
         raise ObserverReadError(f"graph unreadable: {exc}") from exc
+    return read_planned_unclaimed_from_entries(
+        entries,
+        project=project,
+        mission=mission,
+        roadmap_id=roadmap_id,
+        parent=parent,
+    )
+
+
+def read_claim_snapshot() -> list[dict]:
+    from fno.claims.core import list_claims
+    from fno.claims.io import global_claims_root
+
     try:
-        claims = list_claims(
+        return list_claims(
             prefix="node:", include_stale=True, root=global_claims_root()
         )
     except Exception as exc:  # noqa: BLE001 - identify the failed source
         raise ObserverReadError(f"claims unreadable: {exc}") from exc
+
+
+def read_planned_unclaimed_from_entries(
+    entries: list[dict],
+    *,
+    project: str | None = None,
+    mission: str | None = None,
+    roadmap_id: str | None = None,
+    parent: str | None = None,
+) -> dict:
     try:
         return classify_planned_unclaimed(
             entries,
-            claims,
+            read_claim_snapshot(),
             project=project,
             mission=mission,
             roadmap_id=roadmap_id,

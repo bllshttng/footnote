@@ -781,7 +781,7 @@ def _read_claimed_nodes(
 
 def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     """Fetch every source. Never raises; every failure lands in a SourceRead."""
-    undispatched = _run_json([*_fno(), "backlog", "undispatched", "--json"], timeout=timeout)
+    undispatched = _read_undispatched(timeout)
     claims = _run_json([*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
         timeout=timeout,
     )
@@ -801,6 +801,20 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
         warnings=warnings,
         undispatched=undispatched,
     )
+
+
+def _read_undispatched(timeout: int) -> SourceRead:
+    """Unwrap and validate the observer receipt before board construction."""
+    read = _run_json([*_fno(), "backlog", "undispatched", "--json"], timeout=timeout)
+    if not read.ok:
+        return read
+    payload = read.payload
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return SourceRead(error="undispatched: unreadable observer receipt")
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        return SourceRead(error="undispatched: receipt rows are unreadable")
+    return SourceRead(payload=rows)
 
 
 def _fno() -> "list[str]":

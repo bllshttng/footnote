@@ -4207,23 +4207,48 @@ def cmd_next(
     from fno.backlog.undispatched import (
         ObserverReadError,
         build_selection_divergence_event,
+        classify_planned_unclaimed,
         prepend_missed_rows,
+        read_claim_snapshot,
         read_planned_unclaimed,
+        read_planned_unclaimed_from_entries,
     )
     try:
-        observer_receipt = read_planned_unclaimed(
-            graph_path=_graph_path(),
-            project=None if all_ else project_filter,
-            mission=mission,
-            roadmap_id=roadmap_id,
-            parent=parent_target_id,
-        )
+        if _external:
+            assert pre_entries is not None
+            read_planned_unclaimed_from_entries(
+                pre_entries,
+                project=None if all_ else project_filter,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent_target_id,
+            )
+        else:
+            read_planned_unclaimed(
+                graph_path=_graph_path(),
+                project=None if all_ else project_filter,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent_target_id,
+            )
     except ObserverReadError as exc:
         typer.echo(f"Error: {exc}; selection refused", err=True)
         raise typer.Exit(code=1) from exc
 
     def _with_observer(candidates: list[dict], source_entries: list[dict]) -> list[dict]:
         by_id = {entry.get("id"): entry for entry in source_entries}
+        try:
+            current_observer = classify_planned_unclaimed(
+                source_entries,
+                read_claim_snapshot(),
+                project=None if all_ else project_filter,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent_target_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown state refuses recovery
+            typer.echo(f"Error: observer revalidation failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         claimed = _require_live_claimed_node_ids("backlog next observer recovery")
         container_ids = _container_ids(source_entries)
         from fno.backlog.advance import _guard_staleness_days, selection_guards
@@ -4231,7 +4256,7 @@ def cmd_next(
         guard_now = datetime.now(timezone.utc)
         guard_stale = _guard_staleness_days()
         safe_rows = []
-        for row in observer_receipt["rows"]:
+        for row in current_observer["rows"]:
             entry = by_id.get(row.get("id"))
             if entry is None or row.get("id") in claimed:
                 continue
@@ -4246,8 +4271,8 @@ def cmd_next(
                 staleness_days=guard_stale,
             ):
                 continue
-            safe_rows.append(row)
-        safe_observer = {**observer_receipt, "rows": safe_rows}
+            safe_rows.append(entry)
+        safe_observer = {**current_observer, "rows": safe_rows}
         merged, missed = prepend_missed_rows(candidates, safe_observer)
         if missed:
             scope = f"project={(project_filter if not all_ else '*')}"
@@ -4266,7 +4291,7 @@ def cmd_next(
                             selector_command="fno backlog next",
                             scope=scope,
                             selector_entries_scanned=len(candidates),
-                            observer_entries_scanned=observer_receipt["entries_scanned"],
+                            observer_entries_scanned=current_observer["entries_scanned"],
                         ),
                         paths.project_events_json(),
                     )
@@ -4285,6 +4310,7 @@ def cmd_next(
             from fno.claims.core import ClaimHeldByOther, acquire_claim
             from fno.claims.io import claims_root_for
 
+            assert pre_entries is not None
             candidates = _with_observer(_pick_ready(pre_entries), pre_entries)
             for winner in candidates:
                 key = f"node:{winner['id']}"
@@ -4326,7 +4352,11 @@ def cmd_next(
                 return entries
             locked_mutate_graph(_graph_path(), mutator)
     else:
-        entries = pre_entries if _external else read_graph(_graph_path())
+        if _external:
+            assert pre_entries is not None
+            entries = pre_entries
+        else:
+            entries = read_graph(_graph_path())
         candidates = _with_observer(_pick_ready(entries), entries)
         if candidates:
             result[0] = _node_summary(candidates[0])
@@ -4376,16 +4406,34 @@ def cmd_undispatched(
 ) -> None:
     """Name finalized, ready leaf plans with no node claim."""
     del all_, json_output  # the observer is JSON by contract and all-scoped by default
-    from fno.backlog.undispatched import ObserverReadError, read_planned_unclaimed
+    from fno.backlog.undispatched import (
+        ObserverReadError,
+        read_planned_unclaimed,
+        read_planned_unclaimed_from_entries,
+    )
 
     try:
-        receipt = read_planned_unclaimed(
-            graph_path=_graph_path(),
-            project=project,
-            mission=mission,
-            roadmap_id=roadmap_id,
-            parent=parent,
-        )
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            receipt = read_planned_unclaimed_from_entries(
+                _joined_open_candidates(),
+                project=project,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent,
+            )
+        else:
+            receipt = read_planned_unclaimed(
+                graph_path=_graph_path(),
+                project=project,
+                mission=mission,
+                roadmap_id=roadmap_id,
+                parent=parent,
+            )
+    except _ExternalSelectionError as exc:
+        typer.echo(f"Error: tracker unreadable: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     except ObserverReadError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc

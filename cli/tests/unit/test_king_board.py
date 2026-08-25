@@ -229,6 +229,35 @@ def test_ac2_err_unreadable_observer_blocks_clean_board():
     assert board["actionable"] >= 1
 
 
+def test_collect_observer_unwraps_receipt_rows(monkeypatch):
+    from fno.king import board as board_mod
+
+    node = _node("x-receipt")
+    monkeypatch.setattr(
+        board_mod,
+        "_run_json",
+        lambda *args, **kwargs: _ok(
+            {"status": "ok", "entries_scanned": 1, "rows": [node]}
+        ),
+    )
+
+    read = board_mod._read_undispatched(timeout=1)
+
+    assert read.ok
+    assert read.rows() == [node]
+
+
+def test_collect_observer_rejects_unreadable_receipt(monkeypatch):
+    from fno.king import board as board_mod
+
+    monkeypatch.setattr(board_mod, "_run_json", lambda *args, **kwargs: _ok([]))
+
+    read = board_mod._read_undispatched(timeout=1)
+
+    assert not read.ok
+    assert "receipt" in read.error
+
+
 # --- AC1-EDGE ---------------------------------------------------------------
 
 
