@@ -185,6 +185,13 @@ def test_node_model_reads_canonical_difficulty():
     assert rr.node_model({"difficulty": "low"}, snapshot={}, provider="claude") == "glm-4.7"
 
 
+def test_node_model_can_defer_difficulty_to_capacity_grid():
+    """Automatic dispatch leaves difficulty for spawn-default grid resolution."""
+    assert rr.node_model(
+        {"difficulty": "high"}, snapshot={}, provider="claude", resolve_difficulty=False
+    ) is None
+
+
 def test_grid_selects_first_available_candidate_for_difficulty_and_priority():
     """AC3-HP: difficulty x priority joins with current harness capacity."""
     candidate, chain = rr.resolve_grid(

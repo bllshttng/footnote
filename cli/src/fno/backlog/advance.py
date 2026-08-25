@@ -1637,7 +1637,9 @@ def dispatch_lanes(
                 node_id,
                 str(worktree),
                 slug,
-                model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
+                model=_route_resolve.node_model(
+                    node, explicit=model, provider=eff_provider, resolve_difficulty=False
+                ),
                 provider=eff_provider,
                 verb=node.get("dispatch_verb"),
                 brief=_brief,
@@ -2038,7 +2040,9 @@ def advance(
             node_id,
             node_cwd,
             node.get("slug") or node.get("title"),
-            model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
+            model=_route_resolve.node_model(
+                node, explicit=model, provider=eff_provider, resolve_difficulty=False
+            ),
             provider=eff_provider,
             harness=failover_harness,
             extra_env=failover_env,
@@ -2342,7 +2346,9 @@ def _converge_one(
             node_id,
             root,
             slug,
-            model=_route_resolve.node_model(node_meta, explicit=model, provider=eff_provider),
+            model=_route_resolve.node_model(
+                node_meta, explicit=model, provider=eff_provider, resolve_difficulty=False
+            ),
             provider=eff_provider,
             verb=node_meta.get("dispatch_verb"),
             brief=_brief,

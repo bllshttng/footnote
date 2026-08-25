@@ -425,6 +425,22 @@ def test_advance_resolves_node_tier_to_model(iso, monkeypatch):
     assert captured["model"] == "glm-4.7"  # STATIC_TIERS['low'][0]
 
 
+def test_advance_defers_canonical_difficulty_to_spawn_grid(iso, monkeypatch):
+    """A canonical difficulty must not become a Claude model pin upstream."""
+    captured = {}
+
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
+        captured.update(model=model)
+        return "sid"
+
+    node = {**NODE, "difficulty": "high"}
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    monkeypatch.setattr(adv, "_spawn_worker", spawn)
+    res = adv.advance(project="fno", events_path=iso)
+    assert res.decision == "dispatched"
+    assert captured["model"] is None
+
+
 def test_advance_cli_pin_overrides_node(iso, monkeypatch):
     """Locked Decision 1: a dispatch-time model/provider outranks node annotations."""
     captured = {}

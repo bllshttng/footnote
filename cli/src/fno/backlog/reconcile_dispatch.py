@@ -228,7 +228,9 @@ def _dispatch_reconcile(
             root,
             dep.get("slug"),
             reconcile_manifest=str(manifest_path),
-            model=_route_resolve.node_model(dep, provider=dep.get("provider")),
+            model=_route_resolve.node_model(
+                dep, provider=dep.get("provider"), resolve_difficulty=False
+            ),
             provider=dep.get("provider"),
         )
     except SpawnAlreadyRunning:

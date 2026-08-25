@@ -232,6 +232,7 @@ def node_model(
     explicit: Optional[str] = None,
     snapshot: Optional[dict] = None,
     provider: Optional[str] = None,
+    resolve_difficulty: bool = True,
 ) -> Optional[str]:
     """Concrete ``--model`` for a node/task at the spawn seam, or None for default.
 
@@ -253,7 +254,7 @@ def node_model(
             explicit=explicit,
             task_model=node.get("model"),
             task_tier=node.get("model_tier"),
-            task_difficulty=node.get("difficulty"),
+            task_difficulty=node.get("difficulty") if resolve_difficulty else None,
             snapshot=snapshot,
             provider=provider or "claude",
         )
