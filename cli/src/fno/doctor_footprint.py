@@ -145,6 +145,10 @@ def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
     from fno.agents.spawn_gate import _pid_alive, _process_start_time
 
     if pid == 1:
+        # Local to this reader on purpose: _pid_alive rejects pid <= 1 for
+        # every caller (signal-safety guard), and widening that shared guard
+        # would change liveness semantics fleet-wide. A pid-1 root is proven
+        # by incarnation token alone.
         current_start = _process_start_time(pid)
         if current_start is None:
             return None
@@ -305,6 +309,46 @@ def _live_shared_serve_root_pids(
     return roots, None
 
 
+def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None]:
+    """One CPU-only fleet reading shared by `--cause-only` and the spawn gate.
+
+    The single producer for the cause pipeline: both the verb and the gate's
+    load-refusal evidence read through here, so a hardening fix lands once and
+    the two explanations cannot drift. Returns ``(reading, None)`` on success
+    or ``(None, reason)``; the caller decides whether a reason is an exit-4 or
+    missing evidence.
+    """
+    deadline = time.monotonic() + timeout
+    snapshot_at = time.time()
+    ps_output, error = _read_ps(timeout=timeout)
+    if error is not None or ps_output is None:
+        return None, error or "footprint unavailable: ps returned no output"
+    snapshot_pids = _snapshot_pids(ps_output)
+    root_pids, root_error = _live_root_pids(
+        deadline=deadline, snapshot_pids=snapshot_pids, snapshot_at=snapshot_at
+    )
+    if root_error is not None:
+        return None, f"footprint unavailable: {root_error}"
+    shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
+        snapshot_pids=snapshot_pids
+    )
+    if shared_serve_error is not None:
+        return None, f"footprint unavailable: {shared_serve_error}"
+    if (root_pids | shared_serve_pids) - snapshot_pids:
+        return None, "footprint unavailable: discovered worker root missing from ps snapshot"
+    reading = parse_footprint(
+        ps_output,
+        excluded_root_pids={os.getpid()},
+        attributed_root_pids=root_pids | shared_serve_pids,
+        threshold_excluded_root_pids=shared_serve_pids,
+    )
+    if reading.unparsed_lines:
+        return None, (
+            f"footprint unavailable: {reading.unparsed_lines} ps line(s) could not be parsed"
+        )
+    return reading, None
+
+
 def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | None]:
     path: Path | None = None
     try:
@@ -360,12 +404,18 @@ def _bounded_json_command(command: str, byte_limit: int) -> str:
 
 
 def _roster_count() -> tuple[int | None, str | None]:
-    result = subprocess.run(
-        [_fno_binary(), "agents", "list", "--status", "live", "--json"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [_fno_binary(), "agents", "list", "--status", "live", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "roster unavailable: fno agents list timed out after 5.0s"
+    except OSError as exc:
+        return None, f"roster unavailable: {exc}"
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or f"exit {result.returncode}"
         return None, f"roster unavailable: {detail}"
@@ -450,12 +500,14 @@ def _emit_result(
         and reading.direct_process_count > process_threshold
     )
     exit_code = 0 if cause_only else (3 if cpu_over or process_over else 0)
+    top_limit = 5 if cause_only else None
+    command_limit = 1024 if cause_only else None
     payload = _payload(
         reading,
         process_threshold=process_threshold,
         exit_code=exit_code,
-        top_limit=5 if cause_only else None,
-        command_limit=1024 if cause_only else None,
+        top_limit=top_limit,
+        command_limit=command_limit,
     )
     if json_output:
         typer.echo(json.dumps(payload, sort_keys=True))
@@ -487,7 +539,14 @@ def _emit_result(
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
         if exit_code == 3 or cause_only:
             typer.echo("top fleet consumers:")
-            for cpu_percent, command in reading.top[:5]:
+            for cpu_percent, command in reading.top[: top_limit or 5]:
+                if command_limit is not None and len(command.encode("utf-8")) > command_limit:
+                    command = (
+                        command.encode("utf-8")[:command_limit].decode(
+                            "utf-8", errors="ignore"
+                        )
+                        + "..."
+                    )
                 typer.echo(f"  {command} ({cpu_percent:.1f}%)")
     raise typer.Exit(code=exit_code)
 
@@ -507,45 +566,9 @@ def footprint_command(
     ),
 ) -> None:
     """Measure fno CPU and process cost without using load average."""
-    snapshot_at = time.time()
-    ps_output, error = _read_ps()
-    if error is not None or ps_output is None:
-        _emit_failure(error or "footprint unavailable: ps returned no output", json_output=json_output)
-        raise typer.Exit(code=4)
-
-    snapshot_pids = _snapshot_pids(ps_output)
-    root_pids, root_error = _live_root_pids(
-        snapshot_pids=snapshot_pids, snapshot_at=snapshot_at
-    )
-    if root_error is not None:
-        _emit_failure(f"footprint unavailable: {root_error}", json_output=json_output)
-        raise typer.Exit(code=4)
-    shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
-        snapshot_pids=snapshot_pids
-    )
-    if shared_serve_error is not None:
-        _emit_failure(
-            f"footprint unavailable: {shared_serve_error}",
-            json_output=json_output,
-        )
-        raise typer.Exit(code=4)
-    if (root_pids | shared_serve_pids) - snapshot_pids:
-        _emit_failure(
-            "footprint unavailable: discovered worker root missing from ps snapshot",
-            json_output=json_output,
-        )
-        raise typer.Exit(code=4)
-    reading = parse_footprint(
-        ps_output,
-        excluded_root_pids={os.getpid()},
-        attributed_root_pids=root_pids | shared_serve_pids,
-        threshold_excluded_root_pids=shared_serve_pids,
-    )
-    if reading.unparsed_lines:
-        _emit_failure(
-            f"footprint unavailable: {reading.unparsed_lines} ps line(s) could not be parsed",
-            json_output=json_output,
-        )
+    reading, cause_error = cause_reading()
+    if cause_error is not None or reading is None:
+        _emit_failure(cause_error or "footprint unavailable", json_output=json_output)
         raise typer.Exit(code=4)
 
     if cause_only:

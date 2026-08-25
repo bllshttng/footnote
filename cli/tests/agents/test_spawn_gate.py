@@ -358,6 +358,38 @@ class TestRunGate:
         assert capsys.readouterr().err == ""
         guard.release()
 
+    def test_over_load_gathers_cause_after_gate_mutex_release(
+        self, monkeypatch, capsys
+    ):
+        """The cause probe costs seconds of ps/lsof; it must not run inside the
+        held gate mutex (queued spawners would stall behind evidence)."""
+        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+        released: list[str] = []
+        mutex_held_when_probed: list[bool] = []
+
+        monkeypatch.setattr(
+            spawn_gate,
+            "_release_claim_bounded",
+            lambda key, holder: released.append(key) or True,
+        )
+        monkeypatch.setattr(
+            spawn_gate,
+            "_footprint_cause_evidence",
+            lambda: mutex_held_when_probed.append("spawn-gate" in released) or None,
+            raising=False,
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("w2", "bg", no_wait=True)
+
+        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
+        assert mutex_held_when_probed == [True]
+
     def test_over_load_ceiling_refuses_under_cap(self, monkeypatch, capsys):
         """x-3f84 W3 wiring: the CPU guard fires beside the RAM floor, with
         slots FREE - a machine can be oversubscribed while under cap, which is

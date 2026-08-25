@@ -855,42 +855,10 @@ def _check_ram_floor(floor_gb: float) -> None:
 def _footprint_cause_evidence() -> Optional[str]:
     """Read one fail-open fleet footprint for an over-load refusal."""
     try:
-        from fno.doctor_footprint import (
-            _cpu_capacity_cores,
-            _live_root_pids,
-            _live_shared_serve_root_pids,
-            _read_ps,
-            _snapshot_pids,
-        )
-        from fno.footprint import parse_footprint
+        from fno.doctor_footprint import _cpu_capacity_cores, cause_reading
 
-        probe_deadline = time.monotonic() + 5.0
-        snapshot_at = time.time()
-        ps_output, error = _read_ps(timeout=5.0)
-        if error is not None or ps_output is None:
-            return None
-        snapshot_pids = _snapshot_pids(ps_output)
-        root_pids, root_error = _live_root_pids(
-            deadline=probe_deadline,
-            snapshot_pids=snapshot_pids,
-            snapshot_at=snapshot_at,
-        )
-        if root_error is not None:
-            return None
-        shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
-            snapshot_pids=snapshot_pids
-        )
-        if shared_serve_error is not None:
-            return None
-        if (root_pids | shared_serve_pids) - snapshot_pids:
-            return None
-        reading = parse_footprint(
-            ps_output,
-            excluded_root_pids={os.getpid()},
-            attributed_root_pids=root_pids | shared_serve_pids,
-            threshold_excluded_root_pids=shared_serve_pids,
-        )
-        if reading.unparsed_lines:
+        reading, _error = cause_reading()
+        if reading is None:
             return None
         capacity = float(_cpu_capacity_cores())
         measured_share = (
@@ -947,10 +915,9 @@ def _check_load_ceiling(max_load_per_cpu: float) -> None:
             f"{max_load_per_cpu:g} x {cpus} cpus = {ceiling:.1f}; refusing to "
             f"spawn (--force to bypass)"
         )
-        _warn(
-            _footprint_cause_evidence()
-            or "spawn-gate: footprint cause unavailable; load refusal unchanged"
-        )
+        # No evidence probe here: it costs seconds of ps/lsof, and this check
+        # runs inside the held gate mutex. The caller releases first, then
+        # gathers (see run_gate).
         raise GateRefused(EXIT_LOAD_REFUSED)
 
 
@@ -1212,7 +1179,22 @@ def run_gate(
             if slots < cap:
                 try:
                     _check_ram_floor(floor_gb)
+                except GateRefused:
+                    guard.release()
+                    raise
+                try:
                     _check_load_ceiling(max_load_per_cpu)
+                except GateRefused:
+                    # The refusal is decided; release the mutex BEFORE the
+                    # cause probe so queued spawners (and --no-wait callers)
+                    # never sit behind seconds of evidence gathering.
+                    guard.release()
+                    _warn(
+                        _footprint_cause_evidence()
+                        or "spawn-gate: footprint cause unavailable; load refusal unchanged"
+                    )
+                    raise
+                try:
                     _check_king_share(c, cap, caller_session=caller_session)
                 except GateRefused:
                     guard.release()

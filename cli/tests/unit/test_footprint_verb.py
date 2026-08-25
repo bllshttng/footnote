@@ -80,7 +80,7 @@ def test_ac9_edge_ps_timeout_caller_refuses_with_exit_four(monkeypatch) -> None:
     monkeypatch.setattr(
         doctor_footprint,
         "_read_ps",
-        lambda: (None, "ps unavailable: timed out after 5.0s"),
+        lambda **_kwargs: (None, "ps unavailable: timed out after 5.0s"),
     )
 
     result = runner.invoke(app, ["doctor", "footprint", "--json"])
@@ -418,6 +418,49 @@ def test_ac9_edge_cause_payload_is_bounded(monkeypatch) -> None:
         command_limit=64,
     )
     assert len(json.dumps(payload["top"][0]["command"]).encode("utf-8")) <= 64
+
+
+def test_ac9_edge_cause_text_output_is_bounded(capsys) -> None:
+    # The JSON payload bounds cause commands; the text branch must too, or a
+    # --cause-only run floods the terminal with full ps command lines.
+    import typer
+
+    from fno import doctor_footprint
+    from fno.footprint import parse_footprint
+
+    rows = "\n".join(
+        f"{100 + i} 1 01:00:00 {100 - i}.0 1024 fno-agents-worker worker-{i} "
+        + "x" * 5000
+        for i in range(10)
+    )
+    reading = parse_footprint(f"PID PPID ELAPSED %CPU RSS COMMAND\n{rows}")
+
+    with pytest.raises(typer.Exit):
+        doctor_footprint._emit_result(
+            reading, process_threshold=None, json_output=False, cause_only=True
+        )
+
+    lines = capsys.readouterr().out.splitlines()
+    consumers = [ln for ln in lines if "fno-agents-worker" in ln]
+    assert len(consumers) == 5
+    assert all(len(ln) <= 1200 for ln in consumers)
+    assert all("... (" in ln for ln in consumers)
+
+
+def test_ac9_edge_roster_read_is_bounded(monkeypatch) -> None:
+    # A hung `fno agents list` must reach the exit-4 unavailable-roster path,
+    # not block the verb (or a watcher invoking it) indefinitely.
+    from fno import doctor_footprint
+
+    def hung(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="fno agents list", timeout=5.0)
+
+    monkeypatch.setattr(doctor_footprint.subprocess, "run", hung)
+
+    count, error = doctor_footprint._roster_count()
+
+    assert count is None
+    assert error is not None and "timed out" in error
 
 
 def test_ac5_edge_capacity_uses_affinity_on_python_without_process_cpu_count(
