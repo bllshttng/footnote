@@ -792,6 +792,41 @@ def test_backlog_note_cli_verb(tmp_graph):
     assert payload["id"] == "x-9" and payload["note"]["text"] == "shipped wave 1"
 
 
+def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph):
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(
+        tmp_graph,
+        {
+            "id": "x-9",
+            "title": "t",
+            "details": "original rationale",
+            "progress_notes": [{"ts": "T1", "text": "first finding"}],
+        },
+    )
+    cli = CliRunner()
+
+    help_result = cli.invoke(app, ["backlog", "--help"], catch_exceptions=False)
+    assert help_result.exit_code == 0, help_result.output
+    assert "note" in help_result.output
+
+    appended = cli.invoke(
+        app,
+        ["backlog", "note", "x-9", "second finding", "-J"],
+        catch_exceptions=False,
+    )
+    assert appended.exit_code == 0, appended.output
+    import json as _json
+
+    node = _json.loads(tmp_graph.read_text())["entries"][0]
+    assert node["details"] == "original rationale"
+    assert [note["text"] for note in node["progress_notes"]] == [
+        "first finding",
+        "second finding",
+    ]
+
+
 def test_backlog_progress_adapter_task_done_stamps_node_and_plan(tmp_path, monkeypatch):
     from fno import status_fanout as sf
     import fno.graph.store as gs
