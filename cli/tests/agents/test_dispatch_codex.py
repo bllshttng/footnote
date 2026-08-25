@@ -437,7 +437,7 @@ def _adopt_usable_codex_orphan(workdir, session_id):
 def test_recovered_full_id_resumes_marker_and_stamps_exact_row(
     workdir, fake_codex_resume
 ):
-    from fno.agents.dispatch import _codex_followup_path
+    from fno.agents.dispatch import dispatch_ask
 
     session_id = "01a039cc-0000-7000-8000-000000000001"
     marker = "RECOVERY-RESUME-OK-test-full-id"
@@ -449,14 +449,12 @@ def test_recovered_full_id_resumes_marker_and_stamps_exact_row(
         duration_ms=22,
     )
 
-    result = _codex_followup_path(
-        name=entry.name,
+    result = dispatch_ask(
+        name=session_id,
         message=f"Reply exactly {marker}",
-        from_name="fno",
-        existing=entry,
-        yolo=False,
-        timeout_sec=10,
-        lock_handle=_FakeLockHandle(),
+        provider=None,
+        cwd=workdir,
+        timeout=10,
     )
 
     assert result.reply == marker
@@ -470,21 +468,19 @@ def test_recovered_full_id_resumes_marker_and_stamps_exact_row(
 def test_recovered_full_id_resume_failure_leaves_activity_unstamped(
     workdir, fake_codex_resume
 ):
-    from fno.agents.dispatch import DispatchAskError, _codex_followup_path
+    from fno.agents.dispatch import DispatchAskError, dispatch_ask
 
     session_id = "01a039cc-0000-7000-8000-000000000002"
     entry = _adopt_usable_codex_orphan(workdir, session_id)
     fake_codex_resume.side_effect = CodexInvocationError(1)
 
     with pytest.raises(DispatchAskError) as exc:
-        _codex_followup_path(
-            name=entry.name,
+        dispatch_ask(
+            name=session_id,
             message="Reply exactly RECOVERY-RESUME-OK-never",
-            from_name="fno",
-            existing=entry,
-            yolo=False,
-            timeout_sec=10,
-            lock_handle=_FakeLockHandle(),
+            provider=None,
+            cwd=workdir,
+            timeout=10,
         )
 
     assert exc.value.exit_code == 1

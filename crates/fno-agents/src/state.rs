@@ -164,6 +164,14 @@ impl Registry {
         self.entries.iter().find(|e| e.name == name)
     }
 
+    /// Find an entry by agent name or its canonical full harness session id.
+    pub fn find_name_or_full_session_id(&self, token: &str) -> Option<&RegistryEntry> {
+        self.entries.iter().find(|entry| {
+            entry.name == token
+                || entry.harness_session_id.as_deref() == Some(token)
+        })
+    }
+
     /// Mutable find by agent name.
     pub fn find_mut(&mut self, name: &str) -> Option<&mut RegistryEntry> {
         self.entries.iter_mut().find(|e| e.name == name)

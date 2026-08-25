@@ -466,6 +466,36 @@ fn codex_resume_bumps_last_message_at() {
     );
 }
 
+#[test]
+fn codex_resume_accepts_full_session_id_and_stamps_named_row() {
+    let home = AgentsHome::at(tmpdir("r2-full-home"));
+    let bin_dir = tmpdir("r2-full-bin");
+    let cwd = tmpdir("r2-full-cwd");
+    install_fake_codex(&bin_dir);
+
+    let session_id = "01a03a0e-0fa6-7661-b194-7520ce5ea6e2";
+    seed_codex_registry(&home, "01a03a0e", session_id, cwd.to_str().unwrap());
+
+    let outcome = dispatch_with_fake_codex(
+        &home,
+        &bin_dir,
+        session_id,
+        "Reply exactly RECOVERY-RESUME-OK-rust",
+        "fno",
+        &cwd,
+        false,
+        Some(Duration::from_secs(10)),
+        &[("FAKE_CODEX_REPLY", "RECOVERY-RESUME-OK-rust")],
+    );
+
+    assert_eq!(outcome.exit_code, 0, "stderr: {}", outcome.stderr);
+    assert_eq!(outcome.stdout, "RECOVERY-RESUME-OK-rust");
+    let registry_body = fs::read_to_string(home.registry_json()).unwrap();
+    assert!(registry_body.contains("last_message_at"), "{registry_body}");
+    let registry: serde_json::Value = serde_json::from_str(&registry_body).unwrap();
+    assert_eq!(registry["agents"][0]["name"], "01a03a0e");
+}
+
 // ---------------------------------------------------------------------------
 // AC3-ERR: error paths
 // ---------------------------------------------------------------------------

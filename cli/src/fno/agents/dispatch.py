@@ -1976,6 +1976,15 @@ def dispatch_ask(
     _validate_inputs(name=name, message=message, from_name=from_name)
 
     registry_path = paths.agents_registry_path()
+    requested_name = name
+    lock_name = requested_name
+    try:
+        preliminary = resolve_registered_agent_across_sources(
+            load_registry(), requested_name
+        )
+        lock_name = preliminary.entry.name
+    except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
+        pass
 
     def _on_wait() -> None:
         print(
@@ -1987,7 +1996,7 @@ def dispatch_ask(
     # 2. Per-agent flock + 3-onward inside the lock.
     try:
         with hold_agent_lock(
-            name,
+            lock_name,
             registry_path,
             timeout=lock_timeout,
             on_wait=_on_wait,
@@ -2011,10 +2020,14 @@ def dispatch_ask(
                     exit_code=12,
                 ) from exc
 
-            existing = next(
-                (e for e in entries if e.name == name),
-                None,
-            )
+            try:
+                existing = resolve_registered_agent_across_sources(
+                    entries, requested_name
+                ).entry
+            except AgentResolutionError as exc:
+                if exc.ambiguous or exc.unavailable:
+                    raise DispatchAskError(str(exc), exit_code=exc.exit_code) from exc
+                existing = None
 
             # 3b. Unknown-agent guard: ask never creates; spawn/host first.
             # This check precedes select_provider so that an unknown name
@@ -2024,13 +2037,15 @@ def dispatch_ask(
                 events.emit(
                     "agent_ask_failed",
                     stage="unknown-name",
-                    name=name,
+                    name=requested_name,
                 )
                 raise DispatchAskError(
-                    f"unknown agent {name!r}; spawn it first: "
-                    f"fno agents spawn {name} --harness <harness>",
+                    f"unknown agent {requested_name!r}; spawn it first: "
+                    f"fno agents spawn {requested_name} --harness <harness>",
                     exit_code=UNKNOWN_AGENT_EXIT_CODE,
                 )
+
+            name = existing.name
 
             # 3c. Provider mismatch check for EXISTING agents. select_provider
             # raises ProviderMismatchError when a follow-up specifies the wrong
