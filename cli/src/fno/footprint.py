@@ -87,6 +87,7 @@ def parse_footprint(
     sustained_floor_seconds: int = SUSTAINED_FLOOR_SECONDS,
     excluded_root_pids: set[int] | frozenset[int] | None = None,
     attributed_root_pids: set[int] | frozenset[int] | None = None,
+    threshold_excluded_root_pids: set[int] | frozenset[int] | None = None,
 ) -> Footprint:
     """Parse a file-backed ``ps -Ao pid,ppid,etime,%cpu,rss,command`` snapshot.
 
@@ -147,6 +148,7 @@ def parse_footprint(
 
     excluded = frozenset(excluded_root_pids or ())
     attributed_roots = frozenset(attributed_root_pids or ())
+    threshold_excluded_roots = frozenset(threshold_excluded_root_pids or ())
     direct = {
         pid: pid in attributed_roots or _attributed_command(process.command)
         for pid, process in processes.items()
@@ -224,7 +226,8 @@ def parse_footprint(
             if process.cpu_percent:
                 sustained.append((process.cpu_percent, process.command))
         elif pid in attributed_roots:
-            direct_process_count += 1
+            if pid not in threshold_excluded_roots:
+                direct_process_count += 1
             sustained_cpu_percent += process.cpu_percent
             sustained.append((process.cpu_percent, process.command))
         elif process.elapsed_seconds < sustained_floor_seconds:

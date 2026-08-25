@@ -30,7 +30,7 @@ def _fno_binary() -> str:
 
 
 def _live_root_pids() -> set[int]:
-    """Return positively live registry PIDs that may have detached children."""
+    """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
     try:
         from fno.agents.registry import load_registry
@@ -43,6 +43,23 @@ def _live_root_pids() -> set[int]:
                 roots.add(row.pid)
     except Exception:
         pass
+    try:
+        from fno.agents.spawn_gate import _pid_alive, census
+
+        for worker in census().workers:
+            if worker.source != "fno" and worker.spawned_by is None:
+                continue
+            pid = worker.session_pid or worker.pid
+            if pid is not None and _pid_alive(pid, None) is True:
+                roots.add(pid)
+    except Exception:
+        pass
+    return roots
+
+
+def _live_shared_serve_root_pids() -> set[int]:
+    """Return the confirmed PID of the detached shared opencode serve."""
+    roots: set[int] = set()
     try:
         from fno import paths
         from fno.agents.spawn_gate import _pid_alive
@@ -236,10 +253,13 @@ def footprint_command(
         _emit_failure(error or "footprint unavailable: ps returned no output", json_output=json_output)
         raise typer.Exit(code=4)
 
+    root_pids = _live_root_pids()
+    shared_serve_pids = _live_shared_serve_root_pids()
     reading = parse_footprint(
         ps_output,
         excluded_root_pids={os.getpid()},
-        attributed_root_pids=_live_root_pids(),
+        attributed_root_pids=root_pids | shared_serve_pids,
+        threshold_excluded_root_pids=shared_serve_pids,
     )
     if reading.unparsed_lines:
         _emit_failure(

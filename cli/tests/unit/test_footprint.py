@@ -66,6 +66,24 @@ def test_ac1_edge_attributes_detached_registered_root_and_descendants() -> None:
     ]
 
 
+def test_ac1_edge_shared_serve_is_not_a_direct_threshold_process() -> None:
+    reading = parse_footprint(
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        300 1 01:00:00 20.0 1024 fno-agents-worker --run
+        400 1 01:00:00 0.0 1024 opencode serve --detach
+        401 400 01:00:00 10.0 1024 cargo test -p fno
+        """,
+        attributed_root_pids={300, 400},
+        threshold_excluded_root_pids={400},
+    )
+
+    assert reading.process_count == 3
+    assert reading.direct_process_count == 1
+    assert reading.descendant_process_count == 1
+    assert reading.fleet_cpu_cores == 0.3
+
+
 def test_ac1_hp_counts_attributed_rows_and_sustained_cpu() -> None:
     reading = parse_footprint(
         """\
