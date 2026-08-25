@@ -368,7 +368,14 @@ fn spawn_yolo_maps_to_bypass_permissions() {
     );
     let receipt: serde_json::Value =
         serde_json::from_str(out.stdout.trim_end_matches('\n')).unwrap();
-    assert_eq!(receipt["permission_mode"], "bypassPermissions");
+    // (x-74ea / x-d401) The receipt names the REQUESTED mode - fno can back
+    // the request, never the outcome (a forced-default environment ignores
+    // the flag while the old key read as an applied grant).
+    assert_eq!(receipt["permission_mode_requested"], "bypassPermissions");
+    assert!(
+        receipt.get("permission_mode").is_none(),
+        "the outcome-shaped key must be gone"
+    );
 }
 
 // --- follow-up ---

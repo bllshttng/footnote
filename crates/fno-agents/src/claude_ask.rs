@@ -2938,12 +2938,18 @@ pub fn dispatch_claude_spawn(
             );
         }
     };
-    // Locked Decision 5: name the applied mode (flag or yolo-derived) so an audit
-    // of "why did this worker have edit rights" has a durable answer. Only when
-    // set, so the unset receipt is byte-identical (AC7). Values are exact
-    // passthrough, so escape `"` defensively.
+    // Locked Decision 5, renamed by x-74ea/x-d401: name the REQUESTED mode
+    // (flag or yolo-derived) so an audit of "why did this worker have edit
+    // rights" has a durable answer - and only as a request, because fno
+    // cannot back the outcome (a forced-default environment ignores the flag
+    // while the old key read as an applied grant). Only when set, so the
+    // unset receipt is byte-identical (AC7). Values are exact passthrough,
+    // so escape `"` defensively.
     let perm_field = match effective_mode.filter(|m| !m.is_empty()) {
-        Some(m) => format!(r#", "permission_mode": "{}""#, m.replace('"', "\\\"")),
+        Some(m) => format!(
+            r#", "permission_mode_requested": "{}""#,
+            m.replace('"', "\\\"")
+        ),
         None => String::new(),
     };
     // x-85fe: append the effective launch dir on the default canonical move

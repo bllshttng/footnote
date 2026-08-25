@@ -2392,11 +2392,14 @@ def cmd_spawn(
                 receipt_obj["readiness"] = pane_result.readiness
             if pane_result.readiness_rule is not None:
                 receipt_obj["readiness_rule"] = pane_result.readiness_rule
-            # Locked Decision 5: name the applied mode so an audit of "why did
-            # this worker have edit rights" has a durable answer. Only when set,
-            # so the unset receipt is unchanged.
+            # Locked Decision 5, renamed by x-74ea/x-d401: name the REQUESTED
+            # mode so an audit of "why did this worker have edit rights" has a
+            # durable answer - and only as a request, because fno cannot back
+            # the outcome (a forced-default environment ignores the flag while
+            # the old key read as an applied grant). Only when set, so the
+            # unset receipt is unchanged.
             if permission_mode is not None:
-                receipt_obj["permission_mode"] = permission_mode
+                receipt_obj["permission_mode_requested"] = permission_mode
             # x-d012: name the pinned account so a mis-pin is visible at spawn
             # time, not at billing time. Only when set (receipt byte-stable else).
             if account is not None:
@@ -2562,13 +2565,14 @@ def cmd_spawn(
         # consumers (name validation blocks backslash already, so this is the
         # only escapable character; sigma-review hardening finding).
         safe_name = result.name.replace('"', '\\"')
-        # Locked Decision 5 / Rust parity: name the applied mode (flag or the
-        # yolo-derived bypassPermissions) so an audit can tell elevated
-        # permissions were applied on this fallback path. Only when set, so the
-        # unset receipt is byte-identical.
+        # Locked Decision 5 / Rust parity, renamed by x-74ea/x-d401: name the
+        # REQUESTED mode (flag or the yolo-derived bypassPermissions) so an
+        # audit can tell elevated permissions were REQUESTED on this fallback
+        # path - fno can back the request, never the applied outcome. Only
+        # when set, so the unset receipt is byte-identical.
         eff_mode = permission_mode or ("bypassPermissions" if yolo else None)
         perm_field = (
-            f', "permission_mode": "{eff_mode.replace(chr(34), chr(92) + chr(34))}"'
+            f', "permission_mode_requested": "{eff_mode.replace(chr(34), chr(92) + chr(34))}"'
             if eff_mode
             else ""
         )
