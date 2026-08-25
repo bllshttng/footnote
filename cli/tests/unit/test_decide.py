@@ -3049,7 +3049,7 @@ decisions:
             "decision": "Project policy overrides the repository default.",
             "rationale": "This project needs a stricter ceiling.",
             "authority_source": "operator",
-            "supersedes": "d-94b2df45",
+            "supersedes": "D-94B2DF45",
             "ts": "2026-08-26T00:00:00Z",
         },
     )

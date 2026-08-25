@@ -1060,7 +1060,7 @@ def list_decisions(
     retractions = [row for row in rows if row.get("_event_type") == RETRACTION_EVENT]
     latest_retractions: dict[str, dict] = {}
     for row in retractions:
-        target = str(row.get("target_decision_id") or "")
+        target = str(row.get("target_decision_id") or "").casefold()
         if not target:
             continue
         rank = (str(row.get("ts") or ""), str(row.get("reason") or ""))
@@ -1080,6 +1080,7 @@ def list_decisions(
         superseded_target = row.get("supersedes")
         if not isinstance(superseded_target, str) or not superseded_target:
             continue
+        superseded_target = superseded_target.casefold()
         rank = (str(row.get("ts") or ""), str(row.get("decision_id") or ""))
         if rank > superseded_by.get(superseded_target, ("", ""))[0:2]:
             superseded_by[superseded_target] = rank
@@ -1125,16 +1126,17 @@ def list_decisions(
         # the index is append-only, so the reader is where that stops being
         # visible as two rulings.
         did = str(row.get("decision_id") or "")
-        if did in emitted:
+        decision_key = did.casefold()
+        if decision_key in emitted:
             continue
-        emitted.add(did)
+        emitted.add(decision_key)
         row = dict(row)
-        winner = superseded_by.get(str(row.get("decision_id")))
+        winner = superseded_by.get(decision_key)
         row["superseded_by"] = winner[1] if winner else None
         row["lane"] = _decision_lane(row)
-        if str(row.get("decision_id") or "") in latest_retractions:
+        if decision_key in latest_retractions:
             lifecycle = "retracted"
-            row["lifecycle_reason"] = latest_retractions[row["decision_id"]].get("reason")
+            row["lifecycle_reason"] = latest_retractions[decision_key].get("reason")
         elif winner:
             lifecycle = "superseded"
         elif row["lane"] == "coord":
