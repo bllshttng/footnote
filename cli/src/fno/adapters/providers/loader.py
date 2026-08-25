@@ -417,12 +417,13 @@ def _parse_providers_block(
 def _provider_candidates(repo_root: Path | None = None) -> list[Path]:
     """Candidate config file paths for provider loading (FNO_CONFIG or layered).
 
-    Precedence, later layer wins: the repo-root local (where
-    ``fno config set --local`` writes, found from any subdirectory), then a
-    PWD-anchored local when it differs (the legacy anchor, kept so nested
-    config dirs and PWD-pinned callers keep working), then the global
-    settings path. An explicit ``repo_root`` is authoritative and skips the
-    PWD layer.
+    Precedence, FIRST layer wins (repo-root local highest): the repo-root
+    local (where ``fno config set --local`` writes, found from any
+    subdirectory), then a PWD-anchored local when it differs (the legacy
+    anchor, kept so nested config dirs and PWD-pinned callers keep
+    working), then the global settings path. The merge loops iterate the
+    reversed list, so later assignments come from the higher layers. An
+    explicit ``repo_root`` is authoritative and skips the PWD layer.
     """
     env_cfg = os.environ.get("FNO_CONFIG")
     if env_cfg:
@@ -768,6 +769,14 @@ def load_scope_config(scope: "Literal['project', 'global']") -> ProvidersConfig:
     block = _extract_accounts_block(_read_parsed(target)) or {}
     if not block:
         return ProvidersConfig(records=[], active=None)
+    active = block.get("active")
+    if isinstance(active, str):
+        # Cross-layer pointers are legal (a project may point at a global
+        # record), so scope-own parsing must not validate the pointer
+        # against scope-own records; the merged read resolves it instead.
+        rest = {k: v for k, v in block.items() if k != "active"}
+        parsed = _parse_providers_block(rest)
+        return ProvidersConfig(records=parsed.records, active=active)
     return _parse_providers_block(block)
 
 
@@ -783,8 +792,9 @@ def save_providers(
     if scope == "project":
         target = Path(os.environ.get("PWD", os.getcwd())) / ".fno" / "config.toml"
     else:
-        # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference)
-        target = Path.home() / ".fno" / "config.toml"
+        # Same env-honoring resolver load_scope_config reads through, so the
+        # scope-own read/write pair honors FNO_GLOBAL_SETTINGS_PATH together.
+        target = _global_settings_path()
 
     # Read existing file to preserve other keys.
     # Use strict variant: if the file exists but is unparseable, raise rather

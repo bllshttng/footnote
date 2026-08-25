@@ -53,6 +53,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic import ValidationError as _PydValidationError
 
 # Pure file-reader leaf, extracted to break the config<->graph cycle. Re-exported
 # here so every existing `from fno.config import read_config_flat` (etc.) caller
@@ -3979,10 +3980,23 @@ class ConfigBlock(BaseModel):
     @field_validator("accounts", mode="before")
     @classmethod
     def _coerce_accounts(cls, v: object) -> object:
-        """Fail-safe: a non-mapping ``accounts:`` degrades to empty AccountsBlock."""
-        if isinstance(v, (dict, AccountsBlock)):
+        """Fail-safe: a non-mapping or invalid ``accounts:`` degrades to empty.
+
+        The provider loaders treat the same data leniently (a bad quota leaf
+        logs and degrades), so the settings model must not be the stricter
+        reader: an out-of-range quota value in config.toml would otherwise
+        fail EVERY command at load_settings. Invalid accounts data is
+        dropped from the settings view only; the loaders read the file
+        directly and report the problem through doctor.
+        """
+        if isinstance(v, AccountsBlock):
             return v
-        return {}
+        if isinstance(v, dict):
+            try:
+                return AccountsBlock(**v)
+            except _PydValidationError:
+                return AccountsBlock()
+        return AccountsBlock()
 
     @field_validator("state_dir", "plans_dir", mode="before")
     @classmethod

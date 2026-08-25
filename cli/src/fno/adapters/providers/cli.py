@@ -1447,6 +1447,26 @@ def use_provider(
         )
         raise typer.Exit(1)
 
+    # Validate the pointer target BEFORE any side effects: managed.switch
+    # materializes credentials into the shared slot irreversibly, and a
+    # validation failure after it leaves the slot switched with no routing
+    # pointer.
+    try:
+        scope_records = load_scope_config(scope).records  # type: ignore[arg-type]
+    except ProviderConfigError as exc:
+        typer.echo(f"error loading existing config: {exc}", err=True)
+        raise typer.Exit(1)
+    if scope == "global" and provider_id not in {r.id for r in scope_records}:
+        # Same rule `config set` enforces: a GLOBAL pointer must name a
+        # globally declared record, or every project without that record
+        # bricks its loader.
+        typer.echo(
+            f"error: account '{provider_id}' is not declared in the global "
+            "config; declare it there first or set the pointer per project.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     # Managed records materialize the account's credentials into the shared
     # slot (capture-before-overwrite + live-pin gate); oauth_dir/api_key records
     # only re-point active routing (spawns pick up the env), as before.
@@ -1492,21 +1512,6 @@ def use_provider(
             )
 
     from fno.adapters.providers.model import ProvidersConfig
-    try:
-        scope_records = load_scope_config(scope).records  # type: ignore[arg-type]
-    except ProviderConfigError as exc:
-        typer.echo(f"error loading existing config: {exc}", err=True)
-        raise typer.Exit(1)
-    if scope == "global" and provider_id not in {r.id for r in scope_records}:
-        # Same rule `config set` enforces: a GLOBAL pointer must name a
-        # globally declared record, or every project without that record
-        # bricks its loader.
-        typer.echo(
-            f"error: account '{provider_id}' is not declared in the global "
-            "config; declare it there first or set the pointer per project.",
-            err=True,
-        )
-        raise typer.Exit(1)
     new_config = ProvidersConfig(
         records=scope_records,
         active=provider_id,
@@ -1556,19 +1561,25 @@ def remove_provider(
         typer.echo(f"error: account '{provider_id}' not found", err=True)
         raise typer.Exit(1)
 
-    # Cross-layer pointers are legitimate now, so the refusal must look at
-    # BOTH layers' own actives, not just this scope's: deleting a record the
-    # other layer points at bricks that layer's loader.
+    # Cross-layer pointers are legitimate now, so the refusal must see every
+    # layer's own active, not just this scope's: deleting a record any layer
+    # points at bricks that layer's loader.
     if not force:
-        other = "project" if scope == "global" else "global"
-        try:
-            other_active = load_scope_config(other).active  # type: ignore[arg-type]
-        except ProviderConfigError:
-            other_active = None
-        if provider_id in (config.active, other_active):
+        from fno.adapters.providers.loader import (
+            _extract_accounts_block,
+            _provider_candidates,
+            _read_parsed,
+        )
+
+        pointed_at = any(
+            (_extract_accounts_block(_read_parsed(path)) or {}).get("active")
+            == provider_id
+            for path in _provider_candidates()
+        )
+        if pointed_at:
             typer.echo(
-                f"error: '{provider_id}' is an active provider (possibly in the "
-                "other config layer). Use --force to remove it.",
+                f"error: '{provider_id}' is an active provider (some config "
+                "layer points at it). Use --force to remove it.",
                 err=True,
             )
             raise typer.Exit(1)

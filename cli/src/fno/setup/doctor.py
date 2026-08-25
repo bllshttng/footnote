@@ -429,10 +429,9 @@ def _check_accounts_in_dict(raw_data: dict[str, Any], source_label: str) -> list
 
 def check_accounts() -> list[str]:
     """Validate configured accounts / providers and combos."""
-    import tomllib
-    import yaml
     from fno.adapters.providers.loader import (
         _provider_candidates,
+        _read_parsed,
         load_combos,
         load_providers,
     )
@@ -453,32 +452,17 @@ def check_accounts() -> list[str]:
     except Exception as exc:
         problems.append(f"combos load error: {exc}")
 
-    # Scan the SAME file set the loads above merge: a different candidate
-    # walk reports problems for files that have no effect and misses the
-    # ones that do. _read_parsed falls back to a settings.yaml sibling when
-    # the config.toml is absent, so the scan must too.
+    # Scan the SAME file set the loads above merge, parsed by the SAME
+    # reader (_read_parsed, including its settings.yaml fallback), so a
+    # change in reader behavior cannot split the two halves again.
     seen_paths: set[Path] = set()
     for candidate in _provider_candidates():
-        paths = [candidate]
-        if not candidate.is_file():
-            sibling = candidate.with_name("settings.yaml")
-            paths = [sibling] if sibling.is_file() else []
-        for path in paths:
-            if not path.is_file() or path in seen_paths:
-                continue
-            seen_paths.add(path)
-            try:
-                content = path.read_text(encoding="utf-8")
-                if path.suffix in (".toml", ".tml"):
-                    data = tomllib.loads(content)
-                elif path.suffix in (".yaml", ".yml"):
-                    data = yaml.safe_load(content) or {}
-                else:
-                    data = {}
-                if isinstance(data, dict):
-                    problems.extend(_check_accounts_in_dict(data, str(path)))
-            except Exception:
-                continue
+        if candidate in seen_paths:
+            continue
+        seen_paths.add(candidate)
+        data = _read_parsed(candidate)
+        if isinstance(data, dict) and data:
+            problems.extend(_check_accounts_in_dict(data, str(candidate)))
 
     return list(dict.fromkeys(problems))
 
