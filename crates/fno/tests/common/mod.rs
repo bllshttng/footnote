@@ -268,8 +268,12 @@ impl ClientHarness {
     }
 
     pub fn type_bytes(&mut self, bytes: &[u8]) {
-        self.writer.write_all(bytes).unwrap();
-        self.writer.flush().unwrap();
+        if let Err(error) = self.writer.write_all(bytes) {
+            panic!("client input write failed: {error}\n{}", self.diagnostics());
+        }
+        if let Err(error) = self.writer.flush() {
+            panic!("client input flush failed: {error}\n{}", self.diagnostics());
+        }
     }
 
     /// Prove the client's input loop is accepting bytes, not merely that the
