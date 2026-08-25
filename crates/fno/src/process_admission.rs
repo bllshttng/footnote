@@ -427,13 +427,24 @@ pub fn std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comman
 
 pub fn std_spawn(command: &mut std::process::Command) -> io::Result<std::process::Child> {
     let permit = admit_fleet().map_err(admission_io_error)?;
+    let track_child = !is_root_program(command.get_program());
     let mut child = command.spawn()?;
-    if let Err(error) = permit.record_child(child.id()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
+    if track_child {
+        if let Err(error) = permit.record_child(child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
     }
     Ok(child)
+}
+
+pub(crate) fn is_root_program(program: &std::ffi::OsStr) -> bool {
+    let Some(name) = std::path::Path::new(program).file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    name == "fno" || name.starts_with("fno-")
 }
 
 pub fn std_output(command: &mut std::process::Command) -> io::Result<std::process::Output> {
@@ -460,11 +471,14 @@ pub fn tokio_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Co
 
 pub fn tokio_spawn(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
     let permit = admit_fleet().map_err(admission_io_error)?;
+    let track_child = !is_root_program(command.as_std().get_program());
     let mut child = command.spawn()?;
-    if let Some(pid) = child.id() {
-        if let Err(error) = permit.record_child(pid) {
-            let _ = child.start_kill();
-            return Err(error);
+    if track_child {
+        if let Some(pid) = child.id() {
+            if let Err(error) = permit.record_child(pid) {
+                let _ = child.start_kill();
+                return Err(error);
+            }
         }
     }
     Ok(child)

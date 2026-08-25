@@ -358,11 +358,13 @@ impl PtyShell {
                 }
             })?
         };
-        if let Some(pid) = child.process_id() {
-            if let Err(error) = permit.record_child(pid) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(PtyError::Spawn(format!("admission marker failed: {error}")));
+        if !crate::process_admission::is_root_program(OsStr::new(program)) {
+            if let Some(pid) = child.process_id() {
+                if let Err(error) = permit.record_child(pid) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(PtyError::Spawn(format!("admission marker failed: {error}")));
+                }
             }
         }
         wire(pair, child, pane_id, out_tx, exit_tx, shell_rc)
