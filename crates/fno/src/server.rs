@@ -1392,10 +1392,9 @@ const TRUTH_PROBE_EVERY: Duration = Duration::from_secs(10);
 /// Rows whose probe fields are null still enter the map: a probe that did not
 /// answer for one row is that row's absence, not the fleet's.
 fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
-    let out = std::process::Command::new("fno")
-        .args(["agents", "list", "--json"])
-        .output()
-        .ok()?;
+    let mut command = crate::process_admission::std_command("fno");
+    command.args(["agents", "list", "--json"]);
+    let out = crate::process_admission::std_output(&mut command).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1970,13 +1969,13 @@ pub(crate) fn config_get(key: &str) -> Option<String> {
         .collect();
     let out_path = dir.join(format!("config-{}-{safe_key}.out", std::process::id()));
     let out_file = std::fs::File::create(&out_path).ok()?;
-    let mut child = match std::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::std_command(fno_bin());
+    command
         .args(["config", "get", key])
         .stdin(std::process::Stdio::null())
         .stdout(out_file)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::null());
+    let mut child = match crate::process_admission::std_spawn(&mut command) {
         Ok(c) => c,
         Err(_) => {
             let _ = std::fs::remove_file(&out_path);
@@ -2040,12 +2039,13 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
         args.push("--account");
         args.push(a);
     }
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(dispatch_timeout, fut).await {
         Err(_) => "grab work: timed out".to_string(),
         Ok(Err(_)) => "grab work: dispatch unavailable".to_string(),
@@ -2072,13 +2072,15 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
 /// mutation. `verb` is always a fixed literal; the argv is never a shell string.
 async fn run_agent_action(verb: &str, name: &str) -> String {
     const AGENT_ACTION_TIMEOUT: Duration = Duration::from_secs(20);
-    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
         .args([verb, name])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .status();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_status(&mut command);
     let past = if verb == "stop" { "stopped" } else { "removed" };
     match tokio::time::timeout(AGENT_ACTION_TIMEOUT, fut).await {
         Err(_) => format!("{verb} {name}: timed out"),
@@ -2138,11 +2140,12 @@ async fn run_mail_send(name: &str, text: &str) -> String {
     const MAIL_TIMEOUT: Duration = Duration::from_secs(20);
     // `--` ends option parsing so operator text starting with `-` (e.g. a reply
     // of `--help`) is delivered as the message, not consumed as a CLI flag.
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(["agents", "mail", "send", "--", name, text])
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(MAIL_TIMEOUT, fut).await {
         Err(_) => format!("mail {name}: timed out"),
         Ok(Err(_)) => format!("mail {name}: unavailable"),
@@ -2165,11 +2168,12 @@ async fn run_mail_send(name: &str, text: &str) -> String {
 async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String {
     const VERB_TIMEOUT: Duration = Duration::from_secs(5);
     let label = verb.label();
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(verb.args(node))
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(VERB_TIMEOUT, fut).await {
         Err(_) => format!("{label} {node}: timed out"),
         Ok(Err(_)) => format!("{label} {node}: unavailable"),
@@ -2223,11 +2227,12 @@ async fn run_respawn(name: &str, uuid: &str, cwd: &str, account: Option<&str>) -
         args.push("--account");
         args.push(acct);
     }
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(&args)
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(RESPAWN_TIMEOUT, fut).await {
         Err(_) => format!("respawn {name}: timed out"),
         Ok(Err(_)) => format!("respawn {name}: unavailable"),
@@ -2254,11 +2259,12 @@ async fn run_agent_peek(name: &str) -> Vec<String> {
     // rather than wedging the overlay on "loading…" forever.
     const PEEK_TIMEOUT: Duration = Duration::from_secs(5);
     const PEEK_LINES: &str = "20";
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(["agents", "peek", name, "-n", PEEK_LINES])
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let body = match tokio::time::timeout(PEEK_TIMEOUT, fut).await {
         Err(_) => format!("peek timed out ({}s)", PEEK_TIMEOUT.as_secs()),
         Ok(Err(_)) => "peek unavailable (fno not on server PATH?)".to_string(),
@@ -2289,12 +2295,14 @@ async fn run_agent_peek(name: &str) -> Vec<String> {
 /// 0`), else a bounded failure notice. The argv is a fixed literal.
 async fn run_reap() -> String {
     const REAP_TIMEOUT: Duration = Duration::from_secs(20);
-    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
         .args(["reap", "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(REAP_TIMEOUT, fut).await {
         Err(_) => "reap: timed out".to_string(),
         Ok(Err(_)) => "reap: unavailable".to_string(),
@@ -2314,7 +2322,7 @@ async fn run_claude_lifecycle(
     config_dir: Option<std::path::PathBuf>,
 ) -> (bool, Option<String>) {
     const CLAUDE_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut cmd = tokio::process::Command::new("claude");
+    let mut cmd = crate::process_admission::tokio_command("claude");
     cmd.args([verb, attach_id]);
     // (x-c914) Route the lifecycle action at the row's own daemon: an isolated
     // account lives in its own CLAUDE_CONFIG_DIR, so a bare `claude stop|rm`
@@ -2322,12 +2330,11 @@ async fn run_claude_lifecycle(
     if let Some(dir) = config_dir {
         cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
-    let fut = cmd
-        .stdin(std::process::Stdio::null())
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .status();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_status(&mut cmd);
     match tokio::time::timeout(CLAUDE_TIMEOUT, fut).await {
         Err(_) => (false, Some(format!("{verb} timed out"))),
         Ok(Err(_)) => (false, Some("claude unavailable".to_string())),
@@ -2344,12 +2351,13 @@ async fn run_claude_agents_all(
     tracked: &std::collections::HashSet<String>,
 ) -> Option<HashMap<String, crate::agents_view::ObservedExternal>> {
     const AGENTS_TIMEOUT: Duration = Duration::from_secs(10);
-    let fut = tokio::process::Command::new("claude")
+    let mut command = crate::process_admission::tokio_command("claude");
+    command
         .args(["agents", "--json", "--all"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(AGENTS_TIMEOUT, fut).await.ok()?.ok()?;
     if !output.status.success() {
         return None;
@@ -2393,14 +2401,16 @@ fn e2e_log(msg: std::fmt::Arguments<'_>) {
 /// single flaky tick never downgrades an in-flight card.
 async fn run_claim_sweep() -> Option<HashMap<String, String>> {
     const SWEEP_TIMEOUT: Duration = Duration::from_millis(800);
-    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
         .args(["claim", "sweep", "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         // On timeout the future is dropped; kill_on_drop reaps the child so a
         // hung sweep can't accumulate an orphan per tick.
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(SWEEP_TIMEOUT, fut).await.ok()?.ok()?;
     if !output.status.success() {
         return None;
@@ -2580,6 +2590,18 @@ impl Core {
         cols: u16,
         cwd: &str,
     ) -> Result<u64, String> {
+        let permit = crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
+        self.spawn_pane_cmd_with_permit(argv, rows, cols, cwd, permit)
+    }
+
+    fn spawn_pane_cmd_with_permit(
+        &mut self,
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: &str,
+        permit: crate::process_admission::AdmissionPermit,
+    ) -> Result<u64, String> {
         if argv.is_empty() {
             return Err("pane run needs a command (empty argv)".into());
         }
@@ -2589,7 +2611,7 @@ impl Core {
         let account = account_from_argv(argv);
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
-        let pty = PtyShell::spawn_cmd(
+        let pty = PtyShell::spawn_cmd_with_permit(
             argv,
             rows,
             cols,
@@ -2598,6 +2620,7 @@ impl Core {
             id,
             self.out_tx.clone(),
             self.exit_tx.clone(),
+            permit,
         )
         .map_err(|e| e.to_string())?;
         self.register_pane(
@@ -2945,6 +2968,33 @@ impl Core {
         }
     }
 
+    fn placement_pane_count(&self, dest: Option<u64>, placement: &PanePlacement) -> usize {
+        if matches!(placement.tab, Some(TabSel::New)) {
+            return 0;
+        }
+        let Some(sid) = dest else {
+            return 0;
+        };
+        let Some(squad) = self.session.squad(sid) else {
+            return 0;
+        };
+        let tab_index = if let Some(anchor) = placement.at {
+            self.session
+                .find_pane(anchor)
+                .and_then(|(found_sid, ti)| (found_sid == sid).then_some(ti))
+        } else if let Some(selector) = placement.tab.as_ref() {
+            self.resolve_tab_index(sid, selector).ok()
+        } else if squad.tabs.is_empty() {
+            None
+        } else {
+            Some(squad.active_tab.min(squad.tabs.len() - 1))
+        };
+        tab_index
+            .and_then(|index| squad.tabs.get(index))
+            .map(|tab| tree::leaves(&tab.root).len())
+            .unwrap_or(0)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_pane(
         &mut self,
@@ -2957,6 +3007,10 @@ impl Core {
         placement: PanePlacement,
         worker: Option<String>,
     ) -> Result<u64, (u32, String)> {
+        let mut placement = placement;
+        placement.max_panes = Some(crate::process_admission::configured_pane_group_max(
+            placement.max_panes,
+        ));
         // (x-5f7f) The worker name reaches the store and later keys a resume,
         // so the SERVER re-validates it before any pane exists - the CLI gate
         // covers one caller, the control socket is reachable by any client.
@@ -2998,8 +3052,11 @@ impl Core {
                 (dest, None)
             }
         };
+        let pane_count = self.placement_pane_count(dest, &placement);
+        let permit = crate::process_admission::admit_pane(pane_count, placement.max_panes)
+            .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
         let pid = self
-            .spawn_pane_cmd(&argv, rows, cols, &cwd)
+            .spawn_pane_cmd_with_permit(&argv, rows, cols, &cwd, permit)
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
@@ -7868,7 +7925,7 @@ impl Core {
             })
             .to_string();
             const TOUCH_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
-            let mut cmd = tokio::process::Command::new(fno_bin());
+            let mut cmd = crate::process_admission::tokio_command(fno_bin());
             cmd.args([
                 "doctor",
                 "event",
@@ -7888,7 +7945,11 @@ impl Core {
                 cmd.current_dir(dir);
             }
             let ok = matches!(
-                tokio::time::timeout(TOUCH_EMIT_TIMEOUT, cmd.status()).await,
+                tokio::time::timeout(
+                    TOUCH_EMIT_TIMEOUT,
+                    crate::process_admission::tokio_status(&mut cmd),
+                )
+                .await,
                 Ok(Ok(s)) if s.success()
             );
             if !ok {
@@ -7958,27 +8019,28 @@ impl Core {
         let failures = Arc::clone(&self.pane_stats_emit_failures);
         tokio::spawn(async move {
             const PANE_STATS_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
+            let mut command = crate::process_admission::tokio_command(fno_bin());
+            command
+                .args([
+                    "doctor",
+                    "event",
+                    "emit",
+                    "--type",
+                    "mux_pane_counters",
+                    "--source",
+                    "daemon",
+                    "--global",
+                    "--data",
+                    &data,
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
             let ok = matches!(
                 tokio::time::timeout(
                     PANE_STATS_EMIT_TIMEOUT,
-                    tokio::process::Command::new(fno_bin())
-                        .args([
-                            "doctor",
-                            "event",
-                            "emit",
-                            "--type",
-                            "mux_pane_counters",
-                            "--source",
-                            "daemon",
-                            "--global",
-                            "--data",
-                            &data,
-                        ])
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .kill_on_drop(true)
-                        .status(),
+                    crate::process_admission::tokio_status(&mut command),
                 )
                 .await,
                 Ok(Ok(s)) if s.success()

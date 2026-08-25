@@ -684,7 +684,8 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
     // totals. Epoch avoids synthesizing an RFC3339 string in a crate with no
     // date library; `fno-agents` parses each row's ts to epoch for the compare.
     let since_epoch = last.to_string();
-    let fut = tokio::process::Command::new(fno_agents_bin())
+    let mut command = crate::process_admission::tokio_command(fno_agents_bin());
+    command
         .args([
             "digest",
             "--session",
@@ -697,8 +698,8 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
         .stderr(std::process::Stdio::null())
         // On timeout the future is dropped; kill_on_drop reaps the child so a
         // slow `fno-agents` can't leave an orphan behind on each attach.
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
         .await
         .ok()?

@@ -242,6 +242,27 @@ impl PtyShell {
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<PtyShell, PtyError> {
+        let permit =
+            crate::process_admission::admit_fleet().map_err(|e| PtyError::Spawn(e.to_string()))?;
+        Self::spawn_with_permit(
+            candidates, rows, cols, cwd, session, pane_id, out_tx, exit_tx, permit,
+        )
+    }
+
+    /// Spawn after the server has performed the combined fleet/tab decision.
+    /// The permit remains alive through the PTY child-creation syscall.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_permit(
+        candidates: &[OsString],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&std::path::Path>,
+        session: &str,
+        pane_id: u64,
+        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        exit_tx: tokio::sync::mpsc::Sender<u64>,
+        permit: crate::process_admission::AdmissionPermit,
+    ) -> Result<PtyShell, PtyError> {
         let pair = open_pty(rows, cols)?;
         let mut errors = Vec::new();
         let mut child = None;
@@ -268,7 +289,14 @@ impl PtyShell {
             }
         }
         drop(fork);
-        let child = child.ok_or_else(|| PtyError::Spawn(errors.join("; ")))?;
+        let mut child = child.ok_or_else(|| PtyError::Spawn(errors.join("; ")))?;
+        if let Some(pid) = child.process_id() {
+            if let Err(error) = permit.record_child(pid) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PtyError::Spawn(format!("admission marker failed: {error}")));
+            }
+        }
         wire(pair, child, pane_id, out_tx, exit_tx, shell_rc)
     }
 
@@ -287,6 +315,26 @@ impl PtyShell {
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<PtyShell, PtyError> {
+        let permit =
+            crate::process_admission::admit_fleet().map_err(|e| PtyError::Spawn(e.to_string()))?;
+        Self::spawn_cmd_with_permit(
+            argv, rows, cols, cwd, session, pane_id, out_tx, exit_tx, permit,
+        )
+    }
+
+    /// Spawn an explicit command after a server-owned admission decision.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_cmd_with_permit(
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&std::path::Path>,
+        session: &str,
+        pane_id: u64,
+        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        exit_tx: tokio::sync::mpsc::Sender<u64>,
+        permit: crate::process_admission::AdmissionPermit,
+    ) -> Result<PtyShell, PtyError> {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| PtyError::Spawn("empty argv".into()))?;
@@ -299,7 +347,7 @@ impl PtyShell {
         for a in args {
             cmd.arg(a);
         }
-        let child = {
+        let mut child = {
             let _fork = fork_guard();
             pair.slave.spawn_command(cmd).map_err(|e| {
                 let detail = format!("{program}: {e}");
@@ -310,6 +358,13 @@ impl PtyShell {
                 }
             })?
         };
+        if let Some(pid) = child.process_id() {
+            if let Err(error) = permit.record_child(pid) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PtyError::Spawn(format!("admission marker failed: {error}")));
+            }
+        }
         wire(pair, child, pane_id, out_tx, exit_tx, shell_rc)
     }
 
