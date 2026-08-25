@@ -5037,8 +5037,11 @@ def cmd_drain_self(
     # A live-injected send stores the full paired envelope durably (body
     # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
     # needs both shapes: the bare trailer, and the trailer immediately
-    # before a terminal close tag.
-    _trailer_then_close = f"{FNO_MAIL_TRAILER}\n</fno_mail>"
+    # before a terminal close tag. Any origin's trailer counts: a body
+    # stamped `mail_trailer("operator")` is already stamped too, and
+    # appending the peer trailer after its close tag would contradict the
+    # provenance line it just carried.
+    from fno.mail.envelope import ends_with_authority_trailer
 
     def _render_body(body: str) -> str:
         # A durable heads-up body is sender-controlled, so a plain `in`
@@ -5047,7 +5050,7 @@ def cmd_drain_self(
         # then treat the body as already stamped and skip the real
         # terminal trailer. Require the stripped body to END with it.
         text = body.rstrip("\n")
-        if text.endswith(FNO_MAIL_TRAILER) or text.endswith(_trailer_then_close):
+        if ends_with_authority_trailer(text):
             return text
         return f"{text}\n{FNO_MAIL_TRAILER}"
 
