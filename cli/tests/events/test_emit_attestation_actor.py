@@ -18,7 +18,13 @@ _SCRIPT = _REPO_ROOT / "skills" / "review" / "scripts" / "emit-attestation.sh"
 
 
 def _temp_git_repo(tmp_path: Path, manifest: str | None) -> Path:
-    """A throwaway git repo with one commit; optionally a session manifest."""
+    """A throwaway git repo; optionally a session manifest.
+
+    The fixture carries a base commit on origin/main plus a feature commit
+    with a real change, because the emitter measures the diff under review
+    and refuses a zero-line one - an empty-commit fixture trips that refusal
+    on every emit below.
+    """
     sub = tmp_path / "repo"
     sub.mkdir()
     for args in (
@@ -28,6 +34,15 @@ def _temp_git_repo(tmp_path: Path, manifest: str | None) -> Path:
         ["git", "commit", "-q", "--allow-empty", "-m", "init"],
     ):
         subprocess.run(args, cwd=sub, check=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=sub, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", base], cwd=sub, check=True
+    )
+    (sub / "a.txt").write_text("body\n")
+    subprocess.run(["git", "add", "a.txt"], cwd=sub, check=True)
+    subprocess.run(["git", "commit", "-qm", "feature"], cwd=sub, check=True)
     if manifest is not None:
         (sub / ".fno").mkdir()
         (sub / ".fno" / "target-state.md").write_text(manifest)
