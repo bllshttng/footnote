@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -151,8 +152,24 @@ def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
     return _pid_alive(pid, pid_start)
 
 
+def _terminal_row_changed_after_snapshot(row: Any, snapshot_at: float) -> bool:
+    exited_at = getattr(row, "exited_at", None)
+    if exited_at is None:
+        return False
+    try:
+        timestamp = datetime.fromisoformat(str(exited_at).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.timestamp() >= snapshot_at
+    except (TypeError, ValueError, OverflowError):
+        return True
+
+
 def _live_root_pids(
-    *, deadline: float | None = None, snapshot_pids: set[int] | None = None
+    *,
+    deadline: float | None = None,
+    snapshot_pids: set[int] | None = None,
+    snapshot_at: float | None = None,
 ) -> tuple[set[int], str | None]:
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
@@ -166,6 +183,12 @@ def _live_root_pids(
             return roots, "worker registry incomplete"
         for row in rows:
             if row.status not in LIVE_STATUSES:
+                if (
+                    snapshot_at is not None
+                    and row.pid is None
+                    and _terminal_row_changed_after_snapshot(row, snapshot_at)
+                ):
+                    return roots, "worker root liveness unavailable"
                 if (
                     snapshot_pids is None
                     or row.pid is None
@@ -478,13 +501,16 @@ def footprint_command(
     ),
 ) -> None:
     """Measure fno CPU and process cost without using load average."""
+    snapshot_at = time.time()
     ps_output, error = _read_ps()
     if error is not None or ps_output is None:
         _emit_failure(error or "footprint unavailable: ps returned no output", json_output=json_output)
         raise typer.Exit(code=4)
 
     snapshot_pids = _snapshot_pids(ps_output)
-    root_pids, root_error = _live_root_pids(snapshot_pids=snapshot_pids)
+    root_pids, root_error = _live_root_pids(
+        snapshot_pids=snapshot_pids, snapshot_at=snapshot_at
+    )
     if root_error is not None:
         _emit_failure(f"footprint unavailable: {root_error}", json_output=json_output)
         raise typer.Exit(code=4)

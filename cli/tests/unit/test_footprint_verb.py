@@ -216,6 +216,27 @@ def test_live_root_pids_refuses_completed_root_that_matches_snapshot(monkeypatch
     )
 
 
+def test_live_root_pids_refuses_terminal_root_cleared_after_snapshot(monkeypatch) -> None:
+    from datetime import datetime, timezone
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="exited",
+        pid=None,
+        pid_start_time=None,
+        exited_at=datetime.now(timezone.utc).isoformat(),
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    assert doctor_footprint._live_root_pids(
+        snapshot_pids={902}, snapshot_at=0.0
+    ) == (
+        set(),
+        "worker root liveness unavailable",
+    )
+
+
 def test_live_root_pids_refuses_incomplete_registry(monkeypatch) -> None:
     from fno import doctor_footprint
     from fno.agents.registry import LoadedRegistry
