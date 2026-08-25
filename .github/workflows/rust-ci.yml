@@ -181,6 +181,8 @@ jobs:
           --test provider_contract
           --test review_coverage_paths
           --test review_coverage_verb
+          --test run_outcome
+          --test run_state
           --test spawn_routing
           --test verify_evidence_parity
           -- --test-threads=1
@@ -202,6 +204,7 @@ jobs:
           --test layout_e2e
           --test mouse_e2e
           --test multiclient_e2e
+          --test mux_config_e2e
           --test persistence
           --test proto_socket
           --test script_api_e2e
@@ -321,13 +324,19 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Stress the process-backed e2e binaries
-        # The script refuses a dirty working tree, so it must see the checkout
-        # untouched: no build artifacts written into tracked paths, no
-        # generated files. It reads STRESS_TRIALS but 20 is already its
-        # default; naming it here is what makes the contract greppable.
+        # The exit code is not enough on its own. The script stands down with a
+        # zero exit on a dirty tree (it cannot pin a sha), which is right where
+        # it is auto-discovered by the local smoke suite and wrong here, where a
+        # silent stand-down would publish a green job that ran no trials. So the
+        # gate is the POSITIVE summary line, naming the trial count this job
+        # exists to run. It reads STRESS_TRIALS, and 20 is already its default;
+        # naming it here is what makes the contract greppable.
         env:
           STRESS_TRIALS: "20"
-        run: bash scripts/tests/stress-rust-e2e-concurrency.sh
+        run: |
+          set -o pipefail
+          bash scripts/tests/stress-rust-e2e-concurrency.sh | tee stress.log
+          grep -q "^stress_summary trials=20 failures=0" stress.log
 
   audit:
     name: cargo audit (RUSTSEC advisories)

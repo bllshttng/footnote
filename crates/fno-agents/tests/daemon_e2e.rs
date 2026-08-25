@@ -101,12 +101,13 @@ fn start_daemon(home: &AgentsHome) -> DaemonChild {
 }
 
 fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
+    let seen = count_events(home, "daemon_started");
     let mut cmd = Command::new(daemon_bin);
     cmd.env("FNO_AGENTS_HOME", home.root())
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
     let child = cmd.spawn().expect("daemon spawns");
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
-    wait_for_event(home, "daemon_started", Duration::from_secs(10));
+    wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
     DaemonChild(child)
 }
 
@@ -116,6 +117,7 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
 /// an artificially-seeded mid-flight source row intact for a promote-admission
 /// assertion.
 fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
+    let seen = count_events(home, "daemon_started");
     let mut cmd = Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
@@ -125,8 +127,38 @@ fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
     }
     let child = cmd.spawn().expect("daemon spawns");
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
-    wait_for_event(home, "daemon_started", Duration::from_secs(10));
+    wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
     DaemonChild(child)
+}
+
+/// How many lines of the daemon's event log carry `needle`.
+fn count_events(home: &AgentsHome, needle: &str) -> usize {
+    std::fs::read_to_string(home.events_jsonl())
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(needle))
+        .count()
+}
+
+/// Wait until `needle` has been written at least `at_least` times.
+///
+/// [`wait_for_event`] asks whether the log CONTAINS the needle, which is a
+/// no-op for every daemon after the first under one home: the log is
+/// append-only, so a `daemon_started` line left by the previous daemon
+/// satisfies it instantly and the caller races a socket the new daemon has not
+/// accepted on yet. Counting lines makes the wait about THIS spawn.
+fn wait_for_event_count(home: &AgentsHome, needle: &str, at_least: usize, budget: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < budget {
+        if count_events(home, needle) >= at_least {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "event {needle} reached {} of {at_least} within {budget:?}",
+        count_events(home, needle)
+    );
 }
 
 /// Wait for `needle` to appear in the daemon's event log.
@@ -169,6 +201,17 @@ fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, bud
             })
             .collect();
         if let Some(started) = started {
+            // `startup_reconcile_done` carries no pid, so the successor's sweep
+            // can only be named positionally: incumbent first, successor
+            // second. That reading holds only while exactly those two daemons
+            // have swept under this home. A third sweep means the storm forked
+            // an extra daemon and index 1 no longer names what it claims, so
+            // refuse rather than assert against the wrong event.
+            assert!(
+                sweeps.len() <= 2,
+                "{} startup sweeps under this home; the successor's cannot be named positionally; event_order={events:?}",
+                sweeps.len()
+            );
             if let Some(successor_sweep) = sweeps.get(1) {
                 assert!(
                     started < *successor_sweep,
@@ -219,8 +262,15 @@ fn fake_daemon_bin(home: &AgentsHome) -> PathBuf {
     path
 }
 
+/// Quote `value` as one single-quoted shell word.
+///
+/// The escape is `'\''` (close, escaped quote, reopen). The double-quoted
+/// variant `'"'"'` that stood here is the idiom for a DOUBLE-quoted context and
+/// leaves the word unbalanced here, so a path or value containing an apostrophe
+/// produced a wrapper `/bin/sh` could not parse - surfacing much later as a 10s
+/// socket timeout that named nothing.
 fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn daemon_env_bin(
@@ -230,9 +280,13 @@ fn daemon_env_bin(
     extra: &[(&str, &str)],
 ) -> PathBuf {
     let path = home.root().join(format!("{label}-daemon.sh"));
-    let mut script = String::from(
-        "#!/bin/sh\nunset FNO_AGENTS_WORKER_BIN FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS\n",
-    );
+    // Only the worker-bin override is cleared, and only because the export two
+    // lines down replaces it. The delay variable is deliberately NOT unset: it
+    // is the thing the probe MEASURES, and clearing it first made the sibling's
+    // `delay=unset` a constant this test printed about itself. With the unset
+    // gone the printf reports the environment the daemon actually handed down,
+    // so a leak has somewhere to show up.
+    let mut script = String::from("#!/bin/sh\nunset FNO_AGENTS_WORKER_BIN\n");
     script.push_str(&format!(
         "export FNO_AGENTS_WORKER_BIN={}\n",
         shell_quote(WORKER_BIN),
@@ -664,7 +718,8 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     // is serving with a fresh positive probe inside the same latency window,
     // instead of requiring one raced verb to win scheduler timing. The old
     // awaited-startup implementation still cannot answer this before the 3s
-    // delay, so the 2.5s discriminator below remains load-bearing.
+    // delay. The 2.5s discriminator this sentence used to point at is gone; the
+    // positive probe below is now the whole proof.
     let post_restart = call(
         &home,
         &daemon_bin,

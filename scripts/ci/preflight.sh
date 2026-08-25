@@ -1131,7 +1131,13 @@ if retry_run_leg smoke; then
     # PATH until uv syncs the cli project (uv auto-syncs). The attestation
     # logic below is unchanged: a FULL GREEN records, a RED deletes, a subset
     # mints nothing.
-    run_hermetic uv run --project cli fno-py doctor test smoke "${SMOKE_ARGS[@]}"
+    # The smoke registry auto-discovers scripts/tests/stress-rust-e2e-concurrency.sh
+    # and its default is 20 trials, which is 12 minutes by its own measured
+    # 35.9s/trial. Preflight already runs those same binaries serialized in the
+    # cargo-test e2e legs below, so the full denominator here is duplication on
+    # a pre-push gate. One trial proves the harness still runs; rust-ci owns the
+    # 20.
+    run_hermetic env STRESS_TRIALS=1 uv run --project cli fno-py doctor test smoke "${SMOKE_ARGS[@]}"
     sreq=$?
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
     [[ $sreq -eq 0 ]] && record_leg smoke "smoke suite" pass $(( SECONDS - s0 )) || { record_leg smoke "smoke suite" fail $(( SECONDS - s0 )); FAIL=1; }
@@ -1171,8 +1177,8 @@ fi
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
 have_pinned_fmt() { rustup toolchain list 2>/dev/null | grep "^$PINNED_FMT" >/dev/null; }
 
-FNO_AGENTS_INTEGRATION_TARGETS="--test active_backlog_drain --test agy_ask_unit --test claude_ask_dispatch --test claude_ask_parity --test claude_bg_create --test codex_ask_dispatch --test codex_ask_parity --test codex_ask_sigint --test codex_ask_unit --test daemon_e2e --test finalize_e2e --test flock_interop --test gemini_ask_sigint --test gemini_ask_unit --test generic_completion --test kill_criteria_parity --test loop_check --test loop_runtime --test loop_target --test loopcheck_decisions --test loopcheck_hook_payload --test loopcheck_missing_manifest --test opencode_serve_journey --test provider_contract --test review_coverage_paths --test review_coverage_verb --test spawn_routing --test verify_evidence_parity"
-FNO_INTEGRATION_TARGETS="--test agent_edge_e2e --test client_e2e --test idle_reaper_e2e --test keymap_e2e --test layout_e2e --test mouse_e2e --test multiclient_e2e --test persistence --test proto_socket --test script_api_e2e --test search_e2e --test server_spine --test squad_prune --test squad_prune_live_pane --test workspace_persistence_e2e"
+FNO_AGENTS_INTEGRATION_TARGETS="--test active_backlog_drain --test agy_ask_unit --test claude_ask_dispatch --test claude_ask_parity --test claude_bg_create --test codex_ask_dispatch --test codex_ask_parity --test codex_ask_sigint --test codex_ask_unit --test daemon_e2e --test finalize_e2e --test flock_interop --test gemini_ask_sigint --test gemini_ask_unit --test generic_completion --test kill_criteria_parity --test loop_check --test loop_runtime --test loop_target --test loopcheck_decisions --test loopcheck_hook_payload --test loopcheck_missing_manifest --test opencode_serve_journey --test provider_contract --test review_coverage_paths --test review_coverage_verb --test run_outcome --test run_state --test spawn_routing --test verify_evidence_parity"
+FNO_INTEGRATION_TARGETS="--test agent_edge_e2e --test client_e2e --test idle_reaper_e2e --test keymap_e2e --test layout_e2e --test mouse_e2e --test multiclient_e2e --test mux_config_e2e --test persistence --test proto_socket --test script_api_e2e --test search_e2e --test server_spine --test squad_prune --test squad_prune_live_pane --test workspace_persistence_e2e"
 
 run_rust_leg() { # scope  name  cwd  cmd...
     local scope="$1" name="$2" cwd="$3"; shift 3

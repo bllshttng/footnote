@@ -8,6 +8,7 @@
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -52,7 +53,35 @@ fn old_server_reaped_before_rebind_probe() {
     let incumbent = spawn_server(&scratch.main_sock(), &[]);
     let termination = incumbent.terminate_and_wait();
 
-    let replacement = spawn_server(&scratch.main_sock(), &[]);
+    let mut replacement = spawn_server(&scratch.main_sock(), &[]);
+
+    // The stress harness greps the line below as this test's whole verdict, so
+    // the line must not be reachable when the thing it names did not happen.
+    // Assert first, print second.
+    assert!(
+        !termination.forced,
+        "old server pid {} ignored SIGTERM and needed an escalation; the \
+         graceful stop this probe reports did not happen",
+        termination.pid
+    );
+    assert!(
+        termination.status.signal().is_some() || termination.status.code().is_some(),
+        "old server pid {} was never collected",
+        termination.pid
+    );
+    assert!(
+        replacement
+            .0
+            .try_wait()
+            .expect("replacement server status")
+            .is_none(),
+        "replacement exited instead of rebinding {}",
+        scratch.main_sock().display()
+    );
+    // Panics on its own 10s budget if the replacement never accepts, which is
+    // the third thing this probe is asserting.
+    let _accepted = connect_with_retry(&scratch.main_sock());
+
     println!(
         "old_server_reaped_before_rebind old_pid={} new_pid={} socket={} status={:?}",
         termination.pid,

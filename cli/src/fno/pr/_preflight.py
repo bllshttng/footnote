@@ -48,8 +48,10 @@ _PREFLIGHT_BASE_SCOPE = frozenset(
         "smoke",
         "rustfmt:fno-agents",
         "rustfmt:fno",
-        "cargo-test:fno-agents",
-        "cargo-test:fno",
+        "cargo-test:fno-agents-unit",
+        "cargo-test:fno-agents-e2e",
+        "cargo-test:fno-unit",
+        "cargo-test:fno-e2e",
     }
 )
 # Legs preflight adds when the tree calls for them. They are ALLOWED, never

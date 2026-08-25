@@ -39,9 +39,19 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 cd "$repo_root" || exit 2
 
+# A dirty tree cannot be pinned to a sha, so the trials would measure something
+# nobody can name. That is a reason to stand down, NOT a reason to go red: this
+# file is auto-discovered by `fno doctor test smoke` (the scripts/tests/*.sh
+# glob), which reads any non-zero exit as a failure, so refusing here turned an
+# ordinary edit-in-progress into a red local suite.
+#
+# Standing down is only safe because the CI job that owns the 20-trial contract
+# asserts the stress_summary line rather than the exit code. A checkout there is
+# never dirty, and if one ever were, the missing summary fails the job instead
+# of passing quietly.
 if [[ -n "$(git status --porcelain)" ]]; then
-    echo "stress_setup=refused reason=working-tree-not-clean" >&2
-    exit 2
+    echo "stress_skipped=working-tree-not-clean sha=unpinnable"
+    exit 0
 fi
 
 head_sha="$(git rev-parse HEAD)" || exit 2
@@ -144,6 +154,23 @@ for ((trial = 1; trial <= trials; trial++)); do
 
     if [[ "$daemon_verdict" != pass || "$persistence_verdict" != pass || "$workspace_verdict" != pass || "$leak_verdict" != pass ]]; then
         failures=$((failures + 1))
+        # Print the failing binary's own tail. The trial logs live in a runner
+        # tmpdir that no artifact upload collects, so on CI the summary line was
+        # the ONLY evidence a trial produced: "persistence=fail" named the
+        # binary and nothing else, and the run that produced it is gone. A
+        # 1-in-20 failure is the whole reason this harness exists; it has to
+        # arrive diagnosable the first time.
+        for key in daemon_e2e persistence workspace_persistence_e2e; do
+            case "$key" in
+                daemon_e2e) verdict="$daemon_verdict" ;;
+                persistence) verdict="$persistence_verdict" ;;
+                workspace_persistence_e2e) verdict="$workspace_verdict" ;;
+            esac
+            [[ "$verdict" == pass ]] && continue
+            echo "--- stress_trial_failure trial=$trial binary=$key ---" >&2
+            tail -40 "$trial_dir/$key.log" >&2
+            echo "--- end stress_trial_failure trial=$trial binary=$key ---" >&2
+        done
     fi
     echo "stress_trial trial=$trial sha=$head_sha daemon_e2e=$daemon_verdict persistence=$persistence_verdict workspace_persistence_e2e=$workspace_verdict daemons_left=$daemons_left logs=$trial_dir"
 done

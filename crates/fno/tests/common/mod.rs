@@ -473,6 +473,23 @@ pub struct ServerTermination {
 }
 
 impl ServerProc {
+    /// Stop the server and COLLECT it, returning the exit status as proof.
+    ///
+    /// This replaced a `pkill -9 -f <socket path>` plus a 300ms sleep. The
+    /// pattern match could reach any process carrying that path and the sleep
+    /// stood in for a reap it never performed, which is the nondeterminism the
+    /// symptoms below kept tripping over. Owning the child makes the wait a
+    /// real collection.
+    ///
+    /// KNOWN LIMITATION, measured 2026-08-25, read this before trusting a green
+    /// persistence symptom. `server.rs` flushes the topology on its SIGTERM
+    /// shutdown path, so the graceful stop WRITES state that a symptom test may
+    /// be reading back as proof it was already on disk. A SIGKILL variant would
+    /// close that, and it is not a drop-in: switching this to `kill` makes
+    /// `symptom_hand_split_survives_restart` fail deterministically (3 of 3),
+    /// while the old `pkill -9` path still passes, so the difference is NOT the
+    /// signal and the cause is not yet known. Closing this means finding that
+    /// difference first, not swapping the signal.
     pub fn terminate_and_wait(mut self) -> ServerTermination {
         let pid = self.0.id();
         unsafe {
