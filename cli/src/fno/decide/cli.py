@@ -407,7 +407,7 @@ def _retract(
 @shim_app.command("retract")
 def retract_cmd(
     decision_id: str = typer.Argument(..., help="Decision id to retract."),
-    reason: Optional[str] = typer.Option(None, "--reason", help="Why it no longer counts."),
+    reason: Optional[str] = typer.Option(None, "--reason", "-R", help="Why it no longer counts."),
     authority: Optional[str] = typer.Option(None, "--authority", help="Authority lane."),
     origin: Optional[str] = typer.Option(None, "--origin", hidden=True),
 ) -> None:
@@ -416,10 +416,11 @@ def retract_cmd(
 
 def backlog_decide_retract(
     decision_id: str = typer.Argument(..., help="Decision id to retract."),
-    reason: Optional[str] = typer.Option(None, "--reason", help="Why it no longer counts."),
+    reason: Optional[str] = typer.Option(None, "--reason", "-R", help="Why it no longer counts."),
     authority: Optional[str] = typer.Option(None, "--authority", help="Authority lane."),
     origin: Optional[str] = typer.Option(None, "--origin", hidden=True),
 ) -> None:
+    """Append a durable retraction. Retractions are append-only and have no inverse."""
     _retract(decision_id=decision_id, reason=reason, authority=authority, origin=origin)
 
 
