@@ -272,7 +272,7 @@ fn default_true() -> bool {
 /// bump; the handshake is what tells an old client to restart. New variants
 /// are not additive-tolerant either.
 ///
-/// v53 (x-a8f1, guarded tab close): `ControlVerb::TabClose` and the
+/// v53 (guarded tab close): `ControlVerb::TabClose` and the
 /// target-specific `ServerMsg::TabClosed` receipt.
 pub const PROTO_VERSION: u32 = 53;
 
@@ -3843,8 +3843,8 @@ mod tests {
         // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
         // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
         // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
-        // receipts (x-588a) bumped it 51 -> 52; guarded tab close (x-a8f1)
-        // bumps it 52 -> 53.
+        // receipts (x-588a) bumped it 51 -> 52; guarded tab close bumps it
+        // 52 -> 53.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
