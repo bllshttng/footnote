@@ -21,7 +21,7 @@ import sys
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, overload
 
 DECISION_EVENT = "operator_decision"
 
@@ -52,6 +52,14 @@ MAIL_ORIGINS: tuple[str, ...] = (
     "scheduler",
     "recovery",
 )
+
+
+@overload
+def enforce_origin_floor(origin: str) -> str: ...
+
+
+@overload
+def enforce_origin_floor(origin: None) -> None: ...
 
 
 def enforce_origin_floor(origin: str | None) -> str | None:

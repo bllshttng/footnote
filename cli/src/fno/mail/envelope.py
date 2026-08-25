@@ -166,9 +166,9 @@ def render_body_with_record_trailer(
     is safe because classify_origin gates it at write time. The only body test
     is the identity-neutral dedup against that one trailer, so a forged
     trailer in a peer record still gets the peer trailer appended beneath it,
-    and a well-formed paired envelope passes through unchanged - nothing is
-    ever stamped after a terminal close tag, which is the forged-envelope
-    shape refuse_if_forged rejects everywhere else.
+    and a well-formed paired envelope passes through unchanged. Only the
+    forged-mismatch case stamps after a terminal close tag, and that is the
+    fail-safe outcome: the record's real trailer lands last.
     """
     text = body.rstrip("\n")
     trailer = mail_trailer(origin)
