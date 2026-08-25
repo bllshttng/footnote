@@ -297,6 +297,8 @@ def _reserve_budget(
     body: str,
     msg_id: str,
     allow_reason: str | None = None,
+    sender_key: str | None = None,
+    recipient_key: str | None = None,
 ):
     """Reserve the authored count after both pair identities are canonical."""
     from fno import style
@@ -311,6 +313,8 @@ def _reserve_budget(
             words=words,
             msg_id=msg_id,
             enforce=not exempt,
+            sender_key=sender_key,
+            recipient_key=recipient_key,
         )
     except budget.BudgetRefused as exc:
         print(
@@ -1295,6 +1299,11 @@ def cmd_pane_prepare(
         None, "--harness",
         help="Harness hosting the pane (default: resolved from the agent registry).",
     ),
+    style_exception: Optional[str] = typer.Option(
+        None, "--style-exception",
+        help="Reasoned one-send exception to the style and word-budget gates "
+        "on enveloped prose (a --raw send never enters them).",
+    ),
 ) -> None:
     """Gate and envelope a pane payload read from stdin; print it on stdout.
 
@@ -1305,10 +1314,13 @@ def cmd_pane_prepare(
 
     Exit 0 prints the bytes to type. Exit 3 refuses and names why on stderr: the
     pane is showing an option prompt, hosts no registered agent, or the body
-    cannot be attributed.
+    cannot be attributed. Exit 1 refuses on the style, body-cap, or word-budget
+    gates the mail verbs enforce: this is the sole renderer every non-raw pane
+    send passes through, so a sender refused by mail must not deliver the
+    identical prose here instead.
     """
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.mail.pane_transport import PaneSendRefused, prepare
+    from fno.mail.pane_transport import PaneSendRefused, prepare, resolve_pane_identity
 
     session = merge_deprecated_alias(
         session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
@@ -1355,11 +1367,65 @@ def cmd_pane_prepare(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+    # The relay contract's two gates, at the one choke point every non-raw pane
+    # send fails closed through. A `--raw` send never reaches this process, so
+    # its exemption is structural, and `--style-exception` keeps the mail
+    # verbs' one escape shape.
+    _enforce_body_cap(body)
+    _enforce_style(body, allow_reason=style_exception)
+    # ONE registry snapshot drives everything downstream: the envelope's `to`,
+    # the identity the prompt gate pins, and the budget key. Resolving the
+    # recipient here and letting `prepare` re-resolve it was a TOCTOU - a pane
+    # reassigned between the two reads rendered an envelope addressed to the
+    # old occupant while the gate validated the new one. The captured
+    # name/fno_id now pin the gate, so a reassigned pane refuses instead.
+    from fno.agents.self_stamp import resolve_self_session_id, stamp_from
+    from fno.inbox.store import generate_msg_id
+
+    sender = stamp_from(None)
+    identity = resolve_pane_identity(session, pane)
+    msg_id = generate_msg_id()
     try:
-        print(prepare(body, session=session, pane_id=pane, harness=harness), end="")
+        rendered = prepare(
+            body,
+            session=session,
+            pane_id=pane,
+            harness=harness,
+            sender=sender,
+            to=identity.handle if identity else None,
+            msg_id=msg_id,
+            expected_name=identity.name if identity else None,
+            expected_fno_id=identity.fno_id if identity else None,
+        )
     except PaneSendRefused as exc:
         print(f"pane send refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=3) from exc
+    # Reserved only after attribution, prompt gating, and envelope construction
+    # succeeded, so a refused send charges nothing. A later Rust transport
+    # failure can leave a charge that expires with the window; that bounded
+    # overcharge is the safe direction, because this renderer cannot learn
+    # whether its parent delivered.
+    #
+    # The LEDGER keys on full session ids, both ends: an eight-hex handle
+    # collides for codex siblings spawned inside one ~65s bucket, which fused
+    # two distinct workers into one pair and refused normal parallel fanout.
+    # The inbound-reset lookup keeps the display handles (bus envelopes carry
+    # handles). A row without a session id still gets a budget, keyed on the
+    # pane address rather than skipped.
+    pane_address = f"pane {session}:{pane}"
+    recipient = identity.handle if identity and identity.handle else pane_address
+    _reserve_budget(
+        sender=sender,
+        recipient=recipient,
+        body=body,
+        msg_id=msg_id,
+        allow_reason=style_exception,
+        sender_key=resolve_self_session_id() or sender,
+        recipient_key=(
+            identity.session_id if identity and identity.session_id else recipient
+        ),
+    )
+    print(rendered, end="")
 
 
 @mail_app.command("lint", hidden=True)
