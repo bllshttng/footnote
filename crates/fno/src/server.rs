@@ -11363,8 +11363,10 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
 }
 
 /// Return every pane/worker pair that blocks an unforced tab close. Matching
-/// is exact on the server session and pane id, and only an effective identity
-/// with non-Dead liveness is destructive-risk evidence.
+/// is exact on the server session and pane id, and every joined row whose
+/// liveness is not positively `Dead` is destructive-risk evidence. Rows that
+/// have not received an effective identity yet use their registry name in the
+/// diagnostic instead of being silently treated as empty.
 fn tab_close_blockers(session: &str, pane_ids: &[u64], rows: &[RegistryAgent]) -> Vec<String> {
     let mut blockers = Vec::new();
     for &pane_id in pane_ids {
@@ -11373,13 +11375,15 @@ fn tab_close_blockers(session: &str, pane_ids: &[u64], rows: &[RegistryAgent]) -
                 row_session == session && *row_pane == pane_id
             })
         }) {
-            if let Some(identity) = row.effective_identity() {
-                if row.liveness != agents_view::Liveness::Dead {
-                    blockers.push(format!(
-                        "pane {pane_id} fno_id={identity} liveness={:?}",
-                        row.liveness
-                    ));
-                }
+            if row.liveness != agents_view::Liveness::Dead {
+                let (label, value) = match row.effective_identity() {
+                    Some(identity) => ("fno_id", identity),
+                    None => ("worker", row.name.as_str()),
+                };
+                blockers.push(format!(
+                    "pane {pane_id} {label}={value} liveness={:?}",
+                    row.liveness
+                ));
             }
         }
     }
@@ -12691,9 +12695,15 @@ mod tests {
         dead.session_id = Some("dead-worker".into());
         let mut foreign = agent_in("other", 7, None, false);
         foreign.session_id = Some("foreign-worker".into());
+        let mut identity_less = agent_in("main", 10, None, false);
+        identity_less.name = "identity-less-worker".into();
 
-        let blockers = tab_close_blockers("main", &[7, 8, 9], &[alive, unmeasured, dead, foreign]);
-        assert_eq!(blockers.len(), 2);
+        let blockers = tab_close_blockers(
+            "main",
+            &[7, 8, 9, 10],
+            &[alive, unmeasured, dead, foreign, identity_less],
+        );
+        assert_eq!(blockers.len(), 3);
         assert!(blockers
             .iter()
             .any(|b| b.contains("pane 7") && b.contains("alive-worker")));
@@ -12707,6 +12717,12 @@ mod tests {
         assert!(
             !blockers.iter().any(|b| b.contains("foreign-worker")),
             "a different mux session cannot guard this tab"
+        );
+        assert!(
+            blockers
+                .iter()
+                .any(|b| b.contains("pane 10") && b.contains("identity-less-worker")),
+            "an identity-less live row still blocks destructive cleanup"
         );
     }
 
