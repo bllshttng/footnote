@@ -1,27 +1,24 @@
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->
-# Self-Handoff at Pipeline Boundaries (ab-534bcc55)
+# Explicit Capability Escalation
 
-Read this at a pipeline boundary (blueprint->do, or a wave boundary during do/review) when deciding whether to hand the rest of the run to a fresh-context successor. Never invoke mid-wave or mid-task.
+Context pressure is a compaction trigger, never a succession trigger. Continue in this session across blueprint/do and wave boundaries. A fresh session is reserved for capability escalation after an external operator or supervising king selects a stronger destination.
 
-Session succession hands the rest of the pipeline to a fresh-context worker via `bash "${SKILL_DIR}/scripts/handoff.sh"`. The helper performs all state mutations atomically; the LLM invokes it and obeys the decision line.
+The current worker may signal that it is stuck. It may not select its own replacement or infer a destination from ambient harness, model, or account state. The external caller invokes `bash "${SKILL_DIR}/scripts/handoff.sh" --harness <harness> --model <model> [--account <id> | --dispatch-account <id>]` and obeys the decision line.
 
 **Claim-wait BLOCKED:** If `fno do target init` (or `init-target-state.sh`) output contains `RESULT: BLOCKED`, the session MUST stop immediately. Relay the block contract as your final output (`REASON: ...` / `UNBLOCKS_AFTER: ...`). Do NOT run any pipeline phases without a live claim.
 
-**blueprint->do boundary (structural)**
+**Transaction proof**
 
-- **Unattended** (`attended: false` in target-state.md): run `bash "${SKILL_DIR}/scripts/handoff.sh" --boundary blueprint-do` automatically.
-- **Attended** (`attended: true`): ask exactly `Plan ready - dispatch fresh worker for the build? [Y/n]` (one line, no preamble). `y` or Enter -> run the helper. `n` -> park (continue in-session, no claim churn, no spawn). If the question cannot be answered (timeout or no interactive surface) -> park conservatively and continue in-session.
+The helper must prove the selected child can work before parent ownership moves. A registered pane or prompt-ready pane is insufficient. The child must answer the random capability challenge with the exact digest, and `fno agents truth` must report the configured observed model. After claim release, delegation commits only when the child holds `node:<id>` and its new target manifest names the child's harness session.
 
-**Wave/phase boundaries during do + review (pressure)**
-
-Run `bash "${SKILL_DIR}/scripts/handoff.sh" --boundary wave` at each wave boundary. The helper parks on no-pressure (probe reads < `config.target.handoff.used_pct_trigger`, default 50); always invoke it and obey the decision line. Never invoke mid-wave or mid-task.
+Any failure before parent mutation stops the uncommitted child and leaves parent state untouched. Any later failure restores the parent claim and manifest. If restoration or reacquisition fails, the parent stops on the explicit exit-12 outcome.
 
 **Decision-line handling**
 
 | Exit | Decision line prefix | Action |
 |------|---------------------|--------|
 | 0 | `delegated <node> ...` | Print `result: do-phase delegated to <child> (<session>)`. Then **stop immediately** - do NOT continue pipeline phases, do NOT run `claude stop`. The parent's close is sanctioned; the stop hook allows exit because the manifest was archived. |
-| 10 | `parked <node> reason="..."` | Continue in-session exactly as if no handoff was attempted. If the reason contains `chain-exhausted`, emit `<help reason="handoff-chain-exhausted" evidence="<reason>">` first, then continue. |
+| 10 | `parked <node> reason="..."` | Continue in-session. The parent retains or has restored its ownership. |
 | 12 | `handoff-restore-failed <node> ...` | Emit `<help reason="handoff-restore-failed" evidence="<reason>">` and stop work. Never continue silently without a manifest. |
 | 12 | `handoff-claim-lost <node> ...` | Emit `<help reason="handoff-claim-lost" evidence="<reason>">` and stop work. The claim may be held by another worker; do NOT continue in-session on this node. |
 

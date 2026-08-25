@@ -230,6 +230,18 @@ EOF
   # Empty events.jsonl
   touch "$sbx/.fno/events.jsonl"
 
+  # The explicit transaction is opt-in, but tests must not inherit the
+  # operator's machine-wide off switch.
+  cat > "$sbx/.fno/config.toml" <<'CONFIGEOF'
+[autonomy]
+enabled = true
+
+[target.handoff]
+enabled = true
+generation_cap = 4
+used_pct_trigger = 50
+CONFIGEOF
+
   CALL_LOG="$sbx/call-log"
   touch "$CALL_LOG"
 
@@ -412,7 +424,7 @@ run_handoff() {
       CLAUDE_CODE_SESSION_ID="test-claude-sid" \
       CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
-      bash "$SCRIPT" --boundary "$boundary" "$@" 2>&1
+      bash "$SCRIPT" --harness claude --model opus "$@" 2>&1
     )
   else
     output=$(
@@ -426,12 +438,23 @@ run_handoff() {
       CLAUDE_CODE_SESSION_ID="test-claude-sid" \
       CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
-      bash "$SCRIPT" --boundary "$boundary" 2>&1
+      bash "$SCRIPT" --harness claude --model opus 2>&1
     )
   fi
   handoff_rc=$?
   set -e
 }
+
+# ---------------------------------------------------------------------------
+# Scenario 0: legacy boundary pressure is no longer a handoff trigger
+# ---------------------------------------------------------------------------
+set +e
+legacy_output="$(bash "$SCRIPT" --boundary wave 2>&1)"
+legacy_rc=$?
+set -e
+check_exit "explicit escalation: legacy --boundary invocation refuses" "2" "$legacy_rc"
+check_contains "explicit escalation: refusal names required destination" \
+  "capability escalation requires --harness and --model" "$legacy_output"
 
 # ---------------------------------------------------------------------------
 # Scenario 1: AC1-HP - happy path
@@ -473,8 +496,8 @@ check_file_exists "AC1-HP: per-session sentinel exists" \
 
 # Handoff brief artifact
 check_file_exists "AC1-HP: handoff brief artifact exists" \
-  "$SBX/.fno/artifacts/handoff/blueprint-do-${SESSION_ID}.md"
-brief=$(cat "$SBX/.fno/artifacts/handoff/blueprint-do-${SESSION_ID}.md")
+  "$SBX/.fno/artifacts/handoff/capability-${SESSION_ID}.md"
+brief=$(cat "$SBX/.fno/artifacts/handoff/capability-${SESSION_ID}.md")
 check_contains "AC1-HP: current-node builder crumb reaches successor" "current attempt" "$brief"
 check_not_contains "AC1-HP: foreign-node builder crumb stays isolated" "foreign attempt" "$brief"
 
@@ -679,84 +702,32 @@ probe_line() {  # probe_line <input_tokens>
 }
 
 # ---------------------------------------------------------------------------
-# Scenario 7: no-pressure park (real probe reports used_pct 30 < trigger 50)
+# Scenario 7: context readings do not decide explicit capability escalation
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Scenario 7: no-pressure park ==="
+echo "=== Scenario 7: low context does not park explicit escalation ==="
 SBX="$(make_sandbox s7)"
-arm_probe "$SBX" "$(probe_line 300000)"  # 300000/1000000 = 30%
+arm_probe "$SBX" "$(probe_line 300000)"
 
 CALL_LOG="$SBX/call-log"
-HANDOFF_TEST_HOME="$SBX" run_handoff "$SBX" "wave"
+HANDOFF_TEST_HOME="$SBX" run_handoff "$SBX" "capability"
 
-check_exit "no-pressure: exits 10 (parked)" "10" "$handoff_rc"
-check_contains "no-pressure: output contains 'parked'" "parked" "$output"
-check_contains "no-pressure: reason mentions no-pressure" "no-pressure" "$output"
-# The reason must quote the real measurement, proving the probe actually ran
-# rather than the block being skipped (which parks with the same word).
-check_contains "no-pressure: reason quotes measured used_pct=30" "used_pct=30" "$output"
-check_log_absent "no-pressure: no claim acquire" "$CALL_LOG" "claim acquire"
+check_exit "explicit escalation ignores context percentage" "0" "$handoff_rc"
+check_contains "explicit escalation reaches delegated transaction" "delegated" "$output"
+check_contains "explicit escalation launches the selected child" "agents spawn" "$(cat "$CALL_LOG")"
 
 # ---------------------------------------------------------------------------
-# Scenario 7b: pressure present (real probe reports 70 >= trigger) -> delegates.
-# The opposite-direction control for scenario 8: a fix that simply always
-# parked would satisfy every park assertion here, and this is what catches it.
+# Scenario 8: no transcript remains a valid explicit escalation input
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Scenario 7b: pressure -> delegate ==="
-SBX="$(make_sandbox s7b)"
-arm_probe "$SBX" "$(probe_line 700000)"  # 700000/1000000 = 70%
-
-CALL_LOG="$SBX/call-log"
-HANDOFF_TEST_HOME="$SBX" HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 \
-  run_handoff "$SBX" "wave"
-
-check_exit "pressure: exits 0 (delegated)" "0" "$handoff_rc"
-check_contains "pressure: output contains 'delegated'" "delegated" "$output"
-check_contains "pressure: child was spawned" "agents spawn" "$(cat "$CALL_LOG")"
-
-# ---------------------------------------------------------------------------
-# Scenario 8: probe ran and failed (transcript absent -> real probe exits 3).
-#
-# Regression for x-f804: handoff.sh read $? AFTER a `|| true`, so the probe's
-# exit 3 was captured as 0. The park below was skipped, the empty _PROBE_OUT
-# reached `[ "" -lt 50 ]` ("integer expression expected", which returns 2 and
-# so reads as "else"), and the run FELL THROUGH TO A SPAWN. Assert the park,
-# the event, the silence, and above all the absence of that spawn.
-# ---------------------------------------------------------------------------
-echo ""
-echo "=== Scenario 8: probe unreadable ==="
+echo "=== Scenario 8: transcript is not an escalation prerequisite ==="
 SBX="$(make_sandbox s8)"
-arm_probe "$SBX"   # no transcript written -> probe exits 3
 
 CALL_LOG="$SBX/call-log"
-HANDOFF_TEST_HOME="$SBX" run_handoff "$SBX" "wave"
+HANDOFF_TEST_HOME="$SBX" run_handoff "$SBX" "capability"
 
-check_exit "probe-unreadable: exits 10 (parked)" "10" "$handoff_rc"
-check_contains "probe-unreadable: output contains 'parked'" "parked" "$output"
-check_contains "probe-unreadable: reason names probe exit 3" "exit 3" "$output"
-
-# handoff_probe_unreadable event must be in events.jsonl
-set +e
-probe_events=$(grep '"type":"handoff_probe_unreadable"' "$SBX/.fno/events.jsonl" 2>/dev/null | wc -l | tr -d ' ')
-set -e
-check_eq "probe-unreadable: handoff_probe_unreadable event emitted" "1" "$probe_events"
-check_log_absent "probe-unreadable: no claim acquire" "$CALL_LOG" "claim acquire"
-check_log_absent "probe-unreadable: NO spawn on a failed probe" "$CALL_LOG" "agents spawn"
-check_not_contains "probe-unreadable: no integer-expression error" "integer expression" "$output"
-
-# ---------------------------------------------------------------------------
-# Scenario 8b: no transcript id -> probe block skipped entirely, still parks.
-# ---------------------------------------------------------------------------
-echo ""
-echo "=== Scenario 8b: no transcript id ==="
-SBX="$(make_sandbox s8b)"   # manifest deliberately carries no claude_session_id
-
-CALL_LOG="$SBX/call-log"
-HANDOFF_TEST_HOME="$SBX" run_handoff "$SBX" "wave"
-
-check_exit "no-transcript: exits 10 (parked)" "10" "$handoff_rc"
-check_log_absent "no-transcript: no spawn" "$CALL_LOG" "agents spawn"
+check_exit "explicit escalation does not require a context transcript" "0" "$handoff_rc"
+check_contains "transcript-independent escalation delegates" "delegated" "$output"
 
 # ---------------------------------------------------------------------------
 # Scenario 9: restore_failed
@@ -888,7 +859,7 @@ check_contains "C1-verify: handoff_failed reason=reacquire_failed" "reacquire_fa
 # graph_node_id" when the body reader's fence-counting state machine diverged
 # (stray ^---, unterminated frontmatter, CRLF). These scenarios pin the robust
 # placement-independent + shape-validated reader. Present-id fixtures must get
-# PAST Step 0 (proven by a no-pressure park under --boundary wave, which is
+# PAST Step 0 (proven by reaching the explicit delegation transaction, which is
 # reached only after the graph_node_id read and the claim-holder check);
 # genuine-missing fixtures must STILL park with the missing reason.
 # ===========================================================================
@@ -930,8 +901,8 @@ target_claim_ttl: \"2h\""
 run_handoff "$SBX" "wave"
 check_not_contains "stray-fence: NOT parked as missing graph_node_id" \
   "manifest missing graph_node_id" "$output"
-check_contains "stray-fence: reached pressure check (no-pressure park)" \
-  "no-pressure" "$output"
+check_contains "stray-fence: reached explicit delegation" \
+  "delegated" "$output"
 
 # ---------------------------------------------------------------------------
 # Scenario 11: AC1-EDGE - unterminated frontmatter (single ---)
@@ -951,8 +922,8 @@ EOF
 run_handoff "$SBX" "wave"
 check_not_contains "unterminated-fm: NOT parked as missing graph_node_id" \
   "manifest missing graph_node_id" "$output"
-check_contains "unterminated-fm: reached pressure check (no-pressure park)" \
-  "no-pressure" "$output"
+check_contains "unterminated-fm: reached explicit delegation" \
+  "delegated" "$output"
 
 # ---------------------------------------------------------------------------
 # Scenario 12: AC4-EDGE - leading whitespace on the field line
@@ -967,8 +938,8 @@ target_claim_ttl: \"2h\""
 run_handoff "$SBX" "wave"
 check_not_contains "leading-ws: NOT parked as missing graph_node_id" \
   "manifest missing graph_node_id" "$output"
-check_contains "leading-ws: reached pressure check (no-pressure park)" \
-  "no-pressure" "$output"
+check_contains "leading-ws: reached explicit delegation" \
+  "delegated" "$output"
 
 # ---------------------------------------------------------------------------
 # Scenario 13: AC3-HP - CRLF line endings; id read CR-free
@@ -979,7 +950,7 @@ SBX="$(make_sandbox s13)"
 # Build a fully-CRLF manifest so both frontmatter (session_id) and body
 # (graph_node_id) carry trailing \r. A CR-poisoned id would park at the
 # holder-mismatch guard (and a CR-poisoned session_id would too); the robust
-# readers strip CR so the run reaches the no-pressure park instead.
+# readers strip CR so the run reaches the explicit delegation instead.
 {
   printf -- '---\r\n'
   printf 'session_id: %s\r\n' "${SESSION_ID}"
@@ -996,8 +967,8 @@ check_not_contains "crlf: NOT parked as missing graph_node_id" \
   "manifest missing graph_node_id" "$output"
 check_not_contains "crlf: NOT parked as holder-mismatch (CR stripped)" \
   "session does not hold" "$output"
-check_contains "crlf: reached pressure check (no-pressure park)" \
-  "no-pressure" "$output"
+check_contains "crlf: reached explicit delegation" \
+  "delegated" "$output"
 # The node:<id> claim-status lookup must use the CR-free key (anchored grep:
 # a trailing \r would push the line past the $ end-of-line anchor).
 if grep -Eq 'claim status node:'"${NODE_ID}"'$' "$SBX/call-log"; then

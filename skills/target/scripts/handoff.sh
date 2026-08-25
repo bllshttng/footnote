@@ -6,7 +6,7 @@
 # the helper performs all state mutations; the LLM performs only step 9 (close).
 #
 # Usage:
-#   handoff.sh --boundary <blueprint-do|wave> [--flags "<modifiers>"]
+#   handoff.sh --harness <harness> --model <model> [--account <id>]
 #
 # Output (one machine-parseable decision line on stdout):
 #   delegated <node> child=<name> session=<sid> generation=<N>    exit 0
@@ -32,18 +32,38 @@ _EXIT_USAGE=2
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-BOUNDARY=""
-CHILD_FLAGS=""
+BOUNDARY="capability"
+DEST_HARNESS=""
+DEST_MODEL=""
+DEST_ACCOUNT=""
+DEST_DISPATCH_ACCOUNT=""
+DEST_EFFORT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --boundary)
-      BOUNDARY="${2:-}"
+    --harness)
+      DEST_HARNESS="${2:-}"
       shift 2
       ;;
-    --flags)
-      CHILD_FLAGS="${2:-}"
+    --model)
+      DEST_MODEL="${2:-}"
       shift 2
+      ;;
+    --account)
+      DEST_ACCOUNT="${2:-}"
+      shift 2
+      ;;
+    --dispatch-account)
+      DEST_DISPATCH_ACCOUNT="${2:-}"
+      shift 2
+      ;;
+    --effort)
+      DEST_EFFORT="${2:-}"
+      shift 2
+      ;;
+    --boundary|--flags)
+      echo "handoff: capability escalation requires --harness and --model; boundary triggers are retired" >&2
+      exit "$_EXIT_USAGE"
       ;;
     --)
       shift
@@ -59,8 +79,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "$BOUNDARY" ]; then
-  echo "usage: handoff.sh --boundary <blueprint-do|wave> [--flags \"<modifiers>\"]" >&2
+if [ -z "$DEST_HARNESS" ] || [ -z "$DEST_MODEL" ]; then
+  echo "handoff: capability escalation requires --harness and --model" >&2
+  exit "$_EXIT_USAGE"
+fi
+if [ -n "$DEST_ACCOUNT" ] && [ -n "$DEST_DISPATCH_ACCOUNT" ]; then
+  echo "handoff: pass only one of --account or --dispatch-account" >&2
   exit "$_EXIT_USAGE"
 fi
 
@@ -101,19 +125,14 @@ if [ -f "$_CONFIG_SH" ]; then
   LOCAL_SETTINGS="$FNO_DIR/config.toml"
   source "$_CONFIG_SH"
   GENERATION_CAP=$(get_config "target.handoff.generation_cap" "4")
-  USED_PCT_TRIGGER=$(get_config "target.handoff.used_pct_trigger" "50")
   HANDOFF_ENABLED=$(get_config "target.handoff.enabled" "true")
 else
   GENERATION_CAP="4"
-  USED_PCT_TRIGGER="50"
   HANDOFF_ENABLED="true"
 fi
 
-# Both are the config-side operand of an integer `[` test whose failure mode is
-# OPEN (see the _USED_PCT guard below), so a typo'd config value would spawn a
-# handoff instead of parking. Fall back to the documented default.
-case "$GENERATION_CAP"   in ''|*[!0-9]*) GENERATION_CAP="4"    ;; esac
-case "$USED_PCT_TRIGGER" in ''|*[!0-9]*) USED_PCT_TRIGGER="50" ;; esac
+# A malformed legacy cap stays bounded until the one-rung replacement lands.
+case "$GENERATION_CAP" in ''|*[!0-9]*) GENERATION_CAP="4" ;; esac
 
 # ---------------------------------------------------------------------------
 # Helper: emit an event to events.jsonl
@@ -231,10 +250,6 @@ SESSION_ID="$(_parse_manifest_field "$STATE_FILE" "session_id")"
 PLAN_PATH="$(_parse_manifest_field "$STATE_FILE" "plan_path")"
 TARGET_SIZE="$(_parse_manifest_field "$STATE_FILE" "target_size")"
 AUTO_MERGE_APPROVED="$(_parse_manifest_field "$STATE_FILE" "auto_merge_approved")"
-# Current key is claude_session_id; fall back to the pre-rename claude_transcript_id
-# for one release so an in-flight manifest written by an older binary still resolves.
-TRANSCRIPT_ID="$(_parse_manifest_field "$STATE_FILE" "claude_session_id")"
-[ -n "$TRANSCRIPT_ID" ] || TRANSCRIPT_ID="$(_parse_manifest_field "$STATE_FILE" "claude_transcript_id")"
 NODE_ID="$(_validate_node_id "$(_parse_body_field "$STATE_FILE" "graph_node_id")")"
 CLAIM_KEY="$(_parse_body_field "$STATE_FILE" "target_claim_key")"
 CLAIM_HOLDER="$(_parse_body_field "$STATE_FILE" "target_claim_holder")"
@@ -378,58 +393,6 @@ CHILD_GEN="$((2 + _PRIOR_COUNT))"
 if [ "$CHILD_GEN" -gt "$GENERATION_CAP" ]; then
   echo "parked $NODE_ID reason=\"chain-exhausted: generation $CHILD_GEN exceeds cap $GENERATION_CAP\""
   exit "$_EXIT_PARKED"
-fi
-
-# Pressure boundary check (wave only)
-if [ "$BOUNDARY" = "wave" ]; then
-  # Resolve transcript path
-  _TRANSCRIPT_PATH=""
-  if [ -n "$TRANSCRIPT_ID" ]; then
-    # Claude Code project-dir encoding: both / and . in the cwd path are
-    # replaced by - to form the directory name under ~/.claude/projects/.
-    # Pure parameter expansion (bash 3.2+): single-pass bracket-class replacement.
-    _ENCODED_CWD="${PWD//[\/.]/-}"
-    _TRANSCRIPT_PATH="$HOME/.claude/projects/$_ENCODED_CWD/$TRANSCRIPT_ID.jsonl"
-  fi
-
-  # Locate context-probe.sh (same script directory, or on PATH)
-  _PROBE_SCRIPT="$_SCRIPT_DIR/context-probe.sh"
-  if [ ! -f "$_PROBE_SCRIPT" ]; then
-    _PROBE_SCRIPT="$(command -v context-probe.sh 2>/dev/null || true)"
-  fi
-
-  _PROBE_EXIT=3
-  _PROBE_OUT=""
-  if [ -n "$_PROBE_SCRIPT" ] && [ -f "$_PROBE_SCRIPT" ] && [ -n "$_TRANSCRIPT_PATH" ]; then
-    # Capture the probe's OWN status. A trailing `|| true` here makes the next
-    # `$?` read that `true` (always 0), swallowing the probe's exit 3 - an
-    # unreadable transcript then skipped the park below and fell through to a
-    # spawn it should never have attempted (x-f804).
-    _PROBE_OUT="$(bash "$_PROBE_SCRIPT" "$_TRANSCRIPT_PATH" 2>/dev/null)" \
-      && _PROBE_EXIT=0 || _PROBE_EXIT=$?
-  fi
-
-  if [ "$_PROBE_EXIT" -ne 0 ]; then
-    # Emit handoff_probe_unreadable and park
-    _emit_event "handoff_probe_unreadable" \
-      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"probe_exit\":$_PROBE_EXIT,\"transcript_path\":\"${_TRANSCRIPT_PATH:-}\"}"
-    echo "parked $NODE_ID reason=\"no-pressure: probe returned exit $_PROBE_EXIT (unreadable)\""
-    exit "$_EXIT_PARKED"
-  fi
-
-  set +o pipefail
-  _USED_PCT="$(printf '%s' "$_PROBE_OUT" | jq -r '.used_pct // 0' 2>/dev/null || echo 0)"
-  set -o pipefail
-  # jq prints NOTHING (rc 0) on empty stdin - `// 0` defaults a null FIELD, not
-  # absent INPUT - so `|| echo 0` never fires and a blank value reaches `[`.
-  # `[ "" -lt N ]` errors and returns 2, which `if` reads as "else": the park
-  # is skipped and the failure is OPEN. Same integer-shape guard the probe
-  # applies to its own inputs.
-  case "$_USED_PCT" in ''|*[!0-9]*) _USED_PCT=0 ;; esac
-  if [ "$_USED_PCT" -lt "$USED_PCT_TRIGGER" ]; then
-    echo "parked $NODE_ID reason=\"no-pressure: used_pct=$_USED_PCT < trigger=$USED_PCT_TRIGGER\""
-    exit "$_EXIT_PARKED"
-  fi
 fi
 
 # Emit-capability preflight: emit `delegated` kind against a throwaway temp file
@@ -632,10 +595,6 @@ else
 fi
 if [ -n "$TARGET_SIZE" ]; then
   SPAWN_FLAGS="$SPAWN_FLAGS $TARGET_SIZE"
-fi
-# User-supplied flags override/extend
-if [ -n "$CHILD_FLAGS" ]; then
-  SPAWN_FLAGS="$SPAWN_FLAGS $CHILD_FLAGS"
 fi
 SPAWN_FLAGS="$(printf '%s' "$SPAWN_FLAGS" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
 
