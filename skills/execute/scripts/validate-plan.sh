@@ -1035,7 +1035,7 @@ if isinstance(node_id, str) and node_id.strip():
     try:
         from fno.decide import list_decisions
 
-        _subj, rows, damaged = list_decisions(node_id.strip(), limit=None)
+        _subj, rows, damaged = list_decisions(node_id.strip(), limit=None, state="all")
     except Exception as exc:  # noqa: BLE001 - reported as W below, never a bare crash
         sys.stdout.write("W\t" + " ".join(str(exc).split())[:160] + "\n")
     else:
@@ -1050,11 +1050,23 @@ if isinstance(node_id, str) and node_id.strip():
                 "`fno backlog decide-reindex` and re-validate\n" % damaged
             )
         else:
+            for row in rows:
+                if (
+                    row.get("lane") == "coord"
+                    and isinstance(row.get("expiry_ref"), dict)
+                    and row.get("lifecycle") == "unscoped"
+                ):
+                    did = str(row.get("decision_id") or "<missing>")
+                    sys.stdout.write(
+                        "E\tcoord decision %s has explicit expiry_ref but no "
+                        "positive closure evidence; repair the graph evidence "
+                        "and re-validate\n" % did
+                    )
             # Drop rows the derived superseded_by map marks withdrawn - a
             # withdrawn ruling must not demand acknowledgment. Never scan the
             # ruling's own prose for this (see DecisionAcknowledgment's
             # sibling note in ConsolidationBlock's docstring).
-            live = [r for r in rows if not r.get("superseded_by")]
+            live = [r for r in rows if r.get("lifecycle") == "live"]
             # casefold both sides: DecisionAcknowledgment accepts
             # d-ABCD1234 (the id regex is case-insensitive, matching
             # looks_like_decision_id), and a real minted id is always

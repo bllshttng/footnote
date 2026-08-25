@@ -3,10 +3,11 @@
 Change 3 of x-953b. `check_consolidation_file` cross-checks the plan's
 `decisions_acknowledged` list against the node's LIVE decision-index rulings
 (read directly, not through the shape model - `ConsolidationBlock` has no
-access to the index). Each fixture points a fresh subprocess at a hermetic
-decision index via `$FNO_CONFIG` (the only candidate when set, per
-`fno.config._candidate_paths`) naming a `config.state_dir` override, then
-seeds `decisions.jsonl` directly under it, in the envelope
+access to the index). Each fixture points a fresh subprocess at hermetic
+decision and graph stores via `$FNO_CONFIG` (the only candidate when set, per
+`fno.config._candidate_paths`) naming `config.state_dir` and
+`config.paths.graph_json` overrides, then seeds `decisions.jsonl` directly
+under it, in the envelope
 `fno.events.operator_decision` writes - so no graph or carveout root needs to
 exist for the node named in `claims:`.
 """
@@ -23,7 +24,10 @@ VALIDATOR = REPO_ROOT / "scripts" / "validate-plan.sh"
 
 def _run(plan: Path, state_dir: Path) -> subprocess.CompletedProcess[str]:
     settings = state_dir.parent / "settings.yaml"
-    settings.write_text(f"config:\n  state_dir: {state_dir}\n")
+    settings.write_text(
+        f"config:\n  state_dir: {state_dir}\n"
+        f"  paths:\n    graph_json: {state_dir / 'graph.json'}\n"
+    )
     env = dict(os.environ)
     env["FNO_CONFIG"] = str(settings)
     return subprocess.run(
@@ -45,7 +49,15 @@ def _plan(frontmatter: str) -> str:
     )
 
 
-def _seed_decision(state_dir: Path, *, decision_id: str, subject: str, supersedes: str | None = None) -> None:
+def _seed_decision(
+    state_dir: Path,
+    *,
+    decision_id: str,
+    subject: str,
+    supersedes: str | None = None,
+    expiry_ref: dict[str, object] | None = None,
+    authority_source: str = "beastmode",
+) -> None:
     """Append one decision-index row directly, bypassing record_decision.
 
     `record_decision` also writes a durable events journal and projects onto
@@ -59,10 +71,12 @@ def _seed_decision(state_dir: Path, *, decision_id: str, subject: str, supersede
         "decision_id": decision_id,
         "decision": "VERDICT",
         "subject": subject,
-        "authority_source": "beastmode",
+        "authority_source": authority_source,
     }
     if supersedes:
         data["supersedes"] = supersedes
+    if expiry_ref is not None:
+        data["expiry_ref"] = expiry_ref
     row = {"ts": "2026-08-01T00:00:00.000000Z", "type": "operator_decision", "source": "target", "data": data}
     with index.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row) + "\n")
@@ -157,6 +171,29 @@ def test_node_with_no_decisions_passes_with_zero_count(tmp_path):
     result = _run(plan, state_dir)
     assert result.returncode == 0, result.stdout
     assert "0/0 decision(s) acknowledged" in result.stdout
+
+
+def test_scoped_coord_without_graph_evidence_fails_closed(tmp_path):
+    state_dir = tmp_path / "fno-home"
+    _seed_decision(
+        state_dir,
+        decision_id="d-c0ffee12",
+        subject="x-c0ffee12",
+        expiry_ref={"kind": "node", "node_id": "x-c0ffee12"},
+        authority_source="agent",
+    )
+
+    plan = tmp_path / "missing-evidence.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\nclaims: x-c0ffee12\ncreated: 2026-08-23\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  proceed_alone_against: []\n"
+    ))
+    result = _run(plan, state_dir)
+    assert result.returncode == 1, result.stdout
+    assert "explicit expiry_ref but no positive closure evidence" in result.stdout
+    assert "0/0 decision(s) acknowledged" not in result.stdout
 
 
 def test_node_field_is_also_resolved_not_only_claims(tmp_path):
