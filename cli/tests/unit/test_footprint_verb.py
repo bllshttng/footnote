@@ -100,6 +100,11 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
     )
     assert doctor_footprint._live_shared_serve_root_pids() == set()
 
+    (tmp_path / "opencode-serve.json").write_text(
+        json.dumps({"pid": 900, "pid_start": None}), encoding="utf-8"
+    )
+    assert doctor_footprint._live_shared_serve_root_pids() == set()
+
 
 def test_live_root_pids_includes_roster_resolved_claude_bg_worker(monkeypatch) -> None:
     from fno import doctor_footprint
@@ -145,6 +150,23 @@ def test_ac9_edge_cause_payload_is_bounded(monkeypatch) -> None:
 
     assert len(payload["top"]) == 5
     assert all(len(item["command"]) == 64 for item in payload["top"])
+
+
+def test_ac5_edge_capacity_uses_affinity_on_python_without_process_cpu_count(
+    monkeypatch,
+) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.delattr(doctor_footprint.os, "process_cpu_count", raising=False)
+    monkeypatch.setattr(doctor_footprint.os, "cpu_count", lambda: 64)
+    monkeypatch.setattr(
+        doctor_footprint.os,
+        "sched_getaffinity",
+        lambda _pid: {0, 1},
+        raising=False,
+    )
+
+    assert doctor_footprint._cpu_capacity_cores() == 2
 
 
 def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:

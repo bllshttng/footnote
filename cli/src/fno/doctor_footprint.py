@@ -23,7 +23,20 @@ PS_TIMEOUT_SECONDS = 5.0
 
 
 def _cpu_capacity_cores() -> int:
-    return getattr(os, "process_cpu_count", os.cpu_count)() or 1
+    process_cpu_count = getattr(os, "process_cpu_count", None)
+    if callable(process_cpu_count):
+        count = process_cpu_count()
+        if count:
+            return count
+    sched_getaffinity = getattr(os, "sched_getaffinity", None)
+    if callable(sched_getaffinity):
+        try:
+            count = len(sched_getaffinity(0))
+            if count:
+                return count
+        except OSError:
+            pass
+    return os.cpu_count() or 1
 
 
 def _fno_binary() -> str:
@@ -84,6 +97,8 @@ def _live_shared_serve_root_pids() -> set[int]:
         if (
             isinstance(pid, int)
             and not isinstance(pid, bool)
+            and isinstance(pid_start, int)
+            and not isinstance(pid_start, bool)
             and _pid_alive(pid, pid_start) is True
         ):
             roots.add(pid)
