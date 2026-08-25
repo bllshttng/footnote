@@ -4637,6 +4637,65 @@ def test_an_agy_trust_timeout_fails_the_spawn_rather_than_holding_a_slot():
     assert pane == "painted"
 
 
+def test_codex_project_trust_prompt_refuses_before_seed_and_reaps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    modal = "Do you trust the contents of this directory?"
+    runner = FakeRunner(read_stdout=modal)
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, provider="codex", runner=runner)
+
+    detail = str(exc.value)
+    assert "Codex project trust required" in detail
+    assert str(tmp_path) in detail
+    assert "trust_level = \"trusted\"" in detail
+    assert not any(call[1:4] == ["mux", "pane", "send"] for call in runner.calls)
+    assert runner.kill_calls
+    assert load_registry() == []
+
+
+def test_codex_hook_review_prompt_refuses_before_seed_and_reaps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    runner = FakeRunner(read_stdout="Hooks need review")
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, provider="codex", runner=runner)
+
+    detail = str(exc.value)
+    assert "Codex hooks need review" in detail
+    assert "/hooks" in detail
+    assert "binding" not in detail.lower()
+    assert not any(call[1:4] == ["mux", "pane", "send"] for call in runner.calls)
+    assert runner.kill_calls
+    assert load_registry() == []
+
+
+def test_codex_hook_review_bypass_posture_keeps_argv_seed_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: (0, 148, 0))
+    runner = FakeRunner(read_stdout="Hooks need review")
+
+    result, _ = _spawn(
+        monkeypatch, tmp_path, provider="codex", runner=runner, yolo=True
+    )
+
+    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert "--dangerously-bypass-hook-trust" in run_call
+    assert result.seed == "submitted"
+    assert result.seed_source == "argv"
+
+
 def test_a_timed_out_submit_keeps_the_row_and_never_retries(
     tmp_path: Path, monkeypatch
 ) -> None:
