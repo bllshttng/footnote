@@ -2097,6 +2097,7 @@ def _resolve_node_model(
             explicit=explicit,
             task_model=(node or {}).get("model"),
             task_tier=(node or {}).get("model_tier"),
+            task_difficulty=(node or {}).get("difficulty"),
             provider=provider or "claude",
         )
         return model, source

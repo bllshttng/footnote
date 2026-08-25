@@ -103,11 +103,14 @@ def _write_quick_plan(
     title: str = "New plan title",
     *,
     claims: str | None = None,
+    difficulty: str | None = None,
 ) -> Path:
     plan = tmp_path / "plan.md"
     fm_lines = ["---"]
     if claims:
         fm_lines.append(f"claims: {claims}")
+    if difficulty:
+        fm_lines.append(f"difficulty: {difficulty}")
     fm_lines += ["created: 2026-05-05T04:35", "---"]
     body = [f"# {title}", "", "Body."]
     plan.write_text("\n".join(fm_lines + [""] + body) + "\n")
@@ -304,6 +307,21 @@ def test_intake_with_frontmatter_claim_updates_idea_node(fixture_graph, tmp_path
     assert target["title"] == "Backlog intake honors plan claims (final)"
     # claimed_at is reset to None as part of the idea -> ready promotion.
     assert target["claimed_at"] is None
+
+
+def test_intake_claim_records_blueprint_difficulty(fixture_graph, tmp_path, capsys):
+    """AC1-HP: blueprint intake revises the filed estimate with attribution."""
+    plan = _write_quick_plan(
+        tmp_path,
+        title="Difficulty revision",
+        claims="ab-1dea1234",
+        difficulty="high",
+    )
+    _intake_impl(plan_paths=[str(plan)])
+    capsys.readouterr()
+    target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
+    assert target["difficulty"] == "high"
+    assert target["difficulty_history"][-1]["source"] == "blueprint"
 
 
 def test_intake_with_cli_claim_wins_over_frontmatter(fixture_graph, tmp_path, capsys):
@@ -812,7 +830,7 @@ def test_backlog_idea_has_add_flag_parity(tmp_path):
          patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)):
         result = runner.invoke(
             cli,
-            ["idea", "t", "--parent", "ab-1234abcd", "--size", "M", "--domain", "infra"],
+                ["idea", "t", "--parent", "ab-1234abcd", "--size", "M", "--domain", "infra", "--difficulty", "low"],
         )
         assert result.exit_code == 0, result.output
 
@@ -917,7 +935,7 @@ def test_idea_path_survives_scorer_failure_exit_zero(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rel, "similar_nodes", boom)
 
-    result = CliRunner().invoke(cli, ["idea", "Backlog dedup gate filings"])
+    result = CliRunner().invoke(cli, ["idea", "Backlog dedup gate filings", "--difficulty", "low"])
     assert result.exit_code == 0, result.output
     assert len(json.loads(g.read_text())["entries"]) == 1  # node persisted
     # CliRunner mixes stderr into output; pin the dedup warning text (not just

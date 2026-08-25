@@ -298,6 +298,26 @@ PRIORITY_ORDER: dict[str, int] = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 PRIORITY_MIGRATION: dict[str, str] = {"high": "p1", "medium": "p2", "low": "p3"}
 DEFAULT_PRIORITY: str = "p2"
 
+# Difficulty is intrinsic work complexity, not a model or capacity hint.
+DIFFICULTY_BANDS: tuple[str, ...] = ("low", "medium", "high")
+DIFFICULTY_HELP = (
+    "Intrinsic work difficulty: expected duration, edge cases, unknowns, "
+    "and a senior tech lead's estimate. Do not use current capacity or model quality."
+)
+
+
+def normalize_difficulty(value: str | None) -> str | None:
+    """Normalize and validate a filing-time work-difficulty estimate."""
+    if value is None:
+        return None
+    band = value.strip().lower()
+    if band not in DIFFICULTY_BANDS:
+        raise ValueError(
+            f"invalid difficulty {value!r}; must be one of: "
+            f"{', '.join(DIFFICULTY_BANDS)}"
+        )
+    return band
+
 # Tags (x-6c2b wave 1): lowercase-kebab only, so they mirror cleanly into
 # Obsidian frontmatter `tags:` and stay legible as Base/tag-search filters.
 TAG_CHARSET_RE = re.compile(r"^[a-z0-9-]+$")

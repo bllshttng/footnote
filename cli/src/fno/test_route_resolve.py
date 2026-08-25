@@ -180,5 +180,28 @@ def test_node_model_reads_pin_and_tier():
     assert rr.node_model({}) is None
 
 
+def test_node_model_reads_canonical_difficulty():
+    """AC1-HP: dispatch reads the canonical work-difficulty field."""
+    assert rr.node_model({"difficulty": "low"}, snapshot={}, provider="claude") == "glm-4.7"
+
+
+def test_grid_selects_first_available_candidate_for_difficulty_and_priority():
+    """AC3-HP: difficulty x priority joins with current harness capacity."""
+    candidate, chain = rr.resolve_grid(
+        "high",
+        "p1",
+        {"claude": "exhausted", "codex": "ok"},
+    )
+    assert candidate == {"harness": "codex", "model": "gpt-5.5"}
+    assert any("grid candidate" in step for step in chain)
+
+
+def test_grid_is_inert_when_capacity_is_unknown():
+    """AC4-EDGE: unknown runtime capacity never invents a route."""
+    candidate, chain = rr.resolve_grid("medium", "p2", {})
+    assert candidate is None
+    assert "grid=unknown-capacity" in chain
+
+
 def test_node_model_explicit_override_wins():
     assert rr.node_model({"model_tier": "low"}, explicit="cli-x", snapshot={}) == "cli-x"

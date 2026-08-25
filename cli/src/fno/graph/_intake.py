@@ -1389,6 +1389,7 @@ def normalize_type(value: object) -> str:
 
 def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     from datetime import datetime, timezone
+    from fno.graph._constants import normalize_difficulty
 
     project, node_cwd, fm = resolve_node_project_and_cwd(
         spec["plan_path"], spec.get("cli_project"), entries
@@ -1414,6 +1415,19 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     mission_slug: Optional[str] = fm.get("mission_slug") or None
     mission_from_msg_id: Optional[str] = fm.get("mission_from_msg_id") or None
 
+    raw_difficulty = fm.get("difficulty")
+    if raw_difficulty is None:
+        raw_difficulty = fm.get("model_tier")
+        if raw_difficulty is not None:
+            sys.stderr.write(
+                "warning: plan frontmatter model_tier is deprecated; "
+                "use difficulty\n"
+            )
+    try:
+        difficulty = normalize_difficulty(raw_difficulty)
+    except ValueError as exc:
+        raise ValueError(f"{spec['plan_path']}: {exc}") from exc
+
     return {
         "id": mint_node_id({e.get("id") for e in entries if e.get("id")}),
         "parent": None,
@@ -1425,6 +1439,16 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "project": project,
         "cwd": node_cwd,
         "priority": spec["priority"],
+        "difficulty": difficulty,
+        "difficulty_history": (
+            [{
+                "value": difficulty,
+                "source": "blueprint",
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }]
+            if difficulty is not None
+            else []
+        ),
         "domain": "code",
         "blocked_by": spec["deps"],
         "session_id": None,

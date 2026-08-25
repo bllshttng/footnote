@@ -32,6 +32,7 @@ from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
 # supplied one must.
 MIRROR_KEYS: tuple[str, ...] = (
     "priority",
+    "difficulty",
     "blocked_by",
     "tags",
     "project",

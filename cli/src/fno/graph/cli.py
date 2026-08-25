@@ -893,6 +893,7 @@ def _build_backlog_node(
     project: Optional[str] = None,
     cwd: Optional[str] = None,
     priority: str = "p2",
+    difficulty: Optional[str] = None,
     domain: str = "code",
     blocked_by: Optional[list[str]] = None,
     roadmap_id: Optional[str] = None,
@@ -934,6 +935,12 @@ def _build_backlog_node(
         "project": project,
         "cwd": cwd,
         "priority": priority,
+        "difficulty": difficulty,
+        "difficulty_history": (
+            [{"value": difficulty, "source": "filed", "ts": datetime.now(timezone.utc).isoformat()}]
+            if difficulty is not None
+            else []
+        ),
         "domain": domain,
         "blocked_by": list(blocked_by or []),
         "session_id": None,
@@ -992,6 +999,7 @@ def _create_node_impl(
     project: Optional[str] = None,
     cwd: Optional[str] = None,
     priority: str = "p2",
+    difficulty: Optional[str] = None,
     domain: str = "code",
     blocked_by: Optional[str] = None,
     roadmap_id: Optional[str] = None,
@@ -1003,6 +1011,7 @@ def _create_node_impl(
     tags: Optional[list[str]] = None,
     source_node: Optional[str] = None,
     related: Optional[list[str]] = None,
+    require_difficulty: bool = False,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
 
@@ -1012,7 +1021,12 @@ def _create_node_impl(
     ``fno backlog update`` just to set parent/size/domain on a fresh idea.
     """
     _refuse_create_on_external_backend()
-    from fno.graph._constants import PRIORITY_ORDER, mint_node_id
+    from fno.graph._constants import (
+        DIFFICULTY_HELP,
+        PRIORITY_ORDER,
+        mint_node_id,
+        normalize_difficulty,
+    )
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
         VALID_NODE_TYPES,
@@ -1028,6 +1042,24 @@ def _create_node_impl(
             err=True,
         )
         raise typer.Exit(code=1)
+
+    if difficulty is None and require_difficulty:
+        if not sys.stdin.isatty():
+            typer.echo(
+                "Error: non-interactive filing requires --difficulty "
+                f"({', '.join(('low', 'medium', 'high'))}). {DIFFICULTY_HELP}",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        difficulty = typer.prompt(
+            "Difficulty (low|medium|high)",
+            value_proc=lambda value: normalize_difficulty(value) or "",
+        )
+    try:
+        difficulty = normalize_difficulty(difficulty)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}. {DIFFICULTY_HELP}", err=True)
+        raise typer.Exit(code=2)
 
     # `update --type` has always validated; these birth paths never did, so
     # `--type task` wrote an out-of-vocabulary value straight into the graph.
@@ -1094,6 +1126,7 @@ def _create_node_impl(
             project=resolved_project,
             cwd=resolved_cwd,
             priority=priority,
+            difficulty=difficulty,
             domain=domain,
             blocked_by=blockers,
             roadmap_id=roadmap_id,
@@ -1251,6 +1284,7 @@ def cmd_add(
     title: str = typer.Argument(..., help="Feature title"),
     domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
+    difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
     type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
@@ -1307,6 +1341,7 @@ def cmd_add(
         project=project,
         cwd=cwd,
         priority=priority,
+        difficulty=difficulty,
         domain=domain,
         blocked_by=blocked_by,
         roadmap_id=roadmap_id,
@@ -1331,6 +1366,7 @@ def cmd_idea(
     title: str = typer.Argument(..., help="Idea title - what is this?"),
     domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
+    difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
     type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
@@ -1396,6 +1432,7 @@ def cmd_idea(
         project=project,
         cwd=cwd,
         priority=priority,
+        difficulty=difficulty,
         domain=domain,
         blocked_by=blocked_by,
         roadmap_id=roadmap_id,
@@ -1407,6 +1444,7 @@ def cmd_idea(
         tags=tag,
         source_node=source_node,
         related=related,
+        require_difficulty=True,
     )
 
 
@@ -2592,14 +2630,31 @@ def _intake_impl(
             # _build_intake_node, so this one must too or the flow is a guard on
             # one of N paths. Same rule as priority below: the doc only speaks
             # when it declares a real, non-default value.
-            claimed_type = normalize_type(
-                (_read_plan_frontmatter(plan_path) or {}).get("type")
-            )
+            frontmatter = _read_plan_frontmatter(plan_path) or {}
+            claimed_type = normalize_type(frontmatter.get("type"))
+            from fno.graph._constants import normalize_difficulty
+            raw_difficulty = frontmatter.get("difficulty")
+            if raw_difficulty is None:
+                raw_difficulty = frontmatter.get("model_tier")
             for entry in es:
                 if entry.get("id") != claim_id:
                     continue
                 entry["plan_path"] = plan_path
                 entry["title"] = spec["title"]
+                if raw_difficulty is not None:
+                    try:
+                        revised_difficulty = normalize_difficulty(raw_difficulty)
+                    except ValueError as exc:
+                        typer.echo(f"warning: {exc}; difficulty left unchanged", err=True)
+                    else:
+                        entry["difficulty"] = revised_difficulty
+                        entry.setdefault("difficulty_history", []).append(
+                            {
+                                "value": revised_difficulty,
+                                "source": "blueprint",
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
                 if (
                     claimed_type != DEFAULT_NODE_TYPE
                     and entry.get("type") != claimed_type
@@ -2841,6 +2896,11 @@ def cmd_update(
     ),
     domain: Optional[str] = typer.Option(None, "--domain", help="Update domain (e.g. code)"),
     size: Optional[str] = typer.Option(None, "--size", help="Update size estimate: S|M|L"),
+    difficulty: Optional[str] = typer.Option(
+        None,
+        "--difficulty",
+        help="Intrinsic work difficulty: low|medium|high. Not a model or capacity hint.",
+    ),
     model: Optional[str] = typer.Option(
         None,
         "--model",
@@ -2962,7 +3022,12 @@ def cmd_update(
         ),
     ),
 ) -> None:
-    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, normalize_tag
+    from fno.graph._constants import (
+        PRIORITY_ORDER,
+        has_node_id_prefix,
+        normalize_difficulty,
+        normalize_tag,
+    )
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
         _parse_blocker_list,
@@ -3385,14 +3450,28 @@ def cmd_update(
             node["domain"] = domain
         if size is not None:
             node["size"] = size.upper() if size.lower() != "null" else None
+        if difficulty is not None:
+            try:
+                node["difficulty"] = normalize_difficulty(
+                    None if difficulty.lower() == "null" else difficulty
+                )
+            except ValueError as exc:
+                typer.echo(f"fno backlog update: {exc}", err=True)
+                raise typer.Exit(code=2)
         if model is not None:
             node["model"] = None if model.lower() == "null" else model
         if model_tier is not None:
+            typer.echo(
+                "warning: --model-tier is deprecated; use --difficulty",
+                err=True,
+            )
             if model_tier.lower() == "null":
                 node["model_tier"] = None
+                node["difficulty"] = None
             else:
-                band = model_tier.strip().lower()
-                if band not in {"high", "medium", "low"}:
+                try:
+                    band = normalize_difficulty(model_tier)
+                except ValueError:
                     typer.echo(
                         f"fno backlog update: invalid --model-tier {model_tier!r}; "
                         "expected high, medium, or low.",
@@ -3400,6 +3479,7 @@ def cmd_update(
                     )
                     raise typer.Exit(code=2)
                 node["model_tier"] = band
+                node["difficulty"] = band
         if type_ is not None:
             node["type"] = type_
         if public is not None:
@@ -4189,6 +4269,7 @@ def cmd_next(
             "priority": e.get("priority"), "domain": e.get("domain"),
             "project": e.get("project"), "cwd": e.get("cwd"),
             "size": e.get("size"), "plan_path": e.get("plan_path"),
+            "difficulty": e.get("difficulty") or e.get("model_tier"),
             # x-571f: the per-node model pin must ride in the next-JSON so the
             # active-backlog drain can prefer it over cfg.model.
             # model_tier rides alongside it so the dispatch-time tier resolver
@@ -4588,6 +4669,7 @@ def cmd_ready(
         "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
         "domain": e.get("domain"), "project": e.get("project"),
         "cwd": e.get("cwd"), "parent": e.get("parent"),
+        "difficulty": e.get("difficulty") or e.get("model_tier"),
         # select_lane_fill's dispatch-time collision gate compares plan file
         # surfaces; without this it has nothing to read.
         "plan_path": e.get("plan_path"),

@@ -163,9 +163,12 @@ class PlanFrontmatter(BaseModel):
     # (intake + backlog update), never hand-edited. They give the Obsidian Bases
     # the navigation columns the graph already has (order "Next up" by priority).
     priority: str | None = None
+    difficulty: str | None = None
     blocked_by: list[str] = []
     project: str | None = None
     executor: str | None = None
+    # One-release compatibility reader. New plans and projections use
+    # ``difficulty``; old plans may still carry ``model_tier``.
     model_tier: str | None = None
     kind: str | None = None
     parent_epic: str | None = None
@@ -220,6 +223,16 @@ class PlanFrontmatter(BaseModel):
         if isinstance(v, bool):
             return str(v).lower()
         return STATUS_ALIASES.get(v, v) if isinstance(v, str) else v
+
+    @field_validator("difficulty", "model_tier", mode="before")
+    @classmethod
+    def _validate_difficulty(cls, v: Any) -> Any:
+        if v is None:
+            return v
+        band = str(v).strip().lower()
+        if band not in {"low", "medium", "high"}:
+            raise ValueError("difficulty must be one of: low, medium, high")
+        return band
 
     @model_validator(mode="after")
     def _company_work_matches_plan_node(self) -> Self:

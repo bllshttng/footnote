@@ -32,6 +32,71 @@ _STATIC_FALLTHROUGH = {
     "low": ["low", "medium", "high"],
 }
 
+_GRID_CANDIDATES = {
+    "high": ["claude-opus-4-8", "gpt-5.5"],
+    "medium": ["claude-sonnet-5", "gpt-5.4", "glm-5.3"],
+    "low": ["glm-4.7", "claude-haiku-4-5"],
+}
+
+
+def resolve_grid(
+    difficulty: Optional[str],
+    priority: Optional[str],
+    capacity: Optional[dict[str, object]],
+) -> tuple[Optional[dict[str, str]], list[str]]:
+    """Join intrinsic difficulty and priority with a live capacity snapshot.
+
+    The grid is a default route only. ``capacity`` is deliberately supplied by
+    the runtime seam so this pure resolver never reads accounts or the network.
+    Unknown capacity is inert and returns no candidate.
+    """
+    band = (difficulty or "").strip().lower()
+    prio = (priority or "p2").strip().lower()
+    chain = [f"grid difficulty({band}) priority({prio})"]
+    if band not in _GRID_CANDIDATES or prio not in {"p0", "p1", "p2", "p3"}:
+        chain.append("grid=invalid-input")
+        return None, chain
+    if not capacity:
+        chain.append("grid=unknown-capacity")
+        return None, chain
+
+    # p0 gets the high-urgency candidate order, while p3 intentionally prefers
+    # the low-cost band. p1/p2 preserve the filer's intrinsic difficulty.
+    candidate_band = "high" if prio == "p0" else "low" if prio == "p3" else band
+    statuses = {str(k): str(v).lower() for k, v in capacity.items()}
+    saw_unknown = False
+    for model in _GRID_CANDIDATES[candidate_band]:
+        reachable = bm.reachable(model)
+        if reachable is None:
+            continue
+        harness = reachable[0]
+        state = statuses.get(harness)
+        if state in (None, "unknown", "stale", "none"):
+            saw_unknown = True
+            continue
+        if state in ("exhausted", "blocked"):
+            continue
+        if state in ("ok", "low", "available"):
+            chain.append(f"grid candidate {harness}/{model} capacity={state}")
+            return {"harness": harness, "model": model}, chain
+    if saw_unknown:
+        chain.append("grid=unknown-capacity")
+    else:
+        chain.append("grid=no-available-candidate")
+    return None, chain
+
+
+def runtime_capacity(
+    providers: tuple[str, ...] = ("claude", "codex", "gemini", "opencode"),
+) -> dict[str, str]:
+    """Read cached provider headroom without probing or consulting accounts."""
+    try:
+        from fno.adapters.providers.runtime_state import headroom
+
+        return {provider: headroom(provider).state.value for provider in providers}
+    except Exception:  # noqa: BLE001 - unknown capacity keeps the grid inert
+        return {}
+
 
 def _harness_ok(name: str, provider: Optional[str]) -> bool:
     """True if ``name`` maps to a harness AND (``provider`` is None or matches it).
@@ -126,8 +191,10 @@ def resolve_dispatch_model(
     explicit: Optional[str] = None,
     task_model: Optional[str] = None,
     task_tier: Optional[str] = None,
+    task_difficulty: Optional[str] = None,
     plan_model: Optional[str] = None,
     plan_tier: Optional[str] = None,
+    plan_difficulty: Optional[str] = None,
     snapshot: Optional[dict] = None,
     provider: Optional[str] = None,
 ) -> tuple[Optional[str], str, list[str]]:
@@ -144,14 +211,18 @@ def resolve_dispatch_model(
         return explicit, "explicit", ["explicit"]
     if task_model:
         return task_model, "task-pin", ["task-pin"]
-    if task_tier:
-        model, chain = resolve_tier(task_tier, snapshot=snapshot, provider=provider)
-        return model, f"task-tier({task_tier.strip().lower()})", chain
+    effective_task_tier = task_difficulty or task_tier
+    if effective_task_tier:
+        model, chain = resolve_tier(effective_task_tier, snapshot=snapshot, provider=provider)
+        label = "difficulty" if task_difficulty else "tier"
+        return model, f"task-{label}({effective_task_tier.strip().lower()})", chain
     if plan_model:
         return plan_model, "plan-default", ["plan-default"]
-    if plan_tier:
-        model, chain = resolve_tier(plan_tier, snapshot=snapshot, provider=provider)
-        return model, f"plan-tier({plan_tier.strip().lower()})", chain
+    effective_plan_tier = plan_difficulty or plan_tier
+    if effective_plan_tier:
+        model, chain = resolve_tier(effective_plan_tier, snapshot=snapshot, provider=provider)
+        label = "difficulty" if plan_difficulty else "tier"
+        return model, f"plan-{label}({effective_plan_tier.strip().lower()})", chain
     return None, "provider-default", ["provider-default"]
 
 
@@ -182,6 +253,7 @@ def node_model(
             explicit=explicit,
             task_model=node.get("model"),
             task_tier=node.get("model_tier"),
+            task_difficulty=node.get("difficulty"),
             snapshot=snapshot,
             provider=provider or "claude",
         )

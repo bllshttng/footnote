@@ -2124,7 +2124,7 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     Reads the graph (``read_graph`` recomputes ``status`` at read), so a
     dependent whose only open blocker was the just-closed node already reads
     ``ready`` here. Returns minimal dicts
-    ``{id, project, slug, cwd, model, model_tier, cross_project}``.
+    ``{id, project, slug, cwd, model, difficulty, cross_project}``.
 
     RC1 (x-33b2): returns BOTH same-project and cross-project dependents, each
     tagged with ``cross_project = (project != closed_project)``. The caller routes
@@ -2196,8 +2196,9 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
             "slug": e.get("slug") or e.get("title"),
             "cwd": e.get("cwd"),
             # x-571f: carry the model pin so _dispatch_one_dependent threads it.
-            # model_tier rides alongside so the tier resolver sees the annotation.
+            # difficulty rides alongside so the grid resolver sees the work axis.
             "model": e.get("model"),
+            "difficulty": e.get("difficulty") or e.get("model_tier"),
             "model_tier": e.get("model_tier"),
             "cross_project": (e.get("project") or None) != (closed_project or None),
         })

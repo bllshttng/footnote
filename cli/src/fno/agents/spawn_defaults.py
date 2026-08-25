@@ -40,6 +40,7 @@ _VALUE_FLAGS = frozenset(
         "--message", "--session-id", "--cc-session-id", "--channel-id", "--status",
         "--from-name", "--timeout", "-t", "--mode", "--substrate", "--permission-mode",
         "--output-format", "--monitor", "--tab",
+        "--node",
     }
 )
 
@@ -684,6 +685,24 @@ def _flag_value(toks: Sequence[str], *flags: str) -> Optional[str]:
     return None
 
 
+def _grid_node(toks: Sequence[str], env: Optional[Mapping[str, str]] = None) -> Optional[dict]:
+    """Read the node's difficulty and priority for the dispatch grid."""
+    node_id = _flag_value(toks, "--node") or (env or {}).get("FNO_NODE")
+    if not node_id:
+        return None
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+
+        entries = read_graph(graph_json())
+        for entry in entries:
+            if isinstance(entry, Mapping) and entry.get("id") == node_id:
+                return dict(entry)
+    except Exception:  # noqa: BLE001 - the grid is advisory
+        return None
+    return None
+
+
 def _substrate_compatible(substrate: str, provider: str) -> bool:
     """A config-sourced substrate must be a KNOWN value AND honored by the
     resolved provider. ``bg`` is claude-only; ``pane``/``headless`` are universal.
@@ -1153,10 +1172,54 @@ def inject_spawn_defaults(
     cfg_route, route_rung = field("route")
     cfg_account, account_rung = field("account")
     cfg_pane_group, pane_group_rung = field("pane_group")
+    inject: List[str] = []
+    # (axis, value, source) - source is f"{rung}.{field}"; axis is the
+    # coordinate the field actually feeds (provider feeds "harness").
+    from_config: List[Tuple[str, str, str]] = []
+    _resolved: dict = {}
+
+    # The grid is below an explicitly pinned stage profile and above the
+    # bottom defaults. It is evaluated from the node-bearing spawn only; a
+    # node-less spawn has no truthful difficulty or priority input.
+    has_provider, explicit_provider, has_model, has_effort = _scan(out[1:])
+    explicit_vendor = _flag_value(out[1:], "--provider", "-P")
+    explicit_vendor_present = explicit_vendor is not None
+    explicit_route = _flag_present(out[1:], "--route")
+    profile_routing_pinned = bool(
+        profile is not None
+        and (
+            _lane_value(lane, "provider")
+            or _lane_value(lane, "model")
+            or _lane_value(lane, "route")
+            or _lane_value(profile, "provider")
+            or _lane_value(profile, "model")
+            or _lane_value(profile, "route")
+        )
+    )
+    grid_candidate: Optional[dict[str, str]] = None
+    if (
+        not has_model
+        and not has_provider
+        and not explicit_vendor_present
+        and not explicit_route
+        and not profile_routing_pinned
+    ):
+        try:
+            from fno import route_resolve
+
+            node = _grid_node(out[1:], env)
+            if node:
+                grid_candidate, _grid_chain = route_resolve.resolve_grid(
+                    node.get("difficulty") or node.get("model_tier"),
+                    node.get("priority"),
+                    route_resolve.runtime_capacity(),
+                )
+        except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
+            grid_candidate = None
     if not (
         cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
         or cfg_route or cfg_account or cfg_pane_group
-    ):
+    ) and grid_candidate is None:
         # No config field resolved at all, so any --model here was typed.
         _check_model_vendor_mismatch(out, err, env)
         return out
@@ -1168,18 +1231,17 @@ def inject_spawn_defaults(
     # branch below skips injection when resolve_route returns a real route.
     role = _role_of(out[1:])
 
-    has_provider, explicit_provider, has_model, has_effort = _scan(out[1:])
-
-    inject: List[str] = []
-    # (axis, value, source) - source is f"{rung}.{field}"; axis is the
-    # coordinate the field actually feeds (provider feeds "harness", not
-    # "provider" - see docs/architecture/axis-vocabulary.md).
-    from_config: List[Tuple[str, str, str]] = []
+    # A grid candidate is an atomic harness/model pair. Mark both coordinates
+    # occupied so lower default rungs cannot split or overwrite the decision.
+    if grid_candidate is not None:
+        inject += ["--harness", grid_candidate["harness"], "--model", grid_candidate["model"]]
+        from_config.append(("grid", f"{grid_candidate['harness']}/{grid_candidate['model']}", "difficulty-grid"))
+        has_provider = True
+        has_model = True
+        _resolved["v"] = grid_candidate["harness"]
 
     # Lazy resolved-target provider for the substrate/permission compatibility
     # checks: explicit -p > merged config provider > harness inference.
-    _resolved: dict = {}
-
     def resolved_provider() -> Optional[str]:
         if "v" not in _resolved:
             if explicit_provider and explicit_provider.strip():
@@ -1215,10 +1277,6 @@ def inject_spawn_defaults(
     # helpful "add --model" error into a confusing one on an argv the
     # operator never paired with a route at all.
     explicit_model_present = has_model
-    explicit_vendor = _flag_value(out[1:], "--provider", "-P")
-    explicit_vendor_present = explicit_vendor is not None
-    explicit_route = _flag_present(out[1:], "--route")
-
     if cfg_provider and not has_provider:
         from fno.agents.harnesses import READABLE_PROVIDERS
 
@@ -1270,7 +1328,13 @@ def inject_spawn_defaults(
     # which is the invisible-billing shape this node exists to kill. account
     # forwards --account.
     route_injected = False
-    if cfg_route and not explicit_route and not explicit_model_present and not explicit_vendor_present:
+    if (
+        cfg_route
+        and not explicit_route
+        and not explicit_model_present
+        and not explicit_vendor_present
+        and grid_candidate is None
+    ):
         inject += ["--route", cfg_route]
         route_injected = True
         from_config.append(("route", cfg_route, f"{route_rung}.route"))  # type: ignore[arg-type]

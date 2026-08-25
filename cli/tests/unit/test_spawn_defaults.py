@@ -98,6 +98,44 @@ def test_all_unset_is_noop():
     assert _inject(["spawn", "--name", "w", "hi"]) == ["spawn", "--name", "w", "hi"]
 
 
+def test_difficulty_grid_precedes_defaults_when_capacity_is_known(monkeypatch):
+    """AC3-HP: the grid supplies harness/model below profiles and above defaults."""
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda: {"claude": "exhausted", "codex": "ok"},
+    )
+    result = _inject(
+        ["spawn", "--name", "w", "--node", "x-grid1", "hi"],
+        model="default-model",
+    )
+    assert "--harness" in result and "codex" in result
+    assert "--model" in result and "gpt-5.5" in result
+    assert "default-model" not in result
+
+
+def test_stage_profile_suppresses_difficulty_grid(monkeypatch):
+    """AC3-HP: a pinned stage profile remains authoritative over the grid."""
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda: {"claude": "ok", "codex": "ok"},
+    )
+    result = _inject(
+        ["spawn", "--name", "w", "--node", "x-grid1", "/target x"],
+        profiles={"target": {"model": "profile-model"}},
+        model="default-model",
+    )
+    assert "profile-model" in result
+    assert "gpt-5.5" not in result
+
+
 def test_ac3_bare_spawn_inherits_provider_and_model():
     # AC3-HP: bare spawn inherits both fields.
     out = _inject(["spawn", "--name", "w", "hi"], provider="codex", model="gpt-5.6-sol")

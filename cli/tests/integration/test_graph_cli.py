@@ -110,7 +110,7 @@ def test_ac_hp_idea_stamps_ambient_session(tmp_graph, tmp_path, monkeypatch):
     # cwd without an owned manifest -> session+harness stamped, node/plan null.
     monkeypatch.chdir(tmp_path)
 
-    r = _invoke("backlog", "idea", "Ambient idea")
+    r = _invoke("backlog", "idea", "Ambient idea", "--difficulty", "low")
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
     assert entries[0]["source_session_id"] == "itest-sess-7"
@@ -125,7 +125,7 @@ def test_ac_edge_idea_no_env_null_provenance(tmp_graph, tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(tmp_path)
 
-    r = _invoke("backlog", "idea", "Quiet idea")
+    r = _invoke("backlog", "idea", "Quiet idea", "--difficulty", "low")
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
     assert entries[0]["source_session_id"] is None
@@ -2211,7 +2211,7 @@ def test_ac2_hp_idea_explicit_project_stores_workmap_cwd(tmp_graph, tmp_path):
         "fno.graph._intake._settings_candidate_paths",
         return_value=[settings_path],
     ), patch("fno.graph._intake.repo_root", return_value="/some/foreign/cwd"):
-        r = _invoke("backlog", "idea", "Test idea", "--project", "fno")
+            r = _invoke("backlog", "idea", "Test idea", "--project", "fno", "--difficulty", "medium")
 
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
@@ -2232,7 +2232,7 @@ def test_ac2_err_idea_unmapped_project_falls_back_to_repo_root(tmp_graph, tmp_pa
         "fno.graph._intake._settings_candidate_paths",
         return_value=[settings_path],
     ), patch("fno.graph._intake.repo_root", return_value=fake_repo_root):
-        r = _invoke("backlog", "idea", "Unknown proj idea", "--project", "unknown-proj")
+            r = _invoke("backlog", "idea", "Unknown proj idea", "--project", "unknown-proj", "--difficulty", "medium")
 
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)
@@ -2255,9 +2255,10 @@ def test_ac2_edge_idea_explicit_cwd_wins_over_workmap(tmp_graph, tmp_path):
     ):
         r = _invoke(
             "backlog", "idea", "Explicit cwd wins",
-            "--project", "fno",
-            "--cwd", "/tmp/deliberate",
-        )
+                "--project", "fno",
+                "--cwd", "/tmp/deliberate",
+                "--difficulty", "low",
+            )
 
     assert r.exit_code == 0, r.output
     entries = _read_graph(tmp_graph)

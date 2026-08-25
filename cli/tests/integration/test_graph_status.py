@@ -640,7 +640,7 @@ def test_include_ideas_long_flag_still_works(tmp_graph, tmp_path):
 
 def test_backlog_idea_creates_plan_less_node(tmp_graph):
     """`backlog idea "X"` creates an idea-stage node (no plan_path)."""
-    r = _invoke("--json", "backlog", "idea", "Capture this thought")
+    r = _invoke("--json", "backlog", "idea", "Capture this thought", "--difficulty", "low")
     assert r.exit_code == 0, r.output
     payload = json.loads(r.stdout)
     node_id = payload["id"]
@@ -652,11 +652,30 @@ def test_backlog_idea_creates_plan_less_node(tmp_graph):
     assert node.get("status") == "idea"
 
 
+def test_backlog_idea_requires_difficulty_noninteractive(tmp_graph):
+    """AC2-ERR: non-interactive filing must name the work difficulty."""
+    r = _invoke("--json", "backlog", "idea", "Missing difficulty")
+    assert r.exit_code != 0
+    assert "--difficulty" in r.output
+    assert _read_entries(tmp_graph) == []
+
+
+def test_backlog_idea_records_filed_difficulty(tmp_graph):
+    """AC1-HP: the filing estimate is stored with attributable history."""
+    r = _invoke("--json", "backlog", "idea", "Difficulty recorded", "--difficulty", "HIGH")
+    assert r.exit_code == 0, r.output
+    node = _read_entries(tmp_graph)[0]
+    assert node["difficulty"] == "high"
+    assert node["difficulty_history"][-1]["source"] == "filed"
+    assert node["difficulty_history"][-1]["value"] == "high"
+
+
 def test_backlog_idea_accepts_description(tmp_graph):
     """`backlog idea "X" --description "Y"` stores Y in details."""
     r = _invoke(
         "--json", "backlog", "idea", "Idea with body",
         "--description", "explain the idea here",
+        "--difficulty", "medium",
     )
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]
@@ -670,6 +689,7 @@ def test_backlog_idea_accepts_priority(tmp_graph):
     r = _invoke(
         "--json", "backlog", "idea", "Urgent idea",
         "--priority", "p1",
+        "--difficulty", "high",
     )
     assert r.exit_code == 0, r.output
     node_id = json.loads(r.stdout)["id"]
