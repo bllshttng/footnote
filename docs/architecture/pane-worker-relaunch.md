@@ -42,6 +42,10 @@ Selecting an idle row sends `Command::ResumeAgent { name }`. The server joins th
 
 Only a DEAD row offers Resume. A live row has a process writing its session state, and resuming under it opens a second writer on the same rollout. A live claude bg row with a jobId attaches instead: the daemon owns the session, and that gesture already exists. A harness with no resume form here (agy has none verified) offers no Resume button at all. A button that fails is worse than an honest dead row. The session id is always a positional argument, never a shell string. `worker` names are validated to the registry slug charset at load (`valid_worker_name`) before any resume can key on them.
 
+## Live paneless workers after restart
+
+A registry worker can remain live after the mux loses its pane mapping. The old mux owned that PTY, so the current server cannot safely re-parent the process or silently create a second harness writer. The sideline keeps the dead-only Resume guard, classifies the row as live-paneless, and tells the operator to run `fno agents peek <worker-name> --follow` for read-only transcript observation. A row with a live claude daemon `attach_id` still uses the existing placement picker first. Missing harness, missing session id, and unsupported harness remain separate refusal notices; pre-v53 rows without the typed reason keep the generic compatibility notice.
+
 The resumed pane is placed in the squad that holds the worker's recorded membership, falling back to the squad owning its cwd. The two tokens the server builds are pinned against `harness_capabilities.toml` by a test that reads the toml. The Rust mirror cannot drift from the file that owns it. The pane is titled from the registry row and recorded as a worker member again, so it survives the NEXT restart too.
 
 The resume argv cannot go through the porcelain: `fno agents spawn --resume` is claude-bg-only, and the mux is a reader of the registry. So the server binds the row to its new pane itself, in `worker_pane` (name to pane, the worker twin of the claude attach map). While the pane lives, the panel presents the row pane-hosted. A second Resume then focuses it instead of opening a second session on the same rollout. When the pane dies, the binding is swept and the row returns to idle.
@@ -52,5 +56,5 @@ The resume argv cannot go through the porcelain: `fno agents spawn --resume` is 
 - `crates/fno/src/server.rs` - capture in `run_pane` (`record_worker_member`), the idle branch in `restore_squads`, the `ResumeAgent` handler, `row_resumable`
 - `crates/fno/src/mux_cli.rs` - `pane run --worker` parsing and help
 - `crates/fno/src/agents_view.rs` - `RegistryAgent.harness`
-- `crates/fno/src/proto.rs` - `Command::ResumeAgent`, `AgentRow.resumable` (v49)
+- `crates/fno/src/proto.rs` - `Command::ResumeAgent`, `AgentRow.resumable` (v49), `AgentRow.no_pane_reason` (v53)
 - `cli/src/fno/agents/mux_spawn.py` - passes `--worker <name>` on the pane run argv
