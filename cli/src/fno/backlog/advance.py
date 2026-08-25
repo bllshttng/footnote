@@ -1185,10 +1185,11 @@ def _spawn_worker(
         try:
             from fno import route_resolve
 
+            capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
             candidate, _grid_chain = route_resolve.resolve_grid(
                 node.get("difficulty") or node.get("model_tier"),
                 node.get("priority"),
-                route_resolve.runtime_capacity(),
+                capacity,
             )
         except Exception:  # noqa: BLE001 - unknown capacity spawns on defaults
             candidate = None
