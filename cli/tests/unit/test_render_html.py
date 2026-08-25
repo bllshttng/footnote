@@ -251,7 +251,7 @@ def test_render_html_emits_copy_button_with_data_copy_attr(tmp_path: Path):
     assert 'aria-label="Copy ab-cccc9999 to clipboard"' in text
     # JS handler is present.
     assert "navigator.clipboard" in text
-    assert ".eid[data-copy]" in text
+    assert "[data-copy]" in text
 
 
 def test_obsidian_url_non_markdown_path_returns_none():
@@ -654,3 +654,94 @@ def test_html_render_does_not_need_claims_for_status_placement(tmp_path: Path):
     out = tmp_path / "graph.html"
     render_graph_html(entries, out)
     assert out.exists()
+
+
+def test_load_render_entries_uses_canonical_reader_and_archive_overlay(monkeypatch):
+    import fno.graph as graph
+    import fno.graph.store as store
+    from fno.graph.render_html import load_render_entries
+
+    calls: list[str] = []
+    live = [{"id": "x-live", "title": "live"}]
+    archive = [{"id": "x-archive", "title": "archive"}]
+    monkeypatch.setattr(graph, "read_graph", lambda *_: calls.append("read_graph") or live)
+    monkeypatch.setattr(
+        store,
+        "entries_with_archive",
+        lambda entries: calls.append("entries_with_archive") or [*entries, *archive],
+    )
+
+    rows = load_render_entries()
+
+    assert calls == ["read_graph", "entries_with_archive"]
+    assert [row["id"] for row in rows] == ["x-live", "x-archive"]
+
+
+def test_local_card_renders_details_relationships_and_literal_copy_payloads(
+    tmp_path: Path, monkeypatch
+):
+    import fno.graph.render_html as rh
+
+    monkeypatch.setattr(rh, "_load_obsidian_vault", lambda: "c3po")
+    plan = "/Users/bb16/c3po/internal/fno/plans/private-plan.md"
+    entries = [
+        _entry(
+            "x-main",
+            title="Main marker",
+            project="fno",
+            details="  private   details\nwith whitespace ",
+            blocked_by=["x-blocker"],
+            plan_path=plan,
+        ),
+        _entry("x-blocker", title="Blocker marker", project="fno"),
+        _entry(
+            "x-successor",
+            title="Successor marker",
+            project="fno",
+            blocked_by=["x-main"],
+        ),
+    ]
+    out = tmp_path / "graph.html"
+
+    render_graph_html(entries, out)
+
+    body = out.read_text()
+    obsidian = "obsidian://open?vault=c3po&file=internal/fno/plans/private-plan"
+    assert "private details with whitespace" in body
+    assert "x-blocker (Blocker marker)" in body
+    assert "x-successor (Successor marker)" in body
+    assert plan in body
+    assert f'data-copy="{plan}"' in body
+    assert f'data-copy="{obsidian.replace("&", "&amp;")}"' in body
+    assert f'href="{obsidian.replace("&", "&amp;")}"' in body
+    assert "[data-copy]" in body
+
+
+def test_roadmap_public_delegates_html_card_authoring_to_renderer():
+    import inspect
+    from fno.graph import roadmap_public
+
+    source = inspect.getsource(roadmap_public)
+    assert "def _public_card_html" not in source
+    assert "render_public_sections_html" in source
+
+
+def test_renderer_modules_do_not_open_or_parse_graph_json_directly():
+    import ast
+    import inspect
+    from fno.graph import render_html, roadmap_public
+
+    for module in (render_html, roadmap_public):
+        source = inspect.getsource(module)
+        tree = ast.parse(source)
+        assert not any(
+            isinstance(node, (ast.Import, ast.ImportFrom))
+            and any(alias.name == "json" for alias in node.names)
+            for node in ast.walk(tree)
+        )
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "open"
+            for node in ast.walk(tree)
+        )

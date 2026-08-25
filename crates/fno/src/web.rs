@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::http::header;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -98,6 +98,7 @@ struct AppState {
     tx: broadcast::Sender<String>,
     snap: Arc<Mutex<Snapshot>>,
     token: Arc<str>,
+    graph_html: PathBuf,
     /// Fires on Ctrl-C so every ws loop ends and axum's graceful shutdown can
     /// complete: an open browser tab holds a connection that never closes on
     /// its own, so without this arm the bridge hangs past the signal and the
@@ -257,10 +258,12 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         tx,
         snap,
         token,
+        graph_html: crate::backlog_view::graph_path().with_file_name("graph.html"),
         shutdown: shutdown_rx,
     };
     let app = Router::new()
         .route("/", get(page))
+        .route("/backlog", get(backlog))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -479,6 +482,46 @@ async fn page() -> impl IntoResponse {
 #[derive(serde::Deserialize)]
 struct WsQuery {
     t: Option<String>,
+}
+
+async fn backlog(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
+    backlog_response(&st.graph_html, q.t.as_deref(), &st.token).await
+}
+
+async fn backlog_response(path: &Path, supplied: Option<&str>, expected: &str) -> Response {
+    let authorized =
+        supplied.is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()));
+    if !authorized {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "invalid or missing token",
+        )
+            .into_response();
+    }
+    match std::fs::read_to_string(path) {
+        Ok(body) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "backlog not rendered; run FNO_NO_OPEN=1 fno backlog view".to_string(),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("backlog unreadable: {err}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn ws_handler(
@@ -855,6 +898,55 @@ console.log("evictedRowCount: 18 cases ok");
         let a = WebArgs::default();
         assert_eq!(a.bind, "127.0.0.1");
         assert_eq!(a.session, proto::DEFAULT_SESSION);
+    }
+
+    #[tokio::test]
+    async fn backlog_requires_token_and_serves_private_file_without_cache() {
+        let dir =
+            std::env::temp_dir().join(format!("fno-web-backlog-{}-serve", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("graph.html");
+        std::fs::write(&path, "PRIVATE-BACKLOG-MARKER").unwrap();
+        let response = backlog_response(&path, Some("right"), "right").await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("PRIVATE-BACKLOG-MARKER"));
+
+        let denied = backlog_response(&path, Some("wrong"), "right").await;
+        assert_eq!(denied.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("PRIVATE-BACKLOG-MARKER"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn missing_backlog_names_the_render_action() {
+        let dir =
+            std::env::temp_dir().join(format!("fno-web-backlog-{}-missing", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let response = backlog_response(&dir.join("graph.html"), Some("right"), "right").await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("FNO_NO_OPEN=1 fno backlog view"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_preserves_the_token_in_the_backlog_link() {
+        assert!(PAGE.contains("id=\"backlog-link\""));
+        assert!(PAGE.contains("/backlog?t=${encodeURIComponent(token)}"));
     }
 
     fn tiny_frame() -> proto::Frame {

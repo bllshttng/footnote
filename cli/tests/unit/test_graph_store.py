@@ -398,6 +398,34 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
     assert not (custom_dir / "graph.html").exists()
 
 
+def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
+    """A mutation cannot clobber the private served board back to live-only."""
+    import fno.graph._constants as gc
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    graph_json = state_dir / "graph.json"
+    archive_json = state_dir / "graph-archive.json"
+    archive_json.write_text(
+        json.dumps({"entries": [
+            {"id": "ab-archive1", "title": "ARCHIVE-AUTO-RENDER-MARKER",
+             "status": "done", "project": "fno"},
+        ]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gc, "GRAPH_JSON", graph_json)
+    monkeypatch.setattr(gc, "GRAPH_HTML", state_dir / "graph.html")
+    monkeypatch.setattr(gc, "GRAPH_MD", state_dir / "graph.md")
+    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: archive_json)
+
+    locked_mutate_graph(
+        graph_json,
+        lambda entries: [*entries, {"id": "ab-live0001", "title": "live"}],
+    )
+
+    assert "ARCHIVE-AUTO-RENDER-MARKER" in (state_dir / "graph.html").read_text()
+
+
 def test_ac1_hp_read_graph_returns_with_defaults(tmp_path):
     """AC1-HP: read_graph applies defaults to entries."""
     path = _make_graph(tmp_path, [{"id": "ab-12341234", "title": "T"}])

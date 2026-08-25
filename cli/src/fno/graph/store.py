@@ -1069,7 +1069,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             print(f"Warning: graph.md render failed: {e}", file=sys.stderr)
         try:
             from fno.graph.render_html import render_graph_html
-            render_graph_html(entries, html_target)
+            render_graph_html(entries_with_archive(entries), html_target)
         except OSError as e:
             print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
         # Wake the active-backlog drain daemon (node x-c070): a mutation may have
