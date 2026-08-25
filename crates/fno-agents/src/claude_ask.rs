@@ -2718,9 +2718,12 @@ pub fn dispatch_claude_ask(
             return AskOutcome::err(
                 // Python: f"lock timeout for agent {name!r} after {timeout}s"
                 // + holder_note(), with timeout=30.0 (float) -> "...after 30.0s".
+                // The message names the REQUESTED token (Python never rebinds
+                // `name`), while holder_note reads the lock that actually
+                // timed out, the resolved canonical name.
                 format!(
                     "lock timeout for agent {} after {:.1}s{}",
-                    py_repr(&lock_name),
+                    py_repr(name),
                     LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
                     holder_note(home, &lock_name)
                 ),
