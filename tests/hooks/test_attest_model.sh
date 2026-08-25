@@ -172,9 +172,15 @@ else
   # A branch-checked scratch repo to emit from. The emitter refuses a detached
   # HEAD (an empty branch field would mint a pre-branch-field event), and a CI
   # checkout IS detached - $REPO_ROOT is not a place this emitter can run from.
+  # It also measures the diff under review and refuses a zero-line one, so the
+  # fixture carries a base commit on origin/main plus a real feature commit.
   EMITREPO="$TMP/emitrepo"
   git init -q -b scratch/emit "$EMITREPO"
   git -C "$EMITREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  git -C "$EMITREPO" update-ref refs/remotes/origin/main "$(git -C "$EMITREPO" rev-parse HEAD)"
+  echo body > "$EMITREPO/a.txt"
+  git -C "$EMITREPO" add a.txt
+  git -C "$EMITREPO" -c user.email=t@t -c user.name=t commit -qm feature
 
   emitter_stored_model() { # args: MODEL BASE -> echoes the stored model value
     local _m="$1" _b="$2"

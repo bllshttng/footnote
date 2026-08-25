@@ -244,6 +244,15 @@ event_types:
           type: string
           enum: [fresh, shared, unknown]
           description: "Positive evidence about the reviewer's execution context: fresh means a harness-recorded forked review context, shared means a same-context review tool result, and unknown means no positive context marker. Measures context independence, never who invoked the verb, and is not gating."
+        reviewed_base_sha:
+          type: string
+          description: "The merge-base of the base branch and HEAD at emit - the far end of the diff the reviewer read. Recorded so a reader can tell a review of the PR from a review of nothing: a session resolving its target from a checkout sitting on the base branch reads a zero-line diff, and before this field a clean review of nothing was byte-identical to a clean review. The producer REFUSES to emit when the measured diff is 0 lines, so every event carrying these fields covers a non-empty diff. OPTIONAL: every pre-landed attestation lacks the trio."
+        reviewed_head_sha:
+          type: string
+          description: "The HEAD the diff was measured against at emit - equal to head_sha, recorded explicitly so a reader never has to infer the range from two events. OPTIONAL, same pre-landed cohort as reviewed_base_sha."
+        reviewed_line_count:
+          type: integer
+          description: "Added plus deleted lines across the reviewed diff (git diff --numstat of reviewed_base_sha..reviewed_head_sha). The producer refuses to emit at 0, and the coverage gate skips an attestation whose value is present and 0 - the gate-side guard catches an old or hand-crafted event the producer never saw. A line with the field ABSENT still counts: that is the pre-landed backlog and must not be invalidated. OPTIONAL."
     consumers: [fno-agents loop-check]
 
   - name: review_coverage

@@ -49,7 +49,11 @@ if ! command -v jq >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
   echo "SKIP: jq or python3 not available"; exit 77
 fi
 
-# --- a real git repo, because emit-attestation.sh head-pins with rev-parse ---
+# --- a real git repo, because emit-attestation.sh head-pins with rev-parse.
+# The emitter also measures the diff under review and refuses a zero-line one,
+# so the fixture carries a base commit on origin/main plus a feature commit
+# with a real change - without the second commit every positive case below
+# hits the zero-line refusal and attests nothing.
 WORK="$TMP/repo"
 mkdir -p "$WORK"
 git -C "$WORK" init -q 2>/dev/null
@@ -58,6 +62,10 @@ git -C "$WORK" config user.name t
 echo hi > "$WORK/a.txt"
 git -C "$WORK" add a.txt
 git -C "$WORK" commit -qm init
+git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$WORK" rev-parse HEAD)"
+echo more >> "$WORK/a.txt"
+git -C "$WORK" add a.txt
+git -C "$WORK" commit -qm feature
 
 # --- stub `fno` so an emit lands in a file this test owns ---
 BIN="$TMP/bin"

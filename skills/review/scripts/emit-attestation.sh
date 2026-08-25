@@ -142,6 +142,29 @@ if [[ "$upstream" == */* && "${upstream#*/}" != "$base" && "$ahead" == "0" ]]; t
   branch="${upstream#*/}"
 fi
 
+# The diff under review, recorded with the event: its merge-base, its head, and
+# the added+deleted line count across it. Without these a clean review and a
+# review of NOTHING are byte-identical downstream: a session resolving its
+# target from a checkout sitting on the base branch reads a zero-line diff,
+# reports clean, and mints a pass no reader can distinguish from a real one.
+# The base is the resolved base BRANCH above, not the upstream - a reviewer
+# worktree tracks the PR branch itself, and diffing against that would read
+# zero lines for every legitimate reviewer at the PR tip.
+reviewed_base_sha="$(git merge-base HEAD "origin/${base}" 2>/dev/null || git merge-base HEAD "${base}" 2>/dev/null || true)"
+if [[ -z "$reviewed_base_sha" ]]; then
+  echo "emit-attestation: cannot resolve the base branch '${base}' to a merge-base; the diff under review is unmeasurable, so no event emitted" >&2
+  exit 1
+fi
+reviewed_head_sha="$head_sha"
+reviewed_line_count="$(git diff --numstat "${reviewed_base_sha}..HEAD" 2>/dev/null | awk '{ add += $1; del += $2 } END { print add + del + 0 }')"
+if (( reviewed_line_count == 0 )); then
+  echo "emit-attestation: the diff under review is 0 lines (base ${reviewed_base_sha} .. HEAD ${reviewed_head_sha} on branch ${branch})." >&2
+  echo "A review with nothing to read is not a pass; no event emitted." >&2
+  echo "If you are reviewing a worktree from the canonical checkout, hand the review its" >&2
+  echo "target explicitly: run from the worktree path, or pass the PR number to the review verb." >&2
+  exit 1
+fi
+
 # Record the attesting ACTOR alongside what was certified (x-27c5): without a
 # session, an author attesting its own diff is indistinguishable from an
 # independent reviewer, which clears config.review.reviewers with no trace.
@@ -240,7 +263,10 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
   --arg attester_session_id "$attester_session_id" \
   --arg reviewer_context "$reviewer_context" \
   --arg branch "$branch" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id,reviewer_context:$reviewer_context,branch:$branch}')"
+  --arg reviewed_base_sha "$reviewed_base_sha" \
+  --arg reviewed_head_sha "$reviewed_head_sha" \
+  --argjson reviewed_line_count "$reviewed_line_count" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id,reviewer_context:$reviewer_context,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count}')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
@@ -271,4 +297,4 @@ for _b in "${branch:-}" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   "${FNO:-fno}" do pr review-hold release --branch "$_b" >/dev/null 2>&1 || true
 done
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset} reviewer_context=$reviewer_context lines=$reviewed_line_count" >&2

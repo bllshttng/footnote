@@ -5095,6 +5095,20 @@ fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> 
         if line_head.is_empty() {
             continue;
         }
+        // A pass over a ZERO-LINE diff is a review of nothing, not a review:
+        // a session resolving its target from a checkout sitting on the base
+        // branch reads an empty diff and reports clean, and before this guard
+        // that pass was byte-identical to a real one. The producer refuses to
+        // emit at 0, so a line carrying the field as 0 is either pre-guard or
+        // hand-crafted - skipped either way. The field ABSENT is the pre-landed
+        // backlog and still counts; absence must not be read as zero.
+        if val
+            .pointer("/data/reviewed_line_count")
+            .and_then(|v| v.as_i64())
+            == Some(0)
+        {
+            continue;
+        }
         // The branch this attestation named; empty on every event predating
         // the field, which attestation_in_scope then admits only on exact
         // head equality. Once the head moves, a pre-field line emits NO
@@ -12668,6 +12682,51 @@ mod tests {
         );
         let measured = coverage_event_data(826, &measured_rep, "h", "", Some("sess-author"));
         assert_eq!(measured["self_attested_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn a_zero_line_attestation_is_not_review_evidence() {
+        // A pass over a zero-line diff is a review of nothing: a session
+        // resolving its target from a checkout sitting on the base branch
+        // reads an empty diff, reports clean, and before this guard that
+        // pass counted exactly like a real one. The producer refuses to emit
+        // at 0, so a line carrying the field as 0 is either pre-guard or
+        // hand-crafted; skipped either way. The control pins that the field
+        // ABSENT (the pre-landed backlog) still counts - absence must never
+        // be read as zero.
+        let zero = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author", "reviewed_line_count": 0}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &zero,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert!(rep.verdicts.is_empty(), "a zero-line pass must yield no verdict");
+        assert_eq!(rep.coverage, Coverage::Unknown);
+
+        let control = attestation_line("code-review", "h", "pass");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &control,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(1));
     }
 
     #[test]
