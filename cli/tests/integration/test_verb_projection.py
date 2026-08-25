@@ -84,6 +84,7 @@ def test_update_priority_repaints_doc(tmp_graph, tmp_path):
 
     _, fields, _ = read_plan_file(plan)
     assert fields["priority"] == "p0"
+    assert str(fields["blocks_everything"]).lower() == "true"
 
 
 def test_update_type_repaints_doc(tmp_graph, tmp_path):
