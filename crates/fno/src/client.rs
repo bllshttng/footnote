@@ -8388,8 +8388,12 @@ enum ChromeHit {
 fn no_pane_notice(a: &AgentRow) -> String {
     match a.no_pane_reason {
         Some(AgentNoPaneReason::LivePaneless) => format!(
-            "worker {} is live but has no pane; resume refused because it would create a second writer. Follow it with: fno agents peek {} --follow",
+            "fno agents peek {} --follow — worker {} is live but has no pane; resume refused because it would create a second writer",
             a.name, a.name
+        ),
+        Some(AgentNoPaneReason::BackendNotLive) => format!(
+            "worker {} has no pane here: registry backend is not live; inspect its state before resuming",
+            a.name
         ),
         Some(AgentNoPaneReason::MissingHarness) => {
             format!("worker {} has no pane here: no harness recorded", a.name)
@@ -15826,6 +15830,19 @@ mod tests {
                 ),
             }
         }
+        let mut narrow = two_pane_view();
+        narrow.set_notice(match agent_hit(&live_paneless, 2) {
+            ChromeHit::Notice(text) => text,
+            other => panic!(
+                "live paneless must produce a notice for clipping: {}",
+                chrome_hit_label(&Some(other))
+            ),
+        });
+        let (_, clipped) = narrow.notice_overlay(80).expect("notice is set");
+        assert!(
+            clipped.contains("fno agents peek t-live-paneless --follow"),
+            "the actionable command must survive narrow clipping: {clipped}"
+        );
 
         for (reason, marker) in [
             (AgentNoPaneReason::MissingHarness, "no harness recorded"),

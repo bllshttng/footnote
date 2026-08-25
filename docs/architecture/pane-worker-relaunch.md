@@ -44,7 +44,7 @@ Only a DEAD row offers Resume. A live row has a process writing its session stat
 
 ## Live paneless workers after restart
 
-A registry worker can remain live after the mux loses its pane mapping. The old mux owned that PTY, so the current server cannot safely re-parent the process or silently create a second harness writer. The sideline keeps the dead-only Resume guard, classifies the row as live-paneless, and tells the operator to run `fno agents peek <worker-name> --follow` for read-only transcript observation. A row with a live claude daemon `attach_id` still uses the existing placement picker first. Missing harness, missing session id, and unsupported harness remain separate refusal notices. Pre-v53 rows without the typed reason keep the generic compatibility notice.
+A registry worker can remain live after the mux loses its pane mapping. The old mux owned that PTY, so the current server cannot safely re-parent the process or silently create a second harness writer. The sideline keeps the dead-only Resume guard, classifies the row as live-paneless, and tells the operator to run `fno agents peek <worker-name> --follow` for read-only transcript observation. A row with a live claude daemon `attach_id` still uses the existing placement picker first. Missing harness, missing session id, unsupported harness, and a registry backend that is no longer live remain separate refusal notices. Pre-v54 rows without the typed reason keep the generic compatibility notice.
 
 The resumed pane is placed in the squad that holds the worker's recorded membership, falling back to the squad owning its cwd. The two tokens the server builds are pinned against `harness_capabilities.toml` by a test that reads the toml. The Rust mirror cannot drift from the file that owns it. The pane is titled from the registry row and recorded as a worker member again, so it survives the NEXT restart too.
 
@@ -56,5 +56,5 @@ The resume argv cannot go through the porcelain: `fno agents spawn --resume` is 
 - `crates/fno/src/server.rs` - capture in `run_pane` (`record_worker_member`), the idle branch in `restore_squads`, the `ResumeAgent` handler, `row_resumable`
 - `crates/fno/src/mux_cli.rs` - `pane run --worker` parsing and help
 - `crates/fno/src/agents_view.rs` - `RegistryAgent.harness`
-- `crates/fno/src/proto.rs` - `Command::ResumeAgent`, `AgentRow.resumable` (v49), `AgentRow.no_pane_reason` (v53)
+- `crates/fno/src/proto.rs` - `Command::ResumeAgent`, `AgentRow.resumable` (v49), `AgentRow.no_pane_reason` (v54)
 - `cli/src/fno/agents/mux_spawn.py` - passes `--worker <name>` on the pane run argv

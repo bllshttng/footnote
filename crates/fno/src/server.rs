@@ -4875,7 +4875,11 @@ impl Core {
             return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId);
         }
         if !a.exited {
-            return RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless);
+            return RowResumeDisposition::NoPane(if a.liveness == agents_view::Liveness::Alive {
+                AgentNoPaneReason::LivePaneless
+            } else {
+                AgentNoPaneReason::BackendNotLive
+            });
         }
         RowResumeDisposition::Resumable
     }
@@ -16346,7 +16350,7 @@ mod tests {
             updated_at: None,
             crown_level: None,
             crown_scope: None,
-            liveness: agents_view::Liveness::Dead,
+            liveness: agents_view::Liveness::Alive,
         };
         assert_eq!(
             Core::row_resume_disposition(&base()),
@@ -16362,6 +16366,20 @@ mod tests {
         assert!(
             !Core::row_resumable(&live_codex),
             "a live codex row has a process writing its rollout: resuming under it opens a second writer"
+        );
+        let mut backend_not_live = base();
+        backend_not_live.exited = false;
+        backend_not_live.liveness = agents_view::Liveness::Unmeasured;
+        assert!(
+            !matches!(
+                Core::row_resume_disposition(&backend_not_live),
+                RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+            ),
+            "an unmeasured backend must not be labeled live"
+        );
+        assert_eq!(
+            Core::row_resume_disposition(&backend_not_live),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
         );
         let mut agy = base();
         agy.harness = Some("agy".into());
