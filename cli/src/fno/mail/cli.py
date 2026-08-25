@@ -4965,7 +4965,6 @@ def cmd_drain_self(
     from fno.bus.cursor import advance_cursor, scan_unread
     from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
     from fno.harness_identity import canonical_handle, legacy_suffix_handle, session_identity_key
-    from fno.mail.envelope import FNO_MAIL_TRAILER
 
     try:
         ident = require_self_identity()
