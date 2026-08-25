@@ -963,6 +963,11 @@ pub enum AgentNoPaneReason {
     MissingSessionId,
     UnsupportedHarness,
     BackendNotLive,
+    /// (v55, x-d401) The liveness reading is absent: no confirmed-dead pid and
+    /// no confirmed-live backend either. Distinct from `BackendNotLive`
+    /// because that variant asserts a falsified backend; this one says the
+    /// reading does not exist and names the check to run instead.
+    LivenessUnmeasured,
 }
 
 /// One sideline agent row inside [`ServerMsg::Layout`] (v5, brief US2). The

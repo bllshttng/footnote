@@ -8656,6 +8656,10 @@ fn no_pane_notice(a: &AgentRow) -> String {
             "worker {} has no pane here: registry backend is not live; inspect its state before resuming",
             a.name
         ),
+        Some(AgentNoPaneReason::LivenessUnmeasured) => format!(
+            "worker {} has no pane here: liveness reading is absent (neither confirmed dead nor confirmed live); run fno agents peek {} to see before resuming",
+            a.name, a.name
+        ),
         Some(AgentNoPaneReason::MissingHarness) => {
             format!("worker {} has no pane here: no harness recorded", a.name)
         }
