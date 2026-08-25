@@ -127,6 +127,61 @@ def test_named_send_ruling_appends_dated_node_block_before_transport(
     assert re.search(r"### Ruling \(\d{4}-\d{2}-\d{2}\)", fresh.stdout)
 
 
+def test_named_send_ruling_uses_explicit_cwd_graph(
+    runner, ruling_graph, monkeypatch, tmp_path
+):
+    foreign_repo = tmp_path / "foreign-repo"
+    foreign_graph = foreign_repo / "state" / "graph.json"
+    foreign_graph.parent.mkdir(parents=True)
+    foreign_graph.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "x-511a",
+                        "slug": "foreign-mailed-ruling",
+                        "title": "foreign mailed ruling",
+                        "status": "ready",
+                        "type": "feature",
+                        "priority": "p2",
+                        "details": "Foreign node details.",
+                    }
+                ]
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    foreign_settings = foreign_repo / ".fno" / "settings.yaml"
+    foreign_settings.parent.mkdir(parents=True)
+    foreign_settings.write_text(
+        "schema_version: 1\nconfig:\n  paths:\n    graph_json: "
+        + json.dumps(str(foreign_graph))
+        + "\n",
+        encoding="utf-8",
+    )
+    marker = "Foreign ruling sentinel must land only in the requested cwd."
+    _hosted_dispatch(
+        monkeypatch,
+        before_transport=lambda: marker in _graph_details(foreign_graph)
+        or pytest.fail("ruling did not use the explicit cwd graph"),
+    )
+
+    sent = runner.invoke(
+        app,
+        [
+            "agents", "mail", "send", "worker-one", marker,
+            "--from-name", "king", "--cwd", str(foreign_repo),
+            "--ruling", "x-511a",
+        ],
+    )
+
+    assert sent.exit_code == 0, sent.output
+    assert marker in _graph_details(foreign_graph)
+    assert _graph_details(ruling_graph) == "Original node details."
+
+
 def test_send_ruling_unknown_node_refuses_before_mail(
     runner, ruling_graph, monkeypatch
 ):

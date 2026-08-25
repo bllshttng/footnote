@@ -681,12 +681,24 @@ def _is_job_name(name: Optional[str]) -> bool:
     return bool(is_job_token(name))
 
 
-def _append_ruling_to_node(subject: str, body: str) -> str:
+def _ruling_graph_path(workdir: Path) -> Path:
+    """Resolve the graph configured by an explicit mail ``--cwd``."""
+    from fno.config import load_settings_for_repo
+
+    settings = load_settings_for_repo(workdir)
+    override = settings.paths.graph_json
+    raw = override if override is not None else settings.state_dir
+    resolved = paths.resolve_configured_path(
+        raw, project_root=workdir, settings=settings
+    )
+    return resolved if override is not None else resolved / "graph.json"
+
+
+def _append_ruling_to_node(subject: str, body: str, *, graph_path: Path) -> str:
     """Append one dated ruling block to an exact working-graph node."""
     from fno.graph import store as graph_store
     from fno.graph.fuzzy import resolve_node
 
-    graph_path = paths.graph_json()
     block = f"### Ruling ({datetime.now(timezone.utc).date().isoformat()})\n\n{body}"
     node_id: str | None = None
 
@@ -4191,7 +4203,8 @@ def cmd_send(
     _enforce_style(message, allow_reason=style_exception)
 
     if ruling is not None:
-        _append_ruling_to_node(ruling, message)
+        ruling_graph = _ruling_graph_path(workdir) if cwd else paths.graph_json()
+        _append_ruling_to_node(ruling, message, graph_path=ruling_graph)
 
     # --force routes into the shared name-lane choke point with the ladder
     # skipped. Intercepted here rather than threaded through `dispatch_send`
