@@ -265,6 +265,143 @@ const SQUAD_ROW_CAP: usize = 8;
 /// the burst to one `FocusPane` for the pane the pointer lands on.
 const HOVER_DEBOUNCE: Duration = Duration::from_millis(50);
 
+/// (hover affordance) How long the pointer must rest on ONE cell before the
+/// client asks the server whether that cell belongs to a link. A separate
+/// clock from [`HOVER_DEBOUNCE`]: focus-follows-mouse debounces the PANE
+/// (keeping the first landing time through in-pane motion), link detection
+/// debounces the exact CELL (every crossed cell restarts it), so the two
+/// share a duration but never a deadline. Same 50ms so the affordance feels
+/// like the focus it travels with.
+const LINK_HOVER_DEBOUNCE: Duration = HOVER_DEBOUNCE;
+
+/// (hover affordance) Client-local hover-link state. Detection is
+/// server-side (the grid, its scrollback and OSC 8 anchors live there); this
+/// holds the client's pointer target, the debounce clock, and the accepted
+/// underline span. Nothing here is shared: the underline is painted into the
+/// composed frame only, never the cached server `Frame`, and the server
+/// reply carries coordinates only, so no pane text crosses back.
+#[derive(Debug, Default)]
+struct LinkHoverState {
+    /// The cell the pointer last rested on, and when its quiet period ends.
+    /// `None` when the pointer is over chrome, a divider, an overlay, or out
+    /// of every live pane - those targets carry no probe and clear the
+    /// underline immediately, without a request.
+    pending: Option<LinkTarget>,
+    /// The next probe's seq, bumped per probe (and per frame-restart) so a
+    /// reply for a target the pointer has already left, or for a span a new
+    /// frame invalidated, is dropped on arrival.
+    next_seq: u64,
+    /// The accepted underline: which pane and which of its visible cells. A
+    /// miss (empty reply) clears it. Cleared on every new frame for that pane
+    /// and re-debounced, so streaming output never paints a stale span and
+    /// never scans at frame cadence.
+    accepted: Option<(u64, Vec<(u16, u16)>)>,
+}
+
+/// One debounced hover probe target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinkTarget {
+    pane: u64,
+    row: u16,
+    col: u16,
+    /// Identifies THIS probe on the wire and its reply.
+    seq: u64,
+    /// When the quiet period ends and the probe fires.
+    deadline: Instant,
+    /// Whether the probe already fired for this target. Kept so the deadline
+    /// arm does not re-send while the pointer rests motionless (a still
+    /// pointer emits no further events to re-arm on).
+    fired: bool,
+}
+
+impl LinkHoverState {
+    /// Fold one pointer position into the probe state. A new cell restarts
+    /// the quiet period and clears the old underline immediately (an
+    /// underline trailing the pointer reads as stuck, and the cell may not be
+    /// a link at all); the same cell changes nothing, so in-cell jitter does
+    /// not starve the probe. `None` (chrome/divider/overlay/outside) drops
+    /// the target and the underline with no request.
+    fn retarget(&mut self, hit: Option<(u64, u16, u16)>, now: Instant) {
+        match hit {
+            Some((pane, row, col)) => {
+                if !matches!(
+                    self.pending,
+                    Some(t) if (t.pane, t.row, t.col) == (pane, row, col)
+                ) {
+                    let seq = self.next_seq;
+                    self.next_seq += 1;
+                    self.pending = Some(LinkTarget {
+                        pane,
+                        row,
+                        col,
+                        seq,
+                        deadline: now + LINK_HOVER_DEBOUNCE,
+                        fired: false,
+                    });
+                    self.accepted = None;
+                }
+            }
+            None => {
+                self.pending = None;
+                self.accepted = None;
+            }
+        }
+    }
+
+    /// A new frame for `pane` invalidated whatever was accepted: clear the
+    /// span and restart the quiet period from this frame, so the probe waits
+    /// for the pane to go quiet again and repeated streaming frames keep
+    /// postponing the lookup instead of scanning at frame cadence.
+    fn on_frame(&mut self, pane: u64, now: Instant) {
+        if let Some(t) = &mut self.pending {
+            if t.pane == pane {
+                t.seq = self.next_seq;
+                self.next_seq += 1;
+                t.deadline = now + LINK_HOVER_DEBOUNCE;
+                t.fired = false;
+                self.accepted = None;
+            }
+        }
+    }
+
+    /// Take the probe that is due: the pending target whose quiet period
+    /// ended and has not fired. Marks it fired so a resting pointer never
+    /// re-sends.
+    fn take_due_probe(&mut self, now: Instant) -> Option<LinkTarget> {
+        let t = self.pending.as_mut()?;
+        if t.fired || now < t.deadline {
+            return None;
+        }
+        t.fired = true;
+        Some(*t)
+    }
+
+    /// Fold a reply in: accept it only when its pane and seq still identify
+    /// the current target. A stale reply (pointer moved, or a frame
+    /// invalidated and re-sequenced the target) is dropped whole; a current
+    /// reply installs the span, or clears it when the cell is no link.
+    fn on_reply(&mut self, pane: u64, seq: u64, cells: Vec<(u16, u16)>) -> bool {
+        let current = self.pending.is_some_and(|t| t.pane == pane && t.seq == seq);
+        if !current {
+            return false;
+        }
+        self.accepted = (!cells.is_empty()).then_some((pane, cells));
+        true
+    }
+
+    /// The next wake for the probe clock, when one is pending.
+    fn deadline(&self) -> Option<Instant> {
+        self.pending.filter(|t| !t.fired).map(|t| t.deadline)
+    }
+
+    /// Drop the target and the underline (pointer left the panes, or a popup
+    /// took the mouse). Never sends anything.
+    fn clear(&mut self) {
+        self.pending = None;
+        self.accepted = None;
+    }
+}
+
 /// How long a seam drag survives with no motion before it expires (x-d807,
 /// AC7-FR). A drag whose mouse-up never arrives - the terminal lost focus
 /// mid-gesture, or the release was eaten - would otherwise stay latched and
@@ -989,6 +1126,11 @@ struct View {
     /// and when it first landed there. `FocusPane` fires once the same pane holds
     /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
     hover_pending: Option<(u64, Instant)>,
+    /// (hover affordance) The link-probe clock and accepted underline span.
+    /// Independent of [`View::hover_focus`]: the link affordance tracks the
+    /// exact cell, and a focus-follows-mouse off-switch disables focus
+    /// stealing, not hover affordances.
+    link_hover: LinkHoverState,
     /// (x-a496) The `display_rows()` index the pointer is hovering in the
     /// sideline, painted with the selector's INVERSE bar. Highlight-only - never
     /// switches the viewed squad/tab. `None` off the panel.
@@ -2354,6 +2496,7 @@ impl View {
             theme: Theme::default_theme(),
             settings_tab: SettingsTab::General,
             hover_pending: None,
+            link_hover: LinkHoverState::default(),
             hover_row: None,
             hover_seam: None,
             seam_drag: None,
@@ -5069,6 +5212,14 @@ impl View {
         // of the focus-follow off-switch below).
         self.refresh_hover_affordances(row, col);
 
+        // (hover affordance) The link probe tracks the exact CELL, so every
+        // crossed cell restarts its quiet period - unlike focus-follows below,
+        // which keeps the pane's first landing time. Chrome/divider/overlay
+        // targets clear the probe and the underline immediately, no request.
+        // Deliberately ABOVE the focus off-switch: a disabled focus-follow
+        // steals no focus, but links still afford hovering.
+        self.link_hover.retarget(self.hit_test(row, col), now);
+
         // Focus-follows-mouse rides the off-switch. hit_test resolves a PANE
         // (chrome/divider/sideline => None), so hovering the sideline never
         // steals focus - only moving over pane content does.
@@ -5868,6 +6019,23 @@ impl View {
                         if fr < f.rows as usize && fc < f.cols as usize {
                             cells[r * cols + c] = f.cells[fr * f.cols as usize + fc];
                         }
+                    }
+                }
+            }
+        }
+        // (hover affordance) Underline the accepted link span, client-local:
+        // OR UNDERLINE into exactly the pane-local cells the server named,
+        // after the blit (content is in place) and before the grip/indicator/
+        // overlay passes (chrome and overlays still win their cells). The
+        // cached server `Frame` is untouched, so the span clears on the next
+        // compose the moment it is dropped or invalidated.
+        if let Some((pid, span)) = self.link_hover.accepted.as_ref() {
+            if let Some((_, rect)) = self.layout.panes.iter().find(|(p, _)| p == pid) {
+                for &(fr, fc) in span {
+                    let r = origin_r + rect.y as usize + fr as usize;
+                    let c = origin_c + rect.x as usize + fc as usize;
+                    if r < rows && c < cols {
+                        cells[r * cols + c].flags |= cell_flags::UNDERLINE;
                     }
                 }
             }
@@ -10184,10 +10352,12 @@ async fn attach_and_run(
                 | ServerMsg::Err { .. }
                 // Copy and OpenLink answer a mouse-release, and SearchResult
                 // answers a search - all can only follow attach: stray in the
-                // preamble, ignore rather than desync.
+                // preamble, ignore rather than desync. LinkHover answers a
+                // hover probe (same class).
                 | ServerMsg::Copy { .. }
                 | ServerMsg::OpenLink { .. }
                 | ServerMsg::SearchResult { .. }
+                | ServerMsg::LinkHover { .. }
                 // PeekBody answers a post-attach PeekAgent (x-c376): impossible
                 // in the preamble, ignore rather than desync.
                 | ServerMsg::PeekBody { .. }
@@ -10455,6 +10625,11 @@ async fn attach_and_run(
         // its landing time + the debounce, re-armed each loop from the latest
         // pending, so a fast sweep's earlier panes are dropped before they fire.
         let hover_deadline = view.hover_pending.map(|(_, t0)| t0 + HOVER_DEBOUNCE);
+        // (hover affordance) The link probe's own clock: separate from
+        // `hover_deadline` because focus debounces the pane while the link
+        // probe debounces the exact cell, and a fired probe stops the clock
+        // until motion or a frame restarts it.
+        let link_hover_deadline = view.link_hover.deadline();
         // (x-1d91) A dispatched reorder verb the feed never confirmed: the `…`
         // marker must clear with a notice rather than spin forever.
         let backlog_deadline = view.backlog_pending_deadline();
@@ -10515,6 +10690,11 @@ async fn attach_and_run(
                     // ignored (Concurrency: flush-then-re-emit ordering).
                     let known = view.layout.panes.iter().any(|(id, _)| *id == pane_id);
                     if known {
+                        // (hover affordance) A new frame invalidates the
+                        // accepted span and restarts the probe's quiet period
+                        // from this frame, so streaming output neither paints
+                        // a stale span nor scans at frame cadence.
+                        view.link_hover.on_frame(pane_id, Instant::now());
                         view.frames.insert(pane_id, frame);
                         if let Err(e) = compositor.draw(&view.compose()) {
                             break Err(format!("draw: {e}"));
@@ -10616,6 +10796,23 @@ async fn attach_and_run(
                         let outcome = crate::link::open_url(&url);
                         let _ = tx.send((url, outcome));
                     });
+                }
+                Ok(ServerMsg::LinkHover {
+                    pane_id,
+                    seq,
+                    cells,
+                }) => {
+                    // (hover affordance) Accept only a reply that still names
+                    // the current target (its pane and seq): one for a cell
+                    // the pointer left, or one a new frame re-sequenced away,
+                    // paints a stale span. A current miss (empty cells)
+                    // clears the underline - the cell under the pointer is
+                    // not a link.
+                    if view.link_hover.on_reply(pane_id, seq, cells) {
+                        if let Err(e) = compositor.draw(&view.compose()) {
+                            break Err(format!("draw: {e}"));
+                        }
+                    }
                 }
                 Ok(ServerMsg::SearchResult {
                     pane_id,
@@ -11053,6 +11250,32 @@ async fn attach_and_run(
                     }
                 }
             }
+            _ = async {
+                match link_hover_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if link_hover_deadline.is_some() => {
+                // (hover affordance) The pointer rested on one cell past the
+                // quiet period: send exactly one probe. The target stays
+                // pending (marked fired) so the reply can still match it, but
+                // the clock stops until motion or a frame restarts it.
+                if let Some(t) = view.link_hover.take_due_probe(Instant::now()) {
+                    if let Err(e) = write_msg(
+                        &mut sock_w,
+                        &ClientMsg::LinkHover {
+                            pane: t.pane,
+                            row: t.row,
+                            col: t.col,
+                            seq: t.seq,
+                        },
+                    )
+                    .await
+                    {
+                        break Err(format!("link-hover send failed: {e}"));
+                    }
+                }
+            }
         }
     };
     drop(guard); // restore the terminal BEFORE printing the notice
@@ -11163,6 +11386,14 @@ async fn handle_stdin(
         // Hover is left armed so mouse drift never breaks a held resize.
         if !matches!(rep.kind, MouseKind::Move) {
             scanner.disarm_repeat();
+        }
+        // (hover affordance) While a popup owns the pointer, a Move reports
+        // ITS hover, not a pane cell's: drop the link probe so the underline
+        // cannot linger beneath the overlay.
+        if matches!(rep.kind, MouseKind::Move)
+            && (view.keys_modal.is_some() || view.row_menu.is_some() || view.aux.is_some())
+        {
+            view.link_hover.clear();
         }
         // x-8ccf US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
@@ -18037,6 +18268,141 @@ mod tests {
             backlog_stale: false,
         });
         view
+    }
+
+    // -- (hover affordance) the link-probe clock and the local underline -------
+
+    #[test]
+    fn link_hover_probe_debounces_the_cell_and_fires_once() {
+        // The probe clock is per-CELL (every crossed cell restarts it) and
+        // fires exactly once per rest: a still pointer emits no further
+        // events, so re-firing would spam the server at wake cadence.
+        let mut st = LinkHoverState::default();
+        let t0 = Instant::now();
+        st.retarget(Some((10, 2, 3)), t0);
+        assert!(
+            st.take_due_probe(t0 + LINK_HOVER_DEBOUNCE - Duration::from_millis(1))
+                .is_none(),
+            "the quiet period holds"
+        );
+        let t = st
+            .take_due_probe(t0 + LINK_HOVER_DEBOUNCE)
+            .expect("fires at the deadline");
+        assert_eq!((t.pane, t.row, t.col, t.seq), (10, 2, 3, 0));
+        assert!(
+            st.take_due_probe(t0 + Duration::from_secs(5)).is_none(),
+            "a resting pointer never re-sends"
+        );
+        // Same cell again is jitter, not motion: no new clock.
+        st.retarget(Some((10, 2, 3)), t0 + Duration::from_secs(6));
+        assert_eq!(st.deadline(), None, "jitter does not re-arm a fired probe");
+        // A NEW cell restarts the clock with a fresh seq.
+        st.retarget(Some((10, 2, 4)), t0 + Duration::from_secs(7));
+        assert_eq!(
+            st.deadline(),
+            Some(t0 + Duration::from_secs(7) + LINK_HOVER_DEBOUNCE)
+        );
+    }
+
+    #[test]
+    fn link_hover_reply_is_accepted_only_for_the_current_target() {
+        // The seq guard is the whole stale-rejection story: a reply for a
+        // target the pointer left paints nothing; a current reply installs
+        // the span; a current MISS clears it (never leaves an earlier span).
+        let mut st = LinkHoverState::default();
+        let t0 = Instant::now();
+        st.retarget(Some((10, 2, 3)), t0);
+        let a = st.take_due_probe(t0 + LINK_HOVER_DEBOUNCE).unwrap();
+        // Pointer moved before the reply landed: stale, dropped whole.
+        st.retarget(Some((10, 2, 9)), t0 + Duration::from_millis(80));
+        assert!(
+            !st.on_reply(a.pane, a.seq, vec![(2, 3)]),
+            "stale reply dropped"
+        );
+        assert!(st.accepted.is_none(), "and paints nothing");
+        let b = st
+            .take_due_probe(t0 + Duration::from_millis(80) + LINK_HOVER_DEBOUNCE)
+            .unwrap();
+        assert!(
+            st.on_reply(b.pane, b.seq, vec![(2, 9), (2, 10)]),
+            "current reply accepted"
+        );
+        assert_eq!(st.accepted, Some((10, vec![(2, 9), (2, 10)])));
+        // A current miss clears rather than leaving the previous span.
+        st.retarget(Some((10, 3, 3)), t0 + Duration::from_secs(2));
+        let c = st
+            .take_due_probe(t0 + Duration::from_secs(2) + LINK_HOVER_DEBOUNCE)
+            .unwrap();
+        assert!(st.on_reply(c.pane, c.seq, Vec::new()));
+        assert!(st.accepted.is_none(), "an empty reply clears the underline");
+    }
+
+    #[test]
+    fn link_hover_frame_invalidates_and_resequences() {
+        // A new frame for the probed pane clears the accepted span and
+        // restarts the quiet period FROM THE FRAME, so streaming output
+        // postpones the next probe instead of scanning at frame cadence, and
+        // the pre-frame probe's reply is re-sequenced away.
+        let mut st = LinkHoverState::default();
+        let t0 = Instant::now();
+        st.retarget(Some((10, 2, 3)), t0);
+        let a = st.take_due_probe(t0 + LINK_HOVER_DEBOUNCE).unwrap();
+        st.accepted = Some((10, vec![(2, 3)]));
+        let tf = t0 + Duration::from_secs(1);
+        st.on_frame(10, tf);
+        assert!(st.accepted.is_none(), "the frame cleared the span");
+        assert_eq!(
+            st.deadline(),
+            Some(tf + LINK_HOVER_DEBOUNCE),
+            "postponed by the frame"
+        );
+        assert!(
+            !st.on_reply(a.pane, a.seq, vec![(2, 3)]),
+            "the pre-frame probe's reply is stale after re-sequencing"
+        );
+        // A frame for ANOTHER pane leaves this target alone.
+        st.on_frame(99, tf + Duration::from_secs(1));
+        assert_eq!(
+            st.deadline(),
+            Some(tf + LINK_HOVER_DEBOUNCE),
+            "another pane's frame is a no-op"
+        );
+        // Chrome/divider/outside: everything drops, with no request.
+        st.retarget(None, tf + Duration::from_secs(2));
+        assert!(st.pending.is_none() && st.accepted.is_none());
+        assert_eq!(st.deadline(), None);
+    }
+
+    #[test]
+    fn link_hover_compose_underlines_exactly_the_accepted_cells() {
+        // The affordance is client-local: compose ORs UNDERLINE onto exactly
+        // the accepted pane cells, and the cached server Frame is untouched,
+        // so clearing the span restores the byte-identical frame.
+        let mut view = two_pane_view();
+        let clean = view.compose();
+        view.link_hover.accepted = Some((10, vec![(0, 3), (1, 4)]));
+        let lit = view.compose();
+        let ul = cell_flags::UNDERLINE;
+        // Pane 10's rect sits at the content origin (row 1, col 28).
+        let underlined = |f: &Frame| -> Vec<(usize, usize)> {
+            (0..f.rows as usize)
+                .flat_map(move |r| (0..f.cols as usize).map(move |c| (r, c)))
+                .filter(|&(r, c)| f.cells[r * f.cols as usize + c].flags & ul == ul)
+                .collect()
+        };
+        assert_eq!(
+            underlined(&lit),
+            vec![(1, 28 + 3), (2, 28 + 4)],
+            "exactly the two accepted cells, at the pane's screen position"
+        );
+        assert!(
+            underlined(&clean).is_empty(),
+            "control: nothing is underlined without an accepted span"
+        );
+        // The cached server frame is untouched: a clear restores the exact
+        // prior compose.
+        view.link_hover.clear();
+        assert_eq!(view.compose().cells, clean.cells);
     }
 
     #[test]

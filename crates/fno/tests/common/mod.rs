@@ -658,6 +658,10 @@ pub struct FakeClient {
     /// Initiator-only search results (v12, x-e780): `(pane_id, total, current)`,
     /// newest last. A co-viewer never receives these.
     pub search_results: Vec<(u64, u32, u32)>,
+    /// Initiator-only hover replies (v56): `(pane_id, seq, cells)`, newest
+    /// last. Coordinates only - the URL never rides the reply, which is part
+    /// of what the e2e test asserts.
+    pub link_hovers: Vec<(u64, u64, Vec<(u16, u16)>)>,
     /// Every absorbed message's kind, chronologically.
     pub order: Vec<Absorbed>,
     /// Bytes read off the socket that do not yet form a whole message.
@@ -702,6 +706,7 @@ impl FakeClient {
             copies: Vec::new(),
             opened_links: Vec::new(),
             search_results: Vec::new(),
+            link_hovers: Vec::new(),
             order: Vec::new(),
             carry: Vec::new(),
         }
@@ -757,6 +762,22 @@ impl FakeClient {
         write_msg_sync(&mut w, &ClientMsg::SearchClear { pane }).unwrap();
     }
 
+    /// (v56, hover affordance) Ask the server which cells of `pane` belong to
+    /// the link under pane-local `(row, col)`.
+    pub fn link_hover(&mut self, pane: u64, row: u16, col: u16, seq: u64) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(
+            &mut w,
+            &ClientMsg::LinkHover {
+                pane,
+                row,
+                col,
+                seq,
+            },
+        )
+        .unwrap();
+    }
+
     pub fn reset_counts(&mut self) {
         self.frame_counts.clear();
     }
@@ -804,6 +825,11 @@ impl FakeClient {
                 total,
                 current,
             } => self.search_results.push((pane_id, total, current)),
+            ServerMsg::LinkHover {
+                pane_id,
+                seq,
+                cells,
+            } => self.link_hovers.push((pane_id, seq, cells)),
             // Answers a pre-Attach Query only; stray on an attached client.
             ServerMsg::Info { .. } => {}
             // v4 control-verb replies belong to one-shot `fno mux pane`

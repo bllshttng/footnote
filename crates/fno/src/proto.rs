@@ -273,7 +273,12 @@ fn default_true() -> bool {
 /// are not additive-tolerant either.
 /// v55 (guarded tab close): `ControlVerb::TabClose` and the target-specific
 /// `ServerMsg::TabClosed` receipt.
-pub const PROTO_VERSION: u32 = 55;
+///
+/// v56 (hover affordance): `ClientMsg::LinkHover` + `ServerMsg::LinkHover` -
+/// the sequenced, initiator-only hover lookup for clickable URLs. New
+/// variants, so an unbumped peer cannot decode the pair; the handshake is
+/// what stops the skew.
+pub const PROTO_VERSION: u32 = 56;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -374,6 +379,20 @@ pub enum ClientMsg {
     /// Shift-modified events are the native-selection escape hatch and are
     /// never captured, so they never reach this variant (AC3-EDGE).
     Mouse { pane: u64, event: MouseEvent },
+    /// (v56, hover affordance) Ask which cells of `pane` belong to the link
+    /// under pane-local `(row, col)`, for the client's hover underline.
+    /// Read-only and initiator-only: the reply is one
+    /// [`ServerMsg::LinkHover`] to THIS client - co-viewers see nothing, pane
+    /// state and the frame stream are untouched. `seq` is a client-local
+    /// monotonic counter echoed on the reply so a result for a target the
+    /// pointer has already left is dropped client-side (the same A->B->A
+    /// guard `PeekAgent` uses).
+    LinkHover {
+        pane: u64,
+        row: u16,
+        col: u16,
+        seq: u64,
+    },
     /// (v8) Walk the pane's OSC 133 command blocks, moving the shared per-pane
     /// scroll so `dir`'s adjacent block anchors at the viewport top. A pane with
     /// no blocks replies with a `Notice` and no scroll change.
@@ -1933,6 +1952,16 @@ pub enum ServerMsg {
     /// server; the client checks again before exec rather than trusting the
     /// wire. Reliable - a dropped click is a dead-feeling button.
     OpenLink { url: String },
+    /// (v56, hover affordance) The initiator-only answer to a
+    /// [`ClientMsg::LinkHover`]: the visible pane-local cells to underline for
+    /// the requester's current pointer target. `cells` empty means no link (or
+    /// a pane/cell the requester cannot view); the URL never rides this reply,
+    /// so the affordance leaks no pane text. Reliable.
+    LinkHover {
+        pane_id: u64,
+        seq: u64,
+        cells: Vec<(u16, u16)>,
+    },
     /// (v12, x-e780) The initiator-only result of a `SearchOpen`/`SearchStep`:
     /// `total` matches in the snapshot and the `current` 1-based position after
     /// the jump. `total == 0` means no matches (the client shows "no matches" +
@@ -3866,7 +3895,8 @@ mod tests {
         // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
         // receipts (x-588a) bumped it 51 -> 52; the typed paneless recovery
         // reason bumps it 52 -> 53; backend-not-live classification bumps it
-        // 53 -> 54; guarded tab close bumps it 54 -> 55.
+        // 53 -> 54; guarded tab close bumps it 54 -> 55; the hover-affordance
+        // message pair bumps it 55 -> 56.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3875,7 +3905,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 55);
+        assert_eq!(PROTO_VERSION, 56);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,

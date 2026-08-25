@@ -14,11 +14,21 @@ use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{viewport_to_point, Config, Term, TermMode};
+use alacritty_terminal::term::cell::{Flags, Hyperlink};
+use alacritty_terminal::term::{point_to_viewport, viewport_to_point, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
 
 use crate::proto::{cell_flags, BlockDir, BlockMeta, BlockSel, Cell, Color, Frame};
+
+/// One resolved link: the validated URL plus every VISIBLE pane-local cell
+/// belonging to it (the hover affordance's underline span). Built only by
+/// [`Pane::link_span`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSpan {
+    pub uri: String,
+    /// Pane-local `(row, col)` viewport cells inside the current viewport.
+    pub cells: Vec<(u16, u16)>,
+}
 
 /// Default grid until the first client reports its real size. 24x80 is the
 /// historical terminal default (matches the fno-agents drive fallback).
@@ -430,12 +440,24 @@ impl Pane {
     /// chosen by whatever runs in the pane, so the allowlist is applied at this
     /// end rather than trusted to the client.
     pub fn link_at(&self, row: u16, col: u16) -> Option<String> {
+        self.link_span(row, col).map(|span| span.uri)
+    }
+
+    /// One resolved link: the validated URL plus every VISIBLE pane-local cell
+    /// belonging to it, so a hover affordance can underline exactly what a
+    /// click would open. The click path keeps [`Pane::link_at`] as the URL-only
+    /// projection of this match, so click and hover cannot disagree.
+    pub fn link_span(&self, row: u16, col: u16) -> Option<LinkSpan> {
         let point = self.viewport_point(row, col);
-        if let Some(uri) = self.term.grid()[point.line][point.column]
-            .hyperlink()
-            .map(|h| h.uri().to_string())
-        {
-            return crate::link::is_openable(&uri).then_some(uri);
+        if let Some(h) = self.term.grid()[point.line][point.column].hyperlink() {
+            // OSC 8 wins when present (see `link_at`); the span is the run of
+            // cells carrying the SAME anchor, soft wraps included.
+            let uri = h.uri().to_string();
+            let anchor = h.clone();
+            return crate::link::is_openable(&uri).then(|| LinkSpan {
+                uri,
+                cells: self.osc8_span_cells(point, &anchor),
+            });
         }
         let (text, points) = self.logical_line(point.line)?;
         let idx = points.iter().position(|p| *p == point)?;
@@ -443,7 +465,107 @@ impl Pane {
             .into_iter()
             .find(|&(a, b)| idx >= a && idx < b)?;
         let uri: String = text.chars().skip(start).take(end - start).collect();
-        crate::link::is_openable(&uri).then_some(uri)
+        crate::link::is_openable(&uri).then(|| LinkSpan {
+            uri,
+            cells: self.visible_cells(&points[start..end]),
+        })
+    }
+
+    /// Map grid points to pane-local viewport cells, dropping everything the
+    /// current viewport does not show (a link may run into scrolled history;
+    /// only the on-screen part is an affordance).
+    fn visible_cells(&self, points: &[Point]) -> Vec<(u16, u16)> {
+        let d = self.display_offset();
+        let rows = self.rows as usize;
+        points
+            .iter()
+            .filter_map(|p| point_to_viewport(d, *p))
+            .filter(|p| (p.line as usize) < rows)
+            .map(|p| (p.line as u16, p.column.0 as u16))
+            .collect()
+    }
+
+    /// The visible cells of one OSC 8 anchor around `point`: the contiguous
+    /// run of cells carrying the SAME hyperlink (anchor id + URI), extended
+    /// across soft wraps through the wrap region. Hyperlinks compare by value
+    /// over BOTH id and URI, so a later anchor that reuses the URI under its
+    /// own id never joins this span, and the contiguous walk stops at the
+    /// first cell of any other anchor even when an app re-emits mid-row.
+    fn osc8_span_cells(&self, point: Point, anchor: &Hyperlink) -> Vec<(u16, u16)> {
+        let grid = self.term.grid();
+        let cols = self.cols as usize;
+        let last = Column(cols.saturating_sub(1));
+        let same = |line: Line, c: usize| {
+            grid[line][Column(c)]
+                .hyperlink()
+                .is_some_and(|h| h == *anchor)
+        };
+        // The soft-wrap region around the pointed line, capped exactly like
+        // `logical_line` so one hover cannot walk the whole grid.
+        let (top, bot) = (grid.topmost_line().0, grid.bottommost_line().0);
+        let max_rows = (crate::link::MAX_URL_LEN / cols.max(1)) as i32 + 2;
+        let mut lo = point.line.0;
+        while lo > top
+            && point.line.0 - lo < max_rows
+            && grid[Line(lo - 1)][last].flags.contains(Flags::WRAPLINE)
+        {
+            lo -= 1;
+        }
+        let mut hi = point.line.0;
+        while hi < bot
+            && hi - point.line.0 < max_rows
+            && grid[Line(hi)][last].flags.contains(Flags::WRAPLINE)
+        {
+            hi += 1;
+        }
+        // (grid line, col_start, col_end) of each accepted run, in walk order.
+        let mut runs: Vec<(i32, usize, usize)> = Vec::new();
+        let mut s = point.column.0;
+        let mut e = point.column.0;
+        while s > 0 && same(point.line, s - 1) {
+            s -= 1;
+        }
+        while e + 1 < cols && same(point.line, e + 1) {
+            e += 1;
+        }
+        runs.push((point.line.0, s, e));
+        // Upward: the newest run must start at col 0 and the row above must
+        // wrap into it, ending on the same anchor.
+        while runs.last().is_some_and(|(_, s, _)| *s == 0) {
+            let above = Line(runs.last().unwrap().0 - 1);
+            if above.0 < lo
+                || !grid[above][last].flags.contains(Flags::WRAPLINE)
+                || !same(above, cols - 1)
+            {
+                break;
+            }
+            let mut e2 = cols - 1;
+            let mut s2 = e2;
+            while s2 > 0 && same(above, s2 - 1) {
+                s2 -= 1;
+            }
+            runs.push((above.0, s2, e2));
+        }
+        // Downward: the newest run must end at the last column and the row
+        // below must carry the same anchor at col 0.
+        while runs.last().is_some_and(|(_, _, e)| *e + 1 == cols) {
+            let cur = Line(runs.last().unwrap().0);
+            let below = Line(cur.0 + 1);
+            if below.0 > hi || !grid[cur][last].flags.contains(Flags::WRAPLINE) || !same(below, 0) {
+                break;
+            }
+            let mut e2 = 0;
+            while e2 + 1 < cols && same(below, e2 + 1) {
+                e2 += 1;
+            }
+            runs.push((below.0, 0, e2));
+        }
+        self.visible_cells(
+            &runs
+                .iter()
+                .flat_map(|&(ln, s, e)| (s..=e).map(move |c| Point::new(Line(ln), Column(c))))
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// The soft-wrap-joined line containing `line`, as text plus the grid point
@@ -1817,6 +1939,91 @@ mod tests {
         pane.feed(b"https://example.com");
         assert_eq!(pane.link_at(3, 19), None);
         assert_eq!(pane.link_at(200, 200), None, "out-of-range click clamps");
+    }
+
+    // -- hover affordance: the shared span behind click and hover ---------------
+
+    #[test]
+    fn link_span_covers_the_urls_own_cells_and_refuses_non_link_cells() {
+        // Plain text: the span is exactly the linkified URL's cells, so the
+        // hover underline paints what a click would open - no more, no less.
+        let mut pane = Pane::new(4, 40);
+        pane.feed(b"see https://example.com/a now");
+        let span = pane.link_span(0, 4).expect("the URL's own cell resolves");
+        assert_eq!(span.uri, "https://example.com/a");
+        assert_eq!(
+            span.cells,
+            (4..25).map(|c| (0, c)).collect::<Vec<_>>(),
+            "cols 4..=24, row 0, nothing of the surrounding words"
+        );
+        // Negative with a positive control in the same fixture: "see" is not a
+        // link; the URL cell beside it still resolves.
+        assert!(
+            pane.link_span(0, 0).is_none(),
+            "the leading word is no link"
+        );
+        assert!(
+            pane.link_span(0, 26).is_none(),
+            "the trailing word is no link"
+        );
+        assert!(
+            pane.link_span(0, 10).is_some(),
+            "control: the URL still does"
+        );
+    }
+
+    #[test]
+    fn link_span_joins_a_soft_wrapped_url_into_both_rows() {
+        // A URL soft-wrapped across rows is ONE link: querying either half
+        // yields the whole URL and the cells of both halves, so the underline
+        // reads as one link, not two fragments.
+        let mut pane = Pane::new(4, 20);
+        let url = "https://example.com/a/very/long/path";
+        pane.feed(url.as_bytes());
+        let span = pane
+            .link_span(1, 2)
+            .expect("the wrapped continuation resolves");
+        assert_eq!(span.uri, url);
+        assert!(
+            span.cells.iter().any(|&(r, _)| r == 0) && span.cells.iter().any(|&(r, _)| r == 1),
+            "both the head row and the continuation row are in the span"
+        );
+        // Click and hover cannot disagree: the projection answers the same URI.
+        assert_eq!(pane.link_at(0, 0).as_deref(), Some(url));
+    }
+
+    #[test]
+    fn link_span_reads_an_osc8_anchor_across_its_text_without_grouping_a_reused_uri() {
+        // OSC 8: the span is the run of cells carrying the SAME anchor. A
+        // second, separate anchor that happens to reuse the URI sits mid-row
+        // after plain text: the contiguous walk must stop at the gap, never
+        // underline both. Visible text: "open it mid also".
+        let mut pane = Pane::new(4, 60);
+        pane.feed(b"\x1b]8;;https://example.com/pr/700\x07open it\x1b]8;;\x07 mid \x1b]8;;https://example.com/pr/700\x07also\x1b]8;;\x07");
+        let span = pane.link_span(0, 2).expect("the first anchor's text");
+        assert_eq!(span.uri, "https://example.com/pr/700");
+        assert_eq!(
+            span.cells,
+            (0..7).map(|c| (0, c)).collect::<Vec<_>>(),
+            "exactly 'open it' (cols 0..=6); the later anchor never joins"
+        );
+        // The later anchor still resolves on its own cells - a separate span.
+        let second = pane.link_span(0, 13).expect("the second anchor's text");
+        assert_eq!(second.uri, "https://example.com/pr/700");
+        assert_eq!(second.cells, vec![(0, 12), (0, 13), (0, 14), (0, 15)]);
+    }
+
+    #[test]
+    fn link_span_refuses_a_disallowed_osc8_scheme_with_no_cells() {
+        // The allowlist applies to the span exactly as it does to the click.
+        // Positive control beside it: a safe anchor in the same pane resolves.
+        // Visible text: "bad good".
+        let mut pane = Pane::new(4, 60);
+        pane.feed(b"\x1b]8;;file:///etc/passwd\x07bad\x1b]8;;\x07 \x1b]8;;https://ok.example\x07good\x1b]8;;\x07");
+        assert!(pane.link_span(0, 2).is_none(), "file:// answers nothing");
+        let span = pane.link_span(0, 6).expect("the https anchor resolves");
+        assert_eq!(span.uri, "https://ok.example");
+        assert_eq!(span.cells, (4..8).map(|c| (0, c)).collect::<Vec<_>>());
     }
 
     #[test]
