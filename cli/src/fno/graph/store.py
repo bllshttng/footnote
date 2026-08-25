@@ -752,6 +752,15 @@ def entries_with_archive(entries: list) -> list:
         return entries
 
 
+def read_graph_with_archive(path: Path | None = None) -> list[dict]:
+    """Read the working graph through the canonical seam, then overlay archive."""
+    if path is None:
+        from fno.paths import graph_json
+
+        path = graph_json()
+    return entries_with_archive(read_graph_strict(path))
+
+
 def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     """Failure-surfacing counterpart to :func:`read_graph`.
 
@@ -1069,7 +1078,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             print(f"Warning: graph.md render failed: {e}", file=sys.stderr)
         try:
             from fno.graph.render_html import render_graph_html
-            render_graph_html(entries, html_target)
+            render_graph_html(entries_with_archive(entries), html_target)
         except OSError as e:
             print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
         # Wake the active-backlog drain daemon (node x-c070): a mutation may have

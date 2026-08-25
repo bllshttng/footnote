@@ -7,9 +7,11 @@ status: accepted
 
 ## Overview
 
-Both backlog boards - `graph.md` (Obsidian Kanban) and `fno backlog view` (the self-contained HTML board) - and the work selector consume one ordering function.
+Both backlog boards - `graph.md` (Obsidian Kanban) and `fno backlog view` (the self-contained HTML board) - and the work selector consume one ordering function. The HTML renderer also owns the roadmap and public-backlog card markup. Those projections share its escaping and field policy instead of authoring cards separately.
 The board calls `_intake.make_selection_sort_key(entries, swimlane=True)` and selection calls the same function with `swimlane=False`.
 The HTML board additionally draws per-project sub-lane dividers and a soft WIP-cap count per column.
+
+Explicit rendering commands load through `fno.graph.read_graph` plus `entries_with_archive`, with working rows winning by ID. Public selection is opt-out (`public: false` excludes), and both public projections must clear one title leak gate before either artifact is replaced.
 
 Both boards are auto-rendered on every backlog mutation inside `locked_mutate_graph`, after `_write_json`.
 That placement is load-bearing: **a renderer exception must never abort a backlog mutation**, so every derived read on the render path is defensive.

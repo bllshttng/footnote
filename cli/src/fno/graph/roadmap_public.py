@@ -1,22 +1,14 @@
-"""Public roadmap renderer: a curated, leak-free view of the backlog.
+"""Public projection selection and Markdown compatibility.
 
-Filters to nodes explicitly flagged ``public: true`` (set via
-``fno backlog update --public``) for one project, and emits ONLY
-titles + priority + size grouped into Now / Next / Later / Shipped.
-No node IDs, no plan paths, no cwd - nothing internal leaks. Safe to
-commit to a public OSS repo or host on a marketing site.
-
-Reuses the existing column mapping and the shared board/work ordering function
-so the public roadmap cannot drift from the real board.
+HTML authoring belongs exclusively to :mod:`fno.graph.render_html`.
 """
 from __future__ import annotations
-
-import html as _html
 
 from fno.graph.render import (
     _project_key,
     make_kanban_classifiers,
 )
+from fno.graph.render_html import PUBLIC_BACKLOG_STATUSES, group_for
 
 # Public-facing column set + labels. Active work is folded into Now and the
 # internal Triage column is folded into Later; Done is relabeled "Shipped".
@@ -26,7 +18,9 @@ _PUBLIC_COLUMNS = (("Now", "Now"), ("Next", "Next"), ("Later", "Later"), ("Done"
 def _public_entries(entries: list[dict], project: str) -> list[dict]:
     return [
         e for e in entries
-        if isinstance(e, dict) and e.get("public") is True and _project_key(e) == project
+        if isinstance(e, dict)
+        and e.get("public") is not False
+        and _project_key(e) == project
     ]
 
 
@@ -75,65 +69,55 @@ def render_public_roadmap_md(entries: list[dict], project: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
-def _public_card_html(entry: dict) -> str:
-    """A board-styled card carrying ONLY the public fields.
+def public_projection_entries(entries: list[dict], project: str) -> list[dict]:
+    """The union whose titles must clear the public leak gate."""
+    roadmap = [entry for items in _columns(entries, project).values() for entry in items]
+    backlog = public_backlog_entries(entries, project)
+    by_id: dict[str, dict] = {}
+    for entry in [*roadmap, *backlog]:
+        key = str(entry.get("id") or id(entry))
+        by_id.setdefault(key, entry)
+    return list(by_id.values())
 
-    Renders the priority chip, optional size, and title - matching the
-    documented "title/priority/size" guarantee and the markdown renderer.
-    Deliberately omits the eid copy-button, plan path, blocker IDs,
-    deferred reason, PR URLs, AND the live-board status flags
-    (blocked/queued/idea/needs-plan): those expose internal workflow state
-    that must not leak into a published roadmap.
-    """
-    esc = _html.escape
-    title = esc((entry.get("title") or "").replace("\n", " ").strip() or "(untitled)")
-    priority = esc(str(entry.get("priority") or "p2"))
-    head = [f'<header><span class="prio prio-{priority}">{priority}</span>']
-    size = entry.get("size")
-    if size:
-        head.append(f'<span class="chip" style="background:#888">{esc(str(size))}</span>')
-    head.append("</header>")
-    return (
-        '<article class="card">'
-        + "".join(head)
-        + f'<h3 class="title">{title}</h3></article>'
-    )
+
+def public_backlog_entries(entries: list[dict], project: str) -> list[dict]:
+    return [
+        entry
+        for entry in _public_entries(entries, project)
+        if entry.get("status") in PUBLIC_BACKLOG_STATUSES
+    ]
+
+
+def _backlog_sections(entries: list[dict], project: str) -> list[tuple[str, list[dict]]]:
+    groups: dict[str, list[dict]] = {}
+    status_order = {status: index for index, status in enumerate(PUBLIC_BACKLOG_STATUSES)}
+    for entry in public_backlog_entries(entries, project):
+        groups.setdefault(group_for(entry), []).append(entry)
+    for items in groups.values():
+        items.sort(
+            key=lambda entry: (
+                status_order.get(str(entry.get("status")), 99),
+                str(entry.get("priority") or "p2"),
+                str(entry.get("title") or "").lower(),
+            )
+        )
+    return [(name, groups[name]) for name in sorted(groups)]
 
 
 def render_public_roadmap_html(entries: list[dict], project: str) -> str:
-    """Render the public roadmap with the live board's exact look.
-
-    Reuses ``render_html._CSS`` so cards, columns, and colors match the
-    real ``graph.html`` board, but emits only ``public``-flagged nodes
-    and strips every internal field. Native ``<details>`` columns mean
-    no JS is needed.
-    """
-    from fno.graph.render_html import _CSS
-
+    from fno.graph.render_html import render_public_sections_html
     cols = _columns(entries, project)
-    esc = _html.escape
-    css = _CSS.replace("__NCOLS__", str(len(_PUBLIC_COLUMNS)))
-    total = sum(len(v) for v in cols.values())
+    sections = [(label, cols[column]) for column, label in _PUBLIC_COLUMNS]
+    return render_public_sections_html(
+        sections, title=f"{project} roadmap", projection="roadmap"
+    )
 
-    parts = [
-        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">',
-        '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        '<meta name="color-scheme" content="light dark">',
-        f"<title>{esc(project)} roadmap</title>",
-        f"<style>{css}</style></head><body>",
-        f'<header class="page"><h1>{esc(project)} roadmap</h1>',
-        f'<div class="stats"><span>{total} public items</span></div></header>',
-        '<div class="cols">',
-    ]
-    for col, label in _PUBLIC_COLUMNS:
-        items = cols[col]
-        open_attr = "" if col == "Done" else " open"
-        parts.append(
-            f'<details class="col col-{col.lower()}" data-col="{col}"{open_attr}>'
-            f'<summary><h4>{esc(label)} <span class="count">{len(items)}</span></h4></summary>'
-        )
-        for e in items:
-            parts.append(_public_card_html(e))
-        parts.append("</details>")
-    parts.append("</div></body></html>")
-    return "".join(parts) + "\n"
+
+def render_public_backlog_html(entries: list[dict], project: str) -> str:
+    from fno.graph.render_html import render_public_sections_html
+
+    return render_public_sections_html(
+        _backlog_sections(entries, project),
+        title=f"{project} backlog",
+        projection="backlog",
+    )

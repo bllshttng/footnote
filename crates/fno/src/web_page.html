@@ -64,6 +64,8 @@
   #bar.ended { background: #4a1616; color: #f08a8a; }
   #bar.authfailed { background: #4a1616; color: #f08a8a; }
   #status { font-weight: 600; }
+  #backlog-link { color: #9aa4b6; text-decoration: none; }
+  #backlog-link:hover { color: #fff; text-decoration: underline; }
   /* Pushed to the far edge, and a 30px box so a thumb can hit it. */
   #fitbtn { margin-left: auto; font: inherit; font-size: 12px; cursor: pointer;
     background: #141a26; color: #9aa4b6; border: 1px solid #232b3a;
@@ -97,7 +99,7 @@
 </style>
 </head>
 <body>
-  <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span><button id="fitbtn" type="button" title="fit the grid to the screen width, or show it at full size">fit</button></div>
+  <div id="bar" class="connecting"><span id="status">connecting…</span><span id="sub"></span><a id="backlog-link" href="#">backlog</a><button id="fitbtn" type="button" title="fit the grid to the screen width, or show it at full size">fit</button></div>
   <div id="picker"></div>
   <div id="screen"><pre id="term"><span id="keptnote" class="kept-note"></span><span id="kept" class="kept"></span><span id="live"></span></pre></div>
   <div id="overlay"></div>
@@ -489,6 +491,7 @@
 
   // ---- websocket ----
   const token = new URLSearchParams(location.search).get("t") || "";
+  $("backlog-link").href = `/backlog?t=${encodeURIComponent(token)}`;
   // A pasted per-pane link names its pane (x-b80d): pin the first paint to it
   // instead of whichever frame lands first, then clear the want so the operator
   // can still switch panes by hand afterwards. A want that never paints

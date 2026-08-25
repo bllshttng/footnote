@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as _dt
 import html
 import os
+import re
 import tempfile
 import urllib.parse
 import zlib
@@ -36,6 +37,84 @@ COLUMNS = KANBAN_COLUMNS
 # UNSCOPED_LABEL and _project_key are hoisted into render.py (the shared
 # ordering engine) and re-exported here so existing importers + tests that
 # do `from fno.graph.render_html import UNSCOPED_LABEL` keep working.
+
+PUBLIC_BACKLOG_STATUSES = ("in_progress", "ready", "blocked", "idea")
+GROUPS = (
+    ("agents / spawn / dispatch", r"spawn|dispatch|agent|worker|roster|registry|retask|handoff|successor"),
+    ("review & attestation", r"review|attest|coverage|verdict|finding|sigma|peer"),
+    ("PR / merge / CI", r"\bpr\b|merge|\bci\b|check|smoke|pytest|mypy|lint|guard|workflow"),
+    ("identity / session / claims", r"session|identity|claim|short.?id|uuid|lock|liveness|crown|king"),
+    ("backlog / graph / board", r"backlog|graph|node|kanban|board|rank|triage|carveout|groom"),
+    ("mux / panes / tui", r"\bmux\b|pane|tmux|tui|squad|keymap|menu"),
+    ("config / paths / install", r"config|path|install|deploy|doctor|update|version|schema"),
+    ("mail & messaging", r"mail|envelope|inbox|message|relay|notify|digest"),
+    ("providers / models / routing", r"provider|model|route|harness|codex|claude|gemini|zai|glm|account|quota"),
+    ("plans / target / loop", r"plan|target|loop|wave|blueprint|execute|phase|stop.?hook|compact"),
+    ("worktree / git", r"worktree|git\b|branch|rebase|checkout"),
+    ("observability / cost", r"metric|cost|budget|telemetry|event|observab|watchdog|monitor"),
+    ("docs / skills / prose", r"doc\b|docs|skill|readme|prose|style"),
+)
+
+
+def load_render_entries(entries: list[dict] | None = None) -> list[dict]:
+    """Overlay archive on a guarded display read or the canonical graph seam."""
+    from fno.graph.store import entries_with_archive, read_graph_with_archive
+
+    return read_graph_with_archive() if entries is None else entries_with_archive(entries)
+
+
+def group_for(entry: dict) -> str:
+    haystack = f"{entry.get('title', '')} {entry.get('slug', '')}".lower()
+    for name, pattern in GROUPS:
+        if re.search(pattern, haystack):
+            return name
+    return "uncategorized"
+
+
+def public_title_leaks(entries: list[dict]) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Return every public-title offender and every matched leak class."""
+    patterns = (
+        ("pr-reference", re.compile(r"(?i)(?:\bPR(?:\s*#?\s*|-)\d+\b|#\d+\b)")),
+        ("node-id", re.compile(r"\b[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\b", re.I)),
+        ("home-path", re.compile(r"(?:~/(?:[^\s]+)|/(?:Users|home)/[^\s/]+(?:/[^\s]+)?)")),
+        (
+            "session-id",
+            re.compile(
+                r"\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|ses-[A-Za-z0-9_-]+)\b",
+                re.I,
+            ),
+        ),
+    )
+    offenders: list[tuple[str, str, tuple[str, ...]]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").replace("\n", " ").strip()
+        classes = tuple(name for name, pattern in patterns if pattern.search(title))
+        if classes:
+            offenders.append((str(entry.get("id") or "?"), title, classes))
+    return offenders
+
+
+def atomic_write_documents(documents: dict[Path, str]) -> None:
+    """Stage every document before replacing any destination."""
+    staged: list[tuple[Path, str]] = []
+    try:
+        for path, content in documents.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            staged.append((path, temp))
+        for path, temp in staged:
+            os.replace(temp, path)
+    except Exception:
+        for _path, temp in staged:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+        raise
 
 
 def _load_obsidian_vault() -> str | None:
@@ -307,6 +386,10 @@ def _card_html(
     parts.append("".join(header_parts))
     parts.append(f'<h3 class="title">{title}</h3>')
 
+    details = " ".join(str(entry.get("details") or "").split())
+    if details:
+        parts.append(f'<div class="meta details">{html.escape(details)}</div>')
+
     plan_path = entry.get("plan_path")
     if plan_path:
         plan_str = str(plan_path)
@@ -315,13 +398,24 @@ def _card_html(
         # they'd be linked. Falls back to the raw stored value otherwise.
         display_str = _canonicalize_plan_path(plan_str, vault=vault) or plan_str
         obs_url = _obsidian_url(vault, plan_str) if vault else None
+        parts.append('<div class="meta plan planrow">')
         if obs_url:
             parts.append(
-                f'<div class="meta plan"><a href="{html.escape(obs_url, quote=True)}">'
-                f'{html.escape(display_str)}</a></div>'
+                f'<a href="{html.escape(obs_url, quote=True)}">'
+                f'{html.escape(display_str)}</a>'
             )
         else:
-            parts.append(f'<div class="meta plan">{html.escape(display_str)}</div>')
+            parts.append(f'<span>{html.escape(display_str)}</span>')
+        parts.append(
+            f'<button class="copy-control" type="button" '
+            f'data-copy="{html.escape(plan_str, quote=True)}">Copy path</button>'
+        )
+        if obs_url:
+            parts.append(
+                f'<button class="copy-control" type="button" '
+                f'data-copy="{html.escape(obs_url, quote=True)}">Copy link</button>'
+            )
+        parts.append("</div>")
 
     blockers = [b for b in entry.get("blocked_by", []) if isinstance(b, str)]
     is_done = bool(entry.get("completed_at")) or entry.get("status") == "done"
@@ -334,6 +428,18 @@ def _card_html(
                 open_blockers.append(f"{html.escape(bid)} ({html.escape(btitle)})")
         if open_blockers:
             parts.append(f'<div class="meta blockers">blocked by: {", ".join(open_blockers)}</div>')
+
+    successors = []
+    entry_id = entry.get("id")
+    if isinstance(entry_id, str):
+        for successor in id_to_entry.values():
+            if entry_id not in (successor.get("blocked_by") or []):
+                continue
+            sid = html.escape(str(successor.get("id") or "?"))
+            stitle = html.escape(str(successor.get("title") or "?")[:80])
+            successors.append(f"{sid} ({stitle})")
+    if successors:
+        parts.append(f'<div class="meta successors">unblocks: {", ".join(successors)}</div>')
 
     if entry.get("deferred_at") and not is_done:
         reason = (entry.get("deferred_reason") or "").strip()
@@ -470,6 +576,60 @@ def _board_html(
     return "".join(out)
 
 
+def _projected_card_html(entry: dict, projection: str) -> str:
+    """The sole public-card author for roadmap and backlog projections."""
+    esc = html.escape
+    title = esc(str(entry.get("title") or "(untitled)").replace("\n", " ").strip())
+    priority = esc(str(entry.get("priority") or "p2"))
+    header_parts = [f'<header><span class="prio prio-{priority}">{priority}</span>']
+    size = entry.get("size")
+    if size:
+        header_parts.append(
+            f'<span class="chip" style="background:#888">{esc(str(size))}</span>'
+        )
+    if projection == "backlog":
+        status = esc(str(entry.get("status") or "idea"))
+        header_parts.append(f'<span class="flag">{status}</span>')
+    header_parts.append("</header>")
+    return (
+        '<article class="card">'
+        + "".join(header_parts)
+        + f'<h3 class="title">{title}</h3></article>'
+    )
+
+
+def render_public_sections_html(
+    sections: list[tuple[str, list[dict]]],
+    *,
+    title: str,
+    projection: str,
+) -> str:
+    """Render public sections with shared document and card primitives."""
+    css = _CSS.replace("__NCOLS__", str(max(1, len(sections))))
+    total = sum(len(entries) for _label, entries in sections)
+    parts = [
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        '<meta name="color-scheme" content="light dark">',
+        f"<title>{html.escape(title)}</title>",
+        f"<style>{css}</style></head><body>",
+        f'<header class="page"><h1>{html.escape(title)}</h1>',
+        f'<div class="stats"><span>{total} public items</span></div></header>',
+        '<div class="cols">',
+    ]
+    for label, entries in sections:
+        slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+        parts.append(
+            f'<details class="col col-{slug}" data-col="{html.escape(label, quote=True)}" open>'
+            f'<summary><h4>{html.escape(label)} <span class="count">{len(entries)}</span></h4></summary>'
+        )
+        for entry in entries:
+            parts.append(_projected_card_html(entry, projection))
+        parts.append("</details>")
+    parts.append("</div></body></html>")
+    return "".join(parts) + "\n"
+
+
 def _stats(entries: list[dict]) -> tuple[Counter, Counter]:
     statuses: Counter = Counter()
     projects: Counter = Counter()
@@ -592,6 +752,10 @@ details.col[open] > summary { margin-bottom: 0.5rem }
 .meta.plan { font-family: ui-monospace, monospace; font-size: 11px }
 .meta.plan a { color: #6845c2; text-decoration: none; display: inline-block; padding: 0.2rem 0 }
 .meta.plan a:hover { text-decoration: underline }
+.planrow { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center }
+.copy-control { border: 1px solid #d0d0d4; border-radius: 4px; background: #fff;
+                color: #555; padding: 0.2rem 0.45rem; cursor: pointer; font: inherit }
+.copy-control.copied { background: #d8f5d8; border-color: #7bbc7b; color: #2a5d2a }
 .meta.blockers { color: #b85 } .meta.deferred { color: #888; font-style: italic }
 .meta.pr { padding: 0.2rem 0 }
 .meta.pr a { color: #06c; text-decoration: none; word-break: break-all;
@@ -677,24 +841,23 @@ _JS = """\
   if (master && window.matchMedia('(max-width: 767px)').matches) {
     master.removeAttribute('open');
   }
-  // Tap-to-copy on the .eid badge for cross-device paste workflows.
-  // Delegated handler so we don't bind 200+ listeners.
+  // Delegated copy handler for ids, plan paths, and Obsidian links.
   document.body.addEventListener('click', function (ev) {
-    var btn = ev.target.closest && ev.target.closest('.eid[data-copy]');
+    var btn = ev.target.closest && ev.target.closest('[data-copy]');
     if (!btn) return;
     ev.preventDefault();
-    var id = btn.getAttribute('data-copy');
+    var payload = btn.getAttribute('data-copy');
     var done = function () {
       btn.classList.add('copied');
       setTimeout(function () { btn.classList.remove('copied'); }, 1400);
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(id).then(done).catch(function () {
+      navigator.clipboard.writeText(payload).then(done).catch(function () {
         // Fall through to legacy path on permission denied.
-        legacyCopy(id, done);
+        legacyCopy(payload, done);
       });
     } else {
-      legacyCopy(id, done);
+      legacyCopy(payload, done);
     }
   });
   function legacyCopy(text, onSuccess) {

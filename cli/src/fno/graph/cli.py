@@ -207,7 +207,7 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
-def _display_entries(reader: str) -> list[dict]:
+def _display_entries(reader: str, *, strict: bool = False) -> list[dict]:
     """Entries for read-only display/search surfaces (view, find, roadmap,
     relatedness, provenance walks, the status summary).
 
@@ -222,7 +222,7 @@ def _display_entries(reader: str) -> list[dict]:
     from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
 
     try:
-        return read_entries(reader)
+        return read_entries(reader, strict=strict)
     except ExternalMetadataUnavailable as exc:
         typer.echo(f"fno backlog: {exc}", err=True)
         raise typer.Exit(code=2)
@@ -6357,9 +6357,16 @@ def cmd_view() -> None:
     import subprocess
 
     from fno.graph._constants import GRAPH_HTML
-    from fno.graph.render_html import render_graph_html
+    from fno.graph.render_html import load_render_entries, render_graph_html
 
-    render_graph_html(_display_entries("view"), GRAPH_HTML)
+    try:
+        entries = load_render_entries(_display_entries("view", strict=True))
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    render_graph_html(entries, GRAPH_HTML)
     typer.echo(str(GRAPH_HTML))
 
     if os.environ.get("FNO_NO_OPEN") == "1":
@@ -6423,21 +6430,30 @@ def cmd_roadmap(
     ),
     out: Optional[str] = typer.Option(None, "--out", help="Write markdown to this path instead of stdout."),
     html: Optional[str] = typer.Option(None, "--html", help="Also write a standalone HTML file to this path."),
+    backlog_html: Optional[str] = typer.Option(
+        None,
+        "--backlog-html",
+        help="Also write the grouped public open-work HTML projection.",
+    ),
 ) -> None:
-    """Render a public, leak-free roadmap of `public`-flagged nodes.
+    """Render public roadmap and backlog projections through one leak gate.
 
-    Only nodes flagged via `fno backlog update --public` for the given
-    project appear, and only their title/priority/size - never IDs, plan
-    paths, or cwd. Safe to commit to a public repo or host on a site.
-    Grouped into Now / Next / Later / Shipped (reusing the live board's
-    column + lane logic, so it can't drift).
+    Qualifying nodes are public unless explicitly marked ``public: false``.
+    Titles must clear the shared leak gate before any public output is written.
     """
     from pathlib import Path
 
     from fno.graph._intake import detect_project_from_settings, repo_root
     from fno.graph.roadmap_public import (
+        public_projection_entries,
+        render_public_backlog_html,
         render_public_roadmap_html,
         render_public_roadmap_md,
+    )
+    from fno.graph.render_html import (
+        atomic_write_documents,
+        load_render_entries,
+        public_title_leaks,
     )
 
     resolved_project = project or detect_project_from_settings(repo_root())
@@ -6448,19 +6464,47 @@ def cmd_roadmap(
         )
         raise typer.Exit(code=1)
 
-    entries = _display_entries("roadmap")
+    try:
+        entries = load_render_entries(_display_entries("roadmap", strict=True))
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    offenders = public_title_leaks(public_projection_entries(entries, resolved_project))
+    if offenders:
+        typer.echo("Error: public title leak gate refused output:", err=True)
+        for node_id, title, classes in offenders:
+            typer.echo(
+                f"  {node_id}: {','.join(classes)}: {title}",
+                err=True,
+            )
+        raise typer.Exit(code=1)
+
     md = render_public_roadmap_md(entries, resolved_project)
 
-    if out:
-        Path(os.path.expanduser(out)).write_text(md)
-        typer.echo(os.path.expanduser(out))
+    documents: dict[Path, str] = {}
+    out_path = Path(os.path.expanduser(out)) if out else None
+    if out_path:
+        documents[out_path] = md
+    if html:
+        documents[Path(os.path.expanduser(html))] = render_public_roadmap_html(
+            entries, resolved_project
+        )
+    if backlog_html:
+        documents[Path(os.path.expanduser(backlog_html))] = render_public_backlog_html(
+            entries, resolved_project
+        )
+    atomic_write_documents(documents)
+
+    if out_path:
+        typer.echo(str(out_path))
     else:
         typer.echo(md, nl=False)
-
     if html:
-        html_path = os.path.expanduser(html)
-        Path(html_path).write_text(render_public_roadmap_html(entries, resolved_project))
-        typer.echo(html_path)
+        typer.echo(f"written public roadmap: {os.path.expanduser(html)}")
+    if backlog_html:
+        typer.echo(f"written public backlog: {os.path.expanduser(backlog_html)}")
 
 
 # -- tree --
