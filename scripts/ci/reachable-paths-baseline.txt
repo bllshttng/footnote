@@ -92,5 +92,7 @@ A	truth-live-inject-failed	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/
 A	{fno_mail_trailer}</fno_mail>	py=cli/src/fno/mail/cli.py;rs=crates/fno-agents/src/mail_inject.rs	# protocol
 A	{brevity_marker}{brevity_instruction}{brevity_end_marker}	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# protocol: schemas/spawn-brevity.json plus Python and Rust parity tests pin both runtime carriers
 A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
+A	fleet_percent_measured_cpu	py=cli/src/fno/doctor_footprint.py;rs=crates/fno-agents/src/spawn_gate.rs	# protocol
+A	spawn-gate: footprint cause unavailable; load refusal unchanged	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 R	provider-resolution:cli/src/fno/agents/spawn_gate.py::provider_live_count	# both raw row.provider reads live here; no resolver exists yet
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# the epic surface reads stored status; the overlay routing lands with its fix
