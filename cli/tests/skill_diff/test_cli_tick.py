@@ -56,6 +56,52 @@ def test_architectural_followup_filing_declares_difficulty(monkeypatch):
     assert cli._file_no_diff_node("blueprint", "run-1", "architectural") == "fno-a1b2"
     assert "--difficulty" in seen["argv"]
     assert "medium" in seen["argv"]
+    assert "--json" in seen["argv"]
+
+
+def test_architectural_followup_folds_when_near_duplicate_exists(monkeypatch):
+    """choice_required minted NOTHING: the filer folds via --wave-of and never
+    reports the receipt's candidate id as a filed node (the old regex did, and
+    the terminal event marked the run processed - silent finding loss)."""
+    calls = []
+    choice = json.dumps(
+        {
+            "outcome": "choice_required",
+            "minted_id": None,
+            "candidates": [{"id": "fno-cand01"}],
+            "wave_command": "fno backlog idea t --wave-of fno-cand01",
+        },
+        indent=2,
+    )
+    wave = json.dumps(
+        {"outcome": "wave", "node_id": "fno-cand01", "minted_id": None}, indent=2
+    )
+
+    class Result:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return Result(choice if len(calls) == 1 else wave)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli._file_no_diff_node("blueprint", "run-2", "architectural") == "fno-cand01"
+    assert "--wave-of" in calls[1] and "fno-cand01" in calls[1]
+
+
+def test_architectural_followup_unparseable_receipt_defers(monkeypatch):
+    """A receipt with no parseable JSON object defers (None -> retried next
+    tick) instead of regex-harvesting an id-shaped token out of prose."""
+
+    class Result:
+        stdout = (
+            "fold offered: near duplicate\n"
+            "wave: fno backlog idea t --wave-of fno-cand01"
+        )
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, **kwargs: Result())
+    assert cli._file_no_diff_node("blueprint", "run-3", "architectural") is None
 
 
 def test_paused_exits_zero_with_word(monkeypatch, tmp_path):
