@@ -240,7 +240,10 @@ def test_legacy_id_resolves_under_configured_install(tmp_graph, monkeypatch):
     model = SettingsModel(config={"backlog": {"id_prefix": "xy-", "id_hex_width": 4}})
     monkeypatch.setattr("fno.config.load_settings", lambda: model)
 
-    r = _invoke("backlog", "update", "ab-55ba9adb", "--priority", "p0")
+    r = _invoke(
+        "backlog", "update", "ab-55ba9adb", "--priority", "p0",
+        "--blocks-everything",
+    )
     assert r.exit_code == 0, r.output
     entries = _read_graph(g)
     assert entries[0]["priority"] == "p0"
@@ -1144,6 +1147,20 @@ def test_priority_p0_requires_breaking_acknowledgment(tmp_graph):
     assert "p0 blocks everything else, usually a bug" in r.output
     assert "fno backlog rank" in r.output
     assert _read_graph(tmp_graph) == []
+
+
+def test_new_p0_requires_breaking_acknowledgment(tmp_graph):
+    """Every CLI birth path applies the p0 acknowledgment before mutation."""
+    refused = _invoke("backlog", "new", "Not actually broken", "--priority", "p0")
+    assert refused.exit_code != 0
+    assert "p0 blocks everything else, usually a bug" in refused.output
+    assert _read_graph(tmp_graph) == []
+
+    accepted = _invoke(
+        "backlog", "new", "Broken service", "--priority", "p0", "--blocks-everything"
+    )
+    assert accepted.exit_code == 0, accepted.output
+    assert _read_graph(tmp_graph)[0]["blocks_everything"] is True
 
 
 def test_priority_default_is_p2(tmp_graph):

@@ -73,9 +73,11 @@ def _default_create(
     node in the same mutation, but only when that node actually exists in the
     graph - a stale sentinel id is silently skipped rather than dangled.
     """
-    from fno.graph._constants import mint_node_id
+    from fno.graph._constants import mint_node_id, validate_priority_write
     from fno.graph.cli import _build_backlog_node, _graph_path
     from fno.graph.store import locked_mutate_graph
+
+    validate_priority_write(priority)
 
     new_id_holder: list[Optional[str]] = [None]
 

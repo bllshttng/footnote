@@ -920,8 +920,7 @@ def _build_backlog_node(
     dict has no ``id`` - the caller assigns one inside its locked mutator
     so duplicate-ID checks happen against the live snapshot.
     """
-    from fno.graph._constants import ID_PREFIX, validate_priority_write  # noqa: F401
-    validate_priority_write(priority, blocks_everything=blocks_everything)
+    from fno.graph._constants import ID_PREFIX  # noqa: F401
     # Parent-edge provenance (x-30f6): stamped from the running session's env +
     # manifest, or from an explicit --source-node. Centralized here so
     # every creator verb (add/idea/decompose) self-describes its origin.
@@ -1766,7 +1765,7 @@ def cmd_decompose(
     """
     _refuse_create_on_external_backend()
     import sys as _sys
-    from fno.graph._constants import mint_node_id
+    from fno.graph._constants import mint_node_id, validate_priority_write
     from fno.graph.store import locked_mutate_graph, read_graph, GraphUnreadableError
     from fno.graph._intake import _find_node, _would_create_cycle
     from fno.graph._decompose import (
@@ -1919,6 +1918,13 @@ def cmd_decompose(
         live_epic = _find_node(graph_entries, epic_id)
         if live_epic is None:
             raise DecomposeError(f"epic node {epic_id} not found", exit_code=3)
+        try:
+            validate_priority_write(
+                live_epic.get("priority", "p2"),
+                blocks_everything=bool(live_epic.get("blocks_everything")),
+            )
+        except ValueError as exc:
+            raise DecomposeError(str(exc), exit_code=2) from exc
         epic_resolved_id = live_epic["id"]
         epic_id_box[0] = epic_resolved_id
         base = plan_base(live_epic.get("plan_path"))
@@ -12648,6 +12654,7 @@ def cmd_new(
         help="Project name. Defaults to current git repo's basename; pass --unscoped to skip auto-scope.",
     ),
     priority: str = typer.Option("p2", "--priority", help="p0|p1|p2|p3"),
+    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
     unscoped: bool = typer.Option(
         False, "--unscoped",
         help="Create with project=null and cwd=null. Default auto-scopes to current git repo.",
@@ -12671,7 +12678,7 @@ def cmd_new(
     --project always overrides the auto-detected name when both are present.
     """
     _refuse_create_on_external_backend()
-    from fno.graph._constants import PRIORITY_ORDER, mint_node_id
+    from fno.graph._constants import PRIORITY_ORDER, mint_node_id, validate_priority_write
     from fno.graph.fuzzy import suggest_domain
     from fno.graph.store import read_graph, locked_mutate_graph
 
@@ -12691,6 +12698,11 @@ def cmd_new(
             err=True,
         )
         raise typer.Exit(code=1)
+    try:
+        validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
 
     entries = read_graph(_graph_path())
 
@@ -12749,6 +12761,7 @@ def cmd_new(
             "project": resolved_project,
             "cwd": resolved_cwd,
             "priority": priority,
+            "blocks_everything": blocks_everything,
             "domain": domain,
             "blocked_by": [],
             "session_id": None,
