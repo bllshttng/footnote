@@ -93,17 +93,39 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
     )
 
     assert doctor_footprint._live_root_pids() == (set(), None)
-    assert doctor_footprint._live_shared_serve_root_pids() == {900}
+    assert doctor_footprint._live_shared_serve_root_pids() == ({900}, None)
 
     (tmp_path / "opencode-serve.json").write_text(
         json.dumps({"pid": 901, "pid_start": 123}), encoding="utf-8"
     )
-    assert doctor_footprint._live_shared_serve_root_pids() == set()
+    assert doctor_footprint._live_shared_serve_root_pids() == (set(), None)
 
     (tmp_path / "opencode-serve.json").write_text(
         json.dumps({"pid": 900, "pid_start": None}), encoding="utf-8"
     )
-    assert doctor_footprint._live_shared_serve_root_pids() == set()
+    assert doctor_footprint._live_shared_serve_root_pids() == (
+        set(),
+        "shared serve root liveness unavailable",
+    )
+
+
+def test_live_root_pids_refuses_registry_pid_without_start_token(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=902,
+        pid_start_time=None,
+        harness="opencode",
+        short_id="oc",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    assert doctor_footprint._live_root_pids() == (
+        set(),
+        "worker root liveness unavailable",
+    )
 
 
 def test_live_root_pids_includes_roster_resolved_claude_bg_worker(monkeypatch) -> None:

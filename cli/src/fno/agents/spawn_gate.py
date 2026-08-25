@@ -870,7 +870,9 @@ def _footprint_cause_evidence() -> Optional[str]:
         root_pids, root_error = _live_root_pids(deadline=probe_deadline)
         if root_error is not None:
             return None
-        shared_serve_pids = _live_shared_serve_root_pids()
+        shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids()
+        if shared_serve_error is not None:
+            return None
         reading = parse_footprint(
             ps_output,
             excluded_root_pids={os.getpid()},

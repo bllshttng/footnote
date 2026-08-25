@@ -68,6 +68,8 @@ def _live_root_pids(
         for row in rows:
             if row.status not in LIVE_STATUSES or row.pid is None:
                 continue
+            if row.pid_start_time is None:
+                return roots, "worker root liveness unavailable"
             if _root_pid_is_live(row.pid, row.pid_start_time):
                 roots.add(row.pid)
         pidless_claude_rows = [
@@ -104,7 +106,7 @@ def _live_root_pids(
     return roots, None
 
 
-def _live_shared_serve_root_pids() -> set[int]:
+def _live_shared_serve_root_pids() -> tuple[set[int], str | None]:
     """Return the confirmed PID of the detached shared opencode serve."""
     roots: set[int] = set()
     try:
@@ -112,9 +114,7 @@ def _live_shared_serve_root_pids() -> set[int]:
         from fno.agents.spawn_gate import _pid_alive
 
         record = json.loads(
-            (paths.agents_home_dir() / "opencode-serve.json").read_text(
-                encoding="utf-8"
-            )
+            (paths.agents_home_dir() / "opencode-serve.json").read_text(encoding="utf-8")
         )
         pid = record.get("pid") if isinstance(record, dict) else None
         pid_start = record.get("pid_start") if isinstance(record, dict) else None
@@ -126,9 +126,15 @@ def _live_shared_serve_root_pids() -> set[int]:
             and _pid_alive(pid, pid_start) is True
         ):
             roots.add(pid)
+        elif isinstance(record, dict) and "pid_start" not in record:
+            return roots, "shared serve root liveness unavailable"
+        elif isinstance(record, dict) and record.get("pid_start") is None:
+            return roots, "shared serve root liveness unavailable"
+    except FileNotFoundError:
+        return roots, None
     except Exception:
-        pass
-    return roots
+        return roots, "shared serve root discovery unavailable"
+    return roots, None
 
 
 def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | None]:
@@ -319,7 +325,13 @@ def footprint_command(
     if root_error is not None:
         _emit_failure(f"footprint unavailable: {root_error}", json_output=json_output)
         raise typer.Exit(code=4)
-    shared_serve_pids = _live_shared_serve_root_pids()
+    shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids()
+    if shared_serve_error is not None:
+        _emit_failure(
+            f"footprint unavailable: {shared_serve_error}",
+            json_output=json_output,
+        )
+        raise typer.Exit(code=4)
     reading = parse_footprint(
         ps_output,
         excluded_root_pids={os.getpid()},
