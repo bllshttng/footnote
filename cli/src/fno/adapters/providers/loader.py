@@ -415,23 +415,27 @@ def _parse_providers_block(
 
 
 def _provider_candidates(repo_root: Path | None = None) -> list[Path]:
-    """Candidate config file paths for provider loading (FNO_CONFIG or [local, global]).
+    """Candidate config file paths for provider loading (FNO_CONFIG or layered).
 
-    Anchors on ``resolve_repo_root`` (same resolver the config writer uses) so a
-    command run from a subdirectory still finds the repo-root .fno/config.toml
-    that ``fno config set --local`` wrote.
+    Precedence, later layer wins: the repo-root local (where
+    ``fno config set --local`` writes, found from any subdirectory), then a
+    PWD-anchored local when it differs (the legacy anchor, kept so nested
+    config dirs and PWD-pinned callers keep working), then the global
+    settings path. An explicit ``repo_root`` is authoritative and skips the
+    PWD layer.
     """
     env_cfg = os.environ.get("FNO_CONFIG")
     if env_cfg:
         return [Path(env_cfg)]
-    if repo_root is None:
-        from fno.paths import resolve_repo_root
+    from fno.paths import resolve_repo_root
 
-        repo_root = resolve_repo_root()
-    return [
-        repo_root / ".fno" / "config.toml",
-        _global_settings_path(),
-    ]
+    root = repo_root if repo_root is not None else resolve_repo_root()
+    candidates = [root / ".fno" / "config.toml"]
+    if repo_root is None:
+        pwd = Path(os.environ.get("PWD", os.getcwd()))
+        candidates.append(pwd / ".fno" / "config.toml")
+    candidates.append(_global_settings_path())
+    return list(dict.fromkeys(candidates))
 
 
 def _overlay_records(accum: list[Any], incoming: list[Any]) -> list[Any]:
