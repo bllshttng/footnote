@@ -291,12 +291,16 @@ jobs:
     # the thing they measure can have changed, and they run beside the other
     # jobs rather than serially inside someone else's budget.
     #
-    # Measured 2026-08-25: 38s to build the three test binaries, then a flat
-    # 35.9s per trial. 20 trials is about 13 minutes, so 25 is the same
-    # headroom the test job carries. If this job ever approaches its cap, cut
-    # trials or split the binaries; do not raise it.
+    # The cap is SET from measurement, not raised to absorb slack. Two
+    # components: the trials, measured 2026-08-25 at a flat 35.9s each, so 20
+    # of them are about 12 minutes; and a cold build of the three test
+    # binaries, which the `test` job above shows costs the larger half of its
+    # own 20-minute run. That is roughly 24 minutes on a cold cache, and 35
+    # leaves room for a slow runner without leaving room for the suite to grow
+    # unnoticed. If this job approaches the cap, cut trials or split the
+    # binaries across two jobs; do not raise it.
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v5
