@@ -30,11 +30,14 @@ _PROTOCOL_DATA_STR_CAP = 500
 # already dual-writes for exactly this reason, and because x-3a3f moves a reader
 # to the global log and will need it. Named intent, not dead code.
 #
-# Small on purpose. Membership is earned by a cross-checkout reader, current or
-# named-and-coming. `review_coverage` needs no entry: loopcheck.rs emits it to
-# both logs itself, and a second writer here would double every row the merge
-# gate counts.
-GLOBAL_MIRROR_TYPES = frozenset({"review_attestation"})
+# `review_coverage` earns its entry for the HAND emit alone: loopcheck.rs
+# dual-writes its own rows natively and never passes through this mirror (so
+# nothing doubles), but a `fno doctor event emit -t review_coverage` from a
+# worktree whose journal is not linked to canonical previously reached one log
+# only, and a canonical merge reading the other never saw it. The mirror's
+# identity guard (skip when the project log IS the global log) keeps a
+# same-file emit from doubling.
+GLOBAL_MIRROR_TYPES = frozenset({"review_attestation", "review_coverage"})
 
 
 @cli.callback()

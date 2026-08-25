@@ -651,3 +651,85 @@ def test_attestation_refuses_the_ancestry_override_shape(
     assert result.exit_code == 1
     assert "sess-true" in result.stderr and "sess-forged" in result.stderr
     assert not events.exists()
+
+
+# ---------------------------------------------------------------------------
+# review_coverage rides the global mirror: a hand emit reaches every reader
+# ---------------------------------------------------------------------------
+
+
+def _coverage_payload() -> dict:
+    return {
+        "pr": 4242,
+        "coverage": "covered",
+        "review_state": "reviewed",
+        "reviewed_count": 1,
+        "verdicts": [
+            {
+                "name": "code-review",
+                "producer": "local_attestation",
+                "verdict": "reviewed",
+            }
+        ],
+        "head_sha": "b" * 40,
+    }
+
+
+def test_hand_emitted_review_coverage_reaches_both_logs(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manual coverage emit from a worktree whose journal is not the global
+    one lands in BOTH: the project log it named and the machine-global log a
+    canonical merge reads. The mirror adds a destination; it moves nothing."""
+    global_journal = tmp_path / "global-events.jsonl"
+    import fno.paths
+
+    monkeypatch.setattr(fno.paths, "global_events_json", lambda: global_journal)
+    worktree_log = tmp_path / "worktree" / ".fno" / "events.jsonl"
+    worktree_log.parent.mkdir(parents=True)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit",
+            "--type", "review_coverage",
+            "--data", json.dumps(_coverage_payload()),
+            "--events", str(worktree_log),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+
+    project_rows = [json.loads(l) for l in worktree_log.read_text().splitlines()]
+    assert len(project_rows) == 1
+    assert project_rows[0]["type"] == "review_coverage"
+    global_rows = [json.loads(l) for l in global_journal.read_text().splitlines()]
+    assert len(global_rows) == 1
+    # The mirrored copy carries the repo scoping a cross-project reader needs;
+    # the project copy needs none.
+    assert "repo" in global_rows[0]["data"]
+    assert "repo" not in project_rows[0]["data"]
+
+
+def test_mirror_does_not_double_when_the_project_log_is_the_global_one(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identity guard: when the resolved project log IS the global journal
+    (a --global emit, or a config where both resolve to one file), the row is
+    written once, never twice."""
+    global_journal = tmp_path / "global-events.jsonl"
+    import fno.paths
+
+    monkeypatch.setattr(fno.paths, "global_events_json", lambda: global_journal)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit",
+            "--type", "review_coverage",
+            "--data", json.dumps(_coverage_payload()),
+            "--global",
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    rows = [json.loads(l) for l in global_journal.read_text().splitlines()]
+    assert len(rows) == 1
