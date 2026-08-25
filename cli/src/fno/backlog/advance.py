@@ -1179,12 +1179,14 @@ def _spawn_worker(
     # lane HERE, at the seam that can read live capacity - the spawned argv
     # always carries an explicit --harness, so the spawn-CLI grid can never fire
     # on this path. See _grid_lane_for; harness-keyed placement sites resolve
-    # there instead and arrive already pinned.
-    grid_harness, grid_model = _grid_lane_for(node, model=model, provider=provider)
-    if grid_harness is not None:
-        prov = grid_harness
-        model = grid_model
-        if harness is None:
+    # there instead and arrive already pinned - on a grid decline the pin is the
+    # placement harness. An explicit harness therefore skips this consult: under
+    # it the grid could pick a harness the caller's placement did not key for.
+    if harness is None:
+        grid_harness, grid_model = _grid_lane_for(node, model=model, provider=provider)
+        if grid_harness is not None:
+            prov = grid_harness
+            model = grid_model
             # The resolver must see the grid's harness or it resolves a
             # claude substrate/command for a codex spawn (bg is claude-only).
             harness = grid_harness
@@ -1680,14 +1682,18 @@ def dispatch_lanes(
             # The grid must decide BEFORE the worktree is placed: placement is
             # harness-keyed (claude-native vs external base), so it has to agree
             # with the harness the spawn will actually use. Threading the result
-            # into both decisions keeps placement and spawn one decision.
+            # into both decisions keeps placement and spawn one decision. A
+            # DECLINE pins too: an unpinned spawn re-consults the grid at the
+            # spawn seam, and a capacity change in between could land the worker
+            # on a harness the worktree was not keyed for.
             lane_grid_harness, lane_grid_model = _grid_lane_for(
                 node, model=resolved_model, provider=eff_provider
             )
+            lane_placement_harness = _lane_harness(lane_grid_harness or eff_provider)
             worktree = _ensure_lane_worktree(
                 node_id,
                 canonical_root=canonical,
-                harness=_lane_harness(lane_grid_harness or eff_provider),
+                harness=lane_placement_harness,
             )
             # A never-policy lane runs in the canonical checkout in place; seeding
             # a per-lane config.local.toml there would write into canonical .fno.
@@ -1700,7 +1706,7 @@ def dispatch_lanes(
                 slug,
                 model=lane_grid_model or resolved_model,
                 provider=lane_grid_harness or eff_provider,
-                harness=lane_grid_harness,
+                harness=lane_grid_harness or lane_placement_harness,
                 verb=node.get("dispatch_verb"),
                 brief=_brief,
                 node=node,

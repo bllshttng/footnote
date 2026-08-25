@@ -529,6 +529,57 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     assert captured["harness"] == "codex"
 
 
+def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
+    monkeypatch, tmp_path
+):
+    """A grid DECLINE at placement still pins the spawn. The spawn seam
+    re-consults the grid for an unpinned spawn, so a capacity change between
+    placement and spawn must not land the worker on a different harness than
+    the one the worktree was keyed for: one decision, never two."""
+    captured = {}
+    node = {"id": "x-dec1", "slug": "decline-pin", "difficulty": "high", "priority": "p1"}
+    capacity = {"claude": "exhausted", "codex": "exhausted"}
+
+    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
+    monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
+    monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
+    monkeypatch.setattr(adv, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setattr(
+        "fno.claims.core.acquire_claim", lambda *a, **k: object()
+    )
+
+    def fake_ensure(node_id, *, canonical_root, harness="claude"):
+        captured["placement_harness"] = harness
+        # Capacity changes AFTER the placement decision: codex frees up in the
+        # window between _ensure_lane_worktree and _spawn_worker.
+        capacity["codex"] = "ok"
+        return tmp_path
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "s"}')
+
+    monkeypatch.setattr(adv, "_ensure_lane_worktree", fake_ensure)
+    monkeypatch.setattr(adv, "_seed_lane_local_settings", lambda *a, **k: None)
+    monkeypatch.setattr(adv._autobrief, "resolve_dispatch_brief", lambda n: ("", ""))
+    monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda: dict(capacity))
+
+    receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
+
+    assert receipts and receipts[0]["status"] == "dispatched"
+    # The grid declined at placement (all lanes exhausted), so the worktree was
+    # keyed claude-native...
+    assert captured["placement_harness"] == "claude"
+    # ...and the spawn argv must carry that same harness - not the codex lane
+    # the freed capacity would hand a grid re-consult at the spawn seam.
+    cmd = captured["cmd"]
+    i = cmd.index("--harness")
+    assert cmd[i + 1] == "claude"
+
+
 def test_advance_cli_pin_overrides_node(iso, monkeypatch):
     """Locked Decision 1: a dispatch-time model/provider outranks node annotations."""
     captured = {}
