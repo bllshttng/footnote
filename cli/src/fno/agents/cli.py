@@ -2660,6 +2660,56 @@ def cmd_name(
     typer.echo(name)
 
 
+@agents_app.command("rename", hidden=True)
+def cmd_rename(
+    worker: str = typer.Argument(..., help="Current registry label or immutable session id."),
+    new_name: str = typer.Option(..., "--name", help="New mutable registry label."),
+) -> None:
+    """Rename a registry label without changing the worker's session identity."""
+    from fno.agents.registry import AgentResolutionError, rename_agent
+
+    try:
+        entry = rename_agent(worker, new_name)
+    except (AgentResolutionError, ValueError) as exc:
+        typer.echo(f"agents rename: {exc}", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(f"renamed {worker} -> {entry.name} (session={entry.harness_session_id or 'unknown'})")
+
+
+@agents_app.command("retask", hidden=True)
+def cmd_retask(
+    worker: str = typer.Argument(..., help="Blueprint worker registry label or session id."),
+    node: str = typer.Option(..., "--node", help="Target backlog node."),
+    model: Optional[str] = typer.Option(None, "--model"),
+    effort: Optional[str] = typer.Option(None, "--effort"),
+    json_out: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Retask one finished blueprint pane through the verified transaction."""
+    from fno.agents.retask import run_retask
+    from fno.config import load_settings
+
+    try:
+        receipt = run_retask(
+            worker,
+            node=node,
+            settings=load_settings(),
+            model=model,
+            effort=effort,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        typer.echo(f"agents retask: {exc}", err=True)
+        raise typer.Exit(code=2)
+    if json_out:
+        typer.echo(json.dumps(receipt))
+    else:
+        # Same JSON either way (sorted keys are the only difference): the
+        # receipt is machine-parsed by the king loop, so there is no human
+        # rendering to switch to.
+        typer.echo(json.dumps(receipt, sort_keys=True))
+    if receipt.get("status") != "retasked":
+        raise typer.Exit(code=1)
+
+
 @agents_app.command("spawn-guard", hidden=True)
 def cmd_spawn_guard(
     node_id: str = typer.Argument(

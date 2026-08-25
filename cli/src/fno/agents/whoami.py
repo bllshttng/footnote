@@ -75,7 +75,7 @@ def _nonempty(value: Optional[str]) -> Optional[str]:
 
 def _find_by_name(registry: list[AgentEntry], name: str) -> Optional[AgentEntry]:
     for entry in registry:
-        if entry.name == name:
+        if entry.name == name or name in (getattr(entry, "aliases", None) or []):
             return entry
     return None
 

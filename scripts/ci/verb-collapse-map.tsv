@@ -61,8 +61,10 @@ agents reconcile	T1	agents reconcile	12
 agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
 agents report	T1	agents report	3
+agents rename	T1	agents rename	0
 agents restart	T1	agents restart	6
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
+agents retask	T1	agents retask	2
 agents review-coverage	T1	agents review-coverage	34
 agents rm	KEEP	agents rm	56	deliberate readability slack for a high-traffic distinct operation
 agents roles context	T1	agents roles context	2
@@ -165,6 +167,7 @@ backlog retro run	T1	backlog retro run	16
 backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7	
 backlog roadmap	T1	backlog roadmap	1
 backlog session add	T1	backlog session add	4
+backlog session close	T1	backlog session close	3
 backlog session reap-open	T1	backlog session reap-open	3
 backlog status	T1	backlog status	1
 backlog supersede	T1	backlog supersede	10

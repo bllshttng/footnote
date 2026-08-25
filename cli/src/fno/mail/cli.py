@@ -2144,7 +2144,7 @@ def _name_lane_send(
         # vocabulary is claude-code, and stamping a raw "claude" here made the
         # name lane the one producer disagreeing with dispatch, the relay, and
         # the Rust contract. "cli" survives as the honest no-harness value: the
-        # mapper defaults a MISSING provider to claude-code, a guess we avoid.
+        # mapper renders a MISSING provider as "unknown", never a vendor guess.
         harness=harness_for_provider(sender_harness) if sender_harness else "cli",
         model=sender_model,
         to=recipient,

@@ -23,7 +23,7 @@ _NO_CFG: dict = {}
 
 
 _REQUIRED_INTERACTIVE_FIELDS = {
-    "permission_response", "resume_strategy", "ready_marker",
+    "permission_response", "resume_strategy", "model_switch_strategy", "ready_marker",
     "send_keys_enter_delay_ms", "submit_keys", "stop_strategy", "remove_strategy",
     "session_binding",
 }
@@ -42,6 +42,11 @@ def test_packaged_contract_is_complete_for_every_known_harness():
         caps = capabilities(harness)
         assert _REQUIRED_INTERACTIVE_FIELDS <= caps.keys(), harness
         assert set(caps["permission_response"]) == {"allow_once", "allow_always", "deny"}
+
+    assert capabilities("claude")["model_switch_strategy"]["kind"] == "direct"
+    assert capabilities("codex")["model_switch_strategy"]["kind"] == "menu_walk"
+    for harness in ("gemini", "agy", "opencode"):
+        assert capabilities(harness)["model_switch_strategy"]["kind"] == "unsupported"
 
 
 @pytest.mark.parametrize(
@@ -205,6 +210,24 @@ def test_contract_rejects_ready_marker_invented_in_both_marker_fields():
         'ready_rule_ids = ["idle_prompt"]', 'ready_rule_ids = ["invented"]', 1
     )
     with pytest.raises(DispatchResolveError, match="ready_marker.*invented"):
+        parse_capability_contract(bad)
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    [
+        ('tokens = ["/model {model}", "/effort {effort}"]', 'tokens = ["/model {model}"]'),
+        ('tokens = ["/model", "{model}", "{effort_label}"]', 'tokens = ["/model", "{effort_label}", "{model}"]'),
+        ('tokens = ["/model {model}", "/effort {effort}"]', 'tokens = ["/model {bogus}", "/effort {effort}"]'),
+        ('[harness.gemini.model_switch_strategy]\nkind = "unsupported"\ntokens = []', '[harness.gemini.model_switch_strategy]\nkind = "unsupported"\ntokens = ["/model {model}"]'),
+        ('status_command = "/status"', 'status_command = "status"'),
+    ],
+)
+def test_model_switch_strategy_rejects_malformed_shapes(needle, replacement):
+    root = Path(__file__).resolve().parents[4]
+    text = (root / "cli/src/fno/agents/harness_capabilities.toml").read_text(encoding="utf-8")
+    bad = text.replace(needle, replacement, 1)
+    with pytest.raises(DispatchResolveError, match="model_switch_strategy"):
         parse_capability_contract(bad)
 
 

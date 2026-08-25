@@ -57,6 +57,13 @@ tokens = ["claude"]
 kind = "flag"
 tokens = ["claude", "-p", "--resume", "{session_id}"]
 
+[harness.claude.model_switch_strategy]
+kind = "direct"
+tokens = ["/model {model}", "/effort {effort}"]
+effort_labels = {}
+status_command = "/status"
+status_pattern = 'Model:\s+(?P<model>\S+).*?(?:reasoning|effort)\s+(?P<effort>minimal|low|medium|high|xhigh|max)'
+
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 resume = "native-thread"
@@ -119,6 +126,13 @@ tokens = ["codex", "exec"]
 kind = "subcommand"
 tokens = ["codex", "exec", "resume", "{session_id}"]
 
+[harness.codex.model_switch_strategy]
+kind = "menu_walk"
+tokens = ["/model", "{model}", "{effort_label}"]
+effort_labels = { low = "Low", medium = "Medium (default)", high = "High", xhigh = "Extra high", max = "More reasoning…" }
+status_command = "/status"
+status_pattern = 'Model:\s+(?P<model>\S+).*?reasoning\s+(?P<effort>minimal|low|medium|high|xhigh|max)'
+
 [harness.gemini]
 permission_bypass = ["--yolo"]
 resume = "native-continue"
@@ -170,6 +184,13 @@ tokens = ["gemini", "--session-id", "{session_id}"]
 [harness.gemini.resume_strategy.forms.headless_resume]
 kind = "flag"
 tokens = ["gemini", "--resume", "{session_id}"]
+
+[harness.gemini.model_switch_strategy]
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""
 
 [harness.agy]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -230,6 +251,13 @@ tokens = ["agy"]
 kind = "session_flag"
 tokens = ["agy", "--conversation", "{session_id}"]
 
+[harness.agy.model_switch_strategy]
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""
+
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
@@ -282,3 +310,10 @@ tokens = ["opencode", "run"]
 [harness.opencode.resume_strategy.forms.headless_resume]
 kind = "session_flag"
 tokens = ["opencode", "run", "--session", "{session_id}"]
+
+[harness.opencode.model_switch_strategy]
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""

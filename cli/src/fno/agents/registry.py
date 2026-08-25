@@ -240,6 +240,7 @@ class AgentEntry:
     # store (claude full UUID, codex thread id, gemini session id). load_registry
     # back-fills both from a legacy row's ``provider`` / per-provider keys on read.
     harness: str
+    aliases: list[str] = field(default_factory=list)
     provider: Optional[str] = None
     model: Optional[str] = None
     effort: Optional[str] = None
@@ -474,6 +475,7 @@ class AgentEntry:
 # Exactly eight lowercase hex characters, used only when deciding whether a
 # Claude restamp may safely refresh a derived transport short id.
 _DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
+_REGISTRY_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _ACCEPTED_FORMS = (
     "accepted forms: name, canonical handle, transport short id, or full session id"
@@ -581,6 +583,7 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
 
     categories = (
         ("name", [e for e in entries if getattr(e, "name", None) == token]),
+        ("alias", [e for e in entries if token in (getattr(e, "aliases", None) or [])]),
         ("short_id", [e for e in entries if getattr(e, "short_id", None) == token]),
         ("canonical_handle", [e for e in entries if _session_tier(e, token) == 1]),
         ("legacy_suffix", [e for e in entries if _session_tier(e, token) == 2]),
@@ -1598,7 +1601,7 @@ def restamp_harness_session_id(
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         for entry in entries:
-            if entry.name != name or entry.harness != harness:
+            if (entry.name != name and name not in entry.aliases) or entry.harness != harness:
                 continue
             if entry.harness_session_id == session_id:
                 return entries  # already current: no write, no event
@@ -1671,6 +1674,82 @@ def update_registry(
         _validate_changed_identities(before, new_entries)
         write_registry(new_entries, path=target)
         return new_entries
+
+
+def rename_agent(
+    token: str,
+    new_name: str,
+    *,
+    registry_path: Optional[Path] = None,
+) -> AgentEntry:
+    """Change only a row's mutable display label, preserving all identities."""
+    new_name = new_name.strip()
+    if not _REGISTRY_NAME_RE.fullmatch(new_name):
+        raise ValueError(
+            "registry name must be 1-64 letters, numbers, underscores, or hyphens"
+        )
+    resolved = resolve_agent(token, path=registry_path)
+    source = resolved.entry
+    identity = (source.harness, source.harness_session_id, source.short_id)
+    result: list[AgentEntry] = []
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        target = next(
+            (
+                entry
+                for entry in entries
+                if (entry.harness, entry.harness_session_id, entry.short_id) == identity
+                and entry.name == source.name
+            ),
+            None,
+        )
+        if target is None:
+            raise AgentResolutionError(
+                f"agent {source.name!r} changed before rename; retry with its full session id"
+            )
+        if any(entry is not target and entry.name == new_name for entry in entries):
+            raise ValueError(f"registry label {new_name!r} already names another worker")
+        if source.name != new_name and source.name not in target.aliases:
+            target.aliases.append(source.name)
+        target.name = new_name
+        result.append(target)
+        return entries
+
+    update_registry(_updater, path=registry_path)
+    return result[0]
+
+
+def project_verified_tier(
+    name: str,
+    session_id: str,
+    *,
+    model: str,
+    effort: str,
+    registry_path: Optional[Path] = None,
+) -> AgentEntry:
+    """Persist model and effort read from the same verified pane status."""
+    result: list[AgentEntry] = []
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        target = next(
+            (
+                entry
+                for entry in entries
+                if entry.name == name and entry.harness_session_id == session_id
+            ),
+            None,
+        )
+        if target is None:
+            raise AgentResolutionError(
+                f"registry row {name!r} was not restamped to session {session_id!r}"
+            )
+        target.model = model
+        target.effort = effort
+        result.append(target)
+        return entries
+
+    update_registry(_updater, path=registry_path)
+    return result[0]
 
 
 def _identity_signature(entry: AgentEntry) -> tuple[str, str, str, str]:
