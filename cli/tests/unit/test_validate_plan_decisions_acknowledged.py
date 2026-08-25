@@ -55,13 +55,14 @@ def _seed_decision(state_dir: Path, *, decision_id: str, subject: str, supersede
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     index = state_dir / "decisions.jsonl"
-    data = {"decision_id": decision_id, "decision": "VERDICT", "subject": subject}
+    data = {
+        "decision_id": decision_id,
+        "decision": "VERDICT",
+        "subject": subject,
+        "authority_source": "beastmode",
+    }
     if supersedes:
         data["supersedes"] = supersedes
-    # Predates every fixture plan's created: (the earliest is 2026-08-18) so
-    # a missing-acknowledgment test exercises the grandfather-by-plan-vintage
-    # branch, not the postdates-the-plan branch (that has its own dedicated
-    # test with an explicit later ts).
     row = {"ts": "2026-08-01T00:00:00.000000Z", "type": "operator_decision", "source": "target", "data": data}
     with index.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row) + "\n")
@@ -209,7 +210,12 @@ def test_ruling_recorded_after_the_plan_was_written_only_warns(tmp_path):
         "ts": "2026-08-24T00:00:00.000000Z",  # after the plan's created: below
         "type": "operator_decision",
         "source": "target",
-        "data": {"decision_id": "d-abcd1234", "decision": "VERDICT", "subject": "x-abcd"},
+        "data": {
+            "decision_id": "d-abcd1234",
+            "decision": "VERDICT",
+            "subject": "x-abcd",
+            "authority_source": "operator",
+        },
     }
     with index.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row) + "\n")
