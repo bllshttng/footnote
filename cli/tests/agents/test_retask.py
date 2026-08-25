@@ -36,6 +36,15 @@ def _settings(**target):
     )
 
 
+def _screen_verdict(
+    *,
+    matched: bool = True,
+    rule_id: str | None = "idle_prompt",
+    state: str | None = "idle",
+) -> dict:
+    return {"matched": matched, "rule_id": rule_id, "state": state}
+
+
 def test_same_tier_builds_target_payload_without_executable_switch_commands():
     from fno.agents.retask import detect_retask, resolve_target_coordinate
 
@@ -171,10 +180,11 @@ def test_execute_retask_same_tier_orders_clear_rename_status_then_target():
         return True
 
     receipt = execute_retask(
-        _row(screen_state={"state": "idle", "rule": "idle_prompt"}),
+        _row(screen_state=None),
         target,
         node="x-bdb9",
         read_frame=lambda: next(frames),
+        ready_frame=lambda _frame: _screen_verdict(),
         send=send,
         restamp=lambda: "new-session",
         rename=lambda _name: "target-x-bdb9",
@@ -196,7 +206,7 @@ def test_execute_retask_same_tier_orders_clear_rename_status_then_target():
     assert tiers == [("gpt-5.6-sol", "high")]
 
 
-def test_execute_retask_refuses_when_fresh_frame_fails_readiness():
+def test_execute_retask_refuses_live_busy_even_when_cached_snapshot_is_idle():
     from fno.agents.retask import execute_retask, resolve_target_coordinate
 
     target = resolve_target_coordinate(
@@ -209,7 +219,7 @@ def test_execute_retask_refuses_when_fresh_frame_fails_readiness():
         target,
         node="x-bdb9",
         read_frame=lambda: "painted but busy",
-        ready_frame=lambda _frame: False,
+        ready_frame=lambda _frame: _screen_verdict(rule_id="working", state="working"),
         send=lambda _text, _submit: True,
         restamp=lambda: "new-session",
         rename=lambda _name: "target-x-bdb9",
@@ -218,6 +228,99 @@ def test_execute_retask_refuses_when_fresh_frame_fails_readiness():
     assert receipt["reason"] == "pane_not_idle"
     assert receipt["cleared"] is False
     assert receipt["target_submit_confirmed"] is False
+
+
+def test_execute_retask_names_readable_unmatched_frame_as_unobserved():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="codex", model="gpt-5.6-sol", effort="high"),
+        env={},
+    )
+    sends: list[tuple[str, bool]] = []
+    receipt = execute_retask(
+        _row(screen_state={"state": "idle", "rule": "idle_prompt"}),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: "painted but no known manifest rule",
+        ready_frame=lambda _frame: _screen_verdict(matched=False, rule_id=None, state=None),
+        send=lambda text, submit: sends.append((text, submit)) or True,
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["reason"] == "pane_state_unobserved"
+    assert receipt["cleared"] is False
+    assert sends == []
+
+
+def test_execute_retask_names_missing_live_verdict_as_unobserved():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="codex", model="gpt-5.6-sol", effort="high"),
+        env={},
+    )
+    receipt = execute_retask(
+        _row(screen_state=None),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: "readable pane frame",
+        send=lambda _text, _submit: True,
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["reason"] == "pane_state_unobserved"
+    assert receipt["cleared"] is False
+
+
+def test_execute_retask_fails_closed_on_legacy_boolean_live_verdict():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="codex", model="gpt-5.6-sol", effort="high"),
+        env={},
+    )
+    receipt = execute_retask(
+        _row(screen_state=None),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: "readable pane frame",
+        ready_frame=lambda _frame: False,
+        send=lambda _text, _submit: True,
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["reason"] == "pane_state_unobserved"
+    assert receipt["cleared"] is False
+
+
+def test_execute_retask_keeps_empty_frame_unreadable_distinct():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9",
+        settings=_settings(provider="codex", model="gpt-5.6-sol", effort="high"),
+        env={},
+    )
+    receipt = execute_retask(
+        _row(screen_state=None),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: "",
+        ready_frame=lambda _frame: pytest.fail("empty frame must not be evaluated"),
+        send=lambda _text, _submit: True,
+        restamp=lambda: "new-session",
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["reason"] == "pane_frame_unreadable"
+    assert receipt["cleared"] is False
 
 
 def test_execute_retask_codex_menu_walk_verifies_each_target_before_submit():
@@ -249,6 +352,7 @@ def test_execute_retask_codex_menu_walk_verifies_each_target_before_submit():
         target,
         node="x-bdb9",
         read_frame=lambda: next(frames),
+        ready_frame=lambda _frame: _screen_verdict(),
         send=send,
         restamp=lambda: "new-session",
         rename=lambda _name: "target-x-bdb9",
@@ -292,6 +396,7 @@ def test_execute_retask_claude_uses_direct_strategy_commands():
         target,
         node="x-bdb9",
         read_frame=lambda: next(frames),
+        ready_frame=lambda _frame: _screen_verdict(rule_id="live_prompt_box"),
         send=lambda text, submit: (sends.append((text, submit)) or True),
         restamp=lambda: "new-session",
         rename=lambda _name: "target-x-bdb9",
@@ -319,6 +424,7 @@ def test_execute_retask_uses_verified_tier_when_target_axes_are_omitted():
         target,
         node="x-bdb9",
         read_frame=lambda: next(frames),
+        ready_frame=lambda _frame: _screen_verdict(),
         send=lambda text, submit: (sends.append((text, submit)) or True),
         restamp=lambda: "new-session",
         rename=lambda _name: "target-x-bdb9",
@@ -426,6 +532,7 @@ def test_execute_retask_refuses_missing_positive_menu_row_before_target():
         target,
         node="x-bdb9",
         read_frame=lambda: next(frames),
+        ready_frame=lambda _frame: _screen_verdict(),
         send=lambda _text, _submit: True,
         restamp=lambda: "new-session",
         rename=lambda _name: "target-x-bdb9",
