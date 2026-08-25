@@ -376,7 +376,7 @@ def _payload(
         "fleet_cpu_threshold_cores": CPU_THRESHOLD_CORES,
         "transient_call_count": reading.transient_call_count,
         "process_count": reading.process_count,
-        "process_count_threshold": process_threshold,
+        "direct_process_count_threshold": process_threshold,
         "descendant_process_count": reading.descendant_process_count,
         "direct_process_count": reading.direct_process_count,
         "rss_gb": reading.rss_gb,

@@ -711,5 +711,5 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(monkeypatch) -> None
     assert payload["sustained_cpu_cores"] == 0.0
     assert payload["transient_call_count"] == 1
     assert payload["sustained_cpu_threshold_cores"] == 1.0
-    assert payload["process_count_threshold"] == 2
+    assert payload["direct_process_count_threshold"] == 2
     assert payload["exit_code"] == 0
