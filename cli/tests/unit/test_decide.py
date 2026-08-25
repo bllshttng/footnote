@@ -2851,3 +2851,98 @@ def test_relaying_nothing_records_no_relayed_by(
         )["decisions"][0]
         assert row["decided_by"] == handle
         assert "relayed_by" not in row, subject
+
+
+def _write_repository_catalog(root: Path, body: str) -> Path:
+    path = root / "docs" / "architecture" / "decisions.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_repository_catalog_absence_is_an_explicit_empty_source(root: Path):
+    from fno.decide.catalog import load_catalog
+
+    catalog = load_catalog(root)
+
+    assert catalog.rows == ()
+    assert catalog.canonical_subject("target self-handoff") == "target self-handoff"
+
+
+def test_repository_catalog_normalizes_aliases_and_rows(root: Path):
+    from fno.decide.catalog import load_catalog
+
+    _write_repository_catalog(
+        root,
+        """version: 1
+decisions:
+  - decision_id: d-cab50789
+    subject: target-self-handoff
+    aliases: [handoff, target self-handoff]
+    decision: Context pressure is not a handoff trigger.
+    rationale: A harness compaction preserves ownership while a handoff recreates it.
+""",
+    )
+
+    catalog = load_catalog(root)
+
+    assert catalog.canonical_subject("HANDOFF") == "target-self-handoff"
+    assert catalog.canonical_subject("target self-handoff") == "target-self-handoff"
+    assert [row["decision_id"] for row in catalog.rows] == ["d-cab50789"]
+    assert catalog.rows[0]["_source"] == "repository"
+    assert catalog.rows[0]["subject"] == "target-self-handoff"
+
+
+@pytest.mark.parametrize(
+    "body,marker",
+    [
+        (
+            """version: 1
+decisions:
+  - decision_id: d-aaa00001
+    subject: first
+    aliases: [shared]
+    decision: First law.
+    rationale: First reason.
+  - decision_id: d-bbb00002
+    subject: second
+    aliases: [shared]
+    decision: Second law.
+    rationale: Second reason.
+""",
+            "alias 'shared'",
+        ),
+        (
+            """version: 1
+decisions:
+  - decision_id: d-aaa00001
+    subject: first
+    aliases: []
+    decision: First law.
+    rationale: First reason.
+    supersedes: d-bbb00002
+  - decision_id: d-bbb00002
+    subject: first
+    aliases: []
+    decision: Second law.
+    rationale: Second reason.
+    supersedes: d-aaa00001
+""",
+            "supersession cycle",
+        ),
+    ],
+    ids=["duplicate-alias", "supersession-cycle"],
+)
+def test_repository_catalog_rejects_ambiguous_or_cyclic_law(
+    root: Path, body: str, marker: str
+):
+    from fno.decide.catalog import DecisionCatalogError, load_catalog
+
+    path = _write_repository_catalog(root, body)
+
+    with pytest.raises(DecisionCatalogError) as exc:
+        load_catalog(root)
+
+    assert str(path) in str(exc.value)
+    assert marker in str(exc.value)
+

@@ -1,0 +1,28 @@
+version: 1
+decisions:
+  - decision_id: d-cab50789
+    subject: target-self-handoff
+    aliases:
+      - handoff
+      - target self-handoff
+    decision: "Context pressure is not a handoff trigger. A harness self-determines when to compact, and compaction preserves the claim, worktree, branch, and PR. Keep handoff only for capability escalation to a stronger model after a stuck signal."
+    rationale: "The percentage trigger handed off a live x-d6ee worker while its parent still held the claim and later opened the PR. The successor duplicated the same work."
+  - decision_id: d-19e37308
+    subject: target-provider-selection
+    aliases:
+      - agents.profiles.target.provider
+      - model selection
+    decision: "Remove agents.profiles.target.provider. dispatch.harness is the single harness authority for target dispatch."
+    rationale: "The profile provider and dispatch.harness sent one node to different harnesses depending on which dispatch path ran."
+  - decision_id: d-880626b7
+    subject: process-admission
+    aliases: []
+    decision: "An agent count and a process count are different units and must never be compared. agents.max_live must not feed the process-admission ceiling directly or through a conversion factor."
+    rationale: "The process census measured 111 to 124 attributed processes for six live agents. A 30-agent limit used as a process ceiling refuses around the second agent."
+  - decision_id: d-94b2df45
+    subject: process-admission
+    aliases:
+      - process admission
+    decision: "Name every cap for the unit it counts. Give the process ceiling its own config key, environment variable, and constant so one channel never carries two units."
+    rationale: "This strengthens d-880626b7 from prohibiting a cross-unit comparison to prohibiting shared plumbing that can recreate the comparison."
+    supersedes: d-880626b7
