@@ -103,8 +103,8 @@ impl ReadinessDetector for NoSignalDetector {
 // ---------------------------------------------------------------------------
 
 /// Prompt indicators a modern CLI composer draws on its idle input line. A
-/// match on the last non-blank line's trailing glyph is the positive readiness
-/// signal. Centralized so a smoke capture tunes one place.
+/// match on a line in the bottom status region is the positive readiness signal.
+/// Centralized so a smoke capture tunes one place.
 pub const PROMPT_GLYPHS: &[char] = &['\u{276f}', '\u{203a}', '\u{2595}']; // ❯ › ▌
 
 /// Visible substrings that mean the CLI is mid-work and NOT accepting input,
@@ -135,8 +135,8 @@ const WALL_MARKERS: &[&str] = &[
 const STATUS_REGION_LINES: usize = 3;
 
 /// Shared readiness decision: not-ready under any wall or busy marker *in the
-/// bottom status region*; otherwise ready only when the last non-blank line
-/// ends with a recognized prompt glyph. Never guesses from byte counts (Open
+/// bottom status region*; otherwise ready only when a line in that region starts
+/// or ends with a recognized prompt glyph. Never guesses from byte counts (Open
 /// Question #9).
 fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
     let nonblank: Vec<&str> = screen
@@ -144,9 +144,9 @@ fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
         .lines()
         .filter(|l| !l.trim().is_empty())
         .collect();
-    let Some(last) = nonblank.last() else {
+    if nonblank.is_empty() {
         return false; // blank screen: nothing drawn yet, not ready
-    };
+    }
     // Status region = the last few non-blank lines (where the composer/status
     // bar lives), NOT the whole scrollback.
     let region_start = nonblank.len().saturating_sub(STATUS_REGION_LINES);
@@ -157,8 +157,12 @@ fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
     if BUSY_MARKERS.iter().any(|m| region.contains(m)) {
         return false;
     }
-    let tail = last.trim_end();
-    glyphs.iter().any(|g| tail.ends_with(*g))
+    nonblank[region_start..].iter().any(|line| {
+        let prompt = line.trim();
+        glyphs
+            .iter()
+            .any(|glyph| prompt.starts_with(*glyph) || prompt.ends_with(*glyph))
+    })
 }
 
 /// Provider-agnostic readiness check for the grid attention scanner
@@ -447,6 +451,23 @@ mod tests {
                 "codex 0.130\n\n  build feature X\n\u{276f} ".trim_end()
             )),
             Ok(true)
+        );
+    }
+
+    #[test]
+    fn codex_detector_ready_with_status_below_prompt() {
+        let d = CodexReadinessDetector;
+        assert_eq!(
+            d.is_ready(&view(
+                "model reply\n› Ask Codex to do anything\ngpt-5.6-luna xhigh"
+            )),
+            Ok(true)
+        );
+        assert_eq!(
+            d.is_ready(&view(
+                "› Ask Codex to do anything\nWorking · esc to interrupt\nstatus"
+            )),
+            Ok(false)
         );
     }
 

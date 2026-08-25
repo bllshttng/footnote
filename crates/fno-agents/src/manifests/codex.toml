@@ -49,14 +49,14 @@ gate = { any = [
   { contains = "Thinking" },
 ] }
 
-# One of the last three non-blank lines starts with a prompt glyph (❯ › ▌).
+# One of the last three non-blank lines starts or ends with a prompt glyph (❯ › ▌).
 # Literal (single-quoted) TOML string so the backslash reaches the regex engine.
 [[rule]]
 id = "idle_prompt"
 state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(3)"
-gate = { line_regex = '^\s*[\x{276f}\x{203a}\x{2595}]' }
+gate = { line_regex = '(^\s*[\x{276f}\x{203a}\x{2595}])|([\x{276f}\x{203a}\x{2595}]\s*$)' }
 
 # Answerable command/edit approvals (x-f498). Codex 0.144.1 renders a borderless
 # numbered menu and commits the choice on a bare digit. The menu/footer stay in

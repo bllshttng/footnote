@@ -524,6 +524,8 @@ def run_retask(
         from fno.agents.mux_spawn import _evaluate_manifest_screen, _pane_osc_title
 
         osc_title = _pane_osc_title(session, int(pane), subprocess.run)
+        if entry.harness == "claude" and osc_title is None:
+            return {"matched": False, "error": "pane title unreadable"}
         return _evaluate_manifest_screen(
             entry.harness, frame, subprocess.run, osc_title=osc_title
         )

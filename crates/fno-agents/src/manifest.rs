@@ -1444,6 +1444,10 @@ mod tests {
             ("loading a 5000 byte banner of text", false),         // no glyph -> not ready
             ("Waiting for auth...\n\u{276f}", false),              // gemini false-ready trap
             ("Gemini ready\n\u{203a} ", true),                     // › idle glyph
+            (
+                "model reply\n\u{203a} Ask Codex to do anything\ngpt-5.6-luna xhigh",
+                true,
+            ),
             // "Working"/"Thinking" up in scrollback must NOT block (Codex P1).
             (
                 "I am Working on the Thinking task you asked about.\n\
