@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,6 +60,62 @@ def test_prepare_normalizes_fields_and_lists_existing_law(
     assert proposal["existing_law_ids"] == ["d-existing1"]
     assert len(proposal["content_hash"]) == 64
     assert law.proposal_path(proposal["proposal_id"]).exists()
+
+
+def test_operator_records_law_in_one_call_with_two_positionals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno import decide, paths
+    from fno.cli import app
+
+    index = tmp_path / "state" / "decisions.jsonl"
+    monkeypatch.setattr(paths, "decisions_jsonl", lambda: index)
+    monkeypatch.setattr(decide, "_project", lambda _event: None)
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: type("Identity", (), {"session_id": None, "harness": None})(),
+    )
+    monkeypatch.setattr(decide, "_attended_terminal", lambda: True)
+
+    recorded = CliRunner().invoke(
+        app,
+        ["law", "set", "worktree-policy", "Codex uses path-addressed worktrees"],
+        catch_exceptions=False,
+    )
+
+    assert recorded.exit_code == 0, recorded.output
+    decision_id = recorded.stdout.strip().splitlines()[-1]
+    rows = [json.loads(line) for line in index.read_text().splitlines() if line]
+    assert [row["data"]["decision_id"] for row in rows] == [decision_id]
+    assert rows[0]["data"]["subject"] == "worktree-policy"
+    assert rows[0]["data"]["decision"] == "Codex uses path-addressed worktrees"
+    assert rows[0]["data"]["authority_source"] == "operator"
+
+
+def test_agent_cannot_use_one_call_law_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate(tmp_path, monkeypatch)
+    from fno.cli import app
+
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: type(
+            "Identity",
+            (),
+            {"session_id": "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", "harness": "codex"},
+        )(),
+    )
+
+    refused = CliRunner().invoke(
+        app,
+        ["law", "set", "worktree-policy", "Codex uses path-addressed worktrees"],
+        catch_exceptions=False,
+    )
+
+    assert refused.exit_code == 3, refused.output
+    assert "fno backlog note" in refused.output
 
 
 def test_prepare_rejects_coordination_wording(

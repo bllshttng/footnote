@@ -2093,7 +2093,7 @@ def test_resolved_agent_identity_refuses_decision_write(
         decide_app, ["--subject", "pr-923", "--decision", "merged"]
     )
     assert refused.exit_code == 3, refused.output
-    assert "fno law" in refused.output
+    assert "fno law set <subject> <decision>" in refused.output
     assert "fno backlog note" in refused.output
 
 

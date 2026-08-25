@@ -207,7 +207,8 @@ def _record(
         typer.echo(
             f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
             "cannot record decisions. Decisions are operator-authored through "
-            "`fno law`. Append agent findings without replacing node details with "
+            "`fno law set <subject> <decision>`. Append agent findings without "
+            "replacing node details with "
             "`fno backlog note <node> <text>`.",
             err=True,
         )
@@ -216,8 +217,9 @@ def _record(
         typer.echo(
             "backlog decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
-            "authority is never inherited by silence. Run `fno law` from an "
-            "attended operator terminal. Append agent findings with "
+            "authority is never inherited by silence. Run "
+            "`fno law set <subject> <decision>` from an attended operator terminal. "
+            "Append agent findings with "
             "`fno backlog note <node> <text>`.",
             err=True,
         )
