@@ -80,8 +80,9 @@ runs:
       # other smoke step resolves.
       shell: bash
       run: |
-        cargo build --manifest-path crates/fno/Cargo.toml
+        cargo clean -p fno --manifest-path crates/fno/Cargo.toml
         cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+        cargo build --manifest-path crates/fno/Cargo.toml
         cargo build --manifest-path crates/fno-agents/Cargo.toml
         echo "FNO_RUST_FRONT=$PWD/crates/fno/target/debug/fno" >> "$GITHUB_ENV"
         echo "FNO_AGENTS_FRONT=$PWD/crates/fno-agents/target/debug/fno-agents" >> "$GITHUB_ENV"

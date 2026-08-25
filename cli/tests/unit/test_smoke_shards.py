@@ -155,17 +155,32 @@ def test_smoke_setup_cleans_fno_agents_before_building_cached_artifacts() -> Non
     action = yaml.safe_load(_SMOKE_SETUP.read_text())
     run = "\n".join(step.get("run", "") for step in action["runs"]["steps"])
 
-    clean = run.index("cargo clean -p fno-agents")
-    build = run.index("cargo build --manifest-path crates/fno-agents/Cargo.toml")
+    for package in ("fno", "fno-agents"):
+        clean = run.index(f"cargo clean -p {package}")
+        build = run.index(f"cargo build --manifest-path crates/{package}/Cargo.toml")
 
-    assert clean < build, "smoke setup can execute a stale cached fno-agents binary"
+        assert clean < build, f"smoke setup can execute a stale cached {package} binary"
 
 
 def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
     workflow = yaml.safe_load(_RUST_WORKFLOW.read_text())
     steps = workflow["jobs"]["test"]["steps"]
     names = [step.get("name", "") for step in steps]
-    clean = names.index("Clean cached fno-agents package artifacts")
-    unit = names.index("cargo test --lib --bins (fno-agents)")
+    clean = names.index("Clean cached Rust package artifacts")
+    clean_run = steps[clean].get("run", "")
 
-    assert clean < unit, "rust-ci can test a stale cached fno-agents harness"
+    for package in ("fno", "fno-agents"):
+        assert f"cargo clean -p {package}" in clean_run
+        unit = names.index(f"cargo test --lib --bins ({'fno mux' if package == 'fno' else package})")
+        assert clean < unit, f"rust-ci can test a stale cached {package} harness"
+
+
+def test_rust_stress_cleans_both_packages_before_building() -> None:
+    workflow = yaml.safe_load(_RUST_WORKFLOW.read_text())
+    steps = workflow["jobs"]["stress"]["steps"]
+    run = "\n".join(step.get("run", "") for step in steps)
+    stress = run.index("bash scripts/tests/stress-rust-e2e-concurrency.sh")
+
+    for package in ("fno", "fno-agents"):
+        clean = run.index(f"cargo clean -p {package}")
+        assert clean < stress, f"stress can execute a stale cached {package} harness"

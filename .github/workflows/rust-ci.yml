@@ -147,12 +147,13 @@ jobs:
         # the same parser its frozen goldens were captured with.
         run: python3 -m pip install "pyyaml>=6"
 
-      - name: Clean cached fno-agents package artifacts
-        working-directory: crates/fno-agents
+      - name: Clean cached Rust package artifacts
         # The cache key follows Cargo.lock, so source-only changes can restore
         # package artifacts whose mtimes make a stale test harness look fresh.
-        # Dependencies remain cached; only this package is rebuilt and tested.
-        run: cargo clean -p fno-agents
+        # Dependencies remain cached; only both workspace packages are rebuilt.
+        run: |
+          cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
 
       - name: cargo test --lib --bins (fno-agents)
         working-directory: crates/fno-agents
@@ -341,6 +342,8 @@ jobs:
         env:
           STRESS_TRIALS: "20"
         run: |
+          cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
           # No pipeline and no `pipefail`. Both were here, under the runner's
           # default `bash -e`, which made a failing harness fatal at the pipe:
           # the `rc=` capture and the whole summary block below never ran, so
