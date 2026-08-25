@@ -802,19 +802,29 @@ def _dispatch_one(
             # The guard rides into the spawn as provider_gate, so the provider
             # admission the pane consumes is one the caller actually obtained
             # (AC2-EDGE) - not the ungated launch dispatch used to perform.
-            spawn_kwargs = {
-                "name": _worker_agent_name(node_id, slug),
-                "message": message,
-                "provider": spawn_harness,
-                "cwd": workdir,
-                "session": session,
-                "provenance": provenance,
-                "account_env": account_env,
-                "provider_gate": gate,
-            }
-            if parent_id is not None:
-                spawn_kwargs["tab"] = parent_id
-            result = dispatch_spawn_pane(**spawn_kwargs)
+            if parent_id is None:
+                result = dispatch_spawn_pane(
+                    name=_worker_agent_name(node_id, slug),
+                    message=message,
+                    provider=spawn_harness,
+                    cwd=workdir,
+                    session=session,
+                    provenance=provenance,
+                    account_env=account_env,
+                    provider_gate=gate,
+                )
+            else:
+                result = dispatch_spawn_pane(
+                    name=_worker_agent_name(node_id, slug),
+                    message=message,
+                    provider=spawn_harness,
+                    cwd=workdir,
+                    session=session,
+                    provenance=provenance,
+                    account_env=account_env,
+                    provider_gate=gate,
+                    tab=parent_id,
+                )
         finally:
             # The gate's claims go back once the registry row exists (or the
             # spawn failed): the row carries the count from here, the same
