@@ -455,26 +455,32 @@ def check_accounts() -> list[str]:
 
     # Scan the SAME file set the loads above merge: a different candidate
     # walk reports problems for files that have no effect and misses the
-    # ones that do.
+    # ones that do. _read_parsed falls back to a settings.yaml sibling when
+    # the config.toml is absent, so the scan must too.
     seen_paths: set[Path] = set()
     for candidate in _provider_candidates():
-        if not candidate.is_file() or candidate in seen_paths:
-            continue
-        seen_paths.add(candidate)
-        try:
-            content = candidate.read_text(encoding="utf-8")
-            if candidate.suffix in (".toml", ".tml"):
-                data = tomllib.loads(content)
-            elif candidate.suffix in (".yaml", ".yml"):
-                data = yaml.safe_load(content) or {}
-            else:
-                data = {}
-            if isinstance(data, dict):
-                problems.extend(_check_accounts_in_dict(data, str(candidate)))
-        except Exception:
-            continue
+        paths = [candidate]
+        if not candidate.is_file():
+            sibling = candidate.with_name("settings.yaml")
+            paths = [sibling] if sibling.is_file() else []
+        for path in paths:
+            if not path.is_file() or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            try:
+                content = path.read_text(encoding="utf-8")
+                if path.suffix in (".toml", ".tml"):
+                    data = tomllib.loads(content)
+                elif path.suffix in (".yaml", ".yml"):
+                    data = yaml.safe_load(content) or {}
+                else:
+                    data = {}
+                if isinstance(data, dict):
+                    problems.extend(_check_accounts_in_dict(data, str(path)))
+            except Exception:
+                continue
 
-    return problems
+    return list(dict.fromkeys(problems))
 
 
 def run_doctor() -> int:

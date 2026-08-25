@@ -501,8 +501,11 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
     merged_combos: dict[str, Any] = {}
     merged_records: list[Any] = []
     found_any = False
-    declared_dict = False
-    malformed_combos: tuple[Path, Any] | None = None
+    # The highest-precedence layer that DECLARES combos decides the effective
+    # shape: malformed there is an error (a typo'd local block must not
+    # silently fall through to global combos); malformed in a lower layer is
+    # inert, because a higher dict overrides it wholesale.
+    malformed_top: tuple[Path, Any] | None = None
 
     for path in reversed(candidates):
         data = _read_parsed(path)
@@ -513,25 +516,17 @@ def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
         if combos_raw is not None:
             found_any = True
             if isinstance(combos_raw, dict):
-                declared_dict = True
                 merged_combos.update(combos_raw)
-            elif malformed_combos is None:
-                # Remember, do not raise: a higher layer's dict overrides this
-                # value entirely, and only the EFFECTIVE shape is worth
-                # failing on (single-file contract unchanged).
-                malformed_combos = (path, combos_raw)
+            malformed_top = (path, combos_raw) if not isinstance(combos_raw, dict) else None
         records_raw = block.get("records")
         if isinstance(records_raw, list) and records_raw:
             merged_records = _overlay_records(merged_records, records_raw)
 
-    if malformed_combos is not None and not declared_dict:
-        # No layer declared a usable mapping (even an empty one), so the
-        # malformed value IS the effective shape; keep the single-file
-        # contract of failing on it.
+    if malformed_top is not None:
         raise ProviderConfigError(
             "config.providers.combos must be a mapping of name -> spec, "
-            f"got {type(malformed_combos[1]).__name__} "
-            f"({malformed_combos[0]})"
+            f"got {type(malformed_top[1]).__name__} "
+            f"({malformed_top[0]})"
         )
     if not found_any or not merged_combos:
         return {}
@@ -767,7 +762,9 @@ def load_scope_config(scope: "Literal['project', 'global']") -> ProvidersConfig:
     if scope == "project":
         target = Path(os.environ.get("PWD", os.getcwd())) / ".fno" / "config.toml"
     else:
-        target = Path.home() / ".fno" / "config.toml"
+        # _global_settings_path honors FNO_GLOBAL_SETTINGS_PATH, so the
+        # validation read tracks the same pin the config writer honors.
+        target = _global_settings_path()
     block = _extract_accounts_block(_read_parsed(target)) or {}
     if not block:
         return ProvidersConfig(records=[], active=None)
