@@ -192,14 +192,23 @@ def reserve(
     words: int,
     msg_id: str,
     enforce: bool = True,
+    sender_key: Optional[str] = None,
+    recipient_key: Optional[str] = None,
 ) -> Reservation:
     """Charge ``words`` to the pair, refusing when the projection breaks the cap.
 
     ``enforce=False`` is the style-exception path: the send is permitted, but it
     is still charged. An exception is authority to exceed the cap once, never a
     licence to spend the window unrecorded. A REFUSED attempt is never charged.
+
+    ``sender_key`` / ``recipient_key`` rekey the LEDGER while the display pair
+    and the inbound-reset lookup keep the handles callers address by. Eight-hex
+    handles collide for time-ordered codex ids (two siblings spawned inside one
+    ~65s bucket share a prefix), so a caller that holds the occupant's full
+    session id keys the ledger on it and the siblings charge separately. The
+    inbound reset must keep matching bus envelopes, which carry handles.
     """
-    pair = pair_label(sender, recipient)
+    pair = pair_label(sender_key or sender, recipient_key or recipient)
     path = _ledger_path(pair)
     now = time.time()
     floor = now - WINDOW_SECONDS

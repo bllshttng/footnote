@@ -554,6 +554,8 @@ def _pane_prepare(body: str, *extra: str):
 @pytest.fixture
 def stubbed_pane(monkeypatch):
     """Pin the pane transport's environment probes; see the bridge test file."""
+    from fno.mail.pane_transport import PaneIdentity
+
     monkeypatch.setattr(
         "fno.mail.pane_transport.resolve_pane_harness", lambda s, p: "claude"
     )
@@ -563,6 +565,19 @@ def stubbed_pane(monkeypatch):
     )
     monkeypatch.setattr("fno.mail.pane_transport.prompt_refusal", lambda **_kw: None)
     monkeypatch.setattr("fno.agents.self_stamp.stamp_from", lambda _n: "sender-4444")
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.resolve_pane_identity",
+        lambda s, p: PaneIdentity(
+            name="worker",
+            fno_id="33333333-2222-1111-4444-555566667777",
+            session_id="33333333-2222-1111-4444-555566667777",
+            handle="recip-3333",
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_session_id",
+        lambda: "44444444-5555-6666-7777-888899990000",
+    )
     return None
 
 
@@ -593,7 +608,8 @@ def test_pane_lane_refuses_the_second_send_before_any_envelope(stubbed_pane, cap
 
 def test_pane_lane_ledger_entry_matches_the_envelope_identity(stubbed_pane):
     """AC on LD2: the pair file's entry id and words are the envelope's id and
-    the body's masked count, not a second minted identity."""
+    the body's masked count, not a second minted identity. The ledger pair is
+    keyed on the FULL session ids, while the envelope keeps its handles."""
     import re as _re
 
     result = _pane_prepare(_clean_body(20))
@@ -601,8 +617,76 @@ def test_pane_lane_ledger_entry_matches_the_envelope_identity(stubbed_pane):
     envelope_id = _re.search(r'id="([^"]+)"', result.output)
     assert envelope_id, result.output
 
-    pair = budget.pair_label("sender-4444", "recip-3333")
+    pair = budget.pair_label(
+        "44444444-5555-6666-7777-888899990000",
+        "33333333-2222-1111-4444-555566667777",
+    )
     entries = budget._load(budget._ledger_path(pair), pair)
     assert len(entries) == 1
     assert entries[0]["id"] == envelope_id.group(1)
     assert entries[0]["words"] == 20
+
+
+def test_pane_lane_keys_colliding_codex_siblings_separately(monkeypatch):
+    """The measured P1: two codex panes whose full ids share eight leading hex
+    are DISTINCT recipients. Keyed on handles they fused into one pair and the
+    second 45-word send refused at a projected 90; keyed on full ids both
+    charge their own window."""
+    from fno.agents.registry import AgentEntry
+    from fno.mail.pane_transport import PaneIdentity
+
+    s1 = "01a0370b-1111-4aaa-8bbb-ccccdddd0001"
+    s2 = "01a0370b-2222-4aaa-8bbb-ccccdddd0002"
+
+    def _identity(session, pane_id):
+        full = s1 if int(pane_id) == 3 else s2
+        return PaneIdentity(name=f"w{pane_id}", fno_id=full, session_id=full, handle="01a0370b")
+
+    rows = [
+        AgentEntry(
+            name="w3",
+            cwd="/tmp",
+            log_path="/tmp/w3.log",
+            harness="codex",
+            harness_session_id=s1,
+            mux={"session": "s", "pane_id": 3},
+        ),
+        AgentEntry(
+            name="w4",
+            cwd="/tmp",
+            log_path="/tmp/w4.log",
+            harness="codex",
+            harness_session_id=s2,
+            mux={"session": "s", "pane_id": 4},
+        ),
+    ]
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.resolve_pane_harness", lambda s, p: "codex"
+    )
+    monkeypatch.setattr("fno.mail.pane_transport.prompt_refusal", lambda **_kw: None)
+    monkeypatch.setattr("fno.agents.self_stamp.stamp_from", lambda _n: "king-0000")
+    monkeypatch.setattr("fno.agents.self_stamp.resolve_self_session_id", lambda: "king")
+    monkeypatch.setattr("fno.mail.pane_transport.resolve_pane_identity", _identity)
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+
+    def _prepare_pane(body: str, pane: str):
+        from typer.testing import CliRunner
+
+        from fno.mail.cli import mail_app
+
+        return CliRunner().invoke(
+            mail_app,
+            ["pane-prepare", "--session-id", "s", "--pane", pane],
+            input=body,
+        )
+
+    first = _prepare_pane(_clean_body(45), "3")
+    assert first.exit_code == 0, first.output
+    second = _prepare_pane(_clean_body(45), "4")
+    # Distinct codex siblings sharing head-8 must charge separate windows.
+    assert second.exit_code == 0, second.output
+    # Two distinct ledger files, one entry each: the pair keys are the full ids.
+    for full in (s1, s2):
+        pair = budget.pair_label("king", full)
+        entries = budget._load(budget._ledger_path(pair), pair)
+        assert [e["words"] for e in entries] == [45], pair

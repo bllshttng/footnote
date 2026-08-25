@@ -297,6 +297,8 @@ def _reserve_budget(
     body: str,
     msg_id: str,
     allow_reason: str | None = None,
+    sender_key: str | None = None,
+    recipient_key: str | None = None,
 ):
     """Reserve the authored count after both pair identities are canonical."""
     from fno import style
@@ -311,6 +313,8 @@ def _reserve_budget(
             words=words,
             msg_id=msg_id,
             enforce=not exempt,
+            sender_key=sender_key,
+            recipient_key=recipient_key,
         )
     except budget.BudgetRefused as exc:
         print(
@@ -1316,11 +1320,7 @@ def cmd_pane_prepare(
     identical prose here instead.
     """
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.mail.pane_transport import (
-        PaneSendRefused,
-        prepare,
-        resolve_pane_recipient,
-    )
+    from fno.mail.pane_transport import PaneSendRefused, prepare, resolve_pane_identity
 
     session = merge_deprecated_alias(
         session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
@@ -1373,15 +1373,17 @@ def cmd_pane_prepare(
     # verbs' one escape shape.
     _enforce_body_cap(body)
     _enforce_style(body, allow_reason=style_exception)
-    # ONE identity drives both envelope and ledger: the budget pair must match
-    # the envelope's from/to, and the ledger entry id must match the envelope
-    # id. `stamp_from` returns an explicit value verbatim, so the resolved
-    # handle passes through `wrap` unchanged.
-    from fno.agents.self_stamp import stamp_from
+    # ONE registry snapshot drives everything downstream: the envelope's `to`,
+    # the identity the prompt gate pins, and the budget key. Resolving the
+    # recipient here and letting `prepare` re-resolve it was a TOCTOU - a pane
+    # reassigned between the two reads rendered an envelope addressed to the
+    # old occupant while the gate validated the new one. The captured
+    # name/fno_id now pin the gate, so a reassigned pane refuses instead.
+    from fno.agents.self_stamp import resolve_self_session_id, stamp_from
     from fno.inbox.store import generate_msg_id
 
     sender = stamp_from(None)
-    recipient = resolve_pane_recipient(session, pane)
+    identity = resolve_pane_identity(session, pane)
     msg_id = generate_msg_id()
     try:
         rendered = prepare(
@@ -1390,27 +1392,39 @@ def cmd_pane_prepare(
             pane_id=pane,
             harness=harness,
             sender=sender,
-            to=recipient,
+            to=identity.handle if identity else None,
             msg_id=msg_id,
+            expected_name=identity.name if identity else None,
+            expected_fno_id=identity.fno_id if identity else None,
         )
     except PaneSendRefused as exc:
         print(f"pane send refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=3) from exc
-    if recipient is not None:
-        # Reserved only after attribution, prompt gating, and envelope
-        # construction succeeded, so a refused send charges nothing. A later
-        # Rust transport failure can leave a charge that expires with the
-        # window; that bounded overcharge is the safe direction, because this
-        # renderer cannot learn whether its parent delivered. No canonical
-        # recipient means no pair to charge; the style gate above still
-        # refuses the prose.
-        _reserve_budget(
-            sender=sender,
-            recipient=recipient,
-            body=body,
-            msg_id=msg_id,
-            allow_reason=style_exception,
-        )
+    # Reserved only after attribution, prompt gating, and envelope construction
+    # succeeded, so a refused send charges nothing. A later Rust transport
+    # failure can leave a charge that expires with the window; that bounded
+    # overcharge is the safe direction, because this renderer cannot learn
+    # whether its parent delivered.
+    #
+    # The LEDGER keys on full session ids, both ends: an eight-hex handle
+    # collides for codex siblings spawned inside one ~65s bucket, which fused
+    # two distinct workers into one pair and refused normal parallel fanout.
+    # The inbound-reset lookup keeps the display handles (bus envelopes carry
+    # handles). A row without a session id still gets a budget, keyed on the
+    # pane address rather than skipped.
+    pane_address = f"pane {session}:{pane}"
+    recipient = identity.handle if identity and identity.handle else pane_address
+    _reserve_budget(
+        sender=sender,
+        recipient=recipient,
+        body=body,
+        msg_id=msg_id,
+        allow_reason=style_exception,
+        sender_key=resolve_self_session_id() or sender,
+        recipient_key=(
+            identity.session_id if identity and identity.session_id else recipient
+        ),
+    )
     print(rendered, end="")
 
 

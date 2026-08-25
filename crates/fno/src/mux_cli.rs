@@ -2037,6 +2037,17 @@ const SUBMIT_CONFIRM_INTERVAL_MS: u64 = 250;
 /// pastes its own already-gated wrapped bodies through `--stdin --raw`.
 const RAW_PANE_SEND_CAP_BYTES: usize = 8192;
 
+/// The shared refusal for an over-cap pane paste. Used by both paste entry
+/// points (`pane send --raw` and `block pipe`), so the bound is a property of
+/// the transport, not of one verb.
+fn paste_cap_refusal(len: usize) -> String {
+    format!(
+        "payload is {len} bytes (cap {RAW_PANE_SEND_CAP_BYTES}); it would be \
+         typed into the pane with no envelope and no gates. Put the prose in a \
+         node or doc and send a short enveloped pointer."
+    )
+}
+
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
 const DEFAULT_WAIT_TIMEOUT_S: u64 = 30;
@@ -4285,13 +4296,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             // do it precisely when something is already wrong.
             let bytes = if raw {
                 if bytes.len() > RAW_PANE_SEND_CAP_BYTES {
-                    eprintln!(
-                        "fno mux pane send: raw payload is {} bytes (cap {}); it is typed \
-                         verbatim with no envelope and no gates. Put the prose in a node or \
-                         doc and send a short enveloped pointer.",
-                        bytes.len(),
-                        RAW_PANE_SEND_CAP_BYTES
-                    );
+                    eprintln!("fno mux pane send: {}", paste_cap_refusal(bytes.len()));
                     return EXIT_ERROR;
                 }
                 bytes
@@ -5458,6 +5463,14 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
         eprintln!("fno mux block: --force: skipping the receive-side idle guard");
     }
     let bytes = text.trim_end_matches(['\r', '\n']).as_bytes().to_vec();
+    // Same paste bound as `pane send --raw`: the cap is a property of the
+    // transport, and a completed block is still bytes typed ungated into a
+    // pane's input. A consumer wanting a long block reads it from the source
+    // pane instead of pasting it.
+    if bytes.len() > RAW_PANE_SEND_CAP_BYTES {
+        eprintln!("fno mux block: {}", paste_cap_refusal(bytes.len()));
+        return EXIT_ERROR;
+    }
     let sent = bytes.len();
     match control_roundtrip(
         &sock,
@@ -7044,6 +7057,7 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let FNO_BIN_GUARD_LOCK = FNO_BIN_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         let payload = b"you should fix this; it breaks.".to_vec();
         let send_cmd = |raw: bool| PaneCmd::Send {
             pane: 7,
@@ -7059,6 +7073,7 @@ mod tests {
         let refused = dispatch("t", &sock, false, send_cmd(false));
         let raw_exit = dispatch("t", &sock, false, send_cmd(true));
         std::env::remove_var("FNO_BIN");
+        drop(FNO_BIN_GUARD_LOCK);
         let _ = std::fs::remove_file(&script);
         server.join().unwrap();
         let _ = std::fs::remove_file(&sock);
@@ -7613,6 +7628,13 @@ mod tests {
     /// A unique short-lived scratch socket path. No tempfile dep: pid + test
     /// name is unique enough for a test process (sun_path stays short - the
     /// limit is ~104 bytes on macOS).
+    /// Serializes any test that mutates the process-global FNO_BIN (today the
+    /// one renderer-gate test). Cargo runs this binary's tests on parallel
+    /// threads; a second mutator added without this guard would race the
+    /// first for the same env slot. A concurrent test that only READS
+    /// FNO_BIN during the window remains a theoretical exposure.
+    static FNO_BIN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn control_test_sock(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("fno-control-{}-{name}.sock", std::process::id()))
     }

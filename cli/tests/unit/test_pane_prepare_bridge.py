@@ -109,6 +109,8 @@ def stubbed_transport(monkeypatch):
     Patched at their module attributes, not at the CLI's imports: the command
     imports them at call time, so it picks up these stubs.
     """
+    from fno.mail.pane_transport import PaneIdentity
+
     monkeypatch.setattr(
         "fno.mail.pane_transport.resolve_pane_harness", lambda s, p: "claude"
     )
@@ -118,6 +120,19 @@ def stubbed_transport(monkeypatch):
     )
     monkeypatch.setattr("fno.mail.pane_transport.prompt_refusal", lambda **_kw: None)
     monkeypatch.setattr("fno.agents.self_stamp.stamp_from", lambda _n: "sender-2222")
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.resolve_pane_identity",
+        lambda s, p: PaneIdentity(
+            name="worker",
+            fno_id="11111111-2222-3333-4444-555566667777",
+            session_id="11111111-2222-3333-4444-555566667777",
+            handle="recip-1111",
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_session_id",
+        lambda: "99999999-8888-7777-6666-555544443333",
+    )
     return None
 
 
@@ -148,7 +163,9 @@ def test_style_exception_flag_lets_the_body_through_and_charges_it(
     stubbed_transport, monkeypatch
 ):
     """LD3: the exception permits the overage but still records the count, and
-    the ledger identity matches the envelope (LD2)."""
+    the ledger identity matches the envelope (LD2). The ledger key carries the
+    FULL session ids, both ends: an eight-hex handle collides for codex
+    siblings spawned inside one ~65s clock bucket."""
     captured: dict = {}
     import fno.mail.budget as budget_mod
 
@@ -173,14 +190,40 @@ def test_style_exception_flag_lets_the_body_through_and_charges_it(
     assert captured["msg_id"] == envelope_id.group(1)
     assert captured["sender"] == "sender-2222"
     assert captured["recipient"] == "recip-1111"
+    # The KEY is the full ids; the display pair and the envelope stay handles.
+    assert captured["sender_key"] == "99999999-8888-7777-6666-555544443333"
+    assert captured["recipient_key"] == "11111111-2222-3333-4444-555566667777"
     assert captured["enforce"] is False
     assert captured["words"] > 0
 
 
+def test_identity_capture_pins_the_gate_not_a_re_resolve(stubbed_transport, monkeypatch):
+    """A pane reassigned between resolve and gate must refuse, not render an
+    envelope addressed to the old occupant: the CLI threads its captured
+    name/fno_id into prepare as the gate's expected identity."""
+    seen: dict = {}
+    from fno.mail import pane_transport
+
+    real_prepare = pane_transport.prepare
+
+    def _capture(text, **kwargs):
+        seen.update(kwargs)
+        return real_prepare(text, **kwargs)
+
+    monkeypatch.setattr(pane_transport, "prepare", _capture)
+    result = _prepare("the build is green and the tests pass.")
+    assert result.exit_code == 0, result.output
+    assert seen["expected_name"] == "worker"
+    assert seen["expected_fno_id"] == "11111111-2222-3333-4444-555566667777"
+    assert seen["to"] == "recip-1111"
+
+
 def test_empty_enveloped_body_keeps_the_attribution_refusal(stubbed_transport):
     """x-3081's boundary: the new Rust `--raw --submit` exception must not
-    relax the Python attribution refusal, which stays exit 3 with its marker."""
+    relax the Python attribution refusal, which stays exit 3 with its marker
+    and now names the full working form."""
     result = _prepare("  \n")
     assert result.exit_code == 3, result.output
     assert "empty payload: there is nothing to attribute" in result.output
+    assert "--raw --submit" in result.output
     assert "</fno_mail>" not in result.output
