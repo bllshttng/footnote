@@ -2905,7 +2905,7 @@ event_types:
     consumers: [operator, megawalk]
 
   - name: delegated
-    description: "Emitted by handoff.sh when a target session successfully delegates its remaining pipeline to a fresh successor session. Records the full lineage chain: node, from/to session pair, boundary type, and generation number. The terminal-session resolution rule (sec 2.5) follows these events to judge promise/completion for megawalk pre-advance verification."
+    description: "Emitted after explicit capability escalation proves the destination can answer as the configured model and then proves the child executed target by acquiring the node claim with a child-bound manifest. Legacy boundary-delegation rows remain readable."
     sources: [target]
     data:
       required: [node_id, from_session, to_session, boundary, generation]
@@ -2921,16 +2921,26 @@ event_types:
           description: "Agent name of the spawned successor (e.g. tgt-1a2b3c4d-g2). Used by megawalk lineage resolution."
         child_session:
           type: string
-          description: "Short session ID returned by fno agents spawn for the spawned child. May be empty if the registry row was confirmed by name lookup rather than by short-id."
+          description: "Bound child harness session identity from the spawn receipt. Capability escalation refuses before mutation when this is absent."
         boundary:
           type: string
-          description: "Pipeline boundary at which the handoff occurred (e.g. blueprint-do, wave)."
+          description: "Delegation class. New rows use capability; legacy rows may carry blueprint-do or wave."
         generation:
           type: integer
           description: "Generation number of the successor session (parent is N-1; first handoff produces generation 2)."
         harness:
           type: string
-          description: "Owning harness of the delegating (parent) lineage (codex/claude/gemini). Namespaces the successor name (tgt-<node>-<harness>-gN) and scopes the generation count per (node, harness) so two harnesses cannot collide on one registry name (x-3e70). Absent on pre-change events."
+          description: "Actual destination harness proven by the spawn receipt. Legacy rows may instead describe the parent lineage."
+        model:
+          type: string
+          description: "Configured destination model matched against transcript-observed model truth before parent mutation."
+        account:
+          type: string
+          description: "Optional account or dispatch-account identity proven by the spawn receipt."
+        handoff_kind:
+          type: string
+          enum: [capability_escalation]
+          description: "Positive marker distinguishing explicit capability escalation from legacy boundary delegation."
     consumers: [hooks/megawalk-stop-hook.sh, operator]
 
   - name: handoff_failed
@@ -2947,14 +2957,14 @@ event_types:
           description: "Session ID of the parent session that attempted the handoff."
         reason:
           type: string
-          description: "Machine-readable failure reason (e.g. spawn_failed, verify_timeout, release_failed, restore_failed)."
+          description: "Machine-readable failed stage (capability_probe, target_seed, target_execution, release_failed, restore_failed, or reacquire_failed)."
         detail:
           type: string
           description: "Optional human-readable detail about the failure (truncated to 200 chars)."
     consumers: [operator]
 
   - name: handoff_probe_unreadable
-    description: "Emitted by handoff.sh when the context-probe.sh exits non-zero (transcript missing, unparseable, or jq unavailable) during precondition evaluation for a pressure boundary. The parent treats this as no-pressure and continues in-session. Observability signal so operators can detect silently-broken context monitoring."
+    description: "Legacy event emitted by the retired pressure-triggered handoff path. No current producer; retained so historical journals remain auditable."
     sources: [target]
     data:
       required: [node_id, session_id]

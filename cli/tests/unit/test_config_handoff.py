@@ -1,9 +1,8 @@
-"""Tests for config.target.handoff - the self-handoff succession config block.
+"""Tests for capability escalation and shared context-compact thresholds.
 
 Covers defaults, field validation, out-of-range rejection, and yaml round-trip
 through load_settings. The shell consumer (skills/target/scripts/handoff.sh)
-reads the same keys via get_config "target.handoff.*" with matching defaults
-(50/4/true) -- both sides must stay in sync.
+reads the enabled key while context-nudge owns the percentage thresholds.
 
 Node: ab-534bcc55. Locked Decisions 6-8.
 """
@@ -60,7 +59,7 @@ def _config_get(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, conte
 
 
 def test_handoff_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no config.target.handoff block: enabled=True, used_pct_trigger=50, generation_cap=4.
+    """The block keeps escalation enabled and the compact threshold at 50.
 
     Defaults MUST match the shell defaults in handoff.sh (see the get_config
     calls at ~line 100-102 of that file).
@@ -69,11 +68,11 @@ def test_handoff_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     handoff = settings.target.handoff
     assert handoff.enabled is True
     assert handoff.used_pct_trigger == 50
-    assert handoff.generation_cap == 4
+    assert not hasattr(handoff, "generation_cap")
 
 
-def test_handoff_override_all_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """All three fields can be overridden via settings.yaml."""
+def test_handoff_override_live_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live fields override, while a legacy generation cap is ignored."""
     settings = _load(
         tmp_path,
         monkeypatch,
@@ -85,7 +84,7 @@ def test_handoff_override_all_fields(tmp_path: Path, monkeypatch: pytest.MonkeyP
     handoff = settings.target.handoff
     assert handoff.enabled is False
     assert handoff.used_pct_trigger == 75
-    assert handoff.generation_cap == 2
+    assert not hasattr(handoff, "generation_cap")
 
 
 # ---------------------------------------------------------------------------
@@ -133,30 +132,17 @@ def test_handoff_used_pct_trigger_boundary_values_accepted(
         assert settings.target.handoff.used_pct_trigger == val
 
 
-def test_handoff_generation_cap_rejects_zero(
+def test_handoff_legacy_generation_cap_is_ignored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """generation_cap=0 is rejected (must be >= 1)."""
-    with pytest.raises(Exception, match=r"generation_cap|>=\s*1|at least 1"):
-        _load(
-            tmp_path,
-            monkeypatch,
-            "schema_version: 1\nconfig:\n  target:\n    handoff:\n"
-            "      generation_cap: 0\n",
-        )
-
-
-def test_handoff_generation_cap_accepts_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """generation_cap=1 is the minimum valid value."""
+    """Old config remains loadable but cannot create extra escalation rungs."""
     settings = _load(
         tmp_path,
         monkeypatch,
         "schema_version: 1\nconfig:\n  target:\n    handoff:\n"
-        "      generation_cap: 1\n",
+        "      generation_cap: 99\n",
     )
-    assert settings.target.handoff.generation_cap == 1
+    assert not hasattr(settings.target.handoff, "generation_cap")
 
 
 # ---------------------------------------------------------------------------
@@ -178,12 +164,12 @@ def test_config_get_used_pct_trigger_default(
 def test_config_get_generation_cap_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """config get config.target.handoff.generation_cap returns 4 when unset."""
+    """The retired generation key is no longer a public config surface."""
     result = _config_get(
         tmp_path, monkeypatch, "config.target.handoff.generation_cap", "schema_version: 1\n"
     )
-    assert result.exit_code == 0, result.output
-    assert result.stdout.strip() == "4"
+    assert result.exit_code != 0
+    assert "unknown config key" in result.output
 
 
 def test_config_get_enabled_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

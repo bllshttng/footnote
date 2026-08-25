@@ -193,7 +193,12 @@ PLAN_REL="plan.md"
 # harness env deterministically to this value so the expected names below are
 # stable regardless of the harness the test itself runs under.
 TEST_HARNESS="claude"
+TEST_NODE_SLUG="test-node"
+TEST_CHILD_SESSION="00000000-0000-0000-0000-000000abc123"
 TEST_CAPABILITY_NONCE="capability-nonce-for-tests"
+expected_child_name() {
+  printf 'target-%s-%s-g2' "$NODE_ID" "$TEST_NODE_SLUG"
+}
 capability_digest() {
   local sbx="$1"
   printf '%s\n%s\n%s' "$TEST_CAPABILITY_NONCE" "$sbx" "$sbx" \
@@ -255,12 +260,18 @@ CONFIGEOF
   echo "0"  > "$sbx/scenario/fno-ask-rc"
   # Group 1 (ab-8b3e4fe0): the claude create is `agents spawn`, whose receipt
   # is one compact JSON line carrying .short_id (handoff.sh parses it via jq).
-  printf '{"name":"tgt-x","short_id":"abc123","session_id":"00000000-0000-0000-0000-000000abc123","harness":"claude","status":"live","bound":true,"readiness":"ready","model":"opus"}\n' > "$sbx/scenario/fno-ask-out"
+  printf '{"name":"%s","short_id":"abc123","session_id":"%s","harness":"claude","status":"live","bound":true,"readiness":"ready","model":"opus"}\n' \
+    "$(expected_child_name)" "$TEST_CHILD_SESSION" > "$sbx/scenario/fno-ask-out"
   printf '{"state":"your-move","last_message":"FNO_CAPABILITY_READY:%s","observed_model":{"kind":"observed","model":"opus","samples":1}}\n' \
     "$(capability_digest "$sbx")" > "$sbx/scenario/fno-truth-out"
   # Default list output: shows the agent as live after spawn
   # Will be overridden per scenario
-  printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live"}]}\n' "${NODE_ID:3:8}" "$TEST_HARNESS" > "$sbx/scenario/fno-list-out"
+  printf '{"agents":[{"name":"%s","status":"live","session_id":"%s"}]}\n' \
+    "$(expected_child_name)" "$TEST_CHILD_SESSION" > "$sbx/scenario/fno-list-out"
+  echo "$NODE_ID" > "$sbx/scenario/node-id"
+  echo "$TEST_NODE_SLUG" > "$sbx/scenario/node-slug"
+  echo "$TEST_CHILD_SESSION" > "$sbx/scenario/child-session"
+  touch "$sbx/scenario/activate-child"
 
   # Write the expected holder into scenario dir so the stub can read it
   echo "target-session:${SESSION_ID}" > "$sbx/scenario/expected-holder"
@@ -317,6 +328,34 @@ case "$subcmd1 $subcmd2" in
     rc=0; [ -f "$rc_file" ] && rc=$(cat "$rc_file")
     [ -f "$out_file" ] && cat "$out_file"
     exit "$rc"
+    ;;
+  "agents mail")
+    rc_file="$SCENARIO_DIR/fno-mail-rc"
+    rc=0; [ -f "$rc_file" ] && rc=$(cat "$rc_file")
+    if [ "$rc" -eq 0 ] && [ -f "$SCENARIO_DIR/activate-child" ]; then
+      child=$(cat "$SCENARIO_DIR/child-session")
+      node=$(cat "$SCENARIO_DIR/node-id")
+      echo "target-session:$child" > "$SCENARIO_DIR/expected-holder"
+      manifest_child="$child"
+      [ -f "$SCENARIO_DIR/wrong-child-manifest" ] && manifest_child="wrong-session"
+      printf '%s\n' \
+        '---' \
+        "session_id: child-run" \
+        "harness_session_id: $manifest_child" \
+        '---' \
+        '# Target Session State' \
+        "graph_node_id: $node" \
+        "target_claim_key: \"node:$node\"" \
+        "target_claim_holder: \"target-session:$child\"" \
+        > .fno/target-state.md
+      printf 'delivered (hosted) to %s\n' "$child"
+    fi
+    exit "$rc"
+    ;;
+  "backlog get")
+    printf '{"id":"%s","slug":"%s"}\n' \
+      "$(cat "$SCENARIO_DIR/node-id")" "$(cat "$SCENARIO_DIR/node-slug")"
+    exit 0
     ;;
   "claim acquire")
     # Check for selective override.
@@ -502,12 +541,14 @@ check_log_order "AC1-HP: dispatch acquire BEFORE release" \
   "$CALL_LOG" "claim acquire dispatch:" "claim release node:"
 check_log_order "AC1-HP: spawn BEFORE release" \
   "$CALL_LOG" "agents spawn" "claim release node:"
-check_log_order "AC1-HP: spawn BEFORE list" \
-  "$CALL_LOG" "agents spawn" "agents list"
+check_log_order "AC1-HP: spawn BEFORE target seed" \
+  "$CALL_LOG" "agents spawn" "agents mail"
 
-# Manifest archived, NOT in .fno/
-check_file_absent "AC1-HP: target-state.md absent from .fno/" \
+# Parent manifest archived and replaced by the child-bound target manifest.
+check_file_exists "AC1-HP: child target-state.md present" \
   "$SBX/.fno/target-state.md"
+check_contains "AC1-HP: child manifest names child harness session" \
+  "harness_session_id: $TEST_CHILD_SESSION" "$(cat "$SBX/.fno/target-state.md")"
 check_file_exists "AC1-HP: archived manifest exists" \
   "$SBX/${PLAN_REL}.artifacts/target-state-${SESSION_ID}.md"
 
@@ -543,6 +584,17 @@ check_log_order "capability: spawn BEFORE truth" \
   "$CALL_LOG" "agents spawn" "agents truth"
 check_log_order "capability: truth BEFORE parent claim release" \
   "$CALL_LOG" "agents truth" "claim release node:"
+check_log_order "target execution: parent release BEFORE raw seed" \
+  "$CALL_LOG" "claim release node:" "agents mail"
+check_contains "destination name uses full node id and slug" \
+  "child=$(expected_child_name)" "$output"
+delegated_row=$(grep '"type":"delegated"' "$SBX/.fno/events.jsonl" 2>/dev/null | tail -1)
+check_contains "delegated event records destination harness" \
+  '"harness":"claude"' "$delegated_row"
+check_contains "delegated event records destination model" \
+  '"model":"opus"' "$delegated_row"
+check_contains "delegated event records capability kind" \
+  '"handoff_kind":"capability_escalation"' "$delegated_row"
 
 # ---------------------------------------------------------------------------
 # Scenario 1b: exact nonce response is required before parent mutation
@@ -584,8 +636,8 @@ check_log_absent "observed model mismatch keeps parent claim" "$CALL_LOG" "claim
 echo ""
 echo "=== Scenario 1d: prompt-ready proof missing ==="
 SBX="$(make_sandbox s1d)"
-printf '{"name":"tgt-x","short_id":"abc123","session_id":"00000000-0000-0000-0000-000000abc123","harness":"claude","status":"live","bound":true,"readiness":"live","model":"opus"}\n' \
-  > "$SBX/scenario/fno-ask-out"
+printf '{"name":"%s","short_id":"abc123","session_id":"%s","harness":"claude","status":"live","bound":true,"readiness":"live","model":"opus"}\n' \
+  "$(expected_child_name)" "$TEST_CHILD_SESSION" > "$SBX/scenario/fno-ask-out"
 
 CALL_LOG="$SBX/call-log"
 run_handoff "$SBX" "capability"
@@ -594,6 +646,54 @@ check_exit "readiness without positive marker parks" "10" "$handoff_rc"
 check_contains "readiness mismatch names capability stage" "capability_probe" "$output"
 check_file_exists "readiness mismatch keeps parent manifest" "$SBX/.fno/target-state.md"
 check_log_absent "readiness mismatch keeps parent claim" "$CALL_LOG" "claim release node:"
+
+# ---------------------------------------------------------------------------
+# Scenario 1e: delivered seed without child claim/manifest proof rolls back
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 1e: target seed is delivered but not executed ==="
+SBX="$(make_sandbox s1e)"
+rm -f "$SBX/scenario/activate-child"
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_VERIFY_TIMEOUT=1 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "capability"
+
+check_exit "missing child execution proof parks" "10" "$handoff_rc"
+check_contains "missing child execution proof names target stage" "target_execution" "$output"
+check_file_exists "missing child execution proof restores parent manifest" "$SBX/.fno/target-state.md"
+check_contains "missing child execution proof stops child" "agents stop" "$(cat "$CALL_LOG")"
+
+# ---------------------------------------------------------------------------
+# Scenario 1f: child claim with a foreign manifest session fails closed
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 1f: child manifest identity mismatch ==="
+SBX="$(make_sandbox s1f)"
+touch "$SBX/scenario/wrong-child-manifest"
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_VERIFY_TIMEOUT=1 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "capability"
+
+check_exit "child manifest mismatch parks" "10" "$handoff_rc"
+check_contains "child manifest mismatch names target stage" "target_execution" "$output"
+check_file_exists "child manifest mismatch restores parent manifest" "$SBX/.fno/target-state.md"
+check_contains "child manifest mismatch stops child" "agents stop" "$(cat "$CALL_LOG")"
+
+# ---------------------------------------------------------------------------
+# Scenario 1g: raw target delivery failure restores parent ownership
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 1g: target seed delivery fails ==="
+SBX="$(make_sandbox s1g)"
+echo "1" > "$SBX/scenario/fno-mail-rc"
+
+CALL_LOG="$SBX/call-log"
+run_handoff "$SBX" "capability"
+
+check_exit "target seed delivery failure parks" "10" "$handoff_rc"
+check_contains "target seed delivery failure names target stage" "target_seed" "$output"
+check_file_exists "target seed delivery failure restores parent manifest" "$SBX/.fno/target-state.md"
+check_contains "target seed delivery failure stops child" "agents stop" "$(cat "$CALL_LOG")"
 
 # ---------------------------------------------------------------------------
 # Scenario 2: AC1-ERR - spawn failure (ask returns rc=1)
@@ -637,14 +737,13 @@ check_eq "AC1-ERR: no delegated event" "0" "$delegated_events"
 echo ""
 echo "=== Scenario 3: verify timeout ==="
 SBX="$(make_sandbox s3)"
-# ask succeeds but list returns empty agents
-echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
+rm -f "$SBX/scenario/activate-child"
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=3 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
 
 check_exit "verify-timeout: exits 10 (parked)" "10" "$handoff_rc"
-check_contains "verify-timeout: output contains 'parked'" "parked" "$output"
+check_contains "verify-timeout: output names target execution" "target_execution" "$output"
 
 # Manifest must be restored
 check_file_exists "verify-timeout: target-state.md restored" \
@@ -657,8 +756,8 @@ set -e
 check_eq "verify-timeout: handoff_failed event emitted" "1" "$failed_events"
 
 # Re-acquire claim happens in log
-check_log_order "verify-timeout: re-acquire claim AFTER spawn" \
-  "$CALL_LOG" "agents spawn" "claim acquire node:"
+check_log_order "verify-timeout: re-acquire claim AFTER target seed" \
+  "$CALL_LOG" "agents mail" "claim acquire node:"
 
 # ---------------------------------------------------------------------------
 # Scenario 4: AC1-EDGE - manifest without plan_path
@@ -713,18 +812,13 @@ check_contains "double-handoff: output contains 'parked'" "parked" "$output"
 check_log_absent "double-handoff: no claim acquire" "$CALL_LOG" "claim acquire"
 
 # ---------------------------------------------------------------------------
-# Scenario 6: generation cap
-# Pre-seed events.jsonl with 3 delegated events for the node (cap=4 -> child_gen=2+3=5 > 4)
+# Scenario 6: the explicit one-rung escalation is already spent
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Scenario 6: generation cap ==="
+echo "=== Scenario 6: capability escalation already spent ==="
 SBX="$(make_sandbox s6)"
-# 3 delegated events -> child_gen = 2 + 3 = 5; cap=4; refuse
-for i in 1 2 3; do
-  printf '{"ts":"2026-06-05T12:0%d:00Z","type":"delegated","source":"target","data":{"node_id":"%s","from_session":"sess%d","to_session":"tgt-%s-%s-g%d","boundary":"blueprint-do","generation":%d,"harness":"%s"}}\n' \
-    "$i" "$NODE_ID" "$i" "${NODE_ID:3:8}" "$TEST_HARNESS" "$((i+1))" "$((i+1))" "$TEST_HARNESS" \
-    >> "$SBX/.fno/events.jsonl"
-done
+printf '{"ts":"2026-06-05T12:00:00Z","type":"delegated","source":"target","data":{"node_id":"%s","from_session":"sess","to_session":"child","boundary":"capability","generation":2,"harness":"claude","model":"opus","handoff_kind":"capability_escalation"}}\n' \
+  "$NODE_ID" >> "$SBX/.fno/events.jsonl"
 
 CALL_LOG="$SBX/call-log"
 run_handoff "$SBX" "blueprint-do"
@@ -735,17 +829,8 @@ check_contains "gen-cap: reason mentions chain-exhausted" "chain-exhausted" "$ou
 check_log_absent "gen-cap: no claim acquire" "$CALL_LOG" "claim acquire"
 
 # ---------------------------------------------------------------------------
-# Probe-path scenarios (7, 7b, 8).
-#
-# These drive the REAL skills/target/scripts/context-probe.sh, not a stub:
-# handoff.sh resolves the probe as "$_SCRIPT_DIR/context-probe.sh" first and
-# only falls back to PATH, so the sibling script always wins and a stub-bin
-# copy is never consulted. Behavior is steered through the probe's own input
-# instead - the transcript file - which means HOME must point at the sandbox,
-# since the probe path is "$HOME/.claude/projects/<encoded-cwd>/<id>.jsonl".
-#
-# Reaching the probe at all needs claude_session_id in the manifest; without it
-# TRANSCRIPT_ID is empty and the whole block is skipped (scenario 8b).
+# Context fixtures remain only as controls proving explicit escalation ignores
+# context percentage and transcript availability.
 # ---------------------------------------------------------------------------
 
 # arm_probe <sandbox> [transcript-json-line]
@@ -806,8 +891,7 @@ check_contains "transcript-independent escalation delegates" "delegated" "$outpu
 echo ""
 echo "=== Scenario 9: restore_failed ==="
 SBX="$(make_sandbox s9)"
-# ask succeeds; list returns empty so verify times out
-echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
+rm -f "$SBX/scenario/activate-child"
 
 # We need to intercept AFTER the archive mv succeeds but BEFORE restore.
 # Strategy: put a shadow `mv` in stub-bin that fails only when the
@@ -859,8 +943,7 @@ check_contains "restore-failed: reason is restore_failed" "restore_failed" "$res
 echo ""
 echo "=== Scenario 11: C1 claim-lost on verify-fail ==="
 SBX="$(make_sandbox s11)"
-# ask succeeds but list returns empty so verify times out
-echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
+rm -f "$SBX/scenario/activate-child"
 # node: acquire fails during re-acquire
 echo "1" > "$SBX/scenario/fno-claim-acquire-node-rc"
 
