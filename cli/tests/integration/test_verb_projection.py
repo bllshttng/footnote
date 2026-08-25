@@ -79,7 +79,7 @@ def test_update_priority_repaints_doc(tmp_graph, tmp_path):
     plan = _plan(tmp_path)
     _seed(tmp_graph, [_node(plan)])
 
-    res = runner.invoke(app, ["backlog", "update", "x-1234", "--priority", "p0"])
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--priority", "p0", "--blocks-everything"])
     assert res.exit_code == 0, res.output
 
     _, fields, _ = read_plan_file(plan)
@@ -110,7 +110,7 @@ def test_update_without_type_leaves_doc_type_alone(tmp_graph, tmp_path):
     plan = _plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
     _seed(tmp_graph, [_node(plan)])  # graph still says feature
 
-    res = runner.invoke(app, ["backlog", "update", "x-1234", "--priority", "p0"])
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--priority", "p0", "--blocks-everything"])
     assert res.exit_code == 0, res.output
 
     _, fields, _ = read_plan_file(plan)
@@ -180,7 +180,7 @@ def test_missing_plan_file_never_fails_verb(tmp_graph, tmp_path):
     gone = tmp_path / "deleted.md"  # never created
     _seed(tmp_graph, [_node(gone)])
 
-    res = runner.invoke(app, ["backlog", "update", "x-1234", "--priority", "p0"])
+    res = runner.invoke(app, ["backlog", "update", "x-1234", "--priority", "p0", "--blocks-everything"])
     assert res.exit_code == 0, res.output
     # graph still committed the change
     entries = json.loads(tmp_graph.read_text())["entries"]

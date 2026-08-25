@@ -97,7 +97,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "bases", "batch", "board", "capture", "carveout", "collisions", "cost",
         "decide", "decide-reindex", "decide-retract", "decisions", "decompose", "defer",
         "dispatch-lanes", "done", "epic", "find", "get", "groom",
-        "idea", "intake", "lane-fill", "lanes", "maintain", "new",
+        "idea", "intake", "lane-fill", "lanes", "maintain", "migrate-priorities", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
         "rank", "ready", "reconcile", "reconcile-findings", "rehash", "retro",
         "relatedness", "remove", "reopen", "reprioritize", "roadmap",

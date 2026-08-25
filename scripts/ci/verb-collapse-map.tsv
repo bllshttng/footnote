@@ -145,6 +145,7 @@ backlog intake	T1	backlog intake	32
 backlog lane-fill	T1	backlog lane-fill	2
 backlog lanes	T1	backlog lanes	2
 backlog maintain	T1	backlog maintain	7
+backlog migrate-priorities	T1	backlog migrate-priorities	0
 backlog new	T1	backlog new	38
 backlog next	KEEP	backlog next	54	deliberate readability slack for a high-traffic distinct operation
 backlog note	T1	backlog note	1
