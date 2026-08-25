@@ -28,7 +28,9 @@ use tokio::sync::mpsc;
 
 use crate::agents_view::lineage_layout;
 use crate::chrome;
-use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
+use crate::keys::{
+    key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner, PANE_IDS_REPEAT_WINDOW,
+};
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentNoPaneReason,
@@ -246,6 +248,9 @@ const FOOTER_MENU: &str = "☰ menu";
 const HINT_DELAY: Duration = Duration::from_millis(400);
 /// Transient notice lifetime on the tab bar.
 const NOTICE_TTL: Duration = Duration::from_secs(3);
+
+/// The client-side pane identity overlay follows the scanner's repeat grace.
+pub const PANE_ID_REVEAL_WINDOW: Duration = PANE_IDS_REPEAT_WINDOW;
 
 /// (x-c5ee) The top-K live-row cap per rendered squad: attention rows
 /// (Blocked/Working/DoneUnseen) always render, then idle rows fill up to this
@@ -810,6 +815,9 @@ struct View {
     /// scroll+select, Enter runs the selected row, Esc/unbound closes. `None`
     /// when closed. Replaces the old static top-left key-table poster.
     keys_modal: Option<KeysModal>,
+    /// Held prefix+backslash reveal deadline. Client-local and transient: it
+    /// follows whichever pane layout the server last supplied.
+    pane_ids_until: Option<Instant>,
     /// Pending escape bytes in modal mode (arrow/pgup folding), same split-arrow
     /// safety as [`View::sel_esc`].
     keys_modal_esc: Vec<u8>,
@@ -2263,6 +2271,7 @@ impl View {
             status_on: true,
             hint: false,
             keys_modal: None,
+            pane_ids_until: None,
             keys_modal_esc: Vec::new(),
             row_menu: None,
             row_menu_esc: Vec::new(),
@@ -2958,6 +2967,10 @@ impl View {
         self.clear_peek();
         self.keys_modal = Some(build_keys_modal());
         self.keys_modal_esc.clear();
+    }
+
+    fn reveal_pane_ids_at(&mut self, now: Instant) {
+        self.pane_ids_until = Some(now + PANE_ID_REVEAL_WINDOW);
     }
 
     /// The flat popup target under a screen cell while the modal is open, for
@@ -5781,6 +5794,10 @@ impl View {
     /// Pure - all the drawing machinery (row diff, styles, wide-spacer
     /// handling) stays in [`Compositor`].
     fn compose(&self) -> Frame {
+        self.compose_at(Instant::now())
+    }
+
+    fn compose_at(&self, now: Instant) -> Frame {
         let (rows, cols) = self.term;
         let (rows, cols) = (rows.max(1) as usize, cols.max(1) as usize);
         let mut cells = vec![Cell::default(); rows * cols];
@@ -5990,6 +6007,30 @@ impl View {
                         let cell = &mut cells[r * cols + c];
                         cell.fg = self.theme.accent;
                         cell.flags |= cell_flags::INVERSE;
+                    }
+                }
+            }
+        }
+
+        if self.pane_ids_until.is_some_and(|until| now < until) {
+            for (pid, rect) in &self.layout.panes {
+                let label = format!("pane {pid}");
+                let width = label.chars().count();
+                let rect_cols = rect.cols as usize;
+                let row = origin_r + rect.y as usize;
+                if rect_cols < width || row >= rows {
+                    continue;
+                }
+                let start = origin_c + rect.x as usize + rect_cols - width;
+                for (offset, ch) in label.chars().enumerate() {
+                    let col = start + offset;
+                    if col < cols {
+                        cells[row * cols + col] = Cell {
+                            c: ch,
+                            fg: Color::Default,
+                            bg: Color::Default,
+                            flags: cell_flags::INVERSE | cell_flags::DIM,
+                        };
                     }
                 }
             }
@@ -10370,6 +10411,7 @@ async fn attach_and_run(
         }
         // Redraw-after-event; expiry of the transient notice needs a timer.
         let notice_deadline = view.notice.as_ref().map(|(_, d)| *d);
+        let pane_ids_deadline = view.pane_ids_until;
         // The which-key hint fires once per pending chord (US4, AC4-HP).
         let hint_deadline = if view.hint {
             None
@@ -10832,6 +10874,17 @@ async fn attach_and_run(
                 }
             }, if notice_deadline.is_some() => {
                 view.notice = None;
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
+                match pane_ids_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if pane_ids_deadline.is_some() => {
+                view.pane_ids_until = None;
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -11752,6 +11805,9 @@ async fn dispatch_event(
                 .await
                 .map_err(|e| format!("input send failed: {e}"))?;
         }
+        Event::ShowPaneIds => {
+            view.reveal_pane_ids_at(Instant::now());
+        }
         Event::Cmd(cmd) => {
             view.note_command_sent(&cmd);
             write_msg(sock_w, &ClientMsg::Command(cmd))
@@ -12364,11 +12420,9 @@ async fn keys_modal_keys(
                 // chord uses (Locked 3), then the modal closes.
                 ev => {
                     view.keys_modal = None;
-                    // Parity with a typed chord: a modal-executed resize arms
-                    // the repeat window too (the scanner never saw this byte).
-                    if matches!(ev, Event::Cmd(Command::ResizeDir(_))) {
-                        scanner.arm_repeat(Instant::now());
-                    }
+                    // Parity with a typed chord: modal execution arms any
+                    // repeatable event too (the scanner never saw this byte).
+                    scanner.arm_if_repeat(&ev, Instant::now());
                     if matches!(
                         dispatch_event(view, ev, sock_w).await?,
                         DispatchFlow::Detach
@@ -12399,11 +12453,9 @@ async fn keys_modal_execute_selected(
     match ev {
         Some(ev) => {
             view.keys_modal = None;
-            // Parity with a typed chord: a modal-executed resize (Enter or click)
-            // arms the repeat window too (the scanner never saw a key here).
-            if matches!(ev, Event::Cmd(Command::ResizeDir(_))) {
-                scanner.arm_repeat(Instant::now());
-            }
+            // Parity with a typed chord: modal execution arms any repeatable
+            // event too (the scanner never saw a key here).
+            scanner.arm_if_repeat(&ev, Instant::now());
             dispatch_event(view, ev, sock_w).await
         }
         None => {
@@ -16448,6 +16500,86 @@ mod tests {
         assert_eq!(frame.cursor_row, 1);
         assert_eq!(frame.cursor_col, 28 + 36);
         assert!(frame.cursor_visible);
+    }
+
+    #[test]
+    fn pane_id_reveal_labels_each_id_inside_its_own_rectangle() {
+        let mut view = two_pane_view();
+        let t0 = Instant::now();
+        view.reveal_pane_ids_at(t0);
+        let frame = view.compose_at(t0 + Duration::from_millis(100));
+        let cols = view.term.1 as usize;
+        for (pid, rect) in &view.layout.panes {
+            let label = format!("pane {pid}");
+            let start = view.panel_w() as usize + rect.x as usize + rect.cols as usize
+                - label.chars().count();
+            let row = TAB_BAR_ROWS as usize + rect.y as usize;
+            let painted: String = label
+                .chars()
+                .enumerate()
+                .map(|(offset, _)| frame.cells[row * cols + start + offset].c)
+                .collect();
+            assert_eq!(painted, label, "pane {pid} label is not in its rectangle");
+            assert!(start >= view.panel_w() as usize + rect.x as usize);
+            assert!(
+                start + label.chars().count()
+                    <= view.panel_w() as usize + rect.x as usize + rect.cols as usize
+            );
+        }
+    }
+
+    #[test]
+    fn pane_id_reveal_tracks_tab_layout_and_expires_without_layout_space() {
+        let mut view = two_pane_view();
+        let t0 = Instant::now();
+        view.reveal_pane_ids_at(t0);
+        let first = frame_text(&view.compose_at(t0 + Duration::from_millis(100)));
+        assert!(first.contains("pane 10"));
+        assert!(first.contains("pane 11"));
+
+        view.layout.panes = vec![
+            (
+                91,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 35,
+                },
+            ),
+            (
+                94,
+                Rect {
+                    x: 36,
+                    y: 0,
+                    rows: 29,
+                    cols: 36,
+                },
+            ),
+        ];
+        view.frames.insert(91, text_frame(29, 35, 'c'));
+        view.frames.insert(94, text_frame(29, 36, 'd'));
+        let second = frame_text(&view.compose_at(t0 + Duration::from_millis(200)));
+        assert!(second.contains("pane 91"));
+        assert!(second.contains("pane 94"));
+        assert!(!second.contains("pane 10"));
+        assert!(!second.contains("pane 11"));
+
+        let expired =
+            frame_text(&view.compose_at(t0 + PANE_ID_REVEAL_WINDOW + Duration::from_millis(1)));
+        assert!(!expired.contains("pane 91"));
+        assert!(!expired.contains("pane 94"));
+    }
+
+    #[test]
+    fn pane_id_reveal_skips_only_a_rectangle_too_narrow_for_its_label() {
+        let mut view = two_pane_view();
+        view.layout.panes[1].1.cols = 5;
+        let t0 = Instant::now();
+        view.reveal_pane_ids_at(t0);
+        let frame = frame_text(&view.compose_at(t0 + Duration::from_millis(1)));
+        assert!(frame.contains("pane 10"));
+        assert!(!frame.contains("pane 11"));
     }
 
     #[test]
@@ -30581,6 +30713,28 @@ mod tests {
             ClientMsg::Command(Command::ResizeDir(crate::tree::Dir::Left)) => {}
             other => panic!("bare H after a modal resize should repeat-resize, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn keys_modal_executed_pane_ids_arms_the_repeat_window() {
+        let mut v = two_pane_view();
+        v.term = (40, 80);
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        v.open_keys_modal();
+        keys_modal_keys(&mut v, &mut scanner, b"\\", &mut buf)
+            .await
+            .unwrap();
+        buf.clear();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\\", &mut buf)
+            .await
+            .unwrap();
+        assert!(
+            buf.is_empty(),
+            "a modal pane-id repeat must stay client-local"
+        );
+        assert!(v.pane_ids_until.is_some(), "the repeat reopened the reveal");
     }
 
     #[tokio::test]
