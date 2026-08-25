@@ -225,8 +225,8 @@ def test_live_root_pids_refuses_terminal_root_cleared_after_snapshot(monkeypatch
         status="exited",
         pid=None,
         pid_start_time=None,
-        last_reconciled_at=datetime.now(timezone.utc).isoformat(),
-        exited_at=None,
+        last_reconciled_at=None,
+        exited_at=datetime.now(timezone.utc).isoformat(),
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
 
@@ -236,6 +236,54 @@ def test_live_root_pids_refuses_terminal_root_cleared_after_snapshot(monkeypatch
         set(),
         "worker root liveness unavailable",
     )
+
+
+def test_live_root_pids_ignores_checked_stamp_on_terminal_root(monkeypatch) -> None:
+    # A CHECKED bump (last_reconciled_at) inside the measurement window is not
+    # an exit transition; reading it as one refused healthy measurements.
+    from datetime import datetime, timezone
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="exited",
+        pid=None,
+        pid_start_time=None,
+        last_reconciled_at=datetime.now(timezone.utc).isoformat(),
+        exited_at=None,
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    assert doctor_footprint._live_root_pids(
+        snapshot_pids={902}, snapshot_at=0.0
+    ) == (set(), None)
+
+
+def test_terminal_row_stamp_compares_at_stored_precision() -> None:
+    # Transition stamps are whole-second; a stamp of T covers [T, T+1), so a
+    # snapshot inside that second cannot rule out a later transition.
+    from datetime import datetime, timedelta, timezone
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    def row(exited_at):
+        return SimpleNamespace(exited_at=exited_at)
+
+    base = datetime(2026, 8, 25, 10, 0, 59, tzinfo=timezone.utc)
+    changed = doctor_footprint._terminal_row_changed_after_snapshot
+    assert changed(row(base.strftime("%Y-%m-%dT%H:%M:%SZ")), base.timestamp() + 0.5)
+    assert not changed(
+        row((base - timedelta(seconds=2)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        base.timestamp() + 0.5,
+    )
+    assert changed(
+        row(base.replace(microsecond=700000).isoformat()), base.timestamp() + 0.5
+    )
+    assert not changed(
+        row(base.replace(microsecond=300000).isoformat()), base.timestamp() + 0.5
+    )
+    assert not changed(row(None), base.timestamp() + 0.5)
+    assert changed(row("not-a-stamp"), base.timestamp() + 0.5)
 
 
 def test_live_root_pids_refuses_incomplete_registry(monkeypatch) -> None:

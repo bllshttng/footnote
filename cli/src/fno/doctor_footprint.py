@@ -153,19 +153,22 @@ def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
 
 
 def _terminal_row_changed_after_snapshot(row: Any, snapshot_at: float) -> bool:
-    for field in ("last_reconciled_at", "exited_at"):
-        stamp = getattr(row, field, None)
-        if stamp is None:
-            continue
-        try:
-            timestamp = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
-            if timestamp.timestamp() >= snapshot_at:
-                return True
-        except (TypeError, ValueError, OverflowError):
-            return True
-    return False
+    # Only the exit-transition stamp (`exited_at`) counts: `last_reconciled_at`
+    # rotates on every probe, so a CHECKED bump inside the measurement window
+    # is indistinguishable from a transition there. Transition stamps are
+    # whole-second (`now_rfc3339_like`), so a stamp of T covers [T, T+1); a
+    # snapshot inside that window cannot rule out a later transition.
+    stamp = getattr(row, "exited_at", None)
+    if stamp is None:
+        return False
+    try:
+        timestamp = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return True
+    resolution = 0.0 if timestamp.microsecond else 1.0
+    return timestamp.timestamp() + resolution > snapshot_at
 
 
 def _live_root_pids(
