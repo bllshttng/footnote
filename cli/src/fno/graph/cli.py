@@ -1414,10 +1414,11 @@ def _fold_candidates(
     if incoming_files:
         known = {item["id"] for item in out}
         for node in entries:
-            node_id = node.get("id")
+            surface_node_id: object = node.get("id")
             plan_path = node.get("plan_path")
             if (
-                node_id in known
+                not isinstance(surface_node_id, str)
+                or surface_node_id in known
                 or node.get("status") != "in_progress"
                 or not isinstance(plan_path, str)
             ):
@@ -1429,15 +1430,16 @@ def _fold_candidates(
             if overlap:
                 out.append(
                     {
-                        "id": node_id,
+                        "id": surface_node_id,
                         "title": node.get("title"),
                         "status": node.get("status"),
-                        "holder": _live_worker(node_id),
+                        "holder": _live_worker(surface_node_id),
                         "score": 1.0,
                         "evidence": "file overlap: " + ", ".join(sorted(overlap)),
                     }
                 )
-                known.add(node_id)
+                if isinstance(surface_node_id, str):
+                    known.add(surface_node_id)
     return out, source
 
 @cli.command(
@@ -1635,7 +1637,7 @@ def cmd_idea(
                     f"fold offered: {top['title']} status={top['status']} "
                     f"holder={top['holder'] or 'none'} evidence={top['evidence']}"
                 )
-                receipt = {
+                choice_receipt: dict[str, object] = {
                     "outcome": "choice_required",
                     "marker": marker,
                     "candidate_source": candidate_source,
@@ -1646,11 +1648,11 @@ def cmd_idea(
                 }
                 if not sys.stdin.isatty():
                     if json_output or (ctx.obj and ctx.obj.get("json")):
-                        typer.echo(json.dumps(receipt, indent=2))
+                        typer.echo(json.dumps(choice_receipt, indent=2))
                     else:
                         typer.echo(marker)
                         typer.echo(f"wave: {wave_command}")
-                        typer.echo(f"separate: {receipt['separate_command']}")
+                        typer.echo(f"separate: {choice_receipt['separate_command']}")
                     return
                 if typer.confirm(f"{marker}. Fold into {top['id']}?", default=False):
                     from fno.graph.store import append_wave_note
@@ -1668,11 +1670,11 @@ def cmd_idea(
                     if not found:
                         typer.echo(f"Error: {error or 'wave append refused'}", err=True)
                         raise typer.Exit(code=2)
-                    receipt["outcome"] = "wave"
-                    receipt["node_id"] = top["id"]
-                    receipt["note"] = note
+                    choice_receipt["outcome"] = "wave"
+                    choice_receipt["node_id"] = top["id"]
+                    choice_receipt["note"] = note
                     if json_output or (ctx.obj and ctx.obj.get("json")):
-                        typer.echo(json.dumps(receipt, indent=2))
+                        typer.echo(json.dumps(choice_receipt, indent=2))
                     else:
                         typer.echo(f"folded as wave into {top['id']}; minted_id: null")
                     return
@@ -11614,8 +11616,8 @@ def cmd_migrate_priorities(
     if apply and rollback:
         typer.echo("Error: --apply and --rollback are mutually exclusive", err=True)
         raise typer.Exit(code=2)
+    holder: list[dict] = []
     if rollback:
-        holder: list[dict] = []
 
         def rollback_mutator(entries: list[dict]) -> list[dict]:
             holder.append(rollback_legacy_p0(entries))
@@ -11626,8 +11628,6 @@ def cmd_migrate_priorities(
     elif not apply:
         receipt = migrate_legacy_p0(read_graph(_graph_path()), apply=False)
     else:
-        holder: list[dict] = []
-
         def mutator(entries: list[dict]) -> list[dict]:
             holder.append(migrate_legacy_p0(entries, apply=True))
             return entries

@@ -462,8 +462,11 @@ def filing_candidates(entries: list[Entry], sidecar: Path) -> tuple[list[Entry],
                 snapshot_ids.add(key)
             if isinstance(edges, list):
                 snapshot_ids.update(
-                    edge.get("id") for edge in edges
-                    if isinstance(edge, dict) and isinstance(edge.get("id"), str)
+                    [
+                        edge["id"]
+                        for edge in edges
+                        if isinstance(edge, dict) and isinstance(edge.get("id"), str)
+                    ]
                 )
         groom_mtime = sidecar.stat().st_mtime
     except (OSError, ValueError, TypeError):

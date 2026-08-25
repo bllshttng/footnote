@@ -691,10 +691,9 @@ def _grid_node(toks: Sequence[str], env: Optional[Mapping[str, str]] = None) -> 
     if not node_id:
         return None
     try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
+        from fno.tracker.metadata import read_entries
 
-        entries = read_graph(graph_json())
+        entries = read_entries("spawn_defaults._grid_node")
         for entry in entries:
             if isinstance(entry, Mapping) and entry.get("id") == node_id:
                 return dict(entry)
@@ -1209,10 +1208,11 @@ def inject_spawn_defaults(
 
             node = _grid_node(out[1:], env)
             if node:
+                capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
                 grid_candidate, _grid_chain = route_resolve.resolve_grid(
                     node.get("difficulty") or node.get("model_tier"),
                     node.get("priority"),
-                    route_resolve.runtime_capacity(),
+                    capacity,
                 )
         except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
             grid_candidate = None
