@@ -3631,3 +3631,33 @@ def test_true_accretion_is_still_discarded_after_the_collision_repair(
     assert "discarding damaged session alias 'etl-dup-dup'" in capsys.readouterr().err
     assert out == {sid: "etl-dup"}
     assert json.loads(name_map.read_text(encoding="utf-8")) == {sid: "etl-dup"}
+
+
+def test_long_basename_collision_stays_inside_the_stored_cap(tmp_path, capsys):
+    """A long project basename must not resurrect the discard loop.
+
+    With a 50-char basename the full-id candidates exceed the 80-char stored
+    cap, and the exhausted fallback used to emit a 98-char alias - which the
+    persistence pass re-discarded with a user-visible warning on EVERY pass,
+    the same heal loop this repair closes, on a warning instead of growth.
+    The collision name is cut from the head instead, keeping the unique
+    session id tail, so nothing the writer emits is ever thrown back.
+    """
+    from fno.agents.discover import _MAX_STORED_ALIAS_LEN, _resolve_aliases
+
+    live = [
+        {"session_id": "01a034f3-8bad-7e83-92e9-78cfd45881f7",
+         "short_id": "01a034f3", "project": "p" * 50},
+        {"session_id": "01a034f3-a58f-71e3-8ed4-bfe77f816168",
+         "short_id": "01a034f3", "project": "p" * 50},
+    ]
+    name_map = tmp_path / ".fno" / "session-names.json"
+
+    first = _resolve_aliases(live, name_map)
+    second = _resolve_aliases(live, name_map)
+
+    assert second == first
+    assert len(set(first.values())) == len(first), "an alias resolves to two holders"
+    for value in first.values():
+        assert len(value) <= _MAX_STORED_ALIAS_LEN, value
+    assert capsys.readouterr().err == ""

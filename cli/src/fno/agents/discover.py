@@ -1591,6 +1591,23 @@ def _default_alias(project: Optional[str], short_id: str) -> str:
     return f"project-{alias}" if LEGACY_HANDLE_RE.fullmatch(alias) else alias
 
 
+def _fit_sid_alias(candidate: str, sid: str) -> str:
+    """Shorten ``candidate`` from the head so it fits the stored-alias cap.
+
+    Both disambiguation rungs end in ``-{sid}``, so cutting the leading stem
+    keeps the session id tail - the uniqueness carrier - intact. Two chars of
+    headroom are reserved for a numbered rung; a stem long enough to need the
+    cut would otherwise regrow past the cap the moment the exhausted fallback
+    appended ``-2``, and the persistence pass would re-discard the result on
+    every pass after that.
+    """
+    if len(candidate) + 2 <= _MAX_STORED_ALIAS_LEN:
+        return candidate
+    keep = max(_MAX_STORED_ALIAS_LEN - 2 - len(sid) - 1, 0)
+    head = candidate[: len(candidate) - len(sid) - 1]
+    return f"{head[:keep]}-{sid}"
+
+
 def _load_name_map(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1717,8 +1734,8 @@ def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
             project = row.get("project")
             candidates: list[str] = []
             if name == _default_alias(project, row.get("short_id") or ""):
-                candidates.append(_default_alias(project, sid))
-            candidates.append(f"{name}-{sid}")
+                candidates.append(_fit_sid_alias(_default_alias(project, sid), sid))
+            candidates.append(_fit_sid_alias(f"{name}-{sid}", sid))
             name = next(
                 (c for c in candidates if c not in seen and not _is_accreted(c)),
                 None,
@@ -1729,10 +1746,10 @@ def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
                 # through would emit a DUPLICATE - the one thing this function
                 # promises not to do, and a duplicate alias resolves to two
                 # holders on the send path. Counting terminates because `seen`
-                # is finite. The accreted check is deliberately NOT applied
-                # here: numbering an over-long hand stem must stay terminating,
-                # and the persistence pass discards such a result once and
-                # converges on the default instead of looping.
+                # is finite; the candidates are pre-fit to the stored cap, so
+                # the numbered rung stays inside it too. The accreted check is
+                # deliberately NOT applied here: an adjacency hit among fixed
+                # candidate tokens would not resolve as n increments.
                 n = 2
                 while f"{candidates[-1]}-{n}" in seen:
                     n += 1
