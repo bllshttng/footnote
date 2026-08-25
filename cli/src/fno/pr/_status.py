@@ -589,6 +589,55 @@ def _ready_blockers(
     return blockers
 
 
+def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
+    """Explain a counted local review whose author differs from this session."""
+    from fno.pr._reviews import _COUNTED_FRESHNESS
+
+    verdicts = coverage.get("verdicts")
+    if not isinstance(verdicts, list):
+        return None
+    counted_other_session = any(
+        isinstance(verdict, dict)
+        and verdict.get("producer") == "local_attestation"
+        and verdict.get("name") == "code-review"
+        and verdict.get("verdict") == "reviewed"
+        and verdict.get("freshness") in _COUNTED_FRESHNESS
+        and verdict.get("attestation_origin") == "other_session"
+        for verdict in verdicts
+    )
+    if not counted_other_session:
+        return None
+    raw_event_owner = coverage.get("author_session_id")
+    event_owner = (
+        raw_event_owner
+        if isinstance(raw_event_owner, str) and raw_event_owner
+        else None
+    )
+    live_owner = worktree.get("harness_session_id")
+    if event_owner and live_owner == event_owner:
+        authority_note = (
+            f"{worktree.get('authority_note') or 'target manifest'}; "
+            "matches coverage event author"
+        )
+    elif event_owner:
+        authority_note = (
+            "coverage event author; current worktree manifest owner differs"
+        )
+    else:
+        authority_note = (
+            "coverage event lacks author_session_id; current manifest is not "
+            "historical evidence"
+        )
+    return {
+        "attestation_origin": "other_session",
+        "counts": True,
+        "harness_session_id": event_owner,
+        "worktree_path": worktree.get("path"),
+        "manifest_path": worktree.get("manifest_path"),
+        "authority_note": authority_note,
+    }
+
+
 def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
     """Print a one-line JSON verdict for PR `pr`; return the exit code.
 
@@ -828,6 +877,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
                 int(pr), head=pr_json.get("headRefOid"), cwd=cwd
             )
             coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
+    owner_guidance = _review_owner_guidance(coverage, activity.worktree)
     payload = {
         "pr": pr,
         # The commit this verdict describes, so a caller can pin the
@@ -878,6 +928,8 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         "ready": not blockers,
         "ready_blockers": blockers,
     }
+    if owner_guidance is not None:
+        payload["review_owner_guidance"] = owner_guidance
     if coverage_status_repost is not None:
         payload["coverage_status_repost"] = coverage_status_repost
     # The human line precedes the JSON write on stderr: stdout is a machine
@@ -966,6 +1018,26 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             f"{str(v.get('reviewed_sha') or 'an unknown commit')[:8]}, whose code no longer "
             "matches HEAD - that verdict does not count. Ask it to re-read.\n"
         )
+    if owner_guidance is not None:
+        owner = owner_guidance.get("harness_session_id")
+        worktree_path = owner_guidance.get("worktree_path")
+        authority_note = owner_guidance.get("authority_note")
+        if owner and worktree_path:
+            sys.stderr.write(
+                "note: attestation_origin other_session counts toward review coverage. "
+                f"Self-attestation owner is {owner}; PR worktree is {worktree_path}.\n"
+            )
+        elif worktree_path:
+            sys.stderr.write(
+                "note: attestation_origin other_session counts toward review coverage. "
+                f"Matched PR worktree {worktree_path}; harness_session_id unavailable: "
+                f"{authority_note}.\n"
+            )
+        else:
+            sys.stderr.write(
+                "note: attestation_origin other_session counts toward review coverage. "
+                f"PR worktree unavailable: {authority_note}; harness_session_id unavailable.\n"
+            )
     if coverage.get("review_state") == "reviewer_refused":
         raw_verdicts = coverage.get("verdicts")
         verdicts = raw_verdicts if isinstance(raw_verdicts, list) else []

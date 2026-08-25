@@ -2438,6 +2438,14 @@ def _codex_bind_report() -> dict[str, Any]:
     future regression in that sequence's probe order, deadline handling, or
     pane-death detection shows up here too instead of passing silently.
     """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="fno-codex-bind-") as scratch:
+        return _run_codex_bind_canary(Path(scratch).resolve())
+
+
+def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
+    """Run the production binding probe in one fno-owned scratch directory."""
     import time
     import uuid as _uuid
 
@@ -2453,13 +2461,29 @@ def _codex_bind_report() -> dict[str, Any]:
     )
 
     version = _codex_version()
-    cwd = Path.cwd()
     session = resolve_mux_session()
     name = f"codex-bind-canary-{_uuid.uuid4().hex[:8]}"
-    argv = build_pane_argv("codex", "", cwd, True, None, name=name)
+    codex_home = cwd / ".codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        f"[projects.{json.dumps(str(cwd))}]\ntrust_level = \"trusted\"\n",
+        encoding="utf-8",
+    )
+    source_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    source_auth = source_home / "auth.json"
+    if source_auth.is_file():
+        (codex_home / "auth.json").symlink_to(source_auth.resolve())
+    prompt = "fno codex bind canary: reply READY and take no other action."
+    argv = build_pane_argv("codex", prompt, cwd, True, None, name=name)
+    argv = ["env", f"CODEX_HOME={codex_home}", *argv]
     # None (daemon unreachable at this instant) is passed through as-is; the
-    # probe below refuses to correlate against a fabricated empty baseline.
-    baseline_ids = _codex_session_ids_loaded(cwd)
+    # ordinary production probe refuses to correlate against a fabricated
+    # empty baseline. This home is newly created and uniquely owned by the
+    # canary, so it positively contains no pre-existing daemon sessions: an
+    # absent pre-spawn socket is an empty baseline here, not ambiguity.
+    baseline_ids = _codex_session_ids_loaded(cwd, codex_home=codex_home)
+    if baseline_ids is None:
+        baseline_ids = set()
     spawn_started_ms = int(time.time() * 1000)
     proc = _run_mux(
         ["mux", "pane", "run", "--session", session, "--cwd", str(cwd), "--", *argv],
@@ -2468,6 +2492,7 @@ def _codex_bind_report() -> dict[str, Any]:
     if proc.returncode != 0:
         return {
             "bound": False,
+            "session_id": None,
             "oracle": None,
             "elapsed_s": 0.0,
             "codex_version": version,
@@ -2482,6 +2507,7 @@ def _codex_bind_report() -> dict[str, Any]:
         # leak.
         return {
             "bound": False,
+            "session_id": None,
             "oracle": None,
             "elapsed_s": 0.0,
             "codex_version": version,
@@ -2492,50 +2518,72 @@ def _codex_bind_report() -> dict[str, Any]:
             ),
         }
 
-    mux = {"session": session, "pane_id": pane_id}
-    child_pid = _lookup_child_pid(session, pane_id, subprocess.run)
-    started = time.monotonic()
-    oracle_used: list = []
-    if child_pid is not None:
-        binding = _await_pane_binding(
-            mux,
-            _make_codex_bind_probe(
-                cwd=cwd,
-                spawn_started_ms=spawn_started_ms,
-                child_pid=child_pid,
-                codex_sessions_dir=None,
-                daemon_baseline_ids=baseline_ids,
-                mux=mux,
+    try:
+        mux = {"session": session, "pane_id": pane_id}
+        child_pid = _lookup_child_pid(session, pane_id, subprocess.run)
+        started = time.monotonic()
+        oracle_used: list = []
+        if child_pid is not None:
+            binding = _await_pane_binding(
+                mux,
+                _make_codex_bind_probe(
+                    cwd=cwd,
+                    spawn_started_ms=spawn_started_ms,
+                    child_pid=child_pid,
+                    codex_sessions_dir=codex_home / "sessions",
+                    daemon_baseline_ids=baseline_ids,
+                    mux=mux,
+                    runner=subprocess.run,
+                    oracle_used=oracle_used,
+                    daemon_codex_home=codex_home,
+                ),
                 runner=subprocess.run,
-                oracle_used=oracle_used,
-            ),
-            runner=subprocess.run,
-            window_s=_CODEX_BIND_CANARY_WINDOW_S,
-            label="codex-bind-canary",
-        )
-        session_id = binding.session_id
-        error = None if session_id else "neither oracle bound within the window"
-    else:
-        # No window was waited out here at all - a missing child pid is a
-        # pane-lookup miss, not a timed-out bind, and reporting the timeout
-        # message would hide that real cause from whoever reads the canary.
-        session_id = None
-        error = "no child pid found for the canary pane"
-    elapsed = time.monotonic() - started
-    _reap_spawned_pane(session, pane_id, subprocess.run)
-    return {
-        "bound": session_id is not None,
-        "oracle": oracle_used[0] if oracle_used else None,
-        "elapsed_s": round(elapsed, 2),
-        "codex_version": version,
-        "error": error,
-    }
+                window_s=_CODEX_BIND_CANARY_WINDOW_S,
+                label="codex-bind-canary",
+            )
+            candidate = binding.session_id
+            oracle = oracle_used[0] if oracle_used else None
+            try:
+                canonical = str(_uuid.UUID(candidate)) if candidate else ""
+            except (ValueError, AttributeError):
+                canonical = ""
+            if candidate and canonical == candidate.lower() and len(candidate) == 36:
+                session_id = candidate
+                error = None
+            elif candidate:
+                session_id = None
+                error = (
+                    f"{oracle or 'binding oracle'} returned {candidate!r}, not a full "
+                    "canonical session id"
+                )
+                oracle_used.clear()
+            else:
+                session_id = None
+                error = "neither oracle bound within the window"
+        else:
+            # No window was waited out here at all - a missing child pid is a
+            # pane-lookup miss, not a timed-out bind, and reporting the timeout
+            # message would hide that real cause from whoever reads the canary.
+            session_id = None
+            error = "no child pid found for the canary pane"
+        elapsed = time.monotonic() - started
+        return {
+            "bound": session_id is not None,
+            "session_id": session_id,
+            "oracle": oracle_used[0] if oracle_used else None,
+            "elapsed_s": round(elapsed, 2),
+            "codex_version": version,
+            "error": error,
+        }
+    finally:
+        _reap_spawned_pane(session, pane_id, subprocess.run)
 
 
 def _emit_codex_bind_report(result: dict[str, Any]) -> None:
     if result["bound"]:
         typer.echo(
-            f"fno doctor: codex bind: ok, oracle={result['oracle']} "
+            f"fno doctor: codex bind: ok, session={result.get('session_id')} "
+            f"oracle={result['oracle']} "
             f"elapsed={result['elapsed_s']}s codex={result['codex_version'] or 'unknown'}"
         )
     else:

@@ -441,6 +441,23 @@ def test_session_ids_loaded_filters_by_cwd_and_distinguishes_none_from_empty(
     assert mux_spawn._codex_session_ids_loaded(Path("/w/nothing-here")) == set()
 
 
+def test_session_ids_loaded_selects_the_requested_codex_home(monkeypatch) -> None:
+    from fno.agents import discover as _discover
+
+    seen: dict[str, str] = {}
+
+    def threads(*, env):
+        seen["codex_home"] = env["CODEX_HOME"]
+        return []
+
+    monkeypatch.setattr(_discover, "_codex_daemon_threads_raw", threads)
+
+    assert mux_spawn._codex_session_ids_loaded(
+        Path("/w/proj"), codex_home=Path("/tmp/canary-home")
+    ) == set()
+    assert seen["codex_home"] == "/tmp/canary-home"
+
+
 # ---------------------------------------------------------------------------
 # _make_codex_bind_probe: the daemon oracle is stability-gated (the same
 # candidate must repeat across two consecutive probes) and liveness-checked

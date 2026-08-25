@@ -16,8 +16,12 @@ never spawns a real codex pane.
 """
 from __future__ import annotations
 
+import json
 import subprocess
+import tempfile
+from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from fno import doctor
@@ -45,7 +49,9 @@ def _patch_common(monkeypatch, *, run_returncode: int = 0, pane_id_out: str = "7
         "_reap_spawned_pane",
         lambda session, pane_id, runner: (reaped.append((session, pane_id)), (True, ""))[1],
     )
-    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", lambda cwd: set())
+    monkeypatch.setattr(
+        mux_spawn, "_codex_session_ids_loaded", lambda cwd, **_kw: set()
+    )
     monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
     monkeypatch.setattr(mux_spawn, "_read_pane_tail", lambda *a, **k: "")
     return reaped
@@ -62,12 +68,111 @@ def test_binds_via_the_fd_oracle_and_reports_it(monkeypatch) -> None:
 
     assert result == {
         "bound": True,
+        "session_id": SID,
         "oracle": "rollout-fd",
         "elapsed_s": result["elapsed_s"],
         "codex_version": "codex-cli 0.148.0",
         "error": None,
     }
     assert reaped == [("main", 7)]
+
+
+def test_canary_uses_isolated_trusted_cwd_and_nonempty_prompt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_home = tmp_path / "source-codex-home"
+    source_home.mkdir()
+    source_auth = source_home / "auth.json"
+    source_auth.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID
+    )
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+    seen: list[str] = []
+    observed: dict[str, str] = {}
+
+    def record_run(args, *_a, **_kw):
+        seen.extend(args)
+        command = args[args.index("--") + 1 :]
+        home = Path(next(part.split("=", 1)[1] for part in command if part.startswith("CODEX_HOME=")))
+        observed["config"] = (home / "config.toml").read_text(encoding="utf-8")
+        observed["auth_target"] = str((home / "auth.json").resolve())
+        return _proc(stdout="7\n")
+
+    monkeypatch.setattr(mux_spawn, "_run_mux", record_run)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is True
+    cwd = Path(seen[seen.index("--cwd") + 1])
+    command = seen[seen.index("--") + 1 :]
+    assert cwd != Path.cwd()
+    assert not cwd.exists(), "the diagnostic owns and removes its scratch directory"
+    assert command[0] == "env"
+    assert command[2] == "codex"
+    assert observed["config"] == (
+        f"[projects.{json.dumps(str(cwd))}]\ntrust_level = \"trusted\"\n"
+    )
+    assert observed["auth_target"] == str(source_auth)
+    prompt_fence = command.index("--")
+    assert command[prompt_fence + 1].strip()
+
+
+def test_binding_exception_still_reaps_the_canary_pane(monkeypatch) -> None:
+    reaped = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_await_pane_binding",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("binding exploded")),
+    )
+
+    with pytest.raises(RuntimeError, match="binding exploded"):
+        doctor._codex_bind_report()
+
+    assert reaped == [("main", 7)]
+
+
+def test_canary_canonicalizes_scratch_path_for_trust_lookup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    real = tmp_path / "private" / "scratch"
+    real.mkdir(parents=True)
+    alias = tmp_path / "scratch-alias"
+    alias.symlink_to(real, target_is_directory=True)
+
+    class AliasDirectory:
+        def __enter__(self):
+            return str(alias)
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", lambda **_kw: AliasDirectory())
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID
+    )
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+    seen: list[str] = []
+    observed: dict[str, str] = {}
+
+    def record_run(args, *_a, **_kw):
+        seen.extend(args)
+        command = args[args.index("--") + 1 :]
+        home = Path(next(part.split("=", 1)[1] for part in command if part.startswith("CODEX_HOME=")))
+        observed["config"] = (home / "config.toml").read_text(encoding="utf-8")
+        return _proc(stdout="7\n")
+
+    monkeypatch.setattr(mux_spawn, "_run_mux", record_run)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is True
+    cwd = Path(seen[seen.index("--cwd") + 1])
+    assert cwd == real.resolve()
+    assert json.dumps(str(real.resolve())) in observed["config"]
 
 
 def test_binds_via_the_daemon_oracle_when_the_fd_probe_misses(monkeypatch) -> None:
@@ -84,7 +189,38 @@ def test_binds_via_the_daemon_oracle_when_the_fd_probe_misses(monkeypatch) -> No
     result = doctor._codex_bind_report()
 
     assert result["bound"] is True
+    assert result["session_id"] == SID
     assert result["oracle"] == "daemon"
+
+
+def test_daemon_oracle_uses_the_canary_codex_home(monkeypatch) -> None:
+    _patch_common(monkeypatch)
+    homes: list[tuple[str, Path]] = []
+
+    def baseline(_cwd, *, codex_home):
+        homes.append(("baseline", codex_home))
+        return None
+
+    def candidate(_cwd, candidate_baseline, *, codex_home):
+        assert candidate_baseline == set()
+        homes.append(("candidate", codex_home))
+        return SID
+
+    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", baseline)
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None
+    )
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", candidate)
+    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(mux_spawn.time, "sleep", lambda *_a, **_k: None)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is True
+    assert result["oracle"] == "daemon"
+    assert [kind for kind, _home in homes] == ["baseline", "candidate", "candidate"]
+    assert len({home for _kind, home in homes}) == 1
+    assert homes[0][1].name == ".codex-home"
 
 
 def test_neither_oracle_binding_fails_named_and_reaps(monkeypatch) -> None:
@@ -99,8 +235,24 @@ def test_neither_oracle_binding_fails_named_and_reaps(monkeypatch) -> None:
     result = doctor._codex_bind_report()
 
     assert result["bound"] is False
+    assert result["session_id"] is None
     assert result["oracle"] is None
     assert "neither oracle" in result["error"]
+
+
+def test_short_binding_candidate_cannot_pass_the_canary(monkeypatch) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID[:8]
+    )
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is False
+    assert result["session_id"] is None
+    assert result["oracle"] is None
+    assert "full canonical session id" in result["error"]
 
 
 def test_pane_run_failure_is_reported_without_a_child_pid_lookup(monkeypatch) -> None:
