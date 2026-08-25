@@ -405,9 +405,14 @@ mod tests {
     fn scrub_onto_keeps_a_routed_overlay_in_charge() {
         // With an overlay re-supplying the model var, the unrouted clear
         // stands down entirely - no env_remove may fire on the routed key.
+        // The base is pinned to a REAL route: on a clean runner (no base URL
+        // exported) this glm value would read INCOHERENT, whose removal is
+        // correct behavior and would mask the branch under test.
         let _guard = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let prior_base = std::env::var("ANTHROPIC_BASE_URL").ok();
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic");
         std::env::set_var("ANTHROPIC_MODEL", "glm-5.3[1m]");
         let mut cmd = std::process::Command::new("claude");
         scrub_onto(&mut cmd, &[("ANTHROPIC_MODEL", "glm-5.3[1m]")]);
@@ -417,6 +422,10 @@ mod tests {
             .map(|(k, _)| k.to_string_lossy().to_string())
             .collect();
         std::env::remove_var("ANTHROPIC_MODEL");
+        match prior_base {
+            Some(v) => std::env::set_var("ANTHROPIC_BASE_URL", v),
+            None => std::env::remove_var("ANTHROPIC_BASE_URL"),
+        }
         assert!(
             !removed.contains(&"ANTHROPIC_MODEL".to_string()),
             "a routed overlay must own the key, got removals {removed:?}"

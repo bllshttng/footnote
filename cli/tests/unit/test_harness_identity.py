@@ -893,10 +893,17 @@ def test_resolve_attester_identity_refuses_the_command_line_override():
     import fno as _fno
 
     src_dir = str(Path(_fno.__file__).resolve().parents[1])
-    wrapped = (
+    # The parent must be a FAMILY carrier (a process whose argv names the
+    # marker's harness), because the nearest family carrier is what decides:
+    # `exec -a codex` renames the intermediate bash, so its cmdline carries
+    # the family token while its env still holds the harness's own id.
+    import shlex
+
+    leaf = (
         f"CODEX_THREAD_ID=foreign-sess {sys.executable} -c "
         "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'"
     )
+    wrapped = "exec -a codex bash -c " + shlex.quote(leaf)
     r = subprocess.run(
         ["bash", "-c", wrapped],
         env={
@@ -909,16 +916,16 @@ def test_resolve_attester_identity_refuses_the_command_line_override():
         text=True,
     )
     if _proc_environ_strictly_readable():
-        # linux: /proc answers for every ancestor, so the refusal is required.
+        # linux: /proc answers for every ancestor, so the family carrier is
+        # readable and its disagreement with the leaf's override must raise.
         assert r.returncode == 3, r.stdout + r.stderr
         assert "true-sess" in r.stdout and "foreign-sess" in r.stdout
-    elif "CONFLICT" in r.stdout:
-        # darwin with a readable ancestry (measured live): same refusal.
-        assert r.returncode == 3
-        assert "true-sess" in r.stdout and "foreign-sess" in r.stdout
     else:
-        # darwin with an unreadable ancestry: nothing contradicts the
-        # override, so the resolver records env_only rather than guessing.
+        # darwin: a FRESH child's environment is not readable (KERN_PROCARGS2
+        # exposes argv only), so no family carrier corroborates and the
+        # resolver records the claim as env_only instead of guessing. The
+        # real harness chain above a session IS readable on darwin - that is
+        # the lane the rule exists for - just not a child spawned seconds ago.
         assert r.returncode == 0, r.stdout + r.stderr
         assert "foreign-sess" in r.stdout
         assert "env_only" in r.stdout
@@ -939,10 +946,17 @@ def test_resolve_attester_identity_corroborates_the_own_id():
     import fno as _fno
 
     src_dir = str(Path(_fno.__file__).resolve().parents[1])
-    wrapped = (
-        f"CODEX_THREAD_ID=sess-own {sys.executable} -c "
+    # Same family-carrier parent as the override test (exec -a codex renames
+    # the intermediate bash): the carrier agrees with the env. linux reads it
+    # and answers process; darwin cannot read a fresh child's environment, so
+    # the same chain honestly degrades to env_only there.
+    import shlex
+
+    leaf = (
+        f"{sys.executable} -c "
         "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'"
     )
+    wrapped = "exec -a codex bash -c " + shlex.quote(leaf)
     r = subprocess.run(
         ["bash", "-c", wrapped],
         env={
@@ -960,4 +974,4 @@ def test_resolve_attester_identity_corroborates_the_own_id():
     if _proc_environ_strictly_readable():
         assert witness == "process"
     else:
-        assert witness in ("process", "env_only")
+        assert witness == "env_only"
