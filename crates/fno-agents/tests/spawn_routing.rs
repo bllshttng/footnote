@@ -896,6 +896,7 @@ fn client_ask_full_codex_session_id_resumes_named_row() {
     let bin_dir = tmpdir("cli-ask-full-codex-bin");
     let cwd = tmpdir("cli-ask-full-codex-cwd");
     let session_id = "01a03a0e-0fa6-7661-b194-7520ce5ea6e2";
+    let addressed_session_id = session_id.to_ascii_uppercase();
     let marker = "RECOVERY-RESUME-OK-client";
     install_fake_codex(&bin_dir, session_id, marker);
     let log_path = home_dir.join("agents/full-id/output.jsonl");
@@ -916,7 +917,11 @@ fn client_ask_full_codex_session_id_resumes_named_row() {
     }
 
     let out = std::process::Command::new(&bin)
-        .args(["ask", session_id, &format!("Reply exactly {marker}")])
+        .args([
+            "ask",
+            &addressed_session_id,
+            &format!("Reply exactly {marker}"),
+        ])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1")
         .env("FNO_AGENTS_HOME", &home_dir)

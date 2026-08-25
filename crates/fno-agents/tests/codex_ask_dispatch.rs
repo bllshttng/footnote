@@ -474,12 +474,13 @@ fn codex_resume_accepts_full_session_id_and_stamps_named_row() {
     install_fake_codex(&bin_dir);
 
     let session_id = "01a03a0e-0fa6-7661-b194-7520ce5ea6e2";
+    let addressed_session_id = session_id.to_ascii_uppercase();
     seed_codex_registry(&home, "01a03a0e", session_id, cwd.to_str().unwrap());
 
     let outcome = dispatch_with_fake_codex(
         &home,
         &bin_dir,
-        session_id,
+        &addressed_session_id,
         "Reply exactly RECOVERY-RESUME-OK-rust",
         "fno",
         &cwd,
