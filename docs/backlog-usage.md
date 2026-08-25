@@ -323,7 +323,7 @@ fno workspace worktree policy --repo <path> [--harness claude]
 
 ## Public roadmap
 
-A curated view for advertising an OSS project's roadmap. Qualifying nodes are public by default; use `--no-public` for an explicit exclusion. One fail-closed title gate protects both public projections.
+A curated view for advertising an OSS project's roadmap. Qualifying nodes are public by default. Use `--no-public` for an explicit exclusion. One fail-closed title gate protects both public projections.
 
 ```bash
 fno backlog update <id> --no-public
@@ -331,12 +331,6 @@ fno backlog roadmap --project fno --out ROADMAP.md \
   --html roadmap.html --backlog-html backlog.html
 ```
 
-The roadmap emits only title / priority / size grouped Now / Next / Later /
-Shipped (Triage folds into Later). The public backlog groups open `idea`,
-`ready`, `in_progress`, and `blocked` work by subsystem. Neither projection
-emits IDs, details, plan paths, cwd, blockers, PR links, or sessions.
+The roadmap emits only title / priority / size grouped Now / Next / Later / Shipped (Triage folds into Later). The public backlog groups open `idea`, `ready`, `in_progress`, and `blocked` work by subsystem. Neither projection emits IDs, details, plan paths, cwd, blockers, PR links, or sessions.
 
-Before any public file is replaced, the shared gate scans every emitted title
-for PR references, graph IDs, home paths, and session IDs. One offender makes
-the command exit nonzero, prints the complete cleanup queue on private stderr,
-and leaves every requested output unchanged.
+Before any public file is replaced, the shared gate scans every emitted title for PR references, graph IDs, home paths, and session IDs. One offender makes the command exit nonzero, prints the complete cleanup queue on private stderr, and leaves every requested output unchanged.

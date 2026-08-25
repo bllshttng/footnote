@@ -7,7 +7,7 @@ status: accepted
 
 ## Overview
 
-Both backlog boards - `graph.md` (Obsidian Kanban) and `fno backlog view` (the self-contained HTML board) - and the work selector consume one ordering function. The HTML renderer also owns the roadmap and public-backlog card markup; those projections share its escaping and field policy instead of authoring cards separately.
+Both backlog boards - `graph.md` (Obsidian Kanban) and `fno backlog view` (the self-contained HTML board) - and the work selector consume one ordering function. The HTML renderer also owns the roadmap and public-backlog card markup. Those projections share its escaping and field policy instead of authoring cards separately.
 The board calls `_intake.make_selection_sort_key(entries, swimlane=True)` and selection calls the same function with `swimlane=False`.
 The HTML board additionally draws per-project sub-lane dividers and a soft WIP-cap count per column.
 
