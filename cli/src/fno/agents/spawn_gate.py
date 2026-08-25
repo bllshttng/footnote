@@ -20,6 +20,7 @@ zero.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -851,6 +852,39 @@ def _check_ram_floor(floor_gb: float) -> None:
         raise GateRefused(EXIT_RAM_REFUSED, receipt)
 
 
+def _footprint_cause_evidence() -> Optional[str]:
+    """Read one fail-open fleet footprint for an over-load refusal."""
+    try:
+        from fno.doctor_footprint import _cpu_capacity_cores, cause_reading
+
+        reading, _error = cause_reading()
+        if reading is None:
+            return None
+        capacity = float(_cpu_capacity_cores())
+        measured_share = (
+            reading.fleet_cpu_cores / reading.measured_cpu_cores * 100
+            if reading.measured_cpu_cores > 0
+            else 0.0
+        )
+        capacity_share = reading.fleet_cpu_cores / capacity * 100
+        values = (
+            reading.fleet_cpu_cores,
+            capacity,
+            capacity_share,
+            measured_share,
+        )
+        if capacity <= 0 or any(not math.isfinite(value) or value < 0 for value in values):
+            return None
+        return (
+            "spawn-gate: footprint attributes "
+            f"{reading.fleet_cpu_cores:.2f}/{capacity:.2f} cores "
+            f"({capacity_share:.1f}% capacity, {measured_share:.1f}% of measured CPU) "
+            "to the fleet"
+        )
+    except Exception:
+        return None
+
+
 def _check_load_ceiling(max_load_per_cpu: float) -> None:
     """Refuse (never queue) above the CPU ceiling (x-3f84 W3).
 
@@ -881,6 +915,9 @@ def _check_load_ceiling(max_load_per_cpu: float) -> None:
             f"{max_load_per_cpu:g} x {cpus} cpus = {ceiling:.1f}; refusing to "
             f"spawn (--force to bypass)"
         )
+        # No evidence probe here: it costs seconds of ps/lsof, and this check
+        # runs inside the held gate mutex. The caller releases first, then
+        # gathers (see run_gate).
         raise GateRefused(EXIT_LOAD_REFUSED)
 
 
@@ -1142,7 +1179,22 @@ def run_gate(
             if slots < cap:
                 try:
                     _check_ram_floor(floor_gb)
+                except GateRefused:
+                    guard.release()
+                    raise
+                try:
                     _check_load_ceiling(max_load_per_cpu)
+                except GateRefused:
+                    # The refusal is decided; release the mutex BEFORE the
+                    # cause probe so queued spawners (and --no-wait callers)
+                    # never sit behind seconds of evidence gathering.
+                    guard.release()
+                    _warn(
+                        _footprint_cause_evidence()
+                        or "spawn-gate: footprint cause unavailable; load refusal unchanged"
+                    )
+                    raise
+                try:
                     _check_king_share(c, cap, caller_session=caller_session)
                 except GateRefused:
                     guard.release()

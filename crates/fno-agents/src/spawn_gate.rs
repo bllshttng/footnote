@@ -17,7 +17,10 @@
 //! that bricks spawning.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use serde::Deserialize;
 
 use crate::agents_config;
 use crate::claims;
@@ -504,7 +507,17 @@ pub fn run_gate(
                     return Err(code);
                 }
                 if let Err(code) = check_load_ceiling(load_ceiling) {
+                    // The refusal is decided; drop the mutex BEFORE the cause
+                    // probe so queued spawners (and --no-wait callers) never
+                    // sit behind seconds of evidence gathering.
                     guard.release();
+                    eprintln!(
+                        "{}",
+                        footprint_cause_evidence().unwrap_or_else(|| {
+                            "spawn-gate: footprint cause unavailable; load refusal unchanged"
+                                .to_string()
+                        })
+                    );
                     return Err(code);
                 }
                 if substrate == "headless" {
@@ -633,6 +646,75 @@ fn loadavg_1m() -> Option<f64> {
     None
 }
 
+#[derive(Debug, Deserialize)]
+struct FootprintCausePayload {
+    fleet_cpu_cores: f64,
+    cpu_capacity_cores: f64,
+    fleet_percent_capacity: f64,
+    fleet_percent_measured_cpu: f64,
+}
+
+fn format_footprint_cause_json(raw: &str) -> Option<String> {
+    let payload: FootprintCausePayload = serde_json::from_str(raw).ok()?;
+    let values = [
+        payload.fleet_cpu_cores,
+        payload.cpu_capacity_cores,
+        payload.fleet_percent_capacity,
+        payload.fleet_percent_measured_cpu,
+    ];
+    if payload.cpu_capacity_cores <= 0.0
+        || values
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return None;
+    }
+    Some(format!(
+        "spawn-gate: footprint attributes {:.2}/{:.2} cores ({:.1}% capacity, {:.1}% of measured CPU) to the fleet",
+        payload.fleet_cpu_cores,
+        payload.cpu_capacity_cores,
+        payload.fleet_percent_capacity,
+        payload.fleet_percent_measured_cpu,
+    ))
+}
+
+fn footprint_cli_binary() -> Option<&'static str> {
+    ["fno", "fno-py"]
+        .into_iter()
+        .find(|name| resolves_on_path(name))
+}
+
+fn footprint_cause_evidence() -> Option<String> {
+    let binary = footprint_cli_binary()?;
+    let mut child = Command::new(binary)
+        .args(["doctor", "footprint", "--json", "--cause-only"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let output = child.wait_with_output().ok()?;
+                return format_footprint_cause_json(std::str::from_utf8(&output.stdout).ok()?);
+            }
+            Ok(Some(_)) => return None,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 /// CPU ceiling check (Layer 2, x-3f84 W3): refuse when the 1-min loadavg
 /// exceeds `max_load_per_cpu x cpu count` (never queue). Same contract as
 /// [`check_ram_floor`]: `<= 0` disables, unreadable load skips (fail open).
@@ -655,6 +737,9 @@ fn check_load_ceiling(max_load_per_cpu: f64) -> Result<(), i32> {
                  {max_load_per_cpu} x {cpus} cpus = {ceiling:.1}; refusing to spawn \
                  (--force to bypass)"
             );
+            // No evidence probe here: it costs seconds in a subprocess, and
+            // this check runs inside the held gate mutex. The caller releases
+            // first, then gathers (run_gate); the Python twin does the same.
             Err(EXIT_LOAD_REFUSED)
         }
         None => {
@@ -877,6 +962,33 @@ MemAvailable:    8000000 kB\n";
         // Disabled (`<= 0`) never refuses, whatever the machine reads.
         assert!(check_load_ceiling(0.0).is_ok());
         assert!(check_load_ceiling(-1.0).is_ok());
+    }
+
+    #[test]
+    fn footprint_cause_json_formats_available_and_low_share_payloads() {
+        let heavy = r#"{"fleet_cpu_cores":1.86,"cpu_capacity_cores":12,"fleet_percent_capacity":15.5,"fleet_percent_measured_cpu":58.0}"#;
+        assert_eq!(
+            format_footprint_cause_json(heavy).as_deref(),
+            Some("spawn-gate: footprint attributes 1.86/12.00 cores (15.5% capacity, 58.0% of measured CPU) to the fleet")
+        );
+
+        let low = r#"{"fleet_cpu_cores":0.20,"cpu_capacity_cores":12,"fleet_percent_capacity":1.7,"fleet_percent_measured_cpu":4.2}"#;
+        assert_eq!(
+            format_footprint_cause_json(low).as_deref(),
+            Some("spawn-gate: footprint attributes 0.20/12.00 cores (1.7% capacity, 4.2% of measured CPU) to the fleet")
+        );
+    }
+
+    #[test]
+    fn footprint_cause_json_is_unavailable_for_incomplete_payloads() {
+        assert_eq!(format_footprint_cause_json("{}"), None);
+        assert_eq!(format_footprint_cause_json("not json"), None);
+        assert_eq!(
+            format_footprint_cause_json(
+                r#"{"fleet_cpu_cores":-1,"cpu_capacity_cores":12,"fleet_percent_capacity":-8.3,"fleet_percent_measured_cpu":2.0}"#
+            ),
+            None
+        );
     }
 
     #[cfg(unix)]

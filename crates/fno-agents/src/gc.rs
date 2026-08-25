@@ -113,12 +113,14 @@ pub struct GcRow {
     /// stamped (never observed dead before).
     ///
     /// READ THE NAME SCEPTICALLY. This is not when the process exited. It is
-    /// when a GC sweep FIRST OBSERVED the row as non-live, written by the only
-    /// production writer (`gc_sweep`), which computes one timestamp per pass and
-    /// applies it to every newly-observed row. Rows across unrelated tenants and
-    /// projects therefore share a stamp to the second; processes do not exit in
-    /// synchronised batches, and that batching is the proof the field measures a
-    /// sweep tick rather than an exit.
+    /// when fno FIRST OBSERVED the row as non-live, written by two producers:
+    /// the reconcile Exited transition (stamped at the moment it flips the row
+    /// and clears its pid), and `gc_sweep` as the backstop for rows no
+    /// reconcile ever flipped - which computes one timestamp per pass and
+    /// applies it to every newly-observed row. Sweep-stamped rows across
+    /// unrelated tenants and projects therefore share a stamp to the second;
+    /// processes do not exit in synchronised batches, and that batching is the
+    /// proof a sweep-tick stamp measures the sweep, not the exit.
     ///
     /// So a stamp is evidence that a sweep once failed to reach a worker, not
     /// that the worker died. A claude bg thread that finished a turn is idle and
