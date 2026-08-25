@@ -85,7 +85,7 @@ fn server_command(sock: &Path, shell: &str, env: &[(&str, &str)]) -> Command {
     cmd.env("FNO_GRAPH_JSON", iso.join("iso-graph.json"));
     cmd.env("FNO_CLAIMS_ROOT", &home);
     cmd.env("FNO_E2E", "1");
-    cmd.env("FNO_MUX_MAX_LIVE", "512");
+    cmd.env("FNO_PROCESS_ADMISSION_MAX", "512");
     cmd.env(
         "FNO_MUX_ADMISSION_NAMESPACE",
         iso.file_name().unwrap_or_default(),

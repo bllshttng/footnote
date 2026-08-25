@@ -241,7 +241,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
     monkeypatch.setenv("FNO_MUX_DIR", str(mux_dir))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claim-root"))
     monkeypatch.setenv("FNO_E2E", "1")
-    monkeypatch.setenv("FNO_MUX_MAX_LIVE", "512")
+    monkeypatch.setenv("FNO_PROCESS_ADMISSION_MAX", "512")
     monkeypatch.delenv("FNO_SESSION", raising=False)
 
     requested_name = "late-codex-identity"
@@ -489,7 +489,7 @@ sleep 5
         "FNO_MUX_DIR": str(mux_dir),
         "FNO_CLAIMS_ROOT": str(tmp_path / "claims"),
         "FNO_E2E": "1",
-        "FNO_MUX_MAX_LIVE": "512",
+        "FNO_PROCESS_ADMISSION_MAX": "512",
         "FAKE_CODEX_PROMPT_FILE": str(prompt_file),
     }
     for key, value in env.items():
