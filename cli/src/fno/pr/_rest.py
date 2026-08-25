@@ -216,7 +216,9 @@ def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] =
 def _map_pr_state(data: dict) -> str:
     """REST `state` (open/closed + `merged`) -> the OPEN/CLOSED/MERGED shape
     the GraphQL read emitted, so `pr_state` in the output is unchanged."""
-    if data.get("merged"):
+    # The single-PR endpoint carries ``merged`` while list-pulls carries the
+    # same fact as a non-null ``merged_at`` timestamp.
+    if data.get("merged") or data.get("merged_at"):
         return "MERGED"
     return {"open": "OPEN", "closed": "CLOSED"}.get(str(data.get("state") or "").lower(), "UNKNOWN")
 
@@ -437,6 +439,7 @@ def list_prs_rest(
     slug: str,
     *,
     state: str = "open",
+    requested_numbers: Optional[set[int]] = None,
     runner: Callable = run,
     cwd: Optional[str] = None,
     per_page: int = 100,
@@ -450,12 +453,15 @@ def list_prs_rest(
     open-PR question completely and left core untouched, which is why the
     pr-watch bulk sweep routes here instead of `gh pr list` (GraphQL bills
     by point cost; one oversized sweep drained the shared per-user budget).
-    Paginates on `page=` until a short page or the `max_pages` ceiling; rows
-    are reduced to ``{"number", "state"}`` with ``_map_pr_state``, so the
-    caller sees the OPEN/CLOSED/MERGED shape the GraphQL path produced.
+    Paginates on `page=` until a short page, all ``requested_numbers`` are
+    found, or the `max_pages` ceiling; rows are reduced to
+    ``{"number", "state"}`` with ``_map_pr_state``, so the caller sees the
+    OPEN/CLOSED/MERGED shape the GraphQL path produced. The optional requested
+    set is an early-stop bound for terminal lookups and does not filter rows.
     `(None, reason)` on any failure, matching `fetch_pr_rest`'s loud contract.
     """
     rows: list[dict[str, Any]] = []
+    found_numbers: set[int] = set()
     for page in range(1, max_pages + 1):
         res = runner(
             ["gh", "api", f"repos/{slug}/pulls?state={state}&per_page={per_page}&page={page}"],
@@ -493,6 +499,9 @@ def list_prs_rest(
                     }
                 )
             rows.append(summary)
+            found_numbers.add(number)
+        if requested_numbers and requested_numbers.issubset(found_numbers):
+            break
         if len(payload) < per_page:
             break
     else:

@@ -111,6 +111,75 @@ class TestLoadProvidersValid:
         assert primary.auth == "oauth_dir"
         assert primary.priority == 10
 
+    def test_unknown_record_metadata_loads_warns_and_round_trips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """AC1-HP: route-backed records retain unknown metadata on round trips."""
+        from fno.adapters.providers.loader import load_providers, save_providers
+
+        block = {
+            "config": {
+                "accounts": {
+                    "active": "zai-primary",
+                    "records": [
+                        {
+                            "id": "zai-primary",
+                            "name": "Zai Primary",
+                            "harness": "claude",
+                            "auth": "api_key",
+                            "route": "zai/glm-5.3[1m]",
+                            "operator_note": "route-owned",
+                        }
+                    ],
+                }
+            }
+        }
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, block)
+
+        with caplog.at_level(logging.WARNING, logger="fno.adapters.providers.loader"):
+            result = load_providers(repo_root=tmp_path)
+
+        record = result.by_id["zai-primary"]
+        assert record.model_dump()["route"] == "zai/glm-5.3[1m]"
+        assert record.model_dump()["operator_note"] == "route-owned"
+        assert "zai-primary" in caplog.text
+        assert "operator_note" in caplog.text
+
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        save_providers(result, scope="project")
+        round_tripped = load_providers(repo_root=tmp_path).by_id["zai-primary"]
+        assert round_tripped.model_dump()["route"] == "zai/glm-5.3[1m]"
+        assert round_tripped.model_dump()["operator_note"] == "route-owned"
+
+    def test_unknown_metadata_does_not_relax_known_harness(self, tmp_path: Path):
+        """AC1-ERR: an invalid known field still rejects a metadata-bearing record."""
+        from fno.adapters.providers.loader import load_providers
+        from fno.adapters.providers.model import ProviderConfigError
+
+        block = {
+            "config": {
+                "accounts": {
+                    "records": [
+                        {
+                            "id": "bad-harness",
+                            "name": "Bad Harness",
+                            "harness": "zai",
+                            "auth": "api_key",
+                            "env": {"ANTHROPIC_AUTH_TOKEN": "secret"},
+                            "route": "zai/glm-5.3[1m]",
+                        }
+                    ]
+                }
+            }
+        }
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, block)
+
+        with pytest.raises(ProviderConfigError, match="bad-harness"):
+            load_providers(repo_root=tmp_path)
+
     def test_auto_switch_defaults_false(self, tmp_path: Path):
         """US3: config.providers.auto_switch defaults False when the key is absent."""
         from fno.adapters.providers.loader import load_providers
