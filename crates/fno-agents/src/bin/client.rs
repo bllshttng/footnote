@@ -4203,6 +4203,27 @@ mod tests {
     }
 
     #[test]
+    fn spawn_once_after_named_message_stays_headless() {
+        let args = vec![
+            "--name".to_string(),
+            "parity-agent".to_string(),
+            "hi".to_string(),
+            "--harness".to_string(),
+            "codex".to_string(),
+            "--once".to_string(),
+        ];
+
+        let (method, params) = build_request("spawn", &args).unwrap();
+
+        assert_eq!(method, "agent.spawn");
+        assert_eq!(params["name"], "parity-agent");
+        assert_eq!(params["message"], "hi");
+        assert_eq!(params["provider"], "codex");
+        assert_eq!(params["substrate"], "headless");
+        assert!(params.get("host_mode").is_none());
+    }
+
+    #[test]
     fn spawn_substrate_pane_is_default_and_interactive() {
         // AC1-UI: no --substrate -> pane -> interactive defaults applied (the
         // x-3ab8 owned-PTY behavior is the strictly-additive default).
