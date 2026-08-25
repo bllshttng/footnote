@@ -1334,6 +1334,7 @@ def test_other_session_guidance_names_counted_owner_and_worktree(
             "review_state": "reviewed",
             "reviewed_count": 1,
             "head_sha": "current-head",
+            "author_session_id": "OWNER-SESSION",
             "verdicts": [
                 {
                     "name": "code-review",
@@ -1378,7 +1379,7 @@ def test_other_session_guidance_names_counted_owner_and_worktree(
         "harness_session_id": "OWNER-SESSION",
         "worktree_path": "/tmp/pr-worktree",
         "manifest_path": "/tmp/pr-worktree/.fno/target-state.md",
-        "authority_note": "live target manifest",
+        "authority_note": "live target manifest; matches coverage event author",
     }
     assert "other_session counts" in captured.err
     assert "OWNER-SESSION" in captured.err
@@ -1438,9 +1439,66 @@ def test_other_session_guidance_names_unavailable_manifest_authority(
 
     assert out["review_owner_guidance"]["harness_session_id"] is None
     assert out["review_owner_guidance"]["worktree_path"] == "/tmp/pr-worktree"
-    assert "matched worktree" in captured.err
+    assert "coverage event lacks author_session_id" in captured.err
     assert "harness_session_id unavailable" in captured.err
     assert "OWNER-SESSION" not in captured.err
+
+
+def test_other_session_guidance_prefers_coverage_event_author_over_reused_manifest():
+    guidance = _status._review_owner_guidance(
+        {
+            "author_session_id": "EVENT-OWNER",
+            "verdicts": [
+                {
+                    "name": "code-review",
+                    "producer": "local_attestation",
+                    "verdict": "reviewed",
+                    "freshness": "fresh",
+                    "attestation_origin": "other_session",
+                }
+            ],
+        },
+        {
+            "path": "/tmp/pr-worktree",
+            "manifest_path": "/tmp/pr-worktree/.fno/target-state.md",
+            "harness_session_id": "NEW-LIVE-OWNER",
+            "authority_note": "live target manifest",
+        },
+    )
+
+    assert guidance is not None
+    assert guidance["harness_session_id"] == "EVENT-OWNER"
+    assert guidance["authority_note"] == (
+        "coverage event author; current worktree manifest owner differs"
+    )
+
+
+def test_legacy_other_session_guidance_does_not_claim_current_manifest_owner():
+    guidance = _status._review_owner_guidance(
+        {
+            "verdicts": [
+                {
+                    "name": "code-review",
+                    "producer": "local_attestation",
+                    "verdict": "reviewed",
+                    "freshness": "fresh",
+                    "attestation_origin": "other_session",
+                }
+            ],
+        },
+        {
+            "path": "/tmp/pr-worktree",
+            "manifest_path": "/tmp/pr-worktree/.fno/target-state.md",
+            "harness_session_id": "NEW-LIVE-OWNER",
+            "authority_note": "live target manifest",
+        },
+    )
+
+    assert guidance is not None
+    assert guidance["harness_session_id"] is None
+    assert guidance["authority_note"] == (
+        "coverage event lacks author_session_id; current manifest is not historical evidence"
+    )
 
 
 def test_ready_exempts_a_merged_pr_from_the_coverage_conjunct(monkeypatch, capsys):

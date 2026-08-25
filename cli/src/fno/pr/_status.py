@@ -607,15 +607,34 @@ def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
     )
     if not counted_other_session:
         return None
+    raw_event_owner = coverage.get("author_session_id")
+    event_owner = (
+        raw_event_owner
+        if isinstance(raw_event_owner, str) and raw_event_owner
+        else None
+    )
+    live_owner = worktree.get("harness_session_id")
+    if event_owner and live_owner == event_owner:
+        authority_note = (
+            f"{worktree.get('authority_note') or 'target manifest'}; "
+            "matches coverage event author"
+        )
+    elif event_owner:
+        authority_note = (
+            "coverage event author; current worktree manifest owner differs"
+        )
+    else:
+        authority_note = (
+            "coverage event lacks author_session_id; current manifest is not "
+            "historical evidence"
+        )
     return {
         "attestation_origin": "other_session",
         "counts": True,
-        "harness_session_id": worktree.get("harness_session_id"),
+        "harness_session_id": event_owner,
         "worktree_path": worktree.get("path"),
         "manifest_path": worktree.get("manifest_path"),
-        "authority_note": worktree.get("authority_note")
-        or worktree.get("note")
-        or "worktree authority unavailable",
+        "authority_note": authority_note,
     }
 
 

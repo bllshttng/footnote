@@ -262,6 +262,7 @@ async fn review_start_round_trip(
     parse_review_start_response(&resp)
 }
 
+#[cfg(test)]
 fn review_start_audit_fields(
     thread_id: &str,
     target_raw: &str,

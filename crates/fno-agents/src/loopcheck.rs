@@ -5477,6 +5477,9 @@ fn coverage_event_data(
             data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
         }
     }
+    if let Some(author_session_id) = author_session {
+        data["author_session_id"] = serde_json::json!(author_session_id);
+    }
     if !repo.is_empty() {
         data["repo"] = serde_json::json!(repo);
     }
@@ -12639,6 +12642,7 @@ mod tests {
         assert_eq!(data["coverage"], serde_json::json!("covered"));
         assert_eq!(data["reviewed_count"], serde_json::json!(2));
         assert_eq!(data["self_attested_count"], serde_json::json!(1));
+        assert_eq!(data["author_session_id"], serde_json::json!("sess-author"));
     }
 
     #[test]

@@ -2477,8 +2477,13 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
     argv = build_pane_argv("codex", prompt, cwd, True, None, name=name)
     argv = ["env", f"CODEX_HOME={codex_home}", *argv]
     # None (daemon unreachable at this instant) is passed through as-is; the
-    # probe below refuses to correlate against a fabricated empty baseline.
+    # ordinary production probe refuses to correlate against a fabricated
+    # empty baseline. This home is newly created and uniquely owned by the
+    # canary, so it positively contains no pre-existing daemon sessions: an
+    # absent pre-spawn socket is an empty baseline here, not ambiguity.
     baseline_ids = _codex_session_ids_loaded(cwd, codex_home=codex_home)
+    if baseline_ids is None:
+        baseline_ids = set()
     spawn_started_ms = int(time.time() * 1000)
     proc = _run_mux(
         ["mux", "pane", "run", "--session", session, "--cwd", str(cwd), "--", *argv],
