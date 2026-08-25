@@ -9137,8 +9137,10 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
     #[test]
     fn the_exit_stamp_is_written_per_sweep_not_per_exit() {
-        // NAMING THE BATCH WRITER. `gc_sweep` is the only production writer of
-        // `exited_at`, and it computes ONE timestamp per pass and applies it to
+        // NAMING THE BATCH WRITER. `gc_sweep` is the batch writer of
+        // `exited_at` (the reconcile Exited transition stamps one row at a
+        // time; the sweep remains the backstop for rows no reconcile ever
+        // flipped). It computes ONE timestamp per pass and applies it to
         // every row it newly observes as dead. That is why rows across unrelated
         // tenants and projects share a stamp to the second: the field measures a
         // sweep tick, not an exit.

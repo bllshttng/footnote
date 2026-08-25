@@ -154,33 +154,16 @@ def parse_footprint(
         for pid, process in processes.items()
     }
     excluded_cache: dict[int, bool] = {}
-
-    def is_excluded(pid: int) -> bool:
-        cached = excluded_cache.get(pid)
-        if cached is not None:
-            return cached
-        path: list[int] = []
-        seen: set[int] = set()
-        current: int | None = pid
-        result = False
-        while current is not None and current != 0 and current not in seen:
-            if current in excluded:
-                result = True
-                break
-            seen.add(current)
-            path.append(current)
-            process = processes.get(current)
-            current = process.ppid if process is not None else None
-        for path_pid in path:
-            excluded_cache[path_pid] = result
-        return result
-
     attributed_cache: dict[int, bool] = {}
+    attributed_marks = frozenset(p for p, d in direct.items() if d)
 
-    def is_attributed(pid: int) -> bool:
-        if is_excluded(pid):
-            return False
-        cached = attributed_cache.get(pid)
+    def chain_reaches(pid: int, marks: frozenset[int], cache: dict[int, bool]) -> bool:
+        # ONE walker for exclusion and attribution: two hand-rolled copies of
+        # the same parent-chain traversal drifted apart on the last change to
+        # one of them. cache entries are chain-complete (every stored pid's
+        # whole walked path was stored under the same verdict), so consulting
+        # the cache mid-walk is sound.
+        cached = cache.get(pid)
         if cached is not None:
             return cached
         path: list[int] = []
@@ -188,20 +171,28 @@ def parse_footprint(
         current: int | None = pid
         result = False
         while current is not None and current != 0 and current not in seen:
-            cached = attributed_cache.get(current)
+            cached = cache.get(current)
             if cached is not None:
                 result = cached
                 break
             seen.add(current)
             path.append(current)
-            if direct.get(current, False):
+            if current in marks:
                 result = True
                 break
             process = processes.get(current)
             current = process.ppid if process is not None else None
         for path_pid in path:
-            attributed_cache[path_pid] = result
+            cache[path_pid] = result
         return result
+
+    def is_excluded(pid: int) -> bool:
+        return chain_reaches(pid, excluded, excluded_cache)
+
+    def is_attributed(pid: int) -> bool:
+        if is_excluded(pid):
+            return False
+        return chain_reaches(pid, attributed_marks, attributed_cache)
 
     sustained_cpu_percent = 0.0
     descendant_cpu_percent = 0.0

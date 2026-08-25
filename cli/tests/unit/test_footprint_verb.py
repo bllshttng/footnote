@@ -463,6 +463,46 @@ def test_ac9_edge_roster_read_is_bounded(monkeypatch) -> None:
     assert error is not None and "timed out" in error
 
 
+def test_ac9_edge_ps_output_with_invalid_utf8_degrades_not_crashes(monkeypatch) -> None:
+    # A process's argv may legally carry non-UTF-8 bytes; one such byte in the
+    # snapshot must degrade that command string, not kill the verb.
+    from types import SimpleNamespace
+
+    from fno import doctor_footprint
+
+    def raw_bytes_ps(argv, **kwargs):
+        with open(kwargs["stdout"].name, "wb") as raw:
+            raw.write(b"PID PPID ELAPSED %CPU RSS COMMAND\n"
+                      b"100 1 01:00:00 86.0 1024 fno-agents-worker --run \xff\xfe\n")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(doctor_footprint.subprocess, "run", raw_bytes_ps)
+
+    output, error = doctor_footprint._read_ps()
+
+    assert error is None
+    assert "\N{REPLACEMENT CHARACTER}" in output
+
+
+def test_broken_spawn_gate_import_is_loud_not_misdiagnosed(monkeypatch) -> None:
+    # A renamed spawn_gate private must surface as ImportError, not degrade
+    # every reading to "worker root discovery unavailable".
+    from types import SimpleNamespace
+
+    from fno import doctor_footprint
+    from fno.agents import spawn_gate as gate_module
+
+    row = SimpleNamespace(
+        status="live", pid=5, pid_start_time=1, harness="codex", short_id="cd"
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.delattr(gate_module, "_pid_alive")
+    monkeypatch.delattr(gate_module, "_process_start_time")
+
+    with pytest.raises(ImportError):
+        doctor_footprint._live_root_pids(snapshot_pids=set())
+
+
 def test_ac5_edge_capacity_uses_affinity_on_python_without_process_cpu_count(
     monkeypatch,
 ) -> None:

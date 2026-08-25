@@ -507,7 +507,17 @@ pub fn run_gate(
                     return Err(code);
                 }
                 if let Err(code) = check_load_ceiling(load_ceiling) {
+                    // The refusal is decided; drop the mutex BEFORE the cause
+                    // probe so queued spawners (and --no-wait callers) never
+                    // sit behind seconds of evidence gathering.
                     guard.release();
+                    eprintln!(
+                        "{}",
+                        footprint_cause_evidence().unwrap_or_else(|| {
+                            "spawn-gate: footprint cause unavailable; load refusal unchanged"
+                                .to_string()
+                        })
+                    );
                     return Err(code);
                 }
                 if substrate == "headless" {
@@ -727,12 +737,9 @@ fn check_load_ceiling(max_load_per_cpu: f64) -> Result<(), i32> {
                  {max_load_per_cpu} x {cpus} cpus = {ceiling:.1}; refusing to spawn \
                  (--force to bypass)"
             );
-            eprintln!(
-                "{}",
-                footprint_cause_evidence().unwrap_or_else(|| {
-                    "spawn-gate: footprint cause unavailable; load refusal unchanged".to_string()
-                })
-            );
+            // No evidence probe here: it costs seconds in a subprocess, and
+            // this check runs inside the held gate mutex. The caller releases
+            // first, then gathers (run_gate); the Python twin does the same.
             Err(EXIT_LOAD_REFUSED)
         }
         None => {

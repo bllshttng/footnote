@@ -191,6 +191,9 @@ def _live_root_pids(
         rows = load_registry()
         if not getattr(rows, "complete", True):
             return roots, "worker registry incomplete"
+        # A broken import below (a renamed spawn_gate private) is a programming
+        # error, not an environment state: swallowing it here would report
+        # "worker root discovery unavailable" and misdiagnose every reading.
         for row in rows:
             if row.status not in LIVE_STATUSES:
                 if (
@@ -266,6 +269,8 @@ def _live_root_pids(
                 roots.add(pid)
             else:
                 return roots, "worker root liveness unavailable"
+    except ImportError:
+        raise
     except Exception:
         return roots, "worker root discovery unavailable"
     return roots, None
@@ -353,7 +358,14 @@ def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | 
     path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w+", encoding="utf-8", prefix=".fno-footprint-", delete=False
+            # errors="replace": ps command lines legally carry non-UTF-8 bytes
+            # (any process's argv may); one undecodable byte must degrade a
+            # command string, not kill the reading with a traceback.
+            mode="w+",
+            encoding="utf-8",
+            errors="replace",
+            prefix=".fno-footprint-",
+            delete=False,
         ) as output:
             path = Path(output.name)
             run_kwargs: dict[str, Any] = {
