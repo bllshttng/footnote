@@ -273,6 +273,9 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # boundary and must not become the generator - truncating there would make
     # the name a caller reasons about differ from the one the runtime registers.
     "name",
+    # Registry-label mutation and pane retasking remain Python-owned orchestration.
+    "rename",
+    "retask",
     # The cadence-deadline silence backstop. Pure Python: it reads the registry
     # and each row's transcript truth through fno.agents.sweep, writes nothing,
     # and has NO twin on the Rust client - so it must never auto-route to the
