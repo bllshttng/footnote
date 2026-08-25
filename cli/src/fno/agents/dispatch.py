@@ -5390,6 +5390,7 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
         model=ctx.model,
         node=ctx.node,
         to=ctx.to,
+        origin=ctx.origin,
     )
 
 
@@ -5869,6 +5870,7 @@ class _MailCtx:
     # reply-correlatable and dedupable like the name-lane path. None on paths that
     # do not carry a minted id (relay hops), keeping the envelope byte-identical.
     id: Optional[str] = None
+    origin: Optional[str] = None
 
 
 def _build_mail_ctx(
@@ -5877,8 +5879,14 @@ def _build_mail_ctx(
     provider_from: Optional[str],
     to: Optional[str] = None,
     id: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> _MailCtx:
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
+
+    The ``origin`` kwarg is caller-stated, and an in-process caller never
+    routes through the mail CLI's classify_origin, so the same floor binds
+    here (d-02625dda): an ambient agent identity cannot declare an origin
+    above peer, on any path into an envelope.
 
     ``from`` is the sender's canonical session handle (or the bare ``from_name`` when
     the caller is unregistered). ``model`` is the invoking session's real model,
@@ -5894,7 +5902,10 @@ def _build_mail_ctx(
     from fno.mail.envelope import harness_for_provider
 
     from_ = canonical_handle(from_session) if from_session else from_name
+    from fno.decide import enforce_origin_floor
+
     return _MailCtx(
+        origin=enforce_origin_floor(origin),
         from_=from_,
         harness=harness_for_provider(provider_from),
         model=resolve_self_model(),
@@ -6010,6 +6021,7 @@ def _mux_pane_send(
     gate: Optional[bool] = None,
     failure_out: Optional[list[str]] = None,
     review: bool = False,
+    origin: Optional[str] = None,
 ) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
@@ -6214,6 +6226,7 @@ def _mux_pane_send(
                     lane="mux-pane",
                     target_cwd=getattr(entry, "cwd", None),
                     sender=sender,
+                    origin=origin,
                     confirmed=confirmed,
                     source="daemon",
                 ),
@@ -6792,6 +6805,7 @@ def _mail_inject_claude(
     reason_out: Optional[list] = None,
     liveness_scaled: bool = False,
     harness: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
@@ -6879,6 +6893,8 @@ def _mail_inject_claude(
     ]
     if sender:
         argv += ["--sender", sender]
+    if origin:
+        argv += ["--origin", origin]
     timeout = _MAIL_INJECT_TIMEOUT_S
     if liveness_scaled:
         argv += ["--attempts", str(_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS)]
@@ -7320,7 +7336,11 @@ def wake_if_asleep_claude(token: str) -> tuple[bool, Optional[str]]:
 
 
 def _mail_inject_codex(
-    thread_id: str, text: str, *, reason_out: Optional[list] = None
+    thread_id: str,
+    text: str,
+    *,
+    reason_out: Optional[list] = None,
+    origin: Optional[str] = None,
 ) -> bool:
     """Inject ``text`` into a live codex session over the app-server daemon socket
     via the ``fno-agents mail-inject --harness codex`` verb (US8, node x-d899).
@@ -7350,8 +7370,11 @@ def _mail_inject_codex(
     if binary is None:
         return False
     try:
+        argv = [str(binary), "mail-inject", "--harness", "codex", "--session", thread_id]
+        if origin:
+            argv.extend(("--origin", origin))
         proc = subprocess.run(
-            [str(binary), "mail-inject", "--harness", "codex", "--session", thread_id],
+            argv,
             input=text,
             capture_output=True,
             text=True,
@@ -7372,6 +7395,7 @@ def _review_start_codex(
     audit_payload: str | None = None,
     audit_sender: str | None = None,
     audit_target_cwd: str | None = None,
+    origin: str | None = None,
 ) -> dict[str, object]:
     """Start an inline Codex review and preserve its structured outcome receipt."""
     import json
@@ -7396,6 +7420,7 @@ def _review_start_codex(
             ("--audit-payload", audit_payload),
             ("--audit-sender", audit_sender),
             ("--audit-target-cwd", audit_target_cwd),
+            ("--audit-origin", origin),
         ):
             if value is not None:
                 argv.extend((flag, value))
@@ -7515,6 +7540,7 @@ def _deliver_live(
             node=mail.node,
             to=mail.to,
             id=mail.id,
+            origin=mail.origin,
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
@@ -7637,6 +7663,7 @@ def _deliver_live(
                 harness=harness_for_provider(entry.harness),
                 model="unknown",
                 to=mail.from_,
+                origin="peer",
             )
     if _switchboard_exchange(
         entry.name,
@@ -7713,6 +7740,7 @@ def _queue_durable_fallback(
     reason: Optional[str] = None,
     mail_ctx: "Optional[_MailCtx]" = None,
     owner: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> "tuple[str, str]":
     """Write the <fno_mail> envelope to the durable bus.
 
@@ -7772,6 +7800,7 @@ def _queue_durable_fallback(
             # refusal above already proved durable_recipient is not None here.
             to=durable_recipient,
             id=msg_id,
+            origin=origin,
         )
     # `_build_mail_ctx` returns a `_MailCtx`, never None, and the branch above
     # fills one whenever the caller passed none, so the envelope is always
@@ -7785,6 +7814,7 @@ def _queue_durable_fallback(
         node=mail_ctx.node,
         to=mail_ctx.to,
         id=mail_ctx.id,
+        origin=mail_ctx.origin,
     )
     from fno import style as _style
 
@@ -7800,6 +7830,7 @@ def _queue_durable_fallback(
             provider_from=provider_from,
             from_session=from_session,
             owner=owner or DurableOwner.WAKE_DAEMON.value,
+            origin=mail_ctx.origin,
             # Count the raw body, not the wire wrapper: Rule 7 and the rolling
             # budget read the same string, so the row must too.
             word_count=_style.word_count(message),
@@ -7945,6 +7976,7 @@ def dispatch_send(
     *,
     registry_stamp_timeout_seconds: float = 1.0,
     budget_enforce: bool = True,
+    origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
@@ -8201,6 +8233,7 @@ def dispatch_send(
                 provider_from,
                 to=(durable_recipient or existing.short_id or None),
                 id=msg_id,
+                origin=origin,
             )
             reservation = _reserve_send_budget(
                 sender=mail_ctx.from_,
@@ -8553,6 +8586,7 @@ def dispatch_send(
                     provider_from,
                     to=timeout_recipient,
                     id=msg_id,
+                    origin=origin,
                 )
                 reservation = _reserve_send_budget(
                     sender=timeout_mail_ctx.from_,
@@ -8811,6 +8845,7 @@ def dispatch_send_to_project(
     any_: bool = False,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
     budget_enforce: bool = True,
+    origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Async send addressed to a project (anycast over the registry).
 
@@ -8857,6 +8892,7 @@ def dispatch_send_to_project(
             cwd=cwd,
             lock_timeout=lock_timeout,
             from_name=from_name,
+            origin=origin,
             **budget_kwargs,
         )
         return replace(result, recipient=res.recipient, to_project=project)
@@ -8907,6 +8943,7 @@ def dispatch_send_to_project(
             # US6: an explicit --to-project note deliberately chose the durable
             # project-inbox lane; the project's own drain owns it.
             owner=DurableOwner.INBOX_DRAIN.value,
+            origin=origin,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         budget.release(reservation)

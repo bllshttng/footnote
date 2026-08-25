@@ -2146,7 +2146,7 @@ def _send_machine_report(
     ``runner`` remains an injectable subprocess seam for the legacy unit tests.
     """
     if runner is not None:
-        argv = [*_fno(), "agents", "mail", "send"]
+        argv = [*_fno(), "agents", "mail", "send", "--origin", "recovery"]
         if to.startswith("project:"):
             argv += ["--to-project", to[len("project:"):]]
         else:
@@ -2180,6 +2180,7 @@ def _send_machine_report(
                     body,
                     cwd=Path.cwd(),
                     budget_enforce=False,
+                    origin="recovery",
                 )
             else:
                 result = dispatch_send_to_project(
@@ -2188,6 +2189,7 @@ def _send_machine_report(
                     cwd=Path.cwd(),
                     from_name=sender,
                     budget_enforce=False,
+                    origin="recovery",
                 )
         else:
             if sender is None:
@@ -2197,6 +2199,7 @@ def _send_machine_report(
                     provider=None,
                     cwd=Path.cwd(),
                     budget_enforce=False,
+                    origin="recovery",
                 )
             else:
                 result = dispatch_send(
@@ -2206,6 +2209,7 @@ def _send_machine_report(
                     cwd=Path.cwd(),
                     from_name=sender,
                     budget_enforce=False,
+                    origin="recovery",
                 )
     except DispatchAskError as exc:
         return False, str(exc)
