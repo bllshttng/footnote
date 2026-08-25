@@ -228,6 +228,16 @@ pub fn ensure_codex_daemon() -> Result<crate::harness_daemon::DaemonReceipt, Str
 /// Positive Codex app-server health: the control socket must complete the
 /// initialize handshake. Socket existence alone is deliberately insufficient.
 pub fn probe_codex_app_server(socket_path: &Path) -> bool {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let socket_path = socket_path.to_path_buf();
+        return std::thread::spawn(move || probe_codex_app_server_fresh(&socket_path))
+            .join()
+            .unwrap_or(false);
+    }
+    probe_codex_app_server_fresh(socket_path)
+}
+
+fn probe_codex_app_server_fresh(socket_path: &Path) -> bool {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1402,5 +1412,12 @@ mod tests {
 
         assert_eq!(result, Err("timeout"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn synchronous_probe_inside_runtime_does_not_start_a_nested_runtime() {
+        let missing =
+            std::env::temp_dir().join(format!("missing-codex-probe-{}", std::process::id()));
+        assert!(!probe_codex_app_server(&missing));
     }
 }

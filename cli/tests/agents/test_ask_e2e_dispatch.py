@@ -31,8 +31,15 @@ flaky claude e2e.
 from __future__ import annotations
 
 import os
+import base64
+import hashlib
+import json
+import socket
+import shutil
 import stat
 import subprocess
+import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -83,6 +90,93 @@ def _install_fake_codex(bin_dir: Path) -> None:
     path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _install_fake_codex_daemon(codex_home: Path) -> None:
+    """Serve the positive initialize handshake required before Codex spawn."""
+    control = codex_home / "app-server-control"
+    state_dir = codex_home / "app-server-daemon"
+    control.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    socket_path = control / "app-server-control.sock"
+    log_path = codex_home / "fake-daemon.log"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen()
+    listener.settimeout(0.2)
+
+    (state_dir / "fno-harness-daemon.json").write_text(
+        json.dumps({"pid": os.getpid(), "processStartTime": "test-fixture"}),
+        encoding="utf-8",
+    )
+
+    def _recv_until(conn: socket.socket, marker: bytes) -> bytes:
+        data = b""
+        while marker not in data:
+            chunk = conn.recv(1)
+            if not chunk:
+                break
+            data += chunk
+        return data
+
+    def _read_frame(conn: socket.socket) -> bytes:
+        first = conn.recv(2)
+        if len(first) != 2:
+            return b""
+        length = first[1] & 0x7F
+        if length == 126:
+            length = int.from_bytes(conn.recv(2), "big")
+        elif length == 127:
+            length = int.from_bytes(conn.recv(8), "big")
+        mask = conn.recv(4) if first[1] & 0x80 else b""
+        payload = b""
+        while len(payload) < length:
+            payload += conn.recv(length - len(payload))
+        if mask:
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        return payload
+
+    def _serve() -> None:
+        while socket_path.exists():
+            try:
+                conn, _ = listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            try:
+                with conn:
+                    request = _recv_until(conn, b"\r\n\r\n")
+                    key = next(
+                        line.split(b":", 1)[1].strip()
+                        for line in request.split(b"\r\n")
+                        if line.lower().startswith(b"sec-websocket-key:")
+                    )
+                    accept = base64.b64encode(
+                        hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest()
+                    )
+                    conn.sendall(
+                        b"HTTP/1.1 101 Switching Protocols\r\n"
+                        b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                        + b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+                    )
+                    payload = json.loads(_read_frame(conn))
+                    response = json.dumps({"id": payload["id"], "result": {}}).encode()
+                    conn.sendall(bytes([0x81, len(response)]) + response)
+                    log_path.write_text("initialize-ok\n", encoding="utf-8")
+            except Exception as exc:
+                log_path.write_text(f"server-error: {exc!r}\n", encoding="utf-8")
+
+    threading.Thread(target=_serve, daemon=True).start()
+
+
+@pytest.fixture
+def fake_codex_daemon_home(monkeypatch, request) -> Path:
+    home = Path(tempfile.mkdtemp(prefix="fno-cx-daemon-", dir="/tmp"))
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    _install_fake_codex_daemon(home)
+    request.addfinalizer(lambda: shutil.rmtree(home, ignore_errors=True))
+    return home
+
+
 # Per-provider fixture: (installer, env vars to set FAKE_*_SESSION_ID / _REPLY).
 # Keyed so the followup matrix below stays a single parametrized test.
 _PROVIDER_FAKES = {
@@ -107,7 +201,9 @@ _REPLY = "hello from fake codex"
 
 @requires_rust
 @pytest.mark.parametrize("provider", ["codex"])
-def test_spawn_once_python_vs_rust_parity(provider, tmp_path: Path, monkeypatch) -> None:
+def test_spawn_once_python_vs_rust_parity(
+    provider, tmp_path: Path, monkeypatch, fake_codex_daemon_home
+) -> None:
     """A `spawn --once` (the de-overloaded home of the old ask-create
     exchange, Task 1.3) produces the same stdout + exit code regardless of
     whether the dispatch runs through Python (`dispatch_spawn`) or the Rust
@@ -173,7 +269,8 @@ def test_spawn_once_python_vs_rust_parity(provider, tmp_path: Path, monkeypatch)
         f"exit-code drift: python={py_exit} rust={rs_exit}\n"
         f"py stdout: {py_stdout!r}\n"
         f"rust stdout: {rs_stdout!r}\n"
-        f"rust stderr: {completed.stderr}"
+        f"rust stderr: {completed.stderr}\n"
+        f"daemon: {(fake_codex_daemon_home / 'fake-daemon.log').read_text() if (fake_codex_daemon_home / 'fake-daemon.log').exists() else 'no connection'}"
     )
     assert py_stdout == rs_stdout, (
         f"stdout drift (user-visible bytes):\n"
@@ -232,7 +329,7 @@ def test_ask_unknown_agent_python_vs_rust_parity(tmp_path: Path, monkeypatch) ->
 
 @requires_rust
 def test_codex_ask_short_flags_match_long_through_rust_binary(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, fake_codex_daemon_home
 ) -> None:
     """ab-3ff64151 AC1 (the design's highest-risk mitigation): the phone shorts
     ``-p``/``-c``/``-t`` (and Task 1.3's ``-o``) must reach dispatch on the REAL
@@ -278,7 +375,10 @@ def test_codex_ask_short_flags_match_long_through_rust_binary(
         f"exit-code drift: short={short.returncode} long={long.returncode}\n"
         f"short stderr: {short.stderr}\nlong stderr: {long.stderr}"
     )
-    assert short.returncode == 0, f"short-flag spawn --once failed: {short.stderr}"
+    assert short.returncode == 0, (
+        f"short-flag spawn --once failed: {short.stderr}\n"
+        f"daemon: {(fake_codex_daemon_home / 'fake-daemon.log').read_text() if (fake_codex_daemon_home / 'fake-daemon.log').exists() else 'no connection'}"
+    )
     assert short.stdout == long.stdout, (
         "short flags must produce identical stdout to long flags through the "
         f"real binary:\n  short: {short.stdout!r}\n  long:  {long.stdout!r}\n"

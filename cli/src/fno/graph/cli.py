@@ -6049,9 +6049,6 @@ def cmd_view() -> None:
     except Exception as exc:
         typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    if not entries:
-        typer.echo("Error: canonical graph read returned no entries; refusing empty board", err=True)
-        raise typer.Exit(code=1)
     render_graph_html(entries, GRAPH_HTML)
     typer.echo(str(GRAPH_HTML))
 
@@ -6157,10 +6154,6 @@ def cmd_roadmap(
     except Exception as exc:
         typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    if not entries:
-        typer.echo("Error: canonical graph read returned no entries; refusing empty public output", err=True)
-        raise typer.Exit(code=1)
-
     offenders = public_title_leaks(public_projection_entries(entries, resolved_project))
     if offenders:
         typer.echo("Error: public title leak gate refused output:", err=True)
