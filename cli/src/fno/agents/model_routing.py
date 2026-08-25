@@ -1107,6 +1107,7 @@ class RouteRestoreError(RuntimeError):
 def route_settings_path_for(
     route_env: Optional[Mapping[str, str]],
     account_env: Optional[Mapping[str, str]] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
     """The ``--settings`` path a spawn carrying these overlays launches with.
 
@@ -1141,6 +1142,15 @@ def route_settings_path_for(
     from fno.agents.account_env import compose_worker_credentials
 
     merged, _ = compose_worker_credentials(overlay, route_env, {})
+    # An account or route spawn still owes the unrouted-model floor the plain
+    # case gets: the daemon fork carries the launching shell's env (so a
+    # shell-exported model claim reaches the serving session), and this file
+    # is the one channel that survives the fork. Only keys the overlay itself
+    # sets are spared - a route or account that names a model owns the slot;
+    # a bare config-dir account owns nothing, and the SCRUB_AUTH_VARS floor
+    # this file already writes never covered the model vars (round 3).
+    for key in unrouted_model_keys(env):
+        merged.setdefault(key, "")
     return materialize_route_settings(merged)
 
 

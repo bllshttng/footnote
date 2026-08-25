@@ -2679,10 +2679,18 @@ fn read_pr_info(
             &head_branch,
             head_sha,
         );
+        // Same capture-then-apply order as the external-read arm below: the
+        // predicate reads the pre-downgrade report, and the `reviewed` verdict
+        // needs the same corroboration term or the loop finishes DonePRGreen
+        // on a self-attested-only row the merge verb refuses (round 3: the
+        // solo lane - reviewers configured, no bots, no optional lane - takes
+        // this arm every time).
+        let self_attested_alone = coverage.rests_on_self_attestation_alone();
         coverage.apply_corroboration_policy(require_corroboration);
         (
             "none".to_string(),
-            reviewers_ok,
+            reviewers_ok
+                && CoverageReport::corroboration_term(require_corroboration, self_attested_alone),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -2920,7 +2928,7 @@ fn read_pr_info(
         // loop can finish a PR the merge gate refuses on the same row - the
         // two surfaces this repo keeps unified would split under the flag.
         let reviewed = (info.all_required_passed() || local_recovery)
-            && !(require_corroboration && self_attested_alone)
+            && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
             && unaddressed.is_empty()
             && reviewers_ok;
         (
@@ -5078,6 +5086,14 @@ impl CoverageReport {
             .count()
     }
 
+    /// The corroboration term of the `reviewed` verdict, shared by BOTH read
+    /// arms (external reads and login_skipped): DonePRGreen reads the field
+    /// and never consults coverage, so each arm must splice this term or the
+    /// loop can finish a PR the merge verb refuses on the same row.
+    fn corroboration_term(require_corroboration: bool, self_attested_alone: bool) -> bool {
+        !(require_corroboration && self_attested_alone)
+    }
+
     /// Whether every counted review verdict rests on the author's own
     /// (self_attested) local attestation: no GitHub App review, no second
     /// session. Unmeasured origins (Unknown) are NOT self-attestation, so an
@@ -6834,6 +6850,13 @@ pub(crate) fn resolve_review_inputs(
                 // documented repo opt-out, so a local Some(false) must override
                 // a global Some(true). Same overlay rule as required_bots.
                 merged.self_review_required = local.self_review_required;
+            }
+            if local.require_corroboration.is_some() {
+                // Same presence rule: a project-local policy flip is honored by
+                // load_settings_for_repo on the Python merge/status/doctor
+                // side, so omitting it here made the loop gate read the global
+                // file only and the two surfaces split on one config (round 3).
+                merged.require_corroboration = local.require_corroboration;
             }
             if !local.nudge_overrides.is_empty() {
                 // Without this line a project-local `[review.nudge]` (including
@@ -13226,6 +13249,37 @@ mod tests {
             "{:?}",
             shas
         );
+    }
+
+    #[test]
+    fn project_local_require_corroboration_overlays_the_global_file() {
+        // The per-field overlay merge listed every review field except
+        // require_corroboration, so a project-local flip was read from the
+        // GLOBAL file only and the loop gate finished DonePRGreen on a row
+        // the Python merge/status/doctor surfaces refused (round 3).
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.toml");
+        std::fs::write(&global, "[review]\nrequired_bots = []\n").unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".fno")).unwrap();
+        std::fs::write(
+            repo.join(".fno").join("config.toml"),
+            "[review]\nrequire_corroboration = true\n",
+        )
+        .unwrap();
+        let inputs = resolve_review_inputs(&repo, None, None, None, Some(&global), None);
+        assert_eq!(inputs.settings.require_corroboration, Some(true));
+    }
+
+    #[test]
+    fn the_corroboration_term_blocks_exactly_the_policy_held_row() {
+        // Both read arms splice CoverageReport::corroboration_term into the
+        // `reviewed` verdict; the term blocks one shape: policy on AND the
+        // whole count self-attested.
+        assert!(!CoverageReport::corroboration_term(true, true));
+        assert!(CoverageReport::corroboration_term(true, false));
+        assert!(CoverageReport::corroboration_term(false, true));
+        assert!(CoverageReport::corroboration_term(false, false));
     }
 
     #[test]
