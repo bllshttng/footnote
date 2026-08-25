@@ -168,7 +168,7 @@ for ((trial = 1; trial <= trials; trial++)); do
             esac
             [[ "$verdict" == pass ]] && continue
             echo "--- stress_trial_failure trial=$trial binary=$key ---" >&2
-            tail -40 "$trial_dir/$key.log" >&2
+            tail -160 "$trial_dir/$key.log" >&2
             echo "--- end stress_trial_failure trial=$trial binary=$key ---" >&2
         done
     fi
