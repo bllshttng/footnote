@@ -36,6 +36,8 @@ A	accepted forms: name, canonical handle, transport short id, or full session id
 A	agent name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	agent_status_stamp_failed	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
 A	an unsupported submit contract cannot carry a nonzero delay	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# msg-twin
+A	cargo-test:fno-agents-e2e	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# protocol: the preflight receipt scope both trust lists compare against; scripts/tests/test_preflight_parity.sh fails when the two lists or preflight.sh disagree
+A	cargo-test:fno-agents-unit	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# protocol: the preflight receipt scope both trust lists compare against; scripts/tests/test_preflight_parity.sh fails when the two lists or preflight.sh disagree
 A	direct needs model and effort placeholders	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	anthropic_default_haiku_model	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# protocol
 A	claim_idempotent_reacquired	py=cli/src/fno/claims/events.py|cli/src/fno/resume/receipt.py|cli/src/fno/scoreboard/fold.py;rs=crates/fno-agents/src/claims.rs	# protocol

@@ -24,8 +24,10 @@ PREFLIGHT_SCOPE = [
     "smoke",
     "rustfmt:fno-agents",
     "rustfmt:fno",
-    "cargo-test:fno-agents",
-    "cargo-test:fno",
+    "cargo-test:fno-agents-unit",
+    "cargo-test:fno-agents-e2e",
+    "cargo-test:fno-unit",
+    "cargo-test:fno-e2e",
     "squads-leak-guard:fno",
 ]
 
@@ -36,8 +38,8 @@ def receipt(
     candidate_sha: str = SHA,
     mode: str = "full",
     result: str = "passed",
-    steps_expected: int = 6,
-    steps_executed: int = 6,
+    steps_expected: int = 8,
+    steps_executed: int = 8,
     generation: int | float = 1,
     scope: list[str] | None = None,
 ) -> dict:
@@ -148,7 +150,7 @@ def test_type_specific_source_is_enforced() -> None:
         lambda event: event.update(source="test"),
         lambda event: event["data"].update(producer={"kind": "untrusted", "id": "x"}),
         lambda event: event["data"].update(command=["true"]),
-        lambda event: event["data"].update(scope=[f"fake-{i}" for i in range(6)]),
+        lambda event: event["data"].update(scope=[f"fake-{i}" for i in range(8)]),
     ],
 )
 def test_shape_valid_but_untrusted_receipt_cannot_satisfy_ship_gate(
@@ -557,11 +559,11 @@ def test_future_pass_cannot_shadow_later_appended_failure(tmp_path: Path) -> Non
     assert decision["coverage"]["malformed_lines"] == 1
 
 
-def test_optional_squads_guard_absence_keeps_actual_five_step_scope_eligible(
+def test_optional_squads_guard_absence_keeps_the_base_scope_eligible(
     tmp_path: Path,
 ) -> None:
     scope = PREFLIGHT_SCOPE[:-1]
-    event = receipt(scope=scope, steps_expected=5, steps_executed=5)
+    event = receipt(scope=scope, steps_expected=len(scope), steps_executed=len(scope))
     journal = tmp_path / "events.jsonl"
     write(journal, event)
 

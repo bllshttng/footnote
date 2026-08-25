@@ -466,10 +466,60 @@ impl Drop for ClientHarness {
 /// A `fno --server` child, always killed on test exit.
 pub struct ServerProc(pub std::process::Child);
 
+pub struct ServerTermination {
+    pub pid: u32,
+    pub status: std::process::ExitStatus,
+}
+
+impl ServerProc {
+    /// Stop the server and COLLECT it, returning the exit status as proof.
+    ///
+    /// This replaced a `pkill -9 -f <socket path>` plus a 300ms sleep. The
+    /// pattern match could reach any process carrying that path and the sleep
+    /// stood in for a reap it never performed, which is the nondeterminism the
+    /// symptoms below kept tripping over. Owning the child makes the wait a
+    /// real collection.
+    ///
+    /// KNOWN LIMITATION, measured 2026-08-25, read this before trusting a green
+    /// persistence symptom. `server.rs` flushes the topology on its SIGTERM
+    /// shutdown path, so the graceful stop WRITES state that a symptom test may
+    /// be reading back as proof it was already on disk. A SIGKILL variant would
+    /// close that, and it is not a drop-in: switching this to `kill` makes
+    /// `symptom_hand_split_survives_restart` fail deterministically (3 of 3),
+    /// while the old `pkill -9` path still passes, so the difference is NOT the
+    /// signal and the cause is not yet known. Closing this means finding that
+    /// difference first, not swapping the signal.
+    pub fn terminate_and_wait(mut self) -> ServerTermination {
+        let pid = self.0.id();
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Some(status) = self.0.try_wait().expect("owned server status") {
+                return ServerTermination { pid, status };
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        // Escalation is not free and it used to be invisible: a `forced` field
+        // recorded it and nothing ever read the field, so a server that stopped
+        // reaching its SIGTERM handler cost three silent seconds per restart
+        // and every test still passed. Not an assertion - a slow shutdown on a
+        // loaded runner is legitimate, and failing on it would be noise in the
+        // stress trial count. A line on stderr is the right weight.
+        eprintln!("server pid {pid} ignored SIGTERM for 3s; escalating to SIGKILL");
+        let _ = self.0.kill();
+        let status = self.0.wait().expect("owned server waits after escalation");
+        ServerTermination { pid, status }
+    }
+}
+
 impl Drop for ServerProc {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 }
 

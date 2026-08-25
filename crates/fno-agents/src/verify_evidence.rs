@@ -500,12 +500,14 @@ fn valid_receipt(event: &Value) -> bool {
 // this path rejecting a green preflight, which is the silent-discard failure the
 // widening existed to close. Keep the two lists in step; a leg added to
 // preflight.sh must land in BOTH optional sets or receipts go untrusted here.
-const PREFLIGHT_BASE_SCOPE: [&str; 5] = [
+const PREFLIGHT_BASE_SCOPE: [&str; 7] = [
     "smoke",
     "rustfmt:fno-agents",
     "rustfmt:fno",
-    "cargo-test:fno-agents",
-    "cargo-test:fno",
+    "cargo-test:fno-agents-unit",
+    "cargo-test:fno-agents-e2e",
+    "cargo-test:fno-unit",
+    "cargo-test:fno-e2e",
 ];
 
 // Legs preflight adds when the tree calls for them: allowed, never required.
@@ -1181,8 +1183,10 @@ mod tests {
                     "smoke",
                     "rustfmt:fno-agents",
                     "rustfmt:fno",
-                    "cargo-test:fno-agents",
-                    "cargo-test:fno",
+                    "cargo-test:fno-agents-unit",
+                    "cargo-test:fno-agents-e2e",
+                    "cargo-test:fno-unit",
+                    "cargo-test:fno-e2e",
                     "squads-leak-guard:fno"
                 ],
                 "started_at": "2026-07-26T01:00:00Z",
@@ -1191,8 +1195,8 @@ mod tests {
                 "result": result,
                 "producer": {"kind": "preflight", "id": "h:1"},
                 "generation": 1,
-                "steps_expected": 6,
-                "steps_executed": 6
+                "steps_expected": 8,
+                "steps_executed": 8
             }
         })
     }
@@ -1209,13 +1213,15 @@ mod tests {
 
     #[test]
     fn gate_accepts_every_leg_preflight_emits_and_refuses_an_unknown_one() {
-        // The full set this tree emits: five base legs plus both optional ones.
+        // The full set this tree emits: seven base legs plus both optional ones.
         assert!(gate_eligible_receipt(&receipt_event_with_scope(vec![
             "smoke",
             "rustfmt:fno-agents",
             "rustfmt:fno",
-            "cargo-test:fno-agents",
-            "cargo-test:fno",
+            "cargo-test:fno-agents-unit",
+            "cargo-test:fno-agents-e2e",
+            "cargo-test:fno-unit",
+            "cargo-test:fno-e2e",
             "squads-leak-guard:fno",
             "tracker-gates:fno",
         ])));
@@ -1224,23 +1230,27 @@ mod tests {
             "smoke",
             "rustfmt:fno-agents",
             "rustfmt:fno",
-            "cargo-test:fno-agents",
-            "cargo-test:fno",
+            "cargo-test:fno-agents-unit",
+            "cargo-test:fno-agents-e2e",
+            "cargo-test:fno-unit",
+            "cargo-test:fno-e2e",
         ])));
         // A missing base leg is not a green preflight.
         assert!(!gate_eligible_receipt(&receipt_event_with_scope(vec![
             "smoke",
             "rustfmt:fno-agents",
             "rustfmt:fno",
-            "cargo-test:fno-agents",
+            "cargo-test:fno-agents-unit",
         ])));
         // An unknown leg is refused rather than widening the gate by accident.
         assert!(!gate_eligible_receipt(&receipt_event_with_scope(vec![
             "smoke",
             "rustfmt:fno-agents",
             "rustfmt:fno",
-            "cargo-test:fno-agents",
-            "cargo-test:fno",
+            "cargo-test:fno-agents-unit",
+            "cargo-test:fno-agents-e2e",
+            "cargo-test:fno-unit",
+            "cargo-test:fno-e2e",
             "not-a-real-leg:fno",
         ])));
         // A duplicate leg is refused: it pads the set without running anything.
@@ -1249,8 +1259,10 @@ mod tests {
             "smoke",
             "rustfmt:fno-agents",
             "rustfmt:fno",
-            "cargo-test:fno-agents",
-            "cargo-test:fno",
+            "cargo-test:fno-agents-unit",
+            "cargo-test:fno-agents-e2e",
+            "cargo-test:fno-unit",
+            "cargo-test:fno-e2e",
         ])));
     }
 
@@ -1516,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_accepts_actual_five_step_scope_without_optional_squads_guard() {
+    fn gate_accepts_the_base_scope_without_the_optional_squads_guard() {
         let mut event = receipt_event(
             "2026-07-26T03:00:00Z",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1524,8 +1536,9 @@ mod tests {
             "passed",
         );
         event["data"]["scope"].as_array_mut().unwrap().pop();
-        event["data"]["steps_expected"] = json!(5);
-        event["data"]["steps_executed"] = json!(5);
+        let legs = event["data"]["scope"].as_array().unwrap().len() as i64;
+        event["data"]["steps_expected"] = json!(legs);
+        event["data"]["steps_executed"] = json!(legs);
 
         assert!(valid_receipt(&event));
         assert!(gate_eligible_receipt(&event));

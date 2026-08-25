@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use common::{connect_with_retry, spawn_server, ClientHarness, FakeClient, Scratch};
 use fno::proto::{
-    read_msg_sync, write_msg_sync, Cell, ClientMsg, ControlVerb, Frame, ServerMsg, BUILD_VERSION,
-    PROTO_VERSION,
+    read_msg_sync, write_msg_sync, Cell, ClientMsg, ControlVerb, Frame, ProtoError, ServerMsg,
+    BUILD_VERSION, PROTO_VERSION,
 };
 
 /// Serializes this file's PTY-spawning tests. `cargo test --all-targets` runs
@@ -64,12 +64,20 @@ fn pane_send(scratch: &Scratch, pane: u64, bytes: &[u8]) {
         },
     )
     .unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    match read_msg_sync::<_, ServerMsg>(&mut stream) {
-        Ok(ServerMsg::Ok) => {}
-        other => panic!("pane send failed: {other:?}"),
+    stream.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match read_msg_sync::<_, ServerMsg>(&mut stream) {
+            Ok(ServerMsg::Ok) => break,
+            Err(ProtoError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "pane send response did not arrive within 10s"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            other => panic!("pane send failed: {other:?}"),
+        }
     }
 }
 

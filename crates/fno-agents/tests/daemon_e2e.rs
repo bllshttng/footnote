@@ -38,10 +38,97 @@ fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+/// A daemon started by a test, killed and reaped when the test's binding goes
+/// out of scope.
+///
+/// Every daemon here runs with `FNO_AGENTS_IDLE_EXIT_SECS=3600`, so one that is
+/// spawned and never waited on outlives the whole binary. Measured 2026-08-25:
+/// a single run of this file left two live daemons behind, and the stress
+/// harness runs the file twenty times in a row, so one CI job ended with about
+/// forty of them alive at once. That is the pid-exhaustion shape this suite
+/// exists to close, and per-test discipline had already missed it three times.
+/// Reaping in `Drop` makes the obligation structural: a test added later cannot
+/// forget.
+///
+/// The reap asserts the POSITIVE marker. `wait` returns the child's exit
+/// status, so a returning `Drop` means the daemon was collected, not merely
+/// signalled. A test that has already waited leaves an `ESRCH` kill and an
+/// error from the second wait, both harmless.
+struct DaemonChild(std::process::Child);
+
+impl std::ops::Deref for DaemonChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for DaemonChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for DaemonChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Kill a daemon this test spawned but does not hold as a `Child`, then REAP it.
+///
+/// `restart_daemon` spawns the successor from inside this process, so it IS our
+/// child and there is simply no `Child` handle to give [`DaemonChild`]. Killing
+/// without reaping leaves a zombie, and a zombie is invisible to the leak
+/// counter the stress harness runs: `pgrep -f` matches on a command line, and a
+/// zombie's is `<defunct>`. So `daemons_left=0` would have read clean over
+/// exactly the defunct-process exhaustion this suite exists to prevent.
+///
+/// The first attempt here polled `kill(pid, 0)` after a SIGTERM, which cannot
+/// work for the same reason from the other side: a zombie still answers signal
+/// zero, so the poll read "alive" for a process that had already exited and
+/// spent its whole budget every time (10004ms, 10019ms, 10026ms across three
+/// runs). `waitpid` is the operation that actually settles it.
+fn terminate_untracked(pid: u32) {
+    // Teardown, not a shutdown test: every assertion has already run and the
+    // probe marker was written before the exec, so the graceful path buys
+    // nothing but seconds.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut status: libc::c_int = 0;
+        // WNOHANG so a child tokio's process driver already collected returns
+        // -1/ECHILD immediately rather than blocking forever on a wait that
+        // can never be satisfied. Reaped by us or reaped by tokio are the same
+        // outcome here; only "still there" is a failure.
+        let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if reaped != 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon {pid} was still unreaped 10s after SIGKILL"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Spawn the daemon as a tracked child (so the test holds its PID) and wait for
 /// the socket. The worker-bin override is passed through the env.
-fn start_daemon(home: &AgentsHome) -> std::process::Child {
+fn start_daemon(home: &AgentsHome) -> DaemonChild {
     start_daemon_env(home, &[])
+}
+
+fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
+    let seen = count_events(home, "daemon_started");
+    let mut cmd = Command::new(daemon_bin);
+    cmd.env("FNO_AGENTS_HOME", home.root())
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600");
+    let child = cmd.spawn().expect("daemon spawns");
+    wait_for(&home.supervisor_sock(), Duration::from_secs(10));
+    wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
+    DaemonChild(child)
 }
 
 /// Like [`start_daemon`] but with extra env on the daemon process. Used by tests
@@ -49,7 +136,8 @@ fn start_daemon(home: &AgentsHome) -> std::process::Child {
 /// B) would otherwise settle -- e.g. `FNO_AGENTS_NO_STARTUP_RECONCILE=1` to keep
 /// an artificially-seeded mid-flight source row intact for a promote-admission
 /// assertion.
-fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> std::process::Child {
+fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
+    let seen = count_events(home, "daemon_started");
     let mut cmd = Command::new(DAEMON_BIN);
     cmd.env("FNO_AGENTS_HOME", home.root())
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
@@ -59,7 +147,38 @@ fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> std::process::
     }
     let child = cmd.spawn().expect("daemon spawns");
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
-    child
+    wait_for_event_count(home, "daemon_started", seen + 1, Duration::from_secs(10));
+    DaemonChild(child)
+}
+
+/// How many lines of the daemon's event log carry `needle`.
+fn count_events(home: &AgentsHome, needle: &str) -> usize {
+    std::fs::read_to_string(home.events_jsonl())
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(needle))
+        .count()
+}
+
+/// Wait until `needle` has been written at least `at_least` times.
+///
+/// [`wait_for_event`] asks whether the log CONTAINS the needle, which is a
+/// no-op for every daemon after the first under one home: the log is
+/// append-only, so a `daemon_started` line left by the previous daemon
+/// satisfies it instantly and the caller races a socket the new daemon has not
+/// accepted on yet. Counting lines makes the wait about THIS spawn.
+fn wait_for_event_count(home: &AgentsHome, needle: &str, at_least: usize, budget: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < budget {
+        if count_events(home, needle) >= at_least {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "event {needle} reached {} of {at_least} within {budget:?}",
+        count_events(home, needle)
+    );
 }
 
 /// Wait for `needle` to appear in the daemon's event log.
@@ -80,6 +199,54 @@ fn wait_for_event(home: &AgentsHome, needle: &str, budget: Duration) {
         std::thread::sleep(Duration::from_millis(25));
     }
     panic!("event never appeared within {budget:?}: {needle}");
+}
+
+fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, budget: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < budget {
+        let events: Vec<serde_json::Value> = std::fs::read_to_string(home.events_jsonl())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let started = events.iter().position(|event| {
+            event["type"] == "daemon_started"
+                && event["data"]["pid"].as_u64() == Some(successor_pid as u64)
+        });
+        let sweeps: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                (event["type"] == "startup_reconcile_done").then_some(index)
+            })
+            .collect();
+        if let Some(started) = started {
+            // `startup_reconcile_done` carries no pid, so the successor's
+            // sweep can only be named positionally: incumbent first,
+            // successor second. That reading is weaker than it looks when a
+            // third daemon sweeps, and an earlier version of this code
+            // asserted `sweeps.len() <= 2` to say so out loud. That assert was
+            // wrong: the calling test documents a third daemon reaching the
+            // accept loop as LEGITIMATE ("a verb in the burst can legitimately
+            // win the lock ahead of restart's own child"), and the assert sits
+            // inside this poll loop, so a legal outcome became an unwaitable
+            // panic and a flake source in the 20-trial job.
+            //
+            // Closing the weakness for real means putting a pid on the event.
+            // Until then this reads index 1 and does not pretend to more.
+            if let Some(successor_sweep) = sweeps.get(1) {
+                assert!(
+                    started < *successor_sweep,
+                    "daemon successor {successor_pid} started after its startup sweep; event_order={events:?}"
+                );
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "successor {successor_pid} did not produce a positive daemon_started-before-startup_reconcile_done order within {budget:?}"
+    );
 }
 
 /// Every pid that ever reached the accept loop under this home.
@@ -114,6 +281,53 @@ fn fake_daemon_bin(home: &AgentsHome) -> PathBuf {
     .expect("write fake daemon");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("chmod fake daemon");
+    path
+}
+
+/// Quote `value` as one single-quoted shell word.
+///
+/// The escape is `'\''`: close, escaped quote, reopen. What stood here emitted
+/// `'\"'\"'` - the `'"'"'` idiom, which is itself perfectly valid, but with two
+/// stray BACKSLASHES in the Rust literal that produced it. Those turn the
+/// rewritten apostrophe into a double quote, so a path or value containing one
+/// produced a wrapper whose meaning had quietly changed, surfacing much later
+/// as a 10s socket timeout that named nothing.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn daemon_env_bin(
+    home: &AgentsHome,
+    label: &str,
+    marker: Option<&Path>,
+    extra: &[(&str, &str)],
+) -> PathBuf {
+    let path = home.root().join(format!("{label}-daemon.sh"));
+    // Only the worker-bin override is cleared, and only because the export two
+    // lines down replaces it. The delay variable is deliberately NOT unset: it
+    // is the thing the probe MEASURES, and clearing it first made the sibling's
+    // `delay=unset` a constant this test printed about itself. With the unset
+    // gone the printf reports the environment the daemon actually handed down,
+    // so a leak has somewhere to show up.
+    let mut script = String::from("#!/bin/sh\nunset FNO_AGENTS_WORKER_BIN\n");
+    script.push_str(&format!(
+        "export FNO_AGENTS_WORKER_BIN={}\n",
+        shell_quote(WORKER_BIN),
+    ));
+    for (key, value) in extra {
+        script.push_str(&format!("export {key}={}\n", shell_quote(value)));
+    }
+    if let Some(marker) = marker {
+        script.push_str(&format!(
+            "printf '%s delay=%s pid=%s\\n' '{}' \"${{FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS:-unset}}\" \"$$\" >> {}\n",
+            label,
+            shell_quote(&marker.display().to_string()),
+        ));
+    }
+    script.push_str(&format!("exec {} \"$@\"\n", shell_quote(DAEMON_BIN)));
+    std::fs::write(&path, script).expect("write environment probe daemon");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod environment probe daemon");
     path
 }
 
@@ -449,8 +663,12 @@ async fn client_declines_to_spawn_while_the_singleton_lock_is_held() {
 async fn restart_leaves_exactly_one_daemon(rows: usize) {
     let home = short_home();
     home.ensure_root().unwrap();
-    let daemon_bin = PathBuf::from(DAEMON_BIN);
-    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let daemon_bin = daemon_env_bin(
+        &home,
+        "restart-storm",
+        None,
+        &[("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000")],
+    );
 
     for i in 0..rows {
         seed_codex_source(
@@ -464,18 +682,17 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     // Hold the successor's startup sweep open. Post-fix this does not delay
     // serving at all, which is the whole point -- pre-fix it is the window in
     // which the successor is silent and every client below reads that silence
-    // as "no daemon" and forks its own. Inherited by the daemon `restart`
-    // spawns, which is why it goes on the test process rather than on a child.
-    std::env::set_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000");
+    // as "no daemon" and forks its own. The seam belongs only to the wrapper
+    // used for the intended successor, never to this test process.
 
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
+    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
 
     // The storm: a restart and a burst of ordinary client verbs at the same
     // moment. Every verb routes through `ensure_daemon`, which is the site that
     // used to treat a failed connect as licence to fork.
     const CONCURRENT_VERBS: u64 = 8;
-    let storm_started = Instant::now();
     let restart = {
         let h = home.clone();
         let b = daemon_bin.clone();
@@ -516,11 +733,6 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
             Err(e) => failures.push(format!("task join failed: {e}")),
         }
     }
-    // Clear the process-wide seam BEFORE the first assertion. Every panic
-    // between the set and the clear leaks a 3s startup delay into every daemon
-    // a later test in this binary spawns, so nothing that can panic may sit in
-    // between -- which is why the joins above collect rather than expect.
-    std::env::remove_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS");
     let outcome = restart_result
         .expect("restart task joins")
         .expect("restart over a large roster succeeds");
@@ -529,7 +741,8 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     // is serving with a fresh positive probe inside the same latency window,
     // instead of requiring one raced verb to win scheduler timing. The old
     // awaited-startup implementation still cannot answer this before the 3s
-    // delay, so the 2.5s discriminator below remains load-bearing.
+    // delay. The 2.5s discriminator this sentence used to point at is gone; the
+    // positive probe below is now the whole proof.
     let post_restart = call(
         &home,
         &daemon_bin,
@@ -542,7 +755,11 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
         "the restarted daemon rejected the positive probe: {:?}",
         post_restart.error()
     );
-    let storm_took = storm_started.elapsed();
+    wait_for_successor_reconcile_order(&home, outcome.new_pid, Duration::from_secs(10));
+    println!(
+        "daemon_restart_served_during_sweep successor_pid={} rows={} answered={} teardown_casualties={}",
+        outcome.new_pid, rows, answered, teardown_casualties
+    );
     // The teardown shapes, named exhaustively so that anything else still
     // fails this test. All three describe one event: the incumbent's socket
     // went away with a request in flight. Which one surfaces depends on where
@@ -559,22 +776,6 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
              racing the teardown: {f}"
         );
     }
-    // The discriminating assertion, and the reason it is a LATENCY bound rather
-    // than a success count or a process count. Neither of those can fail on the
-    // old code: the flock already forced one supervisor, and the client's 10s
-    // budget still connected eventually, so both stayed green over a successor
-    // nobody could talk to for seconds. Only the time to answer moves. Measured
-    // on this test: 6.2s with the sweep awaited before accept, 176ms with it
-    // concurrent. Pre-fix the successor cannot answer before its own 3s seam
-    // elapses, so any bound under 3s separates the two. 2.5s takes the widest
-    // margin available on a slow runner while still failing the old ordering.
-    assert!(
-        storm_took < Duration::from_millis(2500),
-        "a restart storm over {rows} rows must clear in under 2.5s; took \
-         {storm_took:?} ({answered} raced verbs answered, {teardown_casualties} \
-         raced teardown, failures: {failures:?})"
-    );
-
     assert_eq!(
         outcome.old_pid,
         Some(incumbent_pid),
@@ -630,6 +831,54 @@ async fn restart_over_a_large_roster_leaves_exactly_one_daemon() {
     // 28 rows is the size at which the operator's fleet actually broke. Eight
     // rows the week before did not.
     restart_leaves_exactly_one_daemon(28).await;
+}
+
+#[tokio::test]
+async fn daemon_child_env_isolated_probe() {
+    let intended_home = short_home();
+    let sibling_home = short_home();
+    intended_home.ensure_root().unwrap();
+    sibling_home.ensure_root().unwrap();
+    let marker = intended_home.root().join("daemon-env-probe.log");
+    let intended_bin = daemon_env_bin(
+        &intended_home,
+        "intended",
+        Some(&marker),
+        &[("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000")],
+    );
+    let sibling_bin = daemon_env_bin(&sibling_home, "sibling", Some(&marker), &[]);
+
+    let mut incumbent = start_daemon(&intended_home);
+    let restart = {
+        let home = intended_home.clone();
+        let bin = intended_bin.clone();
+        tokio::spawn(async move { fno_agents::client::restart_daemon(&home, &bin, false).await })
+    };
+    let mut sibling = start_daemon_with_bin(&sibling_home, &sibling_bin);
+    let outcome = restart.await.unwrap().expect("probe restart succeeds");
+    let _ = incumbent.wait();
+    terminate_untracked(outcome.new_pid);
+    let sibling_pid = sibling.id();
+    unsafe { libc::kill(sibling_pid as libc::pid_t, libc::SIGTERM) };
+    let _ = sibling.wait();
+
+    let probe = std::fs::read_to_string(&marker).expect("daemon env probe marker");
+    assert!(
+        probe.contains("intended delay=3000"),
+        "intended successor did not receive its delay seam: {probe}"
+    );
+    assert!(
+        probe.contains("sibling delay=unset"),
+        "daemon_child_env_isolated expected sibling without delay; probe={probe}"
+    );
+    println!(
+        "daemon_child_env_isolated intended_pid={} sibling_pid={} marker={}",
+        outcome.new_pid,
+        sibling_pid,
+        marker.display()
+    );
+    std::fs::remove_dir_all(intended_home.root()).ok();
+    std::fs::remove_dir_all(sibling_home.root()).ok();
 }
 
 /// status (Wave 5, US6.10, AC10-ERR): with no daemon running, the `fno-agents
@@ -1096,8 +1345,7 @@ async fn restart_when_down_starts_fresh() {
     // with no error and old_pid == None.
     let home = short_home();
     home.ensure_root().unwrap();
-    let daemon_bin = PathBuf::from(DAEMON_BIN);
-    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let daemon_bin = daemon_env_bin(&home, "restart-when-down", None, &[]);
 
     let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin, false)
         .await
@@ -1120,7 +1368,7 @@ async fn restart_force_recovers_a_wedged_holder() {
     // operator kill: SIGKILL the holder before any probe, fresh daemon serves.
     let home = short_home();
     home.ensure_root().unwrap();
-    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let daemon_bin = daemon_env_bin(&home, "restart-force", None, &[]);
     let mut daemon = start_daemon(&home);
     let wedged_pid = daemon.id();
 
@@ -1158,7 +1406,7 @@ async fn restart_force_recovers_a_wedged_holder() {
     );
 
     // The recovery: one verb, no operator kill.
-    let outcome = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
+    let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin, true)
         .await
         .expect("--force recovers the wedge");
     assert!(outcome.forced, "the transcript records a kill, not a drain");
@@ -1199,7 +1447,7 @@ async fn restart_force_refuses_to_signal_a_recycled_pid() {
     // SURVIVING the verb that had every reason to kill it.
     let home = short_home();
     home.ensure_root().unwrap();
-    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let daemon_bin = daemon_env_bin(&home, "restart-recycled", None, &[]);
 
     // A live, unrelated process the corrupt lockfile will name. Start time "1"
     // never matches a real process, so the pid-reuse guard must refuse it.
@@ -1209,7 +1457,7 @@ async fn restart_force_refuses_to_signal_a_recycled_pid() {
         .expect("spawn sleep");
     std::fs::write(home.supervisor_lock(), format!("{} 1\n", stranger.id())).unwrap();
 
-    let outcome = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
+    let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin, true)
         .await
         .expect("force-with-recycled-pid still restarts");
     assert!(!outcome.forced, "no kill was performed");
@@ -1237,7 +1485,7 @@ async fn restart_force_refuses_to_signal_a_recycled_pid() {
         libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
     }
     std::thread::sleep(Duration::from_millis(300));
-    let outcome2 = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
+    let outcome2 = fno_agents::client::restart_daemon(&home, &daemon_bin, true)
         .await
         .expect("force-with-pid-only still restarts");
     assert!(!outcome2.forced, "no kill on a startless lockfile record");
@@ -1561,6 +1809,20 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "pre-break list failed: {stdout}");
     assert!(stdout.contains("worker-alpha"), "row missing: {stdout}");
+
+    // Wait for the startup sweep to LAND before breaking anything. The sweep
+    // runs concurrently with the accept loop and it WRITES the registry under
+    // the same advisory lock readers take (daemon.rs, `reconcile_on_start`), so
+    // a break written while it is still in flight is simply overwritten and the
+    // list that follows succeeds over a registry that is no longer broken.
+    //
+    // That is not hypothetical. This test failed 4 of 20 stress trials on a CI
+    // runner, always this test and always with a successful payload, while the
+    // same 20 trials passed on a developer machine: the race is lost only when
+    // the suite runs fast enough to reach the write before the sweep. Its
+    // sibling `registry_lookup_distinguishes_unreadable_from_absent` already
+    // waits for this event, which is why the same shape is stable there.
+    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
 
     // Break the registered lane out from under the running daemon.
     write_divergent_registry(&home);

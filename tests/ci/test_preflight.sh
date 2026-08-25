@@ -94,7 +94,7 @@ if [[ "${1:-}" == "audit" ]]; then
         exit 1
     fi
 fi
-if [[ "${PREFLIGHT_TEST_FAIL_FNO_TEST:-0}" == "1" && "${1:-}" == "test" && "$PWD" == */fno ]]; then
+if [[ "${PREFLIGHT_TEST_FAIL_FNO_TEST:-0}" == "1" && "${1:-}" == "test" && "$PWD" == */fno && "$*" == *"--test-threads=1"* ]]; then
     echo "stub: cargo test (fno) forced red" >&2
     exit 1
 fi
@@ -193,7 +193,7 @@ out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "exit 0 on green" || fail "expected 0 got $rc: $out"
 grep <<<"$out" -q "GREEN - safe to push" && ok "reports GREEN" || fail "no GREEN line"
 grep <<<"$out" -q "cargo fmt --check (fno-agents" && ok "fmt leg in summary (AC3-HP)" || fail "no fmt leg"
-grep <<<"$out" -q "cargo test --all-targets (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
+grep <<<"$out" -q "cargo test --lib --bins (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
 grep <<<"$out" -q "ADVISORY" && ok "audit ADVISORY row present" || fail "no ADVISORY row"
 jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.result == "passed" and .data.generation >= 1' \
@@ -357,7 +357,7 @@ rm -f "$(cur_att)"
 out="$(PREFLIGHT_TEST_FAIL_FNO_TEST=1 run_pf --force 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && ok "cargo-only red exits non-zero" || fail "expected red got $rc: $out"
 [[ -f "$LEGREC" ]] && ok "RED wrote the leg record" || fail "no leg record after RED"
-[[ "$(cat "$LEGREC")" == "cargo-test:fno" ]] && ok "record names exactly cargo-test:fno" \
+[[ "$(cat "$LEGREC")" == "cargo-test:fno-e2e" ]] && ok "record names exactly cargo-test:fno-e2e" \
     || fail "record wrong: $(cat "$LEGREC")"
 
 echo "== --retry-failed honors the leg record: smoke skipped, only the red leg re-runs =="
@@ -366,9 +366,9 @@ out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "leg-scoped retry passes" || fail "expected 0 got $rc: $out"
 grep <<<"$out" -q "smoke suite (skipped - not in the retry leg record)" \
     && ok "smoke leg skipped" || fail "smoke leg ran: $out"
-grep <<<"$out" -q "cargo test --all-targets (fno-agents) (skipped - not in the retry leg record)" \
+grep <<<"$out" -q "cargo test explicit integration targets --test-threads=1 (fno-agents) (skipped - not in the retry leg record)" \
     && ok "untouched cargo leg skipped" || fail "fno-agents leg ran: $out"
-grep <<<"$out" -q "=== cargo test --all-targets (fno) ===" \
+grep <<<"$out" -q "=== cargo test explicit integration targets --test-threads=1 (fno) ===" \
     && ok "the failed leg re-ran" || fail "failed leg did not run: $out"
 [[ ! -f "$(cur_att)" ]] && ok "leg-scoped subset mints no attestation" || fail "subset minted an attestation"
 jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
