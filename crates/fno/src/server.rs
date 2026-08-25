@@ -526,6 +526,15 @@ enum CoreMsg {
         name: String,
         reply: ControlReply,
     },
+    TabClose {
+        squad: PaneTarget,
+        tab: TabSel,
+        force: bool,
+        /// Fresh registry rows for the unforced occupancy guard. `None` is
+        /// either an unreadable registry or the deliberate forced bypass.
+        agents: Option<Vec<RegistryAgent>>,
+        reply: ControlReply,
+    },
     LayoutGet {
         scope: LayoutScope,
         /// (x-1499) Whether the reply carries the per-pane worker join the
@@ -3410,6 +3419,93 @@ impl Core {
         }
         self.push_layout(true);
         Ok(())
+    }
+
+    /// Close one resolved tab after every pre-mutation guard has passed. This
+    /// is the single cascade used by both the interactive command and the
+    /// script control verb, so reaping, member cleanup, persistence cleanup,
+    /// template cleanup, and viewer re-anchoring cannot drift.
+    fn close_tab_cascade(
+        &mut self,
+        sid: u64,
+        ti: usize,
+    ) -> Option<(TabId, Vec<u64>, RemoveOutcome)> {
+        let (tid, pids) = {
+            let sq = self.session.squad(sid)?;
+            let tab = sq.tabs.get(ti)?;
+            (tab.id, tree::leaves(&tab.root))
+        };
+        let ctxs: Vec<_> = pids
+            .iter()
+            .filter_map(|&pid| self.member_ctx(pid))
+            .collect();
+        let ident = self.squad_identity(sid);
+        for &pid in &pids {
+            self.reap_pane(pid);
+        }
+        let outcome = self.session.remove_tab(sid, ti);
+        for ctx in ctxs {
+            self.reconcile_member_close(Some(ctx), false);
+        }
+        if matches!(
+            outcome,
+            RemoveOutcome::SquadRemoved | RemoveOutcome::SessionEmpty
+        ) {
+            self.squad_members.remove(&sid);
+            if let Some((name, key)) = ident {
+                self.persist_remove(&name, &key);
+            }
+        }
+        if matches!(outcome, RemoveOutcome::SessionEmpty) {
+            self.template_specs.remove(&tid);
+            return Some((tid, pids, outcome));
+        }
+        self.tab_areas.remove(&tid);
+        if self.template_specs.remove(&tid).is_some() {
+            self.persist_template_specs(sid);
+        }
+        self.reanchor_views();
+        self.push_layout(true);
+        Some((tid, pids, outcome))
+    }
+
+    /// Resolve and guard a script close before entering the shared mutation
+    /// helper. A worker is safe to ignore only when its fresh row is
+    /// positively `Dead`; `Alive` and `Unmeasured` both refuse.
+    fn tab_close(
+        &mut self,
+        squad: &PaneTarget,
+        sel: &TabSel,
+        force: bool,
+        agents: Option<&[RegistryAgent]>,
+    ) -> Result<(TabId, Vec<u64>, RemoveOutcome), (u32, String)> {
+        let sid = self.resolve_squad(squad)?;
+        let ti = self
+            .resolve_tab_index(sid, sel)
+            .map_err(|e| (err_code::BAD_REQUEST, e))?;
+        let pids = self
+            .session
+            .squad(sid)
+            .and_then(|sq| sq.tabs.get(ti))
+            .map(|tab| tree::leaves(&tab.root))
+            .ok_or((err_code::BAD_REQUEST, "selected tab vanished".into()))?;
+        if !force {
+            let Some(rows) = agents else {
+                return Err((
+                    err_code::REGISTRY_UNAVAILABLE,
+                    "agent registry unavailable".into(),
+                ));
+            };
+            let blockers = tab_close_blockers(&self.session_name, &pids, rows);
+            if !blockers.is_empty() {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("tab contains protected worker(s): {}", blockers.join(", ")),
+                ));
+            }
+        }
+        self.close_tab_cascade(sid, ti)
+            .ok_or((err_code::BAD_REQUEST, "selected tab vanished".into()))
     }
 
     /// The nested tree + per-pane geometry of one tab (Locked Decision 5).
@@ -8370,55 +8466,12 @@ impl Core {
                 let Some((sid, ti)) = self.session.find_tab(view.1) else {
                     return Flow::Continue;
                 };
-                let pids =
-                    tree::leaves(&self.session.squad(sid).expect("live squad").tabs[ti].root);
-                // De-recruit any member panes in this tab (AC3-EDGE), captured
-                // before the reaps clear them; reconciled AFTER remove_tab so
-                // squad-survival (survives vs de-persist) reflects reality.
-                let ctxs: Vec<_> = pids
-                    .iter()
-                    .filter_map(|&pid| self.member_ctx(pid))
-                    .collect();
-                // The squad's store identity before the reap, for the
-                // de-persist below: a memberless workspace yields no ctxs, so
-                // reconcile_member_close alone cannot clear its row.
-                let ident = self.squad_identity(sid);
-                for pid in pids {
-                    self.reap_pane(pid);
-                }
-                let outcome = self.session.remove_tab(sid, ti);
-                for ctx in ctxs {
-                    self.reconcile_member_close(Some(ctx), false);
-                }
-                if matches!(
-                    outcome,
-                    RemoveOutcome::SquadRemoved | RemoveOutcome::SessionEmpty
-                ) {
-                    // The whole workspace left the session - de-persist it on
-                    // EVERY path, not only the member one. SessionEmpty counts:
-                    // closing the last tab of the last workspace still dismissed
-                    // it. `persist_remove` no-ops when reconcile already ran.
-                    self.squad_members.remove(&sid);
-                    if let Some((name, key)) = ident {
-                        self.persist_remove(&name, &key);
-                    }
-                }
+                let Some((_, _, outcome)) = self.close_tab_cascade(sid, ti) else {
+                    return Flow::Continue;
+                };
                 match outcome {
                     RemoveOutcome::SessionEmpty => Flow::Shutdown,
-                    _ => {
-                        // Everyone who viewed the dead tab (sender included)
-                        // re-anchors in this same mutation (AC2-ERR).
-                        self.tab_areas.remove(&view.1);
-                        // (x-c4d4) A closed template tab must drop its stored spec
-                        // so restore never resurrects it (persist rewrites the
-                        // squad's whole list from the tabs that still exist).
-                        if self.template_specs.remove(&view.1).is_some() {
-                            self.persist_template_specs(sid);
-                        }
-                        self.reanchor_views();
-                        self.push_layout(true);
-                        Flow::Continue
-                    }
+                    _ => Flow::Continue,
                 }
             }
             Command::SelectSquad(id) => {
@@ -10097,6 +10150,32 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
+            CoreMsg::TabClose {
+                squad,
+                tab,
+                force,
+                agents,
+                reply,
+            } => {
+                let result = self.tab_close(&squad, &tab, force, agents.as_deref());
+                let (msg, flow) = match result {
+                    Ok((tab_id, pane_ids, outcome)) => (
+                        ServerMsg::TabClosed {
+                            tab_id,
+                            pane_ids,
+                            forced: force,
+                        },
+                        if matches!(outcome, RemoveOutcome::SessionEmpty) {
+                            Flow::Shutdown
+                        } else {
+                            Flow::Continue
+                        },
+                    ),
+                    Err((code, msg)) => (ServerMsg::Err { code, msg }, Flow::Continue),
+                };
+                let _ = reply.send(msg);
+                flow
+            }
             CoreMsg::LayoutGet {
                 scope,
                 workers,
@@ -11240,6 +11319,30 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
     }
 }
 
+/// Return every pane/worker pair that blocks an unforced tab close. Matching
+/// is exact on the server session and pane id, and only an effective identity
+/// with non-Dead liveness is destructive-risk evidence.
+fn tab_close_blockers(session: &str, pane_ids: &[u64], rows: &[RegistryAgent]) -> Vec<String> {
+    let mut blockers = Vec::new();
+    for &pane_id in pane_ids {
+        for row in rows.iter().filter(|row| {
+            row.mux.as_ref().is_some_and(|(row_session, row_pane)| {
+                row_session == session && *row_pane == pane_id
+            })
+        }) {
+            if let Some(identity) = row.effective_identity() {
+                if row.liveness != agents_view::Liveness::Dead {
+                    blockers.push(format!(
+                        "pane {pane_id} fno_id={identity} liveness={:?}",
+                        row.liveness
+                    ));
+                }
+            }
+        }
+    }
+    blockers
+}
+
 fn pane_id_floor(persisted: u64, agents: &[RegistryAgent]) -> u64 {
     let registry_floor = agents
         .iter()
@@ -11501,6 +11604,22 @@ async fn handle_control(
                     squad,
                     tab,
                     name,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::TabClose { squad, tab, force } => {
+            let agents = if force {
+                None
+            } else {
+                read_guard_agents().await
+            };
+            core_tx
+                .send(CoreMsg::TabClose {
+                    squad,
+                    tab,
+                    force,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -12516,6 +12635,64 @@ mod tests {
 
     fn agent(pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         agent_in("main", pane, badge, exited)
+    }
+
+    #[test]
+    fn tab_close_guard_requires_positive_dead_liveness() {
+        let mut alive = agent_in("main", 7, None, false);
+        alive.session_id = Some("alive-worker".into());
+        let mut unmeasured = agent_in("main", 8, None, true);
+        unmeasured.session_id = Some("uncertain-worker".into());
+        unmeasured.liveness = agents_view::Liveness::Unmeasured;
+        let mut dead = agent_in("main", 9, None, true);
+        dead.session_id = Some("dead-worker".into());
+        let mut foreign = agent_in("other", 7, None, false);
+        foreign.session_id = Some("foreign-worker".into());
+
+        let blockers = tab_close_blockers("main", &[7, 8, 9], &[alive, unmeasured, dead, foreign]);
+        assert_eq!(blockers.len(), 2);
+        assert!(blockers
+            .iter()
+            .any(|b| b.contains("pane 7") && b.contains("alive-worker")));
+        assert!(blockers
+            .iter()
+            .any(|b| b.contains("pane 8") && b.contains("uncertain-worker")));
+        assert!(
+            !blockers.iter().any(|b| b.contains("dead-worker")),
+            "positive Dead allows close"
+        );
+        assert!(
+            !blockers.iter().any(|b| b.contains("foreign-worker")),
+            "a different mux session cannot guard this tab"
+        );
+    }
+
+    #[test]
+    fn tab_close_unreadable_registry_refuses_before_mutation() {
+        let (mut core, pane) = template_core();
+        let result = core.tab_close(&PaneTarget::SquadId(1), &TabSel::Id(5), false, None);
+        assert!(matches!(result, Err((code, _)) if code == err_code::REGISTRY_UNAVAILABLE));
+        assert!(core.panes.contains_key(&pane));
+        assert!(core.session.find_tab(5).is_some());
+    }
+
+    #[test]
+    fn tab_close_allows_positive_dead_row_and_returns_exact_receipt_data() {
+        let (mut core, pane) = template_core();
+        let mut dead = agent_in("test", pane, None, true);
+        dead.session_id = Some("dead-worker".into());
+        let result = core
+            .tab_close(
+                &PaneTarget::SquadId(1),
+                &TabSel::Id(5),
+                false,
+                Some(&[dead]),
+            )
+            .unwrap();
+        assert_eq!(result.0, 5);
+        assert_eq!(result.1, vec![pane]);
+        assert_eq!(result.2, RemoveOutcome::SessionEmpty);
+        assert!(!core.panes.contains_key(&pane));
     }
 
     #[test]

@@ -23,6 +23,17 @@ fn pane(scratch: &Scratch, args: &[&str]) -> Output {
         .expect("fno binary runs")
 }
 
+/// Run `fno mux tab <args...>` against `scratch`'s session, headless.
+fn tab(scratch: &Scratch, args: &[&str]) -> Output {
+    scratch
+        .command()
+        .args(["mux", "tab"])
+        .args(args)
+        .env("SHELL", "/bin/sh")
+        .output()
+        .expect("fno binary runs")
+}
+
 fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -41,6 +52,126 @@ fn write_registry(scratch: &Scratch, rows: &str) {
         format!(r#"{{"schema_version":11,"agents":[{rows}]}}"#),
     )
     .unwrap();
+}
+
+#[test]
+fn mux_tab_close_removes_whole_tab_and_reports_receipt() {
+    let scratch = Scratch::new("mux_tab_close");
+    let dir = scratch.0.to_str().unwrap();
+
+    let run = pane(
+        &scratch,
+        &["run", "--cwd", dir, "--", "/bin/sh", "-c", "sleep 30"],
+    );
+    assert!(run.status.success(), "initial pane: {:?}", run);
+    let first = stdout(&run);
+    let split = pane(&scratch, &["split", &first, "--direction", "right"]);
+    assert!(split.status.success(), "split: {:?}", split);
+
+    let survivor = tab(&scratch, &["create", "--name", "survivor"]);
+    assert!(survivor.status.success(), "survivor tab: {:?}", survivor);
+    let listed = tab(&scratch, &["ls", "--json"]);
+    assert!(listed.status.success(), "tab list: {:?}", listed);
+    let tabs: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
+    assert_eq!(
+        tabs.len(),
+        2,
+        "target and survivor tabs must exist: {tabs:?}"
+    );
+    let target = tabs
+        .iter()
+        .find(|t| t["pane_ids"].as_array().unwrap().len() == 2)
+        .unwrap();
+    let target_id = target["tab_id"].as_u64().unwrap();
+    let survivor_id = tabs
+        .iter()
+        .find(|t| t["tab_id"].as_u64() != Some(target_id))
+        .unwrap()["tab_id"]
+        .as_u64()
+        .unwrap();
+
+    let close_arg = format!("id:{target_id}");
+    let closed = tab(&scratch, &["close", "--tab", &close_arg, "--json"]);
+    assert!(
+        closed.status.success(),
+        "close must succeed: stdout={:?} stderr={:?}",
+        stdout(&closed),
+        String::from_utf8_lossy(&closed.stderr)
+    );
+    let receipt: serde_json::Value = serde_json::from_str(&stdout(&closed)).unwrap();
+    assert_eq!(receipt["tab_id"], target_id);
+    assert_eq!(receipt["forced"], false);
+    assert_eq!(
+        receipt["pane_ids"].as_array().unwrap().len(),
+        2,
+        "receipt must positively name every reaped pane"
+    );
+
+    let after = tab(&scratch, &["ls", "--json"]);
+    assert!(after.status.success());
+    let after_text = stdout(&after);
+    assert!(after_text.contains(&format!("\"tab_id\":{survivor_id}")));
+    assert!(!after_text.contains(&format!("\"tab_id\":{target_id}")));
+}
+
+#[test]
+fn mux_tab_close_refuses_live_worker_without_force() {
+    let scratch = Scratch::new("mux_tab_close_guard");
+    let dir = scratch.0.to_str().unwrap();
+    let run = pane(
+        &scratch,
+        &["run", "--cwd", dir, "--", "/bin/sh", "-c", "sleep 30"],
+    );
+    assert!(run.status.success());
+    let first = stdout(&run);
+    let split = pane(&scratch, &["split", &first, "--direction", "right"]);
+    assert!(split.status.success());
+    let survivor = tab(&scratch, &["create", "--name", "survivor"]);
+    assert!(survivor.status.success());
+
+    let listed = tab(&scratch, &["ls", "--json"]);
+    let tabs: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
+    let target = tabs
+        .iter()
+        .find(|t| t["pane_ids"].as_array().unwrap().len() == 2)
+        .unwrap();
+    let target_id = target["tab_id"].as_u64().unwrap();
+    let target_pane = target["pane_ids"].as_array().unwrap()[0].as_u64().unwrap();
+    let target_sel = format!("id:{target_id}");
+    let full_id = "worker-full-id";
+    write_registry(
+        &scratch,
+        &format!(
+            r#"{{"name":"worker","cwd":"{dir}","harness":"codex","session_id":"{full_id}","status":"live","mux":{{"session":"main","pane_id":{target_pane}}}}}"#
+        ),
+    );
+
+    let refused = tab(&scratch, &["close", "--tab", &target_sel, "--json"]);
+    assert!(!refused.status.success(), "live worker must block close");
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        refusal.contains(&target_pane.to_string()),
+        "refusal names pane: {refusal}"
+    );
+    assert!(
+        refusal.contains(full_id),
+        "refusal names full worker id: {refusal}"
+    );
+    assert!(stdout(&refused).is_empty(), "refusal has no close receipt");
+
+    let unchanged = tab(&scratch, &["ls", "--json"]);
+    let unchanged_text = stdout(&unchanged);
+    assert!(unchanged_text.contains(&format!("\"tab_id\":{target_id}")));
+    assert!(unchanged_text.contains(&format!("{target_pane}")));
+
+    let forced = tab(
+        &scratch,
+        &["close", "--tab", &target_sel, "--force", "--json"],
+    );
+    assert!(forced.status.success(), "force close: {:?}", forced);
+    let receipt: serde_json::Value = serde_json::from_str(&stdout(&forced)).unwrap();
+    assert_eq!(receipt["tab_id"], target_id);
+    assert_eq!(receipt["forced"], true);
 }
 
 /// Poll `pane ls --json` until it reports the empty listing (the session has

@@ -271,7 +271,10 @@ fn default_true() -> bool {
 /// index, so a captured `--tab <n>` selector changes meaning across the
 /// bump; the handshake is what tells an old client to restart. New variants
 /// are not additive-tolerant either.
-pub const PROTO_VERSION: u32 = 52;
+///
+/// v53 (x-a8f1, guarded tab close): `ControlVerb::TabClose` and the
+/// target-specific `ServerMsg::TabClosed` receipt.
+pub const PROTO_VERSION: u32 = 53;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -686,6 +689,15 @@ pub enum ControlVerb {
         squad: PaneTarget,
         tab: TabSel,
         name: String,
+    },
+    /// Close one whole tab through the same cascade as the interactive
+    /// `Command::CloseTab`. An unforced close guards every pane against a
+    /// fresh registry row whose worker is not positively dead.
+    TabClose {
+        squad: PaneTarget,
+        tab: TabSel,
+        #[serde(default)]
+        force: bool,
     },
     /// Dump a layout scope's nested tree + per-pane geometry ->
     /// [`ServerMsg::LayoutTree`] (structure + rects, so templates/reconcile can
@@ -2011,6 +2023,13 @@ pub enum ServerMsg {
         /// The tab's focused pane - where `mux view` moves the operator.
         focus: u64,
         panes: Vec<TabPaneOccupant>,
+    },
+    /// Answer to [`ControlVerb::TabClose`]. The receipt names the exact stable
+    /// tab and every pane reaped; `forced` records the explicit guard override.
+    TabClosed {
+        tab_id: TabId,
+        pane_ids: Vec<u64>,
+        forced: bool,
     },
 }
 
@@ -3824,7 +3843,8 @@ mod tests {
         // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
         // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
         // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
-        // receipts (x-588a) bumped it 51 -> 52.
+        // receipts (x-588a) bumped it 51 -> 52; guarded tab close (x-a8f1)
+        // bumps it 52 -> 53.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3833,7 +3853,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 52);
+        assert_eq!(PROTO_VERSION, 53);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -4762,6 +4782,11 @@ mod tests {
                 },
                 workers: false,
             },
+            ControlVerb::TabClose {
+                squad: PaneTarget::SquadId(1),
+                tab: TabSel::Id(27),
+                force: true,
+            },
         ];
         for v in verbs {
             let bytes = serde_json::to_vec(&v).unwrap();
@@ -4826,6 +4851,14 @@ mod tests {
             focused,
             serde_json::from_slice::<ServerMsg>(&bytes).unwrap()
         );
+
+        let closed = ServerMsg::TabClosed {
+            tab_id: 27,
+            pane_ids: vec![35, 36],
+            forced: false,
+        };
+        let bytes = serde_json::to_vec(&closed).unwrap();
+        assert_eq!(closed, serde_json::from_slice::<ServerMsg>(&bytes).unwrap());
     }
 
     #[test]

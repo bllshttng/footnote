@@ -202,7 +202,8 @@ fn wait_for_raw_frame(
             | Ok(ServerMsg::TabSpawned { .. })
             | Ok(ServerMsg::LayoutApplied { .. })
             | Ok(ServerMsg::LayoutGrafted { .. })
-            | Ok(ServerMsg::TabLocation { .. }) => {}
+            | Ok(ServerMsg::TabLocation { .. })
+            | Ok(ServerMsg::TabClosed { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
