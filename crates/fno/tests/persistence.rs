@@ -544,6 +544,7 @@ fn build_tree_guard_refuses_a_write_without_agents_home() {
         tab_name: None,
         cwd: None,
         worker: None,
+        harness_session_id: None,
     };
     let refused = upsert("", "guardprobe", &["/no/such/origin".into()], &[member]);
     assert!(

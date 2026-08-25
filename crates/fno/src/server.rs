@@ -5308,6 +5308,7 @@ impl Core {
                 tab_name: None,
                 cwd: None,
                 worker: None,
+                harness_session_id: None,
             }),
         }
         self.persist_squad(sid);
@@ -5338,6 +5339,11 @@ impl Core {
                     .map(|t| t.name.clone())
             })
             .flatten();
+        let harness_session_id = self
+            .agents
+            .iter()
+            .find(|a| a.name == name)
+            .and_then(|a| a.harness_session_id.clone());
         let members = self.squad_members.entry(sid).or_default();
         match members
             .iter_mut()
@@ -5347,8 +5353,12 @@ impl Core {
                 m.tombstone = false;
                 m.tab_name = tab_name;
                 m.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+                m.harness_session_id = harness_session_id.or(m.harness_session_id.clone());
             }
-            Some(_) => return, // already a live member - no duplicate
+            Some(m) => {
+                m.harness_session_id = harness_session_id.or(m.harness_session_id.clone());
+                return; // already a live member - no duplicate
+            }
             None => {
                 let cwd = (!cwd.is_empty()).then(|| cwd.to_string());
                 members.push(crate::squad_store::StoredMember {
@@ -5357,6 +5367,7 @@ impl Core {
                     tab_name,
                     cwd,
                     worker: Some(name.to_string()),
+                    harness_session_id,
                 });
             }
         }
@@ -5672,6 +5683,7 @@ impl Core {
                         tab_name: m.tab_name.clone(),
                         cwd: m.cwd.clone(),
                         worker: None,
+                        harness_session_id: None,
                     });
                     continue;
                 }
@@ -5711,6 +5723,7 @@ impl Core {
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
                             worker: None,
+                            harness_session_id: None,
                         });
                     }
                     Err(e) => {
@@ -5723,6 +5736,7 @@ impl Core {
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
                             worker: None,
+                            harness_session_id: None,
                         });
                     }
                 }
@@ -9564,6 +9578,7 @@ impl Core {
                             tab_name: None,
                             cwd: None,
                             worker: None,
+                            harness_session_id: None,
                         },
                     );
                     recruited += 1;
@@ -16094,6 +16109,11 @@ mod tests {
         let _s = StoreScratch::new("run-pane-worker");
         let mut core = empty_core();
         core.shells = vec!["/bin/cat".into()];
+        let mut row = exited_claude_row("probe-x5f7f", None);
+        row.harness = Some("codex".into());
+        row.harness_session_id =
+            Some("01a03a85-1111-7222-8333-444455556666".into());
+        core.agents = vec![row];
         let pid = core
             .run_pane(
                 "/repo/proj".into(),
@@ -16132,6 +16152,11 @@ mod tests {
             member.cwd.as_deref(),
             Some("/repo/proj"),
             "the spawn cwd is captured for the resume"
+        );
+        assert_eq!(
+            member.harness_session_id.as_deref(),
+            Some("01a03a85-1111-7222-8333-444455556666"),
+            "the full resume key survives registry-row loss"
         );
     }
 
@@ -16228,6 +16253,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-one".into()),
+                    harness_session_id: None,
                 },
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
@@ -16235,6 +16261,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-two".into()),
+                    harness_session_id: None,
                 },
             ],
         )
@@ -16296,6 +16323,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-live".into()),
+                    harness_session_id: None,
                 },
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
@@ -16303,6 +16331,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-reaped".into()),
+                    harness_session_id: None,
                 },
             ],
         )
@@ -16364,6 +16393,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-one".into()),
+                    harness_session_id: None,
                 },
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
@@ -16371,6 +16401,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-two".into()),
+                    harness_session_id: None,
                 },
             ],
         )
@@ -18915,6 +18946,7 @@ mod tests {
                 tab_name: None,
                 cwd: None,
                 worker: None,
+                harness_session_id: None,
             }],
         );
         core.attached.insert(attach.into(), pid);
@@ -18927,6 +18959,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness_session_id: None,
         }
     }
 
@@ -19842,6 +19875,7 @@ mod tests {
                 tab_name: Some("old".into()),
                 cwd: None,
                 worker: None,
+                harness_session_id: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -19967,6 +20001,7 @@ mod tests {
                 tab_name: Some("home".into()),
                 cwd: None,
                 worker: None,
+                harness_session_id: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -20026,6 +20061,7 @@ mod tests {
                 tab_name: Some("src".into()),
                 cwd: None,
                 worker: None,
+                harness_session_id: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);

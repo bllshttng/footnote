@@ -1595,6 +1595,18 @@ event_types:
           type: string
         pid:
           type: integer
+        harness_session_id:
+          type: string
+          description: "Full harness resume identity captured at birth and retained outside the mutable registry."
+        cwd:
+          type: string
+          description: "Spawn cwd for the session receipt."
+        model:
+          type: string
+          description: "Resolved model requested for the spawned worker."
+        substrate:
+          type: string
+          description: "Spawn substrate: pane, bg, or headless."
         # Parent-edge provenance (x-30f6): the spawning session's ambient env,
         # captured at launch so a worker can be traced BACK to the conversation
         # that decided to spawn it. All optional; absent for legacy spawns.

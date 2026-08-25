@@ -67,6 +67,25 @@ def test_emit_spawned_writes_envelope_to_daemon_log(daemon_log: Path) -> None:
     assert d["spawned_by_cwd"] == "/repo"
 
 
+def test_emit_spawned_persists_full_resume_coordinate(daemon_log: Path) -> None:
+    """A registry reap must not erase the only copy of the resume key."""
+    events.emit_spawned(
+        name="wk-resume",
+        short_id=None,
+        provider="codex",
+        harness_session_id="01a03a85-1111-7222-8333-444455556666",
+        cwd="/repo",
+        model="gpt-5.6-sol",
+        substrate="pane",
+    )
+
+    data = _read_records(daemon_log)[0]["data"]
+    assert data["harness_session_id"] == "01a03a85-1111-7222-8333-444455556666"
+    assert data["cwd"] == "/repo"
+    assert data["model"] == "gpt-5.6-sol"
+    assert data["substrate"] == "pane"
+
+
 def test_emit_spawned_does_not_land_in_python_dispatch_log(daemon_log: Path) -> None:
     """One birth per spawn, in the daemon log only (not also in the python log)."""
     py_log = daemon_log.parent.parent / "events.jsonl"
