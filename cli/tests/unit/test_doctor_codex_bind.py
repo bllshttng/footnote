@@ -16,8 +16,11 @@ never spawns a real codex pane.
 """
 from __future__ import annotations
 
+import json
 import subprocess
+from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from fno import doctor
@@ -67,6 +70,50 @@ def test_binds_via_the_fd_oracle_and_reports_it(monkeypatch) -> None:
         "codex_version": "codex-cli 0.148.0",
         "error": None,
     }
+    assert reaped == [("main", 7)]
+
+
+def test_canary_uses_isolated_trusted_cwd_and_nonempty_prompt(monkeypatch) -> None:
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *a, **k: SID
+    )
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: None)
+    seen: list[str] = []
+
+    def record_run(args, *_a, **_kw):
+        seen.extend(args)
+        return _proc(stdout="7\n")
+
+    monkeypatch.setattr(mux_spawn, "_run_mux", record_run)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is True
+    cwd = Path(seen[seen.index("--cwd") + 1])
+    command = seen[seen.index("--") + 1 :]
+    assert cwd != Path.cwd()
+    assert not cwd.exists(), "the diagnostic owns and removes its scratch directory"
+    assert command[0] == "codex"
+    config_index = command.index("-c")
+    assert command[config_index + 1] == (
+        f"projects.{json.dumps(str(cwd))}.trust_level=\"trusted\""
+    )
+    prompt_fence = command.index("--")
+    assert command[prompt_fence + 1].strip()
+
+
+def test_binding_exception_still_reaps_the_canary_pane(monkeypatch) -> None:
+    reaped = _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_await_pane_binding",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("binding exploded")),
+    )
+
+    with pytest.raises(RuntimeError, match="binding exploded"):
+        doctor._codex_bind_report()
+
     assert reaped == [("main", 7)]
 
 
