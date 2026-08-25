@@ -41,8 +41,35 @@ def _deny(reason: str) -> dict[str, Any]:
     return _output("deny", f"fno law refused: {reason}. Resume from an attended chat with {RECOVERY}.")
 
 
-def _mentions_enact(command: Any) -> bool:
-    return isinstance(command, str) and re.search(r"\bfno\s+law\s+enact\b", command) is not None
+def _contains_enact_action(command: Any) -> bool:
+    """Find enact only at a shell command position, not inside argument text."""
+    if not isinstance(command, str) or not command.strip():
+        return False
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    segment: list[str] = []
+    segments: list[list[str]] = []
+    try:
+        for token in lexer:
+            if token in {";", "&&", "||", "|", "&"}:
+                if segment:
+                    segments.append(segment)
+                segment = []
+            else:
+                segment.append(token)
+    except ValueError:
+        return bool(re.match(r"^\s*fno\s+law\s+enact\b", command))
+    if segment:
+        segments.append(segment)
+
+    for tokens in segments:
+        if tokens[:3] == ["fno", "law", "enact"]:
+            return True
+        for index, token in enumerate(tokens[:-1]):
+            if token in {"bash", "sh", "zsh"} and tokens[index + 1] in {"-c", "-lc"}:
+                if _contains_enact_action(tokens[index + 2] if index + 2 < len(tokens) else ""):
+                    return True
+    return False
 
 
 def _parse_command(command: Any) -> tuple[str, str] | None:
@@ -108,7 +135,7 @@ def evaluate(
     tool_name = payload.get("tool_name")
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not _mentions_enact(command):
+    if not _contains_enact_action(command):
         return None
     if tool_name != "Bash":
         return _deny("tool name is missing") if tool_name is None else None
