@@ -1233,6 +1233,27 @@ def test_priority_migration_idempotent(tmp_graph):
     assert legacy_after_second["priority"] == "p1"
 
 
+def test_priority_migration_command_is_dry_run_then_idempotent(tmp_graph):
+    """AC11-HP: the migration command has explicit dry-run/apply receipts."""
+    tmp_graph.write_text(json.dumps({
+        "entries": [
+            {"id": "ab-old00001", "title": "Legacy", "priority": "p0"},
+            {"id": "ab-old00002", "title": "Legacy 2", "priority": "p0"},
+        ]
+    }))
+    dry = _invoke("backlog", "migrate-priorities")
+    assert dry.exit_code == 0, dry.output
+    assert json.loads(dry.stdout)["legacy_p0"] == 2
+    assert _read_graph(tmp_graph)[0]["priority"] == "p0"
+    applied = _invoke("backlog", "migrate-priorities", "--apply")
+    assert json.loads(applied.stdout)["rebanded_to_p1"] == 2
+    second = _invoke("backlog", "migrate-priorities", "--apply")
+    assert json.loads(second.stdout)["already_migrated"] == 2
+    rollback = _invoke("backlog", "migrate-priorities", "--rollback")
+    assert json.loads(rollback.stdout)["restored_to_p0"] == 2
+    assert all(row["priority"] == "p0" for row in _read_graph(tmp_graph))
+
+
 def test_priority_missing_key_backfill(tmp_graph):
     """An entry with no priority key gets the default p2 via _apply_graph_defaults
     rather than being touched by the backfill loop (which only rewrites legacy

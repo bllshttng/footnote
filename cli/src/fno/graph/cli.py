@@ -11602,6 +11602,41 @@ def cmd_reprioritize(
     typer.echo(f"Reprioritized {task_id}: {old_holder[0]} -> {priority}")
 
 
+@cli.command("migrate-priorities", hidden=True)
+def cmd_migrate_priorities(
+    apply: bool = typer.Option(False, "--apply", help="Apply the idempotent p0 to p1 migration."),
+    rollback: bool = typer.Option(False, "--rollback", help="Restore rows changed by the migration."),
+) -> None:
+    """Dry-run or apply the explicit legacy p0 re-band migration."""
+    from fno.graph.migrations import migrate_legacy_p0, rollback_legacy_p0
+    from fno.graph.store import locked_mutate_graph, read_graph
+
+    if apply and rollback:
+        typer.echo("Error: --apply and --rollback are mutually exclusive", err=True)
+        raise typer.Exit(code=2)
+    if rollback:
+        holder: list[dict] = []
+
+        def rollback_mutator(entries: list[dict]) -> list[dict]:
+            holder.append(rollback_legacy_p0(entries))
+            return entries
+
+        locked_mutate_graph(_graph_path(), rollback_mutator)
+        receipt = holder[0]
+    elif not apply:
+        receipt = migrate_legacy_p0(read_graph(_graph_path()), apply=False)
+    else:
+        holder: list[dict] = []
+
+        def mutator(entries: list[dict]) -> list[dict]:
+            holder.append(migrate_legacy_p0(entries, apply=True))
+            return entries
+
+        locked_mutate_graph(_graph_path(), mutator)
+        receipt = holder[0]
+    typer.echo(json.dumps(receipt, sort_keys=True))
+
+
 # -- rank --
 
 @cli.command("rank")
@@ -13287,7 +13322,7 @@ def _exec_liveness(state: str) -> str:
 
 _TRACKER_OWNED_VERBS = frozenset({
     # node lifecycle + creation
-    "add", "idea", "new", "intake", "decompose", "update", "note", "remove",
+    "add", "idea", "new", "intake", "decompose", "update", "note", "remove", "migrate-priorities",
     "reopen", "supersede", "unsupersede",
     # board/rank/queue state
     "rank", "reprioritize", "defer", "undefer", "queue", "unqueue", "pick",
