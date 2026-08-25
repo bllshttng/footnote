@@ -1123,6 +1123,9 @@ mod tests {
 
     #[test]
     fn the_server_reads_only_what_the_client_latched() {
+        // Same process-global env var as the resolve tests above: serialize
+        // against them (this test set_var/remove_var's the var directly).
+        let _env_lock = lock_board_scope_env();
         // The server resolves nothing: a subprocess on its startup path delayed
         // shutdown past the SIGTERM grace and perturbed multiclient frame
         // ordering. It parses the env the client already resolved.
@@ -1326,6 +1329,8 @@ mod tests {
         // empty value, not an absent one. Both must read as "nothing latched":
         // narrowing here would leave an upgrading user with a board showing
         // only their handful of unscoped cards and no visible cause.
+        // Serialized like its siblings: it writes the same process-global var.
+        let _env_lock = lock_board_scope_env();
         let key = "FNO_BOARD_SCOPE";
         let guard = std::env::var(key).ok();
 

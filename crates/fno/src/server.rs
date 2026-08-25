@@ -7594,37 +7594,40 @@ impl Core {
     /// the underline instead of waiting. No pane state changes, no broadcast:
     /// co-viewers never see another viewer's hover.
     fn link_hover(&mut self, client_id: u64, pane: u64, row: u16, col: u16, seq: u64) {
-        let cells = match self.panes.get(&pane) {
-            Some(e)
-                if route_mouse(e.vt.modes(), MouseKind::Release(MouseButton::Left))
-                    == MouseAction::SelectRelease =>
-            {
-                match self.clients.iter().find(|c| c.id == client_id) {
-                    Some(c) if c.visible.contains(&pane) => {
-                        e.vt.link_span(row, col)
-                            .map(|span| span.cells)
-                            .unwrap_or_default()
-                    }
-                    _ => Vec::new(),
+        // Bind the requester once: the visibility check and the reply send
+        // name the same client, and two independent finds are two places to
+        // drift. The wedge path mutates `clients`, so it runs after the
+        // borrows drop.
+        let wedged = {
+            let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {
+                return;
+            };
+            let cells = match self.panes.get(&pane) {
+                Some(e)
+                    if route_mouse(e.vt.modes(), MouseKind::Release(MouseButton::Left))
+                        == MouseAction::SelectRelease
+                        && c.visible.contains(&pane) =>
+                {
+                    e.vt.link_span(row, col)
+                        .map(|span| span.cells)
+                        .unwrap_or_default()
                 }
-            }
-            _ => Vec::new(),
-        };
-        if let Some(c) = self.clients.iter().find(|c| c.id == client_id) {
-            if c.reliable_tx
+                _ => Vec::new(),
+            };
+            c.reliable_tx
                 .try_send(ServerMsg::LinkHover {
                     pane_id: pane,
                     seq,
                     cells,
                 })
                 .is_err()
-            {
-                eprintln!(
-                    "fno mux: client {client_id} reliable channel wedged on LinkHover; dropping it"
-                );
-                self.clients.retain(|c| c.id != client_id);
-                self.push_layout(true);
-            }
+        };
+        if wedged {
+            eprintln!(
+                "fno mux: client {client_id} reliable channel wedged on LinkHover; dropping it"
+            );
+            self.clients.retain(|c| c.id != client_id);
+            self.push_layout(true);
         }
     }
 

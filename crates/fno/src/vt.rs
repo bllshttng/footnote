@@ -491,7 +491,13 @@ impl Pane {
     /// over BOTH id and URI, so a later anchor that reuses the URI under its
     /// own id never joins this span, and the contiguous walk stops at the
     /// first cell of any other anchor even when an app re-emits mid-row.
+    ///
+    /// The upward and downward extensions both grow from the POINTED row's own
+    /// run, so each row of the span is collected exactly once (a single walk
+    /// list extended from whichever end fired last would re-derive rows on the
+    /// other side and duplicate them).
     fn osc8_span_cells(&self, point: Point, anchor: &Hyperlink) -> Vec<(u16, u16)> {
+        let ((lo, hi), _, _) = self.wrap_region(point.line);
         let grid = self.term.grid();
         let cols = self.cols as usize;
         let last = Column(cols.saturating_sub(1));
@@ -500,26 +506,7 @@ impl Pane {
                 .hyperlink()
                 .is_some_and(|h| h == *anchor)
         };
-        // The soft-wrap region around the pointed line, capped exactly like
-        // `logical_line` so one hover cannot walk the whole grid.
-        let (top, bot) = (grid.topmost_line().0, grid.bottommost_line().0);
-        let max_rows = (crate::link::MAX_URL_LEN / cols.max(1)) as i32 + 2;
-        let mut lo = point.line.0;
-        while lo > top
-            && point.line.0 - lo < max_rows
-            && grid[Line(lo - 1)][last].flags.contains(Flags::WRAPLINE)
-        {
-            lo -= 1;
-        }
-        let mut hi = point.line.0;
-        while hi < bot
-            && hi - point.line.0 < max_rows
-            && grid[Line(hi)][last].flags.contains(Flags::WRAPLINE)
-        {
-            hi += 1;
-        }
-        // (grid line, col_start, col_end) of each accepted run, in walk order.
-        let mut runs: Vec<(i32, usize, usize)> = Vec::new();
+        // The pointed row's own run.
         let mut s = point.column.0;
         let mut e = point.column.0;
         while s > 0 && same(point.line, s - 1) {
@@ -528,44 +515,90 @@ impl Pane {
         while e + 1 < cols && same(point.line, e + 1) {
             e += 1;
         }
-        runs.push((point.line.0, s, e));
-        // Upward: the newest run must start at col 0 and the row above must
-        // wrap into it, ending on the same anchor.
-        while runs.last().is_some_and(|(_, s, _)| *s == 0) {
-            let above = Line(runs.last().unwrap().0 - 1);
-            if above.0 < lo
-                || !grid[above][last].flags.contains(Flags::WRAPLINE)
-                || !same(above, cols - 1)
-            {
-                break;
-            }
-            let mut e2 = cols - 1;
-            let mut s2 = e2;
-            while s2 > 0 && same(above, s2 - 1) {
+        // Rows above: while the current run starts at col 0 and the row above
+        // wraps into it on the same anchor, collect that row's tail run.
+        // Pushed nearest-first; reversed below into row order.
+        let mut above: Vec<(i32, usize, usize)> = Vec::new();
+        let (mut cs, mut cur) = (s, point.line.0);
+        while cs == 0
+            && cur > lo
+            && grid[Line(cur - 1)][last].flags.contains(Flags::WRAPLINE)
+            && same(Line(cur - 1), cols - 1)
+        {
+            let a = Line(cur - 1);
+            let mut s2 = cols - 1;
+            while s2 > 0 && same(a, s2 - 1) {
                 s2 -= 1;
             }
-            runs.push((above.0, s2, e2));
+            above.push((a.0, s2, cols - 1));
+            cs = s2;
+            cur = a.0;
         }
-        // Downward: the newest run must end at the last column and the row
-        // below must carry the same anchor at col 0.
-        while runs.last().is_some_and(|(_, _, e)| *e + 1 == cols) {
-            let cur = Line(runs.last().unwrap().0);
-            let below = Line(cur.0 + 1);
-            if below.0 > hi || !grid[cur][last].flags.contains(Flags::WRAPLINE) || !same(below, 0) {
-                break;
-            }
+        // Rows below: while the current run ends at the last column and the
+        // current row wraps, collect the next row's head run.
+        let mut below: Vec<(i32, usize, usize)> = Vec::new();
+        let (mut ce, mut cur) = (e, point.line.0);
+        while ce + 1 == cols
+            && cur < hi
+            && grid[Line(cur)][last].flags.contains(Flags::WRAPLINE)
+            && same(Line(cur + 1), 0)
+        {
+            let b = Line(cur + 1);
             let mut e2 = 0;
-            while e2 + 1 < cols && same(below, e2 + 1) {
+            while e2 + 1 < cols && same(b, e2 + 1) {
                 e2 += 1;
             }
-            runs.push((below.0, 0, e2));
+            below.push((b.0, 0, e2));
+            ce = e2;
+            cur = b.0;
         }
+        let runs = above
+            .into_iter()
+            .rev()
+            .chain(std::iter::once((point.line.0, s, e)))
+            .chain(below);
         self.visible_cells(
             &runs
-                .iter()
-                .flat_map(|&(ln, s, e)| (s..=e).map(move |c| Point::new(Line(ln), Column(c))))
+                .flat_map(|(ln, s, e)| (s..=e).map(move |c| Point::new(Line(ln), Column(c))))
                 .collect::<Vec<_>>(),
         )
+    }
+
+    /// The soft-wrap row range around `line` and whether the CAP, not a real
+    /// line end, stopped each walk. Shared by [`Pane::logical_line`] (which
+    /// refuses a truncated fragment) and [`Pane::osc8_span_cells`] (whose URI
+    /// comes from the anchor, so only the row bounds matter) so the two walks
+    /// can never disagree about where a wrapped line begins and ends.
+    fn wrap_region(&self, line: Line) -> ((i32, i32), bool, bool) {
+        let grid = self.term.grid();
+        let cols = self.cols as usize;
+        let last = Column(cols.saturating_sub(1));
+        let (top, bot) = (grid.topmost_line().0, grid.bottommost_line().0);
+        // Reach far enough that the longest URL we would act on still fits, so
+        // the walk and `is_openable`'s length bound agree. Deriving it from
+        // the pane width rather than fixing it at 8 rows is what stops a
+        // narrow split from truncating a URL that a wide one resolves fine.
+        // Still a cap: one click must not scan an entire scrollback.
+        let max_rows = (crate::link::MAX_URL_LEN / cols.max(1)) as i32 + 2;
+        // Up while the row ABOVE wraps into this one; down while THIS row
+        // wraps.
+        let mut lo = line.0;
+        while lo > top
+            && line.0 - lo < max_rows
+            && grid[Line(lo - 1)][last].flags.contains(Flags::WRAPLINE)
+        {
+            lo -= 1;
+        }
+        let mut hi = line.0;
+        while hi < bot
+            && hi - line.0 < max_rows
+            && grid[Line(hi)][last].flags.contains(Flags::WRAPLINE)
+        {
+            hi += 1;
+        }
+        let truncated_above = lo > top && grid[Line(lo - 1)][last].flags.contains(Flags::WRAPLINE);
+        let truncated_below = hi < bot && grid[Line(hi)][last].flags.contains(Flags::WRAPLINE);
+        ((lo, hi), truncated_above, truncated_below)
     }
 
     /// The soft-wrap-joined line containing `line`, as text plus the grid point
@@ -581,40 +614,13 @@ impl Pane {
     /// different URL that `find_urls` would happily accept and open. Refusing is
     /// the only safe answer (codex, PR 702).
     fn logical_line(&self, line: Line) -> Option<(String, Vec<Point>)> {
-        let grid = self.term.grid();
-        let cols = self.cols as usize;
-        let last = Column(cols.saturating_sub(1));
-        let (top, bot) = (grid.topmost_line().0, grid.bottommost_line().0);
-
-        // Reach far enough that the longest URL we would act on still fits, so
-        // the walk and `is_openable`'s length bound agree. Deriving it from the
-        // pane width rather than fixing it at 8 rows is what stops a narrow
-        // split from truncating a URL that a wide one resolves fine. Still a
-        // cap: one click must not scan an entire scrollback.
-        let max_rows = (crate::link::MAX_URL_LEN / cols.max(1)) as i32 + 2;
-
-        // Up while the row ABOVE wraps into this one; down while THIS row wraps.
-        let mut start = line.0;
-        while start > top
-            && line.0 - start < max_rows
-            && grid[Line(start - 1)][last].flags.contains(Flags::WRAPLINE)
-        {
-            start -= 1;
-        }
-        let mut end = line.0;
-        while end < bot
-            && end - line.0 < max_rows
-            && grid[Line(end)][last].flags.contains(Flags::WRAPLINE)
-        {
-            end += 1;
-        }
+        let ((start, end), truncated_above, truncated_below) = self.wrap_region(line);
         // Stopped on the cap rather than on a real line end: we hold a fragment.
-        let truncated_above =
-            start > top && grid[Line(start - 1)][last].flags.contains(Flags::WRAPLINE);
-        let truncated_below = end < bot && grid[Line(end)][last].flags.contains(Flags::WRAPLINE);
         if truncated_above || truncated_below {
             return None;
         }
+        let grid = self.term.grid();
+        let cols = self.cols as usize;
 
         let mut text = String::new();
         let mut points = Vec::with_capacity(cols * (end - start + 1) as usize);
@@ -2011,6 +2017,35 @@ mod tests {
         let second = pane.link_span(0, 13).expect("the second anchor's text");
         assert_eq!(second.uri, "https://example.com/pr/700");
         assert_eq!(second.cells, vec![(0, 12), (0, 13), (0, 14), (0, 15)]);
+    }
+
+    #[test]
+    #[test]
+    fn link_span_covers_a_soft_wrapped_osc8_anchor_exactly_once() {
+        // An OSC 8 anchor whose text wraps across three rows: hovering the
+        // MIDDLE row returns every cell of the anchor exactly once. The two
+        // extensions grow from the pointed row's own run in each direction,
+        // so no row is re-derived by the other walk (the duplicate-cells bug
+        // this test pins: the middle row used to come back twice).
+        let mut pane = Pane::new(4, 10);
+        pane.feed(b"\x1b]8;;https://example.com/wrapped\x07");
+        pane.feed(b"aaaaaaaaaaaaaaaaaaaaaaaaa");
+        pane.feed(b"\x1b]8;;\x07");
+        let span = pane.link_span(1, 3).expect("the middle row resolves");
+        assert_eq!(span.uri, "https://example.com/wrapped");
+        let mut cells = span.cells.clone();
+        cells.sort();
+        let want: Vec<(u16, u16)> = (0..10)
+            .map(|c| (0, c))
+            .chain((0..10).map(|c| (1, c)))
+            .chain((0..5).map(|c| (2, c)))
+            .collect();
+        assert_eq!(cells, want, "25 cells, each exactly once");
+        assert_eq!(span.cells.len(), 25, "no row duplicated by the two walks");
+        // Hovering the TOP row yields the same single span: the anchor is one
+        // link whichever half the pointer sits on.
+        let top = pane.link_span(0, 0).expect("the top row resolves");
+        assert_eq!(top.cells.len(), 25);
     }
 
     #[test]

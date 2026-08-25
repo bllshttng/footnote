@@ -11399,11 +11399,17 @@ async fn handle_stdin(
         if !matches!(rep.kind, MouseKind::Move) {
             scanner.disarm_repeat();
         }
-        // (hover affordance) While a popup owns the pointer, a Move reports
-        // ITS hover, not a pane cell's: drop the link probe so the underline
-        // cannot linger beneath the overlay.
-        if matches!(rep.kind, MouseKind::Move)
-            && (view.keys_modal.is_some() || view.row_menu.is_some() || view.aux.is_some())
+        // (hover affordance) While a popup or modal owns the pointer, a
+        // pointer event reports ITS hover, not a pane cell's: drop the link
+        // probe so the underline cannot linger beneath the overlay. Any event
+        // counts, not just Move - a right-click that opens a menu or an
+        // overlay's own press should clear the underline too, and a family-B
+        // overlay (confirm, rename, create, nav) owning the mouse is as much
+        // a popup as the three menus.
+        if view.keys_modal.is_some()
+            || view.row_menu.is_some()
+            || view.aux.is_some()
+            || view.active_overlay_layout().is_some()
         {
             view.link_hover.clear();
         }
