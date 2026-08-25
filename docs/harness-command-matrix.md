@@ -204,7 +204,7 @@ The verb reaches the same destination with none of that exposure.
 - A **codex** pane's full thread ID is the shared identity in the registry, mux `fno_id`, discovery handles, requested-name resolution, and any session-keyed node claim.
 - Codex recovery uses that full thread ID as its only join.
 - `fno agents watchdog --only recoverable --since 24h --cwd PATH` subtracts registered Codex rows from recent exact-cwd rollouts, reports both discovered and usable counts, and refuses a short ID or a rollout without readable transcript work.
-- `--apply` restores only usable candidates as `origin=adopted` rows with full-UUID follow-up paths. It never spawns or resumes the thread. Repeated scans converge to `recoverable=0`.
+- `--apply` restores only usable candidates as `origin=adopted` rows with full-UUID follow-up paths. It never spawns or resumes the thread. Usable candidates converge: the adopted row registers and the next scan subtracts it. An unusable rollout is refused and stays reported until it ages out of the `--since` window. The event lane names each refusal once per verdict change, not once per tick.
 - A live recovery proof uses one disposable orphan and requires positive markers from the apply receipt, resumed reply, and exact full-ID row; row presence or an empty recovery queue is not proof:
 
 ```bash
