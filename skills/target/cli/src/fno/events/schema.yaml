@@ -270,6 +270,9 @@ event_types:
         self_attested_count:
           type: integer
           description: "How many of reviewed_count are the AUTHOR attesting its own diff (attestation_origin == self_attested). Recorded, never gating, and deliberately not named `independent_count` - the schema is explicit below that other_session is not independence, and this must not launder that. A self-attested pass counts, because self-review is the DEFAULT path (config.review.self_review_required floors the harness review verb onto the author's own head), so refusing one would wedge every single-session PR. What x-62a1 asked for is that the answer be visible in the verdict rather than asserted in prose: a gate that wants to demand a second reader is now one predicate over this number, not a redesign. Present alongside reviewed_count."
+        author_session_id:
+          type: string
+          description: "The authoring harness session used to classify each local verdict's attestation_origin. Persisted with the coverage snapshot so later status reads never substitute a newer live worktree manifest owner for the historical comparison. Omitted when authorship was unmeasured."
         verdicts:
           type: array
           description: "One entry per reviewer over one producer axis. Producer is named by axis so the chatgpt-codex-connector App and the local codex CLI are distinct."
