@@ -103,8 +103,8 @@ impl ReadinessDetector for NoSignalDetector {
 // ---------------------------------------------------------------------------
 
 /// Prompt indicators a modern CLI composer draws on its idle input line. A
-/// trailing glyph or the exact Codex composer placeholder is the positive
-/// readiness signal. Centralized so a smoke capture tunes one place.
+/// match on the last non-blank line's trailing glyph is the positive readiness
+/// signal. Centralized so a smoke capture tunes one place.
 pub const PROMPT_GLYPHS: &[char] = &['\u{276f}', '\u{203a}', '\u{2595}']; // ❯ › ▌
 
 /// Visible substrings that mean the CLI is mid-work and NOT accepting input,
@@ -136,8 +136,7 @@ const STATUS_REGION_LINES: usize = 3;
 
 /// Shared readiness decision: not-ready under any wall or busy marker *in the
 /// bottom status region*; otherwise ready only when the last line ends with a
-/// recognized glyph or the exact Codex composer placeholder appears in that
-/// region. Never guesses from byte counts (Open Question #9).
+/// recognized glyph. Never guesses from byte counts (Open Question #9).
 fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
     let nonblank: Vec<&str> = screen
         .visible_text
@@ -158,16 +157,50 @@ fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
         return false;
     }
     let last = nonblank.last().expect("non-empty checked").trim_end();
-    let legacy_prompt = glyphs.iter().any(|glyph| last.ends_with(*glyph));
-    let codex_placeholder = nonblank[region_start..].iter().any(|line| {
+    glyphs.iter().any(|glyph| last.ends_with(*glyph))
+}
+
+fn codex_prompt_ready(screen: &ScreenView) -> bool {
+    let nonblank: Vec<&str> = screen
+        .visible_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if nonblank.is_empty() {
+        return false;
+    }
+    let region_start = nonblank.len().saturating_sub(STATUS_REGION_LINES);
+    let region_lines = &nonblank[region_start..];
+    let region = region_lines.join("\n");
+    if WALL_MARKERS.iter().any(|marker| region.contains(marker))
+        || BUSY_MARKERS.iter().any(|marker| region.contains(marker))
+    {
+        return false;
+    }
+    let selector_visible = region_lines.iter().any(|line| {
+        let trimmed = line.trim_start();
+        PROMPT_GLYPHS.iter().any(|glyph| {
+            trimmed.strip_prefix(*glyph).is_some_and(|rest| {
+                let rest = rest.trim_start();
+                let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+                digits > 0 && rest.as_bytes().get(digits) == Some(&b'.')
+            })
+        })
+    });
+    if selector_visible {
+        return false;
+    }
+    let last = nonblank.last().expect("non-empty checked").trim_end();
+    let legacy_prompt = PROMPT_GLYPHS.iter().any(|glyph| last.ends_with(*glyph));
+    let placeholder = region_lines.iter().any(|line| {
         let prompt = line.trim();
-        glyphs.iter().any(|glyph| {
+        PROMPT_GLYPHS.iter().any(|glyph| {
             prompt
                 .strip_prefix(*glyph)
                 .is_some_and(|rest| rest.trim() == "Ask Codex to do anything")
         })
     });
-    legacy_prompt || codex_placeholder
+    legacy_prompt || placeholder
 }
 
 /// Provider-agnostic readiness check for the grid attention scanner
@@ -193,7 +226,7 @@ impl ReadinessDetector for CodexReadinessDetector {
     }
 
     fn is_ready(&self, screen: &ScreenView) -> Result<bool, ReadinessError> {
-        Ok(prompt_ready(screen, PROMPT_GLYPHS))
+        Ok(codex_prompt_ready(screen))
     }
 }
 
@@ -484,6 +517,21 @@ mod tests {
             d.is_ready(&view("answer\n› quoted text\nstatus")),
             Ok(false)
         );
+        assert_eq!(
+            d.is_ready(&view(
+                "› Ask Codex to do anything\n› 1. gpt-5.6-sol\n  2. gpt-5.6-luna"
+            )),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn codex_placeholder_is_not_a_prompt_for_other_detectors() {
+        let screen = view("› Ask Codex to do anything\nstatus");
+        assert_eq!(GeminiReadinessDetector.is_ready(&screen), Ok(false));
+        assert_eq!(AgyReadinessDetector.is_ready(&screen), Ok(false));
+        assert_eq!(ClaudeReadinessDetector.is_ready(&screen), Ok(false));
+        assert!(!screen_is_waiting(&screen));
     }
 
     #[test]
