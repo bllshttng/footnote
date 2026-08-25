@@ -223,7 +223,7 @@ def execute_retask(
     restamp: Callable[[], Optional[str]],
     rename: Callable[[str], Optional[str]],
     project_tier: Callable[[str, str], None] = lambda _model, _effort: None,
-    ready_frame: Optional[Callable[[str], bool]] = None,
+    ready_frame: Optional[Callable[[str], Mapping[str, object]]] = None,
     settle: Callable[[], None] = lambda: None,
 ) -> dict:
     """Run the bounded retask transaction through injected pane seams.
@@ -254,14 +254,16 @@ def execute_retask(
     planned = detect_retask(entry, target, node=node)
     if planned["outcome"] in {"spawn_required", "refused"}:
         return {**refusal, "reason": planned.get("reason", planned["outcome"])}
-    screen = entry.screen_state or {}
-    ready_marker = capabilities(entry.harness)["ready_marker"]
-    if screen.get("state") != "idle" or screen.get("rule") != ready_marker:
-        return {**refusal, "reason": "pane_not_idle"}
     initial_frame = read_frame()
     if not initial_frame.strip():
         return {**refusal, "reason": "pane_frame_unreadable"}
-    if ready_frame is not None and not ready_frame(initial_frame):
+    verdict = ready_frame(initial_frame) if ready_frame is not None else {}
+    if not isinstance(verdict, Mapping) or not (
+        verdict.get("matched") and verdict.get("rule_id") and verdict.get("state")
+    ):
+        return {**refusal, "reason": "pane_state_unobserved"}
+    ready_marker = capabilities(entry.harness)["ready_marker"]
+    if verdict.get("state") != "idle" or verdict.get("rule_id") != ready_marker:
         return {**refusal, "reason": "pane_not_idle"}
     if not send("/clear", True):
         return {**refusal, "reason": "clear_not_confirmed"}
@@ -518,18 +520,14 @@ def run_retask(
             registry_path=registry_path,
         )
 
-    def ready_frame(frame: str) -> bool:
-        from fno.agents.harness_map import capabilities
-        from fno.agents.mux_spawn import _evaluate_manifest_screen
+    def ready_frame(frame: str) -> Mapping[str, object]:
+        from fno.agents.mux_spawn import _evaluate_manifest_screen, _pane_osc_title
 
-        expected = capabilities(entry.harness)["ready_marker"]
-        if expected == "unsupported":
-            return False
-        verdict = _evaluate_manifest_screen(entry.harness, frame, subprocess.run)
-        return bool(
-            verdict.get("matched")
-            and verdict.get("rule_id") == expected
-            and verdict.get("state") == "idle"
+        osc_title = _pane_osc_title(session, int(pane), subprocess.run)
+        if entry.harness == "claude" and osc_title is None:
+            return {"matched": False, "error": "pane title unreadable"}
+        return _evaluate_manifest_screen(
+            entry.harness, frame, subprocess.run, osc_title=osc_title
         )
 
     try:
