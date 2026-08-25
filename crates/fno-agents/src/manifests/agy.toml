@@ -52,4 +52,7 @@ id = "idle_prompt"
 state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(3)"
-gate = { line_regex = '(^\s*[\x{276f}\x{203a}\x{2595}])|([\x{276f}\x{203a}\x{2595}]\s*$)' }
+gate = { all = [
+  { line_regex = '(^\s*[\x{276f}\x{203a}\x{2595}])|([\x{276f}\x{203a}\x{2595}]\s*$)' },
+  { not = { line_regex = '^\s*[\x{276f}\x{203a}\x{2595}]\s*[0-9]+\.' } },
+] }

@@ -159,9 +159,17 @@ fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
     }
     nonblank[region_start..].iter().any(|line| {
         let prompt = line.trim();
-        glyphs
-            .iter()
-            .any(|glyph| prompt.starts_with(*glyph) || prompt.ends_with(*glyph))
+        glyphs.iter().any(|glyph| {
+            if prompt.ends_with(*glyph) {
+                return true;
+            }
+            let Some(rest) = prompt.strip_prefix(*glyph) else {
+                return false;
+            };
+            let rest = rest.trim_start();
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            digits == 0 || rest.as_bytes().get(digits) != Some(&b'.')
+        })
     })
 }
 
@@ -466,6 +474,12 @@ mod tests {
         assert_eq!(
             d.is_ready(&view(
                 "› Ask Codex to do anything\nWorking · esc to interrupt\nstatus"
+            )),
+            Ok(false)
+        );
+        assert_eq!(
+            d.is_ready(&view(
+                "Select Model and Effort\n› 1. gpt-5.6-sol\n  2. gpt-5.6-luna"
             )),
             Ok(false)
         );

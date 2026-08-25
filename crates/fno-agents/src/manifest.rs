@@ -1448,6 +1448,7 @@ mod tests {
                 "model reply\n\u{203a} Ask Codex to do anything\ngpt-5.6-luna xhigh",
                 true,
             ),
+            ("Select Model\n\u{203a} 1. current\n  2. other", false),
             // "Working"/"Thinking" up in scrollback must NOT block (Codex P1).
             (
                 "I am Working on the Thinking task you asked about.\n\
@@ -2120,6 +2121,13 @@ mod tests {
         .unwrap();
         assert_eq!(busy["rule_id"], "busy");
         assert_eq!(busy["state"], "working");
+
+        let menu = evaluate_screen_json(
+            "codex",
+            "Select Model and Effort\n› 1. gpt-5.6-sol\n  2. gpt-5.6-luna",
+        )
+        .unwrap();
+        assert_eq!(menu["matched"], false);
     }
 
     #[test]
