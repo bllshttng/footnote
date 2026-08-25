@@ -45,13 +45,18 @@ def _write_config(tmp_path: Path, *, pick_on_launch: bool) -> None:
     )
 
 
+def _pin_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PWD", str(tmp_path))
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "config.toml"))
+
+
 @pytest.fixture()
 def armed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """readyrule EXHAUSTED, makers OK, picking armed."""
     _write_config(tmp_path, pick_on_launch=True)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PWD", str(tmp_path))
-    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+    _pin_config(tmp_path, monkeypatch)
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
 
     from fno.adapters.providers.runtime_state import write_usage_snapshot
@@ -90,9 +95,7 @@ class TestPickAtLaunch:
 
     def test_off_by_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_config(tmp_path, pick_on_launch=False)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("PWD", str(tmp_path))
-        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        _pin_config(tmp_path, monkeypatch)
         assert dispatch_mod._pick_account_env() is None
 
     def test_no_candidate_degrades_to_today_with_a_reason(
@@ -110,9 +113,7 @@ class TestPickAtLaunch:
             }}),
             encoding="utf-8",
         )
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("PWD", str(tmp_path))
-        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        _pin_config(tmp_path, monkeypatch)
         assert dispatch_mod._pick_account_env() is None
         assert "pick unavailable" in capsys.readouterr().err
 
@@ -362,9 +363,7 @@ class TestDeferDoesNotStallWhenPickingCanReroute:
         import time as _time
 
         _write_config(tmp_path, pick_on_launch=True)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("PWD", str(tmp_path))
-        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        _pin_config(tmp_path, monkeypatch)
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rs.json"))
         from fno.adapters.providers.runtime_state import write_usage_snapshot
         from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
@@ -384,9 +383,7 @@ class TestDeferDoesNotStallWhenPickingCanReroute:
         # The defer knob and the pick knob are independent; picking being off
         # must not quietly change deferral behaviour.
         _write_config(tmp_path, pick_on_launch=False)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("PWD", str(tmp_path))
-        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        _pin_config(tmp_path, monkeypatch)
         from fno.agents.autonomous_route import _healthy_alternate_exists
 
         assert _healthy_alternate_exists() is False
