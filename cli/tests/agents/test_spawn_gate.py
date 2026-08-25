@@ -307,6 +307,7 @@ class TestRunGate:
                 None,
             ),
         )
+        monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
         monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
 
