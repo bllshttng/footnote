@@ -769,6 +769,7 @@ def _write_codex_rollout(
     mtime_age=5.0,
     meta=True,
     readable_turn=True,
+    turn_timestamp="2026-08-25T15:00:00Z",
 ):
     """Write a rollout jsonl whose first line is a session_meta record."""
     day = codex_dir / "2026" / "07" / "09"
@@ -780,20 +781,20 @@ def _write_codex_rollout(
         line = {"type": "turn_context", "payload": {"nope": 1}}
     lines = [json.dumps(line)]
     if readable_turn:
+        turn = {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": f"resume {session_id}"}
+                ],
+            },
+        }
+        if turn_timestamp is not None:
+            turn["timestamp"] = turn_timestamp
         lines.append(
-            json.dumps(
-                {
-                    "timestamp": "2026-08-25T15:00:00Z",
-                    "type": "response_item",
-                    "payload": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": f"resume {session_id}"}
-                        ],
-                    },
-                }
-            )
+            json.dumps(turn)
         )
     f.write_text("\n".join(lines) + "\n", encoding="utf-8")
     mt = time.time() - mtime_age
@@ -1000,7 +1001,10 @@ def test_recovery_scan_keeps_shared_prefix_full_ids_distinct_and_usable(tmp_path
     assert [row.session_id for row in scan.usable_recoverable] == session_ids[::-1]
     assert scan.usable_recoverable_count == 3
     assert all(row.transcript_usable is True for row in scan.recoverable)
-    assert all(row.last_event_at for row in scan.recoverable)
+    assert all(
+        row.last_event_at == "2026-08-25T15:00:00Z"
+        for row in scan.recoverable
+    )
     assert all(row.last_turn_marker.startswith("resume ") for row in scan.recoverable)
 
 
@@ -1025,6 +1029,30 @@ def test_recovery_scan_names_header_only_candidate_as_unusable(tmp_path):
     assert candidate.unusable_reason == "no_readable_transcript_turn"
     assert candidate.last_event_at is None
     assert candidate.last_turn_marker is None
+
+
+@pytest.mark.parametrize("turn_timestamp", [None, "not-a-timestamp"])
+def test_recovery_scan_rejects_turn_without_readable_timestamp(
+    tmp_path, turn_timestamp
+):
+    codex = tmp_path / "codex"
+    session_id = _recovery_session_id(15)
+    _write_codex_rollout(
+        codex,
+        session_id=session_id,
+        cwd="/repo",
+        turn_timestamp=turn_timestamp,
+    )
+
+    scan = _scan_recoverable(codex, tmp_path / "missing-registry.json")
+
+    assert scan.complete is True
+    assert [row.session_id for row in scan.recoverable] == [session_id]
+    assert scan.usable_recoverable == ()
+    candidate = scan.recoverable[0]
+    assert candidate.transcript_usable is False
+    assert candidate.unusable_reason == "transcript_timestamp_unreadable"
+    assert candidate.last_event_at is None
 
 
 def test_recovery_scan_rejects_short_session_identity(tmp_path):

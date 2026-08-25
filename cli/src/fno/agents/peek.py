@@ -58,6 +58,7 @@ class Record:
 
     role: str
     text: str
+    timestamp: Optional[str] = None
 
 
 class ObserveUnsupported(Exception):
@@ -119,7 +120,12 @@ def _parse_codex_record(rec: dict) -> Optional[Record]:
     text = _extract_text(payload.get("content"))
     if not text:
         return None
-    return Record(role=str(payload.get("role") or "?"), text=text)
+    timestamp = rec.get("timestamp")
+    return Record(
+        role=str(payload.get("role") or "?"),
+        text=text,
+        timestamp=timestamp if isinstance(timestamp, str) else None,
+    )
 
 
 def _records_from_jsonl(

@@ -1582,9 +1582,7 @@ def _recovery_candidate(tmp_path, index, *, usable=True):
         encoding="utf-8",
     )
     mtime = rollout.stat().st_mtime
-    last_event_at = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    last_event_at = "2026-08-16T18:40:00Z"
     return RecoverableCodexRollout(
         session_id=session_id,
         cwd=str(tmp_path),

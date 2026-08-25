@@ -217,16 +217,11 @@ def _recovery_transcript_readback(candidate: Any) -> tuple[Optional[dict], Optio
             "transcript_changed",
             f"transcript_changed: rollout identity changed: {candidate.rollout_path}",
         )
-    try:
-        mtime = candidate.rollout_path.stat().st_mtime
-    except OSError as exc:
-        return None, "transcript_unavailable", f"transcript_unavailable: {exc}"
     usable, last_event_at, last_turn_marker, unusable_reason = _codex_rollout_usability(
         candidate.rollout_path,
         session_id=candidate.session_id,
         cwd=candidate.cwd,
         sessions_dir=candidate.rollout_path.parent,
-        mtime=mtime,
     )
     if not usable:
         return (

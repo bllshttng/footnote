@@ -415,7 +415,6 @@ def _codex_rollout_usability(
     session_id: str,
     cwd: str,
     sessions_dir: Path,
-    mtime: float,
 ) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
     from fno.agents.peek import recent_records
 
@@ -435,11 +434,17 @@ def _codex_rollout_usability(
     marker = " ".join((records[-1].text or "").split())[:200] or None
     if marker is None:
         return False, None, None, "no_readable_transcript_turn"
+    timestamp = records[-1].timestamp
+    if not timestamp:
+        return False, None, None, "transcript_timestamp_unreadable"
     try:
-        last_event_at = _dt.datetime.fromtimestamp(
-            mtime, tz=_dt.timezone.utc
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except (OSError, OverflowError, ValueError):
+        parsed_timestamp = _dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if parsed_timestamp.tzinfo is None:
+            raise ValueError("transcript timestamp lacks a timezone")
+        last_event_at = parsed_timestamp.astimezone(_dt.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except ValueError:
         return False, None, None, "transcript_timestamp_unreadable"
     return True, last_event_at, marker, None
 
@@ -591,7 +596,6 @@ def scan_recoverable_codex_rollouts(
                 session_id=session_id,
                 cwd=rollout_cwd,
                 sessions_dir=root,
-                mtime=mtime,
             )
         )
         recoverable.append(
