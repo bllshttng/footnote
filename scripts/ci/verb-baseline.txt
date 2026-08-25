@@ -94,6 +94,10 @@ king done
 king escalate
 king init
 king manifest-path
+law enact
+law inspect
+law prepare
+law resume
 lint
 loops
 loops resume-all

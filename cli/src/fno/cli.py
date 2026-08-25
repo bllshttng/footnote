@@ -144,6 +144,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Deprecated decision shim; use fno backlog decide/decisions.",
         {"hidden": True},
     ),
+    "law": (
+        "fno.law:law_app",
+        "Compose and enact human-approved project law.",
+        {"hidden": True},
+    ),
     "resume": (
         "fno.resume.cli:cli",
         "Durable typed resume receipts (evidence, never write authority)",

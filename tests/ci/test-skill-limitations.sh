@@ -18,7 +18,7 @@ bash -n "$GATE" || fail "gate failed bash -n"
 bash "$GATE" --selftest "$FIXTURES" || fail "gate selftest failed"
 
 output="$(bash "$GATE")" || fail "shipped skills tree did not pass"
-grep -Fq '23 skill file(s) passed' <<<"$output" \
-    || fail "positive control did not report all 23 skill files"
+grep -Fq '24 skill file(s) passed' <<<"$output" \
+    || fail "positive control did not report all 24 skill files"
 
 printf 'test-skill-limitations: PASS\n'

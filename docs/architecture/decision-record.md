@@ -53,6 +53,10 @@ State 3 exists because state 2 used to be everything that was not state 1. That 
 
 Say the residual limit out loud, because it is narrower than the rule it satisfies. A tty is OBTAINABLE: `script -q /dev/null <cmd>` reports one from a context with no person in it, measured on this box. So the terminal raises the cost of forging law and does not prevent it. Forging law THROUGH THIS VERB now takes two deliberate acts, a wrapped tty and an explicit flag, and neither happens by accident.
 
+### Chat-origin probe
+
+On 2026-08-24, Claude Code 2.1.241 emitted a real `UserPromptSubmit` payload for a disposable sentinel. The positive classifier matched `hook_event_name`, `prompt`, `session_id`, `transcript_path`, `cwd`, `permission_mode`, and the extra `prompt_id`. Its redacted shape digest was `03b48a08fb318830886b5dc8ac822ab7ca881a9c78da147efe3eb4f3ed17f329`. The verdict was `origin_provenance: not_exposed`. The payload carried no harness-authenticated human-origin discriminator. A disposable pane did not confirm live delivery of the separate mail sentinel, so no mail payload is claimed as empirical evidence. The implementation therefore uses the permission-gated fallback and treats an unknown schema as refusal.
+
 That claim is scoped to the verb on purpose. The index is an append-only file that nothing authenticates. One raw line written into `~/.fno/decisions.jsonl` reads as law, and `fno backlog decide-reindex` re-emits a forged journal row verbatim. No local signal proves a human is present, because a caller that owns the process owns every local signal. Proof needs an out-of-band attestation this verb cannot mint for itself.
 
 On 2026-08-19 an agent passed `--decided-by "J.N. Choi"`, and that name landed in `decided_by`. Five workers had been told to verify their orders by reading that field. Each did it correctly and got a fabricated yes.

@@ -18,6 +18,8 @@ import json
 import re
 import secrets
 import sys
+from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -97,6 +99,32 @@ class UnattributedAuthorityError(RuntimeError):
             "no session identity and no terminal, so operator authority "
             "cannot be established"
         )
+
+
+@dataclass(frozen=True)
+class OperatorConsent:
+    """Permission-bound proof for one exact staged law proposal."""
+
+    proposal_id: str
+    content_hash: str
+    session_id: str
+    permission_mode: str
+    tool_input: str
+
+
+def _consent_locked(function: Any) -> Any:
+    """Hold the proposal lock across validation, writes, and consumption."""
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        consent = kwargs.get("consent")
+        if consent is None:
+            return function(*args, **kwargs)
+        from fno.law import proposal_lock
+
+        with proposal_lock(consent.proposal_id):
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def mint_decision_id() -> str:
@@ -213,12 +241,14 @@ def _resolve_decider(
     )
 
 
+@_consent_locked
 def record_decision(
     *,
     decision: str,
     subject: str | None = None,
     decided_by: str | None = None,
     authority_source: str | None = None,
+    consent: OperatorConsent | None = None,
     rationale: str | None = None,
     options: "list[str] | None" = None,
     supersedes: str | None = None,
@@ -243,7 +273,32 @@ def record_decision(
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
 
-    provenance = _resolve_decider(decided_by, authority_source)
+    if consent is not None and authority_source != "chat_attested":
+        from fno.law import InvalidOperatorConsentError
+
+        raise InvalidOperatorConsentError(
+            "consent proves a chat approval, never operator authority"
+        )
+
+    consent_expected = None
+    if consent is not None:
+        from fno.law import validate_operator_consent
+
+        consent_expected = {
+            "subject": subject,
+            "decision": decision,
+            "rationale": rationale,
+            "options": list(options or []),
+            "supersedes": supersedes,
+        }
+        validate_operator_consent(consent, expected=consent_expected)
+        # The permission click approves the attribution; it does not prove a
+        # human origin (the 2026-08-24 UserPromptSubmit probe found no
+        # discriminator), so authority_source keeps the caller's honest value
+        # and the reader lanes the row accordingly.
+        provenance = Provenance("operator", authority_source, "operator", None)
+    else:
+        provenance = _resolve_decider(decided_by, authority_source)
 
     if events_root is None:
         from fno.carveout.core import resolve_carveout_root
@@ -267,7 +322,30 @@ def record_decision(
         rationale=rationale,
         supersedes=supersedes,
     )
-    append_event(event, events_path=events_path(events_root))
+    if consent is not None:
+        from fno.law import claim_operator_consent
+
+        claim_operator_consent(
+            consent,
+            expected=consent_expected or {},
+            decision_id=decision_id,
+        )
+    try:
+        append_event(event, events_path=events_path(events_root))
+    except Exception:
+        if consent is not None:
+            from fno.law import release_operator_consent
+
+            release_operator_consent(consent, decision_id=decision_id)
+        raise
+    if consent is not None:
+        from fno.law import consume_operator_consent
+
+        consume_operator_consent(
+            consent,
+            expected=consent_expected or {},
+            decision_id=decision_id,
+        )
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:
