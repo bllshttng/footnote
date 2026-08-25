@@ -492,6 +492,43 @@ def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     assert "gpt-5.5" not in cmd
 
 
+def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_path):
+    """Worktree placement is harness-keyed (claude-native vs external base), so
+    the grid must decide BEFORE _ensure_lane_worktree runs: placement and spawn
+    are one decision, never two."""
+    captured = {}
+    node = {"id": "x-grid2", "slug": "grid-two", "difficulty": "high", "priority": "p1"}
+
+    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
+    monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
+    monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
+    monkeypatch.setattr(adv, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setattr(
+        "fno.claims.core.acquire_claim", lambda *a, **k: object()
+    )
+
+    def fake_ensure(node_id, *, canonical_root, harness="claude"):
+        captured["harness"] = harness
+        return tmp_path
+
+    monkeypatch.setattr(adv, "_ensure_lane_worktree", fake_ensure)
+    monkeypatch.setattr(adv, "_seed_lane_local_settings", lambda *a, **k: None)
+    monkeypatch.setattr(adv._autobrief, "resolve_dispatch_brief", lambda n: ("", ""))
+    monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **k: _FakeProc(stdout='{"short_id": "s"}')
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda: {"claude": "exhausted", "codex": "ok"},
+    )
+
+    receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
+    assert receipts and receipts[0]["status"] == "dispatched"
+    assert captured["harness"] == "codex"
+
+
 def test_advance_cli_pin_overrides_node(iso, monkeypatch):
     """Locked Decision 1: a dispatch-time model/provider outranks node annotations."""
     captured = {}

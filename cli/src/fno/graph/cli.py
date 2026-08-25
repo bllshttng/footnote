@@ -12522,7 +12522,7 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
         return
 
     typer.echo(f"Multi-intake {len(concrete_files)} plans:")
-    tallies = {"intaked": 0, "already": 0}
+    tallies = {"intaked": 0, "already": 0, "invalid": 0}
     cli_project = getattr(args, "project", None)
     landed_projects: set[str] = set()
     new_ids: list[str] = []
@@ -12533,13 +12533,23 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
                 typer.echo(f"  warning: not found, skipped: {r['path']}")
                 continue
             for f in r["files"]:
-                prep = _prepare_intake(
-                    f, es,
-                    roadmap_id=roadmap_id, cli_title=args.title,
-                    cli_priority=args.priority, cli_deps=cli_deps,
-                    cli_points=args.points,
-                    cli_project=cli_project,
-                )
+                # A refusal (bad priority vocabulary, a cross-roadmap owner
+                # conflict) names ONE file: skip it with a clean per-file error
+                # so the batch lands, exactly like the single-plan surface that
+                # catches the same ValueError. Uncaught, it aborted the whole
+                # mutator with a traceback from inside the lock.
+                try:
+                    prep = _prepare_intake(
+                        f, es,
+                        roadmap_id=roadmap_id, cli_title=args.title,
+                        cli_priority=args.priority, cli_deps=cli_deps,
+                        cli_points=args.points,
+                        cli_project=cli_project,
+                    )
+                except ValueError as exc:
+                    tallies["invalid"] += 1
+                    typer.echo(f"  error: skipped {f}: {exc}", err=True)
+                    continue
                 if prep["status"] == "already":
                     tallies["already"] += 1
                     typer.echo(f'  already intaked {prep["id"]}: "{prep["title"]}"  ({f})')
@@ -12577,6 +12587,7 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
         f'\n{tallies["intaked"]} newly intaked, '
         f'{tallies["already"]} already intaked, '
         f'{missing} skipped.'
+        + (f' {tallies["invalid"]} refused.' if tallies["invalid"] else '')
     )
     if tallies["intaked"] + tallies["already"] == 0:
         raise typer.Exit(code=4)

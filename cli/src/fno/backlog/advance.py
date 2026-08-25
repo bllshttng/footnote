@@ -1178,28 +1178,16 @@ def _spawn_worker(
     # resolve_difficulty=False to node_model precisely so difficulty picks the
     # lane HERE, at the seam that can read live capacity - the spawned argv
     # always carries an explicit --harness, so the spawn-CLI grid can never fire
-    # on this path. Only a fully unpinned spawn defers (explicit model or
-    # provider stays operator authority); unknown capacity falls back to the
-    # defaults above (Locked 10: routing degrades, never blocks a spawn).
-    if model is None and not (provider or "").strip() and node is not None:
-        try:
-            from fno import route_resolve
-
-            capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
-            candidate, _grid_chain = route_resolve.resolve_grid(
-                node.get("difficulty") or node.get("model_tier"),
-                node.get("priority"),
-                capacity,
-            )
-        except Exception:  # noqa: BLE001 - unknown capacity spawns on defaults
-            candidate = None
-        if candidate is not None:
-            prov = candidate["harness"]
-            model = candidate["model"]
-            if harness is None:
-                # The resolver must see the grid's harness or it resolves a
-                # claude substrate/command for a codex spawn (bg is claude-only).
-                harness = candidate["harness"]
+    # on this path. See _grid_lane_for; harness-keyed placement sites resolve
+    # there instead and arrive already pinned.
+    grid_harness, grid_model = _grid_lane_for(node, model=model, provider=provider)
+    if grid_harness is not None:
+        prov = grid_harness
+        model = grid_model
+        if harness is None:
+            # The resolver must see the grid's harness or it resolves a
+            # claude substrate/command for a codex spawn (bg is claude-only).
+            harness = grid_harness
 
     # x-4391/x-4be1: merge posture from config.auto_merge.grant, read with the
     # node_cwd precedence so a cross-project dispatch reads the DEPENDENT node's
@@ -1408,6 +1396,39 @@ def _base_project_id(canonical_root: Path) -> str:
 # value - a claude ACCOUNT record (ccm/ccr), z.ai/glm, an empty/None - runs under
 # the claude harness, so it maps to claude for the worktree-native decision.
 _NON_CLAUDE_HARNESSES = frozenset({"codex", "gemini", "agy", "opencode"})
+
+
+def _grid_lane_for(
+    node: Optional[dict], *, model: Optional[str], provider: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """``(harness, model)`` the capacity grid picks for an UNPINNED spawn, else ``(None, None)``.
+
+    The receiving end of the difficulty deferral: dispatch callers resolve
+    difficulty to nothing precisely so it picks the lane HERE, where live
+    capacity is readable - the spawned argv's explicit --harness can never
+    trigger the spawn-CLI grid. Only a fully unpinned spawn defers (an explicit
+    model or provider stays operator authority); unknown capacity falls back to
+    the caller's defaults (Locked 10: routing degrades, never blocks a spawn).
+    Dispatch sites that make HARNESS-KEYED decisions before spawning (lane
+    worktree placement) must call this first and thread the result through
+    both decisions, so placement and spawn always agree.
+    """
+    if model is not None or (provider or "").strip() or node is None:
+        return None, None
+    try:
+        from fno import route_resolve
+
+        capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
+        candidate, _chain = route_resolve.resolve_grid(
+            node.get("difficulty") or node.get("model_tier"),
+            node.get("priority"),
+            capacity,
+        )
+    except Exception:  # noqa: BLE001 - unknown capacity spawns on defaults
+        return None, None
+    if candidate is None:
+        return None, None
+    return candidate["harness"], candidate["model"]
 
 
 def _lane_harness(eff_provider: Optional[str]) -> str:
@@ -1653,8 +1674,20 @@ def dispatch_lanes(
         # failure path below.
         try:
             eff_provider = provider if provider is not None else node.get("provider")
+            resolved_model = _route_resolve.node_model(
+                node, explicit=model, provider=eff_provider, resolve_difficulty=False
+            )
+            # The grid must decide BEFORE the worktree is placed: placement is
+            # harness-keyed (claude-native vs external base), so it has to agree
+            # with the harness the spawn will actually use. Threading the result
+            # into both decisions keeps placement and spawn one decision.
+            lane_grid_harness, lane_grid_model = _grid_lane_for(
+                node, model=resolved_model, provider=eff_provider
+            )
             worktree = _ensure_lane_worktree(
-                node_id, canonical_root=canonical, harness=_lane_harness(eff_provider)
+                node_id,
+                canonical_root=canonical,
+                harness=_lane_harness(lane_grid_harness or eff_provider),
             )
             # A never-policy lane runs in the canonical checkout in place; seeding
             # a per-lane config.local.toml there would write into canonical .fno.
@@ -1665,10 +1698,9 @@ def dispatch_lanes(
                 node_id,
                 str(worktree),
                 slug,
-                model=_route_resolve.node_model(
-                    node, explicit=model, provider=eff_provider, resolve_difficulty=False
-                ),
-                provider=eff_provider,
+                model=lane_grid_model or resolved_model,
+                provider=lane_grid_harness or eff_provider,
+                harness=lane_grid_harness,
                 verb=node.get("dispatch_verb"),
                 brief=_brief,
                 node=node,

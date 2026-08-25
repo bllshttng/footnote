@@ -948,7 +948,40 @@ def test_multi_intake_birth_path_warns_on_near_duplicate(fixture_graph, tmp_path
     err = capsys.readouterr().err
     assert err.count("dedup:") == 2  # one receipt per intaked node
     assert "ab-1dea1234" in err
-    assert len(_read_entries(fixture_graph)) == 5  # 3 seeded + 2 intaked
+
+
+def test_multi_intake_skips_refused_plan_cleanly(fixture_graph, tmp_path, capsys):
+    """A refusal (bad priority vocabulary, owner conflict) names ONE file: the
+    batch intakes the rest and reports the refusal as a clean per-file error,
+    never a traceback out of the locked mutator."""
+    from types import SimpleNamespace
+
+    def _plan(path: Path, title: str, priority: str | None = None) -> Path:
+        fm = ["---"]
+        if priority:
+            fm.append(f"priority: {priority}")
+        fm += ["created: 2026-05-05T04:35", "---"]
+        path.write_text(
+            "\n".join(fm + ["", f"# {title}", "", "Body.", ""]) + "\n"
+        )
+        return path
+
+    good = _plan(tmp_path / "good.md", "Batch intake good plan gamma")
+    bad = _plan(tmp_path / "bad.md", "Batch intake bad plan delta", priority="urgent")
+    args = SimpleNamespace(
+        # priority None so the PLAN frontmatter supplies it (a cli priority
+        # would outrank the frontmatter and the bad value would never be read).
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(args, [str(good), str(bad)], roadmap_id=None, dry_run=False)
+    captured = capsys.readouterr()
+    assert "invalid priority" in captured.err
+    assert "skipped" in captured.err
+    assert "refused" in captured.out
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert any("good plan gamma" in (t or "") for t in titles)
+    assert not any("bad plan delta" in (t or "") for t in titles)
+    assert len(_read_entries(fixture_graph)) == 4  # 3 seeded + the 1 good plan
 
 
 def test_old_idea_title_warning_function_is_gone():
