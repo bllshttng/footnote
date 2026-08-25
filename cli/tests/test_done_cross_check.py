@@ -358,6 +358,16 @@ def test_unclassified_read_failure_is_not_retryable():
     assert error.retryable is False
 
 
+def test_http_5xx_is_retryable_and_names_retry_action():
+    from fno.graph._reconcile import ReconcileError
+
+    error = ReconcileError("gh: HTTP 502 Bad Gateway")
+
+    assert error.kind == "availability"
+    assert error.retryable is True
+    assert "retry" in error.remedy_for(pr_number=1, repo="o/r").lower()
+
+
 # ---------------------------------------------------------------------------
 # AC2-HP: OPEN no longer closes, even with green CI (regression against the
 # removed behavior). Exit 5, node stays in_review, and no CI query is issued.

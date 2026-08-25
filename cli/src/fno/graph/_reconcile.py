@@ -238,6 +238,12 @@ class ReconcileError(Exception):
             return "evidence_incomplete"
         if "rate limit" in text or "quota" in text:
             return "availability"
+        if (
+            re.search(r"\b(?:http|status)\s*5\d{2}\b", text)
+            or "bad gateway" in text
+            or "internal server error" in text
+        ):
+            return "availability"
         if any(
             token in text
             for token in ("not json", "malformed", "parse", "json value", "no output")
@@ -287,8 +293,10 @@ class ReconcileError(Exception):
                 "Supply `--repo <owner/repo>` or repair the checkout's origin remote; "
                 "repository context is required and this is not retryable."
             )
-        if "rate limit" in str(self).lower() or "quota" in str(self).lower():
-            return "Back off GitHub API requests and retry after the rate limit clears."
+        if self.kind == "availability":
+            if "rate limit" in str(self).lower() or "quota" in str(self).lower():
+                return "Back off GitHub API requests and retry after the rate limit clears."
+            return "Retry the GitHub read when availability returns; the node stays open."
         return "The PR read failed for an unclassified reason; inspect it before retrying."
 
 
