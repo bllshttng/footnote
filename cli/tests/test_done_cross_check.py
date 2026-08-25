@@ -349,6 +349,15 @@ def test_missing_repository_context_is_not_retryable():
     assert "--repo <owner/repo>" in error.remedy_for(pr_number=1, repo=None)
 
 
+def test_unclassified_read_failure_is_not_retryable():
+    from fno.graph._reconcile import ReconcileError
+
+    error = ReconcileError("unexpected reader failure")
+
+    assert error.kind == "reader_error"
+    assert error.retryable is False
+
+
 # ---------------------------------------------------------------------------
 # AC2-HP: OPEN no longer closes, even with green CI (regression against the
 # removed behavior). Exit 5, node stays in_review, and no CI query is issued.

@@ -8929,6 +8929,8 @@ def cmd_reconcile(
         emit_human_touch_for_record,
         emit_session_satisfied_for_record,
         node_is_open,
+        ReconcileError,
+        repo_slug_from_url,
         resolve_promise_evidence,
         scan_merge_drift,
         write_retro_sentinel,
@@ -9345,6 +9347,7 @@ def cmd_reconcile(
     # MAINSTREAM close (auto-fires on SessionStart), so without this leg a node
     # that cmd_done refused would close here on the next session anyway.
     promise_unmet: list[tuple[str, str]] = []
+    promise_warnings: list[dict[str, str]] = []
     if closeable:
         gated: list = []
         for record in closeable:
@@ -9371,6 +9374,10 @@ def cmd_reconcile(
                 # Named, not silent: reconcile is the unattended close path, so a
                 # gate that skipped itself must still leave a trace.
                 typer.echo(f"warning: {verdict.warning}", err=True)
+            if verdict.warning:
+                promise_warnings.append(
+                    {"node_id": record.node_id, "warning": verdict.warning}
+                )
             if verdict.outcome == "promise_unmet":
                 # First refusal line only: the full reason belongs to the verb
                 # the operator runs to resolve it, not this one-line sweep roll.
@@ -9398,6 +9405,7 @@ def cmd_reconcile(
     # lock: these are `gh` round trips, and the graph lock is not the place for
     # them. Full sweep only, matching the other self-heal legs.
     owed_evidence: dict[str, dict] = {}
+    owed_evidence_failures: list[dict[str, str]] = []
     if _full_sweep and not dry_run:
         from fno.graph._reconcile import (
             query_pr_merge_state,
@@ -9405,9 +9413,26 @@ def cmd_reconcile(
         )
 
         for successor_id, successor in successors_owing_verification(entries).items():
+            successor_repo = repo_slug_from_url(successor.get("pr_url"))
+            successor_cwd = successor.get("cwd") if successor_repo is None else None
             try:
-                merged = query_pr_merge_state(successor["pr_number"])
-            except Exception:
+                merged = query_pr_merge_state(
+                    successor["pr_number"],
+                    repo=successor_repo,
+                    cwd=successor_cwd,
+                )
+            except ReconcileError as exc:
+                owed_evidence_failures.append(
+                    {
+                        "successor": successor_id,
+                        "pr_number": str(successor["pr_number"]),
+                        "error": str(exc),
+                        "kind": exc.kind,
+                        "remedy": exc.remedy_for(
+                            pr_number=successor["pr_number"], repo=successor_repo
+                        ),
+                    }
+                )
                 continue
             if merged.state != "MERGED":
                 continue
@@ -10089,11 +10114,13 @@ def cmd_reconcile(
             "promise_unmet": [
                 {"node_id": nid, "reason": reason} for nid, reason in promise_unmet
             ],
+            "promise_warnings": promise_warnings,
+            "supersession_evidence_failures": owed_evidence_failures,
         }
         typer.echo(json.dumps(payload, indent=2))
         # Unresolved PR queries are a partial failure: signal it so unattended
         # callers can detect it from the exit code, not just the JSON body.
-        if failures:
+        if failures or owed_evidence_failures:
             raise typer.Exit(code=4)
         return
 
@@ -10106,6 +10133,8 @@ def cmd_reconcile(
         and not contained_closed
         and not reverted_stamped
         and not promise_unmet
+        and not promise_warnings
+        and not owed_evidence_failures
         and not closure_claims
     ):
         typer.echo("No merged-PR drift found. Backlog is in sync.")
@@ -10172,6 +10201,21 @@ def cmd_reconcile(
         )
         for nid, reason in promise_unmet:
             typer.echo(f"  {nid}: {reason}", err=True)
+
+    if promise_warnings:
+        typer.echo("Promise ship-count warnings:", err=True)
+        for warning in promise_warnings:
+            typer.echo(f"  {warning['node_id']}: {warning['warning']}", err=True)
+
+    if owed_evidence_failures:
+        typer.echo("Supersession evidence reads failed:", err=True)
+        for failure in owed_evidence_failures:
+            typer.echo(
+                f"  {failure['successor']} PR #{failure['pr_number']}: "
+                f"{failure['error']}\n    {failure['remedy']}",
+                err=True,
+            )
+        raise typer.Exit(code=4)
 
     if reverted_stamped:
         verb = "Would stamp" if dry_run else "Stamped"

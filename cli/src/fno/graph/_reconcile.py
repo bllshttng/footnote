@@ -241,7 +241,12 @@ class ReconcileError(Exception):
             for token in ("not json", "malformed", "parse", "json value", "no output")
         ):
             return "malformed"
-        return "availability"
+        if any(
+            token in text
+            for token in ("timeout", "timed out", "network", "transport", "connection", "unavailable")
+        ):
+            return "availability"
+        return "reader_error"
 
     @property
     def retryable(self) -> bool:
@@ -282,7 +287,7 @@ class ReconcileError(Exception):
             )
         if "rate limit" in str(self).lower() or "quota" in str(self).lower():
             return "Back off GitHub API requests and retry after the rate limit clears."
-        return "Retry the GitHub read when availability returns; the node stays open."
+        return "The PR read failed for an unclassified reason; inspect it before retrying."
 
 
 @dataclass
@@ -1016,7 +1021,7 @@ def resolve_promise_evidence(
                 if isinstance(num, int) and num not in seen:
                     refs.append((num, url))
                     seen.add(num)
-        merged, outage = _count_merged_refs(
+        merged, failure = _count_merged_refs(
             refs, ceiling=expected, cwd=cwd, query=query
         )
         if merged < expected:
@@ -1024,12 +1029,20 @@ def resolve_promise_evidence(
             # would tell the operator the plan under-shipped when gh was simply
             # down, and the merge gate already treats an outage as retryable
             # (exit 4) rather than a policy refusal.
-            if outage:
+            if failure and failure.retryable:
                 return PromiseVerdict(
                     outcome="ok",
                     warning=(
                         f"promise gate could not confirm {expected} ships for "
-                        f"{node_id}: {outage}; ship-count check skipped"
+                        f"{node_id}: {failure}; ship-count check skipped"
+                    ),
+                )
+            if failure:
+                return PromiseVerdict(
+                    outcome="promise_unmet",
+                    reason=(
+                        f"Refused: {node_id} could not verify promised ships: "
+                        f"{failure}\n  {failure.remedy_for(pr_number=0, repo=None)}"
                     ),
                 )
             return PromiseVerdict(
@@ -1046,8 +1059,8 @@ def _count_merged_refs(
     ceiling: int,
     cwd: Optional[str] = None,
     query: Optional[Callable[..., PrMergeState]] = None,
-) -> tuple[int, Optional[str]]:
-    """Count MERGED refs; return ``(merged, first_outage)``.
+) -> tuple[int, Optional[ReconcileError]]:
+    """Count MERGED refs; return ``(merged, first typed failure)``.
 
     Mirrors :func:`resolve_merge_evidence`'s per-ref resolution so the two agree
     on what counts as merged. Stops early at ``ceiling``: once enough ships are
@@ -1058,7 +1071,7 @@ def _count_merged_refs(
     """
     query = query or query_pr_merge_state
     merged = 0
-    outage: Optional[str] = None
+    failure: Optional[ReconcileError] = None
     repo: Optional[str] = None
     for pr_number, pr_url in refs:
         pr_repo = repo_slug_from_url(pr_url) or repo
@@ -1068,14 +1081,23 @@ def _count_merged_refs(
         try:
             state = query(pr_number, repo=pr_repo, cwd=pr_cwd)
         except ReconcileError as exc:
-            if outage is None:
-                outage = f"PR #{pr_number}: {exc}"
+            if failure is None or (failure.retryable and not exc.retryable):
+                failure = ReconcileError(
+                    f"PR #{pr_number}: {exc}",
+                    kind=exc.kind,
+                    remedy=exc.remedy_for(pr_number=pr_number, repo=pr_repo),
+                )
             continue
         if state.state == "MERGED":
             merged += 1
             if merged >= ceiling:
                 return merged, None
-    return merged, outage
+        elif state.state == "UNKNOWN":
+            failure = ReconcileError(
+                f"PR #{pr_number}: REST reader returned UNKNOWN state",
+                kind="malformed",
+            )
+    return merged, failure
 
 
 def _promise_refusal_b(node_id: str, plan_display: str, detail: str) -> str:
@@ -1184,6 +1206,7 @@ def query_pr_merge_state(
     timeout_s: float = GH_QUERY_TIMEOUT_S,
     info_reader: Optional[Callable[..., tuple[Optional[dict], str]]] = None,
     files_reader: Optional[Callable[..., tuple[Optional[list[str]], str]]] = None,
+    include_files: bool = True,
 ) -> PrMergeState:
     """Read merge state and complete changed-file evidence through REST.
 
@@ -1261,7 +1284,7 @@ def query_pr_merge_state(
         )
 
     changed_files: list[str] = []
-    if state == "MERGED":
+    if state == "MERGED" and include_files:
         try:
             file_paths, reason = files_reader(pr_number, repo=repo, cwd=cwd)
         except ReconcileError:
