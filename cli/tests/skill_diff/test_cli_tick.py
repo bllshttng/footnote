@@ -42,6 +42,22 @@ def _finding(run_id, verdict="fail"):
                      "dimension": "structural_validity", "verdict": verdict}}
 
 
+def test_architectural_followup_filing_declares_difficulty(monkeypatch):
+    seen = {}
+
+    class Result:
+        stdout = '{"id":"fno-a1b2"}'
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return Result()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli._file_no_diff_node("blueprint", "run-1", "architectural") == "fno-a1b2"
+    assert "--difficulty" in seen["argv"]
+    assert "medium" in seen["argv"]
+
+
 def test_paused_exits_zero_with_word(monkeypatch, tmp_path):
     p = _wire(monkeypatch, tmp_path, [_rc("r1"), _finding("r1")], paused=True)
     r = runner.invoke(cli.skill_diff_app, ["tick", "--skill", "blueprint"])

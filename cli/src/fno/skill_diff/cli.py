@@ -136,7 +136,7 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
     ).format(run_id=run_id)
     try:
         out = subprocess.run(
-            ["fno", "backlog", "idea", title, "-d", details, "-p", "p2", "-t", "feature"],
+            ["fno", "backlog", "idea", title, "-d", details, "-p", "p2", "-t", "feature", "--difficulty", "medium"],
             capture_output=True,
             text=True,
             check=True,
