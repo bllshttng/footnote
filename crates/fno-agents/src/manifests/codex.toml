@@ -49,7 +49,8 @@ gate = { any = [
   { contains = "Thinking" },
 ] }
 
-# One of the last three non-blank lines starts or ends with a prompt glyph (❯ › ▌).
+# The last line ends with a prompt glyph, or the current Codex placeholder is
+# one of the last three lines above its status bar.
 # Literal (single-quoted) TOML string so the backslash reaches the regex engine.
 [[rule]]
 id = "idle_prompt"
@@ -57,7 +58,10 @@ state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(3)"
 gate = { all = [
-  { line_regex = '(^\s*[\x{276f}\x{203a}\x{2595}])|([\x{276f}\x{203a}\x{2595}]\s*$)' },
+  { any = [
+    { regex = '[\x{276f}\x{203a}\x{2595}][ \t]*$' },
+    { line_regex = '^\s*[\x{276f}\x{203a}\x{2595}]\s+Ask Codex to do anything\s*$' },
+  ] },
   { not = { line_regex = '^\s*[\x{276f}\x{203a}\x{2595}]\s*[0-9]+\.' } },
 ] }
 

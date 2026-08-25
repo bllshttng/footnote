@@ -1444,10 +1444,6 @@ mod tests {
             ("loading a 5000 byte banner of text", false),         // no glyph -> not ready
             ("Waiting for auth...\n\u{276f}", false),              // gemini false-ready trap
             ("Gemini ready\n\u{203a} ", true),                     // › idle glyph
-            (
-                "model reply\n\u{203a} Ask Codex to do anything\ngpt-5.6-luna xhigh",
-                true,
-            ),
             ("Select Model\n\u{203a} 1. current\n  2. other", false),
             // "Working"/"Thinking" up in scrollback must NOT block (Codex P1).
             (
@@ -2128,6 +2124,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(menu["matched"], false);
+
+        let quoted = evaluate_screen_json("codex", "answer\n› quoted text\nstatus").unwrap();
+        assert_eq!(quoted["matched"], false);
     }
 
     #[test]

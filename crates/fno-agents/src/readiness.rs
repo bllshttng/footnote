@@ -103,8 +103,8 @@ impl ReadinessDetector for NoSignalDetector {
 // ---------------------------------------------------------------------------
 
 /// Prompt indicators a modern CLI composer draws on its idle input line. A
-/// match on a line in the bottom status region is the positive readiness signal.
-/// Centralized so a smoke capture tunes one place.
+/// trailing glyph or the exact Codex composer placeholder is the positive
+/// readiness signal. Centralized so a smoke capture tunes one place.
 pub const PROMPT_GLYPHS: &[char] = &['\u{276f}', '\u{203a}', '\u{2595}']; // ❯ › ▌
 
 /// Visible substrings that mean the CLI is mid-work and NOT accepting input,
@@ -135,9 +135,9 @@ const WALL_MARKERS: &[&str] = &[
 const STATUS_REGION_LINES: usize = 3;
 
 /// Shared readiness decision: not-ready under any wall or busy marker *in the
-/// bottom status region*; otherwise ready only when a line in that region starts
-/// or ends with a recognized prompt glyph. Never guesses from byte counts (Open
-/// Question #9).
+/// bottom status region*; otherwise ready only when the last line ends with a
+/// recognized glyph or the exact Codex composer placeholder appears in that
+/// region. Never guesses from byte counts (Open Question #9).
 fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
     let nonblank: Vec<&str> = screen
         .visible_text
@@ -157,20 +157,17 @@ fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
     if BUSY_MARKERS.iter().any(|m| region.contains(m)) {
         return false;
     }
-    nonblank[region_start..].iter().any(|line| {
+    let last = nonblank.last().expect("non-empty checked").trim_end();
+    let legacy_prompt = glyphs.iter().any(|glyph| last.ends_with(*glyph));
+    let codex_placeholder = nonblank[region_start..].iter().any(|line| {
         let prompt = line.trim();
         glyphs.iter().any(|glyph| {
-            if prompt.ends_with(*glyph) {
-                return true;
-            }
-            let Some(rest) = prompt.strip_prefix(*glyph) else {
-                return false;
-            };
-            let rest = rest.trim_start();
-            let digits = rest.chars().take_while(char::is_ascii_digit).count();
-            digits == 0 || rest.as_bytes().get(digits) != Some(&b'.')
+            prompt
+                .strip_prefix(*glyph)
+                .is_some_and(|rest| rest.trim() == "Ask Codex to do anything")
         })
-    })
+    });
+    legacy_prompt || codex_placeholder
 }
 
 /// Provider-agnostic readiness check for the grid attention scanner
@@ -481,6 +478,10 @@ mod tests {
             d.is_ready(&view(
                 "Select Model and Effort\n› 1. gpt-5.6-sol\n  2. gpt-5.6-luna"
             )),
+            Ok(false)
+        );
+        assert_eq!(
+            d.is_ready(&view("answer\n› quoted text\nstatus")),
             Ok(false)
         );
     }
