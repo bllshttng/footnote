@@ -8227,7 +8227,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // terminal above already ran (a terminal always beats an idle),
                 // and this sits BEFORE the NoProgress backstop so a long watched
                 // wait degrades to budget/claim-expiry, never a spurious kill.
-                if let Intent::Watching {
+                let watching_refusal = if let Intent::Watching {
                     ref reason,
                     ref timeout,
                     ..
@@ -8238,10 +8238,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // (FNO_DRIVER_LIB, the same discriminator terminal_stop.rs
                     // uses) exits on allow. codex/gemini keep today's block
                     // behavior until their daemon-consumer waker ships (AC1-EDGE).
-                    let blocker = if harness_can_idle(
-                        author_harness.as_deref(),
-                        std::env::var("FNO_DRIVER_LIB").is_ok(),
-                    ) {
+                    let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
+                    let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
+                    let blocker = if can_idle {
                         async_wait_class(&pr_info, open_findings.is_empty(), head_shipped)
                     } else {
                         None
@@ -8305,10 +8304,23 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         // renewal failed / holder mismatch -> fall through to the
                         // block below (AC3-ERR): never idle without a lease.
                     }
-                    // not async-wait class, or a loop-run child -> fall through:
-                    // build_block_reason names the real blocker (AC1-ERR CI red,
-                    // AC2-ERR head mismatch / finding).
-                }
+                    // Not an async-wait class, or a loop-run child: fall through
+                    // with an explicit refusal before the real blocker.
+                    Some(if !can_idle {
+                        watching_harness_refusal(author_harness.as_deref(), is_loop_run_child)
+                    } else if blocker.is_none() && !pr_info.unaddressed_findings.is_empty() {
+                        format!(
+                            "watching ignored: {} unaddressed findings, this is not an async wait",
+                            pr_info.unaddressed_findings.len()
+                        )
+                    } else if blocker.is_none() {
+                        "watching ignored: PR is not in an async wait class".to_string()
+                    } else {
+                        "watching ignored: watch lease could not be renewed".to_string()
+                    })
+                } else {
+                    None
+                };
 
                 // x-b167: a freshly-posted nudge sits in Awaiting until
                 // wait_minutes elapses. On a harness that cannot idle on a
@@ -8422,21 +8434,22 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // A failed probe OR a fidelity refusal IS the blocker when
                 // everything else is green; build_block_reason would otherwise
                 // report a healthy PR.
-                let reason = crate::nudge::append_inbox_nudge(
-                    &probe_block
-                        .clone()
-                        .or(fidelity_block.clone())
-                        .unwrap_or_else(|| {
-                            build_block_reason(
-                                &pr_info,
-                                &head_sha,
-                                open_findings.is_empty(),
-                                head_shipped,
-                            )
-                        }),
-                    &cwd,
-                    &session_id,
-                );
+                let block_reason = probe_block
+                    .clone()
+                    .or(fidelity_block.clone())
+                    .unwrap_or_else(|| {
+                        build_block_reason(
+                            &pr_info,
+                            &head_sha,
+                            open_findings.is_empty(),
+                            head_shipped,
+                        )
+                    });
+                let block_reason = match watching_refusal {
+                    Some(refusal) => format!("{refusal}; {block_reason}"),
+                    None => block_reason,
+                };
+                let reason = crate::nudge::append_inbox_nudge(&block_reason, &cwd, &session_id);
                 emit(
                     "loop_check",
                     serde_json::json!({
@@ -8699,6 +8712,17 @@ fn watch_window_ms(timeout: Option<&str>) -> i64 {
 /// "unroutable harness -> status quo, never a dead watch" degradation.
 fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
     author_harness == Some("claude") && !is_loop_run_child
+}
+
+fn watching_harness_refusal(author_harness: Option<&str>, is_loop_run_child: bool) -> String {
+    if is_loop_run_child {
+        "watching ignored: loop-run child cannot idle".to_string()
+    } else {
+        format!(
+            "watching ignored: harness {} cannot idle",
+            author_harness.unwrap_or("unknown")
+        )
+    }
 }
 
 /// Whether the PR is in the async-wait class a `<watching>` tag may idle on
@@ -14085,6 +14109,18 @@ git_bounded();";
         assert!(!harness_can_idle(Some("gemini"), false));
         // Unknown harness (bare shell / daemon): conservative block.
         assert!(!harness_can_idle(None, false));
+    }
+
+    #[test]
+    fn watching_refusal_names_the_disqualifying_substrate() {
+        assert_eq!(
+            watching_harness_refusal(Some("claude"), true),
+            "watching ignored: loop-run child cannot idle"
+        );
+        assert_eq!(
+            watching_harness_refusal(Some("codex"), false),
+            "watching ignored: harness codex cannot idle"
+        );
     }
 
     #[test]
