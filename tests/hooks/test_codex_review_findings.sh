@@ -47,4 +47,11 @@ rc="$(run_hook turn-clean '[]')"
 [[ "$rc" == "0" ]] || { echo "FAIL: clean review was blocked"; exit 1; }
 [[ ! -s "$TMP/turn-clean.err" ]] || { echo "FAIL: clean review produced a nudge"; exit 1; }
 
+# Real findings carry the priority as a title prefix, not a property.
+title_findings='[{"title":"[P1] Fix the thing","file":"a.py"},{"title":"[p2] Also this","file":"b.py"}]'
+rc="$(run_hook turn-title "$title_findings")"
+[[ "$rc" == "2" ]] || { echo "FAIL: title-shaped findings must block with rc=2, got $rc"; exit 1; }
+grep -q 'P1: 1, P2: 1' "$TMP/turn-title.err" \
+  || { echo "FAIL: nudge does not read priority from title prefixes"; exit 1; }
+
 echo "PASS: Codex review findings nudge the owning worker once at Stop"

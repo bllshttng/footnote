@@ -54,8 +54,10 @@ fi
 touch "$marker" 2>/dev/null || exit 0
 
 total="$(jq 'length' <<<"$findings" 2>/dev/null || printf 'unknown')"
-p1="$(jq '[.[] | (.priority // .severity // "") | ascii_upcase | select(. == "P1")] | length' <<<"$findings" 2>/dev/null || printf '0')"
-p2="$(jq '[.[] | (.priority // .severity // "") | ascii_upcase | select(. == "P2")] | length' <<<"$findings" 2>/dev/null || printf '0')"
+# Priority lives in the title prefix ("[P1] ...") on real review findings; the
+# priority/severity fields stay as fallbacks for shapes that carry them.
+p1="$(jq '[.[] | select(((.priority // .severity // "") | ascii_upcase) == "P1" or ((.title // "") | test("(?i)^\\s*\\[P1\\]")))] | length' <<<"$findings" 2>/dev/null || printf '0')"
+p2="$(jq '[.[] | select(((.priority // .severity // "") | ascii_upcase) == "P2" or ((.title // "") | test("(?i)^\\s*\\[P2\\]")))] | length' <<<"$findings" 2>/dev/null || printf '0')"
 
 cat >&2 <<EOF
 Native review returned $total finding(s) for this turn (P1: $p1, P2: $p2). Act on the findings in your current context now. Read each finding, fix actionable P1/P2 issues, run focused tests, commit and push. Then run 'fno do target request-self-review --pr <n>' on the NEW HEAD; the old attestation is stale. Do not promise completion while findings remain.
