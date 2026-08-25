@@ -411,7 +411,106 @@ if [ "$_PREFLIGHT_OK" -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2: Write handoff brief artifact
+# Step 2: Prove the selected destination can infer and use this worktree
+# ---------------------------------------------------------------------------
+_NODE_8HEX="${NODE_ID:3:8}"
+CHILD_NAME="tgt-${_NODE_8HEX}-${DEST_HARNESS}-g${CHILD_GEN}"
+_CAPABILITY_NONCE="${HANDOFF_CAPABILITY_NONCE:-$(date +%s)-$$-${RANDOM:-0}}"
+_CAPABILITY_CWD="${HANDOFF_CAPABILITY_EXPECTED_CWD:-$PWD}"
+_CAPABILITY_ROOT="${HANDOFF_CAPABILITY_EXPECTED_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
+if [ -z "$_CAPABILITY_ROOT" ]; then
+  echo "parked $NODE_ID reason=\"capability_probe: git root unreadable\""
+  exit "$_EXIT_PARKED"
+fi
+_CAPABILITY_DIGEST="$(printf '%s\n%s\n%s' \
+  "$_CAPABILITY_NONCE" "$_CAPABILITY_CWD" "$_CAPABILITY_ROOT" \
+  | shasum -a 256 | awk '{print $1}')"
+_CAPABILITY_EXPECTED="FNO_CAPABILITY_READY:${_CAPABILITY_DIGEST}"
+_CAPABILITY_PROMPT="Read-only capability probe. Run pwd and git rev-parse --show-toplevel. Compute SHA-256 over these three newline-separated values with no trailing newline: nonce '${_CAPABILITY_NONCE}', the exact pwd output, and the exact git-root output. Reply with exactly FNO_CAPABILITY_READY:<digest> and nothing else."
+
+_SPAWN_ACCOUNT_ARGS=()
+[ -n "$DEST_ACCOUNT" ] && _SPAWN_ACCOUNT_ARGS=(--account "$DEST_ACCOUNT")
+[ -n "$DEST_DISPATCH_ACCOUNT" ] && _SPAWN_ACCOUNT_ARGS=(--dispatch-account "$DEST_DISPATCH_ACCOUNT")
+_SPAWN_EFFORT_ARGS=()
+[ -n "$DEST_EFFORT" ] && _SPAWN_EFFORT_ARGS=(--effort "$DEST_EFFORT")
+
+_ASK_RC=0
+_ASK_OUT=""
+_ASK_ERR_FILE="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/handoff-spawn-$$.err")"
+_ASK_OUT="$(fno agents spawn --substrate pane \
+  --harness "$DEST_HARNESS" --model "$DEST_MODEL" \
+  ${_SPAWN_ACCOUNT_ARGS[@]+"${_SPAWN_ACCOUNT_ARGS[@]}"} \
+  ${_SPAWN_EFFORT_ARGS[@]+"${_SPAWN_EFFORT_ARGS[@]}"} \
+  --cwd "$PWD" --name "$CHILD_NAME" "$_CAPABILITY_PROMPT" \
+  2>"$_ASK_ERR_FILE")" || _ASK_RC=$?
+_ASK_ERR="$(cat "$_ASK_ERR_FILE" 2>/dev/null)"; rm -f "$_ASK_ERR_FILE"
+
+set +o pipefail
+_SPAWN_RECEIPT="$(printf '%s\n' "$_ASK_OUT" | jq -c \
+  'select(type == "object" and (.name // "") != "")' 2>/dev/null | head -1 || true)"
+set -o pipefail
+_RECEIPT_HARNESS="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.harness // empty' 2>/dev/null || true)"
+_RECEIPT_MODEL="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.model // empty' 2>/dev/null || true)"
+_RECEIPT_ACCOUNT="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.account // .dispatch_account // empty' 2>/dev/null || true)"
+_RECEIPT_BOUND="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.bound // false' 2>/dev/null || true)"
+_RECEIPT_READINESS="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.readiness // empty' 2>/dev/null || true)"
+CHILD_SID="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r \
+  '(.session_id | select(. != "")) // (.short_id | select(. != "")) // empty' \
+  2>/dev/null || true)"
+_EXPECTED_ACCOUNT="${DEST_ACCOUNT:-$DEST_DISPATCH_ACCOUNT}"
+
+_CAPABILITY_FAILURE=""
+if [ "$_ASK_RC" -ne 0 ] || [ -z "$_SPAWN_RECEIPT" ]; then
+  _CAPABILITY_FAILURE="spawn rc=$_ASK_RC${_ASK_ERR:+: $(printf '%s' "$_ASK_ERR" | tr '\n' ' ' | cut -c1-160)}"
+elif [ "$_RECEIPT_HARNESS" != "$DEST_HARNESS" ]; then
+  _CAPABILITY_FAILURE="receipt harness $_RECEIPT_HARNESS != $DEST_HARNESS"
+elif [ "$_RECEIPT_MODEL" != "$DEST_MODEL" ]; then
+  _CAPABILITY_FAILURE="receipt model $_RECEIPT_MODEL != $DEST_MODEL"
+elif [ -n "$_EXPECTED_ACCOUNT" ] && [ "$_RECEIPT_ACCOUNT" != "$_EXPECTED_ACCOUNT" ]; then
+  _CAPABILITY_FAILURE="receipt account $_RECEIPT_ACCOUNT != $_EXPECTED_ACCOUNT"
+elif [ "$_RECEIPT_BOUND" != "true" ]; then
+  _CAPABILITY_FAILURE="child is not bound"
+elif [ "$_RECEIPT_READINESS" != "ready" ]; then
+  _CAPABILITY_FAILURE="child readiness is ${_RECEIPT_READINESS:-unknown}, not ready"
+elif [ -z "$CHILD_SID" ]; then
+  _CAPABILITY_FAILURE="spawn receipt has no child session identity"
+fi
+
+_TRUTH_HANDLE="${CHILD_SID:-$CHILD_NAME}"
+_CAPABILITY_ELAPSED=0
+_CAPABILITY_TIMEOUT="${HANDOFF_CAPABILITY_TIMEOUT:-$VERIFY_TIMEOUT}"
+_CAPABILITY_INTERVAL="${HANDOFF_CAPABILITY_INTERVAL:-1}"
+while [ -z "$_CAPABILITY_FAILURE" ] && [ "$_CAPABILITY_ELAPSED" -lt "$_CAPABILITY_TIMEOUT" ]; do
+  _TRUTH_OUT="$(fno agents truth "$_TRUTH_HANDLE" --json 2>/dev/null || true)"
+  _TRUTH_MESSAGE="$(printf '%s' "$_TRUTH_OUT" | jq -r '.last_message // empty' 2>/dev/null || true)"
+  _TRUTH_MODEL_KIND="$(printf '%s' "$_TRUTH_OUT" | jq -r '.observed_model.kind // empty' 2>/dev/null || true)"
+  _TRUTH_MODEL="$(printf '%s' "$_TRUTH_OUT" | jq -r '.observed_model.model // empty' 2>/dev/null || true)"
+  if [ "$_TRUTH_MESSAGE" = "$_CAPABILITY_EXPECTED" ] \
+      && [ "$_TRUTH_MODEL_KIND" = "observed" ] \
+      && [ "$_TRUTH_MODEL" = "$DEST_MODEL" ]; then
+    break
+  fi
+  sleep "$_CAPABILITY_INTERVAL" 2>/dev/null || true
+  _CAPABILITY_ELAPSED=$((_CAPABILITY_ELAPSED + _CAPABILITY_INTERVAL))
+done
+if [ -z "$_CAPABILITY_FAILURE" ] \
+    && { [ "${_TRUTH_MESSAGE:-}" != "$_CAPABILITY_EXPECTED" ] \
+      || [ "${_TRUTH_MODEL_KIND:-}" != "observed" ] \
+      || [ "${_TRUTH_MODEL:-}" != "$DEST_MODEL" ]; }; then
+  _CAPABILITY_FAILURE="truth mismatch: message/model did not prove destination within ${_CAPABILITY_TIMEOUT}s"
+fi
+
+if [ -n "$_CAPABILITY_FAILURE" ]; then
+  fno agents stop "$CHILD_NAME" >/dev/null 2>&1 || true
+  fno agents rm "$CHILD_NAME" >/dev/null 2>&1 || true
+  _emit_event "handoff_failed" \
+    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"capability_probe\",\"detail\":\"$(printf '%s' "$_CAPABILITY_FAILURE" | tr '\n' ' ' | cut -c1-300)\"}"
+  echo "parked $NODE_ID reason=\"capability_probe: $_CAPABILITY_FAILURE\""
+  exit "$_EXIT_PARKED"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3: Write handoff brief artifact
 # Convention: .fno/artifacts/handoff/{boundary}-{session_id}.md
 # ---------------------------------------------------------------------------
 mkdir -p "$ARTIFACTS_DIR"
@@ -437,7 +536,7 @@ delegated remaining pipeline work to generation ${CHILD_GEN}.
 The successor session should re-enter via: /fno:target ${NODE_ID}
 with the same worktree, branch, and .fno/ state as this session.
 
-Successor name: tgt-${NODE_ID:3:8}-${_HARNESS}-g${CHILD_GEN}
+Successor name: ${CHILD_NAME}
 BRIEFEOF
 fi
 
@@ -570,14 +669,8 @@ fi
 # restore the manifest MUST exit 12.
 
 # ---------------------------------------------------------------------------
-# Step 6: Spawn successor
+# Step 7: Submit the target command to the proven successor
 # ---------------------------------------------------------------------------
-# Child name: tgt-<node-8hex-suffix>-<harness>-g<child_gen>. The harness infix
-# namespaces the name by the parent lineage so two dispatchers on different
-# harnesses cannot collide on one registry name (x-3e70).
-_NODE_8HEX="${NODE_ID:3:8}"
-CHILD_NAME="tgt-${_NODE_8HEX}-${_HARNESS}-g${CHILD_GEN}"
-
 # Build command: inject the refusal flag when auto_merge_approved != true.
 # The flag is the attributable carrier in the command; the exported env var is
 # the MECHANICAL carrier (x-9d11): the successor's init folds TARGET_NO_MERGE
@@ -606,28 +699,14 @@ fi
 
 _ASK_RC=0
 _ASK_OUT=""
-# Group 1 (ab-8b3e4fe0): creation moved off `ask` - `spawn --harness claude`
-# builds the same `claude --bg --name` launch (subscription lane) and prints a
-# compact JSON receipt {"name", "short_id", "harness", "status"}. stderr goes
-# to a temp file, NOT 2>&1: a stderr warning must never pollute the JSON
-# receipt parse below (house rule; gemini review PR #457).
+# The child already proved it can infer and use this worktree. Submit only after
+# the parent claim is released, so the child's target init can acquire the node.
 _ASK_ERR_FILE="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/handoff-spawn-$$.err")"
-_ASK_OUT="$(fno agents spawn --harness claude --cwd "$PWD" --name "$CHILD_NAME" "$CHILD_CMD" 2>"$_ASK_ERR_FILE")" || _ASK_RC=$?
+_ASK_OUT="$(fno agents mail send "$_TRUTH_HANDLE" --raw "$CHILD_CMD" 2>"$_ASK_ERR_FILE")" || _ASK_RC=$?
 _ASK_ERR="$(cat "$_ASK_ERR_FILE" 2>/dev/null)"; rm -f "$_ASK_ERR_FILE"
 
-# Parse short_id from the clean-stdout JSON receipt line (grep first as
-# defense in depth). grep/jq exit nonzero on no match; protect against
-# pipefail propagation.
-set +o pipefail
-CHILD_SID="$(printf '%s\n' "$_ASK_OUT" | grep -F '"short_id"' | head -1 | jq -r '.short_id // empty' 2>/dev/null || true)"
-set -o pipefail
-
-# Only a nonzero launch rc is a spawn failure. A clean rc with an empty
-# CHILD_SID (unparseable/truncated receipt) is NOT a failure: the child may be
-# live. It falls through to Step 7's name-keyed registry poll, the authoritative
-# liveness oracle (Locked Decision 1) - the receipt short_id is audit data, not
-# launch proof. Conflating the two used to park the parent while a receiptless
-# child kept running, splitting the branch across two workers (x-1adb).
+# Only a nonzero raw-submit rc is a delivery failure. Task execution is proven
+# separately after this step; a send receipt is never treated as consumption.
 if [ "$_ASK_RC" -ne 0 ] || printf '%s\n' "$_ASK_OUT" | grep -q '"status":[[:space:]]*"refused"'; then
   # Spawn failure: unwind in order
   #   (a) re-acquire node:<id> FIRST; capture the rc

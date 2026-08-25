@@ -2404,6 +2404,8 @@ def cmd_spawn(
             # time, not at billing time. Only when set (receipt byte-stable else).
             if account is not None:
                 receipt_obj["account"] = account
+            if dispatch_account is not None:
+                receipt_obj["dispatch_account"] = dispatch_account
             # x-8552: for the composed spawn, which credential fno made live and
             # who is billed - derived from the composed env, never the flags.
             if credential is not None:
