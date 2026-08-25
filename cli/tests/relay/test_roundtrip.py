@@ -650,7 +650,7 @@ def test_capture_replies_claude_uses_transcript(monkeypatch):
 
 
 def test_capture_replies_unresolved_provider_takes_pty_tail_not_claude(monkeypatch):
-    # x-3aa6 (AC3-HP): an unresolved capture source (provider=None) used to map
+    # AC3-HP: an unresolved capture source (provider=None) used to map
     # to "claude-code" and select the claude transcript strategy. It must take
     # the neutral pty-tail fallback under the unknown key instead.
     monkeypatch.setattr(

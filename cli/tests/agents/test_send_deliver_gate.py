@@ -1860,7 +1860,7 @@ def test_mail_context_uses_canonical_sender_handle(monkeypatch) -> None:
 
 
 def test_mail_context_null_provider_renders_harness_unknown_not_claude(monkeypatch) -> None:
-    # x-3aa6 (AC1-HP): the measured failure - provider_from=None alongside a
+    # AC1-HP: the measured failure - provider_from=None alongside a
     # codex model rendered harness="claude-code", aiming claude's verb spelling
     # and resume form at a codex session. A null harness now renders the
     # explicit unknown marker, and the model axis survives independently.
@@ -1873,7 +1873,7 @@ def test_mail_context_null_provider_renders_harness_unknown_not_claude(monkeypat
 
 
 def test_mail_context_harness_follows_provider_axis_not_model(monkeypatch) -> None:
-    # x-3aa6 (AC1-ERR): negative control - changing ONLY provider_from changes
+    # AC1-ERR: negative control - changing ONLY provider_from changes
     # only the harness. No model value supplies a harness (the axis-vocabulary
     # rule: never infer one axis from another axis's value).
     from fno.agents.dispatch import _build_mail_ctx

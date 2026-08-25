@@ -14,7 +14,7 @@ from fno.mail.envelope import (
 
 
 def test_harness_for_provider_missing_renders_unknown_never_a_vendor():
-    # x-3aa6: a null/blank provider_from is an ABSENCE of harness evidence, and
+    # A null/blank provider_from is an ABSENCE of harness evidence, and
     # rendering it as "claude-code" made a null harness byte-identical to a
     # genuine claude harness on the wire (87 of 1395 measured bus rows). The
     # absence carries its own positive marker instead.
