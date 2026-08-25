@@ -4,13 +4,17 @@
 //! tempdir (socket paths stay short - the sun_path limit is ~104 bytes on
 //! macOS), plus the built `fno` binary for the non-TTY gate.
 
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use std::time::Duration;
 
-use fno::proto::{bind_or_probe, connect_unix_timeout, BindOutcome};
+use fno::proto::{
+    bind_or_probe, connect_unix_timeout, read_msg_sync, write_msg_sync, BindOutcome, ClientMsg,
+    ServerMsg,
+};
 
 /// A unique short-lived scratch dir. No tempfile dep: pid + test name is
 /// unique enough for a test process, and the dir is removed on drop.
@@ -32,6 +36,35 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn respond_to_query(mut stream: UnixStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let _ = read_msg_sync::<_, ClientMsg>(&mut stream);
+    write_msg_sync(
+        &mut stream,
+        &ServerMsg::Info {
+            session: "test".into(),
+            clients: 0,
+            squads: 0,
+            panes: 0,
+        },
+    )
+    .unwrap();
+}
+
+fn serve_queries(listener: UnixListener, duration: Duration) {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        match listener.accept() {
+            Ok((stream, _)) => respond_to_query(stream),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => break,
+        }
     }
 }
 
@@ -80,17 +113,87 @@ fn proto_live_server_is_detected_not_clobbered() {
         BindOutcome::Bound(l) => l,
         BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
     };
+    let responder = listener.try_clone().unwrap();
+    let query_thread = std::thread::spawn(move || {
+        let (stream, _) = responder.accept().unwrap();
+        respond_to_query(stream);
+    });
     // A second bind attempt while the listener lives must yield AlreadyRunning
     // and must NOT unlink the live socket.
     match bind_or_probe(&sock).unwrap() {
         BindOutcome::AlreadyRunning => {}
         BindOutcome::Bound(_) => panic!("live socket was clobbered"),
     }
+    query_thread.join().unwrap();
     assert!(sock.exists(), "live socket file must survive the probe");
     // The original listener still accepts.
     listener.set_nonblocking(true).unwrap();
     let _client = UnixStream::connect(&sock).unwrap();
     drop(listener);
+}
+
+#[test]
+fn proto_connected_silent_peer_without_holder_sidecar_is_rebound() {
+    let scratch = Scratch::new("silent");
+    let sock = scratch.path("s.sock");
+    let listener = match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(l) => l,
+        BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
+    };
+    let responder = listener.try_clone().unwrap();
+    let silent_peer = std::thread::spawn(move || {
+        let (_stream, _) = responder.accept().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    fno::proto::remove_startup_guard(&sock);
+
+    match bind_or_probe(&sock) {
+        Ok(BindOutcome::Bound(rebound)) => drop(rebound),
+        Ok(BindOutcome::AlreadyRunning) => panic!("silent peer has no liveness marker"),
+        Err(err) => panic!("legacy stale socket should be rebindable: {err}"),
+    }
+    silent_peer.join().unwrap();
+}
+
+#[test]
+fn proto_unmarked_holder_is_terminated_before_rebind() {
+    use std::os::unix::io::AsRawFd;
+
+    let scratch = Scratch::new("unmarked-holder");
+    let sock = scratch.path("s.sock");
+    let listener = match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(l) => l,
+        BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
+    };
+    let fd = listener.as_raw_fd();
+    let mut command = Command::new("sh");
+    command.args(["-c", "sleep 30"]);
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    drop(listener);
+    fno::proto::remove_startup_guard(&sock);
+    let start = fno::proto::pid_start_time(child.id());
+    let pid = child.id();
+    let sidecar = match start {
+        Some(start) => format!("{pid}:{start}"),
+        None => pid.to_string(),
+    };
+    std::fs::write(fno::proto::pid_sidecar_path(&sock), sidecar).unwrap();
+
+    match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(_) => {}
+        BindOutcome::AlreadyRunning => panic!("unmarked holder must be reclaimed"),
+    }
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "takeover must terminate the old holder");
 }
 
 #[test]
@@ -103,10 +206,59 @@ fn proto_stale_socket_is_unlinked_and_rebound() {
         BindOutcome::Bound(l) => drop(l),
         BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
     }
+    fno::proto::remove_startup_guard(&sock);
     assert!(sock.exists(), "dropping a listener must leave the file");
+    // The contract is "a dropped listener reads dead EVENTUALLY", not at
+    // zero latency: probe_alive already grants a startup grace on the alive
+    // side, and a loaded runner can land the first probe inside the teardown
+    // window. Bounded retry, same shape as the production probe's own.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match bind_or_probe(&sock).unwrap() {
+            BindOutcome::Bound(_) => break,
+            BindOutcome::AlreadyRunning => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "stale socket must be rebindable"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+    }
+}
+
+#[test]
+fn proto_startup_listener_is_not_clobbered_before_queryable() {
+    let scratch = Scratch::new("startup-window");
+    let sock = scratch.path("s.sock");
+    let listener = match bind_or_probe(&sock).unwrap() {
+        BindOutcome::Bound(l) => l,
+        BindOutcome::AlreadyRunning => panic!("fresh path must bind"),
+    };
+
+    match bind_or_probe(&sock) {
+        Err(err) => assert!(err.to_string().contains("startup"), "got: {err}"),
+        Ok(BindOutcome::Bound(_)) => panic!("startup listener was clobbered"),
+        Ok(BindOutcome::AlreadyRunning) => {
+            panic!("unqueryable startup listener was treated as ready")
+        }
+    }
+    assert!(
+        sock.exists(),
+        "startup listener socket must survive the probe"
+    );
+    drop(listener);
+}
+
+#[test]
+fn proto_partial_startup_marker_is_recoverable_when_socket_is_dead() {
+    let scratch = Scratch::new("partial-startup-marker");
+    let sock = scratch.path("s.sock");
+    std::fs::write(fno::proto::startup_sidecar_path(&sock), "partial").unwrap();
+
     match bind_or_probe(&sock).unwrap() {
         BindOutcome::Bound(_) => {}
-        BindOutcome::AlreadyRunning => panic!("stale socket must be rebindable"),
+        BindOutcome::AlreadyRunning => panic!("dead marker must not look live"),
     }
 }
 
@@ -126,12 +278,11 @@ fn proto_bind_race_converges_on_exactly_one_server() {
             barrier.wait();
             match bind_or_probe(&sock) {
                 Ok(BindOutcome::Bound(l)) => {
-                    // Hold the listener so probes see a live server.
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                    drop(l);
+                    serve_queries(l, Duration::from_millis(400));
                     1
                 }
                 Ok(BindOutcome::AlreadyRunning) => 0,
+                Err(err) if err.to_string().contains("startup") => 0,
                 Err(e) => panic!("bind_or_probe errored in race: {e}"),
             }
         }));
@@ -357,29 +508,16 @@ fn connect_timeout_sets_close_on_exec() {
 }
 
 #[test]
-fn proto_wedged_server_reads_alive_not_clobbered() {
-    // A wedged-but-live server must read as AlreadyRunning at bind time WHEN the
-    // platform surfaces the wedge as a connect TIMEOUT (Linux): unlinking its
-    // socket would orphan it (running, unreachable by name). Where the wedge
-    // surfaces as ConnectionRefused (macOS full/zero backlog), the server is
-    // indistinguishable from dead and the clobber is the accepted, pre-existing
-    // behavior - assert that explicitly rather than skip.
+fn proto_unmarked_wedged_socket_is_rebound() {
+    // A listener that produces no positive protocol marker is not live enough
+    // to protect its socket name. The takeover must be deterministic on every
+    // platform, including a connect timeout from a saturated backlog.
     let scratch = Scratch::new("wedged-bind");
     let sock = scratch.path("s.sock");
-    let wedged = WedgedServer::new(&sock);
-    if wedged.kind == WedgeKind::Refused {
-        match bind_or_probe(&sock).unwrap() {
-            // Refused reads as dead: the stale-socket takeover is correct here.
-            BindOutcome::Bound(_) => {}
-            BindOutcome::AlreadyRunning => {
-                panic!("refused wedge should read as dead and be taken over")
-            }
-        }
-        return;
-    }
+    let _wedged = WedgedServer::new(&sock);
     match bind_or_probe(&sock).unwrap() {
-        BindOutcome::AlreadyRunning => {}
-        BindOutcome::Bound(_) => panic!("wedged-but-live socket was clobbered"),
+        BindOutcome::Bound(_) => {}
+        BindOutcome::AlreadyRunning => panic!("unmarked wedged socket must be rebound"),
     }
     assert!(
         sock.exists(),

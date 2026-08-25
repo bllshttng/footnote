@@ -360,6 +360,30 @@ def test_print_command_emits_one_liner() -> None:
     assert not res.output.startswith("$")
 
 
+def test_claude_print_command_uses_short_id_attach_form() -> None:
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="claude-worker",
+        harness="claude",
+        cwd="/path/to/workdir",
+        short_id="deadbeef",
+        harness_session_id="00000000-1111-2222-3333-444444444444",
+    )
+    res = resume_logic(
+        name="claude-worker",
+        print_command=True,
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+    )
+    assert res.exit_code == 0
+    assert res.exec_argv == ["claude", "attach", "deadbeef"]
+    assert "00000000-1111-2222-3333-444444444444" not in res.output
+
+
 # ---------------------------------------------------------------------------
 # claude path wakes headlessly and verifies the state moved
 # ---------------------------------------------------------------------------

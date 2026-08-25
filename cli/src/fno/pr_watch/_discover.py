@@ -36,6 +36,12 @@ from fno.pr._proc import run as _rest_run
 
 log = logging.getLogger(__name__)
 
+# Exact terminal reads are only a bounded fallback after the repository-level
+# open and closed listings. A missing key is not permission to spend the whole
+# tick on one black-holed endpoint.
+MAX_EXACT_TERMINAL_READS = 3
+EXACT_TERMINAL_READ_TIMEOUT_S = 5.0
+
 
 @dataclass(frozen=True)
 class PrCandidate:
@@ -366,9 +372,10 @@ def read_tracked_pr_states(
     counts into the failure return so a degraded sweep cannot read as a
     clean one. Successful listings also return every OPEN PR, even when it
     was absent from the cache, so the swept snapshot converges to repository
-    truth. A tracked key absent from the open list gets exactly one
-    ``repos/<slug>/pulls/<n>`` read - the only way to tell CLOSED from
-    MERGED - bounded by the tracked-key count rather than by 1057 rows.
+    truth. A tracked key absent from the open list is resolved from one
+    bounded repository-level ``state=closed`` listing before any exact
+    ``repos/<slug>/pulls/<n>`` fallback. A failed closed listing leaves the
+    terminal keys UNKNOWN and increments the failure count.
 
     Returns ``(states, sweep_failures)``.
     """
@@ -387,6 +394,7 @@ def read_tracked_pr_states(
         states[canonical] = "UNKNOWN"
 
     sweep_failures = 0
+    exact_reads_used = 0
     for repo, requested in sorted(grouped.items()):
         try:
             rows, reason = list_prs_rest(repo, state="open", runner=runner, timeout=timeout_s)
@@ -406,13 +414,62 @@ def read_tracked_pr_states(
             states[key] = state
             returned.add(number)
 
-        # Distinguishing CLOSED from MERGED needs the PR itself; the open
-        # list proved only that it is not open. Every per-key failure counts
-        # toward the failure total: a sweep whose keys stay unresolved must
-        # never read as outcome ok (the AC4 swallowed-failure shape).
-        for number in sorted(requested - returned):
+        terminal_requested = requested - returned
+        if terminal_requested:
             try:
-                res = runner(["gh", "api", f"repos/{repo}/pulls/{number}"], timeout=timeout_s)
+                closed_rows, closed_reason = list_prs_rest(
+                    repo,
+                    state="closed",
+                    requested_numbers=terminal_requested,
+                    runner=runner,
+                    timeout=timeout_s,
+                )
+            except (subprocess.TimeoutExpired, OSError, ToolMissing) as exc:
+                closed_rows, closed_reason = None, str(exc)
+            if closed_rows is None:
+                log.warning(
+                    "pr-watch: terminal-state batch failed for %s: %s",
+                    repo,
+                    closed_reason,
+                )
+                sweep_failures += 1
+                continue
+            for row in closed_rows:
+                number, state = row["number"], row["state"]
+                if number not in terminal_requested:
+                    continue
+                key = make_watermark_key(repo_slug=repo, pr_number=number)
+                states[key] = state
+                returned.add(number)
+
+        # The open and closed lists prove only what they returned. Every
+        # per-key failure counts toward the failure total: a sweep whose keys
+        # stay unresolved must never read as outcome ok (the AC4 swallowed-
+        # failure shape).
+        unresolved = sorted(requested - returned)
+        if exact_reads_used >= MAX_EXACT_TERMINAL_READS:
+            if unresolved:
+                log.warning(
+                    "pr-watch: exact terminal-read cap exhausted; keeping %d keys UNKNOWN",
+                    len(unresolved),
+                )
+                sweep_failures += len(unresolved)
+            continue
+        exact_timeout_s = min(float(timeout_s), EXACT_TERMINAL_READ_TIMEOUT_S)
+        for offset, number in enumerate(unresolved):
+            if exact_reads_used >= MAX_EXACT_TERMINAL_READS:
+                remaining = len(unresolved) - offset
+                log.warning(
+                    "pr-watch: exact terminal-read cap exhausted; keeping %d keys UNKNOWN",
+                    remaining,
+                )
+                sweep_failures += remaining
+                break
+            exact_reads_used += 1
+            try:
+                res = runner(
+                    ["gh", "api", f"repos/{repo}/pulls/{number}"], timeout=exact_timeout_s
+                )
             except (subprocess.TimeoutExpired, OSError, ToolMissing) as exc:
                 log.warning("pr-watch: per-key read failed for %s#%d: %s", repo, number, exc)
                 sweep_failures += 1

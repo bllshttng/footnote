@@ -1,4 +1,4 @@
-map_version = 8
+map_version = 9
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -42,8 +42,12 @@ kind = "session_flag"
 tokens = ["claude", "--session-id", "{session_id}"]
 
 [harness.claude.resume_strategy.forms.interactive_resume]
+kind = "flag"
+tokens = ["claude", "--resume", "{session_id}"]
+
+[harness.claude.resume_strategy.forms.interactive_attach]
 kind = "subcommand"
-tokens = ["claude", "attach", "{session_id}"]
+tokens = ["claude", "attach", "{short_id}"]
 
 [harness.claude.resume_strategy.forms.headless_create]
 kind = "flag"
@@ -51,7 +55,7 @@ tokens = ["claude"]
 
 [harness.claude.resume_strategy.forms.headless_resume]
 kind = "flag"
-tokens = ["claude", "--resume", "{session_id}"]
+tokens = ["claude", "-p", "--resume", "{session_id}"]
 
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
@@ -103,6 +107,10 @@ tokens = ["codex"]
 kind = "subcommand"
 tokens = ["codex", "resume", "{session_id}"]
 
+[harness.codex.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
+
 [harness.codex.resume_strategy.forms.headless_create]
 kind = "subcommand"
 tokens = ["codex", "exec"]
@@ -150,6 +158,10 @@ tokens = ["gemini", "--session-id", "{session_id}"]
 [harness.gemini.resume_strategy.forms.interactive_resume]
 kind = "flag"
 tokens = ["gemini", "--resume", "{session_id}"]
+
+[harness.gemini.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
 
 [harness.gemini.resume_strategy.forms.headless_create]
 kind = "session_flag"
@@ -206,6 +218,10 @@ tokens = ["agy"]
 kind = "unsupported"
 tokens = []
 
+[harness.agy.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
+
 [harness.agy.resume_strategy.forms.headless_create]
 kind = "flag"
 tokens = ["agy"]
@@ -254,6 +270,10 @@ tokens = ["opencode"]
 [harness.opencode.resume_strategy.forms.interactive_resume]
 kind = "session_flag"
 tokens = ["opencode", "--session", "{session_id}"]
+
+[harness.opencode.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
 
 [harness.opencode.resume_strategy.forms.headless_create]
 kind = "subcommand"

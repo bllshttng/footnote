@@ -175,6 +175,14 @@ def acquire(
             "stale instantly."
         ),
     ),
+    pid_unavailable: bool = typer.Option(
+        False,
+        "--pid-unavailable",
+        help=(
+            "Record explicit PID absence. Requires --ttl; the TTL is the claim's "
+            "liveness authority."
+        ),
+    ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON to stdout"),
     verbose: bool = typer.Option(False, "--verbose", help="More detail on stderr"),
     harness: Optional[str] = typer.Option(
@@ -232,6 +240,13 @@ def acquire(
     if not holder:
         typer.echo("validation error: --holder is required", err=True)
         raise typer.Exit(code=2)
+    if pid_unavailable and pid is not None:
+        typer.echo(
+            "validation error: --pid and --pid-unavailable are mutually exclusive",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    parsed_ttl = _parse_ttl(ttl)
     # ponytail: an omitted --pid used to anchor to the TRANSIENT acquiring process
     # (a one-shot `fno agents claim acquire` from a shell dies ~1s later, so the claim went
     # instantly STALE -- the footgun). Default instead to the durable session
@@ -239,12 +254,31 @@ def acquire(
     # exists; degrade to the prior os.getpid() default when not (standalone use,
     # plain-shell, no agent session). Reuses the exact walk init-target-state.sh
     # already runs via `fno agents claim session-pid`.
-    if pid is None:
+    if pid is None and not pid_unavailable:
         try:
             from .session_pid import resolve_session_pid
             pid = resolve_session_pid()
         except Exception:
             pid = None  # degrade to acquire_claim's os.getpid() default
+        if pid is None and parsed_ttl is not None:
+            pid_unavailable = True
+    if pid_unavailable and parsed_ttl is None:
+        typer.echo("validation error: --pid-unavailable requires --ttl", err=True)
+        raise typer.Exit(code=2)
+    # A handover MOVES a live worker's claim, so it must not land on this
+    # CLI's transient pid: compare_and_rebind would anchor the node to a
+    # process that exits seconds later and the claim reads STALE, reopening
+    # the exact pid-ambiguity gap the marker scheme closes. The plain
+    # acquire below keeps its documented os.getpid() fallback for standalone
+    # use; only the handover refuses.
+    if handover_from and key and pid is None and not pid_unavailable:
+        typer.echo(
+            "validation error: --handover-from needs a durable pid (run from "
+            "a harness session) or --pid-unavailable with --ttl; the transient "
+            "CLI pid would leave the claim STALE the moment it exits",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     # The handover runs FIRST and is strictly additive: it either moves a claim
     # whose prior holder the caller named exactly, or it declines and the
     # ordinary acquire below runs unchanged. Declining covers every case that is
@@ -270,7 +304,8 @@ def acquire(
                 # depending on on-disk state the caller cannot see.
                 new_metadata=_parse_metadata(metadata) or None,
                 new_pid=pid,
-                ttl_ms=_parse_ttl(ttl),
+                ttl_ms=parsed_ttl,
+                new_pid_unavailable=pid_unavailable,
                 root=_node_aware_root(key),
             )
         except RebindRefused:
@@ -305,9 +340,10 @@ def acquire(
             key=key,
             holder=holder,
             reason=reason or None,
-            ttl_ms=_parse_ttl(ttl),
+            ttl_ms=parsed_ttl,
             metadata=_parse_metadata(metadata),
             pid=pid,
+            pid_unavailable=pid_unavailable,
             harness=harness,
             root=_node_aware_root(key),
         )
@@ -567,6 +603,11 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     refused by a post-acquire re-check owns the rollback: see ``release
     --rollback-do``.
     """
+    if claim is None:
+        # REACHABLE, not dead: the successor reacquire paths call this with
+        # no claim object (free/stale claim, nothing to stamp yet). Skipping
+        # is correct there - there is no row to open.
+        return
     from fno.graph.store import append_session_record
     from fno.paths import graph_json
 

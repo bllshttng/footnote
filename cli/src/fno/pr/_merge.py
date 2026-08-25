@@ -1968,9 +1968,14 @@ def _checks_verdict(
     rollup = data.get("statusCheckRollup") or []
     ignored = set(ignore_contexts)
     if ignored:
-        # StatusContexts use `context`; CheckRuns use `name`. Keep those
-        # namespaces distinct so a same-named real check is never discarded.
-        rollup = [entry for entry in rollup if entry.get("context") not in ignored]
+        # The shared filter, parameterized on the ignore set - one spelling of
+        # the both-keys drop (StatusContexts use `context`, CheckRuns use
+        # `name`, and an internal-gh rollup spells a status row's name as its
+        # context), never a second inline copy that drifts from every other
+        # surface's generic-CI read.
+        from fno.pr._status import without_coverage_statuses
+
+        rollup = without_coverage_statuses(rollup, contexts=ignored)
     # Whole-rollup semantics: with require_checks_pass, every check must pass.
     # A required-vs-optional split would need branch-protection context that
     # `gh pr view` does not expose - its statusCheckRollup entries carry no
@@ -2049,7 +2054,15 @@ def _do_merge(
                 from fno.pr import _coverage_gate, _reviews
 
                 if gate_verdict[0] == _coverage_gate.COVERED:
-                    ignore_contexts = (_reviews.COVERAGE_STATUS_CONTEXT,)
+                    # Both coverage contexts are THIS merge's own projections,
+                    # not generic CI: the required context (covered verdict)
+                    # and the diagnostic (an unknown-read stamp that says
+                    # "retry the review verb", not "wait"). Ignoring only the
+                    # required one let a pending diagnostic hold a covered,
+                    # CI-green merge, and the clearing publish runs after this
+                    # verdict, so a bare retry held again. One shared
+                    # collection, not a third spelling of the filter.
+                    ignore_contexts = tuple(_reviews.COVERAGE_STATUS_CONTEXTS)
             verdict, counts, head_read = _checks_verdict(
                 pr_number, repo, ignore_contexts=ignore_contexts
             )

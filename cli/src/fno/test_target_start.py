@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 import pytest
 import typer
 from pathlib import Path
@@ -902,6 +903,12 @@ def _wire_happy(monkeypatch, wt_path: Path, *, manifest_exists: bool):
     monkeypatch.setattr(
         "fno.worktree._run_setup_worktree_hook", lambda r, w: (0, "")
     )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: SimpleNamespace(
+            harness="codex", session_id="test-successor-session", disposition="single"
+        ),
+    )
     if manifest_exists:
         (wt_path / ".fno").mkdir(parents=True, exist_ok=True)
         (wt_path / ".fno" / "target-state.md").write_text("session_id: x\n")
@@ -1668,29 +1675,104 @@ def test_reacquire_parks_on_live_race(monkeypatch):
 def test_successor_claim_holder_prefers_tsid(monkeypatch):
     monkeypatch.setenv("TARGET_SESSION_ID", "abc-123")
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: SimpleNamespace(
+            harness="claude", session_id="abc-123", disposition="single"
+        ),
+    )
     assert target_cli._successor_claim_holder() == "target-session:abc-123"
 
 
 def test_successor_claim_holder_codex_parity(monkeypatch):
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-z")
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: SimpleNamespace(
+            harness="codex", session_id="thread-z", disposition="single"
+        ),
+    )
     assert target_cli._successor_claim_holder() == "target-session:thread-z"
 
 
-def test_successor_claim_holder_generated_form(monkeypatch):
+def test_successor_claim_holder_resolves_each_acquire(monkeypatch):
+    identities = iter(
+        [
+            SimpleNamespace(session_id="session-a"),
+            SimpleNamespace(session_id="session-b"),
+        ]
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: next(identities),
+    )
+    assert target_cli._successor_claim_holder() == "target-session:session-a"
+    assert target_cli._successor_claim_holder() == "target-session:session-b"
+
+
+def test_successor_claim_holder_refuses_without_proven_identity(monkeypatch):
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
-    monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: 4242)
-    # The holder infix is stamped on a claim, so it resolves through the owned
-    # path rather than raw precedence.
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
         lambda *a, **k: SimpleNamespace(
             harness="claude", session_id=None, disposition="single", markers_present=()
         ),
     )
-    h = target_cli._successor_claim_holder()
-    assert h.startswith("target-session:") and "-cl4242-" in h
+    assert target_cli._successor_claim_holder() is None
+
+
+def test_worktree_occupancy_dirty_recent_transcript_refuses(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setattr(
+        "fno.worktree_reapable.reapable",
+        lambda path: SimpleNamespace(
+            reapable=False, reason="modified-tracked", detail="src/app.py"
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry",
+        lambda: [
+            SimpleNamespace(
+                cwd=str(wt), harness_session_id="worker-session", harness="codex"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "fno.agents.watchdog.tail_facts",
+        lambda sid, cwd, **kwargs: (
+            SimpleNamespace(last_event_epoch=time.time() - 5)
+            if kwargs.get("agent") == "codex"
+            else None
+        ),
+    )
+    verdict, info = target_cli._classify_worktree_occupancy(wt)
+    assert verdict == "occupied_worktree"
+    assert info["session_id"] == "worker-session"
+
+
+def test_worktree_occupancy_probe_failure_is_unknown(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setattr(
+        "fno.worktree_reapable.reapable",
+        lambda path: SimpleNamespace(reapable=False, reason="probe-failed", detail="git"),
+    )
+    verdict, info = target_cli._classify_worktree_occupancy(wt)
+    assert verdict == "unknown"
+    assert info["reason"] == "probe-failed"
+
+
+def test_worktree_occupancy_clean_is_available(monkeypatch, tmp_path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setattr(
+        "fno.worktree_reapable.reapable",
+        lambda path: SimpleNamespace(reapable=True, reason="clean", detail=""),
+    )
+    assert target_cli._classify_worktree_occupancy(wt) == ("available", None)
 
 
 def test_no_merge_reaches_init_argv_on_codex_native_path(monkeypatch, tmp_path):

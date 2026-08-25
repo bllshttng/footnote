@@ -36,13 +36,13 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use crate::agents_view::{self, RegistryAgent};
 use crate::backlog_view;
 use crate::proto::{
-    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
-    AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg,
-    Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot, LayoutSpec,
-    LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement, ServerMsg,
-    SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta,
-    TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge,
+    AgentNoPaneReason, AgentRow, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel,
+    CardState, ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot,
+    LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
+    PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement,
+    ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
+    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -447,6 +447,9 @@ enum CoreMsg {
         lines: Option<u16>,
         /// (v6) Select an OSC 133 command block instead of a plain read.
         block: Option<BlockSel>,
+        /// Fresh registry snapshot used to label the read with the registry
+        /// identity joined to this pane.
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     /// `squad_key` was resolved OFF the core loop (like `Attach`); `cwd` is the
@@ -467,6 +470,7 @@ enum CoreMsg {
         pane: u64,
         bytes: Vec<u8>,
         guarded: bool,
+        expected_identity: Option<String>,
         /// Fresh registry snapshot for a guarded send, read off-loop in
         /// `handle_control`. `None` means either the read failed (guarded ->
         /// fail closed) or the send is unguarded (unused). `Some(rows)` is the
@@ -520,6 +524,15 @@ enum CoreMsg {
         squad: PaneTarget,
         tab: TabSel,
         name: String,
+        reply: ControlReply,
+    },
+    TabClose {
+        squad: PaneTarget,
+        tab: TabSel,
+        force: bool,
+        /// Fresh registry rows for the unforced occupancy guard. `None` is
+        /// either an unreadable registry or the deliberate forced bypass.
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     LayoutGet {
@@ -1244,6 +1257,7 @@ struct SocketGuard(PathBuf);
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         let _ = crate::proto::remove_session_files(&self.0);
+        crate::proto::remove_startup_guard(&self.0);
     }
 }
 
@@ -1299,6 +1313,7 @@ pub fn run(socket: PathBuf) -> i32 {
             return 1;
         }
     };
+    let _guard = SocketGuard(socket.clone());
     match crate::pty::raise_fd_limit() {
         Ok(Some((before, after))) => {
             eprintln!("fno mux: open-file limit raised from {before} to {after}");
@@ -1310,8 +1325,6 @@ pub fn run(socket: PathBuf) -> i32 {
             );
         }
     }
-    let _guard = SocketGuard(socket.clone());
-
     // Stamp this server's wire version next to its socket (x-1a85) so `fno mux
     // ls` can flag a stale-wire server after a binary upgrade. Best-effort: a
     // write failure only means `ls` reads no version and treats the server as
@@ -2497,6 +2510,12 @@ fn dispatch_notice(stdout: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowResumeDisposition {
+    Resumable,
+    NoPane(AgentNoPaneReason),
+}
+
 impl Core {
     /// The view-scoped smallest-client clamp (Locked 1): a tab's content
     /// area is the elementwise min over the dims of every client currently
@@ -2532,7 +2551,7 @@ impl Core {
     /// every later squad's shell in the first client's directory). Empty /
     /// vanished dirs degrade to the server cwd inside `PtyShell::spawn`.
     fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
-        let id = self.next_pane_id;
+        let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn(
             &self.shells,
@@ -2568,7 +2587,7 @@ impl Core {
         let name = agent_self_from_argv(argv);
         let cmd = cmd_from_argv(argv);
         let account = account_from_argv(argv);
-        let id = self.next_pane_id;
+        let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn_cmd(
             argv,
@@ -2595,7 +2614,40 @@ impl Core {
         Ok(id)
     }
 
-    /// Record a freshly-spawned pane: bump the id, insert its VT grid, and
+    fn reserve_pane_id(&mut self) -> Result<u64, String> {
+        #[cfg(test)]
+        {
+            let id = self.next_pane_id;
+            self.next_pane_id = id.saturating_add(1);
+            return Ok(id);
+        }
+        #[cfg(not(test))]
+        {
+            match crate::squad_store::reserve_next_pane_id(self.next_pane_id) {
+                Ok(id) => {
+                    self.next_pane_id = id.saturating_add(1);
+                    Ok(id)
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::PermissionDenied
+                        && e.to_string().contains("build-tree binary") =>
+                {
+                    // A cargo build-tree binary is allowed to run against an
+                    // isolated mux without being allowed to write the user's
+                    // global squad store. Keep pane run usable with a clear,
+                    // process-local fallback; installed binaries still fail
+                    // closed on real persistence errors.
+                    eprintln!("fno mux: pane id persistence unavailable for build-tree binary; using process-local pane ids (set FNO_AGENTS_HOME for persistence)");
+                    let id = self.next_pane_id;
+                    self.next_pane_id = id.saturating_add(1);
+                    Ok(id)
+                }
+                Err(e) => Err(format!("pane id reservation failed: {e}")),
+            }
+        }
+    }
+
+    /// Record a freshly-spawned pane: advance the id floor, insert its VT grid, and
     /// arm its output watch (dropped receiver, so the watch costs nothing
     /// until a `PaneWait` subscribes).
     #[allow(clippy::too_many_arguments)]
@@ -2611,7 +2663,7 @@ impl Core {
         cmd: Option<String>,
         account: Option<String>,
     ) {
-        self.next_pane_id += 1;
+        self.next_pane_id = self.next_pane_id.max(id.saturating_add(1));
         e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
         let stats = Arc::new(PaneCounters::default());
         self.panes.insert(
@@ -2737,6 +2789,7 @@ impl Core {
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
+                    name: entry.name.clone(),
                     tab_name,
                     tab_ordinal,
                     // (x-d865) The fno_id join: the registry row whose mux ref
@@ -2771,12 +2824,17 @@ impl Core {
     }
 
     fn fno_id_for_pane_with_agents(&self, pid: u64, agents: &[RegistryAgent]) -> Option<String> {
-        agents.iter().find_map(|a| match &a.mux {
-            Some((sess, pane)) if sess == &self.session_name && *pane == pid => {
-                a.effective_identity().map(str::to_owned)
+        let mut ids = std::collections::BTreeSet::new();
+        for a in agents {
+            if let Some((sess, pane)) = &a.mux {
+                if sess == &self.session_name && *pane == pid {
+                    if let Some(identity) = a.effective_identity() {
+                        ids.insert(identity.to_string());
+                    }
+                }
             }
-            _ => None,
-        })
+        }
+        (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
 
     fn resolve_placement_target(
@@ -3367,6 +3425,93 @@ impl Core {
         }
         self.push_layout(true);
         Ok(())
+    }
+
+    /// Close one resolved tab after every pre-mutation guard has passed. This
+    /// is the single cascade used by both the interactive command and the
+    /// script control verb, so reaping, member cleanup, persistence cleanup,
+    /// template cleanup, and viewer re-anchoring cannot drift.
+    fn close_tab_cascade(
+        &mut self,
+        sid: u64,
+        ti: usize,
+    ) -> Option<(TabId, Vec<u64>, RemoveOutcome)> {
+        let (tid, pids) = {
+            let sq = self.session.squad(sid)?;
+            let tab = sq.tabs.get(ti)?;
+            (tab.id, tree::leaves(&tab.root))
+        };
+        let ctxs: Vec<_> = pids
+            .iter()
+            .filter_map(|&pid| self.member_ctx(pid))
+            .collect();
+        let ident = self.squad_identity(sid);
+        for &pid in &pids {
+            self.reap_pane(pid);
+        }
+        let outcome = self.session.remove_tab(sid, ti);
+        for ctx in ctxs {
+            self.reconcile_member_close(Some(ctx), false);
+        }
+        if matches!(
+            outcome,
+            RemoveOutcome::SquadRemoved | RemoveOutcome::SessionEmpty
+        ) {
+            self.squad_members.remove(&sid);
+            if let Some((name, key)) = ident {
+                self.persist_remove(&name, &key);
+            }
+        }
+        self.tab_areas.remove(&tid);
+        if matches!(outcome, RemoveOutcome::SessionEmpty) {
+            self.template_specs.remove(&tid);
+            return Some((tid, pids, outcome));
+        }
+        if self.template_specs.remove(&tid).is_some() {
+            self.persist_template_specs(sid);
+        }
+        self.reanchor_views();
+        self.push_layout(true);
+        Some((tid, pids, outcome))
+    }
+
+    /// Resolve and guard a script close before entering the shared mutation
+    /// helper. A worker is safe to ignore only when its fresh row is
+    /// positively `Dead`; `Alive` and `Unmeasured` both refuse.
+    fn tab_close(
+        &mut self,
+        squad: &PaneTarget,
+        sel: &TabSel,
+        force: bool,
+        agents: Option<&[RegistryAgent]>,
+    ) -> Result<(TabId, Vec<u64>, RemoveOutcome), (u32, String)> {
+        let sid = self.resolve_squad(squad)?;
+        let ti = self
+            .resolve_tab_index(sid, sel)
+            .map_err(|e| (err_code::BAD_REQUEST, e))?;
+        let pids = self
+            .session
+            .squad(sid)
+            .and_then(|sq| sq.tabs.get(ti))
+            .map(|tab| tree::leaves(&tab.root))
+            .ok_or((err_code::BAD_REQUEST, "selected tab vanished".into()))?;
+        if !force {
+            let Some(rows) = agents else {
+                return Err((
+                    err_code::REGISTRY_UNAVAILABLE,
+                    "agent registry unavailable".into(),
+                ));
+            };
+            let blockers = tab_close_blockers(&self.session_name, &pids, rows);
+            if !blockers.is_empty() {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("tab contains protected worker(s): {}", blockers.join(", ")),
+                ));
+            }
+        }
+        self.close_tab_cascade(sid, ti)
+            .ok_or((err_code::BAD_REQUEST, "selected tab vanished".into()))
     }
 
     /// The nested tree + per-pane geometry of one tab (Locked Decision 5).
@@ -4808,26 +4953,57 @@ impl Core {
         }
     }
 
-    /// (x-5f7f) Can this registry row be resumed into a pane? Only a DEAD
-    /// row: a live session has a process writing its state (its own harness
-    /// process, or claude's daemon), and resuming under it would open a
-    /// second writer on the same session. Needs a harness that owns a resume
-    /// form plus the session id it resumes. A live claude bg row with a jobId
-    /// is doubly excluded - its daemon owns the session, and the existing
-    /// attach path is the correct gesture.
-    fn row_resumable(a: &RegistryAgent) -> bool {
+    /// (v53) Classify the registry facts once so resumability and the final
+    /// paneless notice cannot disagree about harness/session/liveness truth.
+    fn row_resume_disposition(a: &RegistryAgent) -> RowResumeDisposition {
         let Some(h) = a.harness.as_deref() else {
-            return false;
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness);
         };
-        if !a.exited || Self::resume_form(h).is_none() {
-            return false;
+        if Self::resume_form(h).is_none() {
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness);
         }
         let has_sid = a
             .harness_session_id
             .as_deref()
             .or(a.claude_session_uuid.as_deref())
             .is_some_and(|s| !s.is_empty());
-        has_sid && !(h == "claude" && a.attach_id.is_some() && !a.exited)
+        if !has_sid {
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId);
+        }
+        if !a.exited {
+            return RowResumeDisposition::NoPane(if a.liveness == agents_view::Liveness::Alive {
+                AgentNoPaneReason::LivePaneless
+            } else {
+                AgentNoPaneReason::BackendNotLive
+            });
+        }
+        RowResumeDisposition::Resumable
+    }
+
+    /// (x-5f7f) Can this registry row be resumed into a pane? Only a DEAD
+    /// row: a live session has a process writing its state (its own harness
+    /// process, or claude's daemon), and resuming under it would open a
+    /// second writer on the same session. A live claude bg row with a jobId
+    /// is doubly excluded - its daemon owns the session, and the existing
+    /// attach path is the correct gesture.
+    fn row_resumable(a: &RegistryAgent) -> bool {
+        matches!(
+            Self::row_resume_disposition(a),
+            RowResumeDisposition::Resumable
+        )
+    }
+
+    /// A live attachable row has a higher-priority client action, so it carries
+    /// no registry refusal reason. Every other registry-backed paneless row can
+    /// expose the classification that explains its branch-four notice.
+    fn row_no_pane_reason(a: &RegistryAgent) -> Option<AgentNoPaneReason> {
+        if a.attach_id.is_some() && !a.exited {
+            return None;
+        }
+        match Self::row_resume_disposition(a) {
+            RowResumeDisposition::Resumable => None,
+            RowResumeDisposition::NoPane(reason) => Some(reason),
+        }
     }
 
     /// (x-5f7f) The registry names that still exist, for restore's ghost
@@ -6788,6 +6964,7 @@ impl Core {
                                 basis: self.truth_basis(&a.name),
                                 last_activity_age_s: self.truth_age(&a.name),
                                 resumable: false,
+                                no_pane_reason: None,
                             }
                         }
                         None => {
@@ -6832,6 +7009,7 @@ impl Core {
                                 basis: None,
                                 last_activity_age_s: None,
                                 resumable: false,
+                                no_pane_reason: None,
                             }
                         }
                     };
@@ -6909,6 +7087,7 @@ impl Core {
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable,
+                        no_pane_reason: Self::row_no_pane_reason(a),
                     })
                 }
                 None => {
@@ -6959,6 +7138,7 @@ impl Core {
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable: Self::row_resumable(a),
+                        no_pane_reason: Self::row_no_pane_reason(a),
                     })
                 }
             }
@@ -7009,6 +7189,7 @@ impl Core {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 })
             }
         }
@@ -7088,6 +7269,7 @@ impl Core {
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
+                no_pane_reason: None,
             })
         }
         out
@@ -7475,11 +7657,66 @@ impl Core {
         pane: u64,
         bytes: &[u8],
         guarded: bool,
+        expected_identity: Option<&str>,
         agents: Option<Vec<RegistryAgent>>,
     ) -> ServerMsg {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
         };
+        if let Some(expected) = expected_identity {
+            let host = entry.name.as_deref().unwrap_or("<unknown>");
+            let Some(rows) = agents.as_deref() else {
+                return ServerMsg::Err {
+                    code: err_code::TARGET_IDENTITY_MISMATCH,
+                    msg: format!(
+                        "addressed {expected}, pane hosts {host}; agent registry unreadable"
+                    ),
+                };
+            };
+            let matches: Vec<&RegistryAgent> = rows
+                .iter()
+                .filter(|a| {
+                    a.mux.as_ref().is_some_and(|(session, pane_id)| {
+                        session == &self.session_name && *pane_id == pane
+                    })
+                })
+                .collect();
+            let mut occupants: Vec<&RegistryAgent> = Vec::new();
+            for row in matches {
+                let equivalent = occupants.iter().any(|existing| {
+                    existing.name == row.name
+                        && existing.effective_identity() == row.effective_identity()
+                });
+                if !equivalent {
+                    occupants.push(row);
+                }
+            }
+            let registry_identity = occupants
+                .first()
+                .and_then(|row| row.effective_identity())
+                .unwrap_or("<unknown>");
+            if occupants.len() != 1
+                || registry_identity != expected
+                || occupants.first().is_some_and(|row| row.name != host)
+            {
+                let registry = occupants
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return ServerMsg::Err {
+                    code: err_code::TARGET_IDENTITY_MISMATCH,
+                    msg: format!(
+                        "addressed {expected}, pane hosts {host}; registry fno_id {registry_identity}; occupants: {}",
+                        if registry.is_empty() {
+                            "<none>"
+                        } else {
+                            &registry
+                        }
+                    ),
+                };
+            }
+        }
         if guarded {
             let Some(rows) = agents.as_deref() else {
                 return ServerMsg::Err {
@@ -8272,55 +8509,12 @@ impl Core {
                 let Some((sid, ti)) = self.session.find_tab(view.1) else {
                     return Flow::Continue;
                 };
-                let pids =
-                    tree::leaves(&self.session.squad(sid).expect("live squad").tabs[ti].root);
-                // De-recruit any member panes in this tab (AC3-EDGE), captured
-                // before the reaps clear them; reconciled AFTER remove_tab so
-                // squad-survival (survives vs de-persist) reflects reality.
-                let ctxs: Vec<_> = pids
-                    .iter()
-                    .filter_map(|&pid| self.member_ctx(pid))
-                    .collect();
-                // The squad's store identity before the reap, for the
-                // de-persist below: a memberless workspace yields no ctxs, so
-                // reconcile_member_close alone cannot clear its row.
-                let ident = self.squad_identity(sid);
-                for pid in pids {
-                    self.reap_pane(pid);
-                }
-                let outcome = self.session.remove_tab(sid, ti);
-                for ctx in ctxs {
-                    self.reconcile_member_close(Some(ctx), false);
-                }
-                if matches!(
-                    outcome,
-                    RemoveOutcome::SquadRemoved | RemoveOutcome::SessionEmpty
-                ) {
-                    // The whole workspace left the session - de-persist it on
-                    // EVERY path, not only the member one. SessionEmpty counts:
-                    // closing the last tab of the last workspace still dismissed
-                    // it. `persist_remove` no-ops when reconcile already ran.
-                    self.squad_members.remove(&sid);
-                    if let Some((name, key)) = ident {
-                        self.persist_remove(&name, &key);
-                    }
-                }
+                let Some((_, _, outcome)) = self.close_tab_cascade(sid, ti) else {
+                    return Flow::Continue;
+                };
                 match outcome {
                     RemoveOutcome::SessionEmpty => Flow::Shutdown,
-                    _ => {
-                        // Everyone who viewed the dead tab (sender included)
-                        // re-anchors in this same mutation (AC2-ERR).
-                        self.tab_areas.remove(&view.1);
-                        // (x-c4d4) A closed template tab must drop its stored spec
-                        // so restore never resurrects it (persist rewrites the
-                        // squad's whole list from the tabs that still exist).
-                        if self.template_specs.remove(&view.1).is_some() {
-                            self.persist_template_specs(sid);
-                        }
-                        self.reanchor_views();
-                        self.push_layout(true);
-                        Flow::Continue
-                    }
+                    _ => Flow::Continue,
                 }
             }
             Command::SelectSquad(id) => {
@@ -9733,37 +9927,47 @@ impl Core {
                 pane,
                 lines,
                 block,
+                agents,
                 reply,
             } => {
                 let msg = match self.panes.get(&pane) {
-                    Some(entry) => match block {
-                        // Block mode: `lines` is ignored; an unanswerable block
-                        // is BLOCK_UNAVAILABLE, never empty/stale text.
-                        Some(sel) => match entry.vt.read_block(sel) {
-                            Ok(read) => ServerMsg::PaneText {
-                                pane_id: pane,
-                                text: read.text.clone(),
-                                block: Some(read.meta()),
+                    Some(entry) => {
+                        let pane_name = entry.name.clone();
+                        let registry_fno_id = self
+                            .fno_id_for_pane_with_agents(pane, agents.as_deref().unwrap_or(&[]));
+                        match block {
+                            // Block mode: `lines` is ignored; an unanswerable block
+                            // is BLOCK_UNAVAILABLE, never empty/stale text.
+                            Some(sel) => match entry.vt.read_block(sel) {
+                                Ok(read) => ServerMsg::PaneText {
+                                    pane_id: pane,
+                                    text: read.text.clone(),
+                                    block: Some(read.meta()),
+                                    pane_name,
+                                    registry_fno_id,
+                                },
+                                Err(()) => ServerMsg::Err {
+                                    code: err_code::BLOCK_UNAVAILABLE,
+                                    msg: format!("pane {pane}: no such block"),
+                                },
                             },
-                            Err(()) => ServerMsg::Err {
-                                code: err_code::BLOCK_UNAVAILABLE,
-                                msg: format!("pane {pane}: no such block"),
-                            },
-                        },
-                        // Plain read: `lines` reaches into history (v6, US5);
-                        // no `--lines` keeps the visible-grid behavior (AC5-UI).
-                        None => {
-                            let text = match lines {
-                                Some(n) => entry.vt.read_tail(n),
-                                None => frame_text(&entry.vt.frame()),
-                            };
-                            ServerMsg::PaneText {
-                                pane_id: pane,
-                                text,
-                                block: None,
+                            // Plain read: `lines` reaches into history (v6, US5);
+                            // no `--lines` keeps the visible-grid behavior (AC5-UI).
+                            None => {
+                                let text = match lines {
+                                    Some(n) => entry.vt.read_tail(n),
+                                    None => frame_text(&entry.vt.frame()),
+                                };
+                                ServerMsg::PaneText {
+                                    pane_id: pane,
+                                    text,
+                                    block: None,
+                                    pane_name,
+                                    registry_fno_id,
+                                }
                             }
                         }
-                    },
+                    }
                     None => dead_pane(pane),
                 };
                 let _ = reply.send(msg);
@@ -9830,10 +10034,12 @@ impl Core {
                 pane,
                 bytes,
                 guarded,
+                expected_identity,
                 agents,
                 reply,
             } => {
-                let msg = self.pane_send(pane, &bytes, guarded, agents);
+                let msg =
+                    self.pane_send(pane, &bytes, guarded, expected_identity.as_deref(), agents);
                 let _ = reply.send(msg);
                 Flow::Continue
             }
@@ -9986,6 +10192,32 @@ impl Core {
                 };
                 let _ = reply.send(msg);
                 Flow::Continue
+            }
+            CoreMsg::TabClose {
+                squad,
+                tab,
+                force,
+                agents,
+                reply,
+            } => {
+                let result = self.tab_close(&squad, &tab, force, agents.as_deref());
+                let (msg, flow) = match result {
+                    Ok((tab_id, pane_ids, outcome)) => (
+                        ServerMsg::TabClosed {
+                            tab_id,
+                            pane_ids,
+                            forced: force,
+                        },
+                        if matches!(outcome, RemoveOutcome::SessionEmpty) {
+                            Flow::Shutdown
+                        } else {
+                            Flow::Continue
+                        },
+                    ),
+                    Err((code, msg)) => (ServerMsg::Err { code, msg }, Flow::Continue),
+                };
+                let _ = reply.send(msg);
+                flow
             }
             CoreMsg::LayoutGet {
                 scope,
@@ -10392,6 +10624,8 @@ async fn serve(
     // Attached-client count for the periodic readers (x-4e30): Core owns the
     // sender; each reader holds a receiver as its work gate + 0->1 wakeup.
     let (client_count_tx, client_count_rx) = watch::channel(0usize);
+    let persisted_pane_floor = crate::squad_store::load().next_pane_id;
+    let initial_agents = read_guard_agents().await;
 
     let mut core = Core {
         session: Session::default(),
@@ -10400,7 +10634,10 @@ async fn serve(
         pane_stats: Arc::new(RwLock::new(HashMap::new())),
         pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
         clients: Vec::new(),
-        next_pane_id: 1,
+        next_pane_id: pane_id_floor(
+            persisted_pane_floor,
+            initial_agents.as_deref().unwrap_or(&[]),
+        ),
         next_squad_id: 1,
         tab_areas: HashMap::new(),
         session_name,
@@ -11125,6 +11362,43 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
     }
 }
 
+/// Return every pane/worker pair that blocks an unforced tab close. Matching
+/// is exact on the server session and pane id, and every joined row whose
+/// liveness is not positively `Dead` is destructive-risk evidence. Rows that
+/// have not received an effective identity yet use their registry name in the
+/// diagnostic instead of being silently treated as empty.
+fn tab_close_blockers(session: &str, pane_ids: &[u64], rows: &[RegistryAgent]) -> Vec<String> {
+    let mut blockers = Vec::new();
+    for &pane_id in pane_ids {
+        for row in rows.iter().filter(|row| {
+            row.mux.as_ref().is_some_and(|(row_session, row_pane)| {
+                row_session == session && *row_pane == pane_id
+            })
+        }) {
+            if row.liveness != agents_view::Liveness::Dead {
+                let (label, value) = match row.effective_identity() {
+                    Some(identity) => ("fno_id", identity),
+                    None => ("worker", row.name.as_str()),
+                };
+                blockers.push(format!(
+                    "pane {pane_id} {label}={value} liveness={:?}",
+                    row.liveness
+                ));
+            }
+        }
+    }
+    blockers
+}
+
+fn pane_id_floor(persisted: u64, agents: &[RegistryAgent]) -> u64 {
+    let registry_floor = agents
+        .iter()
+        .filter_map(|agent| agent.mux.as_ref().map(|(_, pane)| pane.saturating_add(1)))
+        .max()
+        .unwrap_or(1);
+    persisted.max(registry_floor).max(1)
+}
+
 /// Does registry row `a` carry `id` as a FULL `session_id` or `harness_session_id`?
 fn identity_exact(a: &RegistryAgent, id: &str) -> bool {
     a.session_id.as_deref() == Some(id) || a.harness_session_id.as_deref() == Some(id)
@@ -11213,11 +11487,13 @@ async fn handle_control(
                 .await
         }
         ControlVerb::PaneRead { pane, lines, block } => {
+            let agents = read_guard_agents().await;
             core_tx
                 .send(CoreMsg::PaneRead {
                     pane,
                     lines,
                     block,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -11251,6 +11527,7 @@ async fn handle_control(
             pane,
             bytes,
             guarded,
+            expected_identity,
         } => {
             // A guarded send reads the agents registry FRESH here, off the core
             // loop: the server's own overlay cache (`self.agents`) is parked
@@ -11259,7 +11536,7 @@ async fn handle_control(
             // into a busy agent. Reading on the server (its own registry path)
             // is what closes the client/server HOME-divergence gap; passing the
             // snapshot into the core loop keeps the check + inject atomic.
-            let agents = if guarded {
+            let agents = if guarded || expected_identity.is_some() {
                 read_guard_agents().await
             } else {
                 None
@@ -11269,6 +11546,7 @@ async fn handle_control(
                     pane,
                     bytes,
                     guarded,
+                    expected_identity,
                     agents,
                     reply: reply_tx,
                 })
@@ -11373,6 +11651,22 @@ async fn handle_control(
                     squad,
                     tab,
                     name,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::TabClose { squad, tab, force } => {
+            let agents = if force {
+                None
+            } else {
+                read_guard_agents().await
+            };
+            core_tx
+                .send(CoreMsg::TabClose {
+                    squad,
+                    tab,
+                    force,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -12379,8 +12673,132 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pane_id_floor_seeds_from_legacy_registry_refs() {
+        let row = agent_in("old", 41, Some(AgentBadge::Done), true);
+
+        assert_eq!(pane_id_floor(0, &[row]), 42);
+    }
+
     fn agent(pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         agent_in("main", pane, badge, exited)
+    }
+
+    #[test]
+    fn tab_close_guard_requires_positive_dead_liveness() {
+        let mut alive = agent_in("main", 7, None, false);
+        alive.session_id = Some("alive-worker".into());
+        let mut unmeasured = agent_in("main", 8, None, true);
+        unmeasured.session_id = Some("uncertain-worker".into());
+        unmeasured.liveness = agents_view::Liveness::Unmeasured;
+        let mut dead = agent_in("main", 9, None, true);
+        dead.session_id = Some("dead-worker".into());
+        let mut foreign = agent_in("other", 7, None, false);
+        foreign.session_id = Some("foreign-worker".into());
+        let mut identity_less = agent_in("main", 10, None, false);
+        identity_less.name = "identity-less-worker".into();
+
+        let blockers = tab_close_blockers(
+            "main",
+            &[7, 8, 9, 10],
+            &[alive, unmeasured, dead, foreign, identity_less],
+        );
+        assert_eq!(blockers.len(), 3);
+        assert!(blockers
+            .iter()
+            .any(|b| b.contains("pane 7") && b.contains("alive-worker")));
+        assert!(blockers
+            .iter()
+            .any(|b| b.contains("pane 8") && b.contains("uncertain-worker")));
+        assert!(
+            !blockers.iter().any(|b| b.contains("dead-worker")),
+            "positive Dead allows close"
+        );
+        assert!(
+            !blockers.iter().any(|b| b.contains("foreign-worker")),
+            "a different mux session cannot guard this tab"
+        );
+        assert!(
+            blockers
+                .iter()
+                .any(|b| b.contains("pane 10") && b.contains("identity-less-worker")),
+            "an identity-less live row still blocks destructive cleanup"
+        );
+    }
+
+    #[test]
+    fn tab_close_unreadable_registry_refuses_before_mutation() {
+        let (mut core, pane) = template_core();
+        let result = core.tab_close(&PaneTarget::SquadId(1), &TabSel::Id(5), false, None);
+        assert!(matches!(result, Err((code, _)) if code == err_code::REGISTRY_UNAVAILABLE));
+        assert!(core.panes.contains_key(&pane));
+        assert!(core.session.find_tab(5).is_some());
+    }
+
+    #[test]
+    fn tab_close_allows_positive_dead_row_and_returns_exact_receipt_data() {
+        let (mut core, pane) = template_core();
+        let mut dead = agent_in("test", pane, None, true);
+        dead.session_id = Some("dead-worker".into());
+        let result = core
+            .tab_close(
+                &PaneTarget::SquadId(1),
+                &TabSel::Id(5),
+                false,
+                Some(&[dead]),
+            )
+            .unwrap();
+        assert_eq!(result.0, 5);
+        assert_eq!(result.1, vec![pane]);
+        assert_eq!(result.2, RemoveOutcome::SessionEmpty);
+        assert!(!core.panes.contains_key(&pane));
+        assert!(!core.tab_areas.contains_key(&5));
+    }
+
+    #[test]
+    fn pane_send_refuses_when_registry_name_disagrees_with_pane_identity() {
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
+        let mut addressed = agent_in("sess", pane, Some(AgentBadge::Done), false);
+        addressed.name = "addressed".into();
+        addressed.harness_session_id = Some("target-id".into());
+
+        match core.pane_send(
+            pane,
+            b"payload",
+            false,
+            Some("target-id"),
+            Some(vec![addressed]),
+        ) {
+            ServerMsg::Err { msg, .. } => {
+                assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
+                assert!(msg.contains("hosted"), "refusal names pane host: {msg}");
+            }
+            other => panic!("expected identity refusal before typing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_send_deduplicates_equivalent_registry_occupants() {
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("worker".into());
+        let mut first = agent_in("sess", pane, Some(AgentBadge::Done), false);
+        first.name = "worker".into();
+        first.harness_session_id = Some("target-id".into());
+        let duplicate = first.clone();
+
+        assert!(matches!(
+            core.pane_send(
+                pane,
+                b"payload",
+                false,
+                Some("target-id"),
+                Some(vec![first, duplicate]),
+            ),
+            ServerMsg::Ok
+        ));
     }
 
     #[test]
@@ -12440,6 +12858,29 @@ mod tests {
                 liveness: agents_view::Liveness::Alive,
                 harness: None,
             },
+            // A live codex worker with a session identity but no pane or attach
+            // target must project the typed branch-four recovery reason.
+            RegistryAgent {
+                spawned_by_session: None,
+                session_id: None,
+                harness_session_id: Some("codex-live-id".into()),
+                name: "live-paneless".into(),
+                cwd: "/live".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+                attach_id: None,
+                external: false,
+                account: None,
+                claude_session_uuid: None,
+                updated_at: None,
+                crown_level: None,
+                crown_scope: None,
+                liveness: agents_view::Liveness::Alive,
+                harness: Some("codex".into()),
+            },
         ];
         let rows = core.agent_rows();
         assert!(
@@ -12460,6 +12901,16 @@ mod tests {
             bg.attach_id.as_deref(),
             Some("c19cd2c3"),
             "the claude jobId must carry through so the sideline can attach it"
+        );
+        assert_eq!(bg.no_pane_reason, None, "attachable rows carry no reason");
+        let live = rows
+            .iter()
+            .find(|r| r.name == "live-paneless")
+            .expect("the live paneless row must surface");
+        assert_eq!(
+            live.no_pane_reason,
+            Some(AgentNoPaneReason::LivePaneless),
+            "registry truth projects the typed live-paneless reason"
         );
     }
 
@@ -14778,8 +15229,10 @@ mod tests {
     fn pane_ls_can_join_a_fresh_registry_snapshot_without_viewers() {
         let (mut core, pane_id) = template_core();
         core.session_name = "sess".into();
+        core.panes.get_mut(&pane_id).unwrap().name = Some("worker".into());
         let mut fresh = agent_in("sess", pane_id, None, false);
         fresh.harness_session_id = Some("019fb024-fresh".into());
+        fresh.name = "worker".into();
         core.panes
             .get_mut(&pane_id)
             .unwrap()
@@ -14796,6 +15249,8 @@ mod tests {
             ServerMsg::PaneList { panes } => {
                 let pane = panes.iter().find(|pane| pane.pane_id == pane_id).unwrap();
                 assert_eq!(pane.title.as_deref(), Some("⠋ Working"));
+                assert_eq!(pane.name.as_deref(), Some("worker"));
+                assert_eq!(pane.fno_id.as_deref(), Some("019fb024-fresh"));
             }
             other => panic!("pane ls should carry OSC title, got {other:?}"),
         }
@@ -16005,10 +16460,10 @@ mod tests {
         // The mirror is checked against the TOML that owns the tokens, not
         // against this crate's own literals (Rust checked against Rust proves
         // nothing). Codex resumes through its own interactive form; a claude
-        // row that reaches the resume arm is dead (no daemon owns it), so the
-        // headless resume token is the honest mirror - the interactive form
-        // is `claude attach`, which is the live-row gesture that already
-        // exists. No override is installed, so the REAL argv is asserted.
+        // row that reaches the mux resume arm uses the saved interactive
+        // transcript form. The headless form is reserved for one-shot and
+        // stream-json workers, while `claude attach` is the live-row gesture.
+        // No override is installed, so the REAL argv is asserted.
         clear_resume_program();
         let toml_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../cli/src/fno/agents/harness_capabilities.toml");
@@ -16031,7 +16486,7 @@ mod tests {
                 .collect()
         };
         let codex_form = token("codex/resume_strategy/forms/interactive_resume");
-        let claude_form = token("claude/resume_strategy/forms/headless_resume");
+        let claude_form = token("claude/resume_strategy/forms/interactive_resume");
         assert_eq!(
             codex_form,
             vec![
@@ -16066,10 +16521,10 @@ mod tests {
     }
 
     #[test]
-    fn row_resumable_gates_on_harness_form_and_session_id() {
-        // The row-level predicate: needs a harness with a resume form plus
-        // the session id it resumes; a LIVE claude bg row with a jobId is
-        // excluded (attach owns that gesture); agy has no form here.
+    fn row_resume_disposition_gates_on_harness_form_and_session_id() {
+        // One table of registry facts owns both the dead-row resume decision
+        // and the branch-four reason. A LIVE claude bg row with a jobId still
+        // uses attach, but its disposition remains live-paneless.
         let base = || RegistryAgent {
             spawned_by_session: None,
             session_id: None,
@@ -16089,18 +16544,44 @@ mod tests {
             updated_at: None,
             crown_level: None,
             crown_scope: None,
-            liveness: agents_view::Liveness::Dead,
+            liveness: agents_view::Liveness::Alive,
         };
+        assert_eq!(
+            Core::row_resume_disposition(&base()),
+            RowResumeDisposition::Resumable
+        );
         assert!(Core::row_resumable(&base()), "a dead codex row resumes");
         let mut live_codex = base();
         live_codex.exited = false;
+        assert_eq!(
+            Core::row_resume_disposition(&live_codex),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+        );
         assert!(
             !Core::row_resumable(&live_codex),
             "a live codex row has a process writing its rollout: resuming under it opens a second writer"
         );
+        let mut backend_not_live = base();
+        backend_not_live.exited = false;
+        backend_not_live.liveness = agents_view::Liveness::Unmeasured;
+        assert!(
+            !matches!(
+                Core::row_resume_disposition(&backend_not_live),
+                RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+            ),
+            "an unmeasured backend must not be labeled live"
+        );
+        assert_eq!(
+            Core::row_resume_disposition(&backend_not_live),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
+        );
         let mut agy = base();
         agy.harness = Some("agy".into());
         agy.harness_session_id = None;
+        assert_eq!(
+            Core::row_resume_disposition(&agy),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness)
+        );
         assert!(
             !Core::row_resumable(&agy),
             "no resume form and no session id: no Resume offered"
@@ -16109,6 +16590,10 @@ mod tests {
         live_claude.harness = Some("claude".into());
         live_claude.exited = false;
         live_claude.attach_id = Some("c19cd2c3".into());
+        assert_eq!(
+            Core::row_resume_disposition(&live_claude),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+        );
         assert!(
             !Core::row_resumable(&live_claude),
             "a live claude bg row attaches; its daemon owns the session"
@@ -16121,9 +16606,19 @@ mod tests {
         );
         let mut no_sid = base();
         no_sid.harness_session_id = None;
+        assert_eq!(
+            Core::row_resume_disposition(&no_sid),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId)
+        );
         assert!(
             !Core::row_resumable(&no_sid),
             "no session id means nothing to resume"
+        );
+        let mut no_harness = base();
+        no_harness.harness = None;
+        assert_eq!(
+            Core::row_resume_disposition(&no_harness),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness)
         );
     }
 

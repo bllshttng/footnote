@@ -272,6 +272,53 @@ def test_a_status_red_beside_an_unattributable_red_keeps_the_ci_name():
     assert "ci_red" in blockers
 
 
+def test_coverage_statuses_are_removed_before_generic_ci_classification():
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"context": "fno/review-coverage", "state": "PENDING"},
+        {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+    ]
+    generic = _status.without_coverage_statuses(rollup)
+    verdict, code, counts = _status.verdict_for(generic)
+    assert (verdict, code) == ("green", 0)
+    assert counts["total"] == 1
+    blockers = _status._ready_blockers(
+        True,
+        verdict,
+        0,
+        {"coverage": "unknown"},
+        True,
+        head="h" * 40,
+        counts=counts,
+    )
+    assert blockers == ["review_coverage_unknown"]
+    assert "ci_red" not in blockers
+    assert "commit_status_red" not in blockers
+
+
+def test_real_uncovered_coverage_stays_a_coverage_blocker_not_code_red():
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"context": "fno/review-coverage", "state": "FAILURE"},
+        {"context": "fno/review-coverage-unavailable", "state": "SUCCESS"},
+    ]
+    generic = _status.without_coverage_statuses(rollup)
+    verdict, code, counts = _status.verdict_for(generic)
+    assert (verdict, code) == ("green", 0)
+    blockers = _status._ready_blockers(
+        True,
+        verdict,
+        0,
+        {"coverage": "uncovered", "review_state": "reviewer_refused"},
+        True,
+        head="h" * 40,
+        counts=counts,
+    )
+    assert any(blocker.startswith("review_coverage_") for blocker in blockers)
+    assert "ci_red" not in blockers
+    assert "commit_status_red" not in blockers
+
+
 def test_an_extra_positional_is_refused_never_dropped():
     """`main(["42","43"])` answered for 42 and discarded 43 in silence.
 

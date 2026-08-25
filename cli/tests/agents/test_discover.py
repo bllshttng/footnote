@@ -3555,3 +3555,112 @@ def test_hand_edited_short_alias_survives_the_heal(tmp_path, monkeypatch):
         psutil_mod=_FakePsutil({932: ct}), project_resolver=lambda c: "proj",
     )
     assert [s.handle for s in sessions] == ["billing-worker"]
+
+
+def test_same_bucket_default_aliases_heal_once_and_stay_healed(tmp_path, capsys):
+    """A shared short_id must not put the alias map in a permanent heal loop.
+
+    Three Codex sessions from one UUIDv7 bucket and two OpenCode sessions
+    sharing a head-8 all default to the same alias. The old collision suffix
+    appended the very short_id the base already carries, so the stored form
+    was ``fno-01a034f3-01a034f3`` - which the next pass classifies as
+    accretion damage, discards with a user-visible warning, and regenerates
+    into the same shape on every mail send and peek. The second pass against
+    the persisted map therefore has to be a complete no-op: same map, same
+    bytes on disk, no diagnostic.
+    """
+    from fno.agents.discover import _is_accreted, _resolve_aliases
+
+    live = [
+        {"session_id": "01a034f3-8bad-7e83-92e9-78cfd45881f7",
+         "short_id": "01a034f3", "project": "fno"},
+        {"session_id": "01a034f3-a58f-71e3-8ed4-bfe77f816168",
+         "short_id": "01a034f3", "project": "fno"},
+        {"session_id": "01a034f3-c9d0-7e70-ba92-1dae616956f4",
+         "short_id": "01a034f3", "project": "fno"},
+        {"session_id": "ses_fd2ad214cffeavsk7YFt3qbKDc",
+         "short_id": "ses_fd2a"},
+        {"session_id": "ses_fd2ad649dffeOX8Yx0RqQEjGg5",
+         "short_id": "ses_fd2a"},
+    ]
+    name_map = tmp_path / ".fno" / "session-names.json"
+
+    first = _resolve_aliases(live, name_map)
+
+    expected = {
+        "01a034f3-8bad-7e83-92e9-78cfd45881f7": "fno-01a034f3",
+        "01a034f3-a58f-71e3-8ed4-bfe77f816168":
+            "fno-01a034f3-a58f-71e3-8ed4-bfe77f816168",
+        "01a034f3-c9d0-7e70-ba92-1dae616956f4":
+            "fno-01a034f3-c9d0-7e70-ba92-1dae616956f4",
+        "ses_fd2ad214cffeavsk7YFt3qbKDc": "session-ses_fd2a",
+        "ses_fd2ad649dffeOX8Yx0RqQEjGg5":
+            "session-ses_fd2ad649dffeOX8Yx0RqQEjGg5",
+    }
+    assert first == expected, f"collision aliases not rebuilt from full ids: {first}"
+    assert json.loads(name_map.read_text(encoding="utf-8")) == expected
+    assert len(set(first.values())) == len(first), "an alias resolves to two holders"
+    assert not any(_is_accreted(v) for v in first.values())
+    assert capsys.readouterr().err == ""
+
+    second = _resolve_aliases(live, name_map)
+    bytes_after_first = name_map.read_text(encoding="utf-8")
+
+    assert second == first
+    assert json.loads(bytes_after_first) == second
+    assert capsys.readouterr().err == ""
+
+
+def test_true_accretion_is_still_discarded_after_the_collision_repair(
+    tmp_path, capsys
+):
+    """The repair must not blind the damage detector.
+
+    ``etl-dup-dup`` is genuine historical accretion: a stored alias with a
+    repeated tail token-group. It has to keep hitting the discard diagnostic
+    and persist the deterministic healed default, or the fix would have
+    traded the heal loop for silent damage retention.
+    """
+    from fno.agents.discover import _resolve_aliases
+
+    sid = "aaaaaaaa-1111-2222-3333-444444444444"
+    live = [{"session_id": sid, "short_id": "dup", "project": "etl"}]
+    name_map = tmp_path / ".fno" / "session-names.json"
+    name_map.parent.mkdir(parents=True, exist_ok=True)
+    name_map.write_text(json.dumps({sid: "etl-dup-dup"}), encoding="utf-8")
+
+    out = _resolve_aliases(live, name_map)
+
+    assert "discarding damaged session alias 'etl-dup-dup'" in capsys.readouterr().err
+    assert out == {sid: "etl-dup"}
+    assert json.loads(name_map.read_text(encoding="utf-8")) == {sid: "etl-dup"}
+
+
+def test_long_basename_collision_stays_inside_the_stored_cap(tmp_path, capsys):
+    """A long project basename must not resurrect the discard loop.
+
+    With a 50-char basename the full-id candidates exceed the 80-char stored
+    cap, and the exhausted fallback used to emit a 98-char alias - which the
+    persistence pass re-discarded with a user-visible warning on EVERY pass,
+    the same heal loop this repair closes, on a warning instead of growth.
+    The collision name is cut from the head instead, keeping the unique
+    session id tail, so nothing the writer emits is ever thrown back.
+    """
+    from fno.agents.discover import _MAX_STORED_ALIAS_LEN, _resolve_aliases
+
+    live = [
+        {"session_id": "01a034f3-8bad-7e83-92e9-78cfd45881f7",
+         "short_id": "01a034f3", "project": "p" * 50},
+        {"session_id": "01a034f3-a58f-71e3-8ed4-bfe77f816168",
+         "short_id": "01a034f3", "project": "p" * 50},
+    ]
+    name_map = tmp_path / ".fno" / "session-names.json"
+
+    first = _resolve_aliases(live, name_map)
+    second = _resolve_aliases(live, name_map)
+
+    assert second == first
+    assert len(set(first.values())) == len(first), "an alias resolves to two holders"
+    for value in first.values():
+        assert len(value) <= _MAX_STORED_ALIAS_LEN, value
+    assert capsys.readouterr().err == ""

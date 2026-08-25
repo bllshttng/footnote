@@ -29,7 +29,12 @@ from fno.adapters.providers.dispatch import dispatch_env, resolve_env_value
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
 
-def _write_settings(tmp_path: Path, records: list[dict]) -> Path:
+def _write_settings(
+    tmp_path: Path,
+    records: list[dict],
+    *,
+    model_routing: dict | None = None,
+) -> Path:
     """Write a settings.yaml with config.providers.records and return the repo_root."""
     settings = {
         "config": {
@@ -38,6 +43,8 @@ def _write_settings(tmp_path: Path, records: list[dict]) -> Path:
             }
         }
     }
+    if model_routing is not None:
+        settings["config"]["model_routing"] = model_routing
     fno_dir = tmp_path / ".fno"
     fno_dir.mkdir(parents=True, exist_ok=True)
     settings_path = fno_dir / "settings.yaml"
@@ -142,6 +149,74 @@ def test_dispatch_env_api_key_keychain(
     assert captured_cmd[0] == [
         "security", "find-generic-password", "-w", "-s", "anthropic-api-key-default"
     ]
+
+
+def test_dispatch_env_route_backed_account_uses_complete_route_overlay(
+    tmp_path: Path, staging_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2-HP: dispatch resolves the same route owner as account overlays."""
+    expected = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "live-token",
+        "ANTHROPIC_MODEL": "glm-5.3[1m]",
+    }
+    calls: list[tuple[str, str]] = []
+
+    def resolve(provider: str, model: str, **_kwargs: object) -> dict[str, str]:
+        calls.append((provider, model))
+        return expected
+
+    import fno.adapters.providers.dispatch as dispatch_mod
+
+    monkeypatch.setattr(dispatch_mod, "resolve_explicit_route", resolve)
+    record = ProviderRecord(
+        id="zai",
+        name="Z.AI",
+        harness="claude",
+        auth="api_key",
+        route="zai/glm-5.3[1m]",
+    )
+    repo_root = _write_settings(
+        tmp_path,
+        [record.model_dump(mode="json", exclude_none=True)],
+    )
+
+    env = dispatch_env(record.id, repo_root=repo_root, root=staging_root)
+
+    assert env == expected
+    assert calls == [("zai", "glm-5.3[1m]")]
+
+
+def test_dispatch_env_route_uses_repository_model_settings(
+    tmp_path: Path, staging_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A route account resolves against the account repository's settings."""
+    monkeypatch.setenv("ZAI_API_KEY", "wrong-repository-token")
+    monkeypatch.setenv("PROJECT_ZAI_KEY", "project-token")
+    record = ProviderRecord(
+        id="zai",
+        name="Z.AI",
+        harness="claude",
+        auth="api_key",
+        route="zai/glm-5.3",
+    )
+    repo_root = _write_settings(
+        tmp_path,
+        [record.model_dump(mode="json", exclude_none=True)],
+        model_routing={
+            "providers": {
+                "zai": {
+                    "base_url": "https://project.example/anthropic",
+                    "api_key_env": "PROJECT_ZAI_KEY",
+                }
+            }
+        },
+    )
+
+    env = dispatch_env(record.id, repo_root=repo_root, root=staging_root)
+
+    assert env["ANTHROPIC_BASE_URL"] == "https://project.example/anthropic"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "project-token"
 
 
 # ---------------------------------------------------------------------------

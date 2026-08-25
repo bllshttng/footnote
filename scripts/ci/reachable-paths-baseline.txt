@@ -41,7 +41,6 @@ A	claim_idempotent_reacquired	py=cli/src/fno/claims/events.py|cli/src/fno/resume
 A	claude attach failed: {exc}	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	claude logs: claude binary not found on path; install claude or check $path	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	claude_code_stop_hook_block_cap	py=cli/src/fno/agents/harnesses/claude.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
-A	context={coverage_status_context}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
 A	delivery-evaluate-response.v1	py=cli/src/fno/delivery/contracts.py;rs=crates/fno-agents/src/delivery_completion.rs	# protocol
 A	delivery_verdict_evaluated	py=cli/src/fno/delivery/contracts.py;rs=crates/fno-agents/src/delivery_completion.rs	# protocol
 A	description={description}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
@@ -50,12 +49,19 @@ A	failed to read {log_path}: {exc}	py=cli/src/fno/agents/read.py;rs=crates/fno-a
 A	fno agents resume: registry read failed: {exc}	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno agents trace: agent name is required unless --all is set	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno mux ls --json failed	py=cli/src/fno/update.py;rs=crates/fno/src/client.rs	# msg-twin
+A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: check-coverage-context-parity.sh pins the py consts against every surface, loopcheck.rs included
 A	fno_global_settings_path	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config_io.py|cli/src/fno/conftest.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/agents_config.rs|crates/fno/src/agents_view.rs|crates/fno/src/digest_overlay.rs	# protocol
 A	fno_mux_shell_integration	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/client.rs|crates/fno/src/pty.rs	# protocol
 A	fno_spawn_gate=0 operator bypass	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	from-name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
 A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# data
 A	holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# msg-twin
+A	claim pid must be positive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must reject non-positive anchors identically
+A	claim requires a positive pid or pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must share the explicit absence contract
+A	pid and pid_unavailable are mutually exclusive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers reject ambiguous PID shapes identically
+A	pid_unavailable requires a ttl claim	py=cli/src/fno/claims/core.py|cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: TTL is the only authority allowed to carry an unavailable PID
+A	pid_unavailable claims require schema_version=2	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: nullable-PID claims are versioned in both readers
+A	schema_version=2 requires pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: version two is reserved for the nullable-PID shape
 A	https://api.z.ai/api/anthropic	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs|crates/fno/src/connections_view.rs	# data
 A	interactive resume single-writer	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	key and holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# msg-twin

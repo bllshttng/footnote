@@ -147,6 +147,10 @@ AMBIENT_IDENTITY_FAMILY: dict[str, str] = {
     **dict(_EXTRA_IDENTITY_NAMES),
 }
 
+_RESOLVER_IDENTITY_NAMES: frozenset[str] = frozenset(
+    marker for marker, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)
+)
+
 
 def scrub_ambient_identity(environ: Optional[dict] = None) -> tuple[str, ...]:
     """Remove every ambient session-identity name from ``environ`` (default
@@ -197,7 +201,9 @@ def ambient_identity_strip_flags(
 ) -> list[str]:
     """``env -u`` flag pairs for identity names PRESENT in ``env`` that belong
     to a foreign HARNESS family (every family except ``keep_family`` and fno
-    plumbing).
+    plumbing). A foreign-family name with the same value as the resolved
+    keep-family session id is a duplicate naming this session, not foreign
+    lineage, and is omitted.
 
     The one-line self-rescue for a poisoned session: it cannot prove which
     harness it is (that is the ambiguity), but the operator reading the
@@ -207,19 +213,46 @@ def ambient_identity_strip_flags(
     family in :data:`_NEVER_STRIPPED_FAMILIES`.
     """
     environ = os.environ if env is None else env
+    keep_session_id: Optional[str] = None
+    for marker, family in HARNESS_SESSION_MARKERS:
+        if family != keep_family:
+            continue
+        value = (environ.get(marker) or "").strip()
+        if value:
+            keep_session_id = value
+            break
+    if keep_session_id is None:
+        for marker, family in LEGACY_HARNESS_SESSION_MARKERS:
+            if family != keep_family:
+                continue
+            value = (environ.get(marker) or "").strip()
+            if value:
+                keep_session_id = value
+                break
+
     flags: list[str] = []
     for name in AMBIENT_IDENTITY_ENV:
-        family = AMBIENT_IDENTITY_FAMILY.get(name)
+        candidate_family = AMBIENT_IDENTITY_FAMILY.get(name)
         # An unmapped name is skipped, which is what the docstring has always
         # said and what the code did not do: `.get(name) in (...)` compares None
         # against the keep list, finds no match, and strips it. So a name added
         # to AMBIENT_IDENTITY_ENV without a family entry landed in the remedy
         # line by default. Fail closed instead - never suggest deleting a
         # variable nobody has classified.
-        if family is None or family == keep_family or family in _NEVER_STRIPPED_FAMILIES:
+        if (
+            candidate_family is None
+            or candidate_family == keep_family
+            or candidate_family in _NEVER_STRIPPED_FAMILIES
+        ):
             continue
-        if (environ.get(name) or "").strip():
-            flags += ["-u", name]
+        value = (environ.get(name) or "").strip()
+        # Resolver markers remain removable: equal values across families still
+        # leave the resolver ambiguous, so the remedy must clear that marker.
+        if not value or (
+            value == keep_session_id and name not in _RESOLVER_IDENTITY_NAMES
+        ):
+            continue
+        flags += ["-u", name]
     return flags
 
 

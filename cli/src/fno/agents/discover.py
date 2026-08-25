@@ -1591,6 +1591,23 @@ def _default_alias(project: Optional[str], short_id: str) -> str:
     return f"project-{alias}" if LEGACY_HANDLE_RE.fullmatch(alias) else alias
 
 
+def _fit_sid_alias(candidate: str, sid: str) -> str:
+    """Shorten ``candidate`` from the head so it fits the stored-alias cap.
+
+    Both disambiguation rungs end in ``-{sid}``, so cutting the leading stem
+    keeps the session id tail - the uniqueness carrier - intact. Two chars of
+    headroom are reserved for a numbered rung; a stem long enough to need the
+    cut would otherwise regrow past the cap the moment the exhausted fallback
+    appended ``-2``, and the persistence pass would re-discard the result on
+    every pass after that.
+    """
+    if len(candidate) + 2 <= _MAX_STORED_ALIAS_LEN:
+        return candidate
+    keep = max(_MAX_STORED_ALIAS_LEN - 2 - len(sid) - 1, 0)
+    head = candidate[: len(candidate) - len(sid) - 1]
+    return f"{head[:keep]}-{sid}"
+
+
 def _load_name_map(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1690,47 +1707,55 @@ def _resolve_aliases(live: list[dict], name_map_path: Path) -> dict[str, str]:
 def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
     """Guarantee aliases are unique within a render (Invariant).
 
-    The loser of a collision gets a suffix appended deterministically (sorted by
+    The loser of a collision is rebuilt deterministically (sorted by
     session_id, never silently dropped).
 
-    The suffix is TRIED, not trusted. This used to append ``short_id``
-    unconditionally on the reasoning that default aliases embed a unique hex -
-    but ``short_id`` is only unique when whatever wrote it honored that, and
-    when it did not, the appended token was the SAME string for every colliding
-    session. The name then still collided, gained another copy on the next
-    render, and grew without bound: observed at 13 repetitions of one 16-char
-    token in a 224-char alias, on 20 of 194 entries. The guard meant to catch a
-    non-unique short_id was the thing amplifying it.
-
-    So each candidate is checked before it is accepted, ending at the full
-    session id, which is the map's own key and therefore unique by
-    construction. A non-unique ``short_id`` upstream is still a bug; this only
-    stops it from compounding here.
+    Every candidate embeds the full session id - the map's own key, unique by
+    construction - because the shorter rungs of the old ladder were the bug.
+    ``short_id`` and ``canonical_handle`` are both head-8 material, and a
+    default alias already carries the short_id: appending it produced
+    ``fno-01a034f3-01a034f3``, which the persistence pass classifies as
+    accretion damage, discards with a user-visible warning, and regenerates
+    into the same shape - a heal loop firing on every mail send and peek, not
+    bounded growth. So a colliding default is rebuilt as
+    ``<basename>-<full session id>`` from scratch rather than stacked on the
+    colliding name, a duplicate hand-edited stem keeps the stem and gains the
+    full session id, and every candidate is checked against ``_is_accreted``
+    before it is accepted: this function must never emit a name the next pass
+    will discard.
     """
     seen: set[str] = set()
-    short_by_sid = {r["session_id"]: r["short_id"] for r in live}
+    row_by_sid = {r["session_id"]: r for r in live}
     out: dict[str, str] = {}
     for sid in sorted(aliases):
         name = aliases[sid]
         if name in seen:
-            for suffix in (short_by_sid.get(sid), canonical_handle(sid), sid):
-                if not suffix:
-                    continue
-                candidate = f"{name}-{suffix}"
-                if candidate not in seen:
-                    name = candidate
-                    break
+            row = row_by_sid.get(sid) or {}
+            project = row.get("project")
+            candidates: list[str] = []
+            if name == _default_alias(project, row.get("short_id") or ""):
+                candidates.append(_fit_sid_alias(_default_alias(project, sid), sid))
+            candidates.append(_fit_sid_alias(f"{name}-{sid}", sid))
+            rebuilt = next(
+                (c for c in candidates if c not in seen and not _is_accreted(c)),
+                None,
+            )
+            if rebuilt is not None:
+                name = rebuilt
             else:
                 # Every candidate taken. Only a hand-edited map aliasing another
                 # session to exactly `<name>-<sid>` gets here, but falling
                 # through would emit a DUPLICATE - the one thing this function
                 # promises not to do, and a duplicate alias resolves to two
                 # holders on the send path. Counting terminates because `seen`
-                # is finite.
+                # is finite; the candidates are pre-fit to the stored cap, so
+                # the numbered rung stays inside it too. The accreted check is
+                # deliberately NOT applied here: an adjacency hit among fixed
+                # candidate tokens would not resolve as n increments.
                 n = 2
-                while f"{name}-{sid}-{n}" in seen:
+                while f"{candidates[-1]}-{n}" in seen:
                     n += 1
-                name = f"{name}-{sid}-{n}"
+                name = f"{candidates[-1]}-{n}"
         out[sid] = name
         seen.add(name)
     return out

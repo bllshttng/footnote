@@ -719,3 +719,39 @@ def test_strip_flags_keep_fno_plumbing():
     assert "CODEX_THREAD_ID" in flags and "CODEX_CI" in flags
     assert "TARGET_SESSION_ID" not in flags
     assert "CLAUDE_CODE_SESSION_ID" not in flags
+
+
+def test_strip_flags_skip_foreign_name_with_matching_keep_session_id():
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_COMPANION_SESSION_ID": "own-session",
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == []
+
+
+def test_strip_flags_keep_equal_foreign_resolver_marker_for_ambiguity_remedy():
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_THREAD_ID": "own-session",
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == ["-u", "CODEX_THREAD_ID"]
+
+
+def test_strip_flags_keep_foreign_name_with_different_session_id():
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_COMPANION_SESSION_ID": "foreign-session",
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == [
+        "-u",
+        "CODEX_COMPANION_SESSION_ID",
+    ]

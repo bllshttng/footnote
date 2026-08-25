@@ -91,6 +91,7 @@ def _sandbox(tmp_path: Path):
         "TARGET_START": "1",
         "TARGET_INPUT": NODE_ID,
         "TARGET_SIZE": "S",
+        "TARGET_SESSION_ID": "worker-session",
         "HOME": str(home),
         "PATH": f"{bindir}:{env['PATH']}",
         "MOCK_ABI_LOG": str(log),
@@ -120,6 +121,7 @@ def _state(repo: Path) -> str:
 
 def test_bare_node_id_acquires_global_ttl_claim(tmp_path):
     repo, home, log, env = _sandbox(tmp_path)
+    env["TARGET_SESSION_ID"] = "worker-session-a"
     env["MOCK_ABI_ACQUIRE_RC"] = "0"
     r = _run_init(repo, env)
     state = _state(repo)
@@ -136,7 +138,23 @@ def test_bare_node_id_acquires_global_ttl_claim(tmp_path):
     assert acquire_lines, log_text
     line = acquire_lines[0]
     assert "--ttl 2h" in line, line
+    assert "--holder target-session:worker-session-a" in line, line
+    assert "--pid-unavailable" in line, line
     assert f"ROOT:{home}" in line, "acquire must set FNO_CLAIMS_ROOT=$HOME: " + line
+
+
+def test_node_without_proven_harness_identity_does_not_claim(tmp_path):
+    repo, home, log, env = _sandbox(tmp_path)
+    env["MOCK_ABI_ACQUIRE_RC"] = "0"
+    env.pop("TARGET_SESSION_ID", None)
+    env.pop("CODEX_THREAD_ID", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    result = _run_init(repo, env)
+    state = _state(repo)
+    assert result.returncode == 0, result.stderr
+    assert "target_claim_blocked_reason: holder_unattributable" in state
+    assert "claim acquire" not in log.read_text()
+    assert 'target_claim_key: "node:' not in state
 
 
 def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
@@ -151,6 +169,7 @@ def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):
         }
     )
     env.pop("CLAUDE_CODE_SESSION_ID", None)
+    env.pop("TARGET_SESSION_ID", None)
 
     result = _run_init(repo, env)
     state = _state(repo)

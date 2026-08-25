@@ -255,6 +255,26 @@ def validate(event: dict[str, Any]) -> None:
         if field not in data:
             raise ValidationError(f"event type {type_name} missing required data field: {field}")
 
+    # Claim records have two truthful PID shapes. A null PID must carry the
+    # positive marker and a TTL expiry, while an integer PID must not carry the
+    # marker. Without this cross-field check, a missing instrument and a
+    # deliberate PID-unavailable claim become indistinguishable in the audit log.
+    if type_name.startswith("claim_") and "pid" in data:
+        pid = data.get("pid")
+        if "pid_unavailable" in data and not isinstance(data["pid_unavailable"], bool):
+            raise ValidationError(
+                f"event type {type_name} pid_unavailable must be boolean"
+            )
+        unavailable = data.get("pid_unavailable") is True
+        if pid is None and (not unavailable or data.get("expires_at") is None):
+            raise ValidationError(
+                f"event type {type_name} null pid requires pid_unavailable=true and expires_at"
+            )
+        if pid is not None and unavailable:
+            raise ValidationError(
+                f"event type {type_name} pid_unavailable=true requires pid=null"
+            )
+
     # a2a status-breakpoint family (x-dbaf): the extended envelope. Routable
     # fields live at envelope level; additionalProperties:false for this family
     # ONLY (legacy types keep today's tolerance). Enforced pre-lock so a
@@ -293,6 +313,14 @@ def validate(event: dict[str, Any]) -> None:
 
     if type_name == "phase_transition" and data.get("gate_bearing") and not data.get("gate"):
         raise ValidationError("phase_transition with gate_bearing=true must include data.gate")
+
+    if type_name == "failover_swapped":
+        if source != "daemon":
+            raise ValidationError("failover_swapped source must be daemon")
+        if not isinstance(data.get("short_id"), str) or not data["short_id"]:
+            raise ValidationError("failover_swapped short_id must be a non-empty string")
+        if type(data.get("redispatched")) is not bool:
+            raise ValidationError("failover_swapped redispatched must be boolean")
 
     if type_name == "context_snapshot":
         if source not in {"hook", "test"}:

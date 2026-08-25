@@ -29,11 +29,14 @@ _HARNESS_BY_PROVIDER = {"claude": "claude-code", "codex": "codex", "gemini": "ge
 
 def harness_for_provider(provider: Optional[str]) -> str:
     """Map a provider id to the ``<fno_mail>`` ``harness`` vocabulary (``claude``
-    -> ``claude-code``; ``codex`` / ``gemini`` unchanged). An unknown or missing
-    provider defaults to ``claude-code`` (the dominant harness). The harness is
-    legible context for how to reply, not unforgeable trust."""
+    -> ``claude-code``; ``codex`` / ``gemini`` and unrecognized nonblank values
+    unchanged). A missing or blank provider renders the explicit ``unknown``
+    marker, never a vendor name: a null harness and a genuine claude harness
+    must not be byte-identical on the wire, and this mapper never recovers a
+    harness by inspecting the model or any other axis. The harness is legible
+    context for how to reply, not unforgeable trust."""
     if not provider:
-        return "claude-code"
+        return "unknown"
     return _HARNESS_BY_PROVIDER.get(provider, provider)
 
 

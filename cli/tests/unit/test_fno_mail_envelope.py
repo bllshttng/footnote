@@ -5,7 +5,31 @@ code once the live inject path stopped rendering its own envelope, so this file
 now pins the Python renderer's own output contract instead."""
 from __future__ import annotations
 
-from fno.mail.envelope import FNO_MAIL_TRAILER, fno_mail_open, wrap_fno_mail
+from fno.mail.envelope import (
+    FNO_MAIL_TRAILER,
+    fno_mail_open,
+    harness_for_provider,
+    wrap_fno_mail,
+)
+
+
+def test_harness_for_provider_missing_renders_unknown_never_a_vendor():
+    # A null/blank provider_from is an ABSENCE of harness evidence, and
+    # rendering it as "claude-code" made a null harness byte-identical to a
+    # genuine claude harness on the wire (87 of 1395 measured bus rows). The
+    # absence carries its own positive marker instead.
+    assert harness_for_provider(None) == "unknown"
+    assert harness_for_provider("") == "unknown"
+
+
+def test_harness_for_provider_preserves_known_and_unrecognized_nonblank():
+    # Nonblank inputs keep today's wire spelling: claude maps to claude-code,
+    # codex/gemini pass through, and an unrecognized value stays itself rather
+    # than being coerced to a known vendor.
+    assert harness_for_provider("claude") == "claude-code"
+    assert harness_for_provider("codex") == "codex"
+    assert harness_for_provider("gemini") == "gemini"
+    assert harness_for_provider("opencode") == "opencode"
 
 
 def test_open_tag_matches_rust_fno_mail_open():

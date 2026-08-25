@@ -1269,25 +1269,24 @@ fn floor_self_review(
 /// stale pre-migration sibling would size the payload from a whole era.
 fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
     for base in ["origin/main", "origin/master"] {
-        let verify = Command::new(git_bin)
-            .args([
+        match git_bounded(
+            git_bin,
+            &[
                 "rev-parse",
                 "--verify",
                 "--quiet",
                 &format!("{base}^{{commit}}"),
-            ])
-            .current_dir(cwd)
-            .output();
-        match verify {
-            Ok(v) if v.status.success() => {}
+            ],
+            cwd,
+        ) {
+            Some(v) if v.status.success() => {}
             _ => continue,
         }
-        let range = format!("{base}...HEAD");
-        let out = Command::new(git_bin)
-            .args(["diff", "--name-only", &range])
-            .current_dir(cwd)
-            .output();
-        if let Ok(o) = out {
+        if let Some(o) = git_bounded(
+            git_bin,
+            &["diff", "--name-only", &format!("{base}...HEAD")],
+            cwd,
+        ) {
             if o.status.success() {
                 let paths = String::from_utf8_lossy(&o.stdout)
                     .lines()
@@ -1497,17 +1496,17 @@ fn pr_code_diff_identity(
     base: &str,
     sha: &str,
 ) -> Option<CodeDiffIdentity> {
-    let out = Command::new(git_bin)
-        .args([
+    let out = git_bounded(
+        git_bin,
+        &[
             "diff",
             "--raw",
             "--no-abbrev",
             "--no-renames",
             &format!("{base}...{sha}"),
-        ])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+        ],
+        cwd,
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -1534,11 +1533,7 @@ fn pr_code_diff_identity(
 
 /// Paths differing between two TREES (two-dot), or `None` on git failure.
 fn git_tree_paths(git_bin: &str, cwd: &Path, a: &str, b: &str) -> Option<Vec<String>> {
-    let out = Command::new(git_bin)
-        .args(["diff", "--name-only", "--no-renames", a, b])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    let out = git_bounded(git_bin, &["diff", "--name-only", "--no-renames", a, b], cwd)?;
     if !out.status.success() {
         return None;
     }
@@ -1633,12 +1628,8 @@ impl<'a> FreshnessResolver<'a> {
 }
 
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
-    let out = Command::new(git_bin)
-        .args(["rev-parse", "HEAD"])
-        .current_dir(cwd)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    match git_bounded(git_bin, &["rev-parse", "HEAD"], cwd) {
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => "unknown".to_string(),
     }
 }
@@ -1653,11 +1644,10 @@ fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
 /// A git that cannot answer reads as DIRTY, so an unreadable tree never
 /// widens what counts as shipped.
 fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
-    let out = Command::new(git_bin)
-        .args(["status", "--porcelain"])
-        .current_dir(cwd)
-        .output();
-    matches!(out, Ok(o) if o.status.success() && o.stdout.is_empty())
+    matches!(
+        git_bounded(git_bin, &["status", "--porcelain"], cwd),
+        Some(o) if o.status.success() && o.stdout.is_empty()
+    )
 }
 
 /// True when local HEAD carries nothing the base does not already have.
@@ -1676,27 +1666,26 @@ fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
 /// [`head_is_shipped`].
 fn git_head_on_base(git_bin: &str, cwd: &Path) -> bool {
     for base in ["origin/main", "origin/master"] {
-        let verify = Command::new(git_bin)
-            .args([
+        match git_bounded(
+            git_bin,
+            &[
                 "rev-parse",
                 "--verify",
                 "--quiet",
                 &format!("{base}^{{commit}}"),
-            ])
-            .current_dir(cwd)
-            .output();
-        match verify {
-            Ok(v) if v.status.success() => {}
+            ],
+            cwd,
+        ) {
+            Some(v) if v.status.success() => {}
             _ => continue,
         }
         // `--is-ancestor` exits 0 when HEAD is reachable from base, 1 when it
         // is not, and >1 on a real error. Only a clean 0 counts, so an errored
         // probe reads as "not shipped" rather than as consent to terminate.
-        let out = Command::new(git_bin)
-            .args(["merge-base", "--is-ancestor", "HEAD", base])
-            .current_dir(cwd)
-            .output();
-        return matches!(out, Ok(o) if o.status.success());
+        return matches!(
+            git_bounded(git_bin, &["merge-base", "--is-ancestor", "HEAD", base], cwd),
+            Some(o) if o.status.success()
+        );
     }
     false
 }
@@ -1731,11 +1720,7 @@ fn head_is_shipped(pr: &PrInfo, local_head: &str, git_bin: &str, cwd: &Path) -> 
 }
 
 fn git_head_branch(git_bin: &str, cwd: &Path) -> Option<String> {
-    let out = Command::new(git_bin)
-        .args(["branch", "--show-current"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    let out = git_bounded(git_bin, &["branch", "--show-current"], cwd)?;
     if !out.status.success() {
         return None;
     }
@@ -1786,7 +1771,7 @@ fn read_pr_view(
     gh_bin: &str,
     cwd: &Path,
     selector: Option<&str>,
-) -> Result<Option<Value>, (String, String)> {
+) -> Result<Option<Value>, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let metadata_read = if rest_adapter {
         "pr_info_rest"
@@ -1803,21 +1788,26 @@ fn read_pr_view(
         args.push(selector);
     }
     args.extend(["--json", PR_VIEW_FIELDS]);
-    let out = Command::new(gh_bin)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| (metadata_read.to_string(), e.to_string()))?;
+    let out = bounded_read(
+        gh_bin.as_ref(),
+        &args,
+        cwd,
+        metadata_read,
+        stopgate_read_timeout(),
+    )?;
     if !out.status.success() {
-        return if is_no_pr_stderr(&out.stderr) {
+        return if is_no_pr_stderr(&out.stderr_tail) {
             Ok(None)
         } else {
-            Err((metadata_read.to_string(), stderr_tail(&out.stderr)))
+            Err(GhReadError::failed(
+                metadata_read,
+                stderr_tail(&out.stderr_tail),
+            ))
         };
     }
     serde_json::from_slice(&out.stdout)
         .map(Some)
-        .map_err(|_| (metadata_parse.to_string(), String::new()))
+        .map_err(|_| GhReadError::parse_failed(metadata_parse))
 }
 
 /// Resolve a numeric PR selector without consulting the checkout branch.
@@ -1830,7 +1820,7 @@ fn read_pr_head_oid(
     gh_bin: &str,
     cwd: &Path,
     selector: &str,
-) -> Result<Option<(String, Value)>, (String, String)> {
+) -> Result<Option<(String, Value)>, GhReadError> {
     let Some(pr_json) = read_pr_view(gh_bin, cwd, Some(selector))? else {
         return Ok(None);
     };
@@ -1840,7 +1830,7 @@ fn read_pr_head_oid(
         } else {
             "pr_view_parse"
         };
-        (read.to_string(), "missing headRefOid".to_string())
+        GhReadError::failed(read, "missing headRefOid".to_string())
     })?;
     Ok(Some((head, pr_json)))
 }
@@ -1869,11 +1859,16 @@ struct GraphqlQuota {
 const GRAPHQL_FLOOR: i64 = 200;
 
 fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
-    let out = Command::new(gh_bin)
-        .args(["api", "rate_limit"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    // Advisory by contract: any failure (including a timeout kill) is None -
+    // a failed probe must never fabricate an exhaustion verdict.
+    let out = bounded_read(
+        gh_bin.as_ref(),
+        &["api", "rate_limit"],
+        cwd,
+        "graphql_quota",
+        stopgate_read_timeout(),
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2413,7 +2408,7 @@ fn read_pr_info(
     author_session: Option<&str>,
     pr_selector: Option<&str>,
     prefetched_pr_json: Option<Value>,
-) -> Result<PrInfo, (String, String)> {
+) -> Result<PrInfo, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
         "pr_status_rest"
@@ -2548,33 +2543,30 @@ fn read_pr_info(
     let (ci_conclusion, failing_checks, ci_has_pending) = if no_hosted_ci {
         (CiConclusion::Skipped, Vec::new(), false)
     } else {
-        let checks_out = Command::new(gh_bin)
-            .args(["pr", "checks"])
-            .args(&sel)
-            .args(["--json", "name,state,bucket,startedAt,workflow"])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| (checks_read.to_string(), e.to_string()))?;
+        let mut checks_args = vec!["pr", "checks"];
+        checks_args.extend(sel.iter().copied());
+        checks_args.extend(["--json", "name,state,bucket,startedAt,workflow"]);
+        let checks_out = bounded_read(
+            gh_bin.as_ref(),
+            &checks_args,
+            cwd,
+            checks_read,
+            stopgate_read_timeout(),
+        )?;
 
         if !checks_out.status.success() {
-            return Err((checks_read.to_string(), stderr_tail(&checks_out.stderr)));
+            return Err(GhReadError::failed(
+                checks_read,
+                stderr_tail(&checks_out.stderr_tail),
+            ));
         }
 
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
-            .map_err(|_| (checks_parse.to_string(), String::new()))?;
-        // One dedup feeds every reader of this payload, so the conclusion, the
-        // failing-name set, and the pending flag can never answer off different
-        // rollups (a superseded run read as the current one is the exact lie
-        // this dedup exists to remove).
-        let checks = latest_per_name(&checks);
-
-        let failing = failing_check_names(&checks);
-        let has_pending = ci_has_pending_checks(&checks);
-        (
-            compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?,
-            failing,
-            has_pending,
-        )
+            .map_err(|_| GhReadError::parse_failed(checks_parse))?;
+        // One truth table for the payload (classify_checks_payload): the
+        // conclusion, the failing-name set, and the pending flag can never
+        // answer off different rollups.
+        classify_checks_payload(&checks).map_err(|e| GhReadError::parse_failed(&e))?
     };
 
     // Reads 3+4: reviews + inline findings. Skipped when the session declares
@@ -2623,12 +2615,21 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
+        // The GitHub axis was intentionally not queried. That is a known
+        // zero ONLY when nothing was configured to read: the skip is the
+        // inactive gate, with or without no_external. A `no_external` session
+        // on a repo with an ACTIVE login gate suppressed reads the config
+        // demanded, so the honest answer for that axis is Unknown with its
+        // retry remedy - reporting a healthy read of zero bots fabricated
+        // "uncovered" and an instrument-health receipt for reviews that were
+        // never queried. A fresh local pass still rescues it inside
+        // classify_coverage (positive evidence).
         let coverage = classify_coverage(
             &[],
             &[],
             &events_text,
             &[],
-            false,
+            !(no_external && login_gate_active),
             author_session,
             &freshness,
             &head_branch,
@@ -2645,20 +2646,26 @@ fn read_pr_info(
         )
     } else {
         // Read 3: top-level reviews + issue comments
-        let reviews_out = Command::new(gh_bin)
-            .args(["pr", "view"])
-            .args(&sel)
-            .args(["--json", "reviews,comments"])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| ("pr_reviews".to_string(), e.to_string()))?;
+        let mut reviews_args = vec!["pr", "view"];
+        reviews_args.extend(sel.iter().copied());
+        reviews_args.extend(["--json", "reviews,comments"]);
+        let reviews_out = bounded_read(
+            gh_bin.as_ref(),
+            &reviews_args,
+            cwd,
+            "pr_reviews",
+            stopgate_read_timeout(),
+        )?;
 
         if !reviews_out.status.success() {
-            return Err(("pr_reviews".to_string(), stderr_tail(&reviews_out.stderr)));
+            return Err(GhReadError::failed(
+                "pr_reviews",
+                stderr_tail(&reviews_out.stderr_tail),
+            ));
         }
 
         let reviews_json: Value = serde_json::from_slice(&reviews_out.stdout)
-            .map_err(|_| ("pr_reviews_parse".to_string(), String::new()))?;
+            .map_err(|_| GhReadError::parse_failed("pr_reviews_parse"))?;
 
         // PRESENCE is required-only: an optional login's absence must never
         // create a missing_bot (never wait for it). FINDINGS honor the union:
@@ -2715,30 +2722,29 @@ fn read_pr_info(
         // the /pulls/N/comments REST endpoint, which `gh pr view --json
         // comments` does NOT return (verified on PR #447). --paginate may
         // emit CONCATENATED JSON arrays (one per page), so parse as a stream.
-        let comments_out = Command::new(gh_bin)
-            .args([
-                "api",
-                &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
-                "--paginate",
-            ])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| ("pulls_comments".to_string(), e.to_string()))?;
+        let pulls_target = format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments");
+        let comments_out = bounded_read(
+            gh_bin.as_ref(),
+            &["api", &pulls_target, "--paginate"],
+            cwd,
+            "pulls_comments",
+            stopgate_read_timeout(),
+        )?;
 
         if !comments_out.status.success() {
-            return Err((
-                "pulls_comments".to_string(),
-                stderr_tail(&comments_out.stderr),
+            return Err(GhReadError::failed(
+                "pulls_comments",
+                stderr_tail(&comments_out.stderr_tail),
             ));
         }
 
         let mut inline_comments: Vec<Value> = Vec::new();
         for page in serde_json::Deserializer::from_slice(&comments_out.stdout).into_iter::<Value>()
         {
-            let page = page.map_err(|_| ("pulls_comments_parse".to_string(), String::new()))?;
+            let page = page.map_err(|_| GhReadError::parse_failed("pulls_comments_parse"))?;
             match page.as_array() {
                 Some(arr) => inline_comments.extend(arr.iter().cloned()),
-                None => return Err(("pulls_comments_parse".to_string(), String::new())),
+                None => return Err(GhReadError::parse_failed("pulls_comments_parse")),
             }
         }
 
@@ -2749,18 +2755,24 @@ fn read_pr_info(
                 && blocking_severity(c.get("body").and_then(|v| v.as_str()).unwrap_or("")).is_some()
         });
         let commit_dates: Vec<String> = if has_blocking_candidate {
-            let commits_out = Command::new(gh_bin)
-                .args(["pr", "view"])
-                .args(&sel)
-                .args(["--json", "commits"])
-                .current_dir(cwd)
-                .output()
-                .map_err(|e| ("pr_commits".to_string(), e.to_string()))?;
+            let mut commits_args = vec!["pr", "view"];
+            commits_args.extend(sel.iter().copied());
+            commits_args.extend(["--json", "commits"]);
+            let commits_out = bounded_read(
+                gh_bin.as_ref(),
+                &commits_args,
+                cwd,
+                "pr_commits",
+                stopgate_read_timeout(),
+            )?;
             if !commits_out.status.success() {
-                return Err(("pr_commits".to_string(), stderr_tail(&commits_out.stderr)));
+                return Err(GhReadError::failed(
+                    "pr_commits",
+                    stderr_tail(&commits_out.stderr_tail),
+                ));
             }
             let commits_json: Value = serde_json::from_slice(&commits_out.stdout)
-                .map_err(|_| ("pr_commits_parse".to_string(), String::new()))?;
+                .map_err(|_| GhReadError::parse_failed("pr_commits_parse"))?;
             commits_json
                 .get("commits")
                 .and_then(|v| v.as_array())
@@ -2965,6 +2977,46 @@ fn latest_per_name(checks: &Value) -> Value {
     Value::Array(kept)
 }
 
+fn without_coverage_statuses(checks: &Value) -> Value {
+    let Some(arr) = checks.as_array() else {
+        return checks.clone();
+    };
+    Value::Array(
+        arr.iter()
+            .filter(|check| {
+                let name = check.get("name").and_then(|v| v.as_str());
+                let context = check.get("context").and_then(|v| v.as_str());
+                let is_coverage = |value: Option<&str>| {
+                    value == Some(COVERAGE_STATUS_CONTEXT)
+                        || value == Some(COVERAGE_UNAVAILABLE_STATUS_CONTEXT)
+                };
+                !is_coverage(name) && !is_coverage(context)
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+/// One truth table for a `gh pr checks --json` payload: dedup to the latest
+/// run per name, drop the coverage projections, then derive the conclusion,
+/// the failing names, and the pending flag. A rollup the filter EMPTIED
+/// (only the two coverage contexts existed) reads Pending - "CI has not
+/// reported yet", never the declared-none None, matching the Python twin's
+/// unknown - and its pending flag is set too, so the wait stays watchable
+/// instead of a non-idlable re-invoke loop.
+fn classify_checks_payload(checks: &Value) -> Result<(CiConclusion, Vec<String>, bool), String> {
+    let deduped = latest_per_name(checks);
+    let had_rows = deduped.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    let filtered = without_coverage_statuses(&deduped);
+    let mut conclusion = compute_ci_conclusion(&filtered)?;
+    let emptied = had_rows && matches!(conclusion, CiConclusion::None);
+    if emptied {
+        conclusion = CiConclusion::Pending;
+    }
+    let pending = emptied || ci_has_pending_checks(&filtered);
+    Ok((conclusion, failing_check_names(&filtered), pending))
+}
+
 fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     let arr = match checks.as_array() {
         Some(a) => a,
@@ -3131,8 +3183,10 @@ fn is_pre_existing_main_red(pr_failing: &[String], main_failing: &[String]) -> b
 /// with no failures on HEAD returns `Some(empty)` -> the subset rule then fails
 /// and the caller holds; only positive proof fires the terminal.
 fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<String>> {
-    let list_out = Command::new(gh_bin)
-        .args([
+    let limit = n.to_string();
+    let list_out = match bounded_read(
+        gh_bin.as_ref(),
+        &[
             "run",
             "list",
             "--branch",
@@ -3140,18 +3194,41 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
             "--status",
             "completed",
             "--limit",
-            &n.to_string(),
+            &limit,
             "--json",
             "databaseId,conclusion,headSha",
-        ])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+        ],
+        cwd,
+        "main_run_list",
+        stopgate_read_timeout(),
+    ) {
+        Ok(out) => out,
+        Err(error) => {
+            log_bounded_read_error("main-head", &error);
+            return None;
+        }
+    };
     if !list_out.status.success() {
+        let error = GhReadError::failed("main_run_list", stderr_tail(&list_out.stderr_tail));
+        log_bounded_read_error("main-head", &error);
         return None; // gh error -> unknown -> hold
     }
-    let list: Value = serde_json::from_slice(&list_out.stdout).ok()?;
-    let arr = list.as_array()?;
+    let list: Value = match serde_json::from_slice(&list_out.stdout) {
+        Ok(value) => value,
+        Err(parse_error) => {
+            let error = GhReadError::failed("main_run_list_parse", parse_error.to_string());
+            log_bounded_read_error("main-head", &error);
+            return None;
+        }
+    };
+    let arr = match list.as_array() {
+        Some(array) => array,
+        None => {
+            let error = GhReadError::parse_failed("main_run_list_shape");
+            log_bounded_read_error("main-head", &error);
+            return None;
+        }
+    };
     // Zero completed runs (new/quiet repo) is not proof -> unknown.
     // The newest run's headSha IS the current main HEAD; classify against only
     // that commit's runs so a failure fixed on a later commit never counts.
@@ -3164,15 +3241,33 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
 
     let mut names: Vec<String> = Vec::new();
     for id in failing_run_ids {
-        let view_out = Command::new(gh_bin)
-            .args(["run", "view", &id.to_string(), "--json", "jobs"])
-            .current_dir(cwd)
-            .output()
-            .ok()?;
+        let id_arg = id.to_string();
+        let view_out = match bounded_read(
+            gh_bin.as_ref(),
+            &["run", "view", &id_arg, "--json", "jobs"],
+            cwd,
+            "main_run_view",
+            stopgate_read_timeout(),
+        ) {
+            Ok(out) => out,
+            Err(error) => {
+                log_bounded_read_error("main-head", &error);
+                return None;
+            }
+        };
         if !view_out.status.success() {
+            let error = GhReadError::failed("main_run_view", stderr_tail(&view_out.stderr_tail));
+            log_bounded_read_error("main-head", &error);
             return None; // any per-run gh error -> unknown -> hold (fail closed)
         }
-        let view: Value = serde_json::from_slice(&view_out.stdout).ok()?;
+        let view: Value = match serde_json::from_slice(&view_out.stdout) {
+            Ok(value) => value,
+            Err(parse_error) => {
+                let error = GhReadError::failed("main_run_view_parse", parse_error.to_string());
+                log_bounded_read_error("main-head", &error);
+                return None;
+            }
+        };
         for name in parse_failing_job_names(&view) {
             if !names.contains(&name) {
                 names.push(name);
@@ -3230,18 +3325,17 @@ fn post_nudge_comment(gh_bin: &str, cwd: &Path, pr_number: i64, review_handle: &
     if std::env::var("FNO_LOOPCHECK_NO_COMMENT").as_deref() == Ok("1") {
         return false;
     }
-    Command::new(gh_bin)
-        .args([
-            "pr",
-            "comment",
-            &pr_number.to_string(),
-            "--body",
-            review_handle,
-        ])
-        .current_dir(cwd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let pr_arg = pr_number.to_string();
+    matches!(
+        bounded_read(
+            gh_bin.as_ref(),
+            &["pr", "comment", &pr_arg, "--body", review_handle],
+            cwd,
+            "nudge_comment",
+            stopgate_read_timeout(),
+        ),
+        Ok(out) if out.status.success()
+    )
 }
 
 /// The first missing bot that has been nudged to its ceiling and gone silent, if
@@ -3257,6 +3351,24 @@ fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
 /// and refresher workflow pin the same name from their own surfaces, and a
 /// context string that splits in two is a green marker on nothing.
 const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
+const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = "fno/review-coverage-unavailable";
+
+fn coverage_unavailable_description(head: &str) -> String {
+    format!(
+        "coverage read unavailable at {}; retry the review verb",
+        short_sha(head)
+    )
+}
+
+fn coverage_instrument_status(coverage: &Coverage, head: &str) -> (&'static str, String) {
+    match coverage {
+        Coverage::Unknown => ("pending", coverage_unavailable_description(head)),
+        Coverage::Covered(_) => (
+            "success",
+            format!("coverage read healthy at {}", short_sha(head)),
+        ),
+    }
+}
 
 /// Whether `name` is the local reviewer Python's gate demands a pass from,
 /// with the same leading-slash tolerance `_coverage_has_local_pass` applies.
@@ -3264,8 +3376,11 @@ fn is_code_review_reviewer(name: &str) -> bool {
     normalize_reviewer(name) == "code-review"
 }
 
-fn successful_output_text(out: std::io::Result<std::process::Output>) -> Option<String> {
-    let out = out.ok()?;
+/// A bounded run's successful stdout: the completed payload's stdout when
+/// the child exited zero. A timeout or unrunnable child is not a success
+/// (None), which preserves each caller's degrade semantics.
+fn bounded_success_text(result: Result<BoundedOutput, GhReadError>) -> Option<String> {
+    let out = result.ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -3297,19 +3412,23 @@ fn successful_output_text(out: std::io::Result<std::process::Output>) -> Option<
 /// description before deciding whether an override green needs protection.
 fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> Option<bool> {
     for attempt in 1..=3 {
-        let out = Command::new(gh_bin)
-            .args([
+        let pr_arg = pr_number.to_string();
+        let out = bounded_read(
+            gh_bin.as_ref(),
+            &[
                 "pr",
                 "view",
-                &pr_number.to_string(),
+                &pr_arg,
                 "--json",
                 "labels",
                 "--jq",
                 "[.labels[].name] | index(\"coverage-override\") != null",
-            ])
-            .current_dir(cwd)
-            .output();
-        if let Some(text) = successful_output_text(out) {
+            ],
+            cwd,
+            "coverage_override_label",
+            stopgate_read_timeout(),
+        );
+        if let Some(text) = bounded_success_text(out) {
             match text.as_str() {
                 "true" => return Some(true),
                 "false" => return Some(false),
@@ -3328,27 +3447,36 @@ fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> Option<boo
 
 fn current_coverage_description(gh_bin: &str, cwd: &Path, head: &str) -> Option<String> {
     let target = format!("repos/:owner/:repo/commits/{head}/status");
-    successful_output_text(
-        Command::new(gh_bin)
-        .args([
+    bounded_success_text(bounded_read(
+        gh_bin.as_ref(),
+        &[
             "api",
             target.as_str(),
             "--jq",
             "[.statuses[] | select(.context == \"fno/review-coverage\")] | first | .description // \"\"",
-        ])
-        .current_dir(cwd)
-        .output(),
-    )
+        ],
+        cwd,
+        "coverage_status_read",
+        stopgate_read_timeout(),
+    ))
 }
 
 /// The one POST shape every coverage-marker writer uses.
-fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, description: &str) {
+fn post_coverage_status(
+    gh_bin: &str,
+    cwd: &Path,
+    head: &str,
+    context: &str,
+    state: &str,
+    description: &str,
+) {
     let target = format!("repos/:owner/:repo/statuses/{head}");
     let state_arg = format!("state={state}");
-    let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
+    let context_arg = format!("context={context}");
     let description_arg = format!("description={description}");
-    let _ = Command::new(gh_bin)
-        .args([
+    let result = bounded_read(
+        gh_bin.as_ref(),
+        &[
             "api",
             "--method",
             "POST",
@@ -3359,9 +3487,19 @@ fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, descr
             context_arg.as_str(),
             "-f",
             description_arg.as_str(),
-        ])
-        .current_dir(cwd)
-        .output();
+        ],
+        cwd,
+        "coverage_status_post",
+        stopgate_read_timeout(),
+    );
+    match result {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let error = GhReadError::failed("coverage_status_post", stderr_tail(&out.stderr_tail));
+            log_bounded_read_error("review-coverage publisher", &error);
+        }
+        Err(error) => log_bounded_read_error("review-coverage publisher", &error),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3421,8 +3559,21 @@ fn publish_coverage_status(
                 gh_bin,
                 cwd,
                 pr_head_oid,
+                COVERAGE_STATUS_CONTEXT,
                 "success",
                 "coverage-override label applied on the PR",
+            );
+            // The diagnostic mirrors the Python override arm, not the
+            // possibly-Unknown computed read: a waived review must not wear
+            // "retry the review verb" beside its override success, and the
+            // two writers of one context must post the same state.
+            post_coverage_status(
+                gh_bin,
+                cwd,
+                pr_head_oid,
+                COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+                "success",
+                &format!("coverage read healthy at {}", short_sha(pr_head_oid)),
             );
             return;
         }
@@ -3468,13 +3619,7 @@ fn publish_coverage_status(
             format!("covered: {} reviewed at {}", n, short_sha(pr_head_oid)),
         )
     } else if matches!(coverage.coverage, Coverage::Unknown) {
-        (
-            "failure",
-            format!(
-                "coverage unknown (gh read failed) at {}; retry the review verb",
-                short_sha(pr_head_oid)
-            ),
-        )
+        ("pending", coverage_unavailable_description(pr_head_oid))
     } else {
         // The sized invocation rides along when it fits: GitHub caps this
         // description at 140 chars and rejects an overflow whole, which would
@@ -3503,7 +3648,24 @@ fn publish_coverage_status(
         };
         ("failure", description)
     };
-    post_coverage_status(gh_bin, cwd, pr_head_oid, state, &description);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_STATUS_CONTEXT,
+        state,
+        &description,
+    );
+    let (diagnostic_state, diagnostic_description) =
+        coverage_instrument_status(&coverage.coverage, pr_head_oid);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+        diagnostic_state,
+        &diagnostic_description,
+    );
 }
 
 /// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
@@ -4656,11 +4818,14 @@ pub enum CoverageVerdict {
 /// honest). Collapsing an API error into 0 produces false refusals; collapsing
 /// it into a count reproduces the bug.
 ///
-/// NOTE (x-0eaf finding 4): `Unknown` is not currently reachable in production.
-/// When the GitHub reviews API call fails, `read_pr_info` returns `Err`, which
-/// the caller handles by block-retry (fail-safe: the session retries, it does
-/// not green or merge). The variant, its receipt, schema enum, and tests exist
-/// so that softening the error path to terminate (rather than block) is a
+/// NOTE (x-0eaf finding 4): a FAILED GitHub reviews read still never yields
+/// `Unknown` - `read_pr_info` returns `Err` and the caller block-retries
+/// (fail-safe: the session retries, it does not green or merge). `Unknown` IS
+/// reachable in production through the login_skipped arm: a `no_external`
+/// session on a repo with an active login gate suppressed the reads the
+/// config demanded, and the honest answer for that axis is Unknown with its
+/// retry remedy (pinned by the no_external-on-active-gate tests). The
+/// receipt, schema enum, and tests exist so softening the error path is a
 /// one-line change, not a redesign. Do not delete it as dead code without
 /// understanding this.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6188,6 +6353,10 @@ struct LoopCheckArgs {
     /// idiom as `gh_bin` / `git_bin`, and for the same reason: a test may not
     /// depend on what happens to be installed.
     fno_bin: String,
+    /// Override for the shared stop-gate read bound, in milliseconds. Tests
+    /// inject a small bound so a sleeping fake wedges for ~1s instead of 30;
+    /// any value <= 0 keeps the default. Production never passes it.
+    read_timeout_ms: Option<u64>,
 }
 
 fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
@@ -6207,6 +6376,12 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut hook_input_stdin = false;
     let mut driver = "target".to_string();
     let mut fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    // Env-as-default like the two bin overrides, so the real shell shim can be
+    // driven end to end against a wedged child at a test bound without the
+    // shim having to forward a flag it does not know about.
+    let mut read_timeout_ms: Option<u64> = std::env::var("FNO_LOOPCHECK_READ_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
 
     // Skip the "loop-check" verb itself if present
     let args = if args.first().map(|s| s.as_str()) == Some("loop-check") {
@@ -6240,6 +6415,12 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             now_override = Some(val);
         } else if let Some(val) = try_flag_value(arg, "--gh-bin", args, &mut i) {
             gh_bin = val;
+        } else if let Some(val) = try_flag_value(arg, "--read-timeout-ms", args, &mut i) {
+            // A parse failure falls back to the default rather than refusing:
+            // the bound is a safety ceiling, and a malformed override must
+            // never wedge or kill the fire over an argument nobody validates
+            // in production.
+            read_timeout_ms = val.parse::<u64>().ok();
         } else if let Some(val) = try_flag_value(arg, "--git-bin", args, &mut i) {
             git_bin = val;
         } else if let Some(val) = try_flag_value(arg, "--author-harness", args, &mut i) {
@@ -6286,6 +6467,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
         hook_input_stdin,
         driver,
         fno_bin,
+        read_timeout_ms,
     })
 }
 
@@ -6515,6 +6697,17 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             return (2, out.to_string());
         }
     };
+    // Publish the per-thread read bound and the fire's budget deadline before
+    // any read can fire. Zero (and absent) both mean "the production
+    // default". Thread-local, not process-global: the test harness fires
+    // `decide` in-process on parallel threads, and one fire must never reset
+    // or inherit a neighboring fire's injected bound mid-read.
+    STOPGATE_READS.with(|cell| {
+        *cell.borrow_mut() = (
+            parsed.read_timeout_ms.unwrap_or(0),
+            Some(std::time::Instant::now() + STOPGATE_FIRE_BUDGET),
+        );
+    });
 
     // The king asks a different question of a different manifest, so it routes
     // BEFORE the target-shaped manifest read below. Branching inside that read
@@ -6810,11 +7003,26 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     let gh_available = {
         // Use a harmless read-only probe: `gh auth status` exits non-zero when
         // not logged in, but the binary IS present. We only care about
-        // NotFound (binary missing from path entirely).
-        match Command::new(gh_bin).arg("--version").output() {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(_) => false,
-            Ok(_) => true, // any exit code: binary exists
+        // NotFound (binary missing from path entirely). Bounded like every
+        // other synchronous child, so even `--version` cannot wedge the fire.
+        match bounded_read(
+            gh_bin.as_ref(),
+            &["--version"],
+            &cwd,
+            "gh_version_probe",
+            std::time::Duration::from_secs(5),
+        ) {
+            // SpawnFailed (kind Failed) covers NotFound and every other spawn
+            // error: binary absent. Completion at any exit code proves it
+            // exists, and so does a timeout - a wedged --version must not read
+            // as "gh not found" and Interrupt an unattended session; the
+            // downstream reads are themselves bounded.
+            Err(GhReadError {
+                kind: ReadErrorKind::Failed | ReadErrorKind::Unrunnable,
+                ..
+            }) => false,
+            Err(_) => true,
+            Ok(_) => true,
         }
     };
 
@@ -7096,10 +7304,17 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // forward the most recent prior fingerprint so the consecutive-unchanged streak
     // continues instead of resetting to "none|none|none" which would mask NoProgress.
     // fp_read_failed is recorded in the event payload for observability.
-    let fp_read_result = Command::new(gh_bin)
-        .args(["pr", "view", "--json", "state,number,headRefName"])
-        .current_dir(&cwd)
-        .output();
+    let fp_read_result = bounded_read(
+        gh_bin.as_ref(),
+        &["pr", "view", "--json", "state,number,headRefName"],
+        &cwd,
+        "fingerprint_pr_view",
+        stopgate_read_timeout(),
+    );
+    let mut fp_timeout: Option<GhReadError> = fp_read_result
+        .as_ref()
+        .err()
+        .and_then(|e| (e.kind == ReadErrorKind::TimedOut).then(|| e.clone()));
     let (fp_pr_state, fp_ci, fp_review_ts, fp_read_failed) = match fp_read_result {
         Ok(o) if o.status.success() => {
             let pv: Value = serde_json::from_slice(&o.stdout).unwrap_or(Value::Null);
@@ -7107,22 +7322,33 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 PrState::from_gh_str(pv.get("state").and_then(|v| v.as_str()).unwrap_or("none"));
 
             // Get CI
-            let ci = match Command::new(gh_bin)
-                .args([
+            let ci = match bounded_read(
+                gh_bin.as_ref(),
+                &[
                     "pr",
                     "checks",
                     "--json",
                     "name,state,bucket,startedAt,workflow",
-                ])
-                .current_dir(&cwd)
-                .output()
-            {
+                ],
+                &cwd,
+                "fingerprint_pr_checks",
+                stopgate_read_timeout(),
+            ) {
                 Ok(co) if co.status.success() => {
                     let cv: Value = serde_json::from_slice(&co.stdout).unwrap_or(Value::Null);
-                    // Same dedup as the main CI read: the fingerprint's CI arm
-                    // must describe the latest run per name, not a superseded
-                    // one a newer push already replaced.
-                    compute_ci_conclusion(&latest_per_name(&cv)).unwrap_or(CiConclusion::None)
+                    // The same truth table as the main CI read (one helper,
+                    // not a second spelling of dedup-plus-filter): the
+                    // fingerprint's CI arm must describe the latest run per
+                    // name, not a superseded one a newer push replaced, and
+                    // must agree with the main read about a coverage-only
+                    // rollup.
+                    classify_checks_payload(&cv)
+                        .map(|(c, _, _)| c)
+                        .unwrap_or(CiConclusion::None)
+                }
+                Err(e) if e.kind == ReadErrorKind::TimedOut => {
+                    fp_timeout = fp_timeout.or_else(|| Some(e.clone()));
+                    CiConclusion::None
                 }
                 _ => CiConclusion::None,
             };
@@ -7130,14 +7356,20 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             // Get review ts (skipped for no_external sessions and declared
             // no-review repos, matching the done() Read 3/4 skip)
             let rv_ts = if !manifest.no_external && !required_bots.is_empty() {
-                match Command::new(gh_bin)
-                    .args(["pr", "view", "--json", "reviews,comments"])
-                    .current_dir(&cwd)
-                    .output()
-                {
+                match bounded_read(
+                    gh_bin.as_ref(),
+                    &["pr", "view", "--json", "reviews,comments"],
+                    &cwd,
+                    "fingerprint_pr_reviews",
+                    stopgate_read_timeout(),
+                ) {
                     Ok(ro) if ro.status.success() => {
                         let rv: Value = serde_json::from_slice(&ro.stdout).unwrap_or(Value::Null);
                         review_activity_ts(&rv)
+                    }
+                    Err(e) if e.kind == ReadErrorKind::TimedOut => {
+                        fp_timeout = fp_timeout.or_else(|| Some(e.clone()));
+                        "none".to_string()
                     }
                     _ => "none".to_string(),
                 }
@@ -7150,13 +7382,52 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         // No PR yet: a healthy fire with a "none" fingerprint (world-state,
         // not an outage) - the backstop keeps ticking for a session that
         // never ships a PR.
-        Ok(o) if is_no_pr_stderr(&o.stderr) => {
+        Ok(o) if is_no_pr_stderr(&o.stderr_tail) => {
             (PrState::None, CiConclusion::None, "none".to_string(), false)
         }
-        // Hard gh failure (spawn error OR non-zero exit): mark as failed; we will
-        // carry forward the prior fingerprint after reading the events log.
+        // Hard gh failure (spawn error, non-zero exit, or any remaining
+        // non-success shape): mark as failed; we will carry forward the prior
+        // fingerprint after reading the events log. A TIMEOUT additionally
+        // surfaces below as a named, event-emitted block reason rather than a
+        // silent carry-forward.
         _ => (PrState::None, CiConclusion::None, "none".to_string(), true),
     };
+
+    // A killed fingerprint read blocks this fire with its own name and bound,
+    // exactly like a hard done() read error. The NoProgress backstop stays
+    // safe because the loop_check row this path emits carries
+    // fp_read_failed=true, which read_prior_fires skips - the streak survives
+    // without the carry-forward logic below ever running (the return exits
+    // before it), so this comment must not point a maintainer at "logic
+    // below" as the mechanism.
+    if let Some(err) = &fp_timeout {
+        let quota = probe_graphql_quota(gh_bin, &cwd);
+        emit(
+            "loop_check_gh_error",
+            serde_json::json!({
+                "session_id": session_id,
+                "read": err.read,
+                "outcome": err.outcome(),
+                "stderr_tail": err.stderr_tail,
+                "elapsed_s": err.elapsed.map(|d| d.as_secs_f64()),
+                "graphql_remaining": quota.as_ref().map(|q| q.remaining),
+                "graphql_reset": quota.as_ref().map(|q| q.reset_epoch)
+            }),
+        );
+        emit(
+            "loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "fingerprint": Value::Null,
+                "decision": "block",
+                "pr_state": "unknown",
+                "ci": "unknown",
+                "reviewed": false,
+                "fp_read_failed": true
+            }),
+        );
+        return (0, allow_output("block", None, &err.render(), 0, None));
+    }
 
     // Build a tentative fingerprint from this fire's gh reads.
     let tentative_fp = generic.delivery_fingerprint(make_fingerprint(
@@ -7649,7 +7920,11 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         manifest.plan_path.as_deref(),
                         &fno_bin,
                         &cwd,
-                        FIDELITY_TIMEOUT,
+                        // The 60s ceiling, clamped to the fire budget: a
+                        // fidelity probe is a stop-gate read like any other,
+                        // and one read must not spend more than the fire
+                        // still has before the harness kills the hook.
+                        clamp_to_fire_deadline(FIDELITY_TIMEOUT),
                     ) {
                         FidelityGate::Refused { reason } => fidelity_block = Some(reason),
                         // Degraded fails OPEN on the stop decision (same as Absent - a
@@ -8185,7 +8460,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     allow_output("block", None, &reason, this_fire, Some(fingerprint)),
                 );
             }
-            Err((failed_read, failed_stderr)) => {
+            Err(read_err) => {
+                let failed_read = read_err.read.clone();
+                let failed_stderr = read_err.stderr_tail.clone();
                 // US4 (locked decision 6, REVERSES the wedge's behavior): a
                 // gh-errored done() read NEVER terminates NoProgress, even
                 // with the backstop tripped - a healthy session must not be
@@ -8234,7 +8511,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     serde_json::json!({
                         "session_id": session_id,
                         "read": failed_read,
+                        "outcome": read_err.outcome(),
                         "stderr_tail": failed_stderr,
+                        "elapsed_s": read_err.elapsed.map(|d| d.as_secs_f64()),
                         "graphql_remaining": quota.as_ref().map(|q| q.remaining),
                         "graphql_reset": quota.as_ref().map(|q| q.reset_epoch),
                         "rate_limit_class": secondary.then_some("secondary")
@@ -8268,7 +8547,13 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // that actually clears in seconds - the exact "assert a
                 // positive marker, never an absence" trap this whole
                 // diagnosis exists to avoid.
-                let reason = if secondary {
+                // A killed timeout renders its own sentence and never falls
+                // through the ordinary failed-read wording: the two demand
+                // opposite operator responses, and the quota probe below must
+                // not label a killed child as a quota problem either.
+                let reason = if read_err.kind == ReadErrorKind::TimedOut {
+                    read_err.render()
+                } else if secondary {
                     format!(
                         "gh read '{failed_read}' hit GitHub's SECONDARY rate limit (burst/\
                          concurrency, not the hourly quota - `gh api rate_limit` can read \
@@ -8343,7 +8628,7 @@ fn run_done(
     global_events_path: &Path,
     repo_slug: &str,
     author_session: Option<&str>,
-) -> Result<PrInfo, (String, String)> {
+) -> Result<PrInfo, GhReadError> {
     let info = read_pr_info(
         gh_bin,
         git_bin,
@@ -8487,11 +8772,11 @@ fn short_sha(s: &str) -> String {
 /// (gh's `--watch` exit varies by version); the design depends only on the task
 /// EXITING, never on its exit code.
 ///
-/// The bound uses shell builtins, never `timeout(1)`: stock macOS has neither
-/// it nor `gtimeout`, so naming it makes the watcher no-op and the session idle
-/// forever on a wait that never started. The watchdog is reaped once the wait
-/// returns - left alive, it wakes 30m later and kills whatever now holds that
-/// recycled pid (codex P1).
+/// The bound uses shell builtins, never `timeout(1)`: the plugin must work on
+/// hosts where that binary (and `gtimeout`) is absent, so naming it makes the
+/// watcher no-op and the session idle forever on a wait that never started.
+/// The watchdog is reaped once the wait returns - left alive, it wakes 30m
+/// later and kills whatever now holds that recycled pid (codex P1).
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // The watcher must WAIT on the actual blocker (codex P2): a review wait
     // has CI already green, so a checks watcher returns instantly and the
@@ -8525,8 +8810,9 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
 // the enforcement arm: the gate refuses done until the declared observation
 // holds, forcing the session to perform the last mile before claiming done.
 
-/// Wall-clock ceiling per probe. The host has no `timeout` binary (and no
-/// gtimeout), so the bound is native: spawn, poll `try_wait`, kill.
+/// Wall-clock ceiling per probe. The bound is native (spawn, poll `try_wait`,
+/// kill): the plugin must run on hosts where `timeout(1)` and `gtimeout` are
+/// absent, so no bound may depend on either binary existing.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A probe list is a gate, not a test suite.
@@ -8595,13 +8881,29 @@ enum FidelityGate {
 /// different things and must be free to drift independently.
 const FIDELITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Cap on RETAINED stderr per bounded run. Only retention is capped - the
+/// drain itself always runs to EOF, or a child that overflows the pipe would
+/// deadlock before exiting. The tail (not the head) is kept because the end
+/// of a diagnostic stream carries the line that killed the run.
+const BOUNDED_STDERR_TAIL_CAP: usize = 2000;
+
+/// A completed bounded run's full classification payload: exit status, stdout,
+/// and a capped stderr tail. Parsers read `stdout`; the status and tail exist
+/// so a non-zero exit or a failing child can be NAMED at the call site rather
+/// than collapsed into "the read failed".
+struct BoundedOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr_tail: Vec<u8>,
+}
+
 /// Outcome of a bounded, killable child run: the whole point is that a hang
 /// inside the child (x-8ad8 was one; nothing rules out another) can never
 /// again read as "the read failed" or wedge forever - it reads as exactly
 /// what happened, with the verb and the elapsed time attached at the call
 /// site.
 enum BoundedRun {
-    Stdout(Vec<u8>),
+    Completed(BoundedOutput),
     TimedOut(std::time::Duration),
     SpawnFailed,
     /// `try_wait()` itself errored (e.g. a concurrent reap of the group
@@ -8613,15 +8915,16 @@ enum BoundedRun {
 
 /// Run `fno_bin args...` under a native wall-clock bound, killing the
 /// child's whole process group on expiry - the same discipline as
-/// `run_probe` (spawn, poll `try_wait`, `kill_process_group`), but capturing
-/// stdout too since the caller needs to parse it as JSON. `Command::output()`
-/// alone has no timeout: it blocks until the child exits, however long that
-/// takes, which is exactly how a hang three calls deep in `fno do plan fidelity`
-/// (x-8ad8) turned into loop-check itself hanging forever and stranding the
-/// session behind it. stdout/stderr are drained on background threads for
-/// the same reason `run_probe` drains stderr that way: reading a pipe only
-/// after the child exits deadlocks against a child that fills the pipe
-/// buffer before exiting.
+/// `run_probe` (spawn, poll `try_wait`, `kill_process_group`) - and return
+/// the completed payload (exit status, stdout, capped stderr tail). This is
+/// the single transport boundary for synchronous external work on the stop
+/// path: `Command::output()` alone has no timeout, so it blocks until the
+/// child exits however long that takes, which is exactly how a hang three
+/// calls deep in `fno do plan fidelity` (x-8ad8) turned into loop-check
+/// itself hanging forever and stranding the session behind it. stdout and
+/// stderr are drained on background threads for the same reason `run_probe`
+/// drains stderr that way: reading a pipe only after the child exits
+/// deadlocks against a child that fills the pipe buffer before exiting.
 fn run_bounded(
     fno_bin: &OsStr,
     args: &[&str],
@@ -8655,16 +8958,35 @@ fn run_bounded(
     });
     let mut stderr_pipe = child.stderr.take();
     let stderr_drain = std::thread::spawn(move || {
-        // Nothing reads this back (the caller only wants stdout) - drain to
-        // sink rather than a growing Vec so an unbounded stderr write
-        // doesn't buy an unbounded allocation for bytes no one inspects.
+        // Retain only the LAST `BOUNDED_STDERR_TAIL_CAP` bytes while still
+        // draining to EOF: an unbounded write must not buy an unbounded
+        // allocation, but stopping the read early would block a child that
+        // is still writing, deadlocking the runner before any timeout.
+        let mut tail: Vec<u8> = Vec::new();
         if let Some(ref mut p) = stderr_pipe {
-            let _ = std::io::copy(p, &mut std::io::sink());
+            let mut chunk = [0u8; 4096];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        // Always append, THEN trim: a guard on append would
+                        // freeze the buffer at whatever the first chunks
+                        // carried, which for a stream longer than one chunk
+                        // keeps the head, not the tail.
+                        tail.extend_from_slice(&chunk[..n]);
+                        if tail.len() > BOUNDED_STDERR_TAIL_CAP {
+                            let excess = tail.len() - BOUNDED_STDERR_TAIL_CAP;
+                            tail.drain(..excess);
+                        }
+                    }
+                }
+            }
         }
+        tail
     });
 
     enum Outcome {
-        Done,
+        Done(std::process::ExitStatus),
         TimedOut(std::time::Duration),
         WaitFailed,
     }
@@ -8672,7 +8994,7 @@ fn run_bounded(
     let start = std::time::Instant::now();
     let outcome = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break Outcome::Done,
+            Ok(Some(status)) => break Outcome::Done(status),
             Ok(None) => {
                 let elapsed = start.elapsed();
                 if elapsed >= timeout {
@@ -8703,10 +9025,245 @@ fn run_bounded(
         // is inflated by cleanup cost instead of reflecting the timeout itself.
         Outcome::TimedOut(elapsed) => BoundedRun::TimedOut(elapsed),
         Outcome::WaitFailed => BoundedRun::WaitFailed,
-        Outcome::Done => {
+        Outcome::Done(status) => {
             let stdout = stdout_drain.join().unwrap_or_default();
-            let _ = stderr_drain.join();
-            BoundedRun::Stdout(stdout)
+            let stderr_tail = stderr_drain.join().unwrap_or_default();
+            BoundedRun::Completed(BoundedOutput {
+                status,
+                stdout,
+                stderr_tail,
+            })
+        }
+    }
+}
+
+/// Wall-clock ceiling for ONE synchronous stop-gate read: PR metadata,
+/// checks, reviews, inline comments, commits, quota, coverage reads,
+/// fingerprint reads, nudges/coverage writes, the king board, and every
+/// local `git` read the gate makes. One named bound so a single wedged child
+/// can never outlive the stop fire; the fidelity ceiling (60s) and the
+/// advisory-hint ceiling (10s) stay separate because they gate different
+/// things and drift independently.
+const STOPGATE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Aggregate wall-clock budget for ONE fire's external reads. The harness
+/// kills the stop hook at 60s (hooks/git-protection.py records the budget and
+/// the Stop hook carries no override), so N sequential reads each legal at
+/// 30s could burn multiples of that and die mid-fire with no decision -
+/// recreating the exact no-decision path this transport exists to close.
+/// Reads that start after the budget is spent still run, but at the floor
+/// bound, so the fire ends fast with a decision naming what it could not
+/// wait for.
+const STOPGATE_FIRE_BUDGET: std::time::Duration = std::time::Duration::from_secs(50);
+
+/// A spent budget must still bound every remaining read, so the effective
+/// ceiling never reaches zero: this floor keeps a late read killable in
+/// bounded time instead of degenerating into an unbounded wait.
+const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration::from_millis(250);
+
+thread_local! {
+    /// The fire's read-bound override (from `--read-timeout-ms`, 0 meaning
+    /// the production default) and its budget deadline, stamped when `decide`
+    /// begins. Thread-local, not process-global: the test harness fires
+    /// `decide` in-process on parallel threads, and one fire must never reset
+    /// or inherit a neighboring fire's injected bound mid-read.
+    static STOPGATE_READS: std::cell::RefCell<(u64, Option<std::time::Instant>)> =
+        const { std::cell::RefCell::new((0, None)) };
+}
+
+/// Effective bound for one stop-gate read: the configured ceiling (flag or
+/// production default) clamped to whatever remains of this fire's aggregate
+/// budget, floored so the answer is always a positive killable bound.
+fn stopgate_read_timeout() -> std::time::Duration {
+    STOPGATE_READS.with(|cell| {
+        let (override_ms, _) = *cell.borrow();
+        let configured = if override_ms > 0 {
+            std::time::Duration::from_millis(override_ms)
+        } else {
+            STOPGATE_READ_TIMEOUT
+        };
+        clamp_to_fire_deadline(configured)
+    })
+}
+
+/// Clamp a configured read ceiling to this fire's budget deadline, so no
+/// single long read can spend more than the fire still has. Used both for
+/// stop-gate reads (via `stopgate_read_timeout`) and for the fidelity
+/// probe's separate 60s ceiling - the budget is the fire's, not the read's.
+fn clamp_to_fire_deadline(configured: std::time::Duration) -> std::time::Duration {
+    STOPGATE_READS.with(|cell| match cell.borrow().1 {
+        Some(d) => {
+            let remaining = d.saturating_duration_since(std::time::Instant::now());
+            clamp_to_fire_budget(configured, remaining)
+        }
+        None => configured,
+    })
+}
+
+/// Pure clamp so the deadline math is testable without a clock: never above
+/// what remains of the budget, never below the floor.
+fn clamp_to_fire_budget(
+    configured: std::time::Duration,
+    remaining: std::time::Duration,
+) -> std::time::Duration {
+    configured.min(remaining).max(STOPGATE_BOUND_FLOOR)
+}
+
+/// How an external stop-gate read failed. `TimedOut` is its own kind so a
+/// killed child can never render through the ordinary failed-read wording -
+/// the two demand opposite operator responses (wait out a reset vs. debug a
+/// command), and conflating them is how a hang reads as a blip forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadErrorKind {
+    /// Non-zero exit or unparseable payload. The ordinary vocabulary
+    /// ("gh read '<name>' failed; retrying next fire").
+    Failed,
+    /// The process could not be spawned or waited on.
+    Unrunnable,
+    /// The child outlived its bound and the process group was killed.
+    TimedOut,
+}
+
+/// One external read's typed failure: the logical read name, the kind, the
+/// capped stderr tail, and - for a timeout - the elapsed bound. Threads
+/// through every stop-gate reader so the render sites classify instead of
+/// guessing from a detail string.
+#[derive(Clone)]
+struct GhReadError {
+    read: String,
+    kind: ReadErrorKind,
+    stderr_tail: String,
+    elapsed: Option<std::time::Duration>,
+}
+
+impl GhReadError {
+    fn failed(read: &str, stderr_tail: String) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::Failed,
+            stderr_tail,
+            elapsed: None,
+        }
+    }
+
+    fn parse_failed(read: &str) -> Self {
+        Self::failed(read, String::new())
+    }
+
+    fn timed_out(read: &str, elapsed: std::time::Duration) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::TimedOut,
+            stderr_tail: String::new(),
+            elapsed: Some(elapsed),
+        }
+    }
+
+    fn unrunnable(read: &str, detail: &str) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::Unrunnable,
+            stderr_tail: detail.to_string(),
+            elapsed: None,
+        }
+    }
+
+    fn render(&self) -> String {
+        match self.kind {
+            ReadErrorKind::TimedOut => format!(
+                "external read '{}' timed out after {:.1}s and was killed; retrying next fire",
+                self.read,
+                self.elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0)
+            ),
+            ReadErrorKind::Failed => format!(
+                "gh read '{}' failed; retrying next fire. {}",
+                self.read, self.stderr_tail
+            ),
+            ReadErrorKind::Unrunnable => format!(
+                "external read '{}' could not run; retrying next fire. {}",
+                self.read, self.stderr_tail
+            ),
+        }
+    }
+
+    /// The positive outcome marker for `loop_check_gh_error` rows: every row
+    /// carries one, so a timeout is distinguishable in the events log without
+    /// parsing prose.
+    fn outcome(&self) -> &'static str {
+        match self.kind {
+            ReadErrorKind::TimedOut => "timeout",
+            ReadErrorKind::Failed => "failed",
+            ReadErrorKind::Unrunnable => "unrunnable",
+        }
+    }
+}
+
+fn bounded_read_diagnostic(context: &str, error: &GhReadError) -> String {
+    let elapsed = error
+        .elapsed
+        .map(|duration| format!("{:.1}", duration.as_secs_f64()))
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "loop-check: {context}: external read '{}' outcome={} elapsed_s={} stderr_tail={:?}",
+        error.read,
+        error.outcome(),
+        elapsed,
+        error.stderr_tail
+    )
+}
+
+fn log_bounded_read_error(context: &str, error: &GhReadError) {
+    eprintln!("{}", bounded_read_diagnostic(context, error));
+}
+
+/// One external read through the single bounded transport. Every synchronous
+/// `gh`/`fno` read reachable from the stop decision routes through here, so
+/// none can hang the fire and none can misreport a kill as an ordinary
+/// failure. The completed payload carries the exit status, stdout, and the
+/// pre-capped stderr tail; policy (fail-closed, fail-open, degrade) stays at
+/// the typed call site.
+fn bounded_read(
+    bin: &OsStr,
+    args: &[&str],
+    cwd: &Path,
+    read_name: &str,
+    timeout: std::time::Duration,
+) -> Result<BoundedOutput, GhReadError> {
+    match run_bounded(bin, args, cwd, timeout) {
+        BoundedRun::Completed(out) => Ok(out),
+        BoundedRun::TimedOut(elapsed) => Err(GhReadError::timed_out(read_name, elapsed)),
+        BoundedRun::SpawnFailed => Err(GhReadError::unrunnable(read_name, "spawn failed")),
+        BoundedRun::WaitFailed => Err(GhReadError::unrunnable(read_name, "wait failed")),
+    }
+}
+
+/// One bounded local-`git` read. Every stop-gate git call routes here for
+/// the same reason the gh reads route through `bounded_read`: an external
+/// diff driver, a locked index, or a stalled mount can hang `git` exactly
+/// the way a wedged network child hangs `gh`, and an unbounded `.output()`
+/// turns that into a fire that never decides. A timeout or unrunnable git is
+/// named on stderr (the shim's forensic log) and reads as "no answer";
+/// every caller already treats no-answer as its conservative outcome
+/// (unshipped, dirty, unknown branch), so the degrade direction is the same
+/// one each caller documented for a failing git.
+fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<BoundedOutput> {
+    let read_name = format!("git {}", args.first().unwrap_or(&"?"));
+    match run_bounded(OsStr::new(git_bin), args, cwd, stopgate_read_timeout()) {
+        BoundedRun::Completed(out) => Some(out),
+        BoundedRun::TimedOut(elapsed) => {
+            let error = GhReadError::timed_out(&read_name, elapsed);
+            log_bounded_read_error("git", &error);
+            None
+        }
+        BoundedRun::SpawnFailed => {
+            let error = GhReadError::unrunnable(&read_name, "spawn failed");
+            log_bounded_read_error("git", &error);
+            None
+        }
+        BoundedRun::WaitFailed => {
+            let error = GhReadError::unrunnable(&read_name, "wait failed");
+            log_bounded_read_error("git", &error);
+            None
         }
     }
 }
@@ -8736,7 +9293,7 @@ fn evaluate_plan_fidelity(
         cwd,
         timeout,
     ) {
-        BoundedRun::Stdout(out) => classify_plan_fidelity(&out),
+        BoundedRun::Completed(out) => classify_plan_fidelity(&out.stdout),
         BoundedRun::SpawnFailed | BoundedRun::WaitFailed => FidelityGate::Absent,
         BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
             reason: format!(
@@ -8794,8 +9351,8 @@ fn sized_self_review_hint(fno_bin: &str, cwd: &Path, harness: Option<&str>) -> O
         cwd,
         std::time::Duration::from_secs(10),
     ) {
-        BoundedRun::Stdout(out) => {
-            let s = String::from_utf8_lossy(&out).trim().to_string();
+        BoundedRun::Completed(out) => {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             // One sane line only: a wrapper's chatter or an error page must
             // never end up embedded in a held reason as if it were an
             // invocation. Empty means the render itself gave up. An unsized
@@ -9745,6 +10302,15 @@ fn build_block_reason(
                 hint("review")
             );
         }
+        // Unknown AFTER the specific arms but BEFORE the config complaint:
+        // the unmet gate, the unaddressed finding, and the outstanding bot
+        // are all more actionable than the read remedy, but "no reviewer is
+        // outstanding" beside an unread coverage axis is the read remedy's
+        // exact case (the pinned test: Unknown names the read remedy, never
+        // a config lecture).
+        if matches!(pr.coverage.coverage, Coverage::Unknown) {
+            return coverage_unavailable_description(&pr.head_oid);
+        }
         // Reaching here means missing_bots is empty, which `async_wait_class`
         // treats as non-idlable, so this must not teach the arm-and-tag ritual
         // either (the two must never disagree about whether a wait is valid).
@@ -9755,6 +10321,12 @@ fn build_block_reason(
              Nothing here will arrive on its own.",
             pr.number
         );
+    }
+
+    // And the reviewed-but-Unknown case (a satisfied gate beside an unread
+    // axis) keeps the read remedy here, outside the block.
+    if matches!(pr.coverage.coverage, Coverage::Unknown) {
+        return coverage_unavailable_description(&pr.head_oid);
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
@@ -9918,19 +10490,29 @@ pub(crate) fn read_king_board(
     // regardless of that exit code; only an absent or unparseable one is a read
     // failure, and that one blocks, because a king that cannot see its board
     // must not certify itself finished.
-    let output = Command::new(fno_bin)
-        .args(["inbox", "board", "--json", "--state"])
-        .arg(state_path)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run {fno_bin} inbox board: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let state_arg = state_path.to_string_lossy().into_owned();
+    let read = bounded_read(
+        fno_bin.as_ref(),
+        &["inbox", "board", "--json", "--state", &state_arg],
+        cwd,
+        "king_board",
+        stopgate_read_timeout(),
+    )
+    .map_err(|e| match e.kind {
+        ReadErrorKind::TimedOut => e.render(),
+        ReadErrorKind::Failed => {
+            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
+        }
+        ReadErrorKind::Unrunnable => {
+            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
+        }
+    })?;
+    let stdout = String::from_utf8_lossy(&read.stdout);
     parse_king_board(&stdout).ok_or_else(|| {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&read.stderr_tail);
         format!(
             "unparseable board output (exit {}): {}",
-            output.status.code().unwrap_or(-1),
+            read.status.code().unwrap_or(-1),
             stderr.trim().chars().take(300).collect::<String>()
         )
     })
@@ -10594,7 +11176,20 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 (resolved, true)
             }
             Ok(None) => return (3, no_pr_payload()),
-            Err((read, tail)) => {
+            Err(read_err) => {
+                // A killed timeout reports its own shape before the unknown-row
+                // machinery: no quota diagnosis for a child that never answered.
+                if read_err.kind == ReadErrorKind::TimedOut {
+                    let mut out = serde_json::json!({
+                        "error": read_err.render(),
+                        "outcome": read_err.outcome(),
+                        "emitted": false,
+                    });
+                    insert_quota_diagnostic(&mut out, &None);
+                    return (4, out.to_string());
+                }
+                let read = read_err.read.clone();
+                let tail = read_err.stderr_tail.clone();
                 let pr_num: i64 = pr.as_deref().and_then(|p| p.parse().ok()).unwrap_or(0);
                 let data = coverage_event_data(
                     pr_num,
@@ -10721,7 +11316,21 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 .to_string(),
             )
         }
-        Err((read, tail)) => {
+        Err(read_err) => {
+            // A killed timeout gets its own stdout shape: the caller must see
+            // what was killed and after how long, never a quota diagnosis for
+            // a child that never answered.
+            if read_err.kind == ReadErrorKind::TimedOut {
+                let mut out = serde_json::json!({
+                    "error": read_err.render(),
+                    "outcome": read_err.outcome(),
+                    "emitted": false,
+                });
+                insert_quota_diagnostic(&mut out, &None);
+                return (4, out.to_string());
+            }
+            let read = read_err.read.clone();
+            let tail = read_err.stderr_tail.clone();
             // The gh read failed. Emit an unknown row when the PR number is
             // known (--pr was passed - always true for the merge recompute) so
             // downstream readers see the failed read rather than nothing; with
@@ -11081,6 +11690,175 @@ mod tests {
                 assert!(!reason.contains("timed out after 0.0s"), "{reason}");
             }
             other => panic!("expected Degraded, got {other:?}"),
+        }
+    }
+
+    // ── bounded run transport (the single subprocess boundary) ─────────────
+    //
+    // Hermetic: every child is a stub script in a tempdir, so no test touches
+    // a real `gh` or `fno`, and every timing case asserts wall-clock bounds
+    // wide enough to survive parallel test scheduling.
+
+    #[test]
+    fn bounded_run_completed_retains_status_stdout_and_capped_stderr_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Writes well past the retention cap to stderr, then JSON to stdout:
+        // the drain must reach EOF anyway (or the child blocks on a full pipe
+        // and the run degrades to a timeout), and the retained tail must be
+        // exactly the cap.
+        let fno = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\nhead -c 5000 /dev/zero | tr '\\0' 'x' 1>&2\necho '{\"ok\":true}'\n",
+        );
+        let cwd = std::env::temp_dir();
+        match run_bounded(fno.as_os_str(), &[], &cwd, PROBE_TIMEOUT) {
+            BoundedRun::Completed(out) => {
+                assert!(out.status.success(), "status: {:?}", out.status);
+                assert_eq!(out.stdout, b"{\"ok\":true}\n");
+                assert!(
+                    out.stderr_tail.len() <= BOUNDED_STDERR_TAIL_CAP,
+                    "retained {} > cap {}",
+                    out.stderr_tail.len(),
+                    BOUNDED_STDERR_TAIL_CAP
+                );
+                // The tail, not the head: the retained bytes are the END of
+                // the stream, which for a uniform fill is still all 'x' but
+                // provably capped.
+                assert_eq!(out.stderr_tail.len(), BOUNDED_STDERR_TAIL_CAP.min(9999));
+                assert!(out.stderr_tail.iter().all(|&b| b == b'x'));
+            }
+            other => panic!("expected Completed, got {}", bounded_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn bounded_run_retains_the_last_stderr_bytes_not_the_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A uniform fill followed by a marker at the END of the stream: the
+        // retained bytes must carry the marker. A cap that freezes at the
+        // first chunks (head-keeping) drops exactly this marker, and the
+        // uniform-fill sibling above cannot tell head from tail - only this
+        // shape distinguishes them.
+        let fno = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\nhead -c 5000 /dev/zero | tr '\\0' 'x' 1>&2\necho TAIL_MARKER 1>&2\necho '{\"ok\":true}'\n",
+        );
+        let cwd = std::env::temp_dir();
+        match run_bounded(fno.as_os_str(), &[], &cwd, PROBE_TIMEOUT) {
+            BoundedRun::Completed(out) => {
+                let tail = String::from_utf8_lossy(&out.stderr_tail);
+                assert!(tail.ends_with("TAIL_MARKER\n"), "retained {tail:?}");
+                assert_eq!(
+                    out.stderr_tail.len(),
+                    BOUNDED_STDERR_TAIL_CAP,
+                    "a stream past the cap retains exactly the cap"
+                );
+            }
+            other => panic!("expected Completed, got {}", bounded_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn bounded_read_diagnostic_preserves_transport_classification() {
+        let timeout = GhReadError::timed_out("main_run_view", std::time::Duration::from_secs(1));
+        let rendered = bounded_read_diagnostic("main-head", &timeout);
+        assert!(rendered.contains("main-head"), "{rendered}");
+        assert!(rendered.contains("main_run_view"), "{rendered}");
+        assert!(rendered.contains("outcome=timeout"), "{rendered}");
+        assert!(rendered.contains("elapsed_s=1.0"), "{rendered}");
+
+        let spawn = GhReadError::unrunnable("git_status", "spawn failed");
+        let rendered = bounded_read_diagnostic("payload", &spawn);
+        assert!(rendered.contains("git_status"), "{rendered}");
+        assert!(rendered.contains("outcome=unrunnable"), "{rendered}");
+        assert!(rendered.contains("spawn failed"), "{rendered}");
+    }
+
+    #[test]
+    fn fire_budget_clamp_stays_under_remaining_and_above_the_floor() {
+        let s = std::time::Duration::from_secs(30);
+        // Budget-rich: the configured ceiling stands.
+        assert_eq!(
+            clamp_to_fire_budget(s, s + std::time::Duration::from_secs(1)),
+            s
+        );
+        // Budget-poor: what remains stands.
+        assert_eq!(
+            clamp_to_fire_budget(s, std::time::Duration::from_millis(500)),
+            std::time::Duration::from_millis(500)
+        );
+        // Budget spent: every read still gets a positive, killable bound.
+        assert_eq!(
+            clamp_to_fire_budget(s, std::time::Duration::ZERO),
+            STOPGATE_BOUND_FLOOR
+        );
+    }
+
+    #[test]
+    fn bounded_run_completed_keeps_a_nonzero_exit_code_distinct_from_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = write_exec(tmp.path(), "fno", "#!/bin/sh\necho boom 1>&2\nexit 3\n");
+        let cwd = std::env::temp_dir();
+        match run_bounded(fno.as_os_str(), &[], &cwd, PROBE_TIMEOUT) {
+            BoundedRun::Completed(out) => {
+                assert_eq!(out.status.code(), Some(3));
+                assert!(!out.status.success());
+                assert_eq!(out.stdout, b"");
+                assert_eq!(out.stderr_tail, b"boom\n");
+            }
+            other => panic!("expected Completed, got {}", bounded_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn bounded_run_spawn_failure_reads_as_spawn_failed() {
+        let cwd = std::env::temp_dir();
+        let missing = Path::new("/definitely/missing/fno");
+        assert!(matches!(
+            run_bounded(missing.as_os_str(), &[], &cwd, PROBE_TIMEOUT),
+            BoundedRun::SpawnFailed
+        ));
+    }
+
+    #[test]
+    fn bounded_run_kills_a_forked_process_group_on_timeout() {
+        // A descendant keeps the stderr pipe open past the leader's death;
+        // only a process-GROUP kill reaps it, and the run must resolve as a
+        // distinct timeout inside the wall-clock budget, never as a hang.
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\n(sleep 30 &) 1>&2\nsleep 30\n",
+        );
+        let cwd = std::env::temp_dir();
+        let started = std::time::Instant::now();
+        match run_bounded(
+            fno.as_os_str(),
+            &[],
+            &cwd,
+            std::time::Duration::from_millis(200),
+        ) {
+            BoundedRun::TimedOut(elapsed) => {
+                assert!(elapsed >= std::time::Duration::from_millis(200));
+                // Cleanup slack for spawn + group kill, generous for parallel
+                // test scheduling: the point is "bounded", not "precise".
+                assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            }
+            other => panic!("expected TimedOut, got {}", bounded_kind(&other)),
+        }
+    }
+
+    /// Render a `BoundedRun` variant name for assertion failures without a
+    /// Debug derive on the payload-carrying enum.
+    fn bounded_kind(run: &BoundedRun) -> &'static str {
+        match run {
+            BoundedRun::Completed(_) => "Completed",
+            BoundedRun::TimedOut(_) => "TimedOut",
+            BoundedRun::SpawnFailed => "SpawnFailed",
+            BoundedRun::WaitFailed => "WaitFailed",
         }
     }
 
@@ -13019,6 +13797,27 @@ mod tests {
     }
 
     #[test]
+    fn unknown_coverage_names_the_read_remedy_not_a_ci_failure() {
+        let mut pr = watch_pr();
+        pr.ci_conclusion = CiConclusion::Success;
+        pr.ci_has_pending = false;
+        pr.coverage = CoverageReport {
+            coverage: Coverage::Unknown,
+            verdicts: vec![],
+        };
+        let reason = build_block_reason(&pr, "abc", true, true);
+        assert!(
+            reason.contains("coverage read unavailable"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("retry the review verb"), "got: {reason}");
+        assert!(!reason.contains("CI red"), "got: {reason}");
+        assert!(!reason.contains("failed"), "got: {reason}");
+        assert!(!reason.contains("Read the failing log"), "got: {reason}");
+        assert!(!reason.contains("fno do pr logs"), "got: {reason}");
+    }
+
+    #[test]
     fn unwatched_async_nudge_ci_pending_teaches_arm_and_tag() {
         // AC3-HP: the CI-pending block message must instruct arming a
         // harness-tracked watcher with a timeout and emitting <watching>,
@@ -13051,6 +13850,111 @@ mod tests {
                 tail.chars().take(60).collect::<String>()
             );
         }
+    }
+
+    /// Names every direct synchronous wait on `gh`/`fno` outside the
+    /// centralized runner, given loopcheck source text. Pure over the source so
+    /// the ratchet test can drive it with a mutated fixture instead of trusting
+    /// a zero-hit scan that never ran.
+    ///
+    /// A bypass is `Command::new(gh_bin|fno_bin|git_bin)` whose statement (the
+    /// next 300 chars, cut at the next `fn ` boundary so one chain cannot
+    /// bleed into the next function) calls `.output()`, `.wait()`, or
+    /// `.status()` - the three synchronous waits. The transport's own
+    /// `.spawn()` chain and the one deliberately detached notifier spawn are
+    /// not waits and pass.
+    fn direct_wait_bypasses(source: &str) -> Vec<String> {
+        let mut hits = Vec::new();
+        for marker in [
+            "Command::new(gh_bin",
+            "Command::new(fno_bin",
+            "Command::new(git_bin",
+        ] {
+            for tail in source.split(marker).skip(1) {
+                let stmt: String = tail
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
+                    .split("fn ")
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let ctx = tail.chars().take(60).collect::<String>();
+                for wait in [".output()", ".wait()", ".status()"] {
+                    if stmt.contains(wait) {
+                        hits.push(format!("{marker} ... {ctx}"));
+                        break;
+                    }
+                }
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn no_direct_external_read_bypasses_bounded_runner() {
+        // Production region only: the file's own test module may legitimately
+        // spawn helper processes.
+        let source = include_str!("loopcheck.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("test module marker");
+        // Positive control first, so an empty scan can never read as green:
+        // the centralized runner must exist and carry real call sites.
+        assert!(production.contains("fn run_bounded("));
+        assert!(
+            production.matches("bounded_read(").count() >= 10,
+            "the bounded transport must carry its registered read sites"
+        );
+        assert!(
+            production.matches("git_bounded(").count() >= 10,
+            "the bounded transport must carry the stop-gate git read sites"
+        );
+        let bypasses = direct_wait_bypasses(production);
+        assert!(
+            bypasses.is_empty(),
+            "direct synchronous gh/fno/git waits outside the bounded runner: {bypasses:?}"
+        );
+    }
+
+    #[test]
+    fn the_bypass_detector_catches_an_injected_bypass() {
+        // The detector itself is under test: a fixture with ONE new direct
+        // wait must be named, proving a green production scan is a scan that
+        // ran and matched the right symbol - not an empty haystack.
+        let fixture = "fn somewhere() {
+    let out = Command::new(gh_bin)
+        .args([\"pr\", \"view\"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| e.to_string())?;
+}
+fn run_bounded() {}
+bounded_read(); bounded_read();";
+        let hits = direct_wait_bypasses(fixture);
+        assert_eq!(hits.len(), 1, "exactly the injected bypass: {hits:?}");
+        assert!(hits[0].contains("Command::new(gh_bin"), "{hits:?}");
+        // The git marker is under test too: a direct git wait is the same
+        // hang shape with a different binary, and the detector must name it.
+        let git_fixture = "fn g() {
+    let out = Command::new(git_bin)
+        .args([\"status\"])
+        .output()?;
+}
+fn run_bounded() {}
+git_bounded();";
+        let git_hits = direct_wait_bypasses(git_fixture);
+        assert_eq!(
+            git_hits.len(),
+            1,
+            "exactly the injected git bypass: {git_hits:?}"
+        );
+        assert!(git_hits[0].contains("Command::new(git_bin"), "{git_hits:?}");
+        // And the wait call is what flagged it, not the spawn shape: the same
+        // fixture without the wait passes clean.
+        let clean = fixture.replace(".output()", ".spawn()");
+        assert!(direct_wait_bypasses(&clean).is_empty());
     }
 
     #[test]
@@ -15312,6 +16216,35 @@ mod tests {
         assert!(failing_check_names(&checks).is_empty());
         // Malformed input never panics, yields empty.
         assert!(failing_check_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn coverage_statuses_are_not_generic_ci_checks() {
+        let checks = serde_json::json!([
+            {"name": "ci", "bucket": "pass"},
+            {"name": "fno/review-coverage", "bucket": "pending"},
+            {"name": "fno/review-coverage-unavailable", "bucket": "pending"}
+        ]);
+        let filtered = without_coverage_statuses(&checks);
+        assert_eq!(filtered.as_array().unwrap().len(), 1);
+        assert_eq!(
+            compute_ci_conclusion(&filtered).unwrap(),
+            CiConclusion::Success
+        );
+        assert!(failing_check_names(&filtered).is_empty());
+        assert!(!ci_has_pending_checks(&filtered));
+    }
+
+    #[test]
+    fn coverage_instrument_status_is_pending_only_when_the_read_is_unknown() {
+        let unknown = coverage_instrument_status(&Coverage::Unknown, "abc123456789");
+        assert_eq!(unknown.0, "pending");
+        assert!(unknown.1.contains("coverage read unavailable"));
+        assert!(unknown.1.contains("retry the review verb"));
+
+        let known = coverage_instrument_status(&Coverage::Covered(0), "abc123456789");
+        assert_eq!(known.0, "success");
+        assert!(known.1.contains("coverage read healthy"));
     }
 
     #[test]

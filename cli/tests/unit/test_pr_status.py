@@ -228,6 +228,25 @@ def _run_status_on(monkeypatch, capsys, rollup):
     return code, _json.loads(cap.out), cap.err
 
 
+def test_unknown_coverage_statuses_block_ready_without_code_red(monkeypatch, capsys):
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"context": "fno/review-coverage", "state": "PENDING"},
+        {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+    ]
+    monkeypatch.setattr(
+        "fno.pr._reviews.publish_coverage_status",
+        lambda *args, **kwargs: (True, ""),
+    )
+    code, out, _err = _run_status_on(monkeypatch, capsys, rollup)
+    assert code == 0
+    assert out["green"] is True
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["review_coverage_unknown"]
+    assert "ci_red" not in out["ready_blockers"]
+    assert "commit_status_red" not in out["ready_blockers"]
+
+
 def test_ac1_cancelled_latest_is_red_and_unsettled(monkeypatch, capsys):
     """AC1-HP: a genuinely-cancelled latest run keeps verdict red (a cancelled
     run is not a pass) but settled FALSE (it is not a conclusion either - the
@@ -358,6 +377,27 @@ def test_pending_and_cancelled_get_their_own_distinct_notes(monkeypatch, capsys)
     cancelled_note, pending_note = notes.split("\n", 1)
     assert "ci" in cancelled_note and "smoke" not in cancelled_note
     assert "smoke" in pending_note and "ci" not in pending_note
+
+
+def test_pending_note_skips_coverage_contexts(monkeypatch, capsys):
+    """codex P2: coverage StatusContexts are filtered out of the
+    generic CI verdict, so the pending-check guidance must not resurrect them
+    from the unfiltered rollup. A pending coverage context means "retry the
+    review verb", never "wait for the run" - naming it in the wait note sent
+    the operator to sleep on a read that needed a retry."""
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [
+            {"name": "ci", "status": "QUEUED", "conclusion": None},
+            {"context": "fno/review-coverage", "state": "PENDING"},
+            {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+        ],
+    )
+    assert code == 2
+    assert out["checks"]["unsettled"] == 1
+    assert "still queued or running" in err
+    assert "fno/review-coverage" not in err
 
 
 def test_latest_in_progress_over_earlier_success_is_pending():
@@ -1614,6 +1654,43 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
             "name": "chatgpt-codex-connector",
             "producer": "github_app",
             "reviewed_sha": "8e557ccd",
+            "freshness": "stale",
+        }
+    ]
+
+
+def test_fresh_reviewer_verdict_supersedes_its_stale_history():
+    event = {
+        "coverage": "covered",
+        "review_state": "reviewed",
+        "reviewed_count": 1,
+        "verdicts": [
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "stale",
+                "reviewed_sha": "old-head",
+                "freshness": "stale",
+            },
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "reviewed_sha": "current-head",
+                "freshness": "fresh",
+            },
+        ],
+    }
+
+    shaped = _reviews._shape_review_coverage(event, "current-head", None)
+
+    assert shaped["coverage"] == "covered"
+    assert shaped["reviewed_count"] == 1
+    assert shaped["stale_verdicts"] == [
+        {
+            "name": "code-review",
+            "producer": "local_attestation",
+            "reviewed_sha": "old-head",
             "freshness": "stale",
         }
     ]

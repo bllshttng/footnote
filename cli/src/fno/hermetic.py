@@ -174,6 +174,7 @@ _ENVIRONMENT: tuple[str, ...] = (
 _RUNNER_PASSTHROUGH = (
     "FNO_REAL_CODEX_PLUGIN_TEST",  # .github/workflows/cli-ci.yml
     "FNO_RUST_FRONT",  # .github/workflows/cli-ci.yml, via $GITHUB_ENV
+    "FNO_LIVE_PROVIDER_USAGE",  # opt-in integration gate; test restores real HOME
 )
 
 # Toolchain CACHES, not state fno reads. Sandboxing HOME relocates them, which

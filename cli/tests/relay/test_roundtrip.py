@@ -649,6 +649,19 @@ def test_capture_replies_claude_uses_transcript(monkeypatch):
     assert rt_mod.capture_replies("claude", session_id="sid") == ["from transcript"]
 
 
+def test_capture_replies_unresolved_provider_takes_pty_tail_not_claude(monkeypatch):
+    # AC3-HP: an unresolved capture source (provider=None) used to map
+    # to "claude-code" and select the claude transcript strategy. It must take
+    # the neutral pty-tail fallback under the unknown key instead.
+    monkeypatch.setattr(
+        rt_mod, "_transcript_replies",
+        lambda sid, cd=None: pytest.fail("unresolved provider must not read a transcript"),
+    )
+    monkeypatch.setattr(rt_mod, "snapshot_via_worker",
+                        lambda sock: "RELAY9BEGINtail replyRELAY9END")
+    assert rt_mod.capture_replies(None, sock=rt_mod.Path("/x/w.sock")) == ["tail reply"]
+
+
 def test_capture_replies_codex_defaults_to_pty_tail(monkeypatch):
     # AC3-EDGE: a harness with no registered strategy (codex) captures via the
     # pty-tail default -- the "from structured output" assumption never blocks it.

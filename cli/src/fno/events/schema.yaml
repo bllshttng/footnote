@@ -963,8 +963,10 @@ event_types:
           type: string
           description: "Symbolic owner string (e.g. target-session:<sid>)."
         pid:
-          type: integer
+          type: [integer, "null"]
           description: "Holder process PID at acquire time."
+        pid_unavailable:
+          type: boolean
         host:
           type: string
           description: "Host (socket.gethostname) at acquire time; liveness compares the claim's machine_id, not this."
@@ -991,7 +993,9 @@ event_types:
         holder:
           type: string
         pid:
-          type: integer
+          type: [integer, "null"]
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1015,7 +1019,9 @@ event_types:
         holder:
           type: string
         pid:
-          type: integer
+          type: [integer, "null"]
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1040,7 +1046,9 @@ event_types:
           type: string
           description: "New holder taking over."
         pid:
-          type: integer
+          type: [integer, "null"]
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1051,7 +1059,7 @@ event_types:
           type: string
           description: "Holder whose claim was reclaimed."
         previous_pid:
-          type: integer
+          type: [integer, "null"]
           description: "PID of the dead/expired holder."
     consumers: [operator]
 
@@ -1087,7 +1095,9 @@ event_types:
         holder:
           type: string
         pid:
-          type: integer
+          type: [integer, "null"]
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1112,8 +1122,10 @@ event_types:
           type: string
           description: "Unchanged symbolic holder across the PID rebind."
         pid:
-          type: integer
+          type: [integer, "null"]
           description: "The resumed durable PID now anchoring the claim."
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1121,7 +1133,7 @@ event_types:
         expires_at:
           type: integer
         previous_pid:
-          type: integer
+          type: [integer, "null"]
           description: "The dead prior PID that proved the rebind was safe."
         previous_state:
           type: string
@@ -1149,8 +1161,10 @@ event_types:
         holder:
           type: string
         pid:
-          type: integer
-          description: "The dead/reused pid that proved the claim was reapable."
+          type: [integer, "null"]
+          description: "The new claim's pid; null when the new holder is pid_unavailable. The dead/reused pid that proved reapability rides previous_pid."
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -3567,6 +3581,20 @@ event_types:
         reason:
           type: string
           description: "chain-empty (config named no chain), all-tried, all-exhausted (every remaining link's own provider reads EXHAUSTED), or chain-malformed:<detail> (the chain refused validation and nothing was spawned)."
+
+  - name: failover_swapped
+    description: "A recovery sweep rotated the provider for a refused worker and records whether a replacement worker was actually redispatched."
+    sources: [daemon]
+    data:
+      required: [short_id, redispatched]
+      properties:
+        short_id:
+          type: string
+          description: "The refusing worker's 8-hex jobId."
+        redispatched:
+          type: boolean
+          description: "True only when a replacement worker actually started."
+    consumers: [operator]
 
   - name: provider_window_closing
     description: "A provider record's PROJECTED usage window is within the configured warning threshold of closing. A projection from a recorded window open plus a configured length, never a utilization measurement - a record with no probe still reads UNKNOWN for headroom. Emitted once per window so a long tick loop does not re-warn."

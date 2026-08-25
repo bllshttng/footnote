@@ -28,6 +28,7 @@ from fno.adapters.providers.model import (
     ProviderUnavailableError,
 )
 from fno.adapters.providers.staging import _default_providers_root, verify_staged
+from fno.agents.model_routing import _parse_target, resolve_explicit_route
 
 
 def resolve_env_value(value: str) -> str:
@@ -106,12 +107,29 @@ def _env_for_oauth(record: ProviderRecord, root: Path) -> dict[str, str]:
         return {"HOME": str(account_dir / "home")}
 
 
-def _env_for_api_key(record: ProviderRecord) -> dict[str, str]:
+def _env_for_api_key(
+    record: ProviderRecord, *, settings: Any = None
+) -> dict[str, str]:
     """Build the env dict for an api_key provider; resolve all references.
 
     Raises ProviderUnavailableError naming the offending key if any value
     cannot be resolved. Never returns a partial dict.
     """
+    if record.route:
+        parsed = _parse_target(record.route)
+        if parsed is None:  # defensive: ProviderRecord validates this at load time
+            raise ProviderUnavailableError(
+                f"Cannot resolve route {record.route!r} for account {record.id!r}: "
+                "malformed provider/model"
+            )
+        route_env = resolve_explicit_route(parsed[0], parsed[1], settings=settings)
+        if route_env is None:
+            raise ProviderUnavailableError(
+                f"Cannot resolve route {record.route!r} for account {record.id!r}: "
+                "route unavailable"
+            )
+        return dict(route_env)
+
     assert record.env is not None  # enforced by model validator
     resolved: dict[str, str] = {}
     for key, raw_value in record.env.items():
@@ -174,7 +192,12 @@ def dispatch_env(
         return {}
 
     # api_key path
-    return _env_for_api_key(record)
+    settings = None
+    if record.route and repo_root is not None:
+        from fno.config import load_settings_for_repo
+
+        settings = load_settings_for_repo(repo_root)
+    return _env_for_api_key(record, settings=settings)
 
 
 # ---------------------------------------------------------------------------
