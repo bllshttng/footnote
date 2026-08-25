@@ -184,8 +184,14 @@ impl crate::harness_daemon::HarnessDaemonAdapter for CodexDaemonAdapter {
                 return Ok(state);
             }
         }
+        // The daemon is a detached service: its startup output must never
+        // land on the spawning client's stdout, whose bytes are the reply
+        // stream by contract (`.status()` inherits, and an inherited child
+        // printed its banner straight into a one-shot spawn's reply).
         let status = std::process::Command::new("codex")
             .args(["app-server", "daemon", "start"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map_err(|error| format!("codex app-server daemon start: {error}"))?;
         if !status.success() {

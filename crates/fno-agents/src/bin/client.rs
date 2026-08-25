@@ -1265,22 +1265,27 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // gemini -p / agy -p). x-c772: --model is forwarded to each (exact
         // passthrough to the provider CLI's own --model).
         ("codex", "headless") => {
+            // The daemon receipt is teardown telemetry for a one-shot spawn
+            // (append_daemon_receipt only stamps stderr on success), never a
+            // precondition: a codex whose app-server cannot boot (a stubbed
+            // CLI on PATH, a partial install, CI) still runs `codex --exec`,
+            // exactly like the Python lane that has no daemon step - refusing
+            // here was exit-code drift against every such environment. The
+            // daemon stays mandatory where it is load-bearing (inject/mail
+            // ensure their own).
             let daemon_receipt = match fno_agents::codex_inject::ensure_codex_daemon() {
-                Ok(receipt) => receipt,
+                Ok(receipt) => Some(receipt),
                 Err(error) => {
-                    eprintln!(
-                        "codex spawn refused: harness=codex observed=unreadable remedy=codex app-server daemon start: {error}"
-                    );
-                    if let Some(g) = gate_guard.as_mut() {
-                        g.release();
-                    }
-                    return Some(13);
+                    eprintln!("spawn: harness=codex daemon-ensure degraded: {error}");
+                    None
                 }
             };
             let mut outcome = dispatch_codex_once(
                 home, name, &message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
             );
-            fno_agents::codex_ask::append_daemon_receipt(&mut outcome, &daemon_receipt);
+            if let Some(receipt) = daemon_receipt.as_ref() {
+                fno_agents::codex_ask::append_daemon_receipt(&mut outcome, receipt);
+            }
             emit!(outcome)
         }
         ("gemini", "headless") => emit!(dispatch_gemini_once(
