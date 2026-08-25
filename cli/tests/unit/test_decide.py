@@ -492,6 +492,252 @@ def _write_decision_index(index: Path, *rows: dict) -> None:
     )
 
 
+def test_coord_expiry_is_derived_from_closed_node_but_law_stays_live(
+    root: Path, tmp_graph: Path, index: Path
+):
+    entries = json.loads(tmp_graph.read_text())
+    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
+    tmp_graph.write_text(json.dumps(entries) + "\n")
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-coord0001",
+            "decision": "coordinate this node",
+            "subject": "x-7d94",
+            "authority_source": "agent",
+            "expiry_ref": {"kind": "node", "node_id": "x-7d94"},
+            "ts": "2026-08-20T00:00:00Z",
+        },
+        {
+            "decision_id": "d-law00001",
+            "decision": "keep the standing law",
+            "subject": "x-7d94",
+            "authority_source": "operator",
+            "ts": "2026-08-21T00:00:00Z",
+        },
+    )
+
+    live = runner.invoke(
+        decide_app, ["list", "--subject", "x-7d94", "--state", "live", "--json"]
+    )
+    assert live.exit_code == 0, live.output
+    payload = json.loads(live.stdout)
+    assert [row["decision_id"] for row in payload["decisions"]] == ["d-law00001"]
+
+    history = runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"])
+    assert history.exit_code == 0, history.output
+    rows = {row["decision_id"]: row for row in json.loads(history.stdout)["decisions"]}
+    assert rows["d-coord0001"]["lifecycle"] == "expired"
+    assert rows["d-law00001"]["lifecycle"] == "live"
+
+
+def test_ambiguous_coord_without_positive_closure_evidence_is_unscoped(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-unscoped1",
+            "decision": "coordinate an ambiguous PR",
+            "subject": "pr-99",
+            "authority_source": "agent",
+            "ts": "2026-08-20T00:00:00Z",
+        }
+    )
+
+    live = runner.invoke(decide_app, ["list", "--state", "live", "--json"])
+    assert live.exit_code == 0, live.output
+    assert json.loads(live.stdout)["decisions"] == []
+
+    history = runner.invoke(decide_app, ["list", "--json"])
+    rows = {row["decision_id"]: row for row in json.loads(history.stdout)["decisions"]}
+    assert rows["d-unscoped1"]["lifecycle"] == "unscoped"
+
+
+def test_decide_retract_appends_an_audit_event_and_changes_only_the_projection(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-retract01",
+            "decision": "coordinate this node",
+            "subject": "x-7d94",
+            "authority_source": "agent",
+            "expiry_ref": {"kind": "node", "node_id": "x-7d94"},
+            "ts": "2026-08-20T00:00:00Z",
+        }
+    )
+    before = index.read_bytes()
+    from fno.graph.cli import cli as backlog_app
+
+    result = runner.invoke(
+        backlog_app,
+        [
+            "decide-retract",
+            "d-retract01",
+            "--reason",
+            "the coordination window ended",
+            "--authority",
+            "agent",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert index.read_bytes().startswith(before)
+    events = _events(root)
+    retractions = [event for event in events if event["type"] == "decision_retracted"]
+    assert len(retractions) == 1
+    assert retractions[0]["data"]["target_decision_id"] == "d-retract01"
+
+    listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
+    assert listed.exit_code == 0, listed.output
+    rows = json.loads(listed.stdout)["decisions"]
+    assert rows[0]["decision_id"] == "d-retract01"
+    assert rows[0]["lifecycle_reason"] == "the coordination window ended"
+
+
+def test_agent_cannot_retract_law(root: Path, tmp_graph: Path, index: Path):
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-law-retr1",
+            "decision": "standing law",
+            "subject": "law-topic",
+            "authority_source": "operator",
+            "ts": "2026-08-22T00:00:00Z",
+        }
+    )
+    before = index.read_bytes()
+    from fno.graph.cli import cli as backlog_app
+
+    result = runner.invoke(
+        backlog_app,
+        [
+            "decide-retract",
+            "d-law-retr1",
+            "--reason",
+            "agent should not legislate",
+            "--authority",
+            "agent",
+        ],
+    )
+    assert result.exit_code == 3, result.output
+    assert index.read_bytes() == before
+
+
+def test_retraction_survives_reindex(root: Path, tmp_graph: Path, index: Path):
+    from fno.decide import reindex
+    from fno.graph.cli import cli as backlog_app
+
+    recorded = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "temporary", "--authority", "crown"],
+    )
+    decision_id = recorded.stdout.strip().splitlines()[-1]
+    retracted = runner.invoke(
+        backlog_app,
+        ["decide-retract", decision_id, "--reason", "no longer applies", "--authority", "agent"],
+    )
+    assert retracted.exit_code == 0, retracted.output
+    index.unlink()
+    assert reindex(sources=[root / ".fno" / "events.jsonl"])["added"] == 2
+    listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
+    assert json.loads(listed.stdout)["decisions"][0]["decision_id"] == decision_id
+
+
+def test_review_list_reports_multiple_live_rulings_without_picking_a_winner(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-review001",
+            "decision": "keep the first option",
+            "subject": "billing-policy",
+            "authority_source": "operator",
+            "ts": "2026-08-21T00:00:00Z",
+        },
+        {
+            "decision_id": "d-review002",
+            "decision": "keep the second option",
+            "subject": "billing-policy",
+            "authority_source": "operator",
+            "ts": "2026-08-22T00:00:00Z",
+        },
+        {
+            "decision_id": "d-subjectless",
+            "decision": "legacy answer",
+            "authority_source": "banana",
+            "ts": "2026-08-20T00:00:00Z",
+        },
+    )
+
+    result = runner.invoke(decide_app, ["list", "--review-list", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert [group["subject"] for group in payload["groups"]] == ["billing-policy"]
+    assert [
+        row["decision_id"] for row in payload["groups"][0]["decisions"]
+    ] == ["d-review002", "d-review001"]
+    assert payload["data_quality"] == {
+        "subjectless": 1,
+        "invalid_authority": 1,
+    }
+
+
+def test_decisions_output_writes_the_full_requested_json_report(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path
+):
+    _write_decision_index(
+        index,
+        *[
+            {
+                "decision_id": f"d-output{number}",
+                "decision": f"decision {number}",
+                "subject": "output-subject",
+                "authority_source": "operator",
+                "ts": f"2026-08-2{number + 1}T00:00:00Z",
+            }
+            for number in range(3)
+        ],
+    )
+    target = tmp_path / "reports" / "decisions.json"
+    result = runner.invoke(
+        decide_app,
+        ["list", "--subject", "output-subject", "--limit", "1", "--output", str(target)],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert receipt["output_path"] == str(target)
+    assert receipt["bytes_written"] == target.stat().st_size
+    report = json.loads(target.read_text())
+    assert report["total"] == 3
+    assert len(report["decisions"]) == 3
+
+
+def test_decisions_output_refuses_an_unknown_format(tmp_path: Path):
+    result = runner.invoke(decide_app, ["list", "--output", str(tmp_path / "report.txt")])
+    assert result.exit_code == 2
+    assert "--format" in result.output or "suffix" in result.output
+
+
+def test_subjectless_outstanding_answer_gets_a_reserved_recovery_subject(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.outstanding.cli import outstanding_app
+
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?"])
+    question_id = asked.stdout.strip().splitlines()[-1]
+    cleared = runner.invoke(
+        outstanding_app,
+        ["clear", question_id, "--answer", "the coordination lane"],
+    )
+    assert cleared.exit_code == 0, cleared.output
+    rows, _ = __import__("fno.decide", fromlist=["_read_index"])._read_index(index)
+    decision = next(row for row in rows if row.get("decision_id"))
+    assert decision["subject"] == f"question:{question_id}"
+
+
 def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_graph: Path, index: Path):
     """fno decide writes the event AND the graph projection."""
     res = runner.invoke(
@@ -528,6 +774,25 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
     assert "options: fold first, migrate first" in listed.output
+
+
+def test_new_coord_record_stamps_an_exact_node_expiry_reference(
+    root: Path, tmp_graph: Path, index: Path
+):
+    result = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "x-7d94",
+            "--decision",
+            "coordinate the node",
+            "--authority",
+            "crown",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    event = _events(root)[0]
+    assert event["data"]["expiry_ref"] == {"kind": "node", "node_id": "x-7d94"}
 
 
 def test_list_returns_decisions_newest_first(root: Path, tmp_graph: Path, index: Path):
@@ -803,10 +1068,10 @@ def test_list_derives_and_filters_authority_lanes_in_the_engine(
 @pytest.mark.parametrize(
     "authority,ts,question_id,marker",
     [
-        ("operator", "2026-08-21T00:00:01Z", None, "LAW"),
-        ("agent", "2026-08-20T23:59:59Z", None, "coord"),
-        ("beastmode", "2026-08-20T23:59:59Z", None, "grant"),
-        ("operator", "2026-08-20T23:59:59Z", None, "unattributed"),
+        ("operator", "2026-08-21T00:00:01Z", None, "LIVE  LAW"),
+        ("agent", "2026-08-20T23:59:59Z", None, "UNSCOPED  coord"),
+        ("beastmode", "2026-08-20T23:59:59Z", None, "LIVE  grant"),
+        ("operator", "2026-08-20T23:59:59Z", None, "UNSCOPED  unattributed"),
     ],
 )
 def test_human_render_leads_with_the_authority_lane(
@@ -873,7 +1138,7 @@ def test_legacy_operator_rows_stay_byte_identical_and_empty_law_is_positive(
         decide_app, ["list", "--subject", "pr-923", "--lane", "unattributed"]
     )
     assert legacy.exit_code == 0, legacy.output
-    assert legacy.stdout.startswith("unattributed  d-legacy")
+    assert legacy.stdout.startswith("UNSCOPED  unattributed  d-legacy")
 
     law = runner.invoke(
         decide_app, ["list", "--subject", "pr-923", "--lane", "law"]

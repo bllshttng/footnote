@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import List, Optional
 
 import typer
@@ -344,6 +345,84 @@ def backlog_decide(
     )
 
 
+def _retract(
+    *,
+    decision_id: str,
+    reason: Optional[str],
+    authority: Optional[str],
+    origin: Optional[str],
+) -> None:
+    from fno.decide import (
+        AUTHORITY_SOURCES,
+        IndexWriteError,
+        RefusedAuthorityError,
+        UnattributedAuthorityError,
+        UnknownOriginError,
+        retract_decision,
+    )
+
+    if authority is not None and authority not in AUTHORITY_SOURCES:
+        typer.echo(
+            f"backlog decide-retract: --authority '{authority}' is not one of "
+            f"{', '.join(AUTHORITY_SOURCES)}. Nothing was recorded.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    try:
+        result = retract_decision(
+            decision_id=decision_id,
+            reason=reason or "",
+            authority_source=authority,
+            origin=origin,
+        )
+    except (KeyError, ValueError) as exc:
+        typer.echo(f"backlog decide-retract: refused: {exc}", err=True)
+        raise typer.Exit(2)
+    except UnknownOriginError as exc:
+        typer.echo(f"backlog decide-retract: refused: {exc}", err=True)
+        raise typer.Exit(3)
+    except RefusedAuthorityError as exc:
+        typer.echo(f"backlog decide-retract: refused: {exc}", err=True)
+        raise typer.Exit(3)
+    except UnattributedAuthorityError as exc:
+        typer.echo(f"backlog decide-retract: refused: {exc}", err=True)
+        raise typer.Exit(3)
+    except IndexWriteError as exc:
+        typer.echo(
+            f"backlog decide-retract: durable retraction for {exc.decision_id} "
+            f"was written, but the recall index append failed: {exc}. Run "
+            "`fno backlog decide-reindex`; do not retry the retraction.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.echo(
+        f"backlog decide-retract: retracted {result['decision_id']}. "
+        "The original decision remains in the append-only history.",
+        err=True,
+    )
+    typer.echo(result["decision_id"])
+
+
+@shim_app.command("retract")
+def retract_cmd(
+    decision_id: str = typer.Argument(..., help="Decision id to retract."),
+    reason: Optional[str] = typer.Option(None, "--reason", help="Why it no longer counts."),
+    authority: Optional[str] = typer.Option(None, "--authority", help="Authority lane."),
+    origin: Optional[str] = typer.Option(None, "--origin", hidden=True),
+) -> None:
+    _retract(decision_id=decision_id, reason=reason, authority=authority, origin=origin)
+
+
+def backlog_decide_retract(
+    decision_id: str = typer.Argument(..., help="Decision id to retract."),
+    reason: Optional[str] = typer.Option(None, "--reason", help="Why it no longer counts."),
+    authority: Optional[str] = typer.Option(None, "--authority", help="Authority lane."),
+    origin: Optional[str] = typer.Option(None, "--origin", hidden=True),
+) -> None:
+    _retract(decision_id=decision_id, reason=reason, authority=authority, origin=origin)
+
+
 @shim_app.command("list")
 def list_cmd(
     subject: Optional[str] = typer.Option(
@@ -360,11 +439,26 @@ def list_cmd(
         metavar="law|coord|grant|unattributed",
         help="Show only one authority lane.",
     ),
+    state: Optional[str] = typer.Option(
+        None,
+        "--state",
+        metavar="live|expired|superseded|retracted|unscoped|all",
+        help="Filter by the derived lifecycle state.",
+    ),
+    review_list: bool = typer.Option(
+        False,
+        "--review-list",
+        help="Report subjects with multiple unrelated live rulings without changing data.",
+    ),
+    output: Optional[str] = typer.Option(None, "--output", help="Write the full report to PATH."),
+    output_format: Optional[str] = typer.Option(
+        None, "--format", help="Export format: markdown or json."
+    ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
     ),
 ) -> None:
-    _list_decisions(subject, limit, lane, as_json)
+    _list_decisions(subject, limit, lane, state, review_list, output, output_format, as_json)
 
 
 def backlog_decisions(
@@ -381,6 +475,21 @@ def backlog_decisions(
         metavar="law|coord|grant|unattributed",
         help="Show only one authority lane.",
     ),
+    state: Optional[str] = typer.Option(
+        None,
+        "--state",
+        metavar="live|expired|superseded|retracted|unscoped|all",
+        help="Filter by the derived lifecycle state.",
+    ),
+    review_list: bool = typer.Option(
+        False,
+        "--review-list",
+        help="Report subjects with multiple unrelated live rulings without changing data.",
+    ),
+    output: Optional[str] = typer.Option(None, "--output", help="Write the full report to PATH."),
+    output_format: Optional[str] = typer.Option(
+        None, "--format", help="Export format: markdown or json."
+    ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
     ),
@@ -396,13 +505,82 @@ def backlog_decisions(
         canonical_flag="<subject>",
         legacy_flag="--subject",
     )
-    _list_decisions(subject, limit, lane, as_json)
+    _list_decisions(subject, limit, lane, state, review_list, output, output_format, as_json)
+
+
+def _resolve_output_format(path: str, requested: Optional[str]) -> str:
+    allowed = {"json", "markdown"}
+    fmt = (requested or "").strip().lower() or None
+    if fmt == "md":
+        fmt = "markdown"
+    if fmt is not None and fmt not in allowed:
+        raise ValueError("--format must be markdown or json")
+    suffix = Path(path).suffix.lower()
+    inferred = {".json": "json", ".md": "markdown", ".markdown": "markdown"}.get(suffix)
+    if fmt and inferred and fmt != inferred:
+        raise ValueError(f"--format {fmt} conflicts with output suffix {suffix}")
+    if fmt:
+        return fmt
+    if inferred:
+        return inferred
+    raise ValueError("--output needs a .json, .md, or .markdown suffix, or --format")
+
+
+def _render_markdown(report: dict) -> str:
+    lines = ["# Decision report", ""]
+    if "groups" in report:
+        for group in report["groups"]:
+            lines.extend([f"## {group['subject']}", ""])
+            for row in group["decisions"]:
+                lines.append(
+                    f"- `{row['decision_id']}` ({row.get('lane', '')}, {row.get('ts', '')}): "
+                    f"{row.get('decision', '')}"
+                )
+            lines.append("")
+        quality = report.get("data_quality", {})
+        lines.append(
+            f"Data quality: {quality.get('subjectless', 0)} subjectless, "
+            f"{quality.get('invalid_authority', 0)} invalid authority value(s)."
+        )
+    else:
+        lines.append(
+            f"Subject: {report.get('subject', '(all)')}  "
+            f"Total: {report.get('total', 0)}"
+        )
+        lines.append("")
+        for row in report.get("decisions", []):
+            lines.append(
+                f"- `{row.get('decision_id', '')}` **{row.get('lifecycle', '')}** "
+                f"({row.get('lane', '')}, {row.get('ts', '')}): {row.get('decision', '')}"
+            )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_report(report: dict, output: str, output_format: Optional[str]) -> None:
+    from fno.handoff.output import write_output_file
+
+    try:
+        fmt = _resolve_output_format(output, output_format)
+        content = (
+            json.dumps(report, indent=2, sort_keys=True) + "\n"
+            if fmt == "json"
+            else _render_markdown(report)
+        )
+        receipt = write_output_file(Path(output), content)
+    except (OSError, ValueError) as exc:
+        typer.echo(f"backlog decisions: cannot export report: {exc}", err=True)
+        raise typer.Exit(2 if isinstance(exc, ValueError) else 1)
+    typer.echo(json.dumps(receipt, separators=(",", ":")))
 
 
 def _list_decisions(
     subject: Optional[str],
     limit: int,
     lane: Optional[str],
+    state: Optional[str],
+    review_list_mode: bool,
+    output: Optional[str],
+    output_format: Optional[str],
     as_json: bool,
 ) -> None:
     """Recover the decision history for a subject, newest first."""
@@ -410,8 +588,32 @@ def _list_decisions(
         list_decisions,
         looks_like_decision_id,
         near_miss_subjects,
+        review_list,
     )
     from fno.tracker.metadata import ExternalMetadataUnavailable
+
+    if review_list_mode:
+        report = review_list()
+        if output:
+            _write_report(report, output, output_format)
+        elif as_json:
+            typer.echo(json.dumps(report, separators=(",", ":")))
+        else:
+            for group in report["groups"]:
+                typer.echo(f"REVIEW  {group['subject']}")
+                for row in group["decisions"]:
+                    typer.echo(
+                        f"  {row['decision_id']}  {row.get('lane', '')}  "
+                        f"{row.get('ts', '')}  {row.get('decision', '')}"
+                    )
+            quality = report["data_quality"]
+            typer.echo(
+                f"review list: {len(report['groups'])} group(s), "
+                f"{quality['subjectless']} subjectless, "
+                f"{quality['invalid_authority']} invalid authority value(s)",
+                err=True,
+            )
+        return
 
     if lane not in {None, "law", "coord", "grant", "unattributed"}:
         typer.echo(
@@ -424,7 +626,9 @@ def _list_decisions(
         # No cap on the read. The cap is applied HERE so the total is known,
         # and a truncated answer can say so - a silent cut on a recall verb is
         # the same lie as a missing record.
-        label, found, damaged = list_decisions(subject, limit=None, lane=lane)
+        label, found, damaged = list_decisions(
+            subject, limit=None, lane=lane, state=state
+        )
     except (OSError, ValueError) as exc:
         # ValueError covers UnicodeDecodeError, which a torn multi-byte append
         # raises and which is NOT an OSError.
@@ -443,38 +647,32 @@ def _list_decisions(
     # and a partial answer reads as a whole one.
     near = near_miss_subjects(subject) if subject else []
 
+    # matched_by tells a machine reader WHICH key answered, so an id lookup is
+    # never mistaken for a subject hit. A LIST is a union: `--subject d-XXXX`
+    # returns that decision and any ruling filed about it.
+    matched: "list[str]" = []
+    if subject:
+        want = subject.strip().casefold()
+        if any(str(d.get("decision_id") or "").casefold() == want for d in found):
+            matched.append("decision_id")
+        if any(str(d.get("decision_id") or "").casefold() != want for d in found):
+            matched.append("subject")
+    payload = {
+        "subject": label,
+        "decisions": decisions,
+        "total": len(found),
+        "truncated": truncated,
+        "damaged": damaged,
+        "matched_by": matched if subject else None,
+        "near_misses": [{"subject": s, "count": n} for s, n in near],
+    }
+    if output:
+        payload["decisions"] = found
+        payload["truncated"] = False
+        _write_report(payload, output, output_format)
+        return
     if as_json:
-        # matched_by tells a machine reader WHICH key answered, so an id lookup
-        # is never mistaken for a subject hit. A LIST, because the read is a
-        # union: `--subject d-XXXX` returns that decision AND any ruling filed
-        # about it, so a single value would deny that the subject key answered.
-        # Computed over `found`, never the --limit slice, or a cap silently
-        # drops one of the two keys from the answer.
-        matched: "list[str]" = []
-        if subject:
-            want = subject.strip().casefold()
-            if any(str(d.get("decision_id") or "").casefold() == want for d in found):
-                matched.append("decision_id")
-            if any(
-                str(d.get("decision_id") or "").casefold() != want for d in found
-            ):
-                matched.append("subject")
-        typer.echo(
-            json.dumps(
-                {
-                    "subject": label,
-                    "decisions": decisions,
-                    "total": len(found),
-                    "truncated": truncated,
-                    # This surface is machine-first, so an under-count that
-                    # looks complete is the same lie "truncated" prevents.
-                    "damaged": damaged,
-                    "matched_by": matched if subject else None,
-                    "near_misses": [{"subject": s, "count": n} for s, n in near],
-                },
-                separators=(",", ":"),
-            )
-        )
+        typer.echo(json.dumps(payload, separators=(",", ":")))
         return
 
     if not decisions:
@@ -558,6 +756,7 @@ def _list_decisions(
         # scoped to one it is the same word on every line.
         scope = "" if subject else f"{d.get('subject') or '(none)'}  "
         lane_marker = "LAW" if d.get("lane") == "law" else d.get("lane", "")
+        lifecycle = str(d.get("lifecycle") or "live").upper()
         # Provenance travels ON the row. A citation is quoted without the lane
         # column far more often than it is read here, so the authority and the
         # attestation have to be part of what a reader copies.
@@ -569,7 +768,7 @@ def _list_decisions(
         authority = str(d.get("authority_source") or "")
         authority = f" ({authority})" if authority else ""
         typer.echo(
-            f"{lane_marker}  {d.get('decision_id')}  {d.get('ts') or ''}  {scope}"
+            f"{lifecycle}  {lane_marker}  {d.get('decision_id')}  {d.get('ts') or ''}  {scope}"
             f"{d.get('decided_by') or ''}{authority}"
             f"{attested}  {d.get('decision') or ''}{marker}"
         )
@@ -586,6 +785,10 @@ def _list_decisions(
             typer.echo(f"    options: {', '.join(str(o) for o in d['options'])}")
         if d.get("supersedes"):
             typer.echo(f"    supersedes: {d['supersedes']}")
+        if d.get("lifecycle_reason"):
+            typer.echo(f"    lifecycle reason: {d['lifecycle_reason']}")
+        if d.get("lifecycle_evidence"):
+            typer.echo(f"    lifecycle evidence: {d['lifecycle_evidence']}")
 
     if truncated:
         typer.echo(

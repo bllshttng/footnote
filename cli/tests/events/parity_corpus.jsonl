@@ -204,3 +204,4 @@
 {"expect":"invalid","reason":"mux_pane_counters without the panes array cannot be differenced","event":{"ts":"2026-08-22T14:31:00Z","type":"mux_pane_counters","source":"daemon","data":{"session":"main"}}}
 {"expect":"valid","reason":"failover_swapped records a truthful redispatch","event":{"ts":"2026-08-23T01:00:00Z","type":"failover_swapped","source":"daemon","data":{"short_id":"aaaa1111","redispatched":true}}}
 {"expect":"invalid","reason":"failover_swapped requires a boolean redispatch marker","event":{"ts":"2026-08-23T01:00:00Z","type":"failover_swapped","source":"daemon","data":{"short_id":"aaaa1111","redispatched":"true"}}}
+{"expect":"valid","reason":"decision_retracted durable lifecycle event","event":{"ts":"2026-08-25T00:00:00Z","type":"decision_retracted","source":"target","data":{"target_decision_id":"d-ab12cd34","subject":"x-7d94","reason":"coordination window ended","retracted_by":"worker-1","authority_source":"agent"}}}

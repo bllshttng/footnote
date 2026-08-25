@@ -68,12 +68,14 @@ cli.add_typer(_batch_cli, name="batch", hidden=True)
 # under backlog. The old top-level spelling remains a lazy shim.
 from fno.decide.cli import (  # noqa: E402
     backlog_decide,
+    backlog_decide_retract,
     backlog_decide_reindex,
     backlog_decisions,
 )
 
 cli.command("decide", hidden=True)(backlog_decide)
 cli.command("decisions", hidden=True)(backlog_decisions)
+cli.command("decide-retract", hidden=True)(backlog_decide_retract)
 cli.command("decide-reindex", hidden=True)(backlog_decide_reindex)
 
 
@@ -12877,7 +12879,7 @@ _TRACKER_OWNED_VERBS = frozenset({
     # footnote-owned DATA with a graph-resident write path (refused until the
     # write moves to the sidecar seam)
     "cost", "session add", "session close", "session reap-open", "decide", "decisions",
-    "decide-reindex",
+    "decide-retract", "decide-reindex",
     # sub-app mutations
     "triage apply", "capture promote",
     "batch join", "batch prepare", "batch ship", "batch ship-closeable",

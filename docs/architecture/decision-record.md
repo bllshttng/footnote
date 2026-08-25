@@ -129,3 +129,19 @@ The graph projection stamps that mark at write time under the lock. The index is
 Journals win a tie because a journal holds the event as written. A projection row is derived and can be lossier: the oldest one on this machine dropped `subject`, the one field a recall query reads. A projection row with no subject falls back to the node it sits on.
 
 The command is idempotent by decision id, so a second run adds nothing.
+
+## Lifecycle and standing law
+
+The index remains append-only. A retraction is a new `decision_retracted` event, never an edit or delete: `fno backlog decide-retract d-1a2b3c4d --reason "the decision no longer applies"`. The command resolves the target first, refuses a blank reason or unknown id, and requires the operator lane to retract law. If the project journal is durable but the recall-index append fails, the command names `fno backlog decide-reindex` and never recommends retrying the retraction.
+
+Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retracted`, or `unscoped`. Human output leads with that marker and JSON includes `lifecycle`, reason, and positive closure evidence when available. `--state live|expired|superseded|retracted|unscoped|all` filters the same projection. A coord row stamped to a node expires only when that node's graph entry has positive closure evidence. A repository-scoped PR row expires only when its exact graph binding is marked merged. Missing, ambiguous, or unreadable closure evidence is `unscoped`, never live. Law does not expire because a node or PR closes.
+
+The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. Peer-mail trailers use that exact query. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
+
+## Review and export
+
+`fno backlog decisions --review-list` is a non-mutating operator report. It groups subjects with more than one unrelated live decision after supersession, retraction, and coord expiry have been applied. It names every candidate id, lane, timestamp, and decision, and never chooses a winner or writes the index. Legacy subjectless rows remain visible under `(unscoped)` and are counted as data-quality findings. New answers to subjectless outstanding questions use `question:<question-id>` as their recovery subject.
+
+`--output PATH` writes the complete requested report, ignoring the display limit. `.json`, `.md`, and `.markdown` infer the format; `--format json|markdown` is explicit and conflicting or unknown formats are refused. The command prints a positive receipt with the exact path and byte count only after the file is written.
+
+`x-53c0` owns mail-origin classification, provenance carriage, and the law chokepoint. `x-12ba` owns `/fno-law`, human-origin proof, law recording, and coord-to-law promotion. This lifecycle node consumes those seams and owns expiry, retraction, review, export, and law-only reads. It does not add another origin classifier, law command, promotion path, or decision store.
