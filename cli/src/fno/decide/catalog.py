@@ -1,4 +1,5 @@
 """Checked-in repository law catalog and canonical subject aliases."""
+
 from __future__ import annotations
 
 import re
@@ -38,9 +39,7 @@ def _required_text(row: Mapping[str, Any], key: str, path: Path, index: int) -> 
     return value.strip()
 
 
-def _validate_supersession_graph(
-    rows: list[dict[str, Any]], ids: set[str], path: Path
-) -> None:
+def _validate_supersession_graph(rows: list[dict[str, Any]], ids: set[str], path: Path) -> None:
     edges: dict[str, str] = {}
     for row in rows:
         target = row.get("supersedes")
@@ -122,9 +121,7 @@ def load_catalog(root: Path | None = None) -> DecisionCatalog:
 
         supersedes = candidate.get("supersedes")
         if supersedes is not None:
-            if not isinstance(supersedes, str) or not _DECISION_ID_RE.fullmatch(
-                supersedes.strip()
-            ):
+            if not isinstance(supersedes, str) or not _DECISION_ID_RE.fullmatch(supersedes.strip()):
                 raise _error(path, f"decisions[{index}].supersedes must be a decision id")
             supersedes = supersedes.strip().casefold()
 
