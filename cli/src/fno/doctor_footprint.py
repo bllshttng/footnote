@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -23,20 +24,52 @@ PS_TIMEOUT_SECONDS = 5.0
 
 
 def _cpu_capacity_cores() -> int:
+    candidates: list[int] = []
     process_cpu_count = getattr(os, "process_cpu_count", None)
     if callable(process_cpu_count):
         count = process_cpu_count()
         if count:
-            return count
+            candidates.append(count)
     sched_getaffinity = getattr(os, "sched_getaffinity", None)
     if callable(sched_getaffinity):
         try:
             count = len(sched_getaffinity(0))
             if count:
-                return count
+                candidates.append(count)
         except OSError:
             pass
-    return os.cpu_count() or 1
+    host_count = os.cpu_count()
+    if host_count:
+        candidates.append(host_count)
+    quota = _cpu_quota_cores()
+    if quota is not None:
+        candidates.append(max(1, math.ceil(quota)))
+    return min(candidates) if candidates else 1
+
+
+def _cpu_quota_cores() -> float | None:
+    """Read a Linux cgroup CPU quota when the host exposes one."""
+    for quota_path, period_path in (
+        (Path("/sys/fs/cgroup/cpu.max"), None),
+        (
+            Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+            Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+        ),
+    ):
+        try:
+            fields = quota_path.read_text(encoding="utf-8").split()
+            if period_path is None:
+                if not fields or fields[0] == "max":
+                    continue
+                quota, period = int(fields[0]), int(fields[1])
+            else:
+                quota = int(fields[0])
+                period = int(period_path.read_text(encoding="utf-8").strip())
+            if quota > 0 and period > 0:
+                return quota / period
+        except (OSError, IndexError, TypeError, ValueError):
+            continue
+    return None
 
 
 def _fno_binary() -> str:
@@ -65,6 +98,8 @@ def _live_root_pids(
         from fno.agents.spawn_gate import LIVE_STATUSES
 
         rows = load_registry()
+        if not getattr(rows, "complete", True):
+            return roots, "worker registry incomplete"
         for row in rows:
             if row.status not in LIVE_STATUSES or row.pid is None:
                 continue
@@ -121,23 +156,24 @@ def _live_shared_serve_root_pids() -> tuple[set[int], str | None]:
         record = json.loads(
             (paths.agents_home_dir() / "opencode-serve.json").read_text(encoding="utf-8")
         )
-        pid = record.get("pid") if isinstance(record, dict) else None
-        pid_start = record.get("pid_start") if isinstance(record, dict) else None
+        if not isinstance(record, dict):
+            return roots, "shared serve root discovery unavailable"
+        pid = record.get("pid")
+        pid_start = record.get("pid_start")
         if (
-            isinstance(pid, int)
-            and not isinstance(pid, bool)
-            and isinstance(pid_start, int)
-            and not isinstance(pid_start, bool)
+            not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+            or not isinstance(pid_start, int)
+            or isinstance(pid_start, bool)
+            or pid_start <= 0
         ):
-            root_live = _root_pid_is_live(pid, pid_start)
-            if root_live is None:
-                return roots, "shared serve root liveness unavailable"
-            if root_live:
-                roots.add(pid)
-        elif isinstance(record, dict) and "pid_start" not in record:
             return roots, "shared serve root liveness unavailable"
-        elif isinstance(record, dict) and record.get("pid_start") is None:
+        root_live = _root_pid_is_live(pid, pid_start)
+        if root_live is None:
             return roots, "shared serve root liveness unavailable"
+        if root_live:
+            roots.add(pid)
     except FileNotFoundError:
         return roots, None
     except Exception:

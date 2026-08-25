@@ -154,6 +154,21 @@ def test_live_root_pids_refuses_unknown_registry_liveness(monkeypatch) -> None:
     )
 
 
+def test_live_root_pids_refuses_incomplete_registry(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from fno.agents.registry import LoadedRegistry
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry",
+        lambda: LoadedRegistry([], complete=False),
+    )
+
+    assert doctor_footprint._live_root_pids() == (
+        set(),
+        "worker registry incomplete",
+    )
+
+
 def test_live_root_pids_includes_roster_resolved_claude_bg_worker(monkeypatch) -> None:
     from fno import doctor_footprint
     from types import SimpleNamespace
@@ -233,6 +248,22 @@ def test_ac5_edge_capacity_uses_affinity_on_python_without_process_cpu_count(
         doctor_footprint.os,
         "sched_getaffinity",
         lambda _pid: {0, 1},
+        raising=False,
+    )
+
+    assert doctor_footprint._cpu_capacity_cores() == 2
+
+
+def test_ac5_edge_capacity_honors_cpu_quota(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: 2.0)
+    monkeypatch.setattr(doctor_footprint.os, "process_cpu_count", lambda: 64)
+    monkeypatch.setattr(doctor_footprint.os, "cpu_count", lambda: 64)
+    monkeypatch.setattr(
+        doctor_footprint.os,
+        "sched_getaffinity",
+        lambda _pid: set(range(64)),
         raising=False,
     )
 
