@@ -371,6 +371,28 @@ event_types:
         head_sha:
           type: string
           description: "The HEAD the coverage was computed against (coverage is a snapshot). This is the EVAL head, not the head any reviewer read - that is per-verdict `reviewed_sha`. Conflating the two is x-5b99: the merge gate compared this field against the current head and correctly refused a stale eval, but a FRESH eval carrying a stale bot verdict walked straight through it."
+        range_tiling:
+          type: object
+          description: "The union-of-ranges answer over the branch's attestations: whether the reviewed_base_sha..reviewed_head_sha ranges on the branch's attestations, taken as a CHAIN, cover merge_base(base, head)..head. This is what lets a fix-and-re-review loop terminate - every commit that fixes a finding moves the head, and under a single-attestation freshness rule every fix voids the only artifact that can clear the gate. Computed by the Rust producer's git walk and READ by the Python shaper (the Ownership rule), so both surfaces apply the same chain exemption. OPTIONAL: every pre-tiling row lacks it and reads under the single-attestation rule alone."
+          properties:
+            tiled:
+              type: boolean
+              description: "Whether the chain covers every commit in merge_base..head. Fail-closed: any git failure, unresolvable sha, or off-branch endpoint answers false."
+            gaps:
+              type: array
+              items:
+                type: string
+              description: "Uncovered stretches, each named 'base..head' by sha (parent-of-first-uncovered .. last-uncovered). Empty iff tiled. A refusal that names the range prescribes the review to run instead of the head-looping 'review at HEAD'."
+            dropped:
+              type: array
+              items:
+                type: string
+              description: "Range head shas dropped from the chain (unresolvable, or endpoints off the branch's ancestry after a rebase), reported by sha so the drop is auditable."
+            chain_heads:
+              type: array
+              items:
+                type: string
+              description: "reviewed_head_sha of every range that participated in the chain. A local_attestation verdict whose reviewed_sha is here counts as Reviewed when tiled is true, whatever its single-sha freshness says."
         repo:
           type: string
           description: "Full repository identity `host/owner/repo`, lowercased, from the git remote (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. It is the FULL identity, never the last path segment: `org-a/widget` and `org-b/widget` would otherwise share a key, and since this gates auto-merge one repo's coverage could clear the other's guard (a fork shares head SHAs, so the staleness check would not catch it). Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the event in the global log rather than guess. Stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree. Producer: crates/fno-agents/src/finalize.rs `repo_identity_from_remote_url`; reader: fno/paths.py `repo_identity_from_remote_url`. The two must agree."

@@ -700,6 +700,25 @@ def _reviewed_sha_still_describes_head(
     return current_head[1] < reviewed[1]
 
 
+def _tiling_chain(data: dict) -> set[str]:
+    """The covering chain's head shas, when the row's tiling answer is tiled.
+
+    The Rust producer walks the attestation ranges with git and writes the
+    answer onto the ``review_coverage`` row; Python reads it rather than
+    re-walking (the Ownership rule: Rust computes, Python reads). A chain
+    member is covered by the UNION of its ranges, so the single-sha freshness
+    rule does not apply to it - every fix commit would otherwise void the
+    only artifact that can clear the gate.
+    """
+    tiling = data.get("range_tiling")
+    if not isinstance(tiling, dict) or tiling.get("tiled") is not True:
+        return set()
+    heads = tiling.get("chain_heads")
+    if not isinstance(heads, list):
+        return set()
+    return {h for h in heads if isinstance(h, str) and h}
+
+
 def _verdicts_with_current_freshness(
     data: dict, head: Optional[str], cwd: Optional[str], pr_number: int = 0
 ) -> list[dict]:
@@ -713,6 +732,9 @@ def _verdicts_with_current_freshness(
     cannot prove freshness. The base ref and the head identity resolve lazily
     and once per pass: N stale verdicts at N shas cost one base read and one
     head diff, not N of each.
+
+    A member of a TILED chain is exempt from the single-sha recheck: its
+    range, not its head alone, is what covers the PR.
     """
     verdicts = data.get("verdicts")
     if not isinstance(verdicts, list):
@@ -720,6 +742,7 @@ def _verdicts_with_current_freshness(
     # Narrowed once for the closure below (mypy cannot carry the loop's
     # truthiness guard into it): the closure is only invoked under `head`.
     current_head = head or ""
+    chain = _tiling_chain(data)
 
     def _describes(reviewed_sha: str) -> bool:
         # The one seam: hermetic tests stub the describes-test, so the closure
@@ -745,12 +768,14 @@ def _verdicts_with_current_freshness(
         elif verdict_kind != "stale":
             current.pop("freshness", None)
         if verdict_kind == "reviewed" and head:
-            if not isinstance(reviewed_sha, str) or not reviewed_sha:
-                stale = True
-            elif reviewed_sha not in describes:
-                describes[reviewed_sha] = _describes(reviewed_sha)
-            if isinstance(reviewed_sha, str) and not describes.get(reviewed_sha, False):
-                stale = True
+            in_chain = isinstance(reviewed_sha, str) and reviewed_sha in chain
+            if not in_chain:
+                if not isinstance(reviewed_sha, str) or not reviewed_sha:
+                    stale = True
+                elif reviewed_sha not in describes:
+                    describes[reviewed_sha] = _describes(reviewed_sha)
+                if isinstance(reviewed_sha, str) and not describes.get(reviewed_sha, False):
+                    stale = True
         if stale:
             current["freshness"] = "stale"
         shaped.append(current)
@@ -778,8 +803,14 @@ def _stale_verdicts(verdicts: list[dict]) -> list[dict]:
     ]
 
 
-def _derive_review_state(coverage: object, verdicts: object) -> str | None:
-    """Derive one known outcome from validated per-reviewer verdicts."""
+def _derive_review_state(coverage: object, verdicts: object, chain: set[str] | None = None) -> str | None:
+    """Derive one known outcome from validated per-reviewer verdicts.
+
+    ``chain`` is the tiled chain's head shas (empty when the row does not
+    carry a tiled answer): a chain member counts whatever its single-sha
+    freshness says, because its RANGE covers the PR.
+    """
+    chain = chain or set()
     if coverage == "unknown":
         return None
     if not isinstance(verdicts, list) or any(
@@ -794,7 +825,10 @@ def _derive_review_state(coverage: object, verdicts: object) -> str | None:
     if any(
         verdict.get("verdict") == "reviewed"
         and not verdict.get("human_approval", False)
-        and verdict.get("freshness") in _COUNTED_FRESHNESS
+        and (
+            verdict.get("freshness") in _COUNTED_FRESHNESS
+            or verdict.get("reviewed_sha") in chain
+        )
         for verdict in verdicts
     ):
         return "reviewed"
@@ -811,7 +845,7 @@ def _shape_review_coverage(
     verdicts = _verdicts_with_current_freshness(data, head, cwd, pr_number)
     shaped["verdicts"] = verdicts
     shaped["stale_verdicts"] = _stale_verdicts(verdicts)
-    review_state = _derive_review_state(data.get("coverage"), verdicts)
+    review_state = _derive_review_state(data.get("coverage"), verdicts, _tiling_chain(data))
     if review_state in _KNOWN_REVIEW_STATES:
         shaped["review_state"] = review_state
     else:
@@ -833,7 +867,12 @@ def _shape_review_coverage(
         )
     )
     reviewed = [v for v in verdicts if v.get("verdict") == "reviewed"]
-    valid = [v for v in reviewed if v.get("freshness") in _COUNTED_FRESHNESS]
+    chain = _tiling_chain(data)
+    valid = [
+        v
+        for v in reviewed
+        if v.get("freshness") in _COUNTED_FRESHNESS or v.get("reviewed_sha") in chain
+    ]
     if malformed or not reviewed or len(valid) != len(reviewed):
         shaped["coverage"] = "uncovered"
         shaped["reviewed_count"] = len(valid)
