@@ -37,31 +37,47 @@ def find_pass(
 ) -> Optional[dict]:
     """The newest passing attestation matching the (reviewer, attester, head)
     triple, or None. None means there is nothing to retract, which the verb
-    reports rather than writing a revocation for a pair that never passed."""
+    reports rather than writing a revocation for a pair that never passed.
+
+    Scans the project log AND the machine-global journal it mirrors to: a
+    pass can reach the mirror with no project row behind it, and a pass the
+    verb cannot see is one it cannot revoke - the irretractable-forgery shape
+    the verb exists to close. The retraction lands in the project log and is
+    mirrored out from there, same as any emission."""
     key = _strip_slashes(reviewer)
     match: Optional[dict] = None
+    logs = [events_path]
     try:
-        text = events_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for line in text.splitlines():
+        from fno.paths import global_events_json
+
+        global_events = global_events_json()
+        if global_events.resolve() != Path(events_path).resolve():
+            logs.append(global_events)
+    except Exception:  # noqa: BLE001 - an unresolvable mirror path degrades to the project log alone
+        pass
+    for log in logs:
         try:
-            val = json.loads(line)
-        except json.JSONDecodeError:
+            text = log.read_text(encoding="utf-8")
+        except OSError:
             continue
-        if val.get("type") != "review_attestation":
-            continue
-        data = val.get("data") or {}
-        if not isinstance(data, dict):
-            continue
-        if _strip_slashes(str(data.get("reviewer", ""))) != key:
-            continue
-        if data.get("attester_session_id") != attester:
-            continue
-        if data.get("head_sha") != head:
-            continue
-        if data.get("verdict") == "pass":
-            match = data
+        for line in text.splitlines():
+            try:
+                val = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if val.get("type") != "review_attestation":
+                continue
+            data = val.get("data") or {}
+            if not isinstance(data, dict):
+                continue
+            if _strip_slashes(str(data.get("reviewer", ""))) != key:
+                continue
+            if data.get("attester_session_id") != attester:
+                continue
+            if data.get("head_sha") != head:
+                continue
+            if data.get("verdict") == "pass":
+                match = data
     return match
 
 

@@ -737,14 +737,26 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
             // stays None -> false here; the Python config loader rejects it,
             // so no config can load green on one side and parse false on the
             // other.
-            s.require_corroboration = v.as_bool().or_else(|| {
-                v.as_str()
-                    .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
-                        "true" | "yes" | "on" | "1" => Some(true),
-                        "false" | "no" | "off" | "0" => Some(false),
+            s.require_corroboration = v
+                .as_bool()
+                .or_else(|| {
+                    v.as_integer().and_then(|i| match i {
+                        1 => Some(true),
+                        0 => Some(false),
                         _ => None,
                     })
-            });
+                })
+                .or_else(|| {
+                    v.as_str()
+                        // pydantic's lax bool spellings in full, so one config
+                        // cannot load true on the Python side and parse false
+                        // here (round 2: "t"/"y" and the bare integers).
+                        .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                            "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
+                            "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
+                            _ => None,
+                        })
+                });
         }
         if let Some(v) = review.get("self_review_required") {
             // A malformed value stays None -> normalized to true (obligation on,
@@ -2428,6 +2440,7 @@ fn read_pr_info(
     no_external: bool,
     required_bots: &[String],
     optional_bots: &[String],
+    optional_lane_configured: bool,
     external_reviewers: &[String],
     reviewers: &[String],
     nudge_configs: &[NudgeConfig],
@@ -2618,7 +2631,7 @@ fn read_pr_info(
     // (fixes a fail-open the sigma review caught). `reviewers` is empty for
     // every pre-x-e703 config, so `reviewers_all_attested` is vacuously true
     // there and this changes nothing for them.
-    let login_gate_active = !required_bots.is_empty() || !optional_bots.is_empty();
+    let login_gate_active = !required_bots.is_empty() || optional_lane_configured;
     let login_skipped = no_external || !login_gate_active;
     // One scan feeds both the gate and its explanation, so the two cannot
     // disagree the way the decision and the message did on PR #618.
@@ -3583,7 +3596,8 @@ fn publish_coverage_status(
     event_head: &str,
     coverage: &CoverageReport,
     required_bots: &[String],
-    optional_bots: &[String],
+    _optional_bots: &[String],
+    optional_lane_configured: bool,
     reviewers: &[String],
 ) {
     // A status target that is not a real 40-hex sha (an unresolved local
@@ -3601,7 +3615,7 @@ fn publish_coverage_status(
     // gate axis). Counting it made this writer post failure on configs the
     // Python merge gate answers "no lane" to - two writers of one context
     // posting opposite states.
-    let lane = !(required_bots.is_empty() && optional_bots.is_empty() && reviewers.is_empty());
+    let lane = !(required_bots.is_empty() && !optional_lane_configured && reviewers.is_empty());
     if !lane {
         eprintln!(
             "review-coverage publisher: not posting for {pr_head_oid}: no review lane configured"
@@ -4301,12 +4315,32 @@ const DEFAULT_OPTIONAL_APPS: [&str; 2] = ["gemini-code-assist", "chatgpt-codex-c
 /// absence never does (x-4baa "honor if present"). Unset resolves to the
 /// built-in default; an explicit `[]` is a real opt-out and wins over it.
 fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
-    settings.optional_apps.clone().unwrap_or_else(|| {
-        DEFAULT_OPTIONAL_APPS
+    match settings.optional_apps.clone() {
+        // Unset: the built-in honored-if-present logins.
+        None => DEFAULT_OPTIONAL_APPS
             .iter()
             .map(|s| s.to_string())
-            .collect()
-    })
+            .collect(),
+        // Explicit [] is the real opt-out (the one behavior this default
+        // changes on purpose, documented in the registry Meta).
+        Some(configured) if configured.is_empty() => Vec::new(),
+        // A non-empty list EXTENDS the built-ins: it named extra honored
+        // logins since before the default existed, and silently dropping a
+        // built-in from a partial list would stop counting that login's
+        // blocking findings on configs that never asked for it.
+        Some(configured) => {
+            let mut all = DEFAULT_OPTIONAL_APPS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            for login in configured {
+                if !all.contains(&login) {
+                    all.push(login);
+                }
+            }
+            all
+        }
+    }
 }
 
 /// Case-insensitive substring match so a configured short name ("codex") or a
@@ -6676,6 +6710,12 @@ pub(crate) struct ReviewInputs {
     pub(crate) required_bots: Vec<String>,
     pub(crate) required_reviewers: Vec<String>,
     pub(crate) optional_bots: Vec<String>,
+    /// Lane CONFIGURATION is explicit config only (a non-empty
+    /// `review.optional_apps`), never the built-in default that fills unset
+    /// configs: the default logins are honored-if-present where a lane
+    /// exists, but must not light the login gate, the publisher's lane
+    /// predicate, or the self-review floor on a stock install.
+    pub(crate) optional_lane_configured: bool,
     pub(crate) nudge_configs: Vec<NudgeConfig>,
 }
 
@@ -6844,6 +6884,10 @@ pub(crate) fn resolve_review_inputs(
         }
     }
     let optional_bots = resolved_optional_bots(&settings);
+    let optional_lane_configured = settings
+        .optional_apps
+        .as_ref()
+        .is_some_and(|v| !v.is_empty());
     let nudge_configs = resolved_nudge_configs(&settings);
 
     ReviewInputs {
@@ -6856,6 +6900,13 @@ pub(crate) fn resolve_review_inputs(
         required_bots,
         required_reviewers,
         optional_bots,
+        // Lane CONFIGURATION is explicit config, never the built-in default:
+        // the default logins are honored-if-present where a lane exists, but
+        // they must not light up the login gate, the coverage publisher's
+        // lane predicate, or the self-review floor on a stock install - that
+        // flip skips the floor and forces gh review reads for installs that
+        // configured nothing (review round 2).
+        optional_lane_configured,
         nudge_configs,
     }
 }
@@ -7009,8 +7060,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // rather than waving the obligation away. The floor is additive: an
     // already-configured lane (reviewers, bots, peers) keeps meaning exactly
     // what it meant today, and a lane that already names code-review is a no-op.
-    let lane_configured =
-        !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
+    let lane_configured = !required_bots.is_empty()
+        || inputs.optional_lane_configured
+        || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
     // The floor applies where a session can satisfy it: a harness with a
     // self-review verb (claude /code-review, codex /review, opencode
@@ -7956,6 +8008,10 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             manifest.no_external,
             &required_bots,
             &optional_bots,
+            settings
+                .optional_apps
+                .as_ref()
+                .is_some_and(|v| !v.is_empty()),
             &settings.external_reviewers,
             &required_reviewers,
             &nudge_configs,
@@ -8796,6 +8852,7 @@ fn run_done(
     no_external: bool,
     required_bots: &[String],
     optional_bots: &[String],
+    optional_lane_configured: bool,
     external_reviewers: &[String],
     reviewers: &[String],
     nudge_configs: &[NudgeConfig],
@@ -8814,6 +8871,7 @@ fn run_done(
         no_external,
         required_bots,
         optional_bots,
+        optional_lane_configured,
         external_reviewers,
         reviewers,
         nudge_configs,
@@ -8843,6 +8901,7 @@ fn run_done(
             &info.coverage,
             required_bots,
             optional_bots,
+            optional_lane_configured,
             reviewers,
         );
     }
@@ -11421,7 +11480,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     // disagreed with the stop hook's floored row for the same PR.
     let mut required_reviewers = inputs.required_reviewers;
     let lane_configured = !(inputs.required_bots.is_empty()
-        && inputs.optional_bots.is_empty()
+        && !inputs.optional_lane_configured
         && required_reviewers.is_empty());
     if !lane_configured
         && inputs.settings.self_review_required.unwrap_or(true)
@@ -11446,6 +11505,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         false,
         &inputs.required_bots,
         &inputs.optional_bots,
+        inputs.optional_lane_configured,
         &inputs.settings.external_reviewers,
         &required_reviewers,
         &inputs.nudge_configs,
@@ -11480,6 +11540,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &pr_info.coverage,
                     &inputs.required_bots,
                     &inputs.optional_bots,
+                    inputs.optional_lane_configured,
                     &required_reviewers,
                 );
             }
@@ -11552,6 +11613,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         },
                         &inputs.required_bots,
                         &inputs.optional_bots,
+                        inputs.optional_lane_configured,
                         &required_reviewers,
                     );
                 }
@@ -13063,8 +13125,8 @@ mod tests {
             s.require_corroboration = v.as_bool().or_else(|| {
                 v.as_str()
                     .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
-                        "true" | "yes" | "on" | "1" => Some(true),
-                        "false" | "no" | "off" | "0" => Some(false),
+                        "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
+                        "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
                         _ => None,
                     })
             });
@@ -13072,6 +13134,7 @@ mod tests {
         assert_eq!(s.require_corroboration, Some(true));
     }
 
+    #[test]
     fn a_retraction_revokes_the_named_pair_not_the_retractor() {
         // The retraction verb addresses the EVENT, not the identity: an
         // operator session emits a fail carrying retracts_attester naming the
@@ -13300,12 +13363,18 @@ mod tests {
             ..Settings::default()
         };
         assert!(resolved_optional_bots(&empty).is_empty());
-        // An explicit list is honored verbatim.
+        // A partial list EXTENDS the built-ins (round-2 ruling): it never
+        // silently drops a honored-if-present login.
+        let partial = v["partial_union"].as_array().unwrap();
+        let partial: Vec<String> = partial
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
         let mine = Settings {
             optional_apps: Some(vec!["my-app".to_string()]),
             ..Settings::default()
         };
-        assert_eq!(resolved_optional_bots(&mine), vec!["my-app".to_string()]);
+        assert_eq!(resolved_optional_bots(&mine), partial);
     }
 
     #[test]
@@ -17946,9 +18015,14 @@ git_bounded();";
             resolved_required_bots(&s).is_empty(),
             "optional must not be required"
         );
+        // A non-empty configured list EXTENDS the built-ins, so this config
+        // (built-in named explicitly) resolves to both built-ins.
         assert_eq!(
             resolved_optional_bots(&s),
-            vec!["chatgpt-codex-connector".to_string()]
+            vec![
+                "gemini-code-assist".to_string(),
+                "chatgpt-codex-connector".to_string()
+            ]
         );
     }
 

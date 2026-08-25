@@ -801,20 +801,26 @@ def resolve_attester_identity(
     depth = 0
     while proc is not None and depth < _MAX_ANCESTRY_DEPTH:
         chain.append(_read_ancestor_marker(proc.pid, marker_name))
-        # Family membership from the process's own name/argv, the same
-        # surface _read_ancestor_marker already opens: the harness binary
-        # (claude, codex, ...) names its family there. Unreadable -> not
-        # family, which can only degrade the witness, never forge one.
+        # Family membership from the EXECUTABLE name alone (cmdline[0], which
+        # preserves an argv0 rename), never the whole argv: an `env
+        # CLAUDE_CODE_SESSION_ID=<forged>` wrapper or a shell assignment
+        # carries the MARKER SPELLING in its argv, and the marker contains
+        # the family token - matching the full argv would crown that wrapper
+        # the deciding family carrier and stamp the forgery `process`
+        # (reproduced live in review round 2). Unreadable -> not family,
+        # which can only degrade the witness, never forge one.
         try:
-            name_and_argv = " ".join(
-                [proc.name()] + (getattr(proc, "cmdline", lambda: [])() or [])
-            ).lower()
+            argv: list = getattr(proc, "cmdline", lambda: [])() or []
+            exe_name = (argv[0] if argv else proc.name()).lower()
         except psutil.Error:
-            name_and_argv = ""
-        carrier_is_family.append(family_token in name_and_argv)
-        if carrier_is_family[-1] and chain[-1] is not None:
-            # The nearest family carrier decides; stop walking (and stop
-            # paying one `ps` per ancestor) once it is found.
+            exe_name = ""
+        carrier_is_family.append(family_token in exe_name)
+        if carrier_is_family[-1]:
+            # The nearest family carrier decides, READABLE OR NOT: stopping
+            # here on an unreadable one yields env_only (no corroboration),
+            # while walking past it would let a farther STALE family carrier
+            # (a daemon with a previous session's marker) raise and wedge the
+            # lane. The break also stops paying one `ps` per ancestor.
             break
         try:
             proc = proc.parent()

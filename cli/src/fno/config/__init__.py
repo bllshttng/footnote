@@ -829,11 +829,20 @@ DEFAULT_OPTIONAL_APPS: tuple[str, ...] = ("gemini-code-assist", "chatgpt-codex-c
 
 
 def resolved_optional_apps(review: "ReviewBlock") -> list[str]:
-    """The effective optional-login list: the raw value when set (including an
-    explicit ``[]`` opt-out), the built-in default when the key was never set."""
-    if review.optional_apps is not None:
-        return list(review.optional_apps)
-    return list(DEFAULT_OPTIONAL_APPS)
+    """The effective optional-login list: unset resolves to the built-in
+    default, an explicit ``[]`` is a real opt-out, and a non-empty list
+    EXTENDS the default (a partial list named extra honored logins since
+    before the default existed; dropping a built-in from it would silently
+    stop counting that login's blocking findings)."""
+    if review.optional_apps is None:
+        return list(DEFAULT_OPTIONAL_APPS)
+    if not review.optional_apps:
+        return []
+    resolved = list(DEFAULT_OPTIONAL_APPS)
+    for login in review.optional_apps:
+        if login not in resolved:
+            resolved.append(login)
+    return resolved
 
 
 class ReviewBlock(BaseModel):
@@ -885,7 +894,8 @@ class ReviewBlock(BaseModel):
     # never waits for them (their absence never blocks - kills the App-bot
     # usage-limit wedge), but a blocking finding from one still holds the gate.
     # None (unset) resolves to DEFAULT_OPTIONAL_APPS via resolved_optional_apps;
-    # an explicit [] is a real opt-out and wins over the default. The RAW field
+    # an explicit [] is a real opt-out and wins over the default; a non-empty
+    # list EXTENDS the default rather than replacing it. The RAW field
     # stays None-vs-list because truthiness of it doubles as the "is a review
     # lane configured" probe in the merge path, which the default must not flip.
     optional_apps: Optional[list[str]] = None

@@ -3237,4 +3237,5 @@ def test_optional_apps_resolves_the_shared_default(tmp_path):
     )
     assert resolved_optional_apps(ReviewBlock()) == golden["unset"]
     assert resolved_optional_apps(ReviewBlock(optional_apps=[])) == golden["explicit_empty"]
-    assert resolved_optional_apps(ReviewBlock(optional_apps=["my-app"])) == ["my-app"]
+    # A partial list EXTENDS the built-ins; it never silently drops one.
+    assert resolved_optional_apps(ReviewBlock(optional_apps=["my-app"])) == golden["partial_union"]

@@ -524,3 +524,37 @@ def test_corroboration_on_covers_a_corroborated_pr(
         assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     finally:
         monkeypatch_run.undo()
+
+
+def test_status_ready_names_the_corroboration_conjunct(
+    corroboration_on, monkeypatch, tmp_path  # noqa: F811
+):
+    """`fno do pr status` reports the same refusal merge enforces: a
+    self-attested-only row blocks `ready` as review_coverage_corroboration,
+    not as a bare uncovered count a worker would retry into budget. The
+    policy-rewritten shape (0 counted, self-attestation preserved) names the
+    policy too - the truer blocker, exactly as the merge verb ranks it."""
+    from fno.pr import _status
+
+    monkeypatch.setattr(_merge, "_repo_state_dir", lambda repo: str(tmp_path / ".fno"))
+    base = dict(
+        head_sha=HEAD,
+        verdicts=_SELF_ONLY_VERDICTS,
+        self_attested_count=1,
+        review_state="reviewed",
+    )
+    covered_row = dict(coverage="covered", reviewed_count=1, **base)
+    rewritten_row = dict(coverage="uncovered", reviewed_count=0, **base)
+    for row in (covered_row, rewritten_row):
+        blockers = _status._ready_blockers(
+            True,
+            "green",
+            0,
+            row,
+            True,
+            head=HEAD,
+            code_review_required=False,
+            counts={},
+            repo=str(tmp_path),
+        )
+        assert blockers == ["review_coverage_corroboration"], (row, blockers)

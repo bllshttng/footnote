@@ -99,6 +99,11 @@ def test_retract_refuses_when_no_matching_pass_exists(
     import fno.harness_identity as hi
 
     monkeypatch.setattr(hi, "resolve_attester_identity", lambda: ("sess-operator", "process"))
+    # find_pass also scans the machine-global journal; point it at an empty
+    # file so the refusal is this project log's, not whatever runs on the host.
+    monkeypatch.setattr(
+        "fno.paths.global_events_json", lambda: tmp_path / "global-events.jsonl"
+    )
     events = tmp_path / ".fno" / "events.jsonl"
     events.parent.mkdir(parents=True)
     events.write_text(_pass_line(attester="sess-SOMEONE-ELSE") + "\n")
@@ -175,3 +180,50 @@ def test_retract_mirrors_the_revocation_to_the_global_log(
     assert rc == 0
     assert mirrored_rows, "the retraction must be mirrored like the pass it revokes"
     assert mirrored_rows[0]["data"]["retracts_attester"] == "sess-author"
+
+
+def test_retract_reaches_a_pass_that_lives_only_in_the_global_log(
+    tmp_path, monkeypatch, capsys
+):
+    """A pass can reach the machine-global journal with no project row behind
+    it (mirrored from a worktree that was never this checkout's, or appended
+    by a forger straight to the one file every reader stands in). find_pass
+    must scan BOTH logs or the verb refuses to retract exactly the pass it
+    exists to revoke."""
+    import json as _json
+
+    from fno.pr import _attestation
+
+    project = tmp_path / ".fno" / "events.jsonl"
+    project.parent.mkdir(parents=True)
+    project.write_text("", encoding="utf-8")
+    head = "cccc3333dddd4444"
+    global_log = tmp_path / "global-events.jsonl"
+    global_log.write_text(
+        _json.dumps(
+            {
+                "ts": "2026-08-25T00:00:00Z",
+                "type": "review_attestation",
+                "data": {
+                    "reviewer": "code-review",
+                    "head_sha": head,
+                    "verdict": "pass",
+                    "attester_session_id": "sess-mirrored-only",
+                    "branch": "feature/x",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.paths.global_events_json", lambda: global_log)
+    import fno.harness_identity
+
+    monkeypatch.setattr(fno.harness_identity, "resolve_attester_identity", lambda: ("s", "process"))
+    monkeypatch.setattr("fno.events.cli.mirror_to_global_log", lambda *a, **k: None)
+    rc = _attestation.retract(
+        "code-review", "sess-mirrored-only", head, "mirrored-only pass", events=project
+    )
+    capsys.readouterr()
+    assert rc == 0, "a mirrored-only pass must be retractable, not refused"
+    assert "retracts_attester" in project.read_text(encoding="utf-8")
