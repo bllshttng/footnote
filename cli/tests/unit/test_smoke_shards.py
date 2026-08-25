@@ -55,6 +55,10 @@ def _selected(names: list[str], flag: str, globs: str) -> list[str]:
     return [n for n in names if not _name_matches(n, globs)]
 
 
+def _command_lines(run: str) -> list[str]:
+    return [line.strip() for line in run.splitlines() if line.strip()]
+
+
 def test_the_workflow_actually_shards_the_gate() -> None:
     """Guard the guard: without this, every test below passes vacuously.
 
@@ -154,10 +158,13 @@ def test_every_shard_clears_the_rust_binary_before_it_starts() -> None:
 def test_smoke_setup_cleans_fno_agents_before_building_cached_artifacts() -> None:
     action = yaml.safe_load(_SMOKE_SETUP.read_text())
     run = "\n".join(step.get("run", "") for step in action["runs"]["steps"])
+    lines = _command_lines(run)
 
     for package in ("fno", "fno-agents"):
-        clean = run.index(f"cargo clean -p {package}")
-        build = run.index(f"cargo build --manifest-path crates/{package}/Cargo.toml")
+        clean = lines.index(
+            f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
+        )
+        build = lines.index(f"cargo build --manifest-path crates/{package}/Cargo.toml")
 
         assert clean < build, f"smoke setup can execute a stale cached {package} binary"
 
@@ -167,10 +174,13 @@ def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
     steps = workflow["jobs"]["test"]["steps"]
     names = [step.get("name", "") for step in steps]
     clean = names.index("Clean cached Rust package artifacts")
-    clean_run = steps[clean].get("run", "")
+    clean_lines = _command_lines(steps[clean].get("run", ""))
 
     for package in ("fno", "fno-agents"):
-        assert f"cargo clean -p {package}" in clean_run
+        assert (
+            f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
+            in clean_lines
+        )
         unit = names.index(f"cargo test --lib --bins ({'fno mux' if package == 'fno' else package})")
         assert clean < unit, f"rust-ci can test a stale cached {package} harness"
 
@@ -179,8 +189,11 @@ def test_rust_stress_cleans_both_packages_before_building() -> None:
     workflow = yaml.safe_load(_RUST_WORKFLOW.read_text())
     steps = workflow["jobs"]["stress"]["steps"]
     run = "\n".join(step.get("run", "") for step in steps)
-    stress = run.index("bash scripts/tests/stress-rust-e2e-concurrency.sh")
+    lines = _command_lines(run)
+    stress = lines.index("bash scripts/tests/stress-rust-e2e-concurrency.sh > stress.log 2>&1 || rc=$?")
 
     for package in ("fno", "fno-agents"):
-        clean = run.index(f"cargo clean -p {package}")
+        clean = lines.index(
+            f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
+        )
         assert clean < stress, f"stress can execute a stale cached {package} harness"
