@@ -131,7 +131,7 @@ def test_named_send_ruling_appends_dated_node_block_before_transport(
 def test_named_send_ruling_uses_explicit_cwd_graph(
     runner, ruling_graph, monkeypatch, tmp_path
 ):
-    foreign_repo = tmp_path / "foreign-repo"
+    foreign_repo = tmp_path / "foreign-répo"
     foreign_graph = foreign_repo / "state" / "graph.json"
     foreign_graph.parent.mkdir(parents=True)
     foreign_graph.write_text(
@@ -168,6 +168,16 @@ def test_named_send_ruling_uses_explicit_cwd_graph(
     )
     nested_workdir = foreign_repo / "nested" / "worker"
     nested_workdir.mkdir(parents=True)
+    real_run = subprocess.run
+    probe_encodings = []
+
+    def capture_git_probe(*args, **kwargs):
+        command = args[0] if args else kwargs.get("args", [])
+        if command[:2] == ["git", "-C"]:
+            probe_encodings.append(kwargs.get("encoding"))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr("fno.mail.cli.subprocess.run", capture_git_probe)
     marker = "Foreign ruling sentinel must land only in the requested cwd."
     _hosted_dispatch(
         monkeypatch,
@@ -185,6 +195,7 @@ def test_named_send_ruling_uses_explicit_cwd_graph(
     )
 
     assert sent.exit_code == 0, sent.output
+    assert probe_encodings == ["utf-8"]
     assert marker in _graph_details(foreign_graph)
     assert _graph_details(ruling_graph) == "Original node details."
 

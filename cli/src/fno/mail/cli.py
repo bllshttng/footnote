@@ -692,6 +692,7 @@ def _ruling_graph_path(workdir: Path) -> Path:
             ["git", "-C", str(workdir), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
             timeout=5,
         )
