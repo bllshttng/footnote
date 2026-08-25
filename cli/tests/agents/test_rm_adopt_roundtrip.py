@@ -180,6 +180,20 @@ def test_rm_notice_calls_the_full_uuid_the_recovery_handle():
     assert f"fno agents adopt {SESSION_ID}" in notice
 
 
+def test_pruned_worktree_guidance_uses_full_id_and_existing_checkout():
+    guide = (
+        Path(__file__).resolve().parents[3]
+        / "docs"
+        / "guides"
+        / "fno-agents-stop-rm-reconcile.md"
+    ).read_text(encoding="utf-8")
+    assert (
+        "fno agents resume <full-harness-session-id> --cross-project "
+        "--cwd <existing-checkout>" in guide
+    )
+    assert "fno agents adopt <full-harness-session-id> --cross-project" in guide
+
+
 # --------------------------------------------------------------------------
 # AC1-ERR / AC2-ERR: the confirmation gate
 # --------------------------------------------------------------------------
