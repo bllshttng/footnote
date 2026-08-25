@@ -21,6 +21,13 @@ INPUT=$(cat)
 # Extract command being run
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
 
+# Rust validation also checks the crate-wide mux process-admission inventory.
+# Keeping this on the normal test surface means a new raw launch cannot hide
+# behind a green unit suite.
+if echo "$COMMAND" | grep -qE '(^|[[:space:]])(cargo test|fno-py doctor test rust)'; then
+    bash scripts/ci/check-mux-process-admission.sh >/dev/null
+fi
+
 # Commands that are always allowed
 ALLOWED_PATTERNS=(
     "npm test"
