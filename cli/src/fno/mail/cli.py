@@ -1295,6 +1295,11 @@ def cmd_pane_prepare(
         None, "--harness",
         help="Harness hosting the pane (default: resolved from the agent registry).",
     ),
+    style_exception: Optional[str] = typer.Option(
+        None, "--style-exception",
+        help="Reasoned one-send exception to the style and word-budget gates "
+        "on enveloped prose (a --raw send never enters them).",
+    ),
 ) -> None:
     """Gate and envelope a pane payload read from stdin; print it on stdout.
 
@@ -1305,10 +1310,17 @@ def cmd_pane_prepare(
 
     Exit 0 prints the bytes to type. Exit 3 refuses and names why on stderr: the
     pane is showing an option prompt, hosts no registered agent, or the body
-    cannot be attributed.
+    cannot be attributed. Exit 1 refuses on the style, body-cap, or word-budget
+    gates the mail verbs enforce: this is the sole renderer every non-raw pane
+    send passes through, so a sender refused by mail must not deliver the
+    identical prose here instead.
     """
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.mail.pane_transport import PaneSendRefused, prepare
+    from fno.mail.pane_transport import (
+        PaneSendRefused,
+        prepare,
+        resolve_pane_recipient,
+    )
 
     session = merge_deprecated_alias(
         session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
@@ -1355,11 +1367,51 @@ def cmd_pane_prepare(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+    # The relay contract's two gates, at the one choke point every non-raw pane
+    # send fails closed through. A `--raw` send never reaches this process, so
+    # its exemption is structural, and `--style-exception` keeps the mail
+    # verbs' one escape shape.
+    _enforce_body_cap(body)
+    _enforce_style(body, allow_reason=style_exception)
+    # ONE identity drives both envelope and ledger: the budget pair must match
+    # the envelope's from/to, and the ledger entry id must match the envelope
+    # id. `stamp_from` returns an explicit value verbatim, so the resolved
+    # handle passes through `wrap` unchanged.
+    from fno.agents.self_stamp import stamp_from
+    from fno.inbox.store import generate_msg_id
+
+    sender = stamp_from(None)
+    recipient = resolve_pane_recipient(session, pane)
+    msg_id = generate_msg_id()
     try:
-        print(prepare(body, session=session, pane_id=pane, harness=harness), end="")
+        rendered = prepare(
+            body,
+            session=session,
+            pane_id=pane,
+            harness=harness,
+            sender=sender,
+            to=recipient,
+            msg_id=msg_id,
+        )
     except PaneSendRefused as exc:
         print(f"pane send refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=3) from exc
+    if recipient is not None:
+        # Reserved only after attribution, prompt gating, and envelope
+        # construction succeeded, so a refused send charges nothing. A later
+        # Rust transport failure can leave a charge that expires with the
+        # window; that bounded overcharge is the safe direction, because this
+        # renderer cannot learn whether its parent delivered. No canonical
+        # recipient means no pair to charge; the style gate above still
+        # refuses the prose.
+        _reserve_budget(
+            sender=sender,
+            recipient=recipient,
+            body=body,
+            msg_id=msg_id,
+            allow_reason=style_exception,
+        )
+    print(rendered, end="")
 
 
 @mail_app.command("lint", hidden=True)

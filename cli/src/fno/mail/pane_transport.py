@@ -275,7 +275,13 @@ def prompt_refusal(
     return None
 
 
-def wrap(text: str, *, sender: Optional[str] = None, to: Optional[str] = None) -> str:
+def wrap(
+    text: str,
+    *,
+    sender: Optional[str] = None,
+    to: Optional[str] = None,
+    msg_id: Optional[str] = None,
+) -> str:
     """Wrap ``text`` in the ``<fno_mail>`` envelope, or return it unchanged when
     it already carries one.
 
@@ -283,6 +289,10 @@ def wrap(text: str, *, sender: Optional[str] = None, to: Optional[str] = None) -
     ``None``, which routes to the process-tree prover. Never
     ``resolve_harness_identity`` and never ``--from-self``: both stamp the shared
     ambient id.
+
+    ``msg_id`` lets a caller that also charges the word budget share ONE
+    identity between the envelope and the ledger entry; unset, an id is minted
+    here.
     """
     if _already_wrapped(text):
         return text
@@ -325,7 +335,7 @@ def wrap(text: str, *, sender: Optional[str] = None, to: Optional[str] = None) -
             # `from_session` first, so the recovered address is the collision-safe
             # one. The mail lane never reaches here -- it mints its own id and
             # hands this function an already-wrapped body.
-            id=generate_msg_id(),
+            id=msg_id or generate_msg_id(),
         )
     except ForgedEnvelopeError as exc:
         raise PaneSendRefused(str(exc)) from exc
@@ -339,6 +349,7 @@ def prepare(
     harness: Optional[str] = None,
     sender: Optional[str] = None,
     to: Optional[str] = None,
+    msg_id: Optional[str] = None,
     gate: bool = True,
     wrap_body: bool = True,
     runner: Optional[Callable[..., "subprocess.CompletedProcess[str]"]] = None,
@@ -379,4 +390,4 @@ def prepare(
             raise PaneSendRefused(refusal)
     if not wrap_body:
         return text
-    return wrap(text, sender=sender, to=to)
+    return wrap(text, sender=sender, to=to, msg_id=msg_id)

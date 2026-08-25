@@ -535,3 +535,74 @@ def test_a_legacy_row_reads_back_without_a_fabricated_count():
 
     zero = Envelope.new(from_="a", to="b", kind="send", body="", word_count=0)
     assert json.loads(to_json_line(zero))["word_count"] == 0, "a real zero is not legacy"
+
+
+# --- the pane lane (x-4268): same gates, same ledger ----------------------
+
+def _pane_prepare(body: str, *extra: str):
+    from typer.testing import CliRunner
+
+    from fno.mail.cli import mail_app
+
+    return CliRunner().invoke(
+        mail_app,
+        ["pane-prepare", "--session-id", "s", "--pane", "3", *extra],
+        input=body,
+    )
+
+
+@pytest.fixture
+def stubbed_pane(monkeypatch):
+    """Pin the pane transport's environment probes; see the bridge test file."""
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.resolve_pane_harness", lambda s, p: "claude"
+    )
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.resolve_pane_recipient",
+        lambda s, p: "recip-3333",
+    )
+    monkeypatch.setattr("fno.mail.pane_transport.prompt_refusal", lambda **_kw: None)
+    monkeypatch.setattr("fno.agents.self_stamp.stamp_from", lambda _n: "sender-4444")
+    return None
+
+
+def _clean_body(n_words: int) -> str:
+    """A style-clean body of exactly ``n_words`` words: 5-word sentences."""
+    words = [f"w{i}" for i in range(n_words)]
+    sentences = [
+        " ".join(words[i : i + 5]) + "." for i in range(0, n_words, 5)
+    ]
+    text = " ".join(sentences)
+    assert style.word_count(text) == n_words
+    return text
+
+
+def test_pane_lane_refuses_the_second_send_before_any_envelope(stubbed_pane, capsys):
+    """AC2-HP through the real CLI: two clean 45-word bodies, one pair, one
+    window; the second refuses with the exact rolling numbers and only the
+    first envelope reaches stdout."""
+    first = _pane_prepare(_clean_body(45))
+    assert first.exit_code == 0, first.output
+    assert "</fno_mail>" in first.output
+
+    second = _pane_prepare(_clean_body(45))
+    assert second.exit_code == 1, second.output
+    assert "running=45 current=45 projected=90 cap=80 window=10m" in second.output
+    assert "</fno_mail>" not in second.output
+
+
+def test_pane_lane_ledger_entry_matches_the_envelope_identity(stubbed_pane):
+    """AC on LD2: the pair file's entry id and words are the envelope's id and
+    the body's masked count, not a second minted identity."""
+    import re as _re
+
+    result = _pane_prepare(_clean_body(20))
+    assert result.exit_code == 0, result.output
+    envelope_id = _re.search(r'id="([^"]+)"', result.output)
+    assert envelope_id, result.output
+
+    pair = budget.pair_label("sender-4444", "recip-3333")
+    entries = budget._load(budget._ledger_path(pair), pair)
+    assert len(entries) == 1
+    assert entries[0]["id"] == envelope_id.group(1)
+    assert entries[0]["words"] == 20

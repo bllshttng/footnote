@@ -77,3 +77,110 @@ def test_the_rust_bridge_flags_still_exist(flag):
     assert flag in _declared_options(), (
         f"`mail pane-prepare` no longer accepts {flag}; the Rust bridge passes it"
     )
+
+
+def test_the_rust_bridge_passes_style_exception_to_the_child():
+    """The conditional bridge flag: present in `prepare_pane_bytes`, accepted
+    by the child. It rides `.arg(...)` beside the literal `.args([...])`, so it
+    needs its own source assertion rather than `_bridge_argv`."""
+    src = MUX_CLI.read_text(encoding="utf-8")
+    body = re.search(r"fn prepare_pane_bytes.*?\n\}", src, re.S)
+    assert body, "prepare_pane_bytes no longer exists"
+    assert 'arg("--style-exception")' in body.group(0), (
+        "the Rust bridge stopped passing --style-exception to the renderer"
+    )
+    assert "--style-exception" in _declared_options(), (
+        "`mail pane-prepare` no longer accepts --style-exception"
+    )
+
+
+# -- the gates on the enveloped body (x-4268) + the empty-payload refusal ----
+
+@pytest.fixture(autouse=True)
+def _isolated_bus(tmp_path, monkeypatch):
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+    monkeypatch.setenv("FNO_INBOX_ROOT", str(tmp_path / "inbox"))
+
+
+@pytest.fixture
+def stubbed_transport(monkeypatch):
+    """Pin the transport's environment probes so the CLI bridge runs clean.
+
+    Patched at their module attributes, not at the CLI's imports: the command
+    imports them at call time, so it picks up these stubs.
+    """
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.resolve_pane_harness", lambda s, p: "claude"
+    )
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.resolve_pane_recipient",
+        lambda s, p: "recip-1111",
+    )
+    monkeypatch.setattr("fno.mail.pane_transport.prompt_refusal", lambda **_kw: None)
+    monkeypatch.setattr("fno.agents.self_stamp.stamp_from", lambda _n: "sender-2222")
+    return None
+
+
+def _prepare(body: str, *extra: str):
+    return CliRunner().invoke(
+        mail_app,
+        ["pane-prepare", "--session-id", "s", "--pane", "3", *extra],
+        input=body,
+    )
+
+
+def test_default_pane_body_violating_style_refuses_before_envelope(stubbed_transport):
+    """The measured bypass: identical prose refused by mail used to pass here."""
+    # One 26-word sentence: rule 1 caps a sentence at 25 words.
+    body = (
+        "the refusal says use --raw for a bare submit keystroke and the next "
+        "command rejects that form because the arity guard still demands a "
+        "text flag"
+    )
+    result = _prepare(body)
+    assert result.exit_code == 1, result.output
+    assert "style" in result.output.lower(), result.output
+    assert "rule 1" in result.output, result.output
+    assert "</fno_mail>" not in result.output, "a refused body must not render"
+
+
+def test_style_exception_flag_lets_the_body_through_and_charges_it(
+    stubbed_transport, monkeypatch
+):
+    """LD3: the exception permits the overage but still records the count, and
+    the ledger identity matches the envelope (LD2)."""
+    captured: dict = {}
+    import fno.mail.budget as budget_mod
+
+    real_reserve = budget_mod.reserve
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return real_reserve(**kwargs)
+
+    monkeypatch.setattr("fno.mail.budget.reserve", _capture)
+    body = (
+        "the refusal says use --raw for a bare submit keystroke and the next "
+        "command rejects that form because the arity guard still demands a "
+        "text flag"
+    )
+    result = _prepare(body, "--style-exception", "quoted operator text")
+    assert result.exit_code == 0, result.output
+    assert "</fno_mail>" in result.output
+    # The envelope's identity is the ledger's identity: one id, one pair.
+    envelope_id = re.search(r'id="([^"]+)"', result.output)
+    assert envelope_id, result.output
+    assert captured["msg_id"] == envelope_id.group(1)
+    assert captured["sender"] == "sender-2222"
+    assert captured["recipient"] == "recip-1111"
+    assert captured["enforce"] is False
+    assert captured["words"] > 0
+
+
+def test_empty_enveloped_body_keeps_the_attribution_refusal(stubbed_transport):
+    """x-3081's boundary: the new Rust `--raw --submit` exception must not
+    relax the Python attribution refusal, which stays exit 3 with its marker."""
+    result = _prepare("  \n")
+    assert result.exit_code == 3, result.output
+    assert "empty payload: there is nothing to attribute" in result.output
+    assert "</fno_mail>" not in result.output
