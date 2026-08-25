@@ -1114,23 +1114,6 @@ def append_progress_note(
     return result["found"], result["plan_path"]
 
 
-def append_difficulty_history(path: Path, node_id: str, entry: dict) -> bool:
-    """Append one attributable difficulty estimate under the graph lock."""
-    from fno.graph._intake import _find_node
-
-    found = {"value": False}
-
-    def mutator(entries: list[dict]) -> list[dict]:
-        node = _find_node(entries, node_id)
-        if node is not None:
-            node.setdefault("difficulty_history", []).append(dict(entry))
-            found["value"] = True
-        return entries
-
-    locked_mutate_graph(path, mutator)
-    return found["value"]
-
-
 def append_wave_note(path: Path, node_id: str, note: dict) -> tuple[bool, str | None]:
     """Append a structured wave note, refusing missing or terminal targets."""
     from fno.graph._intake import _find_node

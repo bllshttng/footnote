@@ -207,6 +207,59 @@ def test_update_model_tier_null_clears(tmp_graph):
     assert _read_graph(tmp_graph)[0]["model_tier"] is None
 
 
+def test_update_difficulty_records_history(tmp_graph):
+    """A manual difficulty revision carries the same attributable trail the
+    birth paths keep; a same-value rewrite records nothing."""
+    r = _invoke("backlog", "add", "Hard Feature")
+    nid = json.loads(r.output)["id"]
+    _invoke("backlog", "update", nid, "--difficulty", "medium")
+    _invoke("backlog", "update", nid, "--difficulty", "high")
+    node = _read_graph(tmp_graph)[0]
+    assert node["difficulty"] == "high"
+    hist = node["difficulty_history"]
+    assert [h["value"] for h in hist] == ["medium", "high"]
+    assert hist[-1]["source"] == "update"
+
+    _invoke("backlog", "update", nid, "--difficulty", "high")
+    assert len(_read_graph(tmp_graph)[0]["difficulty_history"]) == 2
+
+
+def test_update_blocks_everything_alone_acks_existing_p0(tmp_graph):
+    """Standalone --blocks-everything acknowledges an already-p0 node (the
+    migrate-priorities ack spelling) instead of silently writing nothing."""
+    tmp_graph.write_text(
+        json.dumps({"entries": [{"id": "ab-aaaa1111", "title": "Legacy p0", "status": "idea", "priority": "p0"}]})
+    )
+    r = _invoke("backlog", "update", "ab-aaaa1111", "--blocks-everything")
+    assert r.exit_code == 0, r.output
+    assert _read_graph(tmp_graph)[0]["blocks_everything"] is True
+
+
+def test_update_blocks_everything_on_non_p0_is_loud(tmp_graph):
+    """--blocks-everything on a non-p0 node exits 2 rather than pretending to
+    have acknowledged something."""
+    r = _invoke("backlog", "add", "Ordinary")
+    nid = json.loads(r.output)["id"]
+    r2 = runner.invoke(app, ["backlog", "update", nid, "--blocks-everything"])
+    assert r2.exit_code == 2
+    assert "p0" in r2.output
+    node = _read_graph(tmp_graph)[0]
+    assert node["blocks_everything"] is False
+
+
+def test_difficulty_prompt_value_proc_reasks_on_bad_band():
+    """A bad band at the difficulty prompt raises click.UsageError (click's
+    re-ask signal); the old bare ValueError surfaced as a traceback instead."""
+    import click
+    import pytest as _pytest
+
+    import fno.graph.cli as gcli
+
+    with _pytest.raises(click.UsageError):
+        gcli._prompt_difficulty_value("hard")
+    assert gcli._prompt_difficulty_value("high") == "high"
+
+
 def test_pick_extract_id_ignores_prefixed_non_id_tokens(monkeypatch):
     """gemini HIGH: picker extraction must use the strict matcher so a token
     that merely starts with the prefix (e.g. a project name `fno-cli`) is not

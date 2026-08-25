@@ -1194,7 +1194,20 @@ def _prepare_intake(
         )
     points = cli_points if cli_points is not None else (ledger_entry or {}).get("points")
     priority = cli_priority or fm.get("priority") or "p2"
-    from fno.graph._constants import validate_priority_write
+    from fno.graph._constants import (
+        PRIORITY_MIGRATION,
+        PRIORITY_ORDER,
+        validate_priority_write,
+    )
+    if priority in PRIORITY_MIGRATION:
+        # A plan can still carry the legacy severity vocabulary; map it rather
+        # than store a value the ordering silently degrades to p2.
+        priority = PRIORITY_MIGRATION[priority]
+    if priority not in PRIORITY_ORDER:
+        raise ValueError(
+            f"{plan_path}: invalid priority {priority!r}; must be one of "
+            f"{', '.join(PRIORITY_ORDER)}"
+        )
     blocks_everything = fm.get("blocks_everything") is True or str(
         fm.get("blocks_everything", "")
     ).strip().lower() == "true"

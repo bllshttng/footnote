@@ -749,6 +749,41 @@ def test_backlog_idea_offers_fold_before_minting_noninteractive(tmp_graph, monke
     assert len(_read_entries(tmp_graph)) == 1
 
 
+def test_backlog_idea_prompts_difficulty_before_fold_gate_interactive(
+    tmp_graph, monkeypatch, tmp_path
+):
+    """An interactive filing that omits --difficulty still gets the fold offer:
+    the gate keys on difficulty, so the prompt must run BEFORE it, not inside
+    the create impl where the gate has already passed the value over."""
+    import fno.graph.cli as gcli
+
+    target = _invoke("--json", "backlog", "add", "Difficulty routing filing surface")
+    target_id = json.loads(target.stdout)["id"]
+    sidecar = tmp_path / "relatedness.json"
+    sidecar.write_text(json.dumps({target_id: []}))
+    monkeypatch.setattr("fno.graph.cli._relatedness_path", lambda: sidecar)
+
+    monkeypatch.setattr(gcli, "_stdin_is_interactive", lambda: True)
+    prompted = []
+    confirmed = []
+    monkeypatch.setattr(
+        gcli.typer, "prompt", lambda *a, **k: prompted.append(a) or "high"
+    )
+    monkeypatch.setattr(
+        gcli.typer, "confirm", lambda *a, **k: confirmed.append(a) or False
+    )
+
+    r = _invoke(
+        "--json", "backlog", "idea", "Difficulty routing filing surface estimate"
+    )
+    assert r.exit_code == 0, r.output
+    assert prompted, "difficulty prompt never ran before the fold gate"
+    assert confirmed, "fold offer never fired on the interactive path"
+    receipt = json.loads(r.stdout)
+    assert receipt["id"]  # declined the fold -> minted separately
+    assert len(_read_entries(tmp_graph)) == 2
+
+
 def test_backlog_idea_accepts_description(tmp_graph):
     """`backlog idea "X" --description "Y"` stores Y in details."""
     r = _invoke(

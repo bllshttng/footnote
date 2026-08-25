@@ -993,6 +993,26 @@ def _refuse_create_on_external_backend() -> None:
         raise typer.Exit(code=1)
 
 
+def _stdin_is_interactive() -> bool:
+    """One seam for the tty checks the filing prompts key on, so the fold
+    gate and the create impl agree (and tests can pin the answer)."""
+    return bool(sys.stdin.isatty())
+
+
+def _prompt_difficulty_value(value: str) -> str:
+    """``typer.prompt`` value_proc for the difficulty band: re-ask on a bad
+    answer instead of crashing. click re-prompts only on ``UsageError``, while
+    ``normalize_difficulty`` raises a bare ``ValueError`` that would surface as
+    a traceback straight out of the prompt."""
+    import click
+    from fno.graph._constants import DIFFICULTY_HELP, normalize_difficulty
+
+    try:
+        return normalize_difficulty(value) or ""
+    except ValueError as exc:
+        raise click.UsageError(f"{exc}. {DIFFICULTY_HELP}") from exc
+
+
 def _create_node_impl(
     *,
     title: str,
@@ -1053,7 +1073,7 @@ def _create_node_impl(
         raise typer.Exit(code=2)
 
     if difficulty is None and require_difficulty:
-        if not sys.stdin.isatty():
+        if not _stdin_is_interactive():
             typer.echo(
                 "Error: non-interactive filing requires --difficulty "
                 f"({', '.join(('low', 'medium', 'high'))}). {DIFFICULTY_HELP}",
@@ -1062,7 +1082,7 @@ def _create_node_impl(
             raise typer.Exit(code=2)
         difficulty = typer.prompt(
             "Difficulty (low|medium|high)",
-            value_proc=lambda value: normalize_difficulty(value) or "",
+            value_proc=_prompt_difficulty_value,
         )
     try:
         difficulty = normalize_difficulty(difficulty)
@@ -1605,6 +1625,15 @@ def cmd_idea(
             typer.echo(f"folded as wave into {target_id}; minted_id: null")
         return
 
+    if difficulty is None and not separate and _stdin_is_interactive():
+        # Ask BEFORE the fold gate: the gate keys on difficulty, so an
+        # interactive filing that omits --difficulty would otherwise skip the
+        # fold offer entirely and mint straight past it (the in-impl prompt
+        # runs only after this gate has already passed the value over).
+        difficulty = typer.prompt(
+            "Difficulty (low|medium|high)", value_proc=_prompt_difficulty_value
+        )
+
     if difficulty is not None and not separate:
         from fno.graph._constants import normalize_difficulty
         from fno.graph.store import read_graph
@@ -1645,7 +1674,7 @@ def cmd_idea(
                     "separate_command": f"fno backlog idea {shlex.quote(title)} --separate --difficulty {normalized_difficulty}",
                     "minted_id": None,
                 }
-                if not sys.stdin.isatty():
+                if not _stdin_is_interactive():
                     if json_output or (ctx.obj and ctx.obj.get("json")):
                         typer.echo(json.dumps(choice_receipt, indent=2))
                     else:
@@ -3704,8 +3733,22 @@ def cmd_update(
             node["dispatch_brief"] = None if dispatch_brief.lower() == "null" else dispatch_brief
         if priority is not None:
             node["priority"] = priority
-            if priority == "p0":
+        # --blocks-everything acknowledges p0. Standalone, it acknowledges an
+        # ALREADY-p0 node (the migrate-priorities ack spelling); on anything
+        # else it is a loud error, never a silent no-op.
+        if blocks_everything:
+            effective_priority = (
+                priority if priority is not None else node.get("priority")
+            )
+            if effective_priority == "p0":
                 node["blocks_everything"] = True
+            else:
+                typer.echo(
+                    "Error: --blocks-everything acknowledges p0; pass "
+                    f"--priority p0 too (node priority is {node.get('priority')!r})",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
         if project is not None:
             node["project"] = project
         if cwd is not None:
@@ -3726,12 +3769,23 @@ def cmd_update(
             node["size"] = size.upper() if size.lower() != "null" else None
         if difficulty is not None:
             try:
-                node["difficulty"] = normalize_difficulty(
+                revised_difficulty = normalize_difficulty(
                     None if difficulty.lower() == "null" else difficulty
                 )
             except ValueError as exc:
                 typer.echo(f"fno backlog update: {exc}", err=True)
                 raise typer.Exit(code=2)
+            if revised_difficulty != node.get("difficulty"):
+                node["difficulty"] = revised_difficulty
+                # Same attributable trail the birth paths keep: a manual
+                # revision is the estimate most likely to have changed hands.
+                node.setdefault("difficulty_history", []).append(
+                    {
+                        "value": revised_difficulty,
+                        "source": "update",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
         if model is not None:
             node["model"] = None if model.lower() == "null" else model
         if model_tier is not None:

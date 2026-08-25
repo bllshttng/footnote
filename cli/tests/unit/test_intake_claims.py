@@ -170,6 +170,39 @@ def test_prepare_intake_allows_a_plan_owned_under_the_same_roadmap(tmp_path):
     assert result["id"] == "ab-0wn0001"
 
 
+def test_prepare_intake_maps_legacy_plan_priority_vocabulary(tmp_path):
+    """A plan frontmatter priority in the legacy severity vocabulary maps to
+    its pN band instead of landing raw, where the ordering silently degrades
+    it to p2 while the board still displays the raw value."""
+    from fno.graph._intake import _prepare_intake
+
+    plan = _write_quick_plan(tmp_path)
+    plan.write_text(plan.read_text().replace("created:", "priority: high\ncreated:"))
+
+    result = _prepare_intake(
+        str(plan), [],
+        roadmap_id=None, cli_title=None, cli_priority=None, cli_deps=[], cli_points=None,
+    )
+    assert result["status"] == "ready"
+    assert result["node_spec"]["priority"] == "p1"
+
+
+def test_prepare_intake_refuses_out_of_vocabulary_plan_priority(tmp_path):
+    """A plan priority no vocabulary maps refuses loudly at the write boundary
+    rather than storing a value every ordering quietly treats as p2."""
+    from fno.graph._intake import _prepare_intake
+
+    plan = _write_quick_plan(tmp_path)
+    plan.write_text(plan.read_text().replace("created:", "priority: urgent\ncreated:"))
+
+    with pytest.raises(ValueError) as exc:
+        _prepare_intake(
+            str(plan), [],
+            roadmap_id=None, cli_title=None, cli_priority=None, cli_deps=[], cli_points=None,
+        )
+    assert "invalid priority" in str(exc.value)
+
+
 # -- _resolve_claim --
 
 
