@@ -2710,10 +2710,16 @@ fn read_pr_info(
         // this arm every time).
         let self_attested_alone = coverage.rests_on_self_attestation_alone();
         coverage.apply_corroboration_policy(require_corroboration);
+        // Locked Decision 1: the pass condition is disposition-complete.
+        // Non-terminal blocking findings withhold `reviewed` here exactly as
+        // the Python merge gate refuses on them.
+        let blockers =
+            disposition_blockers(&events_text, &head_branch, head_sha, self_attested_alone);
         (
             "none".to_string(),
             reviewers_ok
-                && CoverageReport::corroboration_term(require_corroboration, self_attested_alone),
+                && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
+                && blockers.is_empty(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -2954,7 +2960,15 @@ fn read_pr_info(
         let reviewed = (info.all_required_passed() || local_recovery)
             && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
             && unaddressed.is_empty()
-            && reviewers_ok;
+            && reviewers_ok
+            // Locked Decision 1, same conjunct as the solo lane arm.
+            && disposition_blockers(
+                &events_text,
+                &head_branch,
+                head_sha,
+                self_attested_alone,
+            )
+            .is_empty();
         (
             activity_ts,
             reviewed,
@@ -5279,6 +5293,205 @@ pub struct RangeTiling {
     /// A local attestation whose head is in this list counts as Reviewed
     /// when the whole chain tiles, whatever its single-sha freshness says.
     pub chain_heads: Vec<String>,
+}
+
+// --- The disposition-complete pass condition, Rust gate side ----------------
+//
+// Locked Decision 1: a head is covered when the chain tiles AND every
+// finding in that chain is TERMINAL. Locked Decision 6: the gate re-derives
+// blocking from the per-finding primitives with its own copy of the rule and
+// never trusts the producer's `findings_blocking` count.
+
+/// The gate's own copy of the harmless-category allowlist, held equal to
+/// `DEFAULT_NONBLOCKING_CATEGORIES` on the Python side by tests (Locked
+/// Decision 6: two implementations, one corpus).
+const GATE_NONBLOCKING_CATEGORIES: &[&str] = &[
+    "style",
+    "formatting",
+    "naming",
+    "docs",
+    "typo",
+    "nit",
+    "simplification",
+    "test-coverage",
+];
+
+fn gate_finding_blocks(primitive: &Value) -> bool {
+    if primitive
+        .get("has_required_fields")
+        .and_then(|v| v.as_bool())
+        != Some(true)
+    {
+        return true;
+    }
+    let verdict = primitive
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if verdict.trim().eq_ignore_ascii_case("confirmed") {
+        return true;
+    }
+    let category = primitive
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let lowered = category.trim().to_lowercase();
+    !GATE_NONBLOCKING_CATEGORIES.contains(&lowered.as_str())
+}
+
+/// One non-terminal blocking finding, named by its finding_key plus the axis
+/// that failed, for the block message and the emitted row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DispositionBlocker {
+    pub finding_key: String,
+    /// "open", "fixed-unreviewed", "declined-uncorroborated",
+    /// "declined-without-reason", or "truncated-remainder".
+    pub axis: &'static str,
+}
+
+/// The non-terminal blocking findings in the PR's attestation chain.
+///
+/// Terminal means: fixed (and a LATER round reviewed the fix delta),
+/// non-blocking by the gate's own re-derivation, or declined WITH
+/// corroboration the author cannot mint alone (`self_attested_alone` is the
+/// coverage row's existing predicate - a disposition pass carries its own
+/// corroboration requirement, independent of
+/// `config.review.require_corroboration`, because a disposition pass can be
+/// gamed by declining and a clean review cannot). Pure: scans the events
+/// text, no IO. An empty chain has no findings and blocks nothing.
+pub fn disposition_blockers(
+    events_text: &str,
+    head_branch: &str,
+    head_sha: &str,
+    self_attested_alone: bool,
+) -> Vec<DispositionBlocker> {
+    // Collect the in-scope chain, oldest first, exactly like the tiling
+    // scan: same scoping rule, same admission of both verdicts.
+    let mut chain: Vec<Value> = Vec::new();
+    for line in events_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if line_head.is_empty() {
+            continue;
+        }
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
+        chain.push(val);
+    }
+    if chain.is_empty() {
+        return Vec::new();
+    }
+    let last_round = chain.len().saturating_sub(1);
+
+    let mut findings: Vec<(String, &Value, usize)> = Vec::new(); // key, primitive, raised round
+    let mut dispositions: std::collections::HashMap<String, (&str, &str)> =
+        std::collections::HashMap::new(); // key -> (disposition, reason)
+    let mut truncated = false;
+    for (index, val) in chain.iter().enumerate() {
+        if val
+            .pointer("/data/findings_truncated")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
+            truncated = true;
+        }
+        for primitive in val
+            .pointer("/data/findings")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
+        {
+            if let Some(key) = primitive.get("finding_key").and_then(|v| v.as_str()) {
+                if !key.is_empty() {
+                    if let Some(slot) = findings.iter_mut().find(|(k, _, _)| k == key) {
+                        slot.1 = primitive;
+                        slot.2 = index;
+                    } else {
+                        findings.push((key.to_string(), primitive, index));
+                    }
+                }
+            }
+        }
+        for entry in val
+            .pointer("/data/dispositions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
+        {
+            let key = entry
+                .get("finding_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let disposition = entry
+                .get("disposition")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            if !key.is_empty() {
+                dispositions.insert(key.to_string(), (disposition, reason));
+            }
+        }
+    }
+
+    let mut blockers: Vec<DispositionBlocker> = Vec::new();
+    if truncated {
+        blockers.push(DispositionBlocker {
+            finding_key: "(truncated remainder)".to_string(),
+            axis: "truncated-remainder",
+        });
+    }
+    for (key, primitive, raised) in &findings {
+        if !gate_finding_blocks(primitive) {
+            continue; // non-blocking by class: no action clears the gate
+        }
+        match dispositions.get(key) {
+            None => blockers.push(DispositionBlocker {
+                finding_key: key.clone(),
+                axis: "open",
+            }),
+            Some(("fixed", _)) => {
+                // Terminal only when a LATER round reviewed the fix delta.
+                if *raised >= last_round {
+                    blockers.push(DispositionBlocker {
+                        finding_key: key.clone(),
+                        axis: "fixed-unreviewed",
+                    });
+                }
+            }
+            Some(("declined", reason)) => {
+                if reason.trim().is_empty() {
+                    blockers.push(DispositionBlocker {
+                        finding_key: key.clone(),
+                        axis: "declined-without-reason",
+                    });
+                } else if self_attested_alone {
+                    blockers.push(DispositionBlocker {
+                        finding_key: key.clone(),
+                        axis: "declined-uncorroborated",
+                    });
+                }
+            }
+            // A "nonblocking" disposition over a gate-blocking finding: the
+            // gate's re-derivation wins (Locked Decision 6).
+            Some(_) => blockers.push(DispositionBlocker {
+                finding_key: key.clone(),
+                axis: "open",
+            }),
+        }
+    }
+    blockers
 }
 
 /// Run `git rev-list` and return its commit lines, oldest first only when

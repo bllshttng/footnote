@@ -37,15 +37,35 @@ tell a merge that was reviewed from a merge that was waived.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Any, Optional, Tuple
 
 from fno.pr import _merge
 
 COVERED = 0
 REFUSED = 3
 UNANSWERED = 4
+
+#: The gate's own copy of the harmless-category allowlist (Locked Decision 6:
+#: two implementations of one rule, held equal by a shared corpus). The gate
+#: never imports the producer-side classifier: it re-derives from the
+#: per-finding primitives so a hand-written event claiming
+#: ``findings_blocking: 0`` over a CONFIRMED finding is refused.
+GATE_NONBLOCKING_CATEGORIES = frozenset(
+    {
+        "style",
+        "formatting",
+        "naming",
+        "docs",
+        "typo",
+        "nit",
+        "simplification",
+        "test-coverage",
+    }
+)
 
 # The 3am release valve, read in the ONE predicate so it opens on every
 # surface the docs point at. `docs/best-practices.md` and
@@ -248,6 +268,32 @@ def coverage_verdict(
     if covered and corroboration:
         return REFUSED, corroboration, "", recompute_note
     if covered:
+        # Locked Decision 1: the pass condition is disposition-complete at the
+        # head, not clean. The chain read needs the PR's head branch to scope
+        # its older rounds; a probe miss is an instrument failure, answered
+        # UNANSWERED like the head fetch above rather than silently narrowing
+        # the chain (an under-collected chain is a fail-open).
+        refs = _merge._pr_base_head_refs(pr_number, repo)
+        if refs is None:
+            return UNANSWERED, "", "", "pr head branch fetch failed"
+        chain = attestation_chain(repo, head_branch=refs[1], head=head)
+        refusal, disposition_note = disposition_refusal(chain, cov, repo)
+        if refusal:
+            return REFUSED, refusal, "", recompute_note
+        if disposition_note and recompute_note:
+            return (
+                COVERED,
+                "",
+                (cov.get("head_sha") or "") if cov else "",
+                f"{recompute_note} [{disposition_note}]",
+            )
+        if disposition_note:
+            return (
+                COVERED,
+                "",
+                (cov.get("head_sha") or "") if cov else "",
+                disposition_note,
+            )
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", recompute_note
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
@@ -310,6 +356,225 @@ def refusal_line(refusal: str, note: str) -> str:
     if refusal and note:
         return f"{refusal} [{note}]"
     return refusal or note
+
+
+# --- The disposition-complete pass condition ---------------------------------
+#
+# Locked Decision 1: the pass condition is disposition-complete at the head,
+# not clean. A head is covered when the attestation chain tiles base..head AND
+# every finding in that chain is terminal. The chain and its dispositions are
+# read from the events log directly (the coverage row carries the tiling, the
+# attestations carry the findings), so this predicate composes with the Rust
+# producer rather than duplicating it.
+
+def _gate_finding_blocks(primitive: Any, allow: frozenset[str]) -> bool:
+    """The gate-side re-derivation of one finding primitive's blockingness.
+
+    The producer's own ``blocking`` flag is never read. An unreadable
+    primitive, a missing-fields primitive, a CONFIRMED verdict, or an
+    unrecognized category all block - the same fail-closed order the
+    producer-side classifier applies, restated here so the two are held equal
+    by tests rather than by trust.
+    """
+    if not isinstance(primitive, dict):
+        return True
+    if primitive.get("has_required_fields") is not True:
+        return True
+    verdict = primitive.get("verdict")
+    if isinstance(verdict, str) and verdict.strip().lower() == "confirmed":
+        return True
+    category = primitive.get("category")
+    if (
+        isinstance(category, str)
+        and category.strip().lower() in allow
+    ):
+        return False
+    return True
+
+
+def attestation_chain(
+    cwd: Optional[str] = None, head_branch: str = "", head: str = ""
+) -> list[dict]:
+    """The branch-scoped ``review_attestation`` events, oldest first.
+
+    Reads both logs a coverage read consults (project unscoped, global scoped
+    by repo identity), with the same scoping rule the Rust pass scan applies:
+    an event is in scope when its branch names the PR's head branch, or when
+    it pins the PR's exact head sha. A malformed line is skipped (an
+    append-only log written by several processes), never fatal.
+    """
+    try:
+        from fno.pr._reviews import _coverage_logs
+
+        project_path, global_path, slug = _coverage_logs(cwd, None)
+    except Exception:  # noqa: BLE001 - an unreadable log never tightens a gate
+        return []
+
+    def _in_scope(data: dict) -> bool:
+        if head and data.get("head_sha") == head:
+            return True
+        branch = data.get("branch")
+        return bool(head_branch) and isinstance(branch, str) and branch == head_branch
+
+    chain: list[dict] = []
+    seen: set[str] = set()
+    for path, scoped in ((project_path, False), (global_path, True)):
+        if path is None:
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for raw in fh:
+                    if '"review_attestation"' not in raw:
+                        continue
+                    try:
+                        event = json.loads(raw)
+                    except ValueError:
+                        continue
+                    data = event.get("data")
+                    if not isinstance(data, dict):
+                        continue
+                    if scoped:
+                        if data.get("repo") != slug:
+                            continue
+                    key = json.dumps(data, sort_keys=True)
+                    if key in seen:
+                        continue
+                    if _in_scope(data):
+                        seen.add(key)
+                        chain.append(
+                            {
+                                "ts": event.get("ts", ""),
+                                "head_sha": data.get("head_sha", ""),
+                                "reviewed_base_sha": data.get("reviewed_base_sha", ""),
+                                "verdict": data.get("verdict", ""),
+                                "findings": data.get("findings"),
+                                "findings_truncated": data.get("findings_truncated") is True,
+                                "dispositions": data.get("dispositions"),
+                            }
+                        )
+        except OSError:
+            continue
+    chain.sort(key=lambda e: e["ts"])
+    return chain
+
+
+def _resolved_categories(repo: str) -> frozenset[str]:
+    """The configured allowlist, extended per the shipped default."""
+    try:
+        from fno.config import load_settings_for_repo
+        from fno.review.findings import resolve_nonblocking_categories
+
+        root = Path(_merge._repo_state_dir(repo)).parent
+        return resolve_nonblocking_categories(
+            getattr(
+                load_settings_for_repo(root).review, "nonblocking_categories", None
+            )
+        )
+    except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
+        return GATE_NONBLOCKING_CATEGORIES
+
+
+def disposition_refusal(
+    chain: list[dict], cov: Optional[dict], repo: str = "."
+) -> Tuple[str, str]:
+    """The refusal when a blocking finding in the chain is non-terminal, else "".
+
+    A finding is terminal when it is fixed (and the chain moved past the round
+    that raised it), non-blocking by the gate's own re-derivation, declined
+    WITH corroboration the author cannot mint alone, or waived by the
+    override label (which answers COVERED before this runs). A declined
+    blocking finding on the author's own signature alone is NOT terminal:
+    that is the whole difference between this gate and the exploit.
+    """
+    if not chain:
+        return "", ""
+    allow = _resolved_categories(repo)
+    # Latest disposition per finding_key across the chain, plus the round
+    # each blocking finding was raised in (a fixed finding is terminal only
+    # when a LATER round reviewed the fix delta).
+    dispositions: dict[str, dict] = {}
+    raised_in: dict[str, int] = {}
+    findings_by_key: dict[str, dict] = {}
+    truncated = False
+    last_round = len(chain) - 1
+    for index, event in enumerate(chain):
+        if event["findings_truncated"]:
+            truncated = True
+        for primitive in event["findings"] or []:
+            if isinstance(primitive, dict) and primitive.get("finding_key"):
+                key = primitive["finding_key"]
+                findings_by_key[key] = primitive
+                raised_in[key] = index
+        for entry in event["dispositions"] or []:
+            if isinstance(entry, dict) and entry.get("finding_key"):
+                dispositions[entry["finding_key"]] = entry
+
+    if truncated:
+        return (
+            "attestation chain findings were truncated (findings_truncated); the "
+            "truncated remainder is non-terminal, so the gate refuses rather "
+            "than trust a count it cannot re-derive",
+            "",
+        )
+
+    # Corroboration for declines: the coverage row's existing predicate, read
+    # independent of config.review.require_corroboration (Locked Decision 2 -
+    # a disposition pass can be gamed by declining, a clean review cannot).
+    corroborated = not (cov is not None and rests_on_self_attestation_alone(cov))
+
+    nonterminal: list[str] = []
+    uncorroborated: list[str] = []
+    for key, primitive in findings_by_key.items():
+        if not _gate_finding_blocks(primitive, allow):
+            continue  # non-blocking by class: no action needed to clear the gate
+        disposition = dispositions.get(key)
+        if disposition is None:
+            nonterminal.append(key)
+        elif disposition.get("disposition") == "fixed":
+            # Terminal when the chain moved past the round that raised it:
+            # a later attestation reviewed the fix delta. Exact range
+            # coverage is the tiling conjunct the covered row carries.
+            if raised_in.get(key, last_round) >= last_round:
+                nonterminal.append(key)
+        elif disposition.get("disposition") == "declined":
+            reason = disposition.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                nonterminal.append(key)
+            elif not corroborated:
+                uncorroborated.append(key)
+        # disposition nonblocking on a gate-blocking finding: the producer
+        # claimed harmless where the gate re-derives blocking. The gate wins
+        # (Locked Decision 6); it stays non-terminal.
+        else:
+            nonterminal.append(key)
+
+    if nonterminal:
+        named = ", ".join(sorted(nonterminal))
+        return (
+            f"blocking finding(s) not terminal: {named}; a blocking finding is "
+            "cleared by fixing it and letting the next review cover the fix "
+            "delta, nothing else clears it on your own signature",
+            "",
+        )
+    if uncorroborated:
+        named = ", ".join(sorted(uncorroborated))
+        return (
+            f"declined blocking finding(s) {named} rest on the author's own "
+            "signature alone; corroboration satisfies it two ways: a second "
+            "session's head-pinned attestation, or a non-author GitHub approval",
+            "",
+        )
+    by_class = [
+        key
+        for key, primitive in findings_by_key.items()
+        if not _gate_finding_blocks(primitive, allow)
+    ]
+    note = (
+        f"{len(by_class)} non-blocking finding(s) treated by class"
+        if by_class
+        else ""
+    )
+    return "", note
 
 
 def run_coverage_check(

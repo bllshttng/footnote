@@ -389,3 +389,216 @@ fn distinct_attesters_yield_distinct_verdicts() {
         .collect();
     assert_eq!(local.len(), 2, "distinct attesters keep distinct verdicts");
 }
+
+// --- The disposition-complete pass condition, Rust gate side (AC5) ---------
+
+use fno_agents::loopcheck::disposition_blockers;
+
+fn dispositions_event(
+    head: &str,
+    findings: serde_json::Value,
+    dispositions: serde_json::Value,
+    truncated: bool,
+) -> String {
+    let mut data = serde_json::json!({
+        "reviewer": "code-review",
+        "head_sha": head,
+        "verdict": "fail",
+        "session_id": "s",
+        "branch": BRANCH,
+        "reviewed_file_count": 2,
+        "reviewed_line_count": 20,
+        "findings": findings,
+    });
+    if dispositions
+        .as_array()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false)
+    {
+        data["dispositions"] = dispositions;
+    }
+    if truncated {
+        data["findings_truncated"] = serde_json::json!(true);
+    }
+    serde_json::json!({"ts": "2026-08-25T22:00:00Z", "type": "review_attestation", "source": "hook", "data": data}).to_string()
+}
+
+fn finding(key: &str, category: &str, verdict: Option<&str>, blocking: bool) -> serde_json::Value {
+    serde_json::json!({
+        "category": category,
+        "verdict": verdict,
+        "blocking": blocking,
+        "has_required_fields": true,
+        "finding_key": key,
+    })
+}
+
+const SPECIMEN_HEAD: &str = "46695fffd00000000000000000000000000000000";
+const ROUND1_HEAD: &str = "a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3";
+
+fn specimen_events() -> String {
+    // The byte-pinned shape of ruling d-fc3b3837's specimen: five codex
+    // findings in round 1, five fixes, dispositions recorded on the round
+    // that reviewed the fix delta.
+    let keys = [
+        "cli/src/fno/pr/_reviews.py:88:correctness",
+        "cli/src/fno/pr/_merge.py:1411:correctness",
+        "hooks/git-protection.py:302:security",
+        "crates/fno-agents/src/loopcheck.rs:5355:correctness",
+        "skills/review/scripts/emit-attestation.sh:273:correctness",
+    ];
+    let findings: Vec<_> = keys
+        .iter()
+        .map(|k| finding(k, "correctness", None, true))
+        .collect();
+    let dispositions: Vec<_> = keys
+        .iter()
+        .map(|k| {
+            serde_json::json!({"finding_key": k, "disposition": "fixed", "reason": "commit abc"})
+        })
+        .collect();
+    [
+        dispositions_event(
+            ROUND1_HEAD,
+            serde_json::json!(findings),
+            serde_json::json!([]),
+            false,
+        ),
+        dispositions_event(
+            SPECIMEN_HEAD,
+            serde_json::json!([]),
+            serde_json::json!(dispositions),
+            false,
+        ),
+    ]
+    .join("\n")
+        + "\n"
+}
+
+#[test]
+fn ac5_marker_specimen_blocks_nothing() {
+    let blockers = disposition_blockers(&specimen_events(), BRANCH, SPECIMEN_HEAD, true);
+    assert_eq!(blockers, Vec::new());
+}
+
+#[test]
+fn ac5b_marker_one_open_finding_blocks_by_key() {
+    let mut events = specimen_events();
+    events.push('\n');
+    events.push_str(&dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([finding(
+            "cli/src/fno/pr/_coverage_gate.py:999:correctness",
+            "correctness",
+            None,
+            true
+        )]),
+        serde_json::json!([]),
+        false,
+    ));
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, true);
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(
+        blockers[0].finding_key,
+        "cli/src/fno/pr/_coverage_gate.py:999:correctness"
+    );
+    assert_eq!(blockers[0].axis, "open");
+}
+
+#[test]
+fn declined_without_corroboration_blocks() {
+    let events = [dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([finding("sec.rs:1:security", "security", None, true)]),
+        serde_json::json!([serde_json::json!({
+            "finding_key": "sec.rs:1:security",
+            "disposition": "declined",
+            "reason": "not applicable here",
+        })]),
+        false,
+    )]
+    .join("\n");
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, true);
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0].axis, "declined-uncorroborated");
+
+    let clean = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
+    assert_eq!(clean, Vec::new());
+}
+
+#[test]
+fn fixed_in_the_last_round_is_unreviewed() {
+    // A fixed disposition recorded on the SAME round that raised the
+    // finding: the fix delta was never reviewed.
+    let events = [dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([finding("a.py:1:correctness", "correctness", None, true)]),
+        serde_json::json!([serde_json::json!({
+            "finding_key": "a.py:1:correctness",
+            "disposition": "fixed",
+            "reason": "same round",
+        })]),
+        false,
+    )]
+    .join("\n");
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0].axis, "fixed-unreviewed");
+}
+
+#[test]
+fn producer_count_is_never_the_answer() {
+    // AC5-EDGE's twin at the gate: an event claiming zero blocking over a
+    // CONFIRMED finding tagged style. The gate re-derives; the count is
+    // refused.
+    let events = [dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([finding("lie.py:1:style", "style", Some("CONFIRMED"), false)]),
+        serde_json::json!([]),
+        false,
+    )]
+    .join("\n");
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0].finding_key, "lie.py:1:style");
+}
+
+#[test]
+fn nonblocking_by_class_needs_no_disposition() {
+    let events = [dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([
+            finding("b.py:2:nit", "nit", None, false),
+            finding("c.py:3:typo", "typo", None, false),
+        ]),
+        serde_json::json!([]),
+        false,
+    )]
+    .join("\n");
+    assert_eq!(
+        disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false),
+        Vec::new()
+    );
+}
+
+#[test]
+fn truncated_remainder_blocks() {
+    let events = [dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([finding("a.py:1:typo", "typo", None, false)]),
+        serde_json::json!([]),
+        true,
+    )]
+    .join("\n");
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0].axis, "truncated-remainder");
+}
+
+#[test]
+fn empty_chain_blocks_nothing() {
+    assert_eq!(
+        disposition_blockers("", BRANCH, SPECIMEN_HEAD, true),
+        Vec::new()
+    );
+}
