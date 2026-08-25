@@ -146,7 +146,7 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 **Encode (the graph is the deliverable).**
 `fno backlog epic status <epic>` · `get` · `update --add-blocker/--blocked-by/--plan-path/--dispatch-verb/--dispatch-brief` · `rank` · `defer -R` / `undefer` · `advance --epic`
 
-**Rule.** `fno backlog decide <node|pr-N|area> "<what>" --rationale "<why>"` records a ruling that changes what a worker does. `fno backlog decisions <same>` reads it back, newest first, with superseded rows marked. A bare `fno backlog decisions` shows the recent ones across every subject. The subject is any string. When a node exists, use its id. Otherwise use `pr-<n>`, or the area. A reign makes dozens of rulings and the graph holds none of them, so a ruling you do not record dies with your context. See [decision-record](../../docs/architecture/decision-record.md).
+**Rule.** `fno backlog decide <node|pr-N|area> "<what>" --rationale "<why>"` records a ruling that changes what a worker does. `fno backlog decisions <same>` reads it back, newest first, with superseded rows marked. A bare `fno backlog decisions` shows the recent ones across every subject. When a node exists, use its id. Otherwise use `pr-<n>` or the canonical subject returned by the standing-law query; a checked-in alias is valid, but never mint a near-synonym. Machine-local rulings remain project policy. Design law a stranger cloning the repository needs belongs in `docs/architecture/decisions.yaml` through a reviewed change. See [decision-record](../../docs/architecture/decision-record.md).
 
 **Dispatch.**
 `fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|bg|headless` starts a worker.
