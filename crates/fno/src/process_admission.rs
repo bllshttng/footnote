@@ -415,6 +415,7 @@ pub fn std_spawn(command: &mut std::process::Command) -> io::Result<std::process
 
 pub fn std_output(command: &mut std::process::Command) -> io::Result<std::process::Output> {
     command
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let child = std_spawn(command)?;
@@ -454,6 +455,7 @@ pub async fn tokio_output(
     command: &mut tokio::process::Command,
 ) -> io::Result<std::process::Output> {
     command
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let child = tokio_spawn(command)?;
@@ -581,13 +583,15 @@ fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize,
 
 fn attributed_pids(rows: &[ProcessRow]) -> Result<HashSet<u32>, String> {
     let roots = process_root_names()?;
+    let current_pid = std::process::id();
     let by_pid: HashMap<u32, &ProcessRow> = rows.iter().map(|row| (row.pid, row)).collect();
     let mut attributed = HashSet::new();
     for row in rows {
         // The mux/client/test executable is the admission observer, not a
         // worker slot. Count its descendants, including zombies, so a fresh
         // server can admit two children under a ceiling of two.
-        let is_attributed = !roots.contains(&row.name) && reaches_root(row, &by_pid, &roots)?;
+        let is_attributed =
+            row.pid != current_pid && reaches_root(row, &by_pid, &roots, current_pid)?;
         if is_attributed {
             attributed.insert(row.pid);
         }
@@ -617,11 +621,12 @@ fn reaches_root(
     row: &ProcessRow,
     by_pid: &HashMap<u32, &ProcessRow>,
     roots: &HashSet<String>,
+    root_pid: u32,
 ) -> Result<bool, String> {
     let mut seen = HashSet::new();
     let mut current = row;
     loop {
-        if roots.contains(&current.name) {
+        if current.pid == root_pid || roots.contains(&current.name) {
             return Ok(true);
         }
         if !seen.insert(current.pid) {

@@ -8740,7 +8740,22 @@ impl Core {
                     // Spawn-first (Locked 4): a spawn failure leaves the layout untouched (AC3-ERR).
                     let (acct, cd) = self.attach_account_ctx(&id);
                     let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
-                    let new_pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
+                    let pane_count = self
+                        .viewed_tab(view)
+                        .map(|tab| tree::leaves(&tab.root).len().saturating_sub(1))
+                        .unwrap_or(0);
+                    let permit =
+                        match crate::process_admission::admit_pane(pane_count, placement.max_panes)
+                        {
+                            Ok(permit) => permit,
+                            Err(error) => {
+                                self.notice(client_id, format!("attach failed: {error}"));
+                                return Flow::Continue;
+                            }
+                        };
+                    let new_pid = match self
+                        .spawn_pane_cmd_with_permit(&argv, rows, cols, &spawn_cwd, permit)
+                    {
                         Ok(p) => p,
                         Err(e) => {
                             self.notice(client_id, format!("attach failed: {e}"));
@@ -8852,13 +8867,24 @@ impl Core {
                 };
                 let (acct, cd) = self.attach_account_ctx(&id);
                 let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
-                let pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.notice(client_id, format!("attach failed: {e}"));
+                let permit = match crate::process_admission::admit_pane(
+                    self.placement_pane_count(dest, &effective),
+                    effective.max_panes,
+                ) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        self.notice(client_id, format!("attach failed: {error}"));
                         return Flow::Continue;
                     }
                 };
+                let pid =
+                    match self.spawn_pane_cmd_with_permit(&argv, rows, cols, &spawn_cwd, permit) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.notice(client_id, format!("attach failed: {e}"));
+                            return Flow::Continue;
+                        }
+                    };
                 self.name_attached_pane(pid, &id, cd.as_deref());
                 // Place through the shared v41 helper: it honors the anchored
                 // drop's `tab`/`at` (a split beside the exact drop pane), and
