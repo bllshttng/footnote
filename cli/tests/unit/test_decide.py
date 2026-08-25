@@ -1198,6 +1198,37 @@ def test_empty_lane_filter_recovery_drops_lane_when_lane_caused_zero(
     assert "fno backlog decisions 'force-push' --lane coord --state all" not in listed.output
 
 
+def test_state_plus_missing_lane_drops_lane_from_recovery(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-21T00:00:00Z",
+            "decision_id": "d-stateNoLane",
+            "decision": "standing answer",
+            "subject": "force-push",
+            "authority_source": "operator",
+        },
+    )
+
+    listed = runner.invoke(
+        decide_app,
+        [
+            "list",
+            "--subject",
+            "force-push",
+            "--lane",
+            "coord",
+            "--state",
+            "expired",
+        ],
+    )
+    assert listed.exit_code == 0, listed.output
+    assert "fno backlog decisions 'force-push' --state all" in listed.output
+    assert "fno backlog decisions 'force-push' --lane coord --state all" not in listed.output
+
+
 def test_record_without_a_resolvable_subject_still_writes_the_event(
     root: Path, tmp_graph: Path, index: Path
 ):

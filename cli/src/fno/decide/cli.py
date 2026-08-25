@@ -723,7 +723,7 @@ def _list_decisions(
                 recovery_command = "fno backlog decisions"
                 if subject is not None:
                     recovery_command += f" '{subject}'"
-                if lane is not None and state is not None:
+                if lane is not None and counts.get(lane):
                     recovery_command += f" --lane {lane}"
                 recovery_command += " --state all"
                 typer.echo(
