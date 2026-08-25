@@ -551,14 +551,16 @@ class PreShipReviewPlan:
 
 
 def harness_can_self_review(harness: Optional[str]) -> bool:
-    """Whether this harness exposes a native self-review verb.
+    """Whether a lane THIS code drives can fire the harness's review verb.
 
-    opencode joined at x-dae5: `/review-changes` is recorded in the descriptor
-    map, so the self-review floor is satisfiable there. agy/gemini stay out -
-    no native verb; agy's recorded `/fno:review` fallback serves lane-named
-    block reasons, but the floor's job is to demand only attestations a native
-    path produces."""
-    return harness in {"claude", "codex", "opencode"}
+    A recorded verb is not a transport. opencode's `/review-changes` is in the
+    descriptor map, but an opencode session rides a non-keystroke daemon lane
+    (a raw slash reaches the model as text, never a parser) and its mux row
+    declares submit_keys unsupported, so the verb cannot fire from here;
+    flooring on it demanded an attestation no path produces. agy/gemini stay
+    out the same way: no native verb behind the recorded fallback. Re-add a
+    harness only when a lane that actually fires its verb exists."""
+    return harness in {"claude", "codex"}
 
 
 # The effort levels an autonomous agent may issue. `ultra` is billed

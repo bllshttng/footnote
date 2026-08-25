@@ -1207,12 +1207,13 @@ fn harness_can_self_review(harness: Option<&str>) -> bool {
 /// `cli/src/fno/review_capability.py`; the two are pinned to each other by
 /// `test_floor_verbless_set_stays_locked_to_the_rust_twin`, so a harness lands
 /// on both sides or the suite goes red.
-const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy"];
+const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy", "opencode"];
 
 /// The self-review FLOOR policy on the author harness (x-129b). Distinct from
 /// the capability question above: `None` answers "unattributable", not
 /// "verbless". A KNOWN harness with a native verb floors; a KNOWN verbless
-/// harness (gemini/agy) does not, because the floor would demand an
+/// harness (gemini/agy; opencode's verb is recorded but no lane this code
+/// drives can fire it) does not, because the floor would demand an
 /// attestation no native verb there produces. An UNRESOLVED harness (absent
 /// or ambiguous ambient markers - a claude session started from a codex
 /// shell) floors, because ambiguity about who authored the run is not

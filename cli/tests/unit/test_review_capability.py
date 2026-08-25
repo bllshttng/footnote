@@ -240,7 +240,10 @@ def test_self_review_invocation_names_the_harness_verb():
 
     assert rc.harness_can_self_review("claude") is True
     assert rc.harness_can_self_review("codex") is True
-    assert rc.harness_can_self_review("opencode") is True
+    # opencode's verb is recorded, but no lane this code drives can fire it
+    # (daemon lane submits text; mux declares submit unsupported), so the
+    # floor must not demand its attestation.
+    assert rc.harness_can_self_review("opencode") is False
     assert rc.harness_can_self_review("gemini") is False
     assert rc.harness_can_self_review("agy") is False
     assert rc.harness_can_self_review(None) is False
