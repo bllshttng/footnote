@@ -65,26 +65,58 @@ if copies_agree:
     print(f"  ok: {len(copies)} REQUIRED_SCOPE_NAMES copies in preflight.sh, identical")
 
 py = open("cli/src/fno/pr/_preflight.py").read()
-m = re.search(r"_PREFLIGHT_BASE_SCOPE = frozenset\(\s*\{(.*?)\}", py, re.S)
-python_scope = set(re.findall(r'"([^"]+)"', m.group(1))) if m else set()
-
 rs = open("crates/fno-agents/src/verify_evidence.rs").read()
-m = re.search(r"const PREFLIGHT_BASE_SCOPE: \[&str; \d+\] = \[(.*?)\];", rs, re.S)
-rust_scope = set(re.findall(r'"([^"]+)"', m.group(1))) if m else set()
+
+
+def literals(text, pattern):
+    m = re.search(pattern, text, re.S)
+    return set(re.findall(r'"([^"]+)"', m.group(1))) if m else set()
+
+
+PY_FILE = "cli/src/fno/pr/_preflight.py"
+RS_FILE = "crates/fno-agents/src/verify_evidence.rs"
+
+# The OPTIONAL set is checked too, and it is not a lesser case. Both eligibility
+# tests reject an UNKNOWN leg exactly as hard as they reject a missing required
+# one, so a leg added to one side's optional list and not the other's still
+# untrusts every receipt - and the historical break this guard's header cites,
+# `tracker-gates:fno`, was an optional leg.
+groups = [
+    ("required", declared,
+     literals(py, r"_PREFLIGHT_BASE_SCOPE = frozenset\(\s*\{(.*?)\}"),
+     literals(rs, r"const PREFLIGHT_BASE_SCOPE: \[&str; \d+\] = \[(.*?)\];")),
+    ("optional", None,
+     literals(py, r"_PREFLIGHT_OPTIONAL_SCOPE = frozenset\(\s*\{(.*?)\}"),
+     literals(rs, r"const PREFLIGHT_OPTIONAL_SCOPE: \[&str; \d+\] = \[(.*?)\];")),
+]
 
 if not declared:
     die("read 0 required scope names from preflight.sh")
-for label, names in (("cli/src/fno/pr/_preflight.py", python_scope),
-                     ("crates/fno-agents/src/verify_evidence.rs", rust_scope)):
-    if not names:
-        die(f"{label}: could not read a base scope list")
+
+for kind, from_sh, py_names, rs_names in groups:
+    if not py_names:
+        die(f"{PY_FILE}: could not read the {kind} scope list")
         continue
-    if names != declared:
-        die(f"{label} disagrees with preflight.sh: "
-            f"missing {sorted(declared - names) or 'nothing'}, "
-            f"extra {sorted(names - declared) or 'nothing'}")
-if not fail:
-    print(f"  ok: {len(declared)} required legs, identical in all three files")
+    if not rs_names:
+        die(f"{RS_FILE}: could not read the {kind} scope list")
+        continue
+    # preflight.sh declares the required set only; the optional legs are named
+    # at their record_leg call sites, so the two language copies are compared
+    # against each other there.
+    pairs = [(PY_FILE, py_names), (RS_FILE, rs_names)] if from_sh is not None else []
+    reference = from_sh if from_sh is not None else py_names
+    ref_label = "preflight.sh" if from_sh is not None else PY_FILE
+    if not pairs:
+        pairs = [(RS_FILE, rs_names)]
+    ok = True
+    for label, names in pairs:
+        if names != reference:
+            die(f"{label} {kind} scope disagrees with {ref_label}: "
+                f"missing {sorted(reference - names) or 'nothing'}, "
+                f"extra {sorted(names - reference) or 'nothing'}")
+            ok = False
+    if ok:
+        print(f"  ok: {len(reference)} {kind} legs, identical across the files that carry them")
 
 sys.exit(fail)
 PY

@@ -469,7 +469,6 @@ pub struct ServerProc(pub std::process::Child);
 pub struct ServerTermination {
     pub pid: u32,
     pub status: std::process::ExitStatus,
-    pub forced: bool,
 }
 
 impl ServerProc {
@@ -498,21 +497,20 @@ impl ServerProc {
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
             if let Some(status) = self.0.try_wait().expect("owned server status") {
-                return ServerTermination {
-                    pid,
-                    status,
-                    forced: false,
-                };
+                return ServerTermination { pid, status };
             }
             std::thread::sleep(Duration::from_millis(25));
         }
+        // Escalation is not free and it used to be invisible: a `forced` field
+        // recorded it and nothing ever read the field, so a server that stopped
+        // reaching its SIGTERM handler cost three silent seconds per restart
+        // and every test still passed. Not an assertion - a slow shutdown on a
+        // loaded runner is legitimate, and failing on it would be noise in the
+        // stress trial count. A line on stderr is the right weight.
+        eprintln!("server pid {pid} ignored SIGTERM for 3s; escalating to SIGKILL");
         let _ = self.0.kill();
         let status = self.0.wait().expect("owned server waits after escalation");
-        ServerTermination {
-            pid,
-            status,
-            forced: true,
-        }
+        ServerTermination { pid, status }
     }
 }
 

@@ -263,10 +263,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     # REPORTS, does not gate. The step publishes its trial count to the run
-    # summary and exits 0; graduate by making the step assert failures=0, and
+    # summary and always exits 0; graduate by making it assert failures=0, and
     # only once the comparison below says something. `continue-on-error` stays
-    # as a second belt: without it a genuine harness breakage (no summary line
-    # at all, which the step DOES fail on) would red the PR.
+    # as a second belt against a step that dies before its own reporting runs.
     #
     # WHAT THIS HARNESS HAS AND HAS NOT SHOWN, measured 2026-08-25 on this
     # runner. Read this before citing a trial count as evidence of anything.
@@ -307,14 +306,21 @@ jobs:
             ~/.cargo/git
             crates/fno-agents/target
             crates/fno/target
-          # A key of its OWN, deliberately. This job builds three test binaries
-          # where the `test` job builds forty-six, and it finishes about seven
-          # minutes earlier, so sharing a key means this small tree wins the
-          # save race and the big job restores a cache missing most of its
-          # artifacts. It still WARMS from the shared prefix via restore-keys.
-          key: ${{ runner.os }}-cargo-stress-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          # A key of its OWN, and one that is NOT a prefix match for the shared
+          # one. This job builds three test binaries where the `test` job builds
+          # forty-six, and it finishes about seven minutes earlier, so a shared
+          # key means this small tree wins the save race and the big job
+          # restores a cache missing most of its artifacts. The first attempt at
+          # this comment claimed a dedicated key fixed that while still naming
+          # it `<os>-cargo-stress-...`, which the `test` job's own
+          # `restore-keys: <os>-cargo-` matches as a prefix - the same failure,
+          # one indirection later. `stressonly` sorts outside that prefix.
+          #
+          # The asymmetry is deliberate: this job still warms from the big
+          # cache, and the big job can no longer restore this one.
+          key: ${{ runner.os }}-stressonly-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-stress-
+            ${{ runner.os }}-stressonly-
             ${{ runner.os }}-cargo-
 
       - name: Stress the process-backed e2e binaries
@@ -329,24 +335,28 @@ jobs:
           STRESS_TRIALS: "20"
         run: |
           set -o pipefail
-          bash scripts/tests/stress-rust-e2e-concurrency.sh 2>&1 | tee stress.log || true
-          # PUBLISH the number, do not fail on it. `continue-on-error` alone was
-          # not enough: it keeps the workflow green but the job's own check run
-          # still reports `failure`, which reads as a red PR to every
-          # merge-readiness verb. Reporting means the number reaches a reader
-          # without gating, so it goes to the run summary.
+          bash scripts/tests/stress-rust-e2e-concurrency.sh 2>&1 | tee stress.log
+          rc=${PIPESTATUS[0]}
+          # This job REPORTS. Its only output is the run summary, and it exits 0
+          # whatever happened, because every non-zero path here is
+          # infrastructure noise rather than a verdict: the harness exits 2 when
+          # a cargo build fails, exits 0 with no summary on a dirty tree, and
+          # exits 1 on a failed trial - which is the number being published, not
+          # a reason to red a PR. An earlier version failed on a missing summary
+          # and turned all three into a red merge-readiness signal.
           #
-          # The summary line itself is the positive marker. A run that produced
-          # none did not measure anything, and that DOES fail, because a silent
-          # stand-down must never read as a clean twenty trials.
+          # What replaces that guard is an explicit NOT-MEASURED line. A reader
+          # who sees nothing learns nothing; a reader who sees "not measured"
+          # knows the difference between that and a clean twenty trials.
           summary="$(grep '^stress_summary ' stress.log || true)"
-          if [ -z "$summary" ]; then
-            echo "no stress_summary line: the harness did not run 20 trials" >&2
-            exit 1
+          if [ -n "$summary" ]; then
+            echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+            grep '^stress_trial .*=fail' stress.log >> "$GITHUB_STEP_SUMMARY" || true
+          else
+            reason="$(grep -E '^stress_(skipped|setup)=' stress.log | tail -1)"
+            echo "stress_not_measured exit=$rc ${reason:-reason=unknown}" >> "$GITHUB_STEP_SUMMARY"
           fi
-          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
-          grep '^stress_trial .*=fail' stress.log >> "$GITHUB_STEP_SUMMARY" || true
-          echo "$summary"
+          cat "$GITHUB_STEP_SUMMARY"
 
   audit:
     name: cargo audit (RUSTSEC advisories)

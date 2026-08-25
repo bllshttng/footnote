@@ -1084,7 +1084,12 @@ if [[ -n "$CHANGED_BASE" ]]; then
     echo ""
     echo "preflight: === changed packet (CHANGED SUBSET - partial, never the gate) ==="
     c0="$SECONDS"
-    run_hermetic uv run --project cli fno-py doctor test smoke --changed \
+    # Same cap as the smoke leg below, and for a sharper reason. The changed
+    # selector maps the stress script to ITSELF, so editing that script makes
+    # this leg - the earliest actionable signal preflight produces - spend a
+    # cold build plus twenty 35.9s trials before the real gate has started.
+    # cli-ci pins its own changed-smoke step to 1 for exactly this.
+    run_hermetic env STRESS_TRIALS=1 uv run --project cli fno-py doctor test smoke --changed \
         --base "$CHANGED_BASE" --head "$CANDIDATE_SHA"
     creq=$?
     case $creq in
