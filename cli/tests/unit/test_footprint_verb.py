@@ -114,7 +114,7 @@ def test_live_root_pids_includes_roster_resolved_claude_bg_worker(monkeypatch) -
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
     monkeypatch.setattr(
         "fno.agents.session_procs.bg_socket_pid_map",
-        lambda: {"cl-bg": 902},
+        lambda **_kwargs: {"cl-bg": 902},
     )
     monkeypatch.setattr(
         "fno.agents.spawn_gate._pid_alive",
@@ -122,6 +122,29 @@ def test_live_root_pids_includes_roster_resolved_claude_bg_worker(monkeypatch) -
     )
 
     assert doctor_footprint._live_root_pids() == {902}
+
+
+def test_ac9_edge_cause_payload_is_bounded(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from fno.footprint import parse_footprint
+
+    rows = "\n".join(
+        f"{100 + i} 1 01:00:00 {100 - i}.0 1024 fno-agents-worker worker-{i} "
+        + "x" * 5000
+        for i in range(10)
+    )
+    reading = parse_footprint(f"PID PPID ELAPSED %CPU RSS COMMAND\n{rows}")
+
+    payload = doctor_footprint._payload(
+        reading,
+        process_threshold=None,
+        exit_code=0,
+        top_limit=5,
+        command_limit=64,
+    )
+
+    assert len(payload["top"]) == 5
+    assert all(len(item["command"]) == 64 for item in payload["top"])
 
 
 def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(monkeypatch) -> None:

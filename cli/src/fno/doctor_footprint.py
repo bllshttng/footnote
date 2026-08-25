@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ def _fno_binary() -> str:
     return shutil.which("fno") or shutil.which("fno-py") or "fno"
 
 
-def _live_root_pids() -> set[int]:
+def _live_root_pids(*, deadline: float | None = None) -> set[int]:
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
     try:
@@ -43,7 +44,14 @@ def _live_root_pids() -> set[int]:
                 continue
             if _pid_alive(row.pid, row.pid_start_time) is True:
                 roots.add(row.pid)
-        socket_pids = bg_socket_pid_map()
+        if deadline is not None and time.monotonic() >= deadline:
+            return roots
+        socket_timeout = (
+            15.0
+            if deadline is None
+            else max(0.01, deadline - time.monotonic())
+        )
+        socket_pids = bg_socket_pid_map(timeout=socket_timeout)
         for row in rows:
             if (
                 row.status in LIVE_STATUSES
@@ -146,6 +154,8 @@ def _payload(
     *,
     process_threshold: int | None,
     exit_code: int,
+    top_limit: int | None = None,
+    command_limit: int | None = None,
 ) -> dict[str, Any]:
     cpu_capacity = _cpu_capacity_cores()
     measured_share = (
@@ -169,8 +179,17 @@ def _payload(
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
         "top": [
-            {"cpu_percent": cpu_percent, "command": command}
-            for cpu_percent, command in reading.top
+            {
+                "cpu_percent": cpu_percent,
+                "command": (
+                    command[:command_limit]
+                    if command_limit is not None
+                    else command
+                ),
+            }
+            for cpu_percent, command in (
+                reading.top[:top_limit] if top_limit is not None else reading.top
+            )
         ],
         "unparsed_lines": reading.unparsed_lines,
         "exit_code": exit_code,
@@ -201,6 +220,8 @@ def _emit_result(
         reading,
         process_threshold=process_threshold,
         exit_code=exit_code,
+        top_limit=5 if cause_only else None,
+        command_limit=1024 if cause_only else None,
     )
     if json_output:
         typer.echo(json.dumps(payload, sort_keys=True))
