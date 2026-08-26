@@ -480,6 +480,20 @@ def test_bare_node_claim_counts_as_in_flight(tmp_path, monkeypatch, _isolated_gr
     assert [n["id"] for n in sel] == ["n-c"]
 
 
+def test_domain_seed_failure_fails_open(tmp_path, monkeypatch):
+    """A claims-read fault in the domain seed must not kill the dispatch round
+    to protect a log suffix - the seed feeds only the +same-domain annotation,
+    and the in-flight seed two lines down already fails open the same way."""
+    def boom(claims_root=None):
+        raise OSError("claims dir unreadable")
+
+    monkeypatch.setattr(advance, "_live_lane_domains", boom)
+    ready = _nodes(("n-a", "code"), ("n-c", "docs"))
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    assert [n["id"] for n in advance.select_lane_fill(2, claims_root=tmp_path)] == ["n-a", "n-c"]
+
+
 def test_inflight_seed_failure_fails_open(tmp_path, monkeypatch):
     """Seeding runs outside the main try; a read error must not wedge dispatch."""
     def boom(*a, **k):

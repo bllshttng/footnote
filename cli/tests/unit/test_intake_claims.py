@@ -337,6 +337,37 @@ def test_multi_intake_exempts_already_intaked_surfaceless_plan(
     assert any("Fresh surface plan" in (t or "") for t in titles)
 
 
+def test_multi_intake_exempts_bound_surfaceless_plan_across_roadmaps(
+    fixture_graph, tmp_path, capsys
+):
+    """A surface-less plan owned under ANY roadmap is exempt from the batch
+    refusal: the mutator skips it per file with the accurate owner-conflict
+    error instead of blaming a file table the owner never reads."""
+    from types import SimpleNamespace
+
+    bound = _surfaceless_plan(tmp_path, title="Bound surfaceless")
+    entries = _read_entries(fixture_graph)
+    entries.append(
+        _node("ab-r0ad0001", title="Owner under another roadmap",
+              plan_path=str(bound), status="ready", roadmap_id="roadmap-a")
+    )
+    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    (tmp_path / "fresh2").mkdir()
+    fresh = _write_quick_plan(tmp_path / "fresh2", title="Cross roadmap fresh")
+
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(
+        args, [str(bound), str(fresh)], roadmap_id=None, dry_run=False
+    )
+    captured = capsys.readouterr()
+    # The bound plan resolves per file to the owner conflict, not a refusal.
+    assert "delivery unit" in captured.err
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert any("Cross roadmap fresh" in (t or "") for t in titles)
+
+
 # -- _resolve_claim --
 
 

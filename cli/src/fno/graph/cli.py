@@ -12582,16 +12582,17 @@ def _do_intake_multi(
     # Unlike the per-file refusals inside the mutator (which skip one file and
     # land the rest), a surface-less plan refuses the WHOLE batch here, before
     # any write: the rule is knowable up front and a half-landed batch is what
-    # the caller would otherwise have to unwind by hand. Already-intaked plans
-    # are exempt - they are a no-op for this verb (the single lane prints
-    # 'already intaked' and exits 0), and refusing a plain re-run over one
-    # would blame a file this run was never going to touch.
-    from fno.graph._intake import _match_plan_in_graph
+    # the caller would otherwise have to unwind by hand. Plans already bound to
+    # a node are exempt on every roadmap: the mutator resolves them per file
+    # with the accurate verdicts ('already intaked' same-roadmap, the
+    # owner-conflict error cross-roadmap), and blaming one for the batch would
+    # name a remedy - add file rows - that cannot fix the real blocker.
+    from fno.graph.store import plan_path_owner_conflict
 
     _refuse_surfaceless_intake(
         [
             f for f in concrete_files
-            if _match_plan_in_graph(preview_entries, f, roadmap_id) is None
+            if plan_path_owner_conflict(preview_entries, None, f) is None
         ],
         allow_no_surface=allow_no_surface,
     )

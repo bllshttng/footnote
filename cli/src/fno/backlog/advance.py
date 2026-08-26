@@ -690,8 +690,17 @@ def select_lane_fill(
     # annotation truthful across ticks, not just within this call.
     # The peer-lane set is stable within a single-dispatcher call (the singleton
     # walker:<root> claim serializes dispatchers), so it is seeded once here; this
-    # call's own picks are added below as they are acquired.
-    used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
+    # call's own picks are added below as they are acquired. Fails open like the
+    # in-flight seed below: a read fault must not kill the dispatch round to
+    # protect a log suffix.
+    try:
+        used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
+    except Exception as exc:  # noqa: BLE001 - annotation-only seed; fail open
+        _LOG.warning(
+            "lane-fill: live-lane domain seed unreadable (same-domain "
+            "annotations may be missing): %s", exc,
+        )
+        used_domains = set()
     picked_ids: set[str] = set()
     # Nodes already in flight, for the file-surface collision gate below. Seeded
     # from live workers; this call's own picks are appended as they land. Seeding
@@ -1362,7 +1371,7 @@ def _spawn_worker(
 # Lane dispatch (parallel mode, epic x-42d5 group 3): spawn + per-lane isolation
 # ---------------------------------------------------------------------------
 #
-# G1 shipped the atomic lane-slot cap (claims/lanes.py); G2 the distinct-domain
+# G1 shipped the atomic lane-slot cap (claims/lanes.py); G2 the lane-fill
 # selector (select_lane_fill above) + the `fno backlog lane-fill` preview CLI.
 # G3 is the SPAWN layer: it takes G2's selection (which already holds a
 # dispatch-time lane slot per node, LD#8) and launches each pick as an ISOLATED
