@@ -4334,6 +4334,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     append_review_invocation(
                         session,
                         review_command.take(),
+                        true,
                         code == EXIT_OK,
                         receipt,
                     );
@@ -4454,9 +4455,10 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
         append_review_invocation(
             session,
             review_command,
-            code == EXIT_OK,
+            false,
+            false,
             if code == EXIT_OK {
-                "text delivered"
+                "text delivered, no submit requested"
             } else {
                 "text delivery failed"
             },
@@ -5406,6 +5408,7 @@ fn review_invocation_branch_and_head() -> (Option<String>, Option<String>) {
 fn append_review_invocation(
     session: &str,
     command: Option<(String, String)>,
+    submitted: bool,
     submit_confirmed: bool,
     receipt: &str,
 ) {
@@ -5416,6 +5419,7 @@ fn append_review_invocation(
         &review_events_path(),
         session,
         command,
+        submitted,
         submit_confirmed,
         receipt,
     );
@@ -5425,6 +5429,7 @@ fn append_review_invocation_at(
     path: &Path,
     session: &str,
     command: Option<(String, String)>,
+    submitted: bool,
     submit_confirmed: bool,
     receipt: &str,
 ) {
@@ -5433,6 +5438,14 @@ fn append_review_invocation_at(
     };
     let (branch, head_sha) = review_invocation_branch_and_head();
     let invocation_id = review_invocation_id();
+    // `submitted` records whether this send carried a submit key at all. A
+    // plain text write is not a submit, so it must not claim one: the row is
+    // the transport fact an operator debugs a wedged review against.
+    let (submit_required, submit_key, submit_confirmed) = if submitted {
+        (true, "\\r", submit_confirmed)
+    } else {
+        (false, "none", false)
+    };
     let data = serde_json::json!({
         "invocation_id": invocation_id,
         "stage": "sent",
@@ -5441,8 +5454,8 @@ fn append_review_invocation_at(
         "transport": "mux_pane_send_raw",
         "initiator": "unknown",
         "target_session_id": session,
-        "submit_required": true,
-        "submit_key": "\\r",
+        "submit_required": submit_required,
+        "submit_key": submit_key,
         "submit_confirmed": submit_confirmed,
         "receipt": receipt,
         "branch": branch,
@@ -7372,6 +7385,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let command = review_invocation_command(b"/review medium --comment");
+        let command_plain = command.clone();
         assert_eq!(
             command,
             Some(("/review".to_string(), "medium --comment".to_string()))
@@ -7380,6 +7394,7 @@ mod tests {
             &path,
             "mux-session",
             command,
+            true,
             false,
             "text delivered, submission unconfirmed",
         );
@@ -7394,11 +7409,29 @@ mod tests {
             event["data"]["receipt"],
             "text delivered, submission unconfirmed"
         );
+        assert_eq!(event["data"]["submit_required"], true);
+        assert_eq!(event["data"]["submit_key"], "\\r");
         assert_eq!(event["data"]["submit_confirmed"], false);
         assert!(event["data"]["invocation_id"]
             .as_str()
             .unwrap()
             .starts_with("ri-"));
+        let _ = std::fs::remove_file(&path);
+
+        // A plain text write with no submit key must not claim one.
+        append_review_invocation_at(
+            &path,
+            "mux-session",
+            command_plain,
+            false,
+            false,
+            "text delivered, no submit requested",
+        );
+        let line = std::fs::read_to_string(&path).unwrap();
+        let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(event["data"]["submit_required"], false);
+        assert_eq!(event["data"]["submit_key"], "none");
+        assert_eq!(event["data"]["submit_confirmed"], false);
         let _ = std::fs::remove_file(path);
     }
 

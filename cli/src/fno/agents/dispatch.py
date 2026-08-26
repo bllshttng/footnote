@@ -6089,8 +6089,10 @@ def _mux_pane_send(
     replacing it), and ignored for a non-claude recipient, which has no
     ~/.claude/projects transcript to confirm against.
 
-    ``review`` is a private review-request lane. It is only set by the target
-    final-head producer after it has validated the explicit PR payload. On a
+    ``review`` is a private review-request lane. It is set by the target
+    final-head producer after it has validated the explicit PR payload, and
+    by the raw mail review send (any parsed review verb), which classifies
+    the submitted frame. On a
     Codex pane, the submitted payload is then classified from a positive frame:
     a composer showing ``tab to queue message`` plus the exact payload gets one
     literal Tab and a second frame must positively show a queued marker plus
