@@ -233,7 +233,7 @@ Two enforcement points:
    degrades to no filtering (the acquire/refuse mutex above is the authoritative
    backstop).
 
-## Task claims: the transition IS the claim (x-09d7 group 3)
+## Task claims: the transition IS the claim
 
 When a plan declares per-task waves, two sessions can share one node's work. The node claim guards the node. The task claim guards the task.
 
