@@ -45,15 +45,18 @@ def test_gate_constant_is_the_ship_date():
     assert DIFFICULTY_REQUIRED_AFTER.isoformat() == "2026-08-26"
 
 
-def test_gate_refuses_unreadable_created_but_not_absent():
-    """Round-6: a PRESENT but unparseable created must refuse - the
-    --execution scope never reaches the model's own date validation, so None
-    there was a gate bypass. An ABSENT created stays None: validate-plan.sh's
-    filename-date fallback owns that case."""
+def test_gate_refuses_every_undatable_created_except_no_frontmatter():
+    """Round-6 closed present-but-unreadable; round-9 closed the ABSENT key:
+    the intake lanes call this gate on raw frontmatter, and an undatable
+    plan there silently minted a bandless node because no fallback dater
+    runs on those lanes. Only the EMPTY dict (the no-frontmatter plan,
+    fail-soft by design in _read_plan_frontmatter) still passes."""
     from fno.plan.schema import difficulty_gate_error
 
     err = difficulty_gate_error({"created": "soon"})
     assert err is not None and "cannot read created" in err
+    absent = difficulty_gate_error({"claims": "ab-1dea1234"})
+    assert absent is not None and "absent from frontmatter" in absent
     assert difficulty_gate_error({"created": "2026-08-27", "difficulty": "high"}) is None
     assert difficulty_gate_error({}) is None
 

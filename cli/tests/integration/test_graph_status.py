@@ -129,7 +129,7 @@ def test_idea_status_overridden_by_blocked_at_read_time(tmp_graph):
 def test_node_with_plan_path_derives_to_ready(tmp_graph, tmp_path):
     """A node with a plan_path (via intake) derives to ready, not idea."""
     plan = tmp_path / "fake-plan.md"
-    plan.write_text("---\ntitle: Real Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
+    plan.write_text("---\ncreated: 2026-05-05\ntitle: Real Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     r = _invoke("backlog", "intake", str(plan))
     assert r.exit_code == 0, r.output
 
@@ -150,7 +150,7 @@ def _seed_one_idea_one_ready(tmp_path) -> tuple[str, str]:
     idea = _invoke("--json", "backlog", "add", "Pure idea")
     idea_id = json.loads(idea.stdout)["id"]
     plan = tmp_path / "ready-plan.md"
-    plan.write_text("---\ntitle: Ready Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
+    plan.write_text("---\ncreated: 2026-05-05\ntitle: Ready Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     ready = _invoke("backlog", "intake", str(plan))
     assert ready.exit_code == 0
     return idea_id, ready.stdout
@@ -162,7 +162,7 @@ def _seed_linked_idea_stub(tmp_graph, tmp_path) -> str:
     ``--include-ideas``; a plan-less idea (Rung.NONE) surfaces by default since
     x-e24a and is covered by its own tests. Returns the stub node id."""
     plan = tmp_path / "idea-stub.md"
-    plan.write_text("---\nstatus: idea\n---\n# Unfilled child\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
+    plan.write_text("---\ncreated: 2026-05-05\nstatus: idea\n---\n# Unfilled child\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     assert _invoke("backlog", "intake", str(plan)).exit_code == 0, "intake failed"
     stub = next(
         e for e in _read_entries(tmp_graph)
@@ -176,7 +176,7 @@ def test_linked_idea_stub_excluded_from_next_by_default(tmp_graph, tmp_path):
     stub (Rung.IDEA) stays gated behind --include-ideas (x-e24a)."""
     stub_id = _seed_linked_idea_stub(tmp_graph, tmp_path)
     ready = tmp_path / "ready-plan.md"
-    ready.write_text("---\ntitle: Ready Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
+    ready.write_text("---\ncreated: 2026-05-05\ntitle: Ready Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     assert _invoke("backlog", "intake", str(ready)).exit_code == 0
 
     r = _invoke("backlog", "next", "--all")
@@ -206,7 +206,7 @@ def test_plan_less_idea_surfaces_in_next_by_default(tmp_graph):
 def test_idea_included_with_flag(tmp_graph, tmp_path):
     """`backlog next --include-ideas` considers idea rows alongside ready."""
     plan = tmp_path / "low-prio.md"
-    plan.write_text("---\ntitle: Low Prio Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
+    plan.write_text("---\ncreated: 2026-05-05\ntitle: Low Prio Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     _invoke("backlog", "intake", str(plan), "--priority", "p3")
 
     high = _invoke(
@@ -228,7 +228,7 @@ def test_idea_included_with_flag(tmp_graph, tmp_path):
 def test_intake_p0_requires_plan_acknowledgment(tmp_graph, tmp_path):
     """AC9-ERR/HP: plan intake requires and records blocks_everything."""
     refused = tmp_path / "refused-p0.md"
-    refused.write_text("---\npriority: p0\n---\n# Broken service\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
+    refused.write_text("---\ncreated: 2026-05-05\npriority: p0\n---\n# Broken service\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     r = _invoke("backlog", "intake", str(refused))
     assert r.exit_code != 0
     assert "p0 blocks everything else" in r.output
@@ -236,7 +236,7 @@ def test_intake_p0_requires_plan_acknowledgment(tmp_graph, tmp_path):
 
     accepted = tmp_path / "accepted-p0.md"
     accepted.write_text(
-        "---\npriority: p0\nblocks_everything: true\n---\n# Broken service\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
+        "---\ncreated: 2026-05-05\npriority: p0\nblocks_everything: true\n---\n# Broken service\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
     )
     r2 = _invoke("--json", "backlog", "intake", str(accepted))
     assert r2.exit_code == 0, r2.output
@@ -275,7 +275,7 @@ def test_mission_drain_enumerates_plan_less_idea_child(tmp_graph, tmp_path):
     motivating journey, previously certified only via a mocked
     _ready_leaf_children."""
     stub = tmp_path / "idea-stub.md"
-    stub.write_text("---\nstatus: idea\n---\n# Unfilled\n")
+    stub.write_text("---\ncreated: 2026-05-05\nstatus: idea\n---\n# Unfilled\n")
     entries = [
         {"id": "ab-epic", "title": "Mission", "status": "ready", "project": "fno",
          "plan_path": "e.md", "created_at": "2026-07-28"},
@@ -315,7 +315,7 @@ def test_status_summary_shows_idea_count(tmp_graph, tmp_path):
     """`backlog status` prints `ideas: N` after the ready count."""
     _invoke("backlog", "add", "Idea one")
     plan = tmp_path / "plan.md"
-    plan.write_text("---\ntitle: A Plan\n---\n# Body\n")
+    plan.write_text("---\ncreated: 2026-05-05\ntitle: A Plan\n---\n# Body\n")
     _invoke("backlog", "intake", str(plan))
 
     r = _invoke("backlog", "status", "--all")
@@ -593,7 +593,7 @@ def test_legacy_ready_row_migrates_to_idea(tmp_graph):
 def test_dash_a_is_shorthand_for_all_in_ready(tmp_graph, tmp_path):
     """`backlog ready -A` is equivalent to `--all`."""
     plan = tmp_path / "p.md"
-    plan.write_text("---\ntitle: Plan\n---\n# Body\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
+    plan.write_text("---\ncreated: 2026-05-05\ntitle: Plan\n---\n# Body\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     _invoke("backlog", "intake", str(plan))
     r = _invoke("backlog", "ready", "-A")
     assert r.exit_code == 0, r.output
@@ -604,7 +604,7 @@ def test_dash_a_is_shorthand_for_all_in_ready(tmp_graph, tmp_path):
 def test_dash_a_is_shorthand_for_all_in_next(tmp_graph, tmp_path):
     """`backlog next -A` is equivalent to `--all`."""
     plan = tmp_path / "p.md"
-    plan.write_text("---\ntitle: Plan\n---\n# Body\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
+    plan.write_text("---\ncreated: 2026-05-05\ntitle: Plan\n---\n# Body\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     _invoke("backlog", "intake", str(plan))
     r = _invoke("backlog", "next", "-A")
     assert r.exit_code == 0, r.output

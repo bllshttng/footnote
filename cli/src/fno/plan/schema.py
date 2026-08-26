@@ -47,14 +47,15 @@ DIFFICULTY_REQUIRED_AFTER = date(2026, 8, 26)
 def difficulty_gate_error(frontmatter: dict) -> str | None:
     """The date-keyed difficulty refusal for raw frontmatter, or None.
 
-    ONE implementation shared by the model validator and the execution-scope
-    early return in ``fno do plan validate``: validate-plan.sh runs
-    ``--execution``, which never reaches ``PlanFrontmatter``, so without
-    this shared helper the gate a plan hits at CREATION would drift from the
-    one the model enforces later. An ABSENT ``created`` returns None -
-    validate-plan.sh's filename-date fallback owns dating that plan - while
-    a present-but-unreadable one refuses with the cannot-read error, since
-    the execution scope never reaches the model's own date validation.
+    ONE implementation shared by the model validator, the execution-scope
+    early return in ``fno do plan validate``, and the intake lanes' prep
+    gate: validate-plan.sh runs ``--execution``, which never reaches
+    ``PlanFrontmatter``, so without this shared helper the gate a plan hits
+    at CREATION would drift from the one the model enforces later. An EMPTY
+    dict (the no-frontmatter plan, fail-soft by design) returns None; any
+    other frontmatter that cannot be dated - created absent or unreadable -
+    refuses with the cannot-read error, since an undatable plan cannot bind
+    the gate and the direct-intake lanes have no fallback dater.
     """
     created = frontmatter.get("created")
     if isinstance(created, datetime):
@@ -72,17 +73,28 @@ def difficulty_gate_error(frontmatter: dict) -> str | None:
         # gate everywhere (pydantic even coerces it to an epoch date in the
         # model scope, reading post-gate as pre-gate).
         created = None
-    if "created" in frontmatter and created is None:
+    if "created" not in frontmatter and frontmatter:
+        # HAS frontmatter but no created: undatable. Returning None here
+        # would silently mint a bandless node on the direct-intake lanes
+        # validate-plan.sh never reaches; the empty-dict case above is the
+        # one no-frontmatter flow that keeps passing.
+        return (
+            "cannot read created: absent from frontmatter; the difficulty "
+            "gate needs a date. Set created: <YYYY-MM-DD> and, for "
+            "post-gate plans, difficulty: low, medium, high."
+        )
+    if created is None:
+        if not frontmatter:
+            return None
         # PRESENT but unreadable: returning None here would bypass the gate
         # in the --execution scope, which never reaches the model's own date
-        # validation. An ABSENT created still returns None below -
-        # validate-plan.sh's filename-date fallback owns that case.
+        # validation.
         return (
             f"cannot read created: {frontmatter.get('created')!r}; the difficulty gate needs "
             "a date. Set created: <YYYY-MM-DD> and, for post-gate plans, "
             "difficulty: low, medium, high."
         )
-    if not isinstance(created, date) or created <= DIFFICULTY_REQUIRED_AFTER:
+    if created <= DIFFICULTY_REQUIRED_AFTER:
         return None
     band = frontmatter.get("difficulty")
     if isinstance(band, str) and band.strip().lower() in {"low", "medium", "high"}:

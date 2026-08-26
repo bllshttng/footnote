@@ -1173,6 +1173,16 @@ def _prepare_intake(
             )
     fm_raw, plan_dir = _collect_frontmatter_depends(plan_path)
     fm = _read_plan_frontmatter(plan_path)
+    # The difficulty gate lives HERE, not inside the mutators, so every
+    # surface sees it at the same point: the single-file lane (real and
+    # dry-run), and the multi lane's per-file try/except (a refused file
+    # skips, never aborts the batch). Inside the mutator it fired after the
+    # dry-run preview and, on the multi real lane, escaped the lock body.
+    from fno.plan.schema import difficulty_gate_error
+
+    gate_error = difficulty_gate_error(fm)
+    if gate_error:
+        raise ValueError(f"{plan_path}: {gate_error}")
     resolved_fm, unresolved_fm = _resolve_depends_on(fm_raw, entries, plan_dir)
     for u in unresolved_fm:
         print(
@@ -1455,7 +1465,11 @@ def normalize_type(value: object) -> str:
 
 def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     from datetime import datetime, timezone
-    from fno.graph._constants import normalize_difficulty, validate_priority_write
+    from fno.graph._constants import (
+        append_difficulty_history,
+        normalize_difficulty,
+        validate_priority_write,
+    )
 
     project, node_cwd, fm = resolve_node_project_and_cwd(
         spec["plan_path"], spec.get("cli_project"), entries
@@ -1482,14 +1496,6 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     mission_from_msg_id: Optional[str] = fm.get("mission_from_msg_id") or None
 
     raw_difficulty = fm.get("difficulty")
-    # The gate before the band: intake run directly (not via the blueprint
-    # skill's validate-plan.sh) never reaches fno do plan validate, so the
-    # shared helper is what makes the requirement bind on this lane too.
-    from fno.plan.schema import difficulty_gate_error
-
-    gate_error = difficulty_gate_error(fm)
-    if gate_error:
-        raise ValueError(f"{spec['plan_path']}: {gate_error}")
     if raw_difficulty is None and fm.get("model_tier") is not None:
         # The compat read died with the field (x-baef); a plan still spelling
         # the band as model_tier must hear it lost, not lose it silently.
@@ -1518,7 +1524,7 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     except ValueError as exc:
         raise ValueError(f"{spec['plan_path']}: {exc}") from exc
 
-    return {
+    node = {
         "id": mint_node_id({e.get("id") for e in entries if e.get("id")}),
         "parent": None,
         "title": spec["title"],
@@ -1531,15 +1537,7 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "priority": spec["priority"],
         "blocks_everything": blocks_everything,
         "difficulty": difficulty,
-        "difficulty_history": (
-            [{
-                "value": difficulty,
-                "source": "blueprint",
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }]
-            if difficulty is not None
-            else []
-        ),
+        "difficulty_history": [],
         "domain": "code",
         "blocked_by": spec["deps"],
         "session_id": None,
@@ -1572,6 +1570,14 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "mission_slug": mission_slug,
         "mission_from_msg_id": mission_from_msg_id,
     }
+    if difficulty is not None:
+        # The one append shape every difficulty writer uses (x-baef): a
+        # hand-rolled birth entry here would drift from the helper the
+        # claim, update, and migration lanes all share.
+        append_difficulty_history(
+            node, difficulty, "blueprint", datetime.now(timezone.utc).isoformat()
+        )
+    return node
 
 
 def _collect_intake_paths(args) -> list[str]:

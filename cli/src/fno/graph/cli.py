@@ -2964,13 +2964,7 @@ def _intake_impl(
                 es, claim_id, plan_path=plan_path, spec=spec, project=project
             )
 
-        try:
-            locked_mutate_graph(_graph_path(), claim_mutator)
-        except ValueError as exc:
-            # The claim mutator's own refusals (the difficulty gate) land as
-            # a clean one-line error, not a traceback out of the lock body.
-            typer.echo(f"error: claim refused: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
+        locked_mutate_graph(_graph_path(), claim_mutator)
         typer.echo(
             f'claimed {claim_id} via {claim_source}: "{spec["title"]}"'
         )
@@ -12874,14 +12868,6 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
     # one of N paths. Same rule as priority below: the doc only speaks
     # when it declares a real, non-default value.
     frontmatter = _read_plan_frontmatter(plan_path) or {}
-    # The claim promotes a plan to ready, so the same date-keyed gate that
-    # binds `fno do plan validate` and the intake build lane binds here; a
-    # claim that skipped it would be the silent bandless-node hole (x-baef).
-    from fno.plan.schema import difficulty_gate_error
-
-    gate_error = difficulty_gate_error(frontmatter)
-    if gate_error:
-        raise ValueError(f"{plan_path}: {gate_error}")
     claimed_type = normalize_type(frontmatter.get("type"))
     from fno.graph._constants import normalize_difficulty
 
@@ -13128,15 +13114,10 @@ def _do_intake_multi(
                     typer.echo(
                         f'  would claim: "{spec["title"]}"  (plan: {f})  (claims {prep["id"]})'
                     )
-                    try:
-                        _apply_claim_in_place(
-                            preview_entries, prep["id"], plan_path=f,
-                            spec=spec, project=cli_project,
-                        )
-                    except ValueError as exc:
-                        # A gate refusal previews as would-skip, matching the
-                        # build refusal below it.
-                        typer.echo(f"  error: would skip {f}: {exc}", err=True)
+                    _apply_claim_in_place(
+                        preview_entries, prep["id"], plan_path=f,
+                        spec=spec, project=cli_project,
+                    )
                     continue
                 # Grow the preview graph the way the real mutator grows its
                 # entries - the BUILT node, so a later duplicate of this plan

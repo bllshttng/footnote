@@ -707,9 +707,41 @@ def test_intake_claim_lane_refuses_post_gate_plan_without_difficulty(
         _intake_impl(plan_paths=[str(plan)])
     assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
     err = capsys.readouterr().err
-    assert "claim refused" in err
     assert "difficulty is required" in err
     # The idea node was not linked or promoted.
+    target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
+    assert target.get("plan_path") != str(plan)
+
+
+def test_intake_dry_run_refuses_post_gate_plan_instead_of_previewing(
+    fixture_graph, tmp_path, capsys,
+):
+    """x-baef round-9: the gate lives in _prepare_intake, BEFORE the dry-run
+    return, so the preview cannot promise an intake the real run refuses."""
+    plan = _write_quick_plan(tmp_path, title="Bandless preview", created="2026-08-27")
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(plan)], dry_run=True)
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
+    captured = capsys.readouterr()
+    assert "difficulty is required" in captured.err
+    assert "would intake" not in captured.out
+
+
+def test_intake_refuses_undatable_frontmatter_without_created(
+    fixture_graph, tmp_path, capsys,
+):
+    """x-baef round-9: frontmatter that cannot be dated cannot bind the gate;
+    a claims-only plan refuses with the absent-created message instead of
+    minting a node no fallback dater will ever band."""
+    plan = tmp_path / "no-created.md"
+    plan.write_text(
+        f"---\nclaims: ab-1dea1234\n---\n# Undatable\n\n{_SURFACE}\n\nBody.\n"
+    )
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(plan)])
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
+    err = capsys.readouterr().err
+    assert "absent from frontmatter" in err
     target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
     assert target.get("plan_path") != str(plan)
 
@@ -733,7 +765,8 @@ def test_intake_claim_carries_p0_acknowledgment(fixture_graph, tmp_path, capsys)
     """Claimed intake preserves the plan's validated p0 acknowledgment."""
     plan = tmp_path / "p0-claim.md"
     plan.write_text(
-        "---\nclaims: ab-1dea1234\npriority: p0\nblocks_everything: true\n---\n"
+        "---\nclaims: ab-1dea1234\npriority: p0\nblocks_everything: true\n"
+        "created: 2026-05-05T04:35\n---\n"
         f"# Broken service\n\n{_SURFACE}\n"
     )
     _intake_impl(plan_paths=[str(plan)])
@@ -1480,6 +1513,73 @@ def test_multi_intake_build_refusal_skips_one_file_not_batch(
     assert len(entries) == 4
     assert any("good eta" in (e.get("title") or "") for e in entries)
     assert not any("bad theta" in (e.get("title") or "") for e in entries)
+
+
+def test_multi_intake_claim_gate_refusal_skips_one_file_not_batch(
+    fixture_graph, tmp_path, capsys
+):
+    """x-baef round-9: a post-gate bandless CLAIM plan in a batch refuses at
+    _prepare_intake, so the per-file catch owns it - the good plan's node
+    persists, the idea node is untouched, and no traceback escapes the lock
+    (reproduced: an in-mutator gate raise aborted the batch and rolled back
+    the good node too)."""
+    from types import SimpleNamespace
+
+    def _plan(path: Path, title: str, claims: str | None = None) -> Path:
+        fm = ["---"]
+        if claims:
+            fm.append(f"claims: {claims}")
+        else:
+            fm.append("difficulty: low")
+        fm += ["created: 2026-08-27", "---"]
+        path.write_text(
+            "\n".join(fm + ["", f"# {title}", "", _SURFACE, "", "Body.", ""]) + "\n"
+        )
+        return path
+
+    good = _plan(tmp_path / "good.md", "Claim gate batch good kappa")
+    bad = _plan(tmp_path / "badclaim.md", "Claim gate batch bad lambda", claims="ab-1dea1234")
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(args, [str(good), str(bad)], roadmap_id=None, dry_run=False)
+    captured = capsys.readouterr()
+
+    assert "difficulty is required" in captured.err
+    assert "skipped" in captured.err
+    # The good plan's node persisted despite the sibling refusal.
+    entries = _read_entries(fixture_graph)
+    assert len(entries) == 4
+    assert any("good kappa" in (e.get("title") or "") for e in entries)
+    # The idea node was not linked or promoted.
+    target = next(e for e in entries if e["id"] == "ab-1dea1234")
+    assert target.get("plan_path") != str(bad)
+
+
+def test_multi_intake_dry_run_gate_refusal_never_previews_would_claim(
+    fixture_graph, tmp_path, capsys
+):
+    """x-baef round-9: the gate refusal fires in _prepare_intake, BEFORE the
+    would-claim echo, so a refused claim file prints only the would-skip
+    line - never a success line followed by its own refusal."""
+    from types import SimpleNamespace
+
+    plan = tmp_path / "badclaim.md"
+    plan.write_text(
+        "\n".join(
+            ["---", "claims: ab-1dea1234", "created: 2026-08-27", "---",
+             "", "# Dry run claim refusal mu", "", _SURFACE, "", "Body.", ""]
+        ) + "\n"
+    )
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(args, [str(plan)], roadmap_id=None, dry_run=True)
+    captured = capsys.readouterr()
+
+    assert "would skip" in captured.err and "difficulty is required" in captured.err
+    assert "would claim" not in captured.out
+    assert "would be claimed" not in captured.out or "0 claimed" in captured.out
 
 
 def test_multi_intake_claim_updates_idea_node_in_place(fixture_graph, tmp_path, capsys):
