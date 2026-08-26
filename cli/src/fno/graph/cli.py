@@ -6579,10 +6579,18 @@ def _task_ids_or_exit(plan_path: str) -> list[str]:
     from fno.graph.tasks import derive_task_ids
 
     try:
-        return derive_task_ids(Path(plan_path))
+        ids = derive_task_ids(Path(plan_path))
     except Exception as exc:  # noqa: BLE001 - stop-not-traceback contract
         typer.echo(f"plan parse failed for {plan_path}: {exc}", err=True)
         raise typer.Exit(code=1)
+    if not ids:
+        # A plan declaring `waves:` and no top-level `tasks:` parses fine and
+        # derives nothing. That is the same "no grain here" as an unbound
+        # plan, not the exit 2 that halts a wave which ran before task rows
+        # existed.
+        typer.echo(f"no tasks declared by {plan_path}", err=True)
+        raise typer.Exit(code=TASK_NO_GRAIN_EXIT)
+    return ids
 
 
 @task_app.command("list")
@@ -6634,7 +6642,7 @@ def cmd_task_list(
     def mutator(entries):
         for e in entries:
             if isinstance(e, dict) and e.get("id") == node_id:
-                materialized.extend(ensure_task_rows(e, Path(plan_path)))
+                materialized.extend(ensure_task_rows(e, Path(plan_path), ids))
                 break
         return entries
 
@@ -6716,7 +6724,7 @@ def cmd_task_update(
                 if isinstance(e, dict) and e.get("id") == node_id:
                     from fno.graph.tasks import ensure_task_rows
 
-                    ensure_task_rows(e, Path(plan_path))
+                    ensure_task_rows(e, Path(plan_path), ids)
                     for row in e.get("tasks") or []:
                         if isinstance(row, dict) and row.get("id") == task_id:
                             mutate(row)
@@ -6768,7 +6776,15 @@ def cmd_task_update(
         from fno.claims.core import claim_status as _claim_status
 
         try:
-            held_before = _claim_status(key).get("holder") == holder
+            _before = _claim_status(key)
+            # `holder` is reported for a STALE claim too, so name-only would
+            # read a resumed session's dead claim as one this call holds. The
+            # acquire then mints a genuinely new live claim that no refusal
+            # path releases. Task claims carry ttl_ms=None, so live/stale is
+            # the whole vocabulary here.
+            held_before = (
+                _before.get("holder") == holder and _before.get("state") == "live"
+            )
         except Exception:  # noqa: BLE001 - an unreadable claim is not a held one
             held_before = False
 
@@ -6842,6 +6858,17 @@ def cmd_task_update(
             row.update({"status": "done"})
 
         row = _set_row(_done_row)
+        if done_refused and not holder:
+            # 4, not 3: the boundary settle passes no --owner, and waves.md 3e
+            # turns a 3 into a peer hold the wave retries forever. This is an
+            # identity failure, which is a stop that names its own fix.
+            typer.echo(
+                f"task {task_id} is owned by {done_refused[0]} and this "
+                "context cannot prove a session id; re-run with "
+                f"--owner {done_refused[0]}",
+                err=True,
+            )
+            raise typer.Exit(code=4)
         if done_refused:
             # The owner check has no liveness test, so a reaped or handed-off
             # holder would wedge the row at in_progress forever. Name the

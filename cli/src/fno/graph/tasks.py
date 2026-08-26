@@ -41,7 +41,9 @@ def derive_task_ids(plan_path: Path) -> list[str]:
     return [t["id"] for t in raw.get("tasks", []) if t.get("id")]
 
 
-def ensure_task_rows(entry: dict, plan_path: Path) -> list[dict]:
+def ensure_task_rows(
+    entry: dict, plan_path: Path, task_ids: "list[str] | None" = None
+) -> list[dict]:
     """Materialize ``entry['tasks']`` rows for plan task ids not yet present.
 
     Idempotent and never destructive: existing rows are kept verbatim (an
@@ -50,9 +52,17 @@ def ensure_task_rows(entry: dict, plan_path: Path) -> list[dict]:
     plan are left alone (a replan mid-run must not drop a live claim's row).
     Returns the READABLE rows: a row that is not a dict stays in
     ``entry['tasks']`` but is never handed to a caller that would read it.
+
+    Pass ``task_ids`` when the caller already derived them. Re-parsing the
+    plan here happens INSIDE the graph flock, where a parse error escapes as a
+    traceback instead of the named refusal every other task-verb failure gets.
     """
     raw = entry.get("tasks")
-    raw = raw if isinstance(raw, list) else []
+    if raw is not None and not isinstance(raw, list):
+        # Not a list at all: corrupt, and replacing it with a fresh list would
+        # write the corruption away. Touch nothing and materialize nothing.
+        return []
+    raw = raw or []
     # Keep what cannot be read rather than dropping it: this list is written
     # back over entry["tasks"], so filtering non-dict rows out here DELETES
     # them from graph.json. read_graph and locked_mutate_graph both preserve
@@ -60,7 +70,8 @@ def ensure_task_rows(entry: dict, plan_path: Path) -> list[dict]:
     # the containment, not a silent prune.
     rows = list(raw)
     known = {r.get("id") for r in rows if isinstance(r, dict)}
-    for task_id in derive_task_ids(Path(plan_path)):
+    ids = derive_task_ids(Path(plan_path)) if task_ids is None else task_ids
+    for task_id in ids:
         if task_id not in known:
             rows.append({"id": task_id, "status": "pending", "owner": None})
             # Without this the SAME id twice in one plan yields two rows, and

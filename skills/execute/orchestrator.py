@@ -1047,17 +1047,31 @@ def _manifest_path(state_path: str) -> Path:
     subdirectory the emit still stamped the node while the settle read nothing
     and skipped - leaving the row in_progress under a claim nothing releases,
     which every later pass then reads as peer-held. This module is stdlib-only
-    by design (it shells out to fno), so the walk stands in for the import.
+    by design (it shells out to fno), so the walk stands in for the import: it
+    honors ``FNO_REPO_ROOT`` (the resolver's first tier) and is bounded by the
+    repo root, because a walk that is not bounded finds a STRANGER's manifest.
     """
     given = Path(state_path)
     if given.is_absolute() or given.exists():
         return given
+    env = os.environ.get("FNO_REPO_ROOT")
+    if env:
+        candidate = Path(env) / given
+        return candidate if candidate.exists() else given
     here = Path.cwd().resolve()
+    # Find the root FIRST, then search only within it. Searching on the way up
+    # and stopping at the root afterwards climbs to the filesystem root when
+    # there is no repo at all, and the first `.fno/target-state.md` it meets
+    # there belongs to somebody else: task ids like "1.1" exist in nearly every
+    # plan, so the settle would then land on an unrelated node.
+    root = next((d for d in (here, *here.parents) if (d / ".git").exists()), None)
+    if root is None:
+        return given
     for parent in (here, *here.parents):
         candidate = parent / given
         if candidate.exists():
             return candidate
-        if (parent / ".git").exists():
+        if parent == root:
             break
     return given
 

@@ -114,6 +114,8 @@ python3 "${SKILL_DIR:-skills/execute}/orchestrator.py" --emit-boundary blocked \
 
 `--run`/`--node` fall back to the manifest, so they are optional here. Emission is best-effort: a failure prints one stderr note and never stops the run.
 
+The emit also settles the task row when the manifest binds a node, so a flat run stamps `done` on rows it never claimed. That is deliberate rather than an oversight: a flat run is one worker on the whole plan, so there is no peer to guard against and no claim to take. What it does mean is that a later `waves` pass over the same node reads those tasks as shipped and refuses to re-offer them, which is the right answer for work that really did land. A flat run that did NOT finish a task must emit `blocked` for it, not silence, or the row keeps whatever status it had.
+
 ## 3c. Revision-round crumb (builder trail, best-effort)
 
 Only when a change needed a **revision round** - its verify/test failed and you reworked it before it landed - drop ONE `builder_step` into `.fno/events.jsonl` so a resume or self-handoff successor sees what was tried and how it was fixed. A clean first-pass change emits nothing here: `task_started` + `task_done` already describe it fully. One crumb per reworked change, at the boundary - never per edit.

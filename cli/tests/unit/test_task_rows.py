@@ -494,9 +494,14 @@ def test_malformed_plan_is_a_named_refusal(
 def test_idless_plan_poll_never_takes_the_lock(
     tmp_path: Path, tmp_graph: Path
 ):
-    """A plan with no Execution Strategy and no rows exits 2 WITHOUT the
+    """A plan with no Execution Strategy and no rows exits 6 WITHOUT the
     locked write: a polling fleet must not churn the graph mutation pipeline
-    on every poll of a task-less node."""
+    on every poll of a task-less node.
+
+    6, not 2: a plan that declares `waves:` and no top-level `tasks:` parses
+    fine and derives nothing, which is the same "no grain here" as an unbound
+    plan. Exit 2 halts a wave that ran before task rows existed.
+    """
     from fno.graph import cli as graph_cli
 
     plan = tmp_path / "empty.md"
@@ -509,7 +514,8 @@ def test_idless_plan_poll_never_takes_the_lock(
     before = tmp_graph.read_text(encoding="utf-8")
 
     result = runner.invoke(graph_cli.task_app, ["list", "x-t1"])
-    assert result.exit_code == 2
+    assert result.exit_code == graph_cli.TASK_NO_GRAIN_EXIT
+    assert result.exit_code != 2, "2 halts the wave"
     assert "no tasks declared" in result.output
     assert tmp_graph.read_text(encoding="utf-8") == before
 
@@ -716,3 +722,94 @@ def test_reclaiming_a_done_row_keeps_a_claim_you_already_held(
     assert refused.exit_code == 3
     assert lock.exists(), "the claim this call did not take must survive its refusal"
     assert claim_status(task_key("x-t1", "1.1"), root=claims_root)["holder"] == SID_A
+
+
+# -- review round 5 --
+
+
+def test_a_stale_self_claim_is_not_one_you_hold(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """claim_status reports `holder` for a STALE claim too.
+
+    A resumed session keeps its id and gets a new pid, so a name-only check
+    reads its own dead claim as held, the acquire mints a genuinely NEW live
+    claim, and the refusal path then declines to release it. The task reads
+    peer-held for the rest of the run.
+    """
+    lock = claim_path(task_key("x-t1", "1.1"), root=claims_root)
+    assert _task_update(
+        monkeypatch, _dead_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    ).exit_code == 0
+    assert claim_status(task_key("x-t1", "1.1"), root=claims_root)["state"] == "stale"
+
+    data = json.loads(tmp_graph.read_text(encoding="utf-8"))
+    for e in data["entries"]:
+        if e.get("id") == "x-t1":
+            for r in e["tasks"]:
+                if r["id"] == "1.1":
+                    r["status"] = "done"
+    tmp_graph.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+    refused = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    )
+    assert refused.exit_code == 3
+    assert not lock.exists(), (
+        "the claim this call DID take must be released by its own refusal"
+    )
+
+
+def test_a_non_list_tasks_value_is_never_written_away(tmp_path: Path):
+    """Replacing a corrupt `tasks` value with a fresh list writes the
+    corruption out of graph.json. Touch nothing, materialize nothing."""
+    from fno.graph.tasks import ensure_task_rows
+
+    plan = _plan_with(tmp_path)
+    entry: dict = {"id": "x-t1", "tasks": "corrupt"}
+    assert ensure_task_rows(entry, plan) == []
+    assert entry["tasks"] == "corrupt", "the unreadable value survives"
+
+
+def test_derived_ids_are_not_reparsed_under_the_lock(
+    tmp_graph: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The pre-check derives the ids; re-deriving them inside the graph flock
+    lets a plan that changed in between escape as a traceback instead of the
+    named refusal every other task-verb failure gets."""
+    from fno.graph import cli as graph_cli
+    from fno.graph import tasks as tasks_mod
+
+    seen: list = []
+    real = tasks_mod.derive_task_ids
+
+    def counting(path):
+        seen.append(path)
+        return real(path)
+
+    monkeypatch.setattr(tasks_mod, "derive_task_ids", counting)
+    result = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1, f"the plan is parsed once, not {len(seen)} times"
+
+
+def test_done_with_no_provable_identity_stops_instead_of_looking_held(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The boundary settle passes no --owner, and waves.md 3e turns exit 3
+    into a peer hold the wave retries forever. An identity failure is 4."""
+    assert _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    ).exit_code == 0
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: type("I", (), {"session_id": None, "harness": None})(),
+    )
+    refused = _task_update(monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done")
+    assert refused.exit_code == 4
+    assert refused.exit_code != 3, "3 reads as a peer hold and is retried forever"
+    assert SID_A in refused.output, "the refusal names the owner to pass as --owner"

@@ -217,3 +217,49 @@ def test_manifest_node_resolves_from_a_subdirectory(tmp_path, monkeypatch) -> No
     assert orch.manifest_graph_node_id() == "", (
         "positive control: outside the repo there is still no node"
     )
+
+
+def test_the_manifest_walk_never_leaves_the_repo(tmp_path, monkeypatch) -> None:
+    """An unbounded walk finds a STRANGER's manifest.
+
+    Task ids like "1.1" exist in nearly every plan, so settling against the
+    first `.fno/target-state.md` above cwd marks a task done on an unrelated
+    node. With no repo between cwd and the filesystem root there is no node to
+    settle, and saying so is the only safe answer.
+    """
+    orch = _load_orch()
+    monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
+
+    outer = tmp_path / "outer"
+    (outer / ".fno").mkdir(parents=True)
+    (outer / ".fno" / "target-state.md").write_text(
+        "graph_node_id: x-STRANGER\n", encoding="utf-8"
+    )
+    deep = outer / "inner" / "deep"
+    deep.mkdir(parents=True)
+
+    monkeypatch.chdir(deep)
+    assert orch.manifest_graph_node_id() == "", (
+        "no .git between cwd and / means no repo, so no node"
+    )
+
+    (outer / ".git").mkdir()
+    assert orch.manifest_graph_node_id() == "x-STRANGER", (
+        "positive control: once outer IS a repo, its manifest is the right one"
+    )
+
+
+def test_fno_repo_root_is_honored(tmp_path, monkeypatch) -> None:
+    """FNO_REPO_ROOT is resolve_repo_root's first tier, so the stand-in walk
+    reads it too or the two resolvers disagree in exactly the setups that set
+    it."""
+    orch = _load_orch()
+
+    root = tmp_path / "elsewhere"
+    (root / ".fno").mkdir(parents=True)
+    (root / ".fno" / "target-state.md").write_text(
+        "graph_node_id: x-ENV\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("FNO_REPO_ROOT", str(root))
+    monkeypatch.chdir(tmp_path)
+    assert orch.manifest_graph_node_id() == "x-ENV"
