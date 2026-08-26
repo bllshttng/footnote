@@ -9,6 +9,7 @@ from __future__ import annotations
 import click
 import typer
 import typer.main
+import pytest
 # click's runner: `fno doctor lint` is a plain-function registry entry that the live
 # CLI resolves to a bare TyperCommand, which typer.testing.CliRunner rejects.
 from click.testing import CliRunner
@@ -28,7 +29,12 @@ runner = CliRunner()
 
 def test_menu_caps_passes_on_the_shipped_registry():
     """The real curated menu is within caps (top-level <= 10)."""
+    # This isolates the legacy advertised-menu assertion from the root
+    # namespace ratchet, which intentionally starts red on this branch.
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 50, raising=False)
     result = runner.invoke(_lint_command(), ["menu-caps"])
+    monkeypatch.undo()
     assert result.exit_code == 0, result.output
     assert "menu-caps: ok" in result.output
 
@@ -57,8 +63,66 @@ def test_menu_caps_passes_once_remedy_applied(monkeypatch):
     """AC5-FR: raising the cap constant (remedy 2) clears the failure."""
     # Set the cap comfortably above the shipped set: the ratchet passes again.
     monkeypatch.setattr(L, "MENU_CAP_TOP_LEVEL", 50)
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 50, raising=False)
     result = runner.invoke(_lint_command(), ["menu-caps"])
     assert result.exit_code == 0, result.output
+
+
+def test_root_namespace_names_pin_today_by_name():
+    """AC2-HP: today's Python roots plus the two Rust roots are explicit."""
+    names = set(L._root_namespace_names())
+    assert names == {
+        "agents",
+        "backlog",
+        "config",
+        "decide",
+        "do",
+        "doctor",
+        "done",
+        "help",
+        "inbox",
+        "law",
+        "mail",
+        "mux",
+        "project",
+        "runtime",
+        "test",
+        "update",
+        "version",
+        "whoami",
+        "workspace",
+        "yard",
+    }
+
+
+def test_root_namespace_excludes_a_move_and_counts_a_hidden_root(monkeypatch):
+    """AC1-EDGE/ERR: visibility does not hide roots, and moves cost no slot."""
+    import fno.cli as cli_mod
+
+    monkeypatch.setitem(
+        cli_mod.LAZY_SUBCOMMANDS,
+        "hidden-fixture",
+        ("fno.test:app", "fixture", {"hidden": True}),
+    )
+    names = set(L._root_namespace_names())
+    assert "hidden-fixture" in names
+    assert "annotate" not in names
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 12)
+    result = runner.invoke(_lint_command(), ["menu-caps"])
+    assert result.exit_code == 1, result.output
+    assert "hidden-fixture" in result.output
+
+
+def test_root_namespace_cap_fails_on_today_surface(monkeypatch):
+    """AC1-HP: today's roots fail the 12-root cap and name overage."""
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 12, raising=False)
+    result = runner.invoke(_lint_command(), ["menu-caps"])
+    assert result.exit_code == 1, result.output
+    assert "root namespace has 20 real verbs" in result.output
+    assert "over the cap:" in result.output
+    assert "mark it hidden" not in result.output
+    assert "project" in result.output
+    assert "version" in result.output
 
 
 def _make_group(n_visible: int, n_hidden: int) -> click.Group:

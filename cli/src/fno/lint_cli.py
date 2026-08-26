@@ -42,9 +42,10 @@ CHECKS: dict[str, str] = {
 
 
 # x-71b6 In-N-Out menu ratchet: the advertised command surface stays small.
-# These are the two knobs a maintainer touches to widen the menu, on purpose,
-# in a one-line diff that shows up in review. New verbs default to hidden; promotion is a
-# deliberate act that must fit under these caps.
+# These are the knobs a maintainer touches to widen a surface, on purpose, in
+# a one-line diff that shows up in review. New verbs default to hidden, but
+# hidden roots still consume the namespace cap.
+MENU_CAP_ROOT_NAMESPACE = 12
 MENU_CAP_TOP_LEVEL = 10
 MENU_CAP_SUB_APP = 12
 
@@ -145,6 +146,31 @@ def _visible_command_names(group: click.Group) -> list[str]:
         if cmd is not None and not cmd.hidden:
             names.append(name)
     return names
+
+
+def _root_namespace_names() -> list[str]:
+    """Return real root names across the Python and Rust fronts.
+
+    Visibility is a presentation choice, and moved spellings are forwarding
+    shims. Neither owns a root namespace slot. The Rust names come from the
+    dispatcher source scan already used by the leaf ratchet, so this gate does
+    not maintain a second list that can drift from ``crates/fno``.
+    """
+    from fno import lint_verb_ratchet as ratchet
+    from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP, app as root_app
+    from fno.verb_moves import VERB_MOVES
+
+    root = typer.main.get_command(root_app)
+    names = set(root.list_commands(click.Context(root)))
+    names.update(LAZY_SUBCOMMANDS)
+    names.update(_EAGER_COMMAND_HELP)
+    names.difference_update(VERB_MOVES)
+    try:
+        rust_paths, _families = ratchet.scan_rust_source()
+    except (OSError, ratchet.VerbRatchetError) as exc:
+        raise RuntimeError(f"Rust root source unavailable: {exc}") from exc
+    names.update(path.split(maxsplit=1)[0] for path in rust_paths)
+    return sorted(names)
 
 
 def _repo_root() -> Path:
@@ -268,11 +294,12 @@ def shellout_drift(no_degrade: bool = False) -> None:
 
 
 def menu_caps() -> None:
-    """Enforce the In-N-Out menu caps (x-71b6): <=10 advertised top-level verbs,
-    <=12 advertised verbs per sub-app. New verbs default to hidden; promoting one
-    past a cap fails here until it is hidden again or the cap constant is raised
-    in a deliberate one-line diff. Introspects the registry - no repo scripts, so
-    it runs from a bare install too.
+    """Enforce root namespace, advertised menu, and sub-app caps.
+
+    The root namespace counts real Python and Rust roots, regardless of
+    visibility, while ``MENU_CAP_TOP_LEVEL`` remains the weaker advertised-menu
+    check. Moved spellings are excluded from the root count because they are
+    forwarding shims, not additional commands.
     """
     import importlib
 
@@ -283,6 +310,21 @@ def menu_caps() -> None:
     root = typer.main.get_command(root_app)
     top_visible = _visible_command_names(cast("click.Group", root))
     failures: list[str] = []
+
+    try:
+        root_names = _root_namespace_names()
+    except RuntimeError as exc:
+        failures.append(f"root namespace could not be measured: {exc}")
+    else:
+        if len(root_names) > MENU_CAP_ROOT_NAMESPACE:
+            over = ", ".join(root_names[MENU_CAP_ROOT_NAMESPACE:])
+            failures.append(
+                f"root namespace has {len(root_names)} real verbs "
+                f"(cap {MENU_CAP_ROOT_NAMESPACE}); over the cap: {over}.\n"
+                "  Remedy 1: fold the verb under an existing root group.\n"
+                "  Remedy 2: retire the verb if it has no distinct root meaning.\n"
+                "  Remedy 3: raise MENU_CAP_ROOT_NAMESPACE in a deliberate one-line diff."
+            )
 
     if len(top_visible) > MENU_CAP_TOP_LEVEL:
         over = ", ".join(top_visible[MENU_CAP_TOP_LEVEL:])
@@ -333,7 +375,10 @@ def menu_caps() -> None:
         for f in failures:
             typer.echo(f"menu-caps: FAIL\n{f}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"menu-caps: ok (top-level {len(top_visible)}/{MENU_CAP_TOP_LEVEL})")
+    typer.echo(
+        f"menu-caps: ok (root namespace {len(root_names)}/{MENU_CAP_ROOT_NAMESPACE}; "
+        f"top-level {len(top_visible)}/{MENU_CAP_TOP_LEVEL})"
+    )
 
 
 def verb_ratchet(update: bool = False) -> None:
