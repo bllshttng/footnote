@@ -153,6 +153,31 @@ def test_state_file_collision_rejected(_isolate):
     with pytest.raises(Exception) as exc:
         RenderTargetConfig.model_validate({"path": str(gc.GRAPH_MD), "project": "fno"})
     assert "collides" in str(exc.value)
+    for state_path in (
+        gc.GRAPH_JSON,
+        gc.GRAPH_ARCHIVE_JSON,
+        gc.LEDGER_JSON,
+        str(gc.GRAPH_JSON) + ".sha256",
+    ):
+        with pytest.raises(Exception):
+            RenderTargetConfig.model_validate({"path": str(state_path), "project": "fno"})
+
+
+def test_bad_row_skipped_good_row_renders(_isolate, tmp_path, monkeypatch, capsys):
+    good = tmp_path / "out" / "good.html"
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "relative.html"\nproject = "fno"\n'
+        f'[[backlog.render_targets]]\npath = "{good}"\nproject = "fno"',
+        tmp_path,
+        monkeypatch,
+    )
+    _mutate(
+        _isolate["graph"],
+        [_entry("ab-goodrow0", title="first title")],
+        "second title",
+    )
+    assert "second title" in good.read_text(encoding="utf-8")
+    assert "skipping malformed backlog.render_targets row" in capsys.readouterr().err
 
 
 def test_project_local_rows_warn_not_render(_isolate, tmp_path, monkeypatch, capsys):

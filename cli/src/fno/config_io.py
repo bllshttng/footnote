@@ -230,9 +230,12 @@ def read_global_block(block: str) -> dict[str, object] | None:
     ``load_settings`` semantics, so a partial config.toml cannot shadow a key
     that still lives only in the legacy settings.yaml. The parse is cached
     per process, keyed by each candidate's (mtime_ns, size): every block
-    reader shares ONE parse per mutation, and an edit is visible on the very
-    next call. Returns ``None`` when no global file defines the block or the
-    block is not a table (the caller's absent-block path).
+    reader shares ONE parse per mutation. Caveat: on a filesystem with
+    coarse mtime granularity, a same-size rewrite inside one tick can serve
+    the previous parse until the next size-changing write - bounded
+    staleness, strictly fresher than load_settings' process-lifetime cache.
+    Returns ``None`` when no global file defines the block or the block is
+    not a table (the caller's absent-block path).
     """
     try:
         data = _global_merged_config()

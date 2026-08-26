@@ -1103,9 +1103,11 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     # targets. Runs AFTER the flock drops, unlike the state_dir renders above:
     # these paths are operator-chosen, and a stalled (not erroring) target
     # filesystem - a cloud-synced vault - must never hold the graph lock every
-    # backlog verb in the fleet waits on. atomic_write_documents makes a
-    # concurrent render last-wins, never partial. Fail-open: graph.json is
-    # already written; render_configured_targets itself never raises.
+    # backlog verb in the fleet waits on. Tradeoff: two concurrent mutations
+    # can land their renders out of order, leaving the board one mutation
+    # stale until the next one; bytes are never partial (atomic replaces).
+    # Fail-open: graph.json is already written; render_configured_targets
+    # itself never raises.
     if is_canonical:
         try:
             from fno.graph.roadmap_public import render_configured_targets

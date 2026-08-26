@@ -146,18 +146,30 @@ def _configured_targets() -> "list[RenderTargetConfig]":
     """
     try:
         # Function-local: keep graph-module imports free of config's pydantic.
-        from fno.config import BacklogBlock
+        from fno.config import BacklogBlock, RenderTargetConfig
         from fno.config_io import read_global_block
 
         backlog = read_global_block("backlog") or {}
-        # Route the raw rows through the BacklogBlock shim so coercion and
-        # validation (including the array-of-tables typo warning) have exactly
-        # one implementation, shared with settings load.
-        rows = BacklogBlock.model_validate(
-            {"render_targets": backlog.get("render_targets")}
-        ).render_targets
-        _warn_shadowed_local_rows(rows)
-        return list(rows)
+        rows = backlog.get("render_targets")
+        if rows is None:
+            rows = []
+        elif not isinstance(rows, list):
+            # Container typo: one warning source - the BacklogBlock coercion.
+            BacklogBlock.model_validate({"render_targets": rows})
+            rows = []
+        # Per-row validation, not one atomic model_validate: a single bad row
+        # (e.g. a relative path) must not stop every OTHER target rendering.
+        out: list[RenderTargetConfig] = []
+        for row in rows:
+            try:
+                out.append(RenderTargetConfig.model_validate(row))
+            except Exception as exc:
+                print(
+                    f"Warning: skipping malformed backlog.render_targets row: {exc}",
+                    file=sys.stderr,
+                )
+        _warn_shadowed_local_rows(out)
+        return out
     except Exception as exc:
         # Every other degradation in this module warns; a silent [] here would
         # read as "no targets configured" while the board rots.

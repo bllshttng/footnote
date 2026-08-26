@@ -295,8 +295,6 @@ class RenderTargetConfig(BaseModel):
     @field_validator("path")
     @classmethod
     def _plain_path(cls, v: str) -> str:
-        from pathlib import Path as _Path
-
         v = v.strip()
         if not v:
             raise ValueError("backlog.render_targets path must not be empty")
@@ -304,7 +302,7 @@ class RenderTargetConfig(BaseModel):
         # The auto-render fires from arbitrary project and agent cwds, so a
         # relative path would scatter a copy of the public board into each
         # one. Absolute (or ~/-rooted) only.
-        expanded = _Path(os.path.expanduser(v))
+        expanded = Path(os.path.expanduser(v))
         if not expanded.is_absolute():
             raise ValueError(
                 "backlog.render_targets path must be absolute or ~/-rooted "
@@ -322,8 +320,17 @@ class RenderTargetConfig(BaseModel):
             _gc = _il.import_module("fno.graph._constants")
 
             resolved = expanded.resolve()
-            for state_path in (_gc.GRAPH_JSON, _gc.GRAPH_MD, _gc.GRAPH_HTML):
-                if resolved == _Path(state_path).resolve():
+            state_paths = (
+                _gc.GRAPH_JSON,
+                _gc.GRAPH_MD,
+                _gc.GRAPH_HTML,
+                _gc.GRAPH_ARCHIVE_JSON,
+                _gc.LEDGER_JSON,
+                # the integrity sidecar _write_sha256_sidecar maintains
+                Path(str(_gc.GRAPH_JSON) + ".sha256"),
+            )
+            for state_path in state_paths:
+                if resolved == Path(state_path).resolve():
                     raise ValueError(
                         f"backlog.render_targets path {v!r} collides with the "
                         f"graph state file {state_path}; refusing to overwrite it"
