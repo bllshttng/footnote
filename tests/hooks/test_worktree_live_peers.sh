@@ -42,7 +42,7 @@ reset_live() { rm -rf "$LIVE_DIR"; mkdir -p "$LIVE_DIR"; }
 
 # A fno shim on PATH makes carrier recording deterministic and fast (the real
 # fno may be absent, old, or slow) and keeps the global journal unpolluted. Each
-# shim emulates `fno workspace worktree overlap-record --stdin` and echoes one fixed
+# shim emulates `fno agents workspace worktree overlap-record --stdin` and echoes one fixed
 # result line, ignoring its stdin.
 FNO_SHIM_DIR="$TMP_DIR/fno-shim"
 make_fno_shim() {
@@ -275,7 +275,7 @@ tout="$(printf '{"cwd":"%s","session_id":"self-session"}' "$PROJECT" \
   | FNO_HOME="$TMP_DIR/fno-home" PATH="$FNO_SHIM_DIR:$PATH" \
       bash "$CARRIER" 2>/dev/null)"; trc=$?
 if [[ "$trc" -eq 0 && "$tout" == *"recurrence reached 3/3"* \
-      && "$tout" == *"fno workspace worktree overlaps --since 28"* \
+      && "$tout" == *"fno agents workspace worktree overlaps --since 28"* \
       && "$tout" != *"[fno-overlap-unrecorded]"* ]]; then
   pass "recurrence crossing surfaces the threshold notice"
 else
