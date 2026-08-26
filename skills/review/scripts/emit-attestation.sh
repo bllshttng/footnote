@@ -248,6 +248,10 @@ review_args_raw="$(printf '%s' "$hold_json" | jq -r '.metadata.args_raw // empty
 review_level="$(printf '%s' "$hold_json" | jq -r '.metadata.level // "unset"' 2>/dev/null || echo unset)"
 review_level_source="$(printf '%s' "$hold_json" | jq -r '.metadata.level_source // "fallback"' 2>/dev/null || echo fallback)"
 review_flags="$(printf '%s' "$hold_json" | jq -c '.metadata.flags // []' 2>/dev/null || echo '[]')"
+[[ -n "$review_verb" ]] || review_verb="/code-review"
+[[ -n "$review_level" ]] || review_level="unset"
+[[ -n "$review_level_source" ]] || review_level_source="fallback"
+[[ -n "$review_flags" ]] || review_flags='[]'
 if ! jq -e 'type == "array" and all(.[]; type == "string")' <<<"$review_flags" >/dev/null 2>&1; then
   review_flags='[]'
 fi
