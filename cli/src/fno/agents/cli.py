@@ -2569,10 +2569,14 @@ def cmd_spawn(
         # REQUESTED mode (flag or the yolo-derived bypassPermissions) so an
         # audit can tell elevated permissions were REQUESTED on this fallback
         # path - fno can back the request, never the applied outcome. Only
-        # when set, so the unset receipt is byte-identical.
+        # when set, so the unset receipt is byte-identical. Full JSON-string
+        # encode (not a bare `"`-escape): nothing validates this value against a
+        # closed set before it lands here, so a config-sourced mode carrying a
+        # backslash or control char would otherwise emit invalid JSON. Matches
+        # Rust's json_string_ascii byte-for-byte for every ordinary mode.
         eff_mode = permission_mode or ("bypassPermissions" if yolo else None)
         perm_field = (
-            f', "permission_mode_requested": "{eff_mode.replace(chr(34), chr(92) + chr(34))}"'
+            f', "permission_mode_requested": {json.dumps(eff_mode)}'
             if eff_mode
             else ""
         )

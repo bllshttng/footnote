@@ -8832,8 +8832,18 @@ fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Rev
 /// first, exactly as [`agent_lattice_state`] does, so a dead worker (whose
 /// `pane_state` also reads `Idle`) is never mistaken for live idle and swept
 /// into `+N idle`: dead rows are the section view's business, not the cap's.
+/// `Empty` folds too (x-d401): this branch split the old blind `Idle` into
+/// `Idle`, `Empty` and `Unmeasured`, and testing `== Idle` alone would push
+/// every pristine shell into the `attention` count, saturating `idle_budget`
+/// to zero and killing the fold on exactly the thirty-empty-shells squad it
+/// was written for. `Unmeasured` deliberately does NOT fold: a row with no
+/// reading is the one this branch exists to keep visible.
 fn is_idle_row(a: &AgentRow) -> bool {
-    !a.exited && pane_state(a.badge, a.seen, a.pane_activity) == PaneState::Idle
+    !a.exited
+        && matches!(
+            pane_state(a.badge, a.seen, a.pane_activity),
+            PaneState::Idle | PaneState::Empty
+        )
 }
 
 /// Why a session needs a human, worst-first (x-feec). Declaration order IS the
@@ -30304,6 +30314,43 @@ mod tests {
         r.badge = badge;
         r.seen = seen;
         r
+    }
+
+    /// (x-d401) The top-K fold's target set after this branch split the old
+    /// blind `Idle` three ways. A pristine shell must still fold, or a squad
+    /// of thirty empty shells drives `attention` to thirty and `idle_budget`
+    /// to zero. An UNMEASURED row must not fold: keeping a no-reading row on
+    /// screen is the whole point of the split.
+    #[test]
+    fn idle_fold_takes_empty_shells_but_never_an_unmeasured_row() {
+        let with = |activity: Option<ShellActivity>| {
+            let mut r = agent_row("w", 1, None, true);
+            r.pane_activity = activity;
+            r
+        };
+        assert!(
+            is_idle_row(&with(Some(ShellActivity::Empty))),
+            "a pristine shell folds, else the +N idle cap dies on a shell-heavy squad"
+        );
+        assert!(is_idle_row(&with(Some(ShellActivity::Idle))), "idle folds");
+        assert!(
+            !is_idle_row(&with(Some(ShellActivity::Unmeasured))),
+            "a row with no reading stays visible"
+        );
+        assert!(
+            !is_idle_row(&with(None)),
+            "an absent reading is unmeasured, never a blind idle"
+        );
+        assert!(
+            !is_idle_row(&with(Some(ShellActivity::Running))),
+            "a running pane is attention, not fold"
+        );
+        let mut dead = with(Some(ShellActivity::Empty));
+        dead.exited = true;
+        assert!(
+            !is_idle_row(&dead),
+            "dead rows are the section view's business"
+        );
     }
 
     fn fold_item(kind: &str, name: &str, live: bool) -> crate::needs_overlay::FoldItem {

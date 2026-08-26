@@ -2395,8 +2395,13 @@ def _truthful_base(cwd: Path, base_label: str) -> str:
     # A `_base_receipt` label carries `@<fork-sha>` provenance; the distance
     # is measured against the bare ref underneath it.
     bare = base_label.rpartition("@")[0] or base_label
-    remote = bare.split("/", 1)[0] if "/" in bare else "origin"
-    branch = bare.split("/", 1)[1] if "/" in bare else "main"
+    remote, _, branch = bare.partition("/")
+    if not branch:
+        # No `<remote>/<branch>` shape means the label names a LOCAL ref, and
+        # `HEAD..<local-branch>` is exactly the stale-ref silent zero this
+        # function exists to refuse. Fetching `origin main` and then measuring
+        # against a local `main` would print a confident, wrong distance.
+        return f"{base_label} behind=unmeasured (base names no remote ref)"
     if not _refresh_remote(cwd, remote, branch)[0]:
         return f"{base_label} behind=unmeasured (fetch failed)"
     count = _git_out(cwd, "rev-list", "--count", f"HEAD..{bare}")

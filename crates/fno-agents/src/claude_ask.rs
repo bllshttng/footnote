@@ -2943,13 +2943,12 @@ pub fn dispatch_claude_spawn(
     // rights" has a durable answer - and only as a request, because fno
     // cannot back the outcome (a forced-default environment ignores the flag
     // while the old key read as an applied grant). Only when set, so the
-    // unset receipt is byte-identical (AC7). Values are exact passthrough,
-    // so escape `"` defensively.
+    // unset receipt is byte-identical (AC7). Values are exact passthrough and
+    // nothing validates them against a closed set before here, so use the same
+    // full JSON-string encode as `model_field` below - a `"`-only escape
+    // diverges on a backslash and can emit invalid JSON.
     let perm_field = match effective_mode.filter(|m| !m.is_empty()) {
-        Some(m) => format!(
-            r#", "permission_mode_requested": "{}""#,
-            m.replace('"', "\\\"")
-        ),
+        Some(m) => format!(", \"permission_mode_requested\": {}", json_string_ascii(m)),
         None => String::new(),
     };
     // (x-d401, seventh surface) The model the worker was launched with: an
