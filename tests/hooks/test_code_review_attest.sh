@@ -288,9 +288,15 @@ grep -q '"findings_blocking":1' "$EMITTED" \
 grep -q '"findings_nonblocking":1' "$EMITTED" \
   && pass "ac3hp event carries findings_nonblocking:1" \
   || fail "ac3hp findings_nonblocking: $(cat "$EMITTED")"
-[[ "$(grep -c . "$EMITTED" || true)" == "1" ]] \
+# Two rows per attested run are the design: the review_attestation outcome
+# plus the reviewer-side review_invocation observation (subagent depth and
+# the context contract, joined by invocation_id). Exactly one of EACH.
+[[ "$(grep -c ' -t review_attestation ' "$EMITTED" || true)" == "1" ]] \
   && pass "ac3hp exactly one attestation emitted" \
-  || fail "ac3hp emitted $(grep -c . "$EMITTED" || true) lines"
+  || fail "ac3hp emitted $(grep -c ' -t review_attestation ' "$EMITTED" || true) attestations"
+[[ "$(grep -c '"stage":"started"' "$EMITTED" || true)" == "1" ]] \
+  && pass "ac3hp one reviewer observation row" \
+  || fail "ac3hp emitted $(grep -c '"stage":"started"' "$EMITTED" || true) reviewer rows"
 grep -q 'classified 2 finding(s): 1 blocking, 1 non-blocking' "$HOOK_STDOUT" \
   && pass "ac3hp stdout carries the classification line" \
   || fail "ac3hp classification line missing: $(cat "$HOOK_STDOUT")"
