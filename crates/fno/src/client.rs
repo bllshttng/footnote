@@ -28620,6 +28620,32 @@ mod tests {
         assert_eq!(v.nav.as_ref().unwrap().cursor, 0);
     }
 
+    #[tokio::test]
+    async fn global_chord_opens_the_sideline_on_the_focused_row() {
+        // x-e10f AC11-HP: ESC[1;7D with no prefix opens the sideline seeded on
+        // the focused pane's row. AC12 (consumed, never forwarded) is asserted
+        // at the scanner in keys.rs; this proves the emitted event lands the
+        // SEEDED selector, end to end through dispatch_event.
+        let mut v = two_pane_view();
+        v.layout.agents = vec![
+            agent_row("alpha", 10, None, false),
+            agent_row("omega", 11, None, false),
+        ];
+        let events = crate::keys::Scanner::default().scan(b"\x1b[1;7D", Instant::now());
+        let mut buf: Vec<u8> = Vec::new();
+        for ev in events {
+            if let Event::Forward(chunk) = &ev {
+                panic!("AC12: the chord leaked to the pane: {chunk:?}");
+            }
+            dispatch_event(&mut v, ev, &mut buf).await.unwrap();
+        }
+        let sel = v.selector.expect("the chord opened the sideline");
+        assert!(
+            matches!(v.display_rows()[sel], DisplayRow::Agent(a) if a.pane_id == Some(11)),
+            "seeded on the focused pane's row"
+        );
+    }
+
     #[test]
     fn nav_cursor_clamps_no_wrap() {
         // Boundaries: Ctrl-p at the top and Ctrl-n past the last filtered row
