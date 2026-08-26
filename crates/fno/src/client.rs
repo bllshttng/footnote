@@ -8855,7 +8855,7 @@ fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Rev
 /// fold outright on any real fleet.
 ///
 /// Folding an unmeasured row is safe only because the fold row says `+N more`
-/// rather than `+N more`. An earlier revision of this comment claimed the `?`
+/// rather than `+N idle`. An earlier revision of this comment claimed the `?`
 /// glyph carried the honesty "wherever the row renders", which is exactly
 /// wrong for a row the fold REMOVED: the count would then have stood in for a
 /// measurement nothing took, on the surface this branch exists to fix. The
