@@ -39,6 +39,20 @@ def test_plan_validate_execution_refuses_post_gate_no_difficulty(tmp_path):
     assert "difficulty is required" in result.output
     assert "low, medium, high" in result.output
 
+    # Round-11: the JSON violation names the axis the message is about -
+    # a cannot-read-created refusal is field "created", not "difficulty".
+    no_created = tmp_path / "no-created.md"
+    no_created.write_text("---\nnode: x-baef\nstatus: ready\n---\n# T\n\nBody.\n")
+    import json as _json
+
+    r3 = runner.invoke(
+        app, ["do", "plan", "validate", str(no_created), "--execution", "--json"]
+    )
+    assert r3.exit_code == 1, r3.output
+    payload = _json.loads(r3.output)
+    assert payload["violations"][0]["field"] == "created"
+    assert "absent from frontmatter" in payload["violations"][0]["message"]
+
     on_gate = tmp_path / "on-gate.md"
     on_gate.write_text(
         "---\nnode: x-baef\nstatus: ready\ncreated: 2026-08-26\n---\n"

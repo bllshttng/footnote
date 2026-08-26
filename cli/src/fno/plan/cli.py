@@ -340,19 +340,25 @@ def validate(
 
         gate_error = difficulty_gate_error(doc.frontmatter)
         if gate_error:
+            # The gate's own message names its axis: a cannot-read-created
+            # refusal is a created problem, not a difficulty one, and a
+            # consumer keying on field is pointed at the field to fix.
+            gate_field = (
+                "created" if gate_error.startswith("cannot read created") else "difficulty"
+            )
             if json_out:
                 typer.echo(json.dumps({
                     "valid": False,
                     "path": str(resolved),
                     "scope": "execution",
-                    "violations": [{"field": "difficulty", "message": gate_error}],
+                    "violations": [{"field": gate_field, "message": gate_error}],
                     "warnings": [],
                 }))
             else:
                 typer.echo(
                     f"invalid execution: {resolved} (difficulty gate)", err=True
                 )
-                typer.echo(f"  difficulty: {gate_error}", err=True)
+                typer.echo(f"  {gate_field}: {gate_error}", err=True)
             raise typer.Exit(code=1)
 
         result = validate_execution(doc)

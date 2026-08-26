@@ -63,10 +63,18 @@ def difficulty_gate_error(frontmatter: dict) -> str | None:
     elif isinstance(created, date):
         pass  # a YAML-parsed date object is already the answer
     elif isinstance(created, str):
+        # Exact forms only, no [:10] truncation: a junk suffix
+        # ('2026-08-27xyz', '2026-08-271') truncated to a valid date here
+        # while the model's own date validation refused it, so the intake
+        # gate and the model disagreed on the same file.
+        s = created.strip()
         try:
-            created = date.fromisoformat(created.strip()[:10])
+            created = datetime.fromisoformat(s).date()
         except ValueError:
-            created = None
+            try:
+                created = date.fromisoformat(s)
+            except ValueError:
+                created = None
     else:
         # int/list/None-ish scalars: an unquoted YAML int (20260827) would
         # otherwise fall through the isinstance(date) test and bypass the

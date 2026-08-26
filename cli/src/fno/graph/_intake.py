@@ -791,7 +791,10 @@ def _read_plan_frontmatter(plan_path: str) -> dict:
         return {}
 
     lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    # lstrip the UTF-8 BOM: str.strip() keeps it, so a Windows-authored plan
+    # whose first line is BOM+'---' would read as no-frontmatter here (and
+    # in _has_frontmatter_block), silently un-dating the plan.
+    if not lines or lines[0].lstrip("\ufeff").strip() != "---":
         return {}
 
     end_idx: int | None = None
@@ -836,7 +839,9 @@ def _has_frontmatter_block(plan_path: str) -> bool:
             first = fh.readline()
     except OSError:
         return False
-    return first.strip() == "---"
+    # Same BOM lstrip as _read_plan_frontmatter, so the two readers agree
+    # that a BOM+'---' opener IS a frontmatter block.
+    return first.lstrip("\ufeff").strip() == "---"
 
 
 def _list_known_projects() -> set[str]:
@@ -1189,26 +1194,6 @@ def _prepare_intake(
             )
     fm_raw, plan_dir = _collect_frontmatter_depends(plan_path)
     fm = _read_plan_frontmatter(plan_path)
-    # The difficulty gate lives HERE, not inside the mutators, so every
-    # surface sees it at the same point: the single-file lane (real and
-    # dry-run), and the multi lane's per-file try/except (a refused file
-    # skips, never aborts the batch). Inside the mutator it fired after the
-    # dry-run preview and, on the multi real lane, escaped the lock body.
-    from fno.plan.schema import difficulty_gate_error
-
-    gate_error = difficulty_gate_error(fm)
-    if gate_error is None and not fm and _has_frontmatter_block(plan_path):
-        # _read_plan_frontmatter conflates "no block" (fine) with "block
-        # present but unparseable"; the second is undatable, and the empty-
-        # dict carve-out would mint a bandless node out of broken YAML.
-        raise ValueError(
-            f"{plan_path}: cannot parse frontmatter; the difficulty gate "
-            "cannot date the plan. Fix the YAML block, then set created: "
-            "<YYYY-MM-DD> and, for post-gate plans, difficulty: "
-            "low, medium, high."
-        )
-    if gate_error:
-        raise ValueError(f"{plan_path}: {gate_error}")
     resolved_fm, unresolved_fm = _resolve_depends_on(fm_raw, entries, plan_dir)
     for u in unresolved_fm:
         print(
@@ -1271,6 +1256,29 @@ def _prepare_intake(
             "id": existing["id"],
             "title": title,
         }
+
+    # The difficulty gate lives HERE - after the already-intaked short
+    # circuit (an idempotent re-run of a plan already on the graph stays a
+    # no-op even when the file is undatable), before every lane that would
+    # mint or mutate a node: the single-file lane (real and dry-run) and the
+    # multi lane's per-file try/except (a refused file skips, never aborts
+    # the batch). Inside the mutator it fired after the dry-run preview and,
+    # on the multi real lane, escaped the lock body.
+    from fno.plan.schema import difficulty_gate_error
+
+    gate_error = difficulty_gate_error(fm)
+    if gate_error is None and not fm and _has_frontmatter_block(plan_path):
+        # _read_plan_frontmatter conflates "no block" (fine) with "block
+        # present but unparseable"; the second is undatable, and the empty-
+        # dict carve-out would mint a bandless node out of broken YAML.
+        raise ValueError(
+            f"{plan_path}: cannot parse frontmatter; the difficulty gate "
+            "cannot date the plan. Fix the YAML block, then set created: "
+            "<YYYY-MM-DD> and, for post-gate plans, difficulty: "
+            "low, medium, high."
+        )
+    if gate_error:
+        raise ValueError(f"{plan_path}: {gate_error}")
 
     node_spec = {
         "plan_path": plan_path,

@@ -766,6 +766,44 @@ def test_intake_refuses_unparseable_frontmatter_post_gate(
     assert len(_read_entries(fixture_graph)) == 3
 
 
+def test_intake_refuses_bom_opened_post_gate_plan(
+    fixture_graph, tmp_path, capsys,
+):
+    """x-baef round-11: a UTF-8 BOM before the opening --- used to read as
+    no-frontmatter in BOTH readers, un-dating the plan; both now lstrip the
+    BOM, so the block parses and the gate binds."""
+    plan = tmp_path / "bom.md"
+    plan.write_bytes(
+        "\ufeff---\ncreated: 2026-08-27\n---\n# BOM\n\n"
+        f"{_SURFACE}\n\nBody.\n".encode()
+    )
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(plan)])
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
+    err = capsys.readouterr().err
+    assert "difficulty is required" in err
+    assert len(_read_entries(fixture_graph)) == 3
+
+
+def test_reintake_of_already_intaked_plan_stays_idempotent(
+    fixture_graph, tmp_path, capsys,
+):
+    """x-baef round-11: the gate sits AFTER the already-intaked short
+    circuit, so an idempotent re-run on a plan whose file is undatable (79
+    vault files carry no created) still no-ops with exit 0 instead of
+    failing on a file it would not touch."""
+    plan = tmp_path / "owned.md"
+    plan.write_text(f"---\nclaims: ab-1dea1234\n---\n# Owned\n\n{_SURFACE}\n")
+    entries = _read_entries(fixture_graph)
+    owner = next(e for e in entries if e["id"] == "ab-1dea1234")
+    owner["plan_path"] = str(plan)
+    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    _intake_impl(plan_paths=[str(plan)])
+    out = capsys.readouterr().out
+    assert "already intaked" in out
+
+
 def test_intake_claim_lane_allows_post_gate_plan_with_difficulty(
     fixture_graph, tmp_path, capsys,
 ):

@@ -61,6 +61,20 @@ def test_gate_refuses_every_undatable_created_except_no_frontmatter():
     assert difficulty_gate_error({}) is None
 
 
+def test_gate_reads_created_exactly_not_truncated():
+    """Round-11: the old [:10] slice bound '2026-08-27xyz' to 2026-08-27
+    while the model refused the same string - exact ISO forms only, so a
+    typo'd date is undatable in both scopes alike."""
+    from fno.plan.schema import difficulty_gate_error
+
+    for junk in ("2026-08-27xyz", "2026-08-271"):
+        err = difficulty_gate_error({"created": junk, "difficulty": None})
+        assert err is not None and "cannot read created" in err, junk
+    # Full timestamp and plain date still bind.
+    assert difficulty_gate_error({"created": "2026-08-27T04:35"}) is not None
+    assert difficulty_gate_error({"created": "2026-08-26"}) is None
+
+
 def test_model_tier_field_is_gone():
     m = PlanFrontmatter.model_validate(_fm(model_tier="low"))
     assert not hasattr(m, "model_tier")
