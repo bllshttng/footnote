@@ -6496,6 +6496,249 @@ def cmd_session_reap_open(
 cli.add_typer(session_app, name="session", hidden=True)
 
 
+# -- task rows + task claims (epic x-09d7 group 3) --
+
+task_app = typer.Typer(
+    name="task",
+    help="Task-grain rows and the task claim on status transition (x-09d7).",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+@task_app.callback()
+def _task_callback() -> None:
+    """Keep ``list``/``update`` real subcommands (single-command Typer collapse)."""
+
+
+def _task_plan_or_exit(node_token: str) -> tuple[str, str]:
+    """Resolve NODE to ``(node_id, plan_path)``; exit 1/2 on the named refusals."""
+    from fno.graph.fuzzy import resolve_node
+    from fno.graph.store import read_graph
+
+    entries = read_graph(_graph_path())
+    match = resolve_node(node_token, entries)
+    if match.kind != "exact":
+        typer.echo(f"Error: node '{node_token}' does not resolve to a node", err=True)
+        raise typer.Exit(code=1)
+    entry = match.candidates[0]
+    plan_path = entry.get("plan_path") or ""
+    if not plan_path:
+        typer.echo(f"no plan bound to {entry.get('id')}", err=True)
+        raise typer.Exit(code=2)
+    return entry["id"], plan_path
+
+
+@task_app.command("list")
+def cmd_task_list(
+    node: str = typer.Argument(..., help="Node id / slug / bare-hex with a bound plan."),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit rows as JSON."),
+) -> None:
+    """List the node's task rows, materializing any the plan adds.
+
+    The first read of a node with a bound plan writes the missing ``pending``
+    rows, so a peer never sees a node whose tasks are invisible until someone
+    starts one.
+    """
+    from pathlib import Path
+
+    from fno.graph.store import locked_mutate_graph
+    from fno.graph.tasks import ensure_task_rows
+
+    node_id, plan_path = _task_plan_or_exit(node)
+    rows: list[dict] = []
+
+    def mutator(entries):
+        for e in entries:
+            if isinstance(e, dict) and e.get("id") == node_id:
+                rows.extend(ensure_task_rows(e, Path(plan_path)))
+                break
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+    if not rows:
+        typer.echo(f"no tasks declared by {plan_path}", err=True)
+        raise typer.Exit(code=2)
+    if json_output:
+        typer.echo(json.dumps({"node": node_id, "tasks": rows}, indent=2))
+        return
+    for r in rows:
+        typer.echo(f"{r.get('id')}\t{r.get('status')}\t{r.get('owner') or '-'}")
+
+
+@task_app.command("update")
+def cmd_task_update(
+    node: str = typer.Argument(..., help="Node id / slug / bare-hex with a bound plan."),
+    task_id: str = typer.Argument(..., help="Task id as declared by the plan."),
+    status: str = typer.Option(
+        ..., "--status", help="pending | in_progress | done."
+    ),
+    owner: Optional[str] = typer.Option(
+        None,
+        "--owner",
+        help=(
+            "Full harness session id of the holder (tests / operators). Default: "
+            "this session's proven id; never a head-8 handle - a codex UUIDv7 "
+            "head-8 is a ~65.5s clock bucket two workers can share."
+        ),
+    ),
+) -> None:
+    """Transition one task row; the claim IS the transition.
+
+    ``--status in_progress`` takes the ``task:<node>:<task>`` claim FIRST
+    (exit 3 naming the holder when a peer owns it, exit 4 when no session id
+    is provable and none was passed), then writes the row. ``--status done``
+    writes the row and releases the claim. ``--status pending`` is the
+    holder-only give-back for a blocked or failed task.
+    """
+    from pathlib import Path
+
+    from fno.agents.self_stamp import resolve_self_session_id
+    from fno.claims.core import ClaimHeldByOther, ClaimValidationError
+    from fno.claims.session_pid import resolve_session_harness, resolve_session_pid
+    from fno.claims.tasks import acquire_task, release_task, task_key
+    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.tasks import TASK_STATUSES, derive_task_ids
+
+    if status not in TASK_STATUSES:
+        typer.echo(
+            f"invalid --status {status!r}; one of {', '.join(TASK_STATUSES)}", err=True
+        )
+        raise typer.Exit(code=2)
+    node_id, plan_path = _task_plan_or_exit(node)
+    ids = derive_task_ids(Path(plan_path))
+    if task_id not in ids:
+        typer.echo(
+            f"task '{task_id}' not in plan {plan_path}; plan tasks: "
+            f"{', '.join(ids) or '(none)'}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    holder = owner or resolve_self_session_id()
+    key = task_key(node_id, task_id)
+
+    def _set_row(mutate) -> Optional[dict]:
+        found: list[dict] = []
+
+        def mutator(entries):
+            for e in entries:
+                if isinstance(e, dict) and e.get("id") == node_id:
+                    from fno.graph.tasks import ensure_task_rows
+
+                    ensure_task_rows(e, Path(plan_path))
+                    for row in e.get("tasks") or []:
+                        if isinstance(row, dict) and row.get("id") == task_id:
+                            mutate(row)
+                            found.append(dict(row))
+                            break
+                    break
+            return entries
+
+        locked_mutate_graph(_graph_path(), mutator)
+        return found[0] if found else None
+
+    def _release_claim_or_note() -> None:
+        if holder:
+            release_task(node_id, task_id, holder)
+        else:
+            # done/give-back from a context with no provable session id: the
+            # row write (the record) must not fail on identity. The claim is
+            # pid-liveness anchored, so it frees when its process dies.
+            typer.echo(
+                f"claim {key} not released (no provable holder); "
+                "pid-liveness clears it",
+                err=True,
+            )
+
+    if status == "in_progress":
+        if not holder:
+            typer.echo(
+                "cannot prove a session id for the holder; "
+                "pass --owner <full-session-id>",
+                err=True,
+            )
+            raise typer.Exit(code=4)
+        pid = resolve_session_pid()
+        harness = resolve_session_harness()
+        try:
+            acquire_task(node_id, task_id, holder, pid=pid, harness=harness)
+        except ClaimHeldByOther as exc:
+            typer.echo(
+                f"another holder owns {key} ({exc.holder}, pid={exc.pid})", err=True
+            )
+            raise typer.Exit(code=3)
+        except ClaimValidationError as exc:
+            typer.echo(f"invalid task claim key {key}: {exc}", err=True)
+            raise typer.Exit(code=2)
+        claimed_at = datetime.now(timezone.utc).isoformat()
+        try:
+            row = _set_row(
+                lambda row: row.update(
+                    {"status": "in_progress", "owner": holder, "claimed_at": claimed_at}
+                )
+            )
+        except Exception:
+            release_task(node_id, task_id, holder)
+            raise
+        if row is None:
+            release_task(node_id, task_id, holder)
+            typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"{key} in_progress holder={holder}")
+        return
+
+    if status == "done":
+        row = _set_row(lambda row: row.update({"status": "done"}))
+        if row is None:
+            typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
+            raise typer.Exit(code=1)
+        _release_claim_or_note()
+        typer.echo(f"{key} done")
+        return
+
+    # pending: the holder-only give-back.
+    if not holder:
+        typer.echo(
+            "cannot prove a session id for the holder; "
+            "pass --owner <full-session-id>",
+            err=True,
+        )
+        raise typer.Exit(code=4)
+    entries = read_graph(_graph_path())
+    current = next(
+        (
+            r
+            for e in entries
+            if isinstance(e, dict) and e.get("id") == node_id
+            for r in e.get("tasks") or []
+            if isinstance(r, dict) and r.get("id") == task_id
+        ),
+        None,
+    )
+    current_owner = (current or {}).get("owner")
+    if current_owner and current_owner != holder:
+        typer.echo(
+            f"task {task_id} held by {current_owner}; only the holder can give it back",
+            err=True,
+        )
+        raise typer.Exit(code=3)
+    row = _set_row(
+        lambda row: (
+            row.update({"status": "pending", "owner": None}),
+            row.pop("claimed_at", None),
+        )
+    )
+    if row is None:
+        typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
+        raise typer.Exit(code=1)
+    release_task(node_id, task_id, holder)
+    typer.echo(f"{key} pending (given back by {holder})")
+
+
+cli.add_typer(task_app, name="task", hidden=True)
+
+
 # -- backfill-slugs --
 
 # -- view --
@@ -14139,6 +14382,9 @@ _TRACKER_OWNED_VERBS = frozenset(
         "batch prepare",
         "batch ship",
         "batch ship-closeable",
+        # task rows + task claims write graph state (list materializes rows)
+        "task list",
+        "task update",
     }
 )
 
@@ -14229,6 +14475,7 @@ def iter_backlog_registry():
         ("relatedness", _relatedness_cli),
         ("epic", _epic_cli),
         ("session", session_app),
+        ("task", task_app),
         ("collisions", collisions_app),
     ]
 
