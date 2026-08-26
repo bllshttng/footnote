@@ -118,6 +118,7 @@ def acquire_review_hold(
     head: str,
     holder: str,
     verb: Optional[str] = None,
+    invocation_id: Optional[str] = None,
     ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
 ):
@@ -133,6 +134,8 @@ def acquire_review_hold(
     metadata: dict[str, Any] = {"head_sha": head}
     if verb:
         metadata["verb"] = verb
+    if invocation_id:
+        metadata["invocation_id"] = invocation_id
     try:
         return acquire_claim(
             review_hold_key(branch),

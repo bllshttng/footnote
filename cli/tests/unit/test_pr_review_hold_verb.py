@@ -85,6 +85,26 @@ def test_acquire_then_release_round_trips(tmp_path):
     assert "no hold on" in again.stdout
 
 
+def test_acquire_carries_review_invocation_id_in_hold_metadata(tmp_path):
+    from fno.claims.core import claim_status
+
+    result = _invoke(
+        "acquire",
+        "--branch",
+        "feature/x-a089",
+        "--head",
+        "abc123",
+        "--holder",
+        "reviewer:sess-1",
+        "--invocation-id",
+        "ri-test-4",
+    )
+
+    assert result.exit_code == 0
+    hold = claim_status(_review_hold.review_hold_key("feature/x-a089"), root=tmp_path)
+    assert hold["metadata"]["invocation_id"] == "ri-test-4"
+
+
 def test_a_failed_acquire_still_exits_zero(monkeypatch, tmp_path):
     """Registration must never block a review from starting: an unheld review is
     still covered by the worktree layer, and a review that refuses to start

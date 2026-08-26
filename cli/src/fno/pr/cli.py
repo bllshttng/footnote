@@ -460,6 +460,9 @@ def review_hold(
     head: str = typer.Option("", "--head", help="The head sha being reviewed (acquire)."),
     holder: Optional[str] = typer.Option(None, "--holder", help="Who holds the review."),
     verb: Optional[str] = typer.Option(None, "--verb", help="Which review verb is running."),
+    invocation_id: Optional[str] = typer.Option(
+        None, "--invocation-id", help="Review invocation telemetry join id."
+    ),
     ttl_minutes: Optional[float] = typer.Option(
         None, "--ttl-minutes", help="Override config.review.hold_ttl_minutes."
     ),
@@ -517,6 +520,7 @@ def review_hold(
             head=head,
             holder=holder,
             verb=verb,
+            invocation_id=invocation_id,
             ttl_ms=(_review_hold.resolve_ttl_ms(ttl_minutes) if ttl_minutes is not None else None),
         )
         if claim is None:

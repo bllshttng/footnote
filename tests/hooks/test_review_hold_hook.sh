@@ -49,10 +49,14 @@ git -C "$WORK" checkout -q -b feature/x-a089
 BIN="$TMP/bin"
 mkdir -p "$BIN"
 RECORDED="$TMP/recorded.txt"
+EVENTS="$TMP/events.jsonl"
 cat > "$BIN/fno-stub" <<'STUB'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "do" && "${2:-}" == "pr" && "${3:-}" == "review-hold" ]]; then
   printf '%s\n' "$*" >> "$FNO_RECORD"
+fi
+if [[ "${1:-}" == "doctor" && "${2:-}" == "event" && "${3:-}" == "emit" ]]; then
+  printf '%s\n' "$*" >> "$FNO_EVENTS"
 fi
 exit 0
 STUB
@@ -61,7 +65,8 @@ chmod +x "$BIN/fno-stub"
 run_hook() {
   # $1 = action, $2 = payload JSON
   : > "$RECORDED"
-  printf '%s' "$2" | FNO="$BIN/fno-stub" FNO_RECORD="$RECORDED" \
+  : > "$EVENTS"
+  printf '%s' "$2" | FNO="$BIN/fno-stub" FNO_RECORD="$RECORDED" FNO_EVENTS="$EVENTS" \
     bash "$HOOK" "$1" >/dev/null 2>&1
 }
 
@@ -95,6 +100,31 @@ run_hook acquire "$(skill_call "/code-review")"
 expect_registered "skill=/code-review"
 run_hook acquire "$(skill_call "/code-review <level> --comment")"
 expect_registered "skill=/code-review with args"
+
+echo "-- a review start records a positive invocation marker and joins the hold --"
+run_hook acquire "$(jq -nc --arg cwd "$WORK" \
+  '{hook_event_name:"PreToolUse", tool_name:"Skill", cwd:$cwd,
+    session_id:"sess-started", tool_input:{skill:"/code-review medium --comment"}}')"
+expect_registered "review start telemetry: hold"
+if grep -q 'review_invocation' "$EVENTS"; then
+  pass "review start telemetry: invocation event"
+else
+  fail "review start telemetry: no invocation event"
+fi
+event_id="$(grep -o 'ri-[0-9a-f]*' "$EVENTS" | head -1)"
+hold_id="$(grep -o 'ri-[0-9a-f]*' "$RECORDED" | head -1)"
+if [[ -n "$event_id" && "$event_id" == "$hold_id" ]]; then
+  pass "review start telemetry: event and hold share invocation id"
+else
+  fail "review start telemetry: join id mismatch (event=$event_id hold=$hold_id)"
+fi
+if grep -q 'stage.*started' "$EVENTS" && grep -q 'level.*medium' "$EVENTS" \
+  && grep -q 'level_source.*explicit' "$EVENTS" \
+  && grep -q 'transport.*skill_tool' "$EVENTS"; then
+  pass "review start telemetry: parsed level and transport"
+else
+  fail "review start telemetry: missing parsed fields ($(cat "$EVENTS"))"
+fi
 
 echo "-- a name that merely CONTAINS review registers nothing --"
 for verb in code-review-attest pr-review-fixes reviewer brainstorming; do
