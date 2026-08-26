@@ -1248,13 +1248,14 @@ _DASHBOARD_JS = """\
     return true;
   }
   function detail(n) {
-    var h = '<div class=\"kv\"><span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
-    if (LOCAL) { h = '<div class=\"kv\"><span><b>id</b> ' + esc(n.id) + '</span>' + h.slice(h.indexOf('</span>') + 7); }
+    var h = '<div class=\"kv\">';
+    if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + '</span>';
+    h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
     if (n.bb && n.bb.length) { h += '<div class=\"blk\"><div class=\"h\">Dependencies</div>' + n.bb.map(function (b) { return '<div class=\"item\">blocked by <b>' + esc(b.id) + '</b> ' + esc(b.s) + (b.t ? ' — ' + esc(b.t) : '') + '</div>'; }).join('') + '</div>'; }
     if (n.sb) h += '<div class=\"blk\"><div class=\"h\">Superseded by</div><div class=\"item\"><b>' + esc(n.sb.id) + '</b> ' + esc(n.sb.s) + (n.sb.t ? ' — ' + esc(n.sb.t) : '') + '</div></div>';
     if (n.d) h += '<p>' + esc(n.d) + '</p>'; else if (LOCAL) h += '<p>No description recorded.</p>';
     if (LOCAL && n.pl) h += '<div class=\"planrow\"><span class=\"plan\">' + esc(n.pl) + '</span>' + (n.link ? '<a class=\"pbtn primary\" href=\"' + esc(n.link) + '\">Open in Obsidian ↗</a>' : '') + '</div>';
-    if (LOCAL && n.pr) h += '<div class=\"planrow\"><a class=\"pbtn primary\" href=\"' + esc(n.pu || '') + '\">PR #' + esc(n.pr) + '</a></div>';
+    if (LOCAL && n.pr) h += '<div class=\"planrow\">' + (n.pu ? '<a class=\"pbtn primary\" href=\"' + esc(n.pu) + '\">PR #' + esc(n.pr) + '</a>' : '<span class=\"pill\">PR #' + esc(n.pr) + '</span>') + '</div>';
     return h;
   }
   function render() {
@@ -1302,7 +1303,13 @@ def _dashboard_rows(
                     "d": " ".join(str(entry.get("details") or "").split()),
                     "pl": str(entry.get("plan_path") or ""),
                     "pr": str(entry.get("pr_number") or ""),
-                    "pu": str(entry.get("pr_url") or ""),
+                    "pu": (
+                        str(entry.get("pr_url") or "")
+                        if str(entry.get("pr_url") or "").startswith(
+                            ("https://", "http://")
+                        )
+                        else ""
+                    ),
                     "sb": (
                         {
                             "id": str(entry.get("superseded_by")),
