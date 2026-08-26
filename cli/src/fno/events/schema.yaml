@@ -346,8 +346,8 @@ event_types:
           description: "Parsed review level; unset means no level was present at this site."
         level_source:
           type: string
-          enum: [explicit, ultra_forced, last_used, session_default, fallback]
-          description: "How the level was resolved, without reconstructing an unobservable table."
+          enum: [explicit, ultra_forced, last_used, session_default, fallback, diff-sized]
+          description: "How the level was resolved, without reconstructing an unobservable table. diff-sized is the owned lane's source: a bare invocation sized the level from the measured diff (fno do review resolve-level); it is never inherited, so no owned-lane row carries last_used."
         flags:
           type: array
           items: { type: string }
@@ -384,6 +384,22 @@ event_types:
           enum: [report_findings, json_block]
         subagent_count:
           type: integer
+        band:
+          type: string
+          enum: [low, medium, high, max]
+          description: "Band the resolved level maps to (fno do review resolve-level). Present only when the resolution ran; the owned lane always resolves before dispatch."
+        effort:
+          type: string
+          enum: [low, medium, high, max]
+          description: "Effort resolved beside the model, never folded into the model string (five-axis vocabulary)."
+        model:
+          type: string
+          description: "Resolved model id after band fallthrough and provider-family preference."
+        provider:
+          type: string
+        degraded_max:
+          type: boolean
+          description: "True when max had no distinct model on the provider and degraded to its high model at max effort; the degradation is recorded, never silently presented as max."
         pr:
           type: integer
         head_sha:
