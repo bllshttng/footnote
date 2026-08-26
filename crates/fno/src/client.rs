@@ -12234,16 +12234,28 @@ async fn dispatch_event(
             } else {
                 // Row 0 is NOT always actionable: Extended opens on the inert
                 // column header, where the cursor would paint nothing and Enter
-                // would only ring. Anchor onto the first actionable row instead.
-                view.selector = view.selector_anchor(0);
+                // would only ring. Seed from the FOCUSED pane's row (x-e10f:
+                // opening must land where you already are, not row one - the
+                // confirmed `ctrl+w goes to the top each time` defect); a pane
+                // with no visible row (a scratch pane, a folded section) falls
+                // back to the old row-zero anchor, never an invalid index.
+                // `selector_anchor` still steps off inert rows in both
+                // directions from whatever seed it gets.
+                let seed = view
+                    .agent_row_index_for_pane(view.layout.focus)
+                    .unwrap_or(0);
+                view.selector = view.selector_anchor(seed);
                 // An explicit open is a full modal, never a motion-fresh
                 // hover-arm - clear any stale hover flag so j/k and typing are
                 // owned by the selector, not disarmed on the first non-verb key.
                 view.sel_hover_armed = false;
                 view.sel_esc.clear();
                 // Open at the top: a stale offset from a prior session must
-                // not hide row 0 (x-a621).
+                // not hide row 0 (x-a621). Then re-follow the SEEDED cursor -
+                // offset 0 can leave it scrolled off-screen, and Enter must
+                // act on a visible row.
                 view.sideline_offset = 0;
+                view.clamp_sideline_offset();
             }
         }
         Event::OpenAnswers => {
@@ -28508,6 +28520,38 @@ mod tests {
         assert!(
             lines.iter().all(|l| !l.contains("·")),
             "a label match appends no reason token"
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_opens_on_the_focused_panes_row() {
+        // x-e10f AC6-HP: prefix+w opens on the FOCUSED pane's row, not the
+        // first actionable one - the operator-confirmed `ctrl+w goes to the
+        // top of the sideline each time` defect. AC7-EDGE: a focused pane with
+        // no visible row opens on the old row-zero anchor, never an invalid
+        // index.
+        let mut v = two_pane_view(); // focus = pane 11, the SECOND agent row
+        v.layout.agents = vec![
+            agent_row("alpha", 10, None, false),
+            agent_row("omega", 11, None, false),
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        dispatch_event(&mut v, Event::OpenSelector, &mut buf)
+            .await
+            .unwrap();
+        let sel = v.selector.expect("selector opened");
+        assert!(
+            matches!(v.display_rows()[sel], DisplayRow::Agent(a) if a.pane_id == Some(11)),
+            "cursor rests on the focused pane's row, not row zero"
+        );
+        v.layout.focus = 99; // no row hosts pane 99
+        dispatch_event(&mut v, Event::OpenSelector, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(
+            v.selector,
+            v.selector_anchor(0),
+            "an unfocusable seed falls back to the row-zero anchor"
         );
     }
 
