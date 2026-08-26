@@ -4,7 +4,8 @@ Covers `advance.schedule_shadow` and the shared `_classify_lane_candidate`: the
 read-only frontier decision report that emits selected / serialized / unevaluated
 verdicts with stable typed reasons and performs NO dispatch. The plan's ready-set
 shapes are each a test: empty, singleton, independent, file-colliding,
-same-domain, unknown-liveness (peer-lane), unevaluated (no file surface), and
+same-domain (disjoint surfaces co-select, x-0ae1; overlap serializes on
+collision), unknown-liveness (peer-lane), unevaluated (no file surface), and
 oversized (cap-bounded). `_ready_nodes` and the collision/in-flight seams are
 monkeypatched so the logic is tested without shelling `fno backlog ready`; the
 claims root is isolated to `tmp_path`.
@@ -83,13 +84,47 @@ def test_independent_distinct_domains_up_to_cap(monkeypatch, tmp_path):
     assert [(d["id"], d["reason"]) for d in r["serialized"]] == [("n-c", "cap-full")]
 
 
-def test_same_domain_is_serialized_with_reason(monkeypatch, tmp_path):
+def test_same_domain_disjoint_surfaces_both_selected(monkeypatch, tmp_path):
+    """x-0ae1: domain no longer serializes - two `code` nodes with (hermetic)
+    clean surfaces fill the frontier together."""
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["selected"]] == ["n-a", "n-b"]
+    assert r["serialized"] == []
+
+
+def test_same_domain_overlap_serializes_on_collision(monkeypatch, tmp_path):
+    """x-0ae1: the shadow twin of the live AC2-ERR - same-domain nodes sharing
+    a high-severity overlap serialize with `high-collision:<id>`, a collision
+    verdict, never a domain one."""
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "code")))
+    monkeypatch.setattr(
+        advance, "_high_collision",
+        lambda node, inflight: _Hit("n-a") if node["id"] == "n-b" else None,
+    )
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    assert [(d["id"], d["reason"]) for d in r["serialized"]] == [
+        ("n-b", "high-collision:n-a")
+    ]
+
+
+def test_no_surface_in_a_held_domain_carries_the_same_domain_annotation(
+    monkeypatch, tmp_path
+):
+    """x-0ae1: the domain tiebreak survives only as an annotation on an
+    unevaluated candidate, so the report can still explain the serialized
+    unknown: `unevaluated:no-surface+same-domain:<domain>`."""
+    import fno.graph.collision as collision
+
+    monkeypatch.setattr(
+        collision, "has_file_surface", lambda p: p != "/plans/n-b.md"
+    )
     _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "code")))
     r = advance.schedule_shadow(2, claims_root=tmp_path)
     assert [d["id"] for d in r["selected"]] == ["n-a"]
-    assert r["serialized"] == [
-        {"id": "n-b", "slug": "n-b", "domain": "code",
-         "verdict": "serialized", "reason": "same-domain:code"}
+    assert [(d["id"], d["reason"]) for d in r["unevaluated"]] == [
+        ("n-b", "unevaluated:no-surface+same-domain:code")
     ]
 
 

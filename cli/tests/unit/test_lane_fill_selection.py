@@ -1,10 +1,11 @@
 """Unit tests for parallel-mode lane-fill selection (x-eb82, group 2).
 
-Covers `advance.select_lane_fill`: distinct-domain selection, the cap, the
-sequential-degrade edge, the recompute-after-each-claim contract (x-7441), the
-skip-peer-held-lane guard, the domain-unset collapse, and the read-only preview
-mode. `_ready_nodes` is monkeypatched so the selector's logic is tested without
-shelling `fno backlog ready`; the claims root is isolated to `tmp_path`.
+Covers `advance.select_lane_fill`: collision-gated selection (same-domain nodes
+co-schedule on disjoint surfaces, x-0ae1), the cap, the sequential-degrade
+edge, the recompute-after-each-claim contract (x-7441), the
+skip-peer-held-lane guard, and the read-only preview mode. `_ready_nodes` is
+monkeypatched so the selector's logic is tested without shelling
+`fno backlog ready`; the claims root is isolated to `tmp_path`.
 """
 from __future__ import annotations
 
@@ -21,14 +22,24 @@ def _nodes(*specs):
     return [{"id": i, "domain": d, "title": i} for i, d in specs]
 
 
-def test_selects_first_of_each_distinct_domain_up_to_cap(tmp_path, monkeypatch):
-    ready = _nodes(("n-a", "code"), ("n-b", "code"), ("n-c", "docs"), ("n-d", "infra"))
+def test_same_domain_disjoint_surfaces_co_schedule_up_to_cap(tmp_path, monkeypatch):
+    """x-0ae1 AC2-HP: the collision gate, not the domain, decides. Three
+    `domain: code` nodes with pairwise-disjoint file surfaces fill lanes
+    together, bounded only by the cap - the old selector stopped at one."""
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a",
+         "plan_path": _plan(tmp_path, "a", ["cli/src/fno/alpha.py"])},
+        {"id": "n-b", "domain": "code", "title": "b",
+         "plan_path": _plan(tmp_path, "b", ["cli/src/fno/beta.py"])},
+        {"id": "n-c", "domain": "code", "title": "c",
+         "plan_path": _plan(tmp_path, "c", ["cli/src/fno/gamma.py"])},
+    ]
     monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
-    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+    sel = advance.select_lane_fill(2, claims_root=tmp_path)
 
-    assert [n["id"] for n in sel] == ["n-a", "n-c", "n-d"]
-    assert active_lane_count(root=tmp_path) == 3
+    assert [n["id"] for n in sel] == ["n-a", "n-b"]
+    assert active_lane_count(root=tmp_path) == 2
     for n in sel:
         assert find_lane_slot(n["id"], root=tmp_path) is not None
 
@@ -60,16 +71,28 @@ def test_max_lanes_one_selects_a_single_node(tmp_path, monkeypatch):
 def test_recomputes_distinctness_after_each_claim(tmp_path, monkeypatch):
     """x-7441: a fresh ready-list per pick, not a pre-claim snapshot.
 
-    Pass 1 sees n-b(docs); before pass 2 a peer removes n-b from ready and n-c
-    appears. The selector must pick n-c, never the stale n-b.
+    Pass 1 sees n-b(docs) sharing n-a(code)'s file surface; before pass 2 a
+    peer removes n-b from ready and n-c appears. The selector must pick n-c,
+    never the stale n-b.
     """
     calls = {"n": 0}
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
 
     def fake_ready(project=None, mission=None):
         calls["n"] += 1
         if calls["n"] == 1:
-            return _nodes(("n-a", "code"), ("n-b", "docs"))
-        return _nodes(("n-a", "code"), ("n-c", "infra"))
+            return [
+                {"id": "n-a", "domain": "code", "title": "a",
+                 "plan_path": _plan(tmp_path, "a", shared)},
+                {"id": "n-b", "domain": "docs", "title": "b",
+                 "plan_path": _plan(tmp_path, "b", shared)},
+            ]
+        return [
+            {"id": "n-a", "domain": "code", "title": "a",
+             "plan_path": _plan(tmp_path, "a", shared)},
+            {"id": "n-c", "domain": "infra", "title": "c",
+             "plan_path": _plan(tmp_path, "c", ["docs/unrelated.md"])},
+        ]
 
     monkeypatch.setattr(advance, "_ready_nodes", fake_ready)
 
@@ -79,16 +102,20 @@ def test_recomputes_distinctness_after_each_claim(tmp_path, monkeypatch):
     assert calls["n"] >= 2, "must re-query ready between picks"
 
 
-def test_seeds_used_domains_from_live_peer_lane_domains(tmp_path, monkeypatch):
-    """codex P2: a live lane working `code` blocks selecting another `code` node.
-
-    used_domains is seeded from the domains of live lane holders, so the
-    distinct-domain guarantee holds across ticks (the fill-vacant-lanes case),
-    not just within one call.
+def test_live_peer_domain_seed_no_longer_excludes(tmp_path, monkeypatch):
+    """x-0ae1: a live lane working `code` no longer blocks selecting another
+    `code` node - the collision gate decides, and these surfaces are disjoint.
+    The peer-domain seed now feeds only the `+same-domain` annotation on an
+    unevaluated candidate (asserted in the classifier test below).
     """
     from fno.claims.lanes import acquire_lane_slot
 
-    ready = _nodes(("n-b", "code"), ("n-c", "docs"))
+    ready = [
+        {"id": "n-b", "domain": "code", "title": "b",
+         "plan_path": _plan(tmp_path, "b", ["cli/src/fno/beta.py"])},
+        {"id": "n-c", "domain": "docs", "title": "c",
+         "plan_path": _plan(tmp_path, "c", ["docs/unrelated.md"])},
+    ]
     monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
     # A live peer lane already works a `code` node (records its domain).
     acquire_lane_slot(
@@ -97,8 +124,9 @@ def test_seeds_used_domains_from_live_peer_lane_domains(tmp_path, monkeypatch):
 
     sel = advance.select_lane_fill(3, claims_root=tmp_path)
 
-    # `code` is covered by the live peer lane -> only `docs` is selectable.
-    assert [n["id"] for n in sel] == ["n-c"]
+    # The old selector returned only n-c here; the surfaces are disjoint, so
+    # both dispatch under the collision gate (cap 3: the peer's slot + 2).
+    assert [n["id"] for n in sel] == ["n-b", "n-c"]
 
 
 def test_skips_node_a_peer_lane_already_holds(tmp_path, monkeypatch):
@@ -113,18 +141,21 @@ def test_skips_node_a_peer_lane_already_holds(tmp_path, monkeypatch):
     assert [n["id"] for n in sel] == ["n-b"]
 
 
-def test_domain_unset_collapses_to_one_lane(tmp_path, monkeypatch):
-    """Domain-less nodes share ONE bucket, never one lane each."""
+def test_domain_unset_nodes_dispatch_fail_open_together(tmp_path, monkeypatch):
+    """x-0ae1: the one-lane-per-unset-domain-bucket rule left with the domain
+    guard. Plan-less, domain-less nodes are unevaluated and dispatch
+    fail-open, so two of them co-dispatch instead of collapsing to one lane."""
     ready = [
-        {"id": "n-a", "title": "n-a"},  # no domain
+        {"id": "n-a", "title": "n-a"},  # no domain, no plan
         {"id": "n-b", "domain": None, "title": "n-b"},  # explicit None
-        {"id": "n-c", "domain": "docs", "title": "n-c"},
+        {"id": "n-c", "domain": "docs", "title": "n-c",
+         "plan_path": _plan(tmp_path, "c", ["docs/unrelated.md"])},
     ]
     monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
     sel = advance.select_lane_fill(3, claims_root=tmp_path)
 
-    assert [n["id"] for n in sel] == ["n-a", "n-c"]
+    assert [n["id"] for n in sel] == ["n-a", "n-b", "n-c"]
 
 
 def test_preview_mode_holds_no_slots(tmp_path, monkeypatch):
@@ -479,3 +510,63 @@ def test_peer_with_unparseable_plan_is_reported_not_counted(tmp_path, monkeypatc
 
     assert [n["id"] for n in sel] == ["n-b"]  # fails open
     assert "no comparable file surface" in caplog.text
+
+
+# --- guard order: peer-lane, collision, domain (x-0ae1) ---------------------
+
+
+def test_same_domain_overlap_serializes_on_collision_not_domain(tmp_path, monkeypatch):
+    """AC2-ERR: two `domain: code` nodes sharing a high-severity overlap - the
+    second stays ready carrying `high-collision:<first>`, a collision verdict,
+    never a domain one."""
+    shared = ["cli/src/fno/graph/cli.py", "cli/src/fno/graph/store.py"]
+    ready = [
+        {"id": "n-a", "domain": "code", "title": "a",
+         "plan_path": _plan(tmp_path, "a", shared)},
+        {"id": "n-b", "domain": "code", "title": "b",
+         "plan_path": _plan(tmp_path, "b", shared)},
+    ]
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    sel = advance.select_lane_fill(2, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-a"]
+    assert find_lane_slot("n-b", root=tmp_path) is None  # left ready, not parked
+
+    inflight = [{
+        "id": "n-a", "title": "a", "plan_path": ready[0]["plan_path"],
+        "created_at": "", "status": "ready",
+    }]
+    reason = advance._classify_lane_candidate(
+        ready[1], used_domains={"code"}, inflight=inflight, claims_root=tmp_path,
+    )
+    assert reason == "high-collision:n-a"
+
+
+def test_domain_survives_only_as_the_unevaluated_annotation(tmp_path):
+    """The classifier's whole domain contract post-reorder: an evaluated
+    candidate ignores a held domain (None regardless); an unevaluated one
+    carries `+same-domain:<domain>` on its no-surface token so the report can
+    still explain the serialized unknown."""
+    evaluated = {
+        "id": "n-a", "domain": "code", "title": "a",
+        "plan_path": _plan(tmp_path, "a", ["cli/src/fno/alpha.py"]),
+    }
+    planless = {"id": "n-b", "domain": "code", "title": "b"}
+    domainless = {"id": "n-c", "title": "c"}  # no domain, no plan
+
+    assert advance._classify_lane_candidate(
+        evaluated, used_domains={"code"}, inflight=[], claims_root=tmp_path,
+    ) is None
+
+    token = advance._classify_lane_candidate(
+        planless, used_domains={"code"}, inflight=[], claims_root=tmp_path,
+    )
+    assert token == "unevaluated:no-surface+same-domain:code"
+    assert token.startswith(advance._UNEVALUATED_PREFIX)  # still fail-open class
+
+    # An unset domain never emits a bare `+same-domain:` suffix.
+    assert advance._classify_lane_candidate(
+        domainless, used_domains={advance._DOMAIN_UNSET}, inflight=[],
+        claims_root=tmp_path,
+    ) == "unevaluated:no-surface"

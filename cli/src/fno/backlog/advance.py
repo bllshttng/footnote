@@ -406,23 +406,24 @@ def _next_node(project: Optional[str]) -> Optional[dict]:
     return node
 
 
-# A node with no `domain` set collapses into ONE lane bucket (not one lane
-# each), so a domain-less backlog never fans out into undifferentiated lanes.
+# A node with no `domain` set collapses into ONE bucket in `_live_lane_domains`
+# seeding. Since domain stopped excluding candidates (x-0ae1) this affects only
+# the `+same-domain` annotation - and the classifier skips the annotation for an
+# unset domain, so it never emits a bare `+same-domain:` suffix.
 _DOMAIN_UNSET = ""
 
 
 def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
-    """Domains currently held by live lane slots, for distinct-domain seeding.
+    """Domains currently held by live lane slots, seeding the domain annotation.
 
-    LD#8 recomputes distinctness against the live-claim world, not just this
-    call's picks: a lane already working a ``code`` node must stop a fill from
-    selecting another ``code`` node (else two same-domain lanes run concurrently,
-    the exact collision domain-lane parallelism exists to prevent). Each lane
-    records its ``domain`` in slot metadata at acquire time, so peer-lane domains
-    are readable here without a per-node lookup. A slot with no recorded domain
+    Since the guard reorder (x-0ae1) domain no longer excludes a candidate from
+    lane fill - the file-collision gate decides - but the ``+same-domain``
+    annotation on an unevaluated candidate is only truthful if the seed reads
+    the live-claim world, not just this call's own picks. Each lane records its
+    ``domain`` in slot metadata at acquire time, so peer-lane domains are
+    readable here without a per-node lookup. A slot with no recorded domain
     (e.g. one taken via a bare ``fno agents claim acquire --lane`` CLI) collapses to the
-    ``_DOMAIN_UNSET`` bucket - conservatively blocking co-schedule with an
-    unknown-domain lane rather than guessing it is safe.
+    ``_DOMAIN_UNSET`` bucket.
     """
     from fno.claims.core import list_claims
     from fno.claims.lanes import LANE_SLOT_PREFIX
@@ -635,7 +636,7 @@ def select_lane_fill(
     claim: bool = True,
     claims_root: Optional[Path] = None,
 ) -> list[dict]:
-    """Select up to ``max_lanes`` ready nodes from DISTINCT domains, one lane each.
+    """Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
 
     The parallel-mode (epic x-42d5, group 2) lane-fill selector. With
     ``claim=True`` each pick atomically acquires a dispatch-time lane slot (the
@@ -645,14 +646,20 @@ def select_lane_fill(
     spawns one worker per node and the worker's ``target init`` reconciles that
     same slot (Locked Decision #8) rather than acquiring a fresh one.
 
-    Distinctness is recomputed AFTER each claim from a FRESH ready-list, never a
-    pre-claim snapshot: between two picks a peer may claim a node or a lane may
-    finish, and re-querying reflects that. This is the x-7441 "stops at a
-    claimed head" hazard - selection must skip claimed heads across every domain.
-    A node a live peer lane already holds is skipped so a not-yet-node-claimed
-    lane is never double-dispatched. (Two dispatchers racing the SAME node are
-    prevented upstream by the singleton ``walker:<root>`` claim, so this stays a
-    single-dispatcher selector, not a distributed lock.)
+    Collision-cleanliness is recomputed AFTER each claim from a FRESH ready-list,
+    never a pre-claim snapshot: between two picks a peer may claim a node or a
+    lane may finish, and re-querying reflects that. This is the x-7441 "stops at
+    a claimed head" hazard - selection must skip claimed heads across every
+    domain. A node a live peer lane already holds is skipped so a
+    not-yet-node-claimed lane is never double-dispatched. (Two dispatchers
+    racing the SAME node are prevented upstream by the singleton
+    ``walker:<root>`` claim, so this stays a single-dispatcher selector, not a
+    distributed lock.)
+
+    Domain is NOT a selection rule (x-0ae1): the file-collision gate decides,
+    so two same-domain nodes with disjoint surfaces co-schedule. What remains
+    of domain is the annotation on an unevaluated candidate - see
+    :func:`_classify_lane_candidate`.
 
     ``max_lanes == 1`` selects a single ready node (distinct-domain is a no-op
     for one pick): this is the retargeted active_backlog daemon's sequential
@@ -677,9 +684,10 @@ def select_lane_fill(
         return []
 
     selected: list[dict] = []
-    # Seed from domains already held by live lanes (peer lanes from prior ticks):
-    # LD#8 recomputes distinctness against the live-claim world, so a live `code`
-    # lane blocks this fill from selecting another `code` node (codex P2 on #130).
+    # Seed from domains already held by live lanes (peer lanes from prior ticks).
+    # Domain no longer excludes a candidate (x-0ae1) - it feeds only the
+    # `+same-domain` annotation on an unevaluated one - but the seed keeps that
+    # annotation truthful across ticks, not just within this call.
     # The peer-lane set is stable within a single-dispatcher call (the singleton
     # walker:<root> claim serializes dispatchers), so it is seeded once here; this
     # call's own picks are added below as they are acquired.
@@ -713,9 +721,9 @@ def select_lane_fill(
                 )
                 # Live dispatch fails OPEN on an unevaluated node (no comparable
                 # file surface): it dispatches anyway, today's behavior. Only a
-                # concrete exclusion (same-domain / peer-lane / high-collision)
-                # holds it back. The shadow report is the conservative twin -
-                # it serializes the unevaluated node instead (schedule_shadow).
+                # concrete exclusion (peer-lane / high-collision) holds it back.
+                # The shadow report is the conservative twin - it serializes the
+                # unevaluated node instead (schedule_shadow).
                 if reason is not None and not reason.startswith(_UNEVALUATED_PREFIX):
                     if reason.startswith(_HIGH_COLLISION_PREFIX):
                         _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
@@ -736,7 +744,7 @@ def select_lane_fill(
                 candidate = (node, node.get("domain") or _DOMAIN_UNSET)
                 break
             if candidate is None:
-                break  # no distinct-domain, unclaimed node left
+                break  # no selectable, unclaimed node left
 
             node, domain = candidate
             if claim:
@@ -808,16 +816,23 @@ def _classify_lane_candidate(
     held back. Duplicating this sequence into a second copy is the drift the
     codebase's path-uniqueness rule exists to prevent.
 
+    Guard order: peer-lane, then collision, then domain. Domain was a proxy for
+    "these will not collide"; the collision gate is the real measurement, so it
+    runs first and domain NEVER excludes an evaluated candidate - two
+    same-domain nodes with disjoint file surfaces co-schedule.
+
     Reason tokens (all stable, machine-readable):
 
-      ``same-domain:<domain>``   another live lane or an earlier pick this fill
-        already owns the node's domain (one lane per domain, LD#8).
       ``peer-lane``              a live peer lane already holds this exact node.
       ``high-collision:<id>``    a high-severity file overlap with in-flight work.
       ``unevaluated:no-surface`` the plan states no comparable file surface, so
         collision safety is UNKNOWN. This is a distinct class, not an exclusion:
         live dispatch fails open on it (dispatches anyway); the shadow report is
         conservative and serializes it with this diagnostic (plan Change 1).
+        When the node's domain is already held (by a live lane or an earlier
+        pick) the token carries ``+same-domain:<domain>`` - the domain tiebreak
+        survives only as that annotation, so the report can still explain a
+        serialized unknown.
       ``unevaluated:collision-error`` the collision gate raised, so safety is
         unknown for the same reason and gets the same fail-open treatment. It is
         a stated verdict rather than a swallowed error precisely so it cannot
@@ -825,11 +840,9 @@ def _classify_lane_candidate(
     """
     from fno.claims.lanes import find_lane_slot
 
-    domain = node.get("domain") or _DOMAIN_UNSET
-    if domain in used_domains:
-        return f"same-domain:{domain}"
     if find_lane_slot(node["id"], root=claims_root) is not None:
         return "peer-lane"
+    domain = node.get("domain") or _DOMAIN_UNSET
     # Unknown file state is its own verdict, not a silent pass: a node whose plan
     # states no comparable surface cannot be collision-checked, so its safety is
     # unevaluated rather than clean (plan Change 1: "serialize unknown ... state").
@@ -845,7 +858,10 @@ def _classify_lane_candidate(
     # whose overlap was never actually compared.
     try:
         if not plan or not has_file_surface(resolve_plan_path(plan)):
-            return "unevaluated:no-surface"
+            token = "unevaluated:no-surface"
+            if domain and domain in used_domains:
+                token += f"+same-domain:{domain}"
+            return token
         hit = _high_collision(node, inflight)
     except Exception as exc:  # noqa: BLE001 - fail open, but as a stated verdict
         _LOG.warning(
@@ -886,8 +902,8 @@ def schedule_shadow(
     Runs the SAME per-candidate classification as :func:`select_lane_fill` over
     the guard-eligible ready set (``fno backlog ready`` already applies the
     dependency / design-stage / stale guards, so those exclusions never reach
-    here), greedily filling up to the bounded effective cap across distinct
-    domains, and records a typed verdict for EVERY ready node. It acquires no
+    here), greedily filling up to the bounded effective cap, and records a typed
+    verdict for EVERY ready node. It acquires no
     slot and spawns nothing - purely observational (plan: "perform no dispatch in
     shadow mode").
 
@@ -926,18 +942,21 @@ def schedule_shadow(
     # Seed the domain + in-flight sets from the live-claim world exactly as
     # select_lane_fill does, so the shadow frontier reflects real peer lanes.
     # Each read fails open (an error leaves the seed empty) but is LOUD about it -
-    # both logged AND recorded in `degraded`. A silently-collapsed seed produces a
-    # frontier byte-identical to a healthy one, and this report IS the evidence
-    # that gates live scheduling: an operator reading the JSON must be able to see
-    # that a seed threw, or they gate on an overstated frontier - and over-dispatch
-    # is silently reintroducible by any future swallowed read.
+    # both logged AND recorded in `degraded`. A silently-collapsed in-flight seed
+    # produces a frontier byte-identical to a healthy one, and this report IS the
+    # evidence that gates live scheduling: an operator reading the JSON must be
+    # able to see that a seed threw, or they gate on an overstated frontier - and
+    # over-dispatch is silently reintroducible by any future swallowed read. (A
+    # collapsed DOMAIN seed now only degrades the `+same-domain` annotation,
+    # since domain no longer excludes; it stays flagged for parity with the live
+    # selector's seed.)
     degraded: list[str] = []
     try:
         used_domains: set[str] = _live_lane_domains(claims_root=claims_root)
     except Exception as exc:  # noqa: BLE001 - fail open, but visibly
         _LOG.warning(
-            "schedule shadow: live-lane domain seed unreadable, missed "
-            "same-domain holds mean the frontier may OVERSTATE dispatch: %s", exc,
+            "schedule shadow: live-lane domain seed unreadable, same-domain "
+            "annotations may be missing on unevaluated verdicts: %s", exc,
         )
         used_domains = set()
         degraded.append("live-lane-domains")
@@ -1001,7 +1020,9 @@ def schedule_shadow(
         else:
             verdict, reason = "selected", ""
             selected_count += 1
-            used_domains.add(domain)  # one lane per domain across the frontier
+            # Feeds only the +same-domain annotation on a later unevaluated pick
+            # (x-0ae1); no exclusion rides on it.
+            used_domains.add(domain)
             if node.get("plan_path"):
                 # so later picks collide against this one, like the live selector
                 inflight.append({
