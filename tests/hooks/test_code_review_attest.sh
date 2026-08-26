@@ -14,9 +14,9 @@
 #   - a fork ending in a fenced json block, WITH the header
 #   - a fork ending in a fenced json block, NO header
 #   - a fork whose entire final text is the literal "(none)"
-# plus the negative half, which matters more: every non-clean and every
-# unrecognized shape must emit NOTHING, so the gate holds rather than clearing
-# on evidence that never arrived.
+# plus the negative half, which matters more: every non-review and every
+# unrecognized shape must emit nothing AND never call the classifier, so the
+# gate holds rather than clearing on evidence that never arrived.
 #
 # One live specimen is deliberately in the NEGATIVE half: a real fork ended
 # with the marker, a blank line, then a sentence naming the file it skipped.
@@ -25,8 +25,12 @@
 # bare-marker protocol shape is the positive; the marker plus trailing prose
 # is not.
 #
-# The hook is driven with FNO pointed at a stub recorder, so a "did it attest?"
-# assertion reads a file this test owns rather than the real event log.
+# The hook is driven with FNO pointed at a stub that records `doctor event
+# emit` argv AND serves `do review classify` through the REAL classifier from
+# the repo tree, writing a marker file on every classify call. The marker is
+# how "the classifier never ran" stays distinguishable from "the classifier
+# ran and said clean" (AC3-INV): an absence of emits alone cannot tell the
+# two apart.
 
 set -uo pipefail
 
@@ -67,36 +71,84 @@ echo more >> "$WORK/a.txt"
 git -C "$WORK" add a.txt
 git -C "$WORK" commit -qm feature
 
-# --- stub `fno` so an emit lands in a file this test owns ---
+# --- stub `fno`: records `doctor event emit` argv in a file this test owns,
+# and serves `do review classify` through the real repo-tree classifier,
+# writing a marker so a "never classified" assertion has its positive control.
 BIN="$TMP/bin"
 mkdir -p "$BIN"
 EMITTED="$TMP/emitted.jsonl"
+CLASSIFY_MARKER="$TMP/classify.ran"
+export CLASSIFY_PYTHONPATH="$REPO_ROOT/cli/src"
+export CLASSIFY_PYTHON="$REPO_ROOT/cli/.venv/bin/python"
 cat > "$BIN/fno-stub" <<STUB
 #!/usr/bin/env bash
-# records only \`doctor event emit\` calls; anything else is a silent no-op
 if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; then
   printf '%s\n' "\$*" >> "$EMITTED"
+  exit 0
+fi
+if [[ "\${1:-}" == "do" && "\${2:-}" == "review" && "\${3:-}" == "classify" ]]; then
+  f=""; shift 3
+  while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+      --findings-file) f="\$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  printf '%s\n' "\$f" >> "$CLASSIFY_MARKER"
+  PYTHONPATH="\$CLASSIFY_PYTHONPATH" "\$CLASSIFY_PYTHON" - "\$f" <<'PY'
+import json, sys
+from fno.review.cli import build_emit_record, RecordBuildError
+with open(sys.argv[1], encoding="utf-8") as fh:
+    payload = json.load(fh)
+try:
+    print(json.dumps(build_emit_record(payload)))
+except RecordBuildError as exc:
+    print(f"classify: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+  exit \$?
 fi
 exit 0
 STUB
 chmod +x "$BIN/fno-stub"
 
+HOOK_STDOUT="$TMP/hook-stdout.txt"
+
 run_hook() {
   # $1 = payload JSON on stdin
   : > "$EMITTED"
-  printf '%s' "$1" | FNO="$BIN/fno-stub" bash "$HOOK" >/dev/null 2>&1
+  : > "$CLASSIFY_MARKER"
+  : > "$HOOK_STDOUT"
+  printf '%s' "$1" | FNO="$BIN/fno-stub" bash "$HOOK" >"$HOOK_STDOUT" 2>/dev/null
 }
 
 attested() { [[ -s "$EMITTED" ]]; }
+classified() { [[ -s "$CLASSIFY_MARKER" ]]; }
 
-# Assert an emit happened. $1 = case label.
-expect_attest() {
-  if attested; then pass "$1: attested"; else fail "$1: NO attestation emitted"; fi
+# Assert an emit happened with a given verdict. $1 = case label, $2 = pass|fail.
+expect_attest_verdict() {
+  if attested; then
+    if grep -q "\"verdict\":\"$2" "$EMITTED"; then
+      pass "$1: attested $2"
+    else
+      fail "$1: attested with a verdict other than $2: $(cat "$EMITTED")"
+    fi
+  else
+    fail "$1: NO attestation emitted"
+  fi
 }
 
 # Assert nothing was emitted. $1 = case label.
 expect_silent() {
   if attested; then fail "$1: attested (must not)"; else pass "$1: silent"; fi
+}
+
+# Assert nothing was emitted AND the classifier never ran (AC3-INV: the
+# marker file is the positive control that separates "never classified" from
+# "classified zero"). $1 = case label.
+expect_silent_noclassify() {
+  if attested; then fail "$1: attested (must not)"; return; fi
+  if classified; then fail "$1: silent but the classifier ran"; else pass "$1: silent, classifier never ran"; fi
 }
 
 post_tool_use() {
@@ -212,48 +264,68 @@ JSON_CLEAN=$'Reviewed the diff at HEAD.\n\n```json\n[]\n```\n\nNothing survived 
 
 echo "== PostToolUse(ReportFindings) =="
 run_hook "$(post_tool_use ReportFindings '{"findings":[]}')"
-expect_attest "reportfindings-empty"
+expect_attest_verdict "reportfindings-empty" pass
 
 run_hook "$(post_tool_use ReportFindings '{"findings":[{"file":"a.py","summary":"s","failure_scenario":"f"}]}')"
-expect_silent "reportfindings-nonempty"
+expect_attest_verdict "reportfindings-nonempty" fail
 
 run_hook "$(post_tool_use ReportFindings '{}')"
-expect_silent "reportfindings-absent-key"
+expect_silent_noclassify "reportfindings-absent-key"
 
 run_hook "$(post_tool_use Bash '{"command":"ls"}')"
-expect_silent "posttooluse-other-tool"
+expect_silent_noclassify "posttooluse-other-tool"
+
+echo "== PostToolUse(ReportFindings): the classified record (AC3-HP) =="
+AC3_PAYLOAD='{"findings":[
+  {"category":"nit","file":"a.py","line":10,"summary":"stale comment","failure_scenario":"none; a reader is misled for one line"},
+  {"category":"correctness","file":"b.py","line":20,"summary":"off-by-one","failure_scenario":"wrong total on empty input"}
+]}'
+run_hook "$(post_tool_use ReportFindings "$AC3_PAYLOAD")"
+expect_attest_verdict "ac3hp-one-finding-each-class" fail
+grep -q '"findings_blocking":1' "$EMITTED" \
+  && pass "ac3hp event carries findings_blocking:1" \
+  || fail "ac3hp findings_blocking: $(cat "$EMITTED")"
+grep -q '"findings_nonblocking":1' "$EMITTED" \
+  && pass "ac3hp event carries findings_nonblocking:1" \
+  || fail "ac3hp findings_nonblocking: $(cat "$EMITTED")"
+[[ "$(grep -c . "$EMITTED" || true)" == "1" ]] \
+  && pass "ac3hp exactly one attestation emitted" \
+  || fail "ac3hp emitted $(grep -c . "$EMITTED" || true) lines"
+grep -q 'classified 2 finding(s): 1 blocking, 1 non-blocking' "$HOOK_STDOUT" \
+  && pass "ac3hp stdout carries the classification line" \
+  || fail "ac3hp classification line missing: $(cat "$HOOK_STDOUT")"
 
 echo "== Codex Stop: exact-turn structured review evidence =="
 CODEX_TURN="turn-clean"
 CODEX_CLEAN_ITEM="$(codex_item_completed "$CODEX_TURN" '{"findings":[]}')"
 run_hook "$(codex_stop "$CODEX_CLEAN_ITEM" "$CODEX_TURN" "no findings")"
-expect_attest "codex-stop-empty-findings"
+expect_attest_verdict "codex-stop-empty-findings" pass
 
 CODEX_DIRECT_CLEAN="$(codex_exited_review_mode "$CODEX_TURN" '{"findings":[]}')"
 run_hook "$(codex_stop "$CODEX_DIRECT_CLEAN" "$CODEX_TURN" "no findings")"
-expect_attest "codex-stop-direct-empty-findings"
+expect_attest_verdict "codex-stop-direct-empty-findings" pass
 
 CODEX_DIRTY_ITEM="$(codex_item_completed "$CODEX_TURN" '{"findings":[{"file":"a.py","summary":"boom"}]}')"
 run_hook "$(codex_stop "$CODEX_DIRTY_ITEM" "$CODEX_TURN" "no findings")"
-expect_silent "codex-stop-nonempty-findings"
+expect_attest_verdict "codex-stop-nonempty-findings" fail
 
 CODEX_DIRECT_DIRTY="$(codex_exited_review_mode "$CODEX_TURN" '{"findings":[{"file":"a.py","summary":"boom"}]}')"
 run_hook "$(codex_stop "$CODEX_DIRECT_DIRTY" "$CODEX_TURN" "no findings")"
-expect_silent "codex-stop-direct-nonempty-findings"
+expect_attest_verdict "codex-stop-direct-nonempty-findings" fail
 
 CODEX_NULL_ITEM="$(codex_item_completed "$CODEX_TURN" 'null')"
 run_hook "$(codex_stop "$CODEX_NULL_ITEM" "$CODEX_TURN" "no findings")"
-expect_silent "codex-stop-null-review-output"
+expect_silent_noclassify "codex-stop-null-review-output"
 
 CODEX_MISSING_FINDINGS="$(jq -nc --arg turn "$CODEX_TURN" \
   '{type:"event_msg",payload:{type:"item_completed",turn_id:$turn,
     item:{type:"ExitedReviewMode",review_output:{}}}}')"
 run_hook "$(codex_stop "$CODEX_MISSING_FINDINGS" "$CODEX_TURN" "no findings")"
-expect_silent "codex-stop-missing-findings"
+expect_silent_noclassify "codex-stop-missing-findings"
 
 CODEX_WRONG_TURN="$(codex_item_completed "turn-other" '{"findings":[]}')"
 run_hook "$(codex_stop "$CODEX_WRONG_TURN" "$CODEX_TURN" "no findings")"
-expect_silent "codex-stop-wrong-turn"
+expect_silent_noclassify "codex-stop-wrong-turn"
 
 CODEX_DUPLICATE="$CODEX_CLEAN_ITEM
 $CODEX_CLEAN_ITEM"
@@ -307,7 +379,7 @@ done
 
 echo "== SubagentStop: the header identity lane (payload from the corpus) =="
 run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$(<"$FIXTURES/headered-json-clean.attest")")"
-expect_attest "header-opens-message"
+expect_attest_verdict "header-opens-message" pass
 
 echo "== SubagentStop: caller-chosen names never identify a review =="
 # The one name the harness controls: agent_type naming the skill type. This
@@ -316,20 +388,20 @@ echo "== SubagentStop: caller-chosen names never identify a review =="
 run_hook "$(jq -nc --arg cwd "$WORK" --arg msg "$JSON_CLEAN" \
   '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"code-review",
     last_assistant_message:$msg}')"
-expect_attest "agent-type-documented-json-clean"
+expect_attest_verdict "agent-type-documented-json-clean" pass
 
 # agent_name is the spawn name the caller picked. Naming a task code-review
 # does not make its output a review, whatever the output looks like.
 run_hook "$(subagent_stop "/code-review" "$JSON_CLEAN")"
-expect_silent "agent-name-spawn-name-json-clean"
+expect_silent_noclassify "agent-name-spawn-name-json-clean"
 
 run_hook "$(subagent_stop "code-review high" "$JSON_CLEAN")"
-expect_silent "agent-name-with-level-json-clean"
+expect_silent_noclassify "agent-name-with-level-json-clean"
 
 # The low-level protocol's bare marker under a caller-chosen name: the
 # verdict shape is right, the identity is not.
 run_hook "$(subagent_stop "/code-review <level>" "(none)")"
-expect_silent "agent-name-none-marker"
+expect_silent_noclassify "agent-name-none-marker"
 
 # Prose around the marker is NOT the marker. The observed shape is the whole
 # final text equal to "(none)"; anything longer must never clear the gate,
@@ -339,27 +411,27 @@ echo "== SubagentStop: the forked-skill shape measured live =="
 # This is the exact payload that produced six unmergeable PRs. Nothing in it
 # names code-review except the sidecar.
 run_hook "$(forked_meta_stop "(none)" "/code-review <level>")"
-expect_silent "meta-spawn-name-none"
+expect_silent_noclassify "meta-spawn-name-none"
 
 # A fork of some OTHER skill must never clear the gate, whatever it printed.
 run_hook "$(forked_skill_stop "(none)" "brainstorming")"
-expect_silent "forked-marker-other-skill"
+expect_silent_noclassify "forked-marker-other-skill"
 
 # No sidecar on disk (renamed, or a harness that writes none) leaves the
 # structural signal at 0. Silence, not a guess.
 run_hook "$(forked_skill_stop "(none)" "")"
-expect_silent "forked-no-sidecar"
+expect_silent_noclassify "forked-no-sidecar"
 
 # skillName alone is not a skill fork. The forkedSkill flag is the part only
 # the harness writes; a marker without it gates nothing.
 run_hook "$(forked_skill_stop "$JSON_CLEAN" "code-review" "noflag")"
-expect_silent "marker-without-forkedskill-flag"
+expect_silent_noclassify "marker-without-forkedskill-flag"
 
 # A spawned TASK is not a review. .meta.json exists for every subagent and
 # its description is caller prose; no marker, no name field, so prose naming
 # the verb must not attest even over an empty fence.
 run_hook "$(task_spawn_stop "code-review the failing tests and report matches" $'Matches for the pattern:\n\n```json\n[]\n```')"
-expect_silent "task-spawn-verb-in-description"
+expect_silent_noclassify "task-spawn-verb-in-description"
 
 # Same trap in the PAYLOAD: its description field is caller prose too, so a
 # task described as a review that ends clean must stay silent. (The
@@ -369,28 +441,33 @@ run_hook "$(jq -nc --arg cwd "$WORK" \
   --arg desc "code-review the failing tests and report matches" --arg msg "$JSON_CLEAN" \
   '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"general-purpose",
     description:$desc, last_assistant_message:$msg}')"
-expect_silent "task-payload-description-prose"
+expect_silent_noclassify "task-payload-description-prose"
 
 echo "== SubagentStop: shapes that must stay silent =="
 # An unrelated subagent that happens to end in an empty json array must not
 # clear a merge gate. Whatever identifies a code-review must be positive.
 run_hook "$(subagent_stop "general-purpose" $'Here is the list.\n\n```json\n[]\n```')"
-expect_silent "unrelated-subagent-empty-array"
+expect_silent_noclassify "unrelated-subagent-empty-array"
 
 # The heading must OPEN the message. Quoting it inside longer output is not
 # the review's shape.
 run_hook "$(subagent_stop "" $'Notes on the skill:\n## Review findings\n```json\n[]\n```')"
-expect_silent "heading-quoted-midtext"
+expect_silent_noclassify "heading-quoted-midtext"
 
 run_hook "$(subagent_stop "general-purpose" "(none)")"
-expect_silent "unrelated-subagent-none-word"
+expect_silent_noclassify "unrelated-subagent-none-word"
 
 echo "== unrecognized events =="
 run_hook '{"hook_event_name":"SessionStart","cwd":"'"$WORK"'"}'
-expect_silent "unknown-event"
+expect_silent_noclassify "unknown-event"
 
 run_hook 'not json at all'
-expect_silent "garbage-input"
+expect_silent_noclassify "garbage-input"
+
+echo "== AC3-INV: a second non-empty fence never reaches the classifier =="
+TWO_FENCES=$'## Review findings\n\n```json\n[]\n```\n\n```json\n[{"file":"a.py","summary":"excluded","failure_scenario":"f"}]\n```'
+run_hook "$(forked_skill_stop "$TWO_FENCES" "code-review")"
+expect_silent_noclassify "second-fence-nonempty"
 
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"

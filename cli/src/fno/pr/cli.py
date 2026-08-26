@@ -425,7 +425,9 @@ def base_lineage_check(
         "The merge guard's coverage predicate, for callers that cannot import "
         "it (the stdlib-only git-protection hook shells this verb on a bare "
         "gh pr merge). Exit 0 covered, 3 uncovered (the guard's refusal on "
-        "stderr), 4 unanswered (a named instrument failure)."
+        "stderr), 4 unanswered (a named instrument failure), 5 impossible "
+        "(round budget spent with blocking findings non-terminal; the "
+        "refusal names the two remedies that can still clear it)."
     ),
 )
 def coverage_check(

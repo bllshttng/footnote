@@ -700,6 +700,25 @@ def _reviewed_sha_still_describes_head(
     return current_head[1] < reviewed[1]
 
 
+def _tiling_chain(data: dict) -> set[str]:
+    """The covering chain's head shas, when the row's tiling answer is tiled.
+
+    The Rust producer walks the attestation ranges with git and writes the
+    answer onto the ``review_coverage`` row; Python reads it rather than
+    re-walking (the Ownership rule: Rust computes, Python reads). A chain
+    member is covered by the UNION of its ranges, so the single-sha freshness
+    rule does not apply to it - every fix commit would otherwise void the
+    only artifact that can clear the gate.
+    """
+    tiling = data.get("range_tiling")
+    if not isinstance(tiling, dict) or tiling.get("tiled") is not True:
+        return set()
+    heads = tiling.get("chain_heads")
+    if not isinstance(heads, list):
+        return set()
+    return {h for h in heads if isinstance(h, str) and h}
+
+
 def _verdicts_with_current_freshness(
     data: dict, head: Optional[str], cwd: Optional[str], pr_number: int = 0
 ) -> list[dict]:
@@ -713,6 +732,9 @@ def _verdicts_with_current_freshness(
     cannot prove freshness. The base ref and the head identity resolve lazily
     and once per pass: N stale verdicts at N shas cost one base read and one
     head diff, not N of each.
+
+    A member of a TILED chain is exempt from the single-sha recheck: its
+    range, not its head alone, is what covers the PR.
     """
     verdicts = data.get("verdicts")
     if not isinstance(verdicts, list):
@@ -720,6 +742,7 @@ def _verdicts_with_current_freshness(
     # Narrowed once for the closure below (mypy cannot carry the loop's
     # truthiness guard into it): the closure is only invoked under `head`.
     current_head = head or ""
+    chain = _tiling_chain(data)
 
     def _describes(reviewed_sha: str) -> bool:
         # The one seam: hermetic tests stub the describes-test, so the closure
@@ -745,12 +768,14 @@ def _verdicts_with_current_freshness(
         elif verdict_kind != "stale":
             current.pop("freshness", None)
         if verdict_kind == "reviewed" and head:
-            if not isinstance(reviewed_sha, str) or not reviewed_sha:
-                stale = True
-            elif reviewed_sha not in describes:
-                describes[reviewed_sha] = _describes(reviewed_sha)
-            if isinstance(reviewed_sha, str) and not describes.get(reviewed_sha, False):
-                stale = True
+            in_chain = isinstance(reviewed_sha, str) and reviewed_sha in chain
+            if not in_chain:
+                if not isinstance(reviewed_sha, str) or not reviewed_sha:
+                    stale = True
+                elif reviewed_sha not in describes:
+                    describes[reviewed_sha] = _describes(reviewed_sha)
+                if isinstance(reviewed_sha, str) and not describes.get(reviewed_sha, False):
+                    stale = True
         if stale:
             current["freshness"] = "stale"
         shaped.append(current)
@@ -778,8 +803,59 @@ def _stale_verdicts(verdicts: list[dict]) -> list[dict]:
     ]
 
 
-def _derive_review_state(coverage: object, verdicts: object) -> str | None:
-    """Derive one known outcome from validated per-reviewer verdicts."""
+def _resolved_github_approval_flag(cwd: Optional[str]) -> bool:
+    """The resolved ``config.review.github_approval_satisfies`` for the repo at
+    ``cwd``. True is BOTH the config default and the unreadable-config
+    direction, mirroring the Rust fail-closed settings parse (None -> true):
+    the two surfaces must not split on the same unreadable config, or the
+    loop finishes a PR this gate refuses on the same row.
+    """
+    try:
+        from pathlib import Path
+
+        from fno.config import load_settings_for_repo
+
+        root = Path(cwd) if cwd else Path.cwd()
+        return bool(
+            getattr(
+                load_settings_for_repo(root).review,
+                "github_approval_satisfies",
+                True,
+            )
+        )
+    except Exception:  # noqa: BLE001 - mirror of the Rust None -> true default
+        return True
+
+
+def _human_approval_counts(verdict: dict, github_approval_satisfies: bool) -> bool:
+    """Mirror of the Rust counting rule: a human GitHub approval counts only
+    when the flag is on AND the approver is provably not the PR author.
+
+    ``author_approval`` absent reads as the exclude side (True), which is
+    both the fail-closed direction for an unreadable PR author and the
+    correct reading of every row emitted before the field existed.
+    """
+    return not verdict.get("human_approval") or (
+        github_approval_satisfies and not verdict.get("author_approval", True)
+    )
+
+
+def _derive_review_state(
+    coverage: object,
+    verdicts: object,
+    chain: set[str] | None = None,
+    github_approval_satisfies: bool = False,
+) -> str | None:
+    """Derive one known outcome from validated per-reviewer verdicts.
+
+    ``chain`` is the tiled chain's head shas (empty when the row does not
+    carry a tiled answer): a chain member counts whatever its single-sha
+    freshness says, because its RANGE covers the PR.
+    ``github_approval_satisfies`` defaults False (today's semantics) so the
+    pre-flag call sites and rows stay unchanged; the shaper resolves the
+    config flag and passes it.
+    """
+    chain = chain or set()
     if coverage == "unknown":
         return None
     if not isinstance(verdicts, list) or any(
@@ -793,8 +869,11 @@ def _derive_review_state(coverage: object, verdicts: object) -> str | None:
         return None
     if any(
         verdict.get("verdict") == "reviewed"
-        and not verdict.get("human_approval", False)
-        and verdict.get("freshness") in _COUNTED_FRESHNESS
+        and _human_approval_counts(verdict, github_approval_satisfies)
+        and (
+            verdict.get("freshness") in _COUNTED_FRESHNESS
+            or verdict.get("reviewed_sha") in chain
+        )
         for verdict in verdicts
     ):
         return "reviewed"
@@ -811,7 +890,12 @@ def _shape_review_coverage(
     verdicts = _verdicts_with_current_freshness(data, head, cwd, pr_number)
     shaped["verdicts"] = verdicts
     shaped["stale_verdicts"] = _stale_verdicts(verdicts)
-    review_state = _derive_review_state(data.get("coverage"), verdicts)
+    review_state = _derive_review_state(
+        data.get("coverage"),
+        verdicts,
+        _tiling_chain(data),
+        _resolved_github_approval_flag(cwd),
+    )
     if review_state in _KNOWN_REVIEW_STATES:
         shaped["review_state"] = review_state
     else:
@@ -833,7 +917,12 @@ def _shape_review_coverage(
         )
     )
     reviewed = [v for v in verdicts if v.get("verdict") == "reviewed"]
-    valid = [v for v in reviewed if v.get("freshness") in _COUNTED_FRESHNESS]
+    chain = _tiling_chain(data)
+    valid = [
+        v
+        for v in reviewed
+        if v.get("freshness") in _COUNTED_FRESHNESS or v.get("reviewed_sha") in chain
+    ]
     if malformed or not reviewed or len(valid) != len(reviewed):
         shaped["coverage"] = "uncovered"
         shaped["reviewed_count"] = len(valid)

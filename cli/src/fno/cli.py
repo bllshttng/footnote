@@ -937,6 +937,12 @@ def review(
     ),
 ) -> None:
     """Run the internal sigma-review panel and write a quality_check artifact."""
+    # Under ``fno do review`` this body is the GROUP's default callback, so a
+    # subcommand invocation (``fno do review classify``) reaches this line
+    # first; step aside and let the subcommand run. The root ``fno review``
+    # command never carries a subcommand, so its behavior is unchanged.
+    if getattr(ctx, "invoked_subcommand", None):
+        return
     from fno._flag_aliases import merge_deprecated_alias
     from fno.worker.review import (
         ReviewInputError,

@@ -593,7 +593,14 @@ def _ready_blockers(
             # blocker, exactly as the merge verb ranks it, because re-running
             # your own review can never satisfy the policy.
             corroboration = _corroboration_refusal(coverage, repo) if repo else None
-            if corroboration and (ok or failed == "uncovered"):
+            # The exhausted round budget gets its own name (the row's
+            # advisory flag, Rust-computed from the same chain the gate
+            # re-derives): a board reading several PRs must tell "needs
+            # another review round" from "cannot be cleared by reviewing" -
+            # the two prescribe opposite next actions.
+            if coverage.get("impossible") is True:
+                blockers.append("review_coverage_impossible")
+            elif corroboration and (ok or failed == "uncovered"):
                 blockers.append("review_coverage_corroboration")
             elif not ok:
                 blockers.append(f"review_coverage_{failed}")

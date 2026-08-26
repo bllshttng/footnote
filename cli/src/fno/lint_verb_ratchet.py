@@ -178,6 +178,18 @@ def _iter_group_leaves(group, ctx, prefix: str, depth: int = 0):
         return
     if getattr(group, "_fno_collapsed_dispatcher", False):
         yield prefix, group
+    # A NESTED group that runs without a subcommand is itself an action, and its
+    # callback can carry hidden options no leaf repeats. Yield it so those flags
+    # stay inside the ratchet instead of dropping out the moment the group gains
+    # its first subcommand. Scoped to nested groups because the collapse map
+    # models a top-level group as its actions, never as a row of its own, so a
+    # bare top-level row has no legal shape there.
+    elif (
+        " " in prefix
+        and getattr(group, "invoke_without_command", False)
+        and _hidden_option_tokens(group)
+    ):
+        yield prefix, group
     for name in group.list_commands(ctx):
         sub = group.get_command(ctx, name)
         if sub is None:

@@ -937,6 +937,27 @@ class ReviewBlock(BaseModel):
     # changes behavior - flip it only with the doctor's self-attestation report
     # in hand.
     require_corroboration: bool = False
+    # Whether a non-author human GitHub APPROVED review satisfies coverage on
+    # its own (and the corroboration term). DEFAULT TRUE: this is the one
+    # producer a stranger's GitHub project emits with no footnote machinery
+    # at all. GitHub refuses an author's approval of their own PR
+    # server-side; the gate still asserts it (an unreadable PR author
+    # excludes fail-closed). The limit: GitHub's refusal is per identity, not
+    # per human - a second account with its own token can still self-approve.
+    github_approval_satisfies: bool = True
+    # The review-round budget before the gate reports IMPOSSIBLE: with more
+    # review rounds than this on the branch since the last pass AND blocking
+    # findings still non-terminal, re-reviewing cannot clear the gate, and
+    # the refusal says so instead of teaching one more round (the PR-1170
+    # eleven-round shape). A round is a review VERDICT since the last pass;
+    # CI failures, lint failures and rebases are not rounds, and a pass
+    # resets the counter. Validated at parse: at least 1.
+    max_rounds: int = Field(default=2, ge=1)
+    # Categories a CONFIRMED-free finding may carry and still be non-blocking.
+    # A configured list EXTENDS the shipped default rather than replacing it,
+    # so a project cannot silently narrow the gate by naming one category. The
+    # gate re-derives blocking from this, never from the producer's own count.
+    nonblocking_categories: Optional[list[str]] = None
     # How long a registered review hold (`review:branch:<branch>`, taken where a
     # review is DISPATCHED) protects a PR from a merge before it ages out. A
     # review is unbounded, so this is a wedge bound rather than an estimate:

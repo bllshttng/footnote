@@ -293,11 +293,11 @@ sniffing for a tone:
 When `--attest` is present, save stdout verbatim as `$REVIEW_FILE` and continue to step 6.
 Do not infer the verdict from exit code, non-empty prose, sentiment, or a hand-written summary.
 
-### 5. OFFER to apply (advisory mode only)
+### 5. ACT on the verdict (advisory mode only)
 
-Do not auto-apply. Summarize the P1/P2 findings and ask whether to address them.
-On a yes, fix them like any other review feedback. P3 nits are optional - call
-them out, let the user choose.
+Do not auto-apply. Summarize the P1/P2 findings and ask whether to address them. P3 nits are optional - call them out, let the user choose.
+
+**Termination (the round budget).** A blocking finding is cleared by fixing it. The next review covers the fix delta. Nothing else clears it on your own signature. A non-blocking finding needs no action to clear the gate. Answer it in thread or skip it. Note the skip rather than arguing with it. When the gate reports IMPOSSIBLE, stop. Do not request another review. At the round cap without a hard finding the gate FILES the remainder and the PR merges, so a fourth round is never the answer. Report the blocking findings and the two remedies to the operator. The remedies are a non-author GitHub approval on the PR, or the coverage-override label. A refused gate escalates.
 
 ### 6. ATTEST (only with `--attest`) - the identity-free local gate
 
@@ -310,7 +310,8 @@ bash "${SKILL_DIR}/scripts/consume-peer-verdict.sh" "$REVIEW_FILE"
 The consumer requires the exact terminal JSON record, counts the syntactically declared P1/P2 finding lines, and rejects empty, malformed, contradictory, or count-mismatched output.
 A valid clean verdict with zero findings emits `review_attestation` for reviewer `peer` with verdict `pass` at the current HEAD.
 A valid blocked verdict, or any invalid output, emits `fail` when possible and exits non-zero, so the gate remains unmet and loop-check reports local work to do.
-After any fix commit, the old attestation is stale by design and the peer must review the new HEAD.
+
+After any fix commit the old attestation is stale by design. The next review covers the fix delta. The round budget bounds how many rounds that loop can take (`fno do pr status` shows it). An exhausted budget is IMPOSSIBLE, not one more round.
 
 ### 7. POST (only with `--post`) - the legacy identity-backed gate
 

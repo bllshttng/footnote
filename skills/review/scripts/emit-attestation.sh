@@ -26,12 +26,15 @@
 # reviewer name and verdict it is PASSED. Nothing here can tell a real review
 # from a caller that typed the arguments.
 #
-# Usage: emit-attestation.sh <reviewer> [verdict] [reviewer_context]
+# Usage: emit-attestation.sh <reviewer> [verdict] [reviewer_context] [--findings-file <path>]
 #   <reviewer>  a built-in (sigma | peer | code-review | declare) or any name declared
 #               in config.review.reviewer_registry (a leading '/' is stripped)
 #   [verdict]   pass (default) | fail
 #   [reviewer_context]  fresh | shared | unknown (default unknown); positive
 #                       context evidence only, never inferred from the sender
+#   [--findings-file <path>]  a JSON findings payload; classified by `fno do
+#               review classify` and carried on the event as the finding record.
+#               A malformed or unreadable file is a refusal, never an empty record.
 set -euo pipefail
 
 usage() {
@@ -63,9 +66,35 @@ case "${1:-}" in
     ;;
 esac
 
-reviewer="${1:?reviewer name required: a built-in (sigma|code-review|declare) or a config.review.reviewer_registry name}"
-verdict="${2:-pass}"
-reviewer_context="${3:-unknown}"
+# --findings-file <path> (positionals first, flag after): the classified
+# finding record rides onto the event. The classification itself is `fno do
+# review classify --emit-record`, the one shell entry point, so the blocking
+# rule is never reimplemented in bash. A malformed or unreadable findings
+# file is a refusal, not an empty record: an unmeasurable finding set must
+# not attest as though it classified zero.
+findings_file=""
+prev_arg=""
+positional=()
+for arg in "$@"; do
+  if [[ "$prev_arg" == "--findings-file" ]]; then
+    findings_file="$arg"
+    prev_arg=""
+    continue
+  fi
+  if [[ "$arg" == "--findings-file" ]]; then
+    prev_arg="$arg"
+    continue
+  fi
+  positional+=("$arg")
+done
+[[ -z "$prev_arg" ]] || {
+  echo "emit-attestation: --findings-file needs a path; no event emitted" >&2
+  exit 2
+}
+
+reviewer="${positional[0]:?reviewer name required: a built-in (sigma|code-review|declare) or a config.review.reviewer_registry name}"
+verdict="${positional[1]:-pass}"
+reviewer_context="${positional[2]:-unknown}"
 case "$reviewer_context" in
   fresh|shared|unknown) ;;
   *)
@@ -261,6 +290,28 @@ esac
 # Build the data object with jq so a reviewer/verdict value can never break the
 # JSON (codex peer review P2). fno doctor event emit then validates envelope + required
 # fields + the verdict enum before writing.
+# A findings file, when given, contributes its record through the SAME jq
+# build: only the six event-schema keys project across, nulls dropped, so a
+# classify output can never smuggle an unregistered field onto a trust-core
+# event and the no-file path stays byte-identical to today.
+findings_json="null"
+if [[ -n "$findings_file" ]]; then
+  if [[ ! -f "$findings_file" ]]; then
+    echo "emit-attestation: findings file not found: $findings_file; no event emitted" >&2
+    exit 2
+  fi
+  if ! classify_out="$("${FNO:-fno}" do review classify --findings-file "$findings_file" --emit-record)"; then
+    echo "emit-attestation: classify refused the findings file $findings_file; no event emitted" >&2
+    exit 2
+  fi
+  if ! findings_json="$(jq -c '
+    {findings_blocking, findings_nonblocking, findings, findings_truncated, review_round, dispositions}
+    | with_entries(select(.value != null))
+  ' <<<"$classify_out" 2>/dev/null)"; then
+    echo "emit-attestation: classify produced no parsable record for $findings_file; no event emitted" >&2
+    exit 2
+  fi
+fi
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
   --arg session_id "$session_id" --arg harness "$harness" \
   --arg model "$model" --arg provider "$provider" \
@@ -270,7 +321,8 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
   --arg reviewed_head_sha "$reviewed_head_sha" \
   --argjson reviewed_line_count "$reviewed_line_count" \
   --argjson reviewed_file_count "$reviewed_file_count" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count}')"
+  --argjson findings "$findings_json" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count} + $findings')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"

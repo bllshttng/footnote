@@ -266,6 +266,47 @@ event_types:
         reviewed_line_count:
           type: integer
           description: "Added plus deleted lines across the reviewed diff (git diff --numstat of reviewed_base_sha..reviewed_head_sha). An honest 0 on a binary, pure-rename or empty-file diff - the gate skips an attestation only when this is 0 AND reviewed_file_count is absent or 0, the empty-diff shape the producer refuses to emit. A line with BOTH fields ABSENT still counts: that is the pre-landed backlog and must not be invalidated. OPTIONAL."
+        findings_blocking:
+          type: integer
+          description: "Count of findings this round classified BLOCKING. The producer's OWN count, never the gate's answer: the gate re-derives blocking from the `findings` primitives with its own copy of the rule, so a hand-written event claiming 0 over a CONFIRMED finding is refused. OPTIONAL: every pre-existing attestation carries none of the finding-record keys, and the gate's treatment of such an event is the pre-existing treatment."
+        findings_nonblocking:
+          type: integer
+          description: "Count of findings this round classified non-blocking by the category allowlist (config.review.nonblocking_categories extends the shipped default). OPTIONAL."
+        findings:
+          type: array
+          description: "The bounded per-finding primitives the gate re-derives from: `category`, `verdict`, `blocking` (producer's claim), `has_required_fields`, and `finding_key` (file:line:category, the round-over-round identity a disposition keys on). One primitive per classified finding, so nothing is dropped between producer and gate. Capped in count and serialized bytes; an overflow truncates from the end and sets `findings_truncated: true`, which the gate reads as BLOCKING for the truncated remainder. OPTIONAL."
+          items:
+            type: object
+            properties:
+              category:
+                type: string
+              verdict:
+                type: string
+              blocking:
+                type: boolean
+              has_required_fields:
+                type: boolean
+              finding_key:
+                type: string
+        findings_truncated:
+          type: boolean
+          description: "The `findings` array was capped and the remainder dropped. The gate treats the truncated remainder as non-terminal (blocking), so truncation can never quietly lose a finding into harmlessness. OPTIONAL."
+        review_round:
+          type: integer
+          description: "The branch-scoped round this verdict is (a review VERDICT since the last pass; CI failures, lint failures and rebases are not rounds). The round budget (config.review.max_rounds) counts these. OPTIONAL."
+        dispositions:
+          type: array
+          description: "The author's recorded disposition per finding_key for THIS round: `fixed`, `declined` (with a non-empty reason), or `nonblocking`. A declined BLOCKING finding is terminal only with corroboration the author cannot mint alone - see docs/architecture/review-coverage-termination.md. OPTIONAL."
+          items:
+            type: object
+            properties:
+              finding_key:
+                type: string
+              disposition:
+                type: string
+                enum: [fixed, declined, nonblocking]
+              reason:
+                type: string
     consumers: [fno-agents loop-check]
 
   - name: review_coverage
@@ -319,6 +360,9 @@ event_types:
                 description: "Whether reviewed_sha still describes the code at HEAD. `fresh` = the reviewer read this exact commit. `carried_base_sync` = the PR's own code delta is byte-identical and any tree difference came from the base moving (a rebase). `carried_docs_only` = only documentation paths changed since. `carried_subset` = the code delta only shrank: every raw diff line still shipping is byte-identical to one the reviewer read, and the vanished lines are paths the base absorbed on the rebase (a strict subset of the reviewed diff). `stale` = everything else, including every failure path. A carry requires a positive match between two successfully computed code-diff identities; two absences never match. Omitted on a verdict with no review behind it (absent, refused)."
               human_approval:
                 type: boolean
+              author_approval:
+                type: boolean
+                description: "Only meaningful alongside human_approval: whether the approving login is the PR author's (or the PR author could not be read, which asserts the same thing fail-closed). A false here is what lets a human approval count when config.review.github_approval_satisfies is on. GitHub refuses an author's own approval server-side; the gate asserts the property it depends on rather than inferring it."
               scope:
                 type: string
                 enum: [attested_branch, legacy_head_match]
@@ -330,6 +374,37 @@ event_types:
         head_sha:
           type: string
           description: "The HEAD the coverage was computed against (coverage is a snapshot). This is the EVAL head, not the head any reviewer read - that is per-verdict `reviewed_sha`. Conflating the two is x-5b99: the merge gate compared this field against the current head and correctly refused a stale eval, but a FRESH eval carrying a stale bot verdict walked straight through it."
+        range_tiling:
+          type: object
+          description: "The union-of-ranges answer over the branch's attestations: whether the reviewed_base_sha..reviewed_head_sha ranges on the branch's attestations, taken as a CHAIN, cover merge_base(base, head)..head. This is what lets a fix-and-re-review loop terminate - every commit that fixes a finding moves the head, and under a single-attestation freshness rule every fix voids the only artifact that can clear the gate. Computed by the Rust producer's git walk and READ by the Python shaper (the Ownership rule), so both surfaces apply the same chain exemption. OPTIONAL: every pre-tiling row lacks it and reads under the single-attestation rule alone."
+          properties:
+            tiled:
+              type: boolean
+              description: "Whether the chain covers every commit in merge_base..head. Fail-closed: any git failure, unresolvable sha, or off-branch endpoint answers false."
+            gaps:
+              type: array
+              items:
+                type: string
+              description: "Uncovered stretches, each named 'base..head' by sha (parent-of-first-uncovered .. last-uncovered). Empty iff tiled. A refusal that names the range prescribes the review to run instead of the head-looping 'review at HEAD'."
+            dropped:
+              type: array
+              items:
+                type: string
+              description: "Range head shas dropped from the chain (unresolvable, or endpoints off the branch's ancestry after a rebase), reported by sha so the drop is auditable."
+            chain_heads:
+              type: array
+              items:
+                type: string
+              description: "reviewed_head_sha of every range that participated in the chain. A local_attestation verdict whose reviewed_sha is here counts as Reviewed when tiled is true, whatever its single-sha freshness says."
+        rounds_used:
+          type: integer
+          description: "Review rounds since the last pass on this branch (a round is a review VERDICT since the last pass; CI failures, lint failures and rebases are not rounds; a pass resets the counter). Computed by the Rust producer from the same chain, same scoping as the tiling walk, and re-derived by the Python merge gate before it refuses - never trusted off this row for a gate decision (the status surface reads the flag below to name its blocker)."
+        rounds_exhausted:
+          type: boolean
+          description: "Whether rounds_used exceeds the resolved config.review.max_rounds (default 2). The raw budget fact: at the cap the PR merges with its remaining findings filed as nodes, unless a hard finding remains (see impossible)."
+        impossible:
+          type: boolean
+          description: "rounds_exhausted AND a hard non-terminal finding remains: a CONFIRMED correctness or security finding, or a truncated remainder. Only this shape keeps the IMPOSSIBLE verdict (exit 5) at the cap; every other non-terminal finding is filed by the merge gate and the PR merges. Advisory on the row - the merge gate re-derives before answering - and fno do pr status names review_coverage_impossible from it."
         repo:
           type: string
           description: "Full repository identity `host/owner/repo`, lowercased, from the git remote (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. It is the FULL identity, never the last path segment: `org-a/widget` and `org-b/widget` would otherwise share a key, and since this gates auto-merge one repo's coverage could clear the other's guard (a fork shares head SHAs, so the staleness check would not catch it). Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the event in the global log rather than guess. Stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree. Producer: crates/fno-agents/src/finalize.rs `repo_identity_from_remote_url`; reader: fno/paths.py `repo_identity_from_remote_url`. The two must agree."
