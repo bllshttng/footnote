@@ -562,6 +562,10 @@ def test_current_session_helpers_include_canonical_session_id():
     assert current_session_id({"FNO_HARNESS_SESSION_ID": session_id}) is None
 
 
+def test_current_session_ids_ignore_partial_canonical_stamp():
+    assert current_session_ids({"FNO_HARNESS_SESSION_ID": "session-only"}) == set()
+
+
 def test_ac1_hp_canonical_handle_is_first_eight():
     """The generated mailbox id is the harness's own short-id (first eight),
     carrying no harness prefix (AC1-HP)."""

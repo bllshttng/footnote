@@ -983,7 +983,7 @@ def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
         for marker, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)
         if (session_id := (environ.get(marker) or "").strip())
     }
-    canonical_session_id = (environ.get(FNO_HARNESS_SESSION_ID) or "").strip()
-    if canonical_session_id:
-        ids.add(canonical_session_id)
+    canonical = parse_canonical_identity(environ)
+    if canonical.disposition == "complete" and canonical.session_id:
+        ids.add(canonical.session_id)
     return ids
