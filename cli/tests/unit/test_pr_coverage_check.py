@@ -350,6 +350,28 @@ def test_an_override_applied_by_the_pr_author_is_refused(
     assert "cannot override its own review gate" in refusal
 
 
+def test_an_override_by_the_author_in_different_casing_is_refused(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """A GitHub login is case-insensitive. An exact-case compare would open
+    the valve for the author the moment the events feed and /pulls/{n}
+    disagree on casing, which is the one shape this check exists to stop."""
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, "BllsHttng")
+    )
+    monkeypatch.setattr(_coverage_gate, "_pr_author_login", lambda pr, repo: "bllshttng")
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "cannot override its own review gate" in refusal, refusal
+
+
 def test_an_override_with_an_unreadable_actor_fails_closed(
     enabled, monkeypatch, capsys, tmp_path  # noqa: F811
 ):
@@ -1689,6 +1711,32 @@ def test_round_budget_pass_resets_the_github_axis_too():
     assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 2
 
 
+def test_round_budget_drops_the_github_axis_when_the_pass_has_no_ts():
+    """A pass with no readable ts leaves nothing to filter the reviews axis
+    by. Counting the whole review history there would fire the cap on a
+    budget this very pass just defused: the three pre-pass reviews below
+    would read as 3 spent rounds when the pass reset them to 0. The answer
+    is the events-only 0, and the positive marker is that exact number - an
+    unfiltered read would answer 3."""
+    chain = [
+        {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
+        {"verdict": "pass"},
+    ]
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T09:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T09:30:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T09:45:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 0
+    # The same chain with a readable pass ts still counts the axis, so the
+    # guard above is narrow: it drops the axis, never the whole counter.
+    dated = [
+        {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
+        {"verdict": "pass", "ts": "2026-08-26T08:00:00Z"},
+    ]
+    assert _coverage_gate.rounds_since_last_pass(dated, reviews=reviews) == 3
+
+
 def test_round_budget_counts_review_objects_posted_under_the_pr_author_login():
     """The measured specimen: the codex cloud connector posts its review
     objects under the PR AUTHOR's own login - 116 of 117 objects on the
@@ -1846,7 +1894,7 @@ def test_past_the_cap_the_gate_refusal_names_the_terminal_act(monkeypatch, tmp_p
     monkeypatch.setattr(
         _coverage_gate, "file_findings_at_cap", lambda *a, **k: ["x-filed1"]
     )
-    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+    state, refusal, _head, note = _coverage_gate.coverage_verdict(
         42, str(tmp_path), recompute=False
     )
     assert state == _coverage_gate.REFUSED
@@ -1855,5 +1903,10 @@ def test_past_the_cap_the_gate_refusal_names_the_terminal_act(monkeypatch, tmp_p
         "decline the remainder, file it with the declining identity and the "
         "reason, then merge" in refusal
     ), refusal
+    # file_findings_at_cap ran and created a real node. The refusal says
+    # "file it"; the note must say it was already filed, and name the node,
+    # or the operator files the same finding twice.
+    assert "x-filed1" in note, "the filed node must reach the receipt: " + note
+    assert "filed at the round cap (3/2)" in note, note
     for needle in ("/code-review", "/review", "/fno:review", "review verb"):
         assert needle not in refusal, f"past-cap refusal names {needle}: {refusal}"

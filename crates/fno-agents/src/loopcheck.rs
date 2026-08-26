@@ -5797,6 +5797,7 @@ pub fn rounds_since_last_pass(
 ) -> i64 {
     let mut rounds: i64 = 0;
     let mut last_pass_ts = String::new();
+    let mut pass_ts_unreadable = false;
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -5824,6 +5825,11 @@ pub fn rounds_since_last_pass(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            // A pass with no readable ts leaves nothing to filter the reviews
+            // axis by. Counting the whole review history there would fire the
+            // cap on a budget this very pass just defused, so the axis is
+            // dropped instead - the same bias as the absent-reviews arm below.
+            pass_ts_unreadable = last_pass_ts.is_empty();
             continue;
         }
         match val.pointer("/data/review_round").and_then(|v| v.as_i64()) {
@@ -5835,6 +5841,9 @@ pub fn rounds_since_last_pass(
     let Some(reviews) = reviews else {
         return events_rounds;
     };
+    if pass_ts_unreadable {
+        return events_rounds;
+    }
     // The reviews axis. An object counts when it names a real reviewed
     // commit (state and commit.oid present) and was submitted strictly
     // after the newest in-scope pass - the reset must reach this axis too,
@@ -6669,6 +6678,16 @@ pub fn classify_coverage_tiled(
                 }
             }
             for lp in &fails {
+                // A reviewer whose chain already yielded a PASS is already in
+                // verdicts from the loop above. Pushing its fail link too
+                // would count one reviewer twice, so Covered(2) and the row's
+                // reviewed_count would both read 2 for a single reviewer.
+                if verdicts.iter().any(|v| {
+                    v.producer == CoverageProducer::LocalAttestation
+                        && login_equals(&v.name, &lp.reviewer)
+                }) {
+                    continue;
+                }
                 let fresh = freshness(&lp.head);
                 verdicts.push(ReviewerVerdict {
                     producer: CoverageProducer::LocalAttestation,

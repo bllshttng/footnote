@@ -144,7 +144,11 @@ def _override_valve(pr_number: int, repo: str) -> tuple[bool, str, str]:
             f"coverage-override label applied by {actor} but the PR author is "
             "unreadable; refused (cannot prove the labeller is not the author)",
         )
-    if actor == author:
+    # Case-insensitive, matching the Rust side's login_equals and _merge.py's
+    # node-slug compare: a GitHub login is itself case-insensitive, and an
+    # exact-case compare here opens the valve for the author the moment the
+    # events feed and /pulls/{n} disagree on casing.
+    if actor.lower() == author.lower():
         return (
             False,
             "",
@@ -432,7 +436,10 @@ def coverage_verdict(
             "the reason, then merge; the operator lever is "
             "config.review.max_rounds",
             "",
-            recompute_note,
+            # file_findings_at_cap ran above and created real nodes; dropping
+            # its note here would hand the operator "file the remainder" with
+            # no word that it was already filed, or which nodes hold it.
+            "; ".join(n for n in (recompute_note, filed_note) if n),
         )
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
@@ -834,10 +841,16 @@ def rounds_since_last_pass(
     """
     rounds = 0
     last_pass_ts = ""
+    pass_ts_unreadable = False
     for event in chain:
         if event.get("verdict") == "pass":
             rounds = 0
             last_pass_ts = str(event.get("ts") or "")
+            # A pass with no readable ts leaves nothing to filter the reviews
+            # axis by. Counting the whole review history there would fire the
+            # cap on a budget this very pass just defused, so the axis is
+            # dropped instead - the same bias as the read-failure arm below.
+            pass_ts_unreadable = not last_pass_ts
             continue
         declared = event.get("review_round")
         if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
@@ -845,7 +858,7 @@ def rounds_since_last_pass(
         else:
             rounds += 1
     events_rounds = rounds
-    if reviews is None:
+    if reviews is None or pass_ts_unreadable:
         return events_rounds
     counted: set[str] = set()
     for review in reviews:
@@ -872,9 +885,12 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
     The paginated REST read rides ``_internal_gh._rest_pages`` (the same
     reader every other gate REST read uses, with its rate-limit-aware
     failure classification) and the field mapping is the subset of
-    ``_internal_gh._coverage_reviews`` the counter reads. The read is
-    bounded at 30s like the Rust gate's stopgate timeout: a stalled gh must
-    not hang the merge verb. A read failure answers None: the round budget
+    ``_internal_gh._coverage_reviews`` the counter reads. Each page call is
+    bounded at 30s like the Rust gate's stopgate timeout, so a STALLED gh
+    costs one timeout and then answers None rather than hanging the merge
+    verb. That is a per-call bound, not a whole-read one: ``_rest_pages``
+    walks up to 100 pages, so a read that keeps succeeding slowly is bounded
+    by the page cap, not by 30s. A read failure answers None: the round budget
     then keeps its events-only answer rather than guessing - a cap that
     fires on a broken read would decline review remainder the budget may
     not have spent.

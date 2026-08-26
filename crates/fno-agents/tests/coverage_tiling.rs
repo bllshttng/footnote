@@ -975,6 +975,46 @@ fn round_budget_pass_resets_the_github_axis_too() {
 }
 
 #[test]
+fn round_budget_drops_the_github_axis_when_the_pass_has_no_ts() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (_base, shas, head) = repo_with(repo, 4);
+    // A pass with no readable ts leaves nothing to filter the reviews axis
+    // by. Counting the whole review history there would fire the cap on a
+    // budget this very pass just defused. All three reviews below predate
+    // the pass, so the honest answer is the events-only 0; an unfiltered
+    // read answers 3, and that 3 is the regression this pins.
+    let events = events_file(
+        repo,
+        &[
+            attestation_round("code-review", &shas[0], &shas[1], "fail", None),
+            {
+                let mut row: serde_json::Value = serde_json::from_str(&attestation_round(
+                    "code-review",
+                    &shas[1],
+                    &shas[2],
+                    "pass",
+                    None,
+                ))
+                .unwrap();
+                row.as_object_mut().unwrap().remove("ts");
+                row.to_string()
+            },
+        ],
+    );
+    let reviews = vec![
+        review_object(CONNECTOR, "COMMENTED", &shas[0], "2026-08-26T09:00:00Z"),
+        review_object(CONNECTOR, "COMMENTED", &shas[1], "2026-08-26T09:30:00Z"),
+        review_object(CONNECTOR, "COMMENTED", &shas[2], "2026-08-26T09:45:00Z"),
+    ];
+    assert_eq!(
+        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews)),
+        0
+    );
+}
+
+#[test]
 fn round_budget_counts_review_objects_posted_under_the_pr_author_login() {
     use fno_agents::loopcheck::rounds_since_last_pass;
     let tmp = TempDir::new().unwrap();
@@ -1045,6 +1085,72 @@ fn round_budget_no_reviews_evidence_keeps_the_events_only_answer() {
 }
 
 // --- the round cap under the operator's ruling: file the rest, keep the hard ---
+
+#[test]
+fn cap_a_reviewer_with_both_a_pass_and_a_fail_link_counts_once() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 4);
+    // One REVIEWER across two attester sessions: a pass from sess-a on the
+    // first link, fails from sess-b on the rest. Two sessions are what it
+    // takes to hold both verdicts at once - local_latest_passes keys on
+    // (reviewer, attester), so one session's later fail replaces its own
+    // pass. The shape is ordinary: a handoff, or a review fork, re-runs the
+    // same verb under a new session id.
+    //
+    // The pass loop pushes a verdict for "code-review"; the spent-budget
+    // fail arm keys on the reviewer NAME alone, so without the guard it
+    // pushes a SECOND one and Covered(n) plus the row's reviewed_count both
+    // read 2 for a single reviewer. That is the coverage count lying.
+    let from_sess_b = |base: &str, head: &str| {
+        let mut row: serde_json::Value =
+            serde_json::from_str(&attestation("code-review", base, head, "fail")).unwrap();
+        row["data"]["attester_session_id"] = serde_json::json!("sess-b");
+        row.to_string()
+    };
+    let events = events_file(
+        repo,
+        &[
+            attestation("code-review", &base, &shas[0], "pass"),
+            from_sess_b(&shas[0], &shas[1]),
+            from_sess_b(&shas[1], &shas[2]),
+            from_sess_b(&shas[2], &head),
+        ],
+    );
+    let tiling = tiling_for(repo, &events);
+    assert!(tiling.tiled, "chain must tile: {:?}", tiling.gaps);
+    assert!(
+        tiling.rounds_exhausted,
+        "three fails after the pass must spend a budget of 2: {:?}",
+        tiling.rounds_used
+    );
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &|_| Freshness::Stale,
+        BRANCH,
+        &head,
+        Some(&tiling),
+        None,
+        false,
+    );
+    let local: Vec<_> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .collect();
+    assert_eq!(
+        local.len(),
+        1,
+        "one reviewer, one verdict: {:?}",
+        rep.verdicts
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+}
 
 #[test]
 fn cap_a_declined_tiling_chain_counts_as_coverage_past_the_budget() {
