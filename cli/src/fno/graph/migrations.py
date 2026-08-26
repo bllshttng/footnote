@@ -87,17 +87,19 @@ def _retired_band(row: dict) -> str | None:
 
 
 def split_retired_tier_rows(entries: list[dict]) -> tuple[list[str], list[str]]:
-    """(migratable ids, divergent-band ids) for rows still carrying model_tier.
+    """(drainable ids, needs-decision ids) for rows still carrying model_tier.
 
     ONE classifier, shared by the migration verb and the reconcile advisory,
     so the prescription the advisory prints can never drift from the verdict
-    the verb delivers. A row carrying both spellings with the SAME band is
-    migratable: the retired ``--model-tier`` handler always wrote both keys
-    with equal bands, so same-band rows are what machine-created leftovers
-    actually look like, and only a DIVERGENT pair is a real conflict.
+    the verb delivers. Drainable: a valid band with no canonical field, a
+    same-band pair (the retired ``--model-tier`` handler wrote both keys with
+    equal bands, so those are what machine-created leftovers look like), or a
+    garbage retired key under a live difficulty. Needs a decision: a divergent
+    pair, or a garbage band with no canonical field - both are fixed by the
+    same one command, `fno backlog update <id> --difficulty <band>`.
     """
-    migratable: list[str] = []
-    divergent: list[str] = []
+    drainable: list[str] = []
+    needs_decision: list[str] = []
     from fno.graph._constants import normalize_difficulty
 
     for row in entries:
@@ -110,56 +112,43 @@ def split_retired_tier_rows(entries: list[dict]) -> tuple[list[str], list[str]]:
             try:
                 current = normalize_difficulty(current)
             except ValueError:
-                pass  # garbage canonical band: the divergent lane names both
-        if current is not None and band is not None and band != current:
-            divergent.append(rid)
+                pass  # garbage canonical band: the needs-decision lane names both
+        if (current is None and band is None) or (
+            current is not None and band is not None and band != current
+        ):
+            needs_decision.append(rid)
         else:
-            # model_tier-only rows, same-band pairs (case-folded), and a
-            # garbage retired key under a live difficulty: all drain without
-            # a judgment.
-            migratable.append(rid)
-    return migratable, divergent
+            drainable.append(rid)
+    return drainable, needs_decision
 
 
 def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
     """Move the retired ``model_tier`` band onto ``difficulty``, once, audibly.
 
     Same-band both-spellings rows drain (the retired handler wrote both keys
-    with equal bands, so those are the machine-created leftovers); only a
-    DIVERGENT pair is refused rather than guessed at. Bands run through
-    ``normalize_difficulty`` like every other difficulty writer - a
-    model_tier-only value that does not normalize is refused by id, never
+    with equal bands, so those are the machine-created leftovers). A row the
+    classifier routes to needs-decision (a divergent pair, or a garbage band
+    with no canonical field) is refused, named with its values and the one
+    command that fixes it. Bands run through ``normalize_difficulty`` like
+    every other difficulty writer - a value that does not normalize is never
     migrated verbatim under a success receipt.
     """
     from fno.graph._constants import append_difficulty_history
 
-    _migratable, divergent = split_retired_tier_rows(entries)
-    if divergent:
-        _divergent_ids = set(divergent)
+    _drainable, needs_decision = split_retired_tier_rows(entries)
+    if needs_decision:
+        _decision_ids = set(needs_decision)
         raise ValueError(
-            "rows carry difficulty and a DIVERGENT model_tier; pick the band "
-            "with `fno backlog update <id> --difficulty <band>` (which clears "
-            "the retired key) before migrating: "
+            "rows need a hand-picked band before migrating; pick it with "
+            "`fno backlog update <id> --difficulty <band>` (which also clears "
+            "the retired key): "
             + ", ".join(
                 f"{row.get('id', '?')} model_tier={row.get('model_tier')!r} "
                 f"difficulty={row.get('difficulty')!r}"
                 for row in entries
                 if isinstance(row, dict)
-                and str(row.get("id", "?")) in _divergent_ids
+                and str(row.get("id", "?")) in _decision_ids
             )
-        )
-    invalid = sorted(
-        f"{row.get('id', '?')}={row.get('model_tier')!r}"
-        for row in entries
-        if isinstance(row, dict)
-        and row.get("model_tier") is not None
-        and row.get("difficulty") is None
-        and _retired_band(row) is None
-    )
-    if invalid:
-        raise ValueError(
-            "model_tier values that are not a difficulty band; fix or drop "
-            "them by hand before migrating: " + ", ".join(invalid)
         )
     pending = [
         row for row in entries

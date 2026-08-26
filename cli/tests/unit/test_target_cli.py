@@ -776,6 +776,22 @@ def test_resolve_node_model_defers_difficulty_to_grid(monkeypatch):
     assert source == "provider-default"
 
 
+def test_resolve_model_command_resolves_difficulty_band(monkeypatch):
+    """x-baef round-6: the bash dispatch lane pins --harness in its spawn
+    argv, standing the capacity grid down, so resolve-model resolves the band
+    itself - the resolution model_tier gave that lane before retirement."""
+    from fno.adapters.providers import benchmarks as _bm
+
+    monkeypatch.setattr(_bm, "load_snapshot", lambda path=None: None)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(
+        target_cli, "_find_node", lambda node_id: {"id": node_id, "difficulty": "low"}
+    )
+    result = runner.invoke(app, ["do", "target", "resolve-model", "x-band1"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "glm-4.7"
+
+
 def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, monkeypatch):
     """x-6390: `start` no-ops inside a linked worktree and returns before it can
     forward --beastmode, so the grant is dropped. Same silent-drop class as the init

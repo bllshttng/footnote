@@ -61,7 +61,16 @@ def difficulty_gate_error(frontmatter: dict) -> str | None:
         try:
             created = date.fromisoformat(created.strip()[:10])
         except ValueError:
-            return None
+            # PRESENT but unreadable: returning None here would bypass the
+            # gate in the --execution scope, which never reaches the model's
+            # own date validation (x-baef round-6 finding 2). An ABSENT
+            # created still returns None - validate-plan.sh's filename-date
+            # fallback owns that case.
+            return (
+                f"cannot read created: {created!r}; the difficulty gate needs "
+                "a date. Set created: <YYYY-MM-DD> and, for post-gate plans, "
+                "difficulty: low, medium, high."
+            )
     if not isinstance(created, date) or created <= DIFFICULTY_REQUIRED_AFTER:
         return None
     band = frontmatter.get("difficulty")

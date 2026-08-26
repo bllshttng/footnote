@@ -115,7 +115,7 @@ def test_migrate_difficulty_normalizes_and_refuses_bad_bands(tmp_graph):
     ]}))
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r.exit_code == 2, r.output
-    assert "x-0004='turbo'" in r.output
+    assert "x-0004 model_tier='turbo'" in r.output
     rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
     # refused before any write: the good row is untouched too
     assert rows["x-0003"]["model_tier"] == "HIGH"
@@ -140,7 +140,7 @@ def test_migrate_difficulty_refuses_non_string_band(tmp_graph):
     ]}))
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r.exit_code == 2, r.output
-    assert "x-0005=3" in r.output
+    assert "x-0005 model_tier=3" in r.output
     assert json.loads(tmp_graph.read_text())["entries"][0].get("difficulty") is None
 
 
@@ -157,7 +157,7 @@ def test_migrate_difficulty_drains_machine_leftovers(tmp_graph):
     ]}))
     r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
     assert r.exit_code == 2, r.output
-    assert "x-0007" in r.output and "DIVERGENT" in r.output
+    assert "x-0007" in r.output and "hand-picked band" in r.output
     rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
     assert all("model_tier" in e for e in rows.values()), "divergent row refuses the batch"
 

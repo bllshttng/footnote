@@ -2074,7 +2074,11 @@ def _find_node(node_id: str) -> Optional[dict]:
 
 
 def _resolve_node_model(
-    node_id: str, *, explicit: Optional[str] = None, provider: Optional[str] = None
+    node_id: str,
+    *,
+    explicit: Optional[str] = None,
+    provider: Optional[str] = None,
+    include_difficulty: bool = False,
 ) -> tuple[Optional[str], str]:
     """``(model, decision_source)`` for a node's ``model`` pin.
 
@@ -2089,11 +2093,13 @@ def _resolve_node_model(
     non-fatal: any error degrades to the explicit value or the provider default,
     so a dispatch never fails because of the routing layer (inherited Locked 10).
 
-    ``difficulty`` is deliberately NOT resolved here: advance's dispatch seams
-    defer it to the capacity grid (``advance._spawn_worker``), and a static pin
-    at start would suppress the same grid for a bare ``target start`` - the
-    exact upstream pin the deferral exists to remove. A difficulty-only node
-    starts on the provider default.
+    ``difficulty`` is deliberately NOT resolved here by default: advance's
+    dispatch seams defer it to the capacity grid, and a static pin at start
+    would suppress the same grid for a bare ``target start``. A lane whose
+    spawn argv pins ``--harness`` stands that grid down and has no receiving
+    end - the bash dispatch lane (``resolve-model``) - so it passes
+    ``include_difficulty=True`` and resolves the band itself (the resolution
+    ``model_tier`` gave it before the field retired).
     """
     try:
         from fno import route_resolve
@@ -2102,6 +2108,9 @@ def _resolve_node_model(
         model, source, _chain = route_resolve.resolve_dispatch_model(
             explicit=explicit,
             task_model=(node or {}).get("model"),
+            task_difficulty=(
+                (node or {}).get("difficulty") if include_difficulty else None
+            ),
             provider=provider or "claude",
         )
         return model, source
@@ -2156,7 +2165,13 @@ def resolve_model(
 
     refuse_retired_provider(_provider_tombstone)
 
-    model, _source = _resolve_node_model(_resolve_node_id(node), provider=harness)
+    # include_difficulty: the bash dispatch lane pins --harness in its spawn
+    # argv, which stands inject_spawn_defaults' grid down - there is no grid
+    # receiving end here, so the band resolves statically (the resolution
+    # model_tier gave this lane before the field retired).
+    model, _source = _resolve_node_model(
+        _resolve_node_id(node), provider=harness, include_difficulty=True
+    )
     if model and harness and not _model_reachable_by(model, harness):
         return  # a pin resolves unfiltered; the guard drops a cross-harness pin
     if model:

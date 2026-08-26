@@ -1111,7 +1111,7 @@ def test_start_bare_tiered_node_threads_resolved_model(monkeypatch, tmp_path):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None, provider=None: ("claude-sonnet-5", "task-pin"),
+        lambda nid, explicit=None, provider=None, **_kw: ("claude-sonnet-5", "task-pin"),
     )
     result = runner.invoke(target_app, ["start", "x-d7a7"])
     assert result.exit_code == 0, result.stdout
@@ -1171,7 +1171,7 @@ def test_start_untiered_node_forwards_no_model(monkeypatch, tmp_path):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None, provider=None: (None, "provider-default"),
+        lambda nid, explicit=None, provider=None, **_kw: (None, "provider-default"),
     )
     result = runner.invoke(target_app, ["start", "x-d7a7"])
     assert result.exit_code == 0, result.stdout
@@ -1250,7 +1250,7 @@ def test_resolve_model_command_prints_model(monkeypatch):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None, provider=None: ("claude-sonnet-5", "task-pin"),
+        lambda nid, explicit=None, provider=None, **_kw: ("claude-sonnet-5", "task-pin"),
     )
     result = runner.invoke(target_app, ["resolve-model", "x-d7a7"])
     assert result.exit_code == 0
@@ -1263,7 +1263,7 @@ def test_resolve_model_command_empty_when_no_model(monkeypatch):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None, provider=None: (None, "provider-default"),
+        lambda nid, explicit=None, provider=None, **_kw: (None, "provider-default"),
     )
     result = runner.invoke(target_app, ["resolve-model", "x-d7a7"])
     assert result.exit_code == 0
@@ -1276,7 +1276,7 @@ def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None, provider=None: ("gpt-5.4", "task-pin"),
+        lambda nid, explicit=None, provider=None, **_kw: ("gpt-5.4", "task-pin"),
     )
     # gpt-5.4 maps to the codex harness in the real REACHABILITY table.
     result = runner.invoke(
@@ -1292,7 +1292,7 @@ def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None, provider=None: ("claude-sonnet-5", "task-pin"),
+        lambda nid, explicit=None, provider=None, **_kw: ("claude-sonnet-5", "task-pin"),
     )
     result = runner.invoke(
         target_app, ["resolve-model", "x-d7a7", "--harness", "claude"]
