@@ -111,8 +111,9 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
             STATE_FILE="$RESOLVED_STATE"
             TARGET_CWD="$RESOLVED_CWD"
         elif [[ "$RESOLVE_RC" -eq 1 ]]; then
-            echo "loop-check: no manifest names session ${RESOLVE_HARNESS_ID}; visitor allowed" >&2
-            exit 0
+            TARGET_NO_MATCH=1
+            LIVE_STATE_FILE=""
+            STATE_FILE=""
         else
             TARGET_RESOLVE_BROKEN=1
         fi
