@@ -1266,7 +1266,7 @@ def _prepare_intake(
 
 
 def _refuse_surfaceless_intake(paths: list[str], *, allow_no_surface: bool) -> None:
-    """Refuse intake of a plan that states no comparable file surface (x-0ae1).
+    """Refuse intake of a plan that states no comparable file surface.
 
     A plan whose ``## Files to Modify`` parses to an empty set - which is also
     what a missing or unreadable plan file parses to - cannot be

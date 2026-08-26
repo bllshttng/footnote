@@ -101,7 +101,7 @@ def _read_entries(graph_file: Path) -> list[dict]:
 
 
 # Every plan fixture in this file carries a file surface: intake refuses a
-# surface-less plan by default (x-0ae1), so a realistic default fixture states
+# surface-less plan by default, so a realistic default fixture states
 # one and the refusal tests opt OUT via a body without this section.
 _SURFACE = (
     "## Files to Modify\n\n| File | Action |\n|---|---|\n"
@@ -214,7 +214,7 @@ def test_prepare_intake_refuses_out_of_vocabulary_plan_priority(tmp_path):
     assert "invalid priority" in str(exc.value)
 
 
-# -- mandatory file surface at intake (x-0ae1) --
+# -- mandatory file surface at intake --
 
 
 def _surfaceless_plan(tmp_path: Path, title: str = "No surface plan") -> Path:

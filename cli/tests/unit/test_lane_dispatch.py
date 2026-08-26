@@ -80,7 +80,7 @@ def test_dispatch_spawns_one_isolated_worker_per_lane(
         3, project_root=tmp_path, claims_root=tmp_path / "claims"
     )
 
-    # Collision-gated selection (x-0ae1): domain no longer excludes and these
+    # Collision-gated selection: domain no longer excludes and these
     # plan-less nodes dispatch fail-open, so all three fill lanes.
     assert [r["node_id"] for r in receipts] == ["n-a", "n-b", "n-c"]
     assert all(r["status"] == "dispatched" for r in receipts)

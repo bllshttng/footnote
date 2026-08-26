@@ -2890,7 +2890,7 @@ def _intake_impl(
         return
 
     # After _prepare_intake validates and before any write, so the refusal
-    # also covers the dry-run preview (x-0ae1: surface is mandatory at intake).
+    # also covers the dry-run preview (surface is mandatory at intake).
     _refuse_surfaceless_intake([plan_path], allow_no_surface=allow_no_surface)
 
     spec = prep["node_spec"]
@@ -4956,7 +4956,7 @@ def cmd_lane_fill(
 
     Prints the JSON list of nodes that would dispatch as concurrent lanes -
     the file-collision gate decides, so same-domain nodes with disjoint
-    surfaces co-schedule (epic x-42d5, group 2; x-0ae1). Read-only by
+    surfaces co-schedule (epic x-42d5, group 2). Read-only by
     default; ``--claim``
     atomically holds a dispatch-time lane slot per node - what the dispatcher
     does before spawn (Locked Decision #8). ``max_lanes < 2`` prints ``[]``
@@ -12581,7 +12581,7 @@ def _do_intake_multi(
     # Unlike the per-file refusals inside the mutator (which skip one file and
     # land the rest), a surface-less plan refuses the WHOLE batch here, before
     # any write: the rule is knowable up front and a half-landed batch is what
-    # the caller would otherwise have to unwind by hand (x-0ae1).
+    # the caller would otherwise have to unwind by hand.
     _refuse_surfaceless_intake(concrete_files, allow_no_surface=allow_no_surface)
 
     preview_entries = read_graph(_graph_path())

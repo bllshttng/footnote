@@ -1,7 +1,7 @@
 """Unit tests for parallel-mode lane-fill selection (x-eb82, group 2).
 
 Covers `advance.select_lane_fill`: collision-gated selection (same-domain nodes
-co-schedule on disjoint surfaces, x-0ae1), the cap, the sequential-degrade
+co-schedule on disjoint surfaces), the cap, the sequential-degrade
 edge, the recompute-after-each-claim contract (x-7441), the
 skip-peer-held-lane guard, and the read-only preview mode. `_ready_nodes` is
 monkeypatched so the selector's logic is tested without shelling
@@ -23,7 +23,7 @@ def _nodes(*specs):
 
 
 def test_same_domain_disjoint_surfaces_co_schedule_up_to_cap(tmp_path, monkeypatch):
-    """x-0ae1 AC2-HP: the collision gate, not the domain, decides. Three
+    """AC2-HP: the collision gate, not the domain, decides. Three
     `domain: code` nodes with pairwise-disjoint file surfaces fill lanes
     together, bounded only by the cap - the old selector stopped at one."""
     ready = [
@@ -103,7 +103,7 @@ def test_recomputes_distinctness_after_each_claim(tmp_path, monkeypatch):
 
 
 def test_live_peer_domain_seed_no_longer_excludes(tmp_path, monkeypatch):
-    """x-0ae1: a live lane working `code` no longer blocks selecting another
+    """A live lane working `code` no longer blocks selecting another
     `code` node - the collision gate decides, and these surfaces are disjoint.
     The peer-domain seed now feeds only the `+same-domain` annotation on an
     unevaluated candidate (asserted in the classifier test below).
@@ -142,7 +142,7 @@ def test_skips_node_a_peer_lane_already_holds(tmp_path, monkeypatch):
 
 
 def test_domain_unset_nodes_dispatch_fail_open_together(tmp_path, monkeypatch):
-    """x-0ae1: the one-lane-per-unset-domain-bucket rule left with the domain
+    """The one-lane-per-unset-domain-bucket rule left with the domain
     guard. Plan-less, domain-less nodes are unevaluated and dispatch
     fail-open, so two of them co-dispatch instead of collapsing to one lane."""
     ready = [
@@ -512,7 +512,7 @@ def test_peer_with_unparseable_plan_is_reported_not_counted(tmp_path, monkeypatc
     assert "no comparable file surface" in caplog.text
 
 
-# --- guard order: peer-lane, collision, domain (x-0ae1) ---------------------
+# --- guard order: peer-lane, collision, domain ------------------------------
 
 
 def test_same_domain_overlap_serializes_on_collision_not_domain(tmp_path, monkeypatch):

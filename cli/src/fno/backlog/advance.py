@@ -407,7 +407,7 @@ def _next_node(project: Optional[str]) -> Optional[dict]:
 
 
 # A node with no `domain` set collapses into ONE bucket in `_live_lane_domains`
-# seeding. Since domain stopped excluding candidates (x-0ae1) this affects only
+# seeding. Since domain stopped excluding candidates this affects only
 # the `+same-domain` annotation - and the classifier skips the annotation for an
 # unset domain, so it never emits a bare `+same-domain:` suffix.
 _DOMAIN_UNSET = ""
@@ -416,7 +416,7 @@ _DOMAIN_UNSET = ""
 def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
     """Domains currently held by live lane slots, seeding the domain annotation.
 
-    Since the guard reorder (x-0ae1) domain no longer excludes a candidate from
+    Since the guard reorder, domain no longer excludes a candidate from
     lane fill - the file-collision gate decides - but the ``+same-domain``
     annotation on an unevaluated candidate is only truthful if the seed reads
     the live-claim world, not just this call's own picks. Each lane records its
@@ -656,7 +656,7 @@ def select_lane_fill(
     ``walker:<root>`` claim, so this stays a single-dispatcher selector, not a
     distributed lock.)
 
-    Domain is NOT a selection rule (x-0ae1): the file-collision gate decides,
+    Domain is NOT a selection rule: the file-collision gate decides,
     so two same-domain nodes with disjoint surfaces co-schedule. What remains
     of domain is the annotation on an unevaluated candidate - see
     :func:`_classify_lane_candidate`.
@@ -685,7 +685,7 @@ def select_lane_fill(
 
     selected: list[dict] = []
     # Seed from domains already held by live lanes (peer lanes from prior ticks).
-    # Domain no longer excludes a candidate (x-0ae1) - it feeds only the
+    # Domain no longer excludes a candidate - it feeds only the
     # `+same-domain` annotation on an unevaluated one - but the seed keeps that
     # annotation truthful across ticks, not just within this call.
     # The peer-lane set is stable within a single-dispatcher call (the singleton
@@ -1021,7 +1021,7 @@ def schedule_shadow(
             verdict, reason = "selected", ""
             selected_count += 1
             # Feeds only the +same-domain annotation on a later unevaluated pick
-            # (x-0ae1); no exclusion rides on it.
+            # no exclusion rides on it.
             used_domains.add(domain)
             if node.get("plan_path"):
                 # so later picks collide against this one, like the live selector

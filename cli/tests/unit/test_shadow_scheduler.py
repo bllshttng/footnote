@@ -4,7 +4,7 @@ Covers `advance.schedule_shadow` and the shared `_classify_lane_candidate`: the
 read-only frontier decision report that emits selected / serialized / unevaluated
 verdicts with stable typed reasons and performs NO dispatch. The plan's ready-set
 shapes are each a test: empty, singleton, independent, file-colliding,
-same-domain (disjoint surfaces co-select, x-0ae1; overlap serializes on
+same-domain (disjoint surfaces co-select; overlap serializes on
 collision), unknown-liveness (peer-lane), unevaluated (no file surface), and
 oversized (cap-bounded). `_ready_nodes` and the collision/in-flight seams are
 monkeypatched so the logic is tested without shelling `fno backlog ready`; the
@@ -85,7 +85,7 @@ def test_independent_distinct_domains_up_to_cap(monkeypatch, tmp_path):
 
 
 def test_same_domain_disjoint_surfaces_both_selected(monkeypatch, tmp_path):
-    """x-0ae1: domain no longer serializes - two `code` nodes with (hermetic)
+    """Domain no longer serializes - two `code` nodes with (hermetic)
     clean surfaces fill the frontier together."""
     _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "code")))
     r = advance.schedule_shadow(2, claims_root=tmp_path)
@@ -94,7 +94,7 @@ def test_same_domain_disjoint_surfaces_both_selected(monkeypatch, tmp_path):
 
 
 def test_same_domain_overlap_serializes_on_collision(monkeypatch, tmp_path):
-    """x-0ae1: the shadow twin of the live AC2-ERR - same-domain nodes sharing
+    """The shadow twin of the live AC2-ERR - same-domain nodes sharing
     a high-severity overlap serialize with `high-collision:<id>`, a collision
     verdict, never a domain one."""
     _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "code")))
@@ -112,7 +112,7 @@ def test_same_domain_overlap_serializes_on_collision(monkeypatch, tmp_path):
 def test_no_surface_in_a_held_domain_carries_the_same_domain_annotation(
     monkeypatch, tmp_path
 ):
-    """x-0ae1: the domain tiebreak survives only as an annotation on an
+    """The domain tiebreak survives only as an annotation on an
     unevaluated candidate, so the report can still explain the serialized
     unknown: `unevaluated:no-surface+same-domain:<domain>`."""
     import fno.graph.collision as collision
