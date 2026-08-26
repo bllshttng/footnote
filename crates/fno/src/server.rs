@@ -5875,11 +5875,25 @@ impl Core {
                     .map(|t| t.name.clone())
             })
             .flatten();
-        let facts = self
-            .agents
-            .iter()
-            .find(|a| a.name == name)
-            .and_then(Self::worker_facts);
+        let named_rows: Vec<&RegistryAgent> =
+            self.agents.iter().filter(|a| a.name == name).collect();
+        let facts = match persisted_session_id {
+            Some(session_id) => {
+                let pair_rows: Vec<&RegistryAgent> = named_rows
+                    .iter()
+                    .copied()
+                    .filter(|a| a.effective_identity() == Some(session_id))
+                    .collect();
+                match pair_rows.as_slice() {
+                    [one] => Self::worker_facts(one),
+                    _ => None,
+                }
+            }
+            None => match named_rows.as_slice() {
+                [one] => Self::worker_facts(one),
+                _ => None,
+            },
+        };
         let harness = facts.as_ref().map(|facts| facts.harness.clone());
         let harness_session_id = persisted_session_id
             .map(str::to_string)
@@ -6401,10 +6415,21 @@ impl Core {
                     let worker_name = m.worker.as_deref().expect("checked above");
                     if hold_workers {
                         members.push(m.clone());
-                        let row = self
+                        let matching_rows: Vec<&RegistryAgent> = self
                             .agents
                             .iter()
-                            .find(|agent| worker_registry_match(m, agent, worker_name));
+                            .filter(|agent| worker_registry_match(m, agent, worker_name))
+                            .collect();
+                        let row = match matching_rows.as_slice() {
+                            [one] => Some(*one),
+                            [] => None,
+                            _ => {
+                                self.notice_all(format!(
+                                    "restore: {worker_name} is ambiguous; resume by exact session id"
+                                ));
+                                None
+                            }
+                        };
                         let held = row
                             .filter(|agent| Self::row_resumable(agent))
                             .and_then(Self::worker_facts)
