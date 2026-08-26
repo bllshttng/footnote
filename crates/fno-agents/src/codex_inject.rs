@@ -1422,6 +1422,19 @@ mod tests {
             "codex review/start failed: server-error: review target must be a base branch"
         );
         assert!(fields["invocation_id"].as_str().unwrap().starts_with("ri-"));
+
+        let temp = tempfile::tempdir().unwrap();
+        emit_review_invocation_fields(
+            &crate::events::EventEmitter::new(temp.path().join("events.jsonl"), "daemon"),
+            fields,
+        );
+        let raw = std::fs::read_to_string(temp.path().join("events.jsonl")).unwrap();
+        let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(event["type"], "review_invocation");
+        assert_eq!(
+            event["data"]["receipt"],
+            "codex review/start failed: server-error: review target must be a base branch"
+        );
     }
 
     #[test]
