@@ -5595,12 +5595,12 @@ pub fn disposition_blockers(
 /// Run `git rev-list` and return its commit lines, oldest first only when
 /// `--reverse` is in the args. None on any git failure (fail closed).
 fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>> {
-    let out = std::process::Command::new(git_bin)
-        .current_dir(cwd)
-        .args(["rev-list"])
-        .args(args)
-        .output()
-        .ok()?;
+    // Through the bounded runner like every other stop-gate git read: a hung
+    // `rev-list` on a pathological history must read as not-tiled, never
+    // wedge the hook that called it.
+    let mut argv: Vec<&str> = vec!["rev-list"];
+    argv.extend_from_slice(args);
+    let out = git_bounded(git_bin, &argv, cwd)?;
     if !out.status.success() {
         return None;
     }
@@ -5679,11 +5679,7 @@ pub fn compute_range_tiling(
     tiling.rounds_exhausted = tiling.rounds_used > max_rounds.max(1);
     // The merge base decides where coverage must start. An unresolvable one
     // answers the whole question fail-closed.
-    let merge_out = std::process::Command::new(git_bin)
-        .current_dir(cwd)
-        .args(["merge-base", head_sha, base_ref])
-        .output()
-        .ok();
+    let merge_out = git_bounded(git_bin, &["merge-base", head_sha, base_ref], cwd);
     let merge_base = merge_out
         .and_then(|o| {
             if o.status.success() {
