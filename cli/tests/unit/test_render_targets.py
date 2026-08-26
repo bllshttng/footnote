@@ -316,7 +316,7 @@ def test_configured_target_written_on_mutation(_isolate, tmp_path, monkeypatch, 
     )
     text = _isolate["target"].read_text(encoding="utf-8")
     assert "second title" in text
-    assert "public items" in text
+    assert 'id="stats"' in text
 
 
 def test_target_mtime_advances_within_mutation_call(_isolate, tmp_path, monkeypatch):
@@ -391,7 +391,7 @@ def test_drained_project_writes_valid_empty_projection(_isolate, tmp_path, monke
     )
     text = target.read_text(encoding="utf-8")
     assert "STALE BYTES" not in text
-    assert "0 public items" in text
+    assert '"nodes":[]' in text
     assert "matches no graph entry" not in capsys.readouterr().err
 
 

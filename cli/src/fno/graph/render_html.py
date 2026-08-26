@@ -634,7 +634,7 @@ def _project_filter_html(projects: list[str]) -> str:
     )
 
 
-def render_public_sections_html(
+def _legacy_render_public_sections_html(
     sections: list[tuple[str, list[dict]]],
     *,
     title: str,
@@ -974,7 +974,7 @@ _JS = """\
 """
 
 
-def render_graph_html(
+def _legacy_render_graph_html(
     entries: list[dict],
     path: Path | None = None,
     project: str | None = None,
@@ -1079,3 +1079,347 @@ def render_graph_html(
         except OSError:
             pass
         raise
+
+
+# The dashboard below is the single HTML author for local and public backlog
+# surfaces. Its data payload is deliberately separate from its document shape:
+# public rows omit private fields, while local rows retain them.
+_DASHBOARD_STATUS_ORDER = (
+    "in_progress",
+    "in_review",
+    "ready",
+    "blocked",
+    "design",
+    "idea",
+    "deferred",
+    "done",
+    "superseded",
+)
+
+_DASHBOARD_CSS = """\
+:root { color-scheme: light dark; --bg:#f7f8fa; --surface:#fff; --ink:#20242b;
+        --muted:#707782; --line:#d9dde3; --accent:#3568a8; --done:#3f8b61;
+        --blocked:#b06a22; --prog:#7056a8; --idea:#9a7620 }
+* { box-sizing:border-box }
+body { margin:0; padding:20px; background:var(--bg); color:var(--ink);
+       font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif }
+header.page { max-width:1180px; margin:0 auto 18px }
+h1 { margin:0 0 6px; font-size:24px }
+.lede { margin:0 0 16px; color:var(--muted) }
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; margin-bottom:14px }
+.stat { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:10px 12px }
+.stat .n { font-size:22px; font-weight:700 }
+.stat .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em }
+.filters { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:var(--surface);
+           border:1px solid var(--line); border-radius:8px; padding:10px }
+input[type=search], input[type=date], select { min-height:34px; border:1px solid var(--line);
+  border-radius:6px; padding:5px 8px; background:var(--surface); color:inherit }
+input[type=search] { flex:1 1 230px }
+.chips { display:flex; flex-wrap:wrap; gap:5px }
+.chip { border:1px solid var(--line); border-radius:999px; padding:5px 9px; background:var(--surface);
+        color:inherit; cursor:pointer; font:inherit; font-size:12px }
+.chip[aria-pressed=true] { background:var(--accent); border-color:var(--accent); color:#fff }
+.chip .c { opacity:.7; font-size:11px }
+.project-chip { border-radius:5px }
+.from { display:flex; align-items:center; gap:5px; color:var(--muted); font-size:12px }
+.from input { width:135px }
+#shown { color:var(--muted); margin:12px 0 8px }
+#board { max-width:1180px; margin:0 auto }
+.group { background:var(--surface); border:1px solid var(--line); border-radius:9px; margin:9px 0; overflow:hidden }
+.ghead { width:100%; display:flex; align-items:center; gap:9px; padding:10px 12px; border:0;
+         background:transparent; color:inherit; text-align:left; cursor:pointer; font:inherit }
+.ghead h2 { margin:0; font-size:15px; flex:0 0 auto }
+.caret { width:13px; color:var(--muted) }
+.tw { display:flex; flex:1; height:7px; overflow:hidden; border-radius:5px; background:var(--line) }
+.tw i { display:block; height:100% }
+.tw i:nth-child(1), .tw i:nth-child(2) { background:var(--prog) }
+.tw i:nth-child(3) { background:var(--done) }
+.tw i:nth-child(4) { background:var(--blocked) }
+.tw i:nth-child(5), .tw i:nth-child(6) { background:var(--idea) }
+.tw i:nth-child(7) { background:#8c929a }
+.tw i:nth-child(8) { background:var(--done) }
+.tw i:nth-child(9) { background:#a5a9af }
+.gc { color:var(--muted); font-size:12px }
+.rows { border-top:1px solid var(--line) }
+.row { border-bottom:1px solid var(--line) }
+.row:last-child { border-bottom:0 }
+.row.is-hidden { display:none }
+.rmain { width:100%; display:grid; grid-template-columns:auto minmax(0,1fr) auto auto; gap:9px;
+         align-items:center; padding:9px 12px; border:0; background:transparent; color:inherit;
+         text-align:left; cursor:pointer; font:inherit }
+.rid { color:var(--muted); font:12px ui-monospace,SFMono-Regular,monospace }
+.rt { overflow-wrap:anywhere }
+.meta, .dot { color:var(--muted); font-size:12px; white-space:nowrap }
+.pill { display:inline-block; border:1px solid var(--line); border-radius:4px; padding:2px 5px; margin-left:3px; font-size:11px }
+.pill.pr-p1 { color:#a33; border-color:#d99 }
+.haspl { color:var(--accent); margin-right:5px }
+.haspr { color:var(--done); margin-right:5px }
+.detail { padding:10px 12px 13px; background:color-mix(in srgb,var(--bg) 70%,var(--surface)); color:inherit }
+.kv { display:flex; flex-wrap:wrap; gap:5px 14px; color:var(--muted); font-size:12px; margin-bottom:8px }
+.blk { border-left:3px solid var(--blocked); padding-left:9px; margin:7px 0; font-size:12px }
+.blk .h { font-weight:700; margin-bottom:3px }
+.item { margin:3px 0 }
+.planrow { display:flex; flex-wrap:wrap; align-items:center; gap:7px; margin-top:8px }
+.plan { overflow-wrap:anywhere; color:var(--muted); font:12px ui-monospace,SFMono-Regular,monospace }
+.pbtn { border:1px solid var(--line); border-radius:5px; padding:4px 7px; color:inherit; background:var(--surface); text-decoration:none; cursor:pointer; font:inherit; font-size:12px }
+.pbtn.primary { color:var(--accent); border-color:var(--accent) }
+.empty { padding:18px; color:var(--muted) }
+footer { max-width:1180px; margin:18px auto 0; color:var(--muted); font-size:11px }
+@media (max-width:700px) { body { padding:12px } .rmain { grid-template-columns:auto minmax(0,1fr) }
+  .meta, .dot { grid-column:2; white-space:normal } }
+"""
+
+_DASHBOARD_JS = """\
+(function () {
+  var DATA = JSON.parse(document.getElementById('data').textContent);
+  var NODES = DATA.nodes || [];
+  var ORDER = (DATA.status_order || []).slice();
+  NODES.forEach(function (node) {
+    if (ORDER.indexOf(node.s) < 0) ORDER.push(node.s);
+  });
+  var LOCAL = document.body.dataset.local === 'true';
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>\"]/g, function (c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c];
+  }); };
+  var label = function (s) { return String(s).replace(/_/g, ' ').replace(/\\b\\w/g, function (c) { return c.toUpperCase(); }); };
+  var counts = function (nodes) { var result = {}; ORDER.forEach(function (s) { result[s] = 0; });
+    nodes.forEach(function (n) { result[n.s] = (result[n.s] || 0) + 1; }); return result; };
+  var ALL = counts(NODES);
+  var state = { q:'', status:new Set(), projects:new Set(), group:'', prio:'', size:'', from:'', planOnly:false, prOnly:false, open:{} };
+  var PROJECT_KEY = 'fno-kanban-project-state';
+  function loadProjects() {
+    try {
+      var saved = JSON.parse(localStorage.getItem(PROJECT_KEY) || '[]');
+      if (Array.isArray(saved)) return new Set(saved);
+      if (saved && typeof saved === 'object') return new Set(Object.keys(saved).filter(function (p) { return saved[p] === false; }));
+    } catch (e) {}
+    return new Set();
+  }
+  function saveProjects() { try { localStorage.setItem(PROJECT_KEY, JSON.stringify(Array.from(state.projects))); } catch (e) {} }
+  var statsEl = document.getElementById('stats');
+  var statRows = [['Total', NODES.length, ''], ['In progress', ALL.in_progress || 0, ''],
+    ['In review', ALL.in_review || 0, ''], ['Ready', ALL.ready || 0, ''], ['Blocked', ALL.blocked || 0, ''],
+    ['Design', ALL.design || 0, ''], ['Idea', ALL.idea || 0, ''], ['Deferred', ALL.deferred || 0, ''],
+    ['Done', ALL.done || 0, ''], ['Shipped', NODES.length ? Math.round(100 * (ALL.done || 0) / NODES.length) + '%' : '0%', '']];
+  statRows.forEach(function (s) { var d = document.createElement('div'); d.className = 'stat';
+    d.innerHTML = '<div class=\"n\">' + s[1] + '</div><div class=\"k\">' + s[0] + '</div>'; statsEl.appendChild(d); });
+  document.getElementById('totalCount').textContent = NODES.length;
+  document.getElementById('planCount').textContent = NODES.filter(function (n) { return n.pl && n.s !== 'done' && n.s !== 'superseded'; }).length;
+  document.getElementById('prCount').textContent = NODES.filter(function (n) { return n.pr; }).length;
+  var statusChips = document.getElementById('statusChips');
+  ORDER.forEach(function (s) { var b = document.createElement('button'); b.className = 'chip'; b.type = 'button';
+    b.dataset.s = s; b.setAttribute('aria-pressed', 'false'); b.innerHTML = esc(label(s)) + ' <span class=\"c\">' + (ALL[s] || 0) + '</span>';
+    b.addEventListener('click', function () { if (state.status.has(s)) state.status.delete(s); else state.status.add(s);
+      b.setAttribute('aria-pressed', state.status.has(s) ? 'true' : 'false'); render(); }); statusChips.appendChild(b); });
+  var projectNames = []; NODES.forEach(function (n) { if (projectNames.indexOf(n.project) < 0) projectNames.push(n.project); });
+  projectNames.sort(function (a, b) { return a === 'unscoped' ? 1 : b === 'unscoped' ? -1 : a.localeCompare(b); });
+  var projectChips = document.getElementById('projectChips');
+  projectNames.forEach(function (p) { var b = document.createElement('button'); b.className = 'chip project-chip'; b.type = 'button';
+    b.dataset.project = p; b.textContent = p; b.setAttribute('aria-pressed', 'false'); b.addEventListener('click', function () {
+      if (state.projects.has(p)) state.projects.delete(p); else state.projects.add(p); saveProjects(); syncProjects(); render(); }); projectChips.appendChild(b); });
+  state.projects = loadProjects();
+  var queryProject = new URLSearchParams(window.location.search).get('project');
+  if (queryProject && projectNames.indexOf(queryProject) >= 0) state.projects = new Set([queryProject]);
+  function syncProjects() { projectChips.querySelectorAll('[data-project]').forEach(function (b) {
+    b.setAttribute('aria-pressed', state.projects.has(b.dataset.project) ? 'true' : 'false'); }); }
+  syncProjects();
+  var groups = []; NODES.forEach(function (n) { if (groups.indexOf(n.g) < 0) groups.push(n.g); }); groups.sort();
+  var groupSel = document.getElementById('groupSel'); groups.forEach(function (g) { var o = document.createElement('option'); o.value = g; o.textContent = g; groupSel.appendChild(o); });
+  groupSel.addEventListener('change', function () { state.group = groupSel.value; render(); });
+  function fill(sel, key, prefix) { var vals = []; NODES.forEach(function (n) { if (n[key] && vals.indexOf(n[key]) < 0) vals.push(n[key]); }); vals.sort(); vals.forEach(function (v) { var o = document.createElement('option'); o.value = v; o.textContent = prefix + ' ' + v; sel.appendChild(o); }); }
+  fill(document.getElementById('prioSel'), 'p', 'Priority'); fill(document.getElementById('sizeSel'), 'sz', 'Size');
+  document.getElementById('prioSel').addEventListener('change', function (e) { state.prio = e.target.value; render(); });
+  document.getElementById('sizeSel').addEventListener('change', function (e) { state.size = e.target.value; render(); });
+  var fromEl = document.getElementById('fromDate'); var stamps = NODES.map(function (n) { return n.u || n.c || ''; }).filter(Boolean).sort();
+  if (stamps.length) { fromEl.min = stamps[0]; fromEl.max = stamps[stamps.length - 1]; }
+  fromEl.addEventListener('change', function () { state.from = fromEl.value || ''; render(); });
+  document.getElementById('q').addEventListener('input', function (e) { state.q = e.target.value.toLowerCase().trim(); render(); });
+  function buttonFilter(id, key) { var b = document.getElementById(id); b.addEventListener('click', function () { state[key] = !state[key]; b.setAttribute('aria-pressed', state[key] ? 'true' : 'false'); render(); }); }
+  buttonFilter('planOnly', 'planOnly'); buttonFilter('prOnly', 'prOnly');
+  var openStatuses = new Set(['in_progress', 'in_review', 'ready', 'blocked']); openStatuses.forEach(function (s) { if (ORDER.indexOf(s) >= 0) state.status.add(s); });
+  ORDER.forEach(function (s) { var b = statusChips.querySelector('[data-s="' + s + '"]'); if (b) b.setAttribute('aria-pressed', state.status.has(s) ? 'true' : 'false'); });
+  function projectMatch(n) { return !state.projects.size || state.projects.has(n.project); }
+  function matches(n) {
+    if (!projectMatch(n) || (state.status.size && !state.status.has(n.s))) return false;
+    if (state.group && state.group !== n.g) return false; if (state.prio && state.prio !== n.p) return false;
+    if (state.size && state.size !== n.sz) return false; if (state.from && (n.u || n.c || '') < state.from) return false;
+    if (state.planOnly && !(n.pl && n.s !== 'done' && n.s !== 'superseded')) return false; if (state.prOnly && !n.pr) return false;
+    if (state.q && (String(n.id || '') + ' ' + n.t + ' ' + String(n.d || '') + ' ' + String(n.pl || '')).toLowerCase().indexOf(state.q) < 0) return false;
+    return true;
+  }
+  function detail(n) {
+    var h = '<div class=\"kv\"><span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
+    if (LOCAL) { h = '<div class=\"kv\"><span><b>id</b> ' + esc(n.id) + '</span>' + h.slice(h.indexOf('</span>') + 7); }
+    if (n.bb && n.bb.length) { h += '<div class=\"blk\"><div class=\"h\">Dependencies</div>' + n.bb.map(function (b) { return '<div class=\"item\">blocked by <b>' + esc(b.id) + '</b> ' + esc(b.s) + (b.t ? ' — ' + esc(b.t) : '') + '</div>'; }).join('') + '</div>'; }
+    if (n.sb) h += '<div class=\"blk\"><div class=\"h\">Superseded by</div><div class=\"item\"><b>' + esc(n.sb.id) + '</b> ' + esc(n.sb.s) + (n.sb.t ? ' — ' + esc(n.sb.t) : '') + '</div></div>';
+    if (n.d) h += '<p>' + esc(n.d) + '</p>'; else if (LOCAL) h += '<p>No description recorded.</p>';
+    if (LOCAL && n.pl) h += '<div class=\"planrow\"><span class=\"plan\">' + esc(n.pl) + '</span>' + (n.link ? '<a class=\"pbtn primary\" href=\"' + esc(n.link) + '\">Open in Obsidian ↗</a>' : '') + '</div>';
+    if (LOCAL && n.pr) h += '<div class=\"planrow\"><a class=\"pbtn primary\" href=\"' + esc(n.pu || '') + '\">PR #' + esc(n.pr) + '</a></div>';
+    return h;
+  }
+  function render() {
+    var visible = NODES.filter(matches); document.getElementById('shown').textContent = visible.length + ' of ' + NODES.length + ' nodes shown';
+    var board = document.getElementById('board'); board.innerHTML = ''; var by = {}; NODES.forEach(function (n) { (by[n.g] = by[n.g] || []).push(n); });
+    Object.keys(by).sort().forEach(function (g) { var rows = by[g], c = counts(rows); var sec = document.createElement('section'); sec.className = 'group';
+      var head = document.createElement('button'); head.className = 'ghead'; head.type = 'button'; head.innerHTML = '<span class=\"caret\">▼</span><h2>' + esc(g) + '</h2><span class=\"tw\">' + ORDER.map(function (s) { return c[s] ? '<i style=\"width:' + (100 * c[s] / rows.length) + '%\"></i>' : ''; }).join('') + '</span><span class=\"gc\">' + rows.length + '</span>';
+      var list = document.createElement('div'); list.className = 'rows'; head.addEventListener('click', function () { list.hidden = !list.hidden; head.querySelector('.caret').textContent = list.hidden ? '▶' : '▼'; }); sec.appendChild(head);
+      rows.forEach(function (n) { var row = document.createElement('div'); row.className = 'row' + (matches(n) ? '' : ' is-hidden'); row.dataset.project = n.project; row.dataset.status = n.s;
+        var main = document.createElement('button'); main.className = 'rmain'; main.type = 'button'; main.innerHTML = (LOCAL ? '<span class=\"rid\">' + esc(n.id) + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\"><span class=\"pill\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
+        main.setAttribute('aria-expanded', 'false'); main.addEventListener('click', function () { var old = row.querySelector('.detail'); if (old) { old.remove(); main.setAttribute('aria-expanded', 'false'); return; } var d = document.createElement('div'); d.className = 'detail'; d.innerHTML = detail(n); row.appendChild(d); main.setAttribute('aria-expanded', 'true'); }); row.appendChild(main); list.appendChild(row); }); sec.appendChild(list); board.appendChild(sec); });
+  }
+  render();
+})();
+"""
+
+
+def _dashboard_rows(
+    entries: list[dict],
+    *,
+    local: bool,
+    vault: str | None = None,
+    context_entries: list[dict] | None = None,
+) -> list[dict]:
+    """Project graph entries into the canonical dashboard's data contract."""
+    source = context_entries if context_entries is not None else entries
+    index = {e.get("id"): e for e in source if isinstance(e.get("id"), str)}
+    rows: list[dict] = []
+    for entry in entries:
+        status = str(entry.get("status") or "unknown")
+        row: dict[str, object] = {
+            "s": status,
+            "t": str(entry.get("title") or "(untitled)").replace("\n", " ").strip(),
+            "p": str(entry.get("priority") or ""),
+            "sz": str(entry.get("size") or ""),
+            "g": group_for(entry),
+            "project": _project_key(entry),
+            "c": str(entry.get("created_at") or "")[:10],
+            "u": str(entry.get("touched_at") or "")[:10],
+        }
+        if local:
+            row.update(
+                {
+                    "id": str(entry.get("id") or "?"),
+                    "d": " ".join(str(entry.get("details") or "").split()),
+                    "pl": str(entry.get("plan_path") or ""),
+                    "pr": str(entry.get("pr_number") or ""),
+                    "pu": str(entry.get("pr_url") or ""),
+                    "sb": (
+                        {
+                            "id": str(entry.get("superseded_by")),
+                            "s": str(
+                                index.get(entry.get("superseded_by"), {}).get("status")
+                                or "not found"
+                            ),
+                            "t": str(
+                                index.get(entry.get("superseded_by"), {}).get("title")
+                                or ""
+                            )[:90],
+                        }
+                        if isinstance(entry.get("superseded_by"), str)
+                        and entry.get("superseded_by")
+                        else None
+                    ),
+                    "bb": [
+                        {
+                            "id": bid,
+                            "s": str(index.get(bid, {}).get("status") or "not found"),
+                            "t": str(index.get(bid, {}).get("title") or "")[:90],
+                        }
+                        for bid in entry.get("blocked_by") or []
+                        if isinstance(bid, str)
+                    ],
+                }
+            )
+            plan_path = str(row["pl"])
+            if vault and plan_path:
+                row["link"] = _obsidian_url(vault, plan_path)
+        rows.append(row)
+    return rows
+
+
+def _dashboard_html(
+    entries: list[dict],
+    *,
+    title: str,
+    local: bool,
+    vault: str | None = None,
+    context_entries: list[dict] | None = None,
+) -> str:
+    rows = _dashboard_rows(
+        entries, local=local, vault=vault, context_entries=context_entries
+    )
+    json_module = __import__("json")
+    payload = json_module.dumps(
+        {"nodes": rows, "status_order": list(_DASHBOARD_STATUS_ORDER)},
+        separators=(",", ":"),
+    ).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    config = json_module.dumps({"local": local}, separators=(",", ":"))
+    generated = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{html.escape(title)}</title><style>{_DASHBOARD_CSS}</style></head>"
+        f'<body data-local="{str(local).lower()}"><header class="page"><h1>{html.escape(title)}</h1>'
+        '<p class="lede">Every open node, plus recent closed context. <b id="totalCount">0</b> nodes.</p>'
+        '<div class="stats" id="stats"></div><div class="filters">'
+        '<input type="search" id="q" placeholder="Search title, id, or description…" aria-label="Search nodes">'
+        '<div class="chips" id="statusChips" role="group" aria-label="Filter by status"></div>'
+        '<div class="chips" id="projectChips" role="group" aria-label="Filter by project"></div>'
+        '<select id="groupSel" aria-label="Filter by group"><option value="">All groups</option></select>'
+        '<span class="from">from <input type="date" id="fromDate" aria-label="From date"></span>'
+        '<select id="prioSel" aria-label="Filter by priority"><option value="">All priorities</option></select>'
+        '<select id="sizeSel" aria-label="Filter by size"><option value="">All sizes</option></select>'
+        '<button class="chip" id="planOnly" type="button" aria-pressed="false">Plan, unfinished <span class="c" id="planCount"></span></button>'
+        '<button class="chip" id="prOnly" type="button" aria-pressed="false">has a PR <span class="c" id="prCount"></span></button>'
+        '</div><div id="shown"></div></header><main id="board"><section class="group" hidden></section></main>'
+        f'<footer>rendered {generated}</footer><script id="config" type="application/json">{config}</script>'
+        f'<script id="data" type="application/json">{payload}</script><script>{_DASHBOARD_JS}</script></body></html>\n'
+    )
+
+
+def render_graph_html(
+    entries: list[dict],
+    path: Path | None = None,
+    project: str | None = None,
+    *,
+    all_projects: bool = False,
+) -> None:
+    """Render the canonical full-detail dashboard for the local surface."""
+    all_entries = [entry for entry in entries if isinstance(entry, dict)]
+    scoped = (
+        all_entries
+        if all_projects or not project
+        else [entry for entry in all_entries if _project_key(entry) == project]
+    )
+    if path is None:
+        from fno.graph._constants import GRAPH_HTML
+
+        path = GRAPH_HTML
+    vault = _load_obsidian_vault()
+    content = _dashboard_html(
+        scoped,
+        title="fno Backlog",
+        local=True,
+        vault=vault,
+        context_entries=all_entries,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temp, str(path))
+    except Exception:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def render_public_sections_html(
+    sections: list[tuple[str, list[dict]]], *, title: str, projection: str
+) -> str:
+    """Render any public projection with the same canonical dashboard shape."""
+    entries = [entry for _label, section in sections for entry in section]
+    return _dashboard_html(entries, title=title, local=False)

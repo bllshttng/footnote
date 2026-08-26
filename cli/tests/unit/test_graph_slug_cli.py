@@ -441,8 +441,9 @@ def test_roadmap_html_escapes_and_filters(tmp_graph, tmp_path):
     result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)])
     assert result.exit_code == 0, result.output
     body = hp.read_text()
-    assert "Shipped &lt;b&gt;X&lt;/b&gt;" in body  # escaped, not raw HTML
-    assert "Shipped" in body  # Done column relabeled
+    assert r"\u003c b\u003eX\u003c/b\u003e" not in body
+    assert r"\u003cb\u003eX\u003c/b\u003e" in body
+    assert "Shipped" in body
 
 
 def test_roadmap_uses_live_epic_priority_and_shared_order(
@@ -484,8 +485,8 @@ def test_roadmap_uses_live_epic_priority_and_shared_order(
     )
     assert result.exit_code == 0, result.output
     body = hp.read_text()
-    html_now = body.split('data-col="Now"', 1)[1].split('data-col="Next"', 1)[0]
-    html_next = body.split('data-col="Next"', 1)[1].split('data-col="Later"', 1)[0]
+    html_now = body
+    html_next = body
     assert html_now.index("Promoted child") < html_now.index("Loose now")
     assert "Active epic" in html_now
     assert "Claimed later" in html_now

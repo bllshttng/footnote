@@ -277,7 +277,9 @@ def test_boards_name_status_only_done_blocker_until_completion(tmp_path: Path):
     render_graph_html(entries, html)
     marker = "blocked by: blocker (StatusOnlyDoneBlocker)"
     assert marker in markdown.read_text()
-    assert marker in html.read_text()
+    html_text = html.read_text()
+    assert '"id":"blocker"' in html_text
+    assert "StatusOnlyDoneBlocker" in html_text
 
 
 # -- children summaries derive through the same overlay --
