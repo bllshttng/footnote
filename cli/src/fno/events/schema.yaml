@@ -254,6 +254,9 @@ event_types:
           type: string
           enum: [fresh, shared, unknown]
           description: "Positive evidence about the reviewer's execution context: fresh means a harness-recorded forked review context, shared means a same-context review tool result, and unknown means no positive context marker. Measures context independence, never who invoked the verb, and is not gating."
+        invocation_id:
+          type: string
+          description: "Join to the review_invocation attempt that produced this attestation."
         reviewed_base_sha:
           type: string
           description: "The merge-base of the base branch and HEAD at emit - the far end of the diff the reviewer read. Recorded so a reader can tell a review of the PR from a review of nothing: a session resolving its target from a checkout sitting on the base branch reads an empty diff, and before this field a clean review of nothing was byte-identical to a clean review. The producer REFUSES to emit when the measured diff changed no FILE, so every event carrying these fields covers a non-empty diff. OPTIONAL: every pre-landed attestation lacks the trio."

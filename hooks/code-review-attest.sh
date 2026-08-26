@@ -47,7 +47,27 @@ event="$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null ||
 # object for codex). Empty string means "no review was identified here" -
 # emit nothing and call no classifier.
 findings_payload=""
+record_review_subagent_marker() {
+  local cwd branch hold_json invocation_id marker_dir marker_name
+  cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
+  [[ -n "$cwd" && -d "$cwd" ]] || return 0
+  branch="$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  [[ -n "$branch" && "$branch" != "HEAD" ]] || return 0
+  hold_json="$("${FNO:-fno}" do pr review-hold metadata --branch "$branch" \
+    --repo "$cwd" 2>/dev/null || true)"
+  invocation_id="$(printf '%s' "$hold_json" \
+    | jq -r '.metadata.invocation_id // empty' 2>/dev/null || true)"
+  [[ -n "$invocation_id" ]] || return 0
+  marker_dir="${FNO_HOME:-$HOME/.fno}/review-invocations/${invocation_id}.subagents"
+  marker_name="$(printf '%s' "${agent_transcript:-$$}" \
+    | shasum -a 256 2>/dev/null | awk '{print $1}')"
+  [[ -n "$marker_name" ]] || marker_name="pid-$$"
+  mkdir -p "$marker_dir" 2>/dev/null || return 0
+  : > "$marker_dir/$marker_name" 2>/dev/null || true
+}
 reviewer_context="unknown"
+execution_context="inline"
+output_contract="json_block"
 case "$event" in
   PostToolUse)
     tool_name="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)"
@@ -63,6 +83,8 @@ case "$event" in
     # ReportFindings is a tool call in the authoring turn. That is positive
     # same-context evidence, not a guess from who typed the command.
     reviewer_context="shared"
+    execution_context="inline"
+    output_contract="report_findings"
     ;;
   SubagentStop)
     message="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
@@ -137,7 +159,12 @@ case "$event" in
     [[ "$message" =~ ^[[:space:]]*"## Review findings" ]] && shaped=1
 
     [[ "$described" == "1" || "$forked" == "1" || "$shaped" == "1" ]] || exit 0
+    record_review_subagent_marker
     [[ "$forked" == "1" ]] && reviewer_context="fresh"
+    if [[ "$forked" == "1" ]]; then
+      execution_context="fork"
+      output_contract="json_block"
+    fi
 
     # The clean-pass verdict, positively enumerated over every shape observed
     # live. An empty fenced JSON array is the high-level protocol's marker; a
@@ -218,6 +245,8 @@ print("[]")
     # Codex's Stop payload proves the structured review result, but this hook
     # has no positive evidence that the reviewer ran in a separate context.
     reviewer_context="unknown"
+    execution_context="inline"
+    output_contract="json_block"
     ;;
   *)
     exit 0
@@ -259,4 +288,5 @@ fi
 # classifier never fired is visibly different from one that classified zero.
 echo "code-review-attest: classified $total finding(s): $blocking blocking, $nonblocking non-blocking"
 
-bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review "$verdict" "$reviewer_context" --findings-file "$payload_file"
+bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review "$verdict" \
+  "$reviewer_context" "$execution_context" "$output_contract" --findings-file "$payload_file"

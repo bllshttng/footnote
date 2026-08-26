@@ -132,5 +132,7 @@ fi
 "$FNO_BIN" do pr review-hold acquire \
   --branch "$branch" --head "$head" --holder "$holder" --verb "/$skill" \
   --invocation-id "$invocation_id" \
+  --args-raw "$args_raw" --level "$level" --level-source "$level_source" \
+  --flags-json "$flags" \
   --repo "$cwd" >/dev/null 2>&1 || true
 exit 0

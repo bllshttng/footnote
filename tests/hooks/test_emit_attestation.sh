@@ -225,6 +225,58 @@ grep -q -- "--holder" "$ALL_CALLS" \
   && fail "the release passed a holder it cannot reconstruct" \
   || pass "the release names no holder"
 
+# 12. A hold-created invocation id is copied onto both the reviewer observation
+# and the completion attestation. This is the lifecycle join, not a receipt
+# inferred from either command's stdout.
+LINKED="$TMP/linked"
+LINKED_REVIEW="$TMP/linked-review.json"
+LINKED_ATTEST="$TMP/linked-attest.json"
+cat > "$TMP/fno-linked-stub" <<STUB
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "do" && "\${2:-}" == "pr" && "\${3:-}" == "review-hold" && "\${4:-}" == "metadata" ]]; then
+  printf '%s\n' '{"metadata":{"invocation_id":"ri-linked-positive","verb":"/code-review","args_raw":"medium --comment","level":"medium","level_source":"explicit","flags":["--comment"]}}'
+  exit 0
+fi
+if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; then
+  type=""; data=""
+  while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+      -t) type="\$2"; shift 2 ;;
+      -d) data="\$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ "\$type" == "review_invocation" ]]; then
+    printf '%s\n' "\$data" > "$LINKED_REVIEW"
+  elif [[ "\$type" == "review_attestation" ]]; then
+    printf '%s\n' "\$data" > "$LINKED_ATTEST"
+  fi
+fi
+exit 0
+STUB
+chmod +x "$TMP/fno-linked-stub"
+rm -f "$LINKED_REVIEW" "$LINKED_ATTEST"
+mkdir -p "$TMP/fno-home/review-invocations/ri-linked-positive.subagents"
+touch "$TMP/fno-home/review-invocations/ri-linked-positive.subagents/subagent-1"
+(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-linked-stub" FNO_HOME="$TMP/fno-home" \
+  bash "$EMITTER" code-review pass shared inline report_findings) >/dev/null 2>&1
+if [[ -s "$LINKED_REVIEW" && -s "$LINKED_ATTEST" ]]; then
+  pass "lifecycle join emits reviewer and attestation markers"
+else
+  fail "lifecycle join did not emit both records"
+fi
+if jq -e '.invocation_id == "ri-linked-positive" and .execution_context == "inline" and .output_contract == "report_findings" and .subagent_count == 1' "$LINKED_REVIEW" >/dev/null 2>&1; then
+  pass "reviewer observation carries id, trigger contract, and depth"
+else
+  fail "reviewer observation lost lifecycle fields: $(cat "$LINKED_REVIEW" 2>/dev/null)"
+fi
+if jq -e '.invocation_id == "ri-linked-positive" and .reviewer == "code-review"' "$LINKED_ATTEST" >/dev/null 2>&1; then
+  pass "review_attestation carries the invocation id"
+else
+  fail "review_attestation lost invocation id: $(cat "$LINKED_ATTEST" 2>/dev/null)"
+fi
+
 # 11. The payload records the diff under review: base (merge-base), head, and
 #     a line count greater than 0. This is the positive control for the
 #     refusal below - a refusal alone cannot separate "zero lines measured"

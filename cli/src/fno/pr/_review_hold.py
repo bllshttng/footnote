@@ -119,6 +119,10 @@ def acquire_review_hold(
     holder: str,
     verb: Optional[str] = None,
     invocation_id: Optional[str] = None,
+    args_raw: Optional[str] = None,
+    level: Optional[str] = None,
+    level_source: Optional[str] = None,
+    flags: Optional[list[str]] = None,
     ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
 ):
@@ -136,6 +140,14 @@ def acquire_review_hold(
         metadata["verb"] = verb
     if invocation_id:
         metadata["invocation_id"] = invocation_id
+    if args_raw is not None:
+        metadata["args_raw"] = args_raw
+    if level:
+        metadata["level"] = level
+    if level_source:
+        metadata["level_source"] = level_source
+    if flags is not None:
+        metadata["flags"] = flags
     try:
         return acquire_claim(
             review_hold_key(branch),

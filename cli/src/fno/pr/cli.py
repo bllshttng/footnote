@@ -463,6 +463,16 @@ def review_hold(
     invocation_id: Optional[str] = typer.Option(
         None, "--invocation-id", help="Review invocation telemetry join id."
     ),
+    args_raw: Optional[str] = typer.Option(
+        None, "--args-raw", help="Review arguments preserved for invocation telemetry."
+    ),
+    level: Optional[str] = typer.Option(None, "--level", help="Parsed review level."),
+    level_source: Optional[str] = typer.Option(
+        None, "--level-source", help="Source of the parsed review level."
+    ),
+    flags_json: Optional[str] = typer.Option(
+        None, "--flags-json", help="JSON array of parsed review flags."
+    ),
     ttl_minutes: Optional[float] = typer.Option(
         None, "--ttl-minutes", help="Override config.review.hold_ttl_minutes."
     ),
@@ -511,16 +521,33 @@ def review_hold(
             f"review-hold: released {branch}" if released else f"review-hold: no hold on {branch}"
         )
         raise typer.Exit(code=0)
+    if action == "metadata":
+        from fno.claims.core import claim_status
+
+        typer.echo(json.dumps(claim_status(_review_hold.review_hold_key(branch))))
+        raise typer.Exit(code=0)
     if not holder:
         typer.echo("review-hold acquire needs --holder", err=True)
         raise typer.Exit(code=1)
     if action == "acquire":
+        flags = None
+        if flags_json is not None:
+            try:
+                parsed_flags = json.loads(flags_json)
+            except json.JSONDecodeError:
+                parsed_flags = None
+            if isinstance(parsed_flags, list) and all(isinstance(flag, str) for flag in parsed_flags):
+                flags = parsed_flags
         claim = _review_hold.acquire_review_hold(
             branch,
             head=head,
             holder=holder,
             verb=verb,
             invocation_id=invocation_id,
+            args_raw=args_raw,
+            level=level,
+            level_source=level_source,
+            flags=flags,
             ttl_ms=(_review_hold.resolve_ttl_ms(ttl_minutes) if ttl_minutes is not None else None),
         )
         if claim is None:
