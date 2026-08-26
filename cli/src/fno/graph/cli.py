@@ -4952,10 +4952,12 @@ def cmd_lane_fill(
         help="Atomically hold a lane slot per selected node (default: preview only).",
     ),
 ) -> None:
-    """Select up to max_lanes ready nodes from DISTINCT domains (parallel mode).
+    """Select up to max_lanes ready nodes, each collision-clean (parallel mode).
 
-    Prints the JSON list of nodes that would dispatch as concurrent lanes, one
-    per distinct domain (epic x-42d5, group 2). Read-only by default; ``--claim``
+    Prints the JSON list of nodes that would dispatch as concurrent lanes -
+    the file-collision gate decides, so same-domain nodes with disjoint
+    surfaces co-schedule (epic x-42d5, group 2; x-0ae1). Read-only by
+    default; ``--claim``
     atomically holds a dispatch-time lane slot per node - what the dispatcher
     does before spawn (Locked Decision #8). ``max_lanes < 2`` prints ``[]``
     (sequential: use ``fno backlog next``).
@@ -4996,7 +4998,7 @@ def cmd_dispatch_lanes(
 ) -> None:
     """Spawn up to max_lanes isolated background lanes (parallel mode, group 3).
 
-    Selects distinct-domain ready nodes (like ``lane-fill``), then for each one
+    Selects collision-clean ready nodes (like ``lane-fill``), then for each one
     isolates a worktree off origin/main, seeds its per-lane
     ``.fno/config.local.toml`` (x-cbce: own project.id), and
     spawns a detached ``/target --no-merge`` worker rooted there. Prints one JSON

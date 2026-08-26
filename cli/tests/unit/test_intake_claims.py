@@ -19,7 +19,9 @@ from unittest.mock import patch
 import click.exceptions
 import pytest
 
-from fno.graph._intake import _resolve_claim, _warn_similar_nodes
+from fno.graph._intake import (
+    _refuse_surfaceless_intake, _resolve_claim, _warn_similar_nodes,
+)
 from fno.graph.cli import _create_node_impl, _do_intake_multi, _intake_impl
 
 
@@ -278,6 +280,31 @@ def test_multi_intake_refuses_whole_batch_on_surfaceless_plan(
     titles = [e.get("title") for e in _read_entries(fixture_graph)]
     assert not any("Good surface plan" in (t or "") for t in titles)
     assert len(_read_entries(fixture_graph)) == 3  # batch left the graph alone
+
+
+def test_intake_missing_plan_file_refused_as_not_found(fixture_graph, tmp_path, capsys):
+    """A missing plan file gets its own not-found refusal, not the misleading
+    'add rows' message (and never mints a node pointing at nothing)."""
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(tmp_path / "typo.md")])
+    code = getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0))
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "plan file not found" in err
+    assert "--allow-no-surface" in err
+    assert len(_read_entries(fixture_graph)) == 3
+
+
+def test_surface_refusal_reads_cli_paths_cwd_relative(tmp_path, monkeypatch):
+    """The probe reads the CLI-given spelling (Path, not a git-root join), so a
+    ../path from a subdirectory does not false-refuse a valid surface."""
+    (tmp_path / "sub").mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text(f"# Title\n\n{_SURFACE}\n")
+    monkeypatch.chdir(tmp_path / "sub")
+    _refuse_surfaceless_intake(["../plan.md"], allow_no_surface=False)  # no raise
+    with pytest.raises((SystemExit, click.exceptions.Exit)):
+        _refuse_surfaceless_intake(["../missing.md"], allow_no_surface=False)
 
 
 # -- _resolve_claim --

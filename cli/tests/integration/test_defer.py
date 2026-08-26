@@ -50,7 +50,7 @@ def _read_entries(g: Path) -> list[dict]:
 
 def _seed_with_plan(tmp_path, title: str = "Plan") -> str:
     plan = tmp_path / f"{title.lower().replace(' ', '-')}.md"
-    plan.write_text(f"---\ntitle: {title}\n---\n# Body\n")
+    plan.write_text(f"---\ntitle: {title}\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     r = _invoke("backlog", "intake", str(plan))
     assert r.exit_code == 0, r.output
     entries = json.loads(open(plan.parent.parent / "graph.json").read_text())["entries"] \
@@ -89,7 +89,7 @@ def test_deferred_overrides_blocked(tmp_graph, tmp_path):
     blocker_id = json.loads(a.stdout)["id"]
 
     plan = tmp_path / "blocked-plan.md"
-    plan.write_text("---\ntitle: Blocked\n---\n# Body\n")
+    plan.write_text("---\ntitle: Blocked\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     _invoke("backlog", "intake", str(plan), "--deps", blocker_id)
     entries = _read_entries(tmp_graph)
     target_id = next(e["id"] for e in entries if e.get("plan_path") == str(plan))
@@ -327,11 +327,11 @@ def test_deferred_included_with_flag(tmp_graph, tmp_path):
 def test_deferred_excluded_from_next_default(tmp_graph, tmp_path):
     """``backlog next`` skips deferred nodes."""
     plan_a = tmp_path / "plan-a.md"
-    plan_a.write_text("---\ntitle: A\n---\n# A\n")
+    plan_a.write_text("---\ntitle: A\n---\n# A\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     _invoke("backlog", "intake", str(plan_a), "--priority", "p1")
 
     plan_b = tmp_path / "plan-b.md"
-    plan_b.write_text("---\ntitle: B\n---\n# B\n")
+    plan_b.write_text("---\ntitle: B\n---\n# B\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     _invoke("backlog", "intake", str(plan_b), "--priority", "p2")
 
     entries = _read_entries(tmp_graph)

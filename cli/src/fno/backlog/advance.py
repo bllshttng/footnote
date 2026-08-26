@@ -661,8 +661,8 @@ def select_lane_fill(
     of domain is the annotation on an unevaluated candidate - see
     :func:`_classify_lane_candidate`.
 
-    ``max_lanes == 1`` selects a single ready node (distinct-domain is a no-op
-    for one pick): this is the retargeted active_backlog daemon's sequential
+    ``max_lanes == 1`` selects a single ready node: this is the retargeted
+    active_backlog daemon's sequential
     fire-and-forget dispatch (x-0ad6). ``max_lanes < 1`` returns ``[]`` with no
     side effects.
 
@@ -1610,7 +1610,7 @@ def dispatch_lanes(
     A dispatch-time ``model``/``provider`` applies to every lane spawned this run
     and outranks each node's own annotation (Locked Decision 1).
 
-    The parallel-mode dispatcher (epic x-42d5, group 3). Selects distinct-domain
+    The parallel-mode dispatcher (epic x-42d5, group 3). Selects collision-clean
     ready nodes via :func:`select_lane_fill` (which atomically holds a lane slot
     per pick, LD#8), then for each pick: isolates a worktree off origin/main,
     seeds its per-lane `.fno/settings.local.yaml` (x-cbce), and spawns a detached
