@@ -669,11 +669,22 @@ def resolve_owned_identity(
     if canonical_disposition == "contradiction":
         return OwnedHarnessIdentity(None, None, present, "contradiction")
     if canonical_disposition == "canonical":
+        if not identity.session_id or not identity.harness:
+            return OwnedHarnessIdentity(None, None, present, "ambiguous")
+        verdict = prove(identity.harness, identity.session_id) if prove else None
+        if verdict is not True:
+            owner = collide(identity.harness, identity.session_id) if collide else None
+            rejected = (
+                {
+                    "harness": identity.harness,
+                    "session_id": identity.session_id,
+                    "reason": "owned_by_live_row",
+                    "owner": owner,
+                },
+            ) if owner else ()
+            return OwnedHarnessIdentity(None, None, present, "ambiguous", rejected)
         return OwnedHarnessIdentity(
-            identity.session_id,
-            identity.harness,
-            present,
-            "canonical",
+            identity.session_id, identity.harness, present, "canonical"
         )
     if not markers:
         return OwnedHarnessIdentity(None, None, (), "empty")

@@ -112,10 +112,33 @@ def test_canonical_pair_resolves_without_vendor_markers():
     env = {"FNO_HARNESS_NAME": "claude", "FNO_HARNESS_SESSION_ID": session_id}
 
     assert resolve_harness_identity(env) == HarnessIdentity(session_id, "claude")
-    assert resolve_owned_identity(env) == OwnedHarnessIdentity(
+    assert resolve_owned_identity(env, prove=lambda _harness, _session: True) == OwnedHarnessIdentity(
         session_id=session_id,
         harness="claude",
         disposition="canonical",
+    )
+
+
+def test_canonical_pair_requires_process_proof_and_respects_collision():
+    session_id = "11111111-1111-4111-8111-111111111111"
+    env = {"FNO_HARNESS_NAME": "claude", "FNO_HARNESS_SESSION_ID": session_id}
+
+    owned = resolve_owned_identity(
+        env,
+        prove=lambda _harness, _session: False,
+        collide=lambda _harness, _session: "victim",
+    )
+
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.harness is None
+    assert owned.rejected == (
+        {
+            "harness": "claude",
+            "session_id": session_id,
+            "reason": "owned_by_live_row",
+            "owner": "victim",
+        },
     )
 
 
@@ -123,7 +146,9 @@ def test_canonical_name_only_uses_same_family_vendor_session():
     env = {"FNO_HARNESS_NAME": "codex", "CODEX_THREAD_ID": "thread-1"}
 
     assert resolve_harness_identity(env) == HarnessIdentity("thread-1", "codex")
-    assert resolve_owned_identity(env).disposition == "canonical"
+    assert resolve_owned_identity(
+        env, prove=lambda _harness, _session: True
+    ).disposition == "canonical"
 
 
 @pytest.mark.parametrize(
