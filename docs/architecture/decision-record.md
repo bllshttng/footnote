@@ -15,7 +15,7 @@ fno backlog decisions                    # the recent decisions across every sub
 fno backlog decide-reindex                 # backfill records written before the index
 ```
 
-The old `fno decide` spelling remains as a one-release compatibility shim. It prints the new `fno backlog` spelling to stderr and is removed next release.
+The old `fno inbox decide` spelling remains as a one-release compatibility shim. It prints the new `fno backlog` spelling to stderr and is removed next release.
 
 ## Two producers, both explicit
 

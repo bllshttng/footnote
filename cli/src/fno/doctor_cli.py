@@ -60,7 +60,7 @@ doctor_app.command("lint")(lint)
 doctor_app.command("footprint", hidden=True)(footprint_command)
 doctor_app.add_typer(observer_app, name="observer")
 doctor_app.add_typer(skill_diff_app, name="skill-diff")
-# test and update resolve the SAME command objects as the root spellings
-# `fno test` / `fno update`, which are canonical by the 2026-08-22 operator
-# ruling on the reorg node; these registrations are the kept silent aliases.
+# `doctor test` is the canonical spelling (x-6233, d-df6c29a6): the root
+# `fno test` is a VERB_MOVES shim. `doctor update` resolves the same command
+# object as the root `fno update`, which stays a root verb.
 doctor_app.command("update")(update_command)

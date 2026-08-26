@@ -433,7 +433,7 @@ def _worktree_ensure_for_launch(
 
     The node's recorded cwd is the canonical checkout for every organically
     filed node, and launching there puts a code worker on the protected branch
-    that sibling terminals share. ``fno workspace worktree ensure`` owns the
+    that sibling terminals share. ``fno agents workspace worktree ensure`` owns the
     policy resolution (per-project policy > global > harness-native); it
     prints the resolved root and exits 0, or prints nothing and exits non-zero
     on a refusal/misconfig - the caller HOLDS on that answer rather than

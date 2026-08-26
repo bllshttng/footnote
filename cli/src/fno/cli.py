@@ -588,7 +588,7 @@ command is about" and differs by family:
   fno config accounts add               -p priority   (-H harness, -a auth, -s scope)
   fno doctor event emit                 -t type       (-d data, -s source)
   fno agents mail send                  -k kind       (-b body; --to-project long-only)
-  fno done (deprecated root)            -p pr-number  (-l link, -m note)
+  fno backlog done                      -p pr-number  (-l link, -m note)
   fno backlog carveout add              -k kind       (-p priority)
 
 Unix-entrenched lowercase stays put: -h help, -n tail / -f follow
@@ -598,9 +598,10 @@ Unix-entrenched lowercase stays put: -h help, -n tail / -f follow
 Canonical spellings: --session-id and --pr-number. The old --session /
 --pr spellings still work as hidden deprecated aliases.
 
-`fno backlog done` is a different command from the deprecated root
-`fno done` and shares none of its flags: it takes --skip-stamp,
--F --force and -R --reason only.
+`fno backlog done` carries both faces: a bare node id takes the
+close flags (--skip-stamp, -F --force, -R --reason); any completion
+flag (-p/-l/-m, --backfill) or a title/branch query takes the rich
+completion surface ported from the retired root spelling.
 
 Run `fno help <command>` for any command's full flag list.\
 """

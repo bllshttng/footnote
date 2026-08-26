@@ -77,7 +77,7 @@ command -v jq  >/dev/null 2>&1 || { echo "failed: - reason=\"jq not on PATH\""  
 
 # Canonical MAIN checkout for deterministic --fresh isolation (x-73ca). The
 # git-common-dir's parent is the main checkout even when the dispatcher runs
-# from a linked worktree; `fno workspace worktree ensure --repo <this>` then creates the
+# from a linked worktree; `fno agents workspace worktree ensure --repo <this>` then creates the
 # worker's conductor worktree off origin/main. Empty when not in a git repo
 # (the --fresh arm falls back to the Rust runtime's own --fresh resolution).
 CANONICAL_ROOT=""
@@ -784,7 +784,7 @@ for id in "${NODES[@]}"; do
     # cwd= must stay a real, space-free path so the receipt is machine-parseable
     # (the conductor worktree path is not known until ensure runs, so preview the
     # canonical root the --fresh fallback would use); the hint carries the intent.
-    cwd_hint="--cwd <fno workspace worktree ensure> "
+    cwd_hint="--cwd <fno agents workspace worktree ensure> "
     dry_cwd="${CANONICAL_ROOT:-$(pwd)}"
   fi
 
@@ -879,7 +879,7 @@ for id in "${NODES[@]}"; do
     # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
     # so forward it as --harness: a claude bg dispatch lands harness-native at
     # <repo>/.claude/worktrees/, a non-native harness degrades to external.
-    [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno workspace worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null)"
+    [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno agents workspace worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null)"
     if [[ -n "$wt" ]]; then
       # policy=never returns the repo root: launch in place, but SKIP setup - it
       # links shared state INTO the canonical checkout (Locked Decision 4: guard

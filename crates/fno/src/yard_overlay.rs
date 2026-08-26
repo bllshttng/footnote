@@ -1,5 +1,5 @@
 //! The yard identity fold's shell-out leg (x-b2bf): a bounded, fail-open
-//! call to `fno yard --json`, mirroring [`crate::needs_overlay`]'s idiom.
+//! call to `fno agents yard --json`, mirroring [`crate::needs_overlay`]'s idiom.
 //!
 //! The client owns the status leg (badge / need / PR readings from the
 //! layout it already holds) and derives the eye from those values at render
@@ -20,7 +20,7 @@ use std::time::Duration;
 /// notice, never blocks the UI.
 const SHELLOUT_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// One yard citizen, as emitted by `fno yard --json`. Identity channels
+/// One yard citizen, as emitted by `fno agents yard --json`. Identity channels
 /// only - no status field lives here, by design: the eye is computed from
 /// the roster row the client already renders, so the payload cannot
 /// disagree with it.

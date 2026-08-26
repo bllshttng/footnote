@@ -5122,7 +5122,7 @@ fn control_roundtrip(
 const PANE_PREPARE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Gate and envelope `bytes` for `session:pane` by shelling to the Python
-/// renderer (`fno mail pane-prepare`), the SOLE `<fno_mail>` renderer.
+/// renderer (`fno agents mail pane-prepare`), the SOLE `<fno_mail>` renderer.
 ///
 /// Fails closed on every arm: a missing renderer, a non-zero exit (the pane is
 /// showing an option prompt, hosts no registered agent, or the body cannot be
@@ -5148,6 +5148,7 @@ fn prepare_pane_bytes(
     };
     let mut command = crate::process_admission::std_command(&exe);
     command.args([
+        "agents",
         "mail",
         "pane-prepare",
         "--session-id",

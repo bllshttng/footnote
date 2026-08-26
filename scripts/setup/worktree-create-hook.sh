@@ -74,7 +74,7 @@ REPO_NAME="$(basename "$MAIN_REPO")"
 # Fails open on anything but an affirmative `never` - this is the interactive
 # path and a stale fno must not break it.
 if command -v fno >/dev/null 2>&1; then
-    WT_POLICY="$(fno workspace worktree policy --repo "$MAIN_REPO" 2>/dev/null | head -1 | tr -d '[:space:]')"
+    WT_POLICY="$(fno agents workspace worktree policy --repo "$MAIN_REPO" 2>/dev/null | head -1 | tr -d '[:space:]')"
     if [ "$WT_POLICY" = "never" ]; then
         echo "worktree.policy=never for $REPO_NAME: refusing to create a worktree; work in place on the canonical checkout." >&2
         exit 0

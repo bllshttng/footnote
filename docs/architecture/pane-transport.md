@@ -1,10 +1,10 @@
 # Pane transport: what a typed message carries, and what its receipt claims
 
-`fno mux pane send` types keystrokes at a worker's prompt. It is the most reliable transport footnote has. It used to be the only one carrying no attribution. This doc states what it carries now, what each receipt word means, and why `fno mail send --force` is opt-in.
+`fno mux pane send` types keystrokes at a worker's prompt. It is the most reliable transport footnote has. It used to be the only one carrying no attribution. This doc states what it carries now, what each receipt word means, and why `fno agents mail send --force` is opt-in.
 
 ## The defect, measured
 
-On 2026-08-21 an operator read a king's instruction in pane 45 and asked why it had been sent `--raw`. It had not. `fno mail send` returned `queued (durable) [live-miss]`. The king fell back to `fno mux pane send --text ... --submit`. The message arrived with no sender, no message id, no reply handle, and no authority footer. In the pane it is indistinguishable from the operator typing. A worker cannot tell a peer's dispatch from an operator order. The two carry different authority. A peer cannot authorize an outward action the operator did not. The footer is the only thing that says so.
+On 2026-08-21 an operator read a king's instruction in pane 45 and asked why it had been sent `--raw`. It had not. `fno agents mail send` returned `queued (durable) [live-miss]`. The king fell back to `fno mux pane send --text ... --submit`. The message arrived with no sender, no message id, no reply handle, and no authority footer. In the pane it is indistinguishable from the operator typing. A worker cannot tell a peer's dispatch from an operator order. The two carry different authority. A peer cannot authorize an outward action the operator did not. The footer is the only thing that says so.
 
 The same night, mail live-missed repeatedly against a codex worker under both its registry name and its full session id. The pane path landed 4 of 4. So the transport that worked was the one carrying nothing. The design call is to wrap the durable path, not to route around it.
 
@@ -28,7 +28,7 @@ An earlier ruling said "an envelope typed as keystrokes is still keystrokes" and
 
 The three passthroughs rely on `_already_wrapped`, which tests the FIRST tag of the body. A digest that merely CONTAINS an envelope fails that test. `wrap_fno_mail` then refuses it, because a body must not hold an envelope. So a caller whose payload EMBEDS mail says `raw` rather than trusting the passthrough.
 
-**One renderer.** `cli/src/fno/mail/envelope.py` is the sole `<fno_mail>` renderer. A prior node deleted the Rust mirror as dead code. If the Rust verb cannot reach `fno mail pane-prepare`, it **fails closed**. There is no bare-paste fallback. A silent one rebuilds the exact defect this closes, and it fires exactly at the moment something is already wrong.
+**One renderer.** `cli/src/fno/mail/envelope.py` is the sole `<fno_mail>` renderer. A prior node deleted the Rust mirror as dead code. If the Rust verb cannot reach `fno agents mail pane-prepare`, it **fails closed**. There is no bare-paste fallback. A silent one rebuilds the exact defect this closes, and it fires exactly at the moment something is already wrong.
 
 ## The read-back gate
 
@@ -60,13 +60,13 @@ There is a fourth case, and it long had no receipt at all. `--submit` defaults t
 
 Both defaults are correct and neither changes here. A send that submitted by default is the read-back gate's own failure case. A stray submit against a showing prompt selects the highlighted default and discards the payload. What was missing is that the doc said so nowhere, while `skills/using-fno/SKILL.md` lists this verb beside mail as a handoff channel. Measured twice on 2026-08-22. A king sent a ruling to a busy pane and to an idle one. Both times it got silence and a clean exit, and had delivered nothing. That is the `queued (durable)` shape again, a transport whose surface reads normal while the message sits.
 
-## `fno mail send --force`, and why it stays opt-in
+## `fno agents mail send --force`, and why it stays opt-in
 
 `--force` keeps every mail semantic and changes only the transport. Before it existed, a live-miss forced the sender to switch verbs. Switching verbs is what lost the envelope, the message id, the reply handle, and the outbox row.
 
 The bus row records `mail_id` alongside the `pane_id` it was typed into. That one mapping buys three things:
 
-- **Auditability.** A message delivered by keystroke used to be invisible to every mail surface. Now `fno mail sent` shows it and names the transport.
+- **Auditability.** A message delivered by keystroke used to be invisible to every mail surface. Now `fno agents mail sent` shows it and names the transport.
 - **Diagnosis.** A payload that lands and is never consumed traces back to a pane a reader can go read.
 - **Honest receipts.** `--force` reports what it actually did.
 
@@ -80,8 +80,8 @@ A claude session id is UUIDv4, so its head-8 is 32 random bits and safe as an ad
 
 So:
 
-- `fno mail send` refuses a codex head-8 supplied as an address. It refuses on SHAPE rather than on whether the slice happens to resolve uniquely this second. Uniqueness right now is not a defence. The collision arrives silently the moment a sibling spawns in the same minute.
-- `fno mail reply --sender-session <full-session-id>` answers one candidate of an ambiguous legacy message and keeps `in_reply_to`. A threaded reply that cannot be sent is worse than an unthreaded one.
+- `fno agents mail send` refuses a codex head-8 supplied as an address. It refuses on SHAPE rather than on whether the slice happens to resolve uniquely this second. Uniqueness right now is not a defence. The collision arrives silently the moment a sibling spawns in the same minute.
+- `fno agents mail reply --sender-session <full-session-id>` answers one candidate of an ambiguous legacy message and keeps `in_reply_to`. A threaded reply that cannot be sent is worse than an unthreaded one.
 - Tail-8 is not the answer either. It carries entropy under both UUID versions. It is still a lossy slice, and it creates a second transition mailbox. Full `session_id` or the pane is the standing rule.
 
 ## The spawn seed

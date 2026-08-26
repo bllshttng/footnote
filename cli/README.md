@@ -126,7 +126,7 @@ Run `fno --help` for the full list. The main trees are `state`, `graph`
 
 ### Backlog commands (top-level)
 
-- `fno done [id-or-title] [--pr N] [--link URL] [--note TEXT] [--backfill]`
+- `fno backlog done [id-or-title] [--pr N] [--link URL] [--note TEXT] [--backfill]`
   -- mark a graph node done. Auto-detects from current git branch +
   `gh pr view` for `domain: code` when no flags are given. For non-code
   domains (research, design, trading, etc.) pass `--link` for an artifact
@@ -145,7 +145,7 @@ Run `fno --help` for the full list. The main trees are `state`, `graph`
   exit 2 with a "did you mean" suggestion; pass `--force-domain` to
   introduce a genuinely new domain.
 
-See `fno done --help`, `fno backlog find --help`, `fno backlog new --help` for
+See `fno backlog done --help`, `fno backlog find --help`, `fno backlog new --help` for
 the full flag list.
 
 Key exit codes (see `fno <sub> --help` for per-command specifics):

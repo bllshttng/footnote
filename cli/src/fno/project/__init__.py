@@ -44,10 +44,10 @@ PROJECTS_ROOT = "~/.fno/projects"
 
 @project_app.callback()
 def _group() -> None:
-    """Keep `project` a GROUP, so the verb is `fno project init <id>`.
+    """Keep `project` a GROUP, so the verb is `fno config project init <id>`.
 
     Typer collapses a single-command app into that command, which would make
-    the spelling `fno project <id>` and leave no room for a second action.
+    the spelling `fno config project <id>` and leave no room for a second action.
     """
 
 

@@ -38,7 +38,7 @@ def _output(
 
 
 def _deny(reason: str) -> dict[str, Any]:
-    return _output("deny", f"fno law refused: {reason}. Resume from an attended chat with {RECOVERY}.")
+    return _output("deny", f"fno inbox law refused: {reason}. Resume from an attended chat with {RECOVERY}.")
 
 
 def _contains_enact_action(command: Any) -> bool:
@@ -88,7 +88,7 @@ def _parse_command(command: Any) -> tuple[str, str] | None:
     proposal_id, content_hash = tokens[4], tokens[6]
     if not PROPOSAL_ID.fullmatch(proposal_id) or not CONTENT_HASH.fullmatch(content_hash):
         return None
-    canonical = f"fno law enact --proposal {proposal_id} --hash {content_hash}"
+    canonical = f"fno inbox law enact --proposal {proposal_id} --hash {content_hash}"
     if command != canonical:
         return None
     return proposal_id, content_hash

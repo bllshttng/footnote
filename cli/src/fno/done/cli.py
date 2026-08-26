@@ -27,8 +27,10 @@ A done_race_collision event is emitted to events.jsonl for forensic audit.
 
 Never hand-rolls graph writes - goes through locked_mutate_graph for safety.
 
-Registered in fno.cli via `app.command(name="done")(done_command)` so
-the main app treats `fno done <args>` as a single command, not a sub-app.
+Registered under `fno backlog done` (x-6233): the plain node-id close is
+graph.cli's cmd_done; this command owns the rich completion surface
+(--backfill rollups, PR/link/note metadata, fuzzy and branch queries) and is
+reached through cmd_done's delegation and the `fno done` VERB_MOVES shim.
 """
 from __future__ import annotations
 

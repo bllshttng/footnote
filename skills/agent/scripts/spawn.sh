@@ -272,7 +272,7 @@ esac
 # A bg /target|/execute|/fix launched into a repo's MAIN checkout lands on the
 # canonical (often protected) branch and relies on the soft skill instruction
 # "a bg /target self-creates its worktree before building." Do it
-# deterministically here instead: `fno workspace worktree ensure` (policy-resolved base,
+# deterministically here instead: `fno agents workspace worktree ensure` (policy-resolved base,
 # see the call below) on a fresh feature branch, launching THERE so it is born isolated
 # (location verdict ok from line one) regardless of whether the cwd came from
 # -P, a node's _resolved_cwd, or the caller sitting on canonical main.
@@ -310,12 +310,12 @@ is_code_payload() {
   esac
 }
 # A claude `/target <node>` worker isolates ITSELF at cold-start (`fno do target
-# start` -> `fno workspace worktree ensure` -> the harness `EnterWorktree` tool), which
+# start` -> `fno agents workspace worktree ensure` -> the harness `EnterWorktree` tool), which
 # moves the session's cwd while leaving its PROJECT at the launch dir. Pre-
 # creating here instead binds the project to the worktree: claude keys
 # ~/.claude/projects/ off the launch cwd with no rename hook, so every such spawn
 # mints a throwaway project dir holding one transcript, orphaned once the
-# worktree is reaped. Both paths reach the same `fno workspace worktree ensure` and so
+# worktree is reaped. Both paths reach the same `fno agents workspace worktree ensure` and so
 # honor the per-project policy identically; what differs is the project binding
 # (and the branch name, spawn-derived vs `/target`'s own).
 #
@@ -358,7 +358,7 @@ maybe_auto_worktree() {
   fi
   # The git/worktree mechanism (main-checkout-only gate, idempotent reuse,
   # stray-dir non-clobber, origin/main base, best-effort setup-worktree.sh)
-  # lives in the `fno workspace worktree ensure` verb (x-73ca) so all three code-dispatch
+  # lives in the `fno agents workspace worktree ensure` verb (x-73ca) so all three code-dispatch
   # paths share ONE implementation. On any failure it prints nothing on stdout,
   # so $wt is empty and we launch in the original CWD -- isolation is best-effort
   # and never blocks the spawn. (NOTE: ensure bases the branch on origin/main,
@@ -370,7 +370,7 @@ maybe_auto_worktree() {
   # --harness: ensure lands a claude payload harness-native at <repo>/.claude/
   # worktrees/, degrades any non-claude (or unexpected) harness to the external base.
   local wt
-  wt="$(fno workspace worktree ensure --repo "$top" --name "$NAME" --harness "$PROVIDER" 2>/dev/null)"
+  wt="$(fno agents workspace worktree ensure --repo "$top" --name "$NAME" --harness "$PROVIDER" 2>/dev/null)"
   if [[ -n "$wt" ]]; then
     CWD="$wt"; AUTO_WT="$wt"
     # policy=never launches in place: ensure prints the repo main checkout itself.

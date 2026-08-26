@@ -30,7 +30,7 @@ from fno.time_budget import validate_timeout_budget
 
 ENVELOPE_VERSION = 1
 HOSTED_DELIVERY = "hosted"
-#: `fno mail send --force`: the body was TYPED into a pane as keystrokes. Kept
+#: `fno agents mail send --force`: the body was TYPED into a pane as keystrokes. Kept
 #: distinct from `hosted` on purpose (node x-3a64). Bytes written to a PTY is
 #: not delivery and is certainly not action -- a full payload can arrive, render,
 #: and be discarded while the return selects a prompt's default. The row says
@@ -515,7 +515,7 @@ def record_typed_delivery(
     The mapping from ``msg_id`` to ``pane_id`` is the whole point (node x-3a64).
     A message delivered by keystroke used to be invisible to every mail surface:
     the recipient saw text with no id and the sender's outbox had no row. With
-    the mapping, ``fno mail sent`` shows the message and names the transport, and
+    the mapping, ``fno agents mail sent`` shows the message and names the transport, and
     a payload that lands in a pane and is never consumed becomes traceable to a
     pane a reader can go read.
     """

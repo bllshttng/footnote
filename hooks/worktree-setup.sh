@@ -49,7 +49,7 @@ if [[ -n "$_gate_repo" ]] && command -v fno >/dev/null 2>&1; then
     # (stale binary lacking `worktree policy`, misconfigured, etc.) would
     # abort the hook and skip all setup. The old inline `[[ ]]` read absorbed
     # this; the hoisted assignment does not.
-    _WT_POLICY="$(fno workspace worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    _WT_POLICY="$(fno agents workspace worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
 fi
 
 if [[ -z "$WORKTREE_PATH" ]]; then

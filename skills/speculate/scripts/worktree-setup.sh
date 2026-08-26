@@ -37,7 +37,7 @@ _gate_repo="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null 
 _WT_POLICY=""
 if [[ -n "$_gate_repo" ]] && command -v fno >/dev/null 2>&1; then
     # `|| true` is load-bearing under `set -euo pipefail`; see hooks/worktree-setup.sh.
-    _WT_POLICY="$(fno workspace worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    _WT_POLICY="$(fno agents workspace worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
 fi
 
 if [[ -z "$WORKTREE_PATH" ]]; then

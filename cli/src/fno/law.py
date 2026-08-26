@@ -290,7 +290,7 @@ def _arm_proposal_from_hook_unlocked(
         raise InvalidOperatorConsentError("session id is required")
     if permission_mode not in PROMPTING_MODES:
         raise InvalidOperatorConsentError("permission mode cannot approve law")
-    expected_tool = f"fno law enact --proposal {proposal_id} --hash {content_hash}"
+    expected_tool = f"fno inbox law enact --proposal {proposal_id} --hash {content_hash}"
     if tool_input != expected_tool:
         raise InvalidOperatorConsentError("tool input is not the canonical enact command")
     approval_receipt = secrets.token_urlsafe(32)
@@ -337,7 +337,7 @@ def _validate_operator_consent(
     if consent.permission_mode != proposal.get("armed_permission_mode"):
         raise InvalidOperatorConsentError("permission mode mismatch")
     expected_tool_prefix = (
-        f"fno law enact --proposal {proposal['proposal_id']} "
+        f"fno inbox law enact --proposal {proposal['proposal_id']} "
         f"--hash {proposal['content_hash']} --receipt "
     )
     if not consent.tool_input.startswith(expected_tool_prefix):
@@ -464,7 +464,7 @@ def _consent_from_proposal(
     from fno.decide import OperatorConsent
 
     tool_input = (
-        f"fno law enact --proposal {proposal['proposal_id']} "
+        f"fno inbox law enact --proposal {proposal['proposal_id']} "
         f"--hash {content_hash} --receipt {receipt}"
     )
 

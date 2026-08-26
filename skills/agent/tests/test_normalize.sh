@@ -684,7 +684,7 @@ check_eq       'bare trailing -C status' "$(field "$out" status)" 'error'
 # (run_nofno's _de43_stub) PLUS a python-shebang `fno-py` on PATH, with NO
 # injected PROJECT_ROOT_RESOLVER, and assert the resolver ran fno-py's
 # interpreter (so it never emits the dead-resolver "is not a python entrypoint"
-# error). Whether the host python can import fno decides import-vs-resolve, but
+# error). Whether the host python can import fno inbox decides import-vs-resolve, but
 # selection is the bug being fixed.
 if command -v python3 >/dev/null 2>&1; then
   _fpy_stub="$(mktemp -d)"
