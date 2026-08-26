@@ -1895,3 +1895,60 @@ def test_no_merge_reaches_init_argv_on_codex_native_path(monkeypatch, tmp_path):
     assert any("--no-merge" in a for a in init_argv), (
         f"--no-merge never reached target init: {init_argv}"
     )
+
+
+def _clear_remote_cache():
+    target_cli._REFRESHED_REMOTES.clear()
+
+
+def test_refresh_remote_marks_a_timeout_apart_from_a_fetch_error(monkeypatch):
+    """A timeout is not a verdict (x-d401).
+
+    The 60s bound is this branch's addition; before it the fetch simply ran to
+    completion. A caller must be able to tell "the network was slow" from
+    "the remote said no", or a slow-but-working fetch reads as a failure.
+    """
+    _clear_remote_cache()
+
+    def _timeout(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="git fetch", timeout=60)
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+    ok, err = target_cli._refresh_remote(Path("/repo"), "origin")
+    assert ok is False
+    assert err == target_cli._TIMED_OUT
+
+    _clear_remote_cache()
+
+    def _refused(*_a, **_k):
+        return SimpleNamespace(returncode=128, stderr="fatal: Authentication failed")
+
+    monkeypatch.setattr(subprocess, "run", _refused)
+    ok, err = target_cli._refresh_remote(Path("/repo"), "origin")
+    assert ok is False
+    assert err != target_cli._TIMED_OUT
+    assert "Authentication failed" in err
+
+
+def test_remote_base_ref_survives_a_slow_fetch_but_still_refuses_a_real_error(monkeypatch):
+    """A timed-out refresh must NOT refuse a cold start that used to work.
+
+    `origin/main` carried no timeout before this branch, so hard-exiting on
+    one would break a start on a slow network. A genuine fetch error still
+    exits, exactly as it did.
+    """
+    _clear_remote_cache()
+    monkeypatch.setattr(
+        target_cli, "_refresh_remote", lambda *_a, **_k: (False, target_cli._TIMED_OUT)
+    )
+    monkeypatch.setattr(
+        target_cli, "_git_out", lambda _cwd, *args: "abc123" if "rev-parse" in args else ""
+    )
+    assert target_cli._remote_base_ref(Path("/repo"), fetch=True) == "origin/main"
+
+    monkeypatch.setattr(
+        target_cli, "_refresh_remote", lambda *_a, **_k: (False, "fatal: could not read from remote")
+    )
+    with pytest.raises(typer.Exit) as excinfo:
+        target_cli._remote_base_ref(Path("/repo"), fetch=True)
+    assert excinfo.value.exit_code == 1

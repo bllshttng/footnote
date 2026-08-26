@@ -16,12 +16,12 @@ It does not reimplement worktree mechanics; it sequences pieces that already exi
 1. **Create / reuse the worktree off `origin/main`** via `fno workspace worktree ensure`. That verb branches off `origin/main` (never local HEAD) and reuses an existing worktree idempotently. It refuses to nest inside a linked worktree, and prints the worktree path on stdout.
 2. **Heal `.fno`** — if it arrived as a whole-dir symlink, `rm` + `mkdir` it — then link shared state via `worktree.py`'s `_run_setup_worktree_hook` (the setup-worktree.sh runner that the `shellout-drift` gate explicitly exempts).
 3. **Init the session from the worktree** via `fno do target init`, which writes the immutable manifest and claims the node exactly once. `start` re-uses that one-call claim rather than claiming separately.
-4. **Print a receipt:** `worktree=<path>  .fno=healed|ok  base=origin/main  node=claimed`.
+4. **Print a receipt:** `worktree=<path>  .fno=healed|ok  base=origin/main behind=<n>  node=claimed`. The base field carries a MEASURED distance: `start` fetches the remote branch first, because `rev-list --count HEAD..origin/main` reads the LOCAL ref and a stale ref answers 0 for a branch dozens of commits behind. When the fetch or the count fails, the field says `behind=unmeasured (<why>)` rather than a silent zero. Both halves are one whitespace-separated `key=value` line, so `behind=` reads as its own token.
 
 ## Idempotency
 
 - Run from **inside a valid (linked) worktree** → no-op: `already isolated at <path>; nothing created`. It never nests a worktree inside a worktree.
-- Re-run from canonical when the worktree **already has a manifest** → skip init (the manifest is write-once) and report `node=already-claimed`; it never double-claims.
+- Re-run from canonical when the worktree **already has a manifest** → skip init (the manifest is write-once) and report `node=already-claimed (holder <holder>, state <state>)`, read from the live claim lockfile; it never double-claims.
 
 ## Gate-safety
 

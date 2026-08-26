@@ -2948,7 +2948,13 @@ pub fn dispatch_claude_spawn(
     // full JSON-string encode as `model_field` below - a `"`-only escape
     // diverges on a backslash and can emit invalid JSON.
     let perm_field = match effective_mode.filter(|m| !m.is_empty()) {
-        Some(m) => format!(", \"permission_mode_requested\": {}", json_string_ascii(m)),
+        // RAW string, not escaped quotes: `check-reachable-paths.sh` normalizes
+        // a literal by stripping `\.` escapes, so the escaped spelling folds to
+        // `, permission_mode_requested: {}` and stops matching the Python twin.
+        // The pair is still real, so keep it SPELLED as a twin rather than
+        // retiring its baseline row - a guard dropped is worse than a guard
+        // that made us pick a string form.
+        Some(m) => format!(r#", "permission_mode_requested": {}"#, json_string_ascii(m)),
         None => String::new(),
     };
     // (x-d401, seventh surface) The model the worker was launched with: an

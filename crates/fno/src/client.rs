@@ -8832,17 +8832,25 @@ fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Rev
 /// first, exactly as [`agent_lattice_state`] does, so a dead worker (whose
 /// `pane_state` also reads `Idle`) is never mistaken for live idle and swept
 /// into `+N idle`: dead rows are the section view's business, not the cap's.
-/// `Empty` folds too (x-d401): this branch split the old blind `Idle` into
-/// `Idle`, `Empty` and `Unmeasured`, and testing `== Idle` alone would push
-/// every pristine shell into the `attention` count, saturating `idle_budget`
-/// to zero and killing the fold on exactly the thirty-empty-shells squad it
-/// was written for. `Unmeasured` deliberately does NOT fold: a row with no
-/// reading is the one this branch exists to keep visible.
+/// (x-d401) The fold takes every NON-ATTENTION state, which after this branch
+/// means three of them, not one. `pane_state` used to answer `Idle` for any
+/// badgeless row; the split sends a pristine shell to `Empty` and a row with
+/// no reading to `Unmeasured`, and `server.rs` hard-codes `pane_activity:
+/// None` on watch-only paneless rows - so a bg `/target` worker between turns
+/// is `Unmeasured`. Testing `== Idle` alone therefore counted every shell AND
+/// every bg worker as `attention`, drove `idle_budget` to zero and killed the
+/// fold outright on any real fleet.
+///
+/// Folding an unmeasured row does NOT re-hide what the split exposed: the
+/// GLYPH still says `?` wherever the row renders. This predicate is display
+/// density, not truth. Attention states (`Blocked`, `Working`, `DoneUnseen`)
+/// are enumerated by exclusion here on purpose - a state added later does not
+/// fold, so a new signal fails VISIBLE rather than silently hidden.
 fn is_idle_row(a: &AgentRow) -> bool {
     !a.exited
         && matches!(
             pane_state(a.badge, a.seen, a.pane_activity),
-            PaneState::Idle | PaneState::Empty
+            PaneState::Idle | PaneState::Empty | PaneState::Unmeasured
         )
 }
 
@@ -30317,12 +30325,14 @@ mod tests {
     }
 
     /// (x-d401) The top-K fold's target set after this branch split the old
-    /// blind `Idle` three ways. A pristine shell must still fold, or a squad
-    /// of thirty empty shells drives `attention` to thirty and `idle_budget`
-    /// to zero. An UNMEASURED row must not fold: keeping a no-reading row on
-    /// screen is the whole point of the split.
+    /// blind `Idle` three ways. Every non-attention state must still fold: on
+    /// `origin/main` a badgeless row was `Idle` and folded, so folding only
+    /// `Idle` would strand both a pristine shell AND every badgeless bg
+    /// worker (`server.rs` hard-codes `pane_activity: None` on watch-only
+    /// paneless rows), driving `idle_budget` to zero on any real fleet. The
+    /// `?` glyph, not the fold, is what keeps a no-reading row honest.
     #[test]
-    fn idle_fold_takes_empty_shells_but_never_an_unmeasured_row() {
+    fn idle_fold_takes_every_non_attention_state() {
         let with = |activity: Option<ShellActivity>| {
             let mut r = agent_row("w", 1, None, true);
             r.pane_activity = activity;
@@ -30334,12 +30344,12 @@ mod tests {
         );
         assert!(is_idle_row(&with(Some(ShellActivity::Idle))), "idle folds");
         assert!(
-            !is_idle_row(&with(Some(ShellActivity::Unmeasured))),
-            "a row with no reading stays visible"
+            is_idle_row(&with(Some(ShellActivity::Unmeasured))),
+            "an unmeasured row folds: the `?` glyph carries the honesty, not the cap"
         );
         assert!(
-            !is_idle_row(&with(None)),
-            "an absent reading is unmeasured, never a blind idle"
+            is_idle_row(&with(None)),
+            "a badgeless bg worker (pane_activity None) folds as it did before the split"
         );
         assert!(
             !is_idle_row(&with(Some(ShellActivity::Running))),

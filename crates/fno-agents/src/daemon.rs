@@ -5281,14 +5281,13 @@ where
                 evidence,
                 progress,
                 progress_basis,
-                pid_confirmed_live,
             )
         })
         .collect();
     let mut entries: Vec<Value> = classified
         .into_iter()
         .filter(
-            |(_e, rendered_status, _observed, _evidence, progress, _progress_basis, _pid_alive)| {
+            |(_e, rendered_status, _observed, _evidence, progress, _progress_basis)| {
                 if let Some(ref st) = filter_status {
                     if rendered_status != &st.as_str() {
                         return false;
@@ -5303,15 +5302,7 @@ where
             },
         )
         .map(
-            |(
-                e,
-                rendered_status,
-                observed_model,
-                evidence,
-                progress,
-                progress_basis,
-                pid_alive,
-            )| {
+            |(e, rendered_status, observed_model, evidence, progress, progress_basis)| {
                 let (reachability, basis, last_activity_age_s, last_event_at, last_message) =
                     evidence;
                 // Return the full row shape matching Python's serialize_entry. The
@@ -5488,16 +5479,14 @@ where
                     "project_root": e.project_root,
                 });
                 if let Some(object) = row.as_object_mut() {
-                    // (x-d401) `pid_alive` is a caller-injected INPUT that
-                    // `apply_row_contradiction` reads and pops, exactly as
-                    // Python's row builder supplies it. Without this line the
-                    // stale-spawning rule can never fire on the daemon path,
-                    // so `agent.list` would keep rendering a bare `spawning`
-                    // where `fno agents top` says `live
-                    // (stale-spawning-live-pid)` - a guard on one of two
-                    // reachable paths, which is the defect this branch exists
-                    // to delete.
-                    object.insert("pid_alive".into(), json!(pid_alive));
+                    // No `pid_alive` injection here: this row's `status` is
+                    // `rendered_status`, which `rendered_status_from_truth`
+                    // draws from a closed set of live/orphaned/unknown, so the
+                    // stale-spawning rule cannot match it. Injecting the input
+                    // would be a guard that never fires, reading as coverage.
+                    // The rule's one live carrier is Python's
+                    // `spawn_gate.census` (`fno agents top`), which measures
+                    // liveness itself and renders the stored token.
                     apply_row_contradiction(object, chrono::Utc::now());
                     object.remove("pid_start_time");
                 }

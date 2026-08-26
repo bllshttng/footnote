@@ -2318,7 +2318,18 @@ def _remote_base_ref(cwd: Path, *, fetch: bool = False) -> str:
     """Verified remote default-branch ref used by native target bootstrap."""
     if fetch:
         ok, err = _refresh_remote(cwd, "origin")
-        if not ok:
+        if not ok and err == _TIMED_OUT:
+            # The bound is this branch's addition; before it, a slow fetch just
+            # finished. Refusing here would break a cold start that used to
+            # work, so say the freshness is unproven and let the ref check
+            # below be the gate. A stale ref is not silently blessed: the
+            # receipt's own base line reports `behind=unmeasured`.
+            typer.echo(
+                "fno do target start: remote refresh timed out; "
+                "resolving the base against possibly stale refs.",
+                err=True,
+            )
+        elif not ok:
             typer.echo(
                 "fno do target start: could not refresh remote base: "
                 f"{err or 'git fetch origin failed'}",
@@ -2349,6 +2360,11 @@ def _base_receipt(cwd: Path, base: str, *, head: str = "HEAD") -> str:
 
 _REFRESHED_REMOTES: set = set()
 
+# `_refresh_remote`'s stderr value when the fetch hit its own 60s bound rather
+# than answering. A sentinel, not prose: a caller deciding whether to refuse
+# must not have to pattern-match a message that a rewording could change.
+_TIMED_OUT = "fetch timed out after 60s"
+
 
 def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> Tuple[bool, str]:
     """One fetch per (repo, remote, refspec) per process (x-3ae1).
@@ -2372,6 +2388,14 @@ def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> Tuple[bool, str]:
             text=True,
             timeout=60,
         )
+    except subprocess.TimeoutExpired:
+        # A TIMEOUT is not a fetch verdict, and callers must be able to tell it
+        # apart. Before this bound existed the fetch simply ran to completion,
+        # so treating a slow-but-working network as a hard failure would refuse
+        # a cold start that used to succeed. `_TIMED_OUT` is the marker; the
+        # base-ref path warns and carries on, and the measurement path already
+        # degrades to `behind=unmeasured`.
+        return False, _TIMED_OUT
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     if fetched.returncode != 0:

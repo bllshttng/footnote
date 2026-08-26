@@ -1516,8 +1516,13 @@ def register_existing_session(
                 if provider is not None:
                     entry.provider = provider
                 if model is not None:
+                    # Only a CHANGED model re-bases. The SessionStart hook
+                    # re-fires register after every resume, and restamping the
+                    # SAME model would downgrade a `verified` basis (read back
+                    # off a pane status) to this call's mere intent.
+                    if entry.model != model:
+                        entry.model_basis = "requested"
                     entry.model = model
-                    entry.model_basis = "requested"
                 if effort is not None:
                     entry.effort = effort
                 return entries
