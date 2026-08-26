@@ -1851,7 +1851,6 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
-            harness: None,
         }
     }
 
@@ -2095,7 +2094,6 @@ mod tests {
             worker: Some("probe-x5f7f".into()),
             harness: None,
             harness_session_id: None,
-            harness: None,
         };
         upsert("work", "", &["/repo".into()], &[worker, m("c19cd2c3")]).unwrap();
         let loaded = load();
@@ -2148,7 +2146,6 @@ mod tests {
             worker: Some("a;rm -rf".into()),
             harness: None,
             harness_session_id: None,
-            harness: None,
         };
         upsert("work", "", &["/repo".into()], &[hostile, m("c19cd2c3")]).unwrap();
         let loaded = load();
@@ -3039,7 +3036,6 @@ mod tests {
                 worker: None,
                 harness: None,
                 harness_session_id: None,
-                harness: None,
             }];
             assert_eq!(
                 prune_decision(&s, false, live_some, &no_cwds, &gone),
@@ -3236,7 +3232,6 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
-            harness: None,
         }];
         assert_eq!(
             prune_decision_at(
@@ -3394,7 +3389,6 @@ mod tests {
             worker: None,
             harness: None,
             harness_session_id: None,
-            harness: None,
         }
     }
 
