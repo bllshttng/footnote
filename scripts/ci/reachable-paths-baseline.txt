@@ -63,6 +63,9 @@ A	github_approval_satisfies	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/s
 A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# data
 A	holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# msg-twin
 A	claim pid must be positive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must reject non-positive anchors identically
+A	codex_companion_session_id	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs	# protocol: the shared Python/Rust ambient scrub inventory must remove this Codex marker on every spawn path
+A	codex_companion_transcript_path	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs	# protocol: the shared Python/Rust ambient scrub inventory must remove this Codex marker on every spawn path
+A	codex_internal_originator_override	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs	# protocol: the shared Python/Rust ambient scrub inventory must remove this Codex marker on every spawn path
 A	claim requires a positive pid or pid_unavailable: true	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must share the explicit absence contract
 A	pid and pid_unavailable are mutually exclusive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers reject ambiguous PID shapes identically
 A	pid_unavailable requires a ttl claim	py=cli/src/fno/claims/core.py|cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: TTL is the only authority allowed to carry an unavailable PID
