@@ -309,6 +309,13 @@ pub(crate) struct Settings {
     /// GitHub's refusal is per identity, not per human - a second account
     /// with its own token can still self-approve.
     github_approval_satisfies: Option<bool>,
+    /// config.review.max_rounds (default 2, clamped at least 1 at read): the
+    /// review-round budget before the gate reports IMPOSSIBLE. More rounds
+    /// than this on the branch since the last pass, with blocking findings
+    /// still non-terminal, means re-reviewing cannot clear it. A round is a
+    /// review VERDICT since the last pass; CI failures, lint failures and
+    /// rebases are not rounds, and a pass resets the counter.
+    max_rounds: Option<i64>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -753,6 +760,17 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
             // config that loads at all. Malformed stays None -> true (the
             // default-ON direction), matching the Python loader's rejection.
             s.github_approval_satisfies = lax_bool(v);
+        }
+        if let Some(v) = review.get("max_rounds") {
+            // An integer at least 1, read-side clamped; anything else stays
+            // None -> the default 2, so a typo cannot zero the budget (a
+            // missing cap fires IMPOSSIBLE on every second round).
+            let parsed = v
+                .as_integer()
+                .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<i64>().ok()));
+            if parsed.is_some_and(|n| n >= 1) {
+                s.max_rounds = parsed;
+            }
         }
         if let Some(v) = review.get("self_review_required") {
             // A malformed value stays None -> normalized to true (obligation on,
@@ -2478,6 +2496,7 @@ fn read_pr_info(
     prefetched_pr_json: Option<Value>,
     require_corroboration: bool,
     github_approval_satisfies: bool,
+    max_rounds: i64,
 ) -> Result<PrInfo, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
@@ -2593,6 +2612,7 @@ fn read_pr_info(
         &events_text_for_tiling,
         &head_branch,
         head_sha,
+        max_rounds,
     );
 
     // x-8b64 (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
@@ -5362,6 +5382,15 @@ pub struct RangeTiling {
     /// A local attestation whose head is in this list counts as Reviewed
     /// when the whole chain tiles, whatever its single-sha freshness says.
     pub chain_heads: Vec<String>,
+    /// Review rounds since the last pass on this branch (see
+    /// [`rounds_since_last_pass`]). Carried on the chain analysis because it
+    /// reads the same events with the same scoping; computed even on the
+    /// git-failure paths, which answer tiling fail-closed but rounds honestly.
+    pub rounds_used: i64,
+    /// Whether `rounds_used` exceeds the resolved `config.review.max_rounds`.
+    /// Advisory on this struct - the merge gate re-derives before refusing -
+    /// but the status surface reads it to name its own blocker.
+    pub rounds_exhausted: bool,
 }
 
 // --- The disposition-complete pass condition, Rust gate side ----------------
@@ -5583,6 +5612,48 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
             .collect(),
     )
 }
+/// Review rounds since the last pass on this branch, from the attestation
+/// chain. A round is a review VERDICT since the last pass - CI failures, lint
+/// failures and rebases are not rounds - and a pass resets the counter. The
+/// declared `review_round` wins when present (the running max since the last
+/// reset); every event from before the field existed falls back to counting
+/// verdicts. Scoped exactly like the tiling and disposition scans: branch
+/// match, with the legacy exact-head admission. Pure: scans the events text,
+/// no IO. The Python gate-side mirror is `rounds_since_last_pass` in
+/// `_coverage_gate.py`; the two are held equal by the shared corpus.
+pub fn rounds_since_last_pass(events_text: &str, head_branch: &str, head_sha: &str) -> i64 {
+    let mut rounds: i64 = 0;
+    for line in events_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if line_head.is_empty() {
+            continue;
+        }
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
+        if val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass") {
+            rounds = 0;
+            continue;
+        }
+        match val.pointer("/data/review_round").and_then(|v| v.as_i64()) {
+            Some(n) if n >= 0 => rounds = rounds.max(n),
+            _ => rounds += 1,
+        }
+    }
+    rounds
+}
 
 /// Compute the range tiling for one PR's attestation chain.
 ///
@@ -5598,8 +5669,14 @@ pub fn compute_range_tiling(
     events_text: &str,
     head_branch: &str,
     head_sha: &str,
+    max_rounds: i64,
 ) -> RangeTiling {
     let mut tiling = RangeTiling::default();
+    // Rounds do not depend on the git walk, so they are computed before the
+    // fail-closed early returns: a merge-base failure answers tiling
+    // not-tiled but the round budget honestly.
+    tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha);
+    tiling.rounds_exhausted = tiling.rounds_used > max_rounds.max(1);
     // The merge base decides where coverage must start. An unresolvable one
     // answers the whole question fail-closed.
     let merge_out = std::process::Command::new(git_bin)
@@ -6333,6 +6410,14 @@ fn coverage_event_data_tiled(
             "dropped": t.dropped,
             "chain_heads": t.chain_heads,
         });
+        // The round budget, same chain, same scoping. Emitted beside the
+        // tiling (not inside it) because it is a property of the review
+        // loop, not of the ranges: a chain can tile perfectly and still have
+        // burned its rounds. `rounds_exhausted` is the advisory flag the
+        // status surface names its blocker from; the merge gate re-derives
+        // before refusing (Locked Decision 6: never trust a producer count).
+        data["rounds_used"] = serde_json::json!(t.rounds_used);
+        data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
     }
     data
 }
@@ -8682,6 +8767,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             manifest.harness_session_id.as_deref(),
             settings.require_corroboration.unwrap_or(false),
             settings.github_approval_satisfies.unwrap_or(true),
+            settings.max_rounds.unwrap_or(2).max(1),
         );
 
         match done_result {
@@ -9537,6 +9623,7 @@ fn run_done(
     author_session: Option<&str>,
     require_corroboration: bool,
     github_approval_satisfies: bool,
+    max_rounds: i64,
 ) -> Result<PrInfo, GhReadError> {
     let info = read_pr_info(
         gh_bin,
@@ -9559,6 +9646,7 @@ fn run_done(
         None,
         require_corroboration,
         github_approval_satisfies,
+        max_rounds,
     )?;
     // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
@@ -12206,6 +12294,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         prefetched_pr_json,
         inputs.settings.require_corroboration.unwrap_or(false),
         inputs.settings.github_approval_satisfies.unwrap_or(true),
+        inputs.settings.max_rounds.unwrap_or(2).max(1),
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {

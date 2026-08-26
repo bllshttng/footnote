@@ -660,15 +660,20 @@ def _inprocess_dispatch_hold_reason(pr_number):
 
 
 def _fno_veto_refusal(args, timeout, fallback):
-    """One fno-verb probe: deny on the verb's exit-3 refusal line, else open.
+    """One fno-verb probe: deny on the verb's refusal exits, else open.
 
     The shared scaffold of both merge vetoes (lineage, coverage): fail OPEN on
     every way the probe itself can die - a missing `fno`, a timeout, any exit
-    other than the verb's refusal code - because a guard whose own machinery is
-    down must not become a merge outage. That includes an unknown-command exit
-    from a `fno` deployment older than the verb (the rollout window): it is
-    indistinguishable from any other usage error and fails open silently, which
-    is why each veto's timeout stays well under the harness hook budget.
+    other than the verb's refusal codes - because a guard whose own machinery
+    is down must not become a merge outage. That includes an unknown-command
+    exit from a `fno` deployment older than the verb (the rollout window): it
+    is indistinguishable from any other usage error and fails open silently,
+    which is why each veto's timeout stays well under the harness hook
+    budget. The refusal set is {3, 5}: 3 is the ordinary refusal, 5 is the
+    coverage verb's IMPOSSIBLE verdict (round budget spent, blocking
+    findings non-terminal). 5 had to join by hand - `!= 3` fails open on it,
+    and an IMPOSSIBLE silently permitting the merge it exists to stop is the
+    one wrong allow this scaffold cannot absorb.
     """
     try:
         proc = subprocess.run(
@@ -679,7 +684,7 @@ def _fno_veto_refusal(args, timeout, fallback):
         )
     except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired
         return None
-    if proc.returncode != 3:
+    if proc.returncode not in (3, 5):
         return None
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
     return detail[0] if detail else fallback
@@ -717,6 +722,8 @@ def _coverage_refusal(command=""):
     cannot distinguish from any other usage error. A guard whose own machinery
     is down must not become a merge outage. An empty read is not a machinery
     failure - it is the answer that nothing attested this head, and it exits 3.
+    Exit 5 (IMPOSSIBLE: round budget spent with blocking findings
+    non-terminal) denies like 3 - it is the strongest refusal the verb has.
     """
     pr_number = _parse_merge_pr(command)
     if not pr_number or _targets_other_repo(command):

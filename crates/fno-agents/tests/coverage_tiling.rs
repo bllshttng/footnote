@@ -103,6 +103,7 @@ fn tiling_for(repo: &Path, events: &str) -> RangeTiling {
         events,
         BRANCH,
         &git(repo, &["rev-parse", "HEAD"]),
+        2,
     )
 }
 
@@ -742,4 +743,151 @@ fn github_approval_stale_review_is_not_counted() {
         .iter()
         .any(|v| v.name == "bob" && v.verdict == CoverageVerdict::Stale));
     assert_eq!(rep.coverage_count(), Some(0));
+}
+
+// --- AC7: the round budget ---
+
+fn attestation_round(
+    reviewer: &str,
+    base: &str,
+    head: &str,
+    verdict: &str,
+    review_round: Option<i64>,
+) -> String {
+    let mut data = serde_json::json!({
+        "reviewer": reviewer,
+        "head_sha": head,
+        "verdict": verdict,
+        "session_id": "s-run",
+        "attester_session_id": "sess-a",
+        "branch": BRANCH,
+        "reviewed_base_sha": base,
+        "reviewed_head_sha": head,
+        "reviewed_file_count": 3,
+        "reviewed_line_count": 40,
+    });
+    if let Some(n) = review_round {
+        data["review_round"] = serde_json::json!(n);
+    }
+    serde_json::json!({
+        "ts": "2026-08-25T23:00:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": data,
+    })
+    .to_string()
+}
+
+#[test]
+fn round_budget_counts_verdicts_since_the_last_pass() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, _head) = repo_with(repo, 4);
+    let events = events_file(
+        repo,
+        &[
+            attestation_round("code-review", &base, &shas[0], "fail", None),
+            attestation_round("code-review", &shas[0], &shas[1], "fail", None),
+            attestation_round("code-review", &shas[1], &shas[2], "pass", None),
+            attestation_round("code-review", &shas[2], &shas[3], "fail", None),
+        ],
+    );
+    // The pass resets: one round since.
+    assert_eq!(rounds_since_last_pass(&events, BRANCH, &shas[3]), 1);
+    // Drop the pass from the chain: three rounds.
+    let no_pass = events_file(
+        repo,
+        &[
+            attestation_round("code-review", &base, &shas[0], "fail", None),
+            attestation_round("code-review", &shas[0], &shas[1], "fail", None),
+            attestation_round("code-review", &shas[1], &shas[2], "fail", None),
+        ],
+    );
+    assert_eq!(rounds_since_last_pass(&no_pass, BRANCH, &shas[2]), 3);
+}
+
+#[test]
+fn round_budget_declared_review_round_wins_when_present() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 3);
+    let events = events_file(
+        repo,
+        &[
+            attestation_round("code-review", &base, &shas[0], "fail", Some(1)),
+            attestation_round("code-review", &shas[0], &shas[1], "fail", Some(2)),
+            attestation_round("code-review", &shas[1], &head, "fail", Some(3)),
+        ],
+    );
+    assert_eq!(rounds_since_last_pass(&events, BRANCH, head.as_str()), 3);
+}
+
+#[test]
+fn round_budget_off_branch_events_do_not_count() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 2);
+    let other = attestation_round("code-review", &base, &shas[0], "fail", None)
+        .replace("\"feature/x\"", "\"feature/someone-else\"");
+    let events = events_file(
+        repo,
+        &[
+            other,
+            attestation_round("code-review", &base, &head, "fail", None),
+        ],
+    );
+    // Only the on-branch verdict counts: one round, not two.
+    assert_eq!(rounds_since_last_pass(&events, BRANCH, head.as_str()), 1);
+}
+
+#[test]
+fn round_budget_is_computed_even_when_tiling_fails_closed() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 3);
+    let events = events_file(
+        repo,
+        &[
+            attestation_round("code-review", &base, &shas[0], "fail", None),
+            attestation_round("code-review", &shas[0], &shas[1], "fail", None),
+            attestation_round("code-review", &shas[1], &head, "fail", None),
+        ],
+    );
+    // An unresolvable base ref answers tiling fail-closed, but the round
+    // budget does not depend on the git walk: three rounds, exhausted.
+    let tiling = compute_range_tiling(
+        "git",
+        repo,
+        "refs/remotes/origin/nope",
+        &events,
+        BRANCH,
+        &head,
+        2,
+    );
+    assert!(!tiling.tiled);
+    assert_eq!(tiling.rounds_used, 3);
+    assert!(tiling.rounds_exhausted);
+}
+
+#[test]
+fn round_budget_exhausted_needs_more_than_max() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 3);
+    let events = events_file(
+        repo,
+        &[
+            attestation_round("code-review", &base, &shas[0], "fail", None),
+            attestation_round("code-review", &shas[0], &head, "fail", None),
+        ],
+    );
+    let tiling = compute_range_tiling("git", repo, "origin/main", &events, BRANCH, &head, 2);
+    assert_eq!(tiling.rounds_used, 2);
+    assert!(
+        !tiling.rounds_exhausted,
+        "max_rounds is a budget, not an off-by-one"
+    );
 }

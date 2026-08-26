@@ -48,6 +48,12 @@ from fno.pr import _merge
 COVERED = 0
 REFUSED = 3
 UNANSWERED = 4
+#: The fourth state (Locked Decision 4): the round budget is spent with
+#: blocking findings still non-terminal, so no further review can clear it.
+#: Distinct from REFUSED so a caller can tell "needs another round" from
+#: "cannot be cleared by reviewing" - and from UNANSWERED, which is an
+#: instrument failure, never a verdict.
+IMPOSSIBLE = 5
 
 #: The gate's own copy of the harmless-category allowlist (Locked Decision 6:
 #: two implementations of one rule, held equal by a shared corpus). The gate
@@ -265,21 +271,50 @@ def coverage_verdict(
 
     covered, failed = covered_conjuncts(cov, head, code_review_required)
     corroboration = _corroboration_refusal(cov, repo)
+
+    # Locked Decision 1: the pass condition is disposition-complete at the
+    # head, not clean. The chain read needs the PR's head branch to scope
+    # its older rounds; on a covered row a probe miss is an instrument
+    # failure, answered UNANSWERED like the head fetch above rather than
+    # silently narrowing the chain (an under-collected chain is a fail-open).
+    # On an uncovered row the miss keeps today's refusal: the chain there
+    # only ever WIDENS the answer to IMPOSSIBLE, and a guessed branch would
+    # fire it on the wrong scope.
+    refs = _merge._pr_base_head_refs(pr_number, repo)
+    if covered and refs is None:
+        return UNANSWERED, "", "", "pr head branch fetch failed"
+    chain = attestation_chain(
+        repo, head_branch=refs[1] if refs else "", head=head
+    )
+    disposition_text, disposition_note, disposition_named = disposition_refusal(
+        chain, cov, repo
+    )
+    max_rounds = resolved_max_rounds(repo)
+    rounds = rounds_since_last_pass(chain)
+
+    # Locked Decision 4's fourth state, before any covered/uncovered branch:
+    # the all-fails loop shape never produces a covered row - that is exactly
+    # why it spun - so the budget check must not live inside the covered arm.
+    # Fires only when findings are non-terminal AND the rounds are spent;
+    # either alone keeps its ordinary verdict.
+    if disposition_named and rounds > max_rounds:
+        return (
+            IMPOSSIBLE,
+            _impossible_refusal(rounds, max_rounds, ", ".join(disposition_named)),
+            "",
+            "",
+        )
+
     if covered and corroboration:
         return REFUSED, corroboration, "", recompute_note
     if covered:
-        # Locked Decision 1: the pass condition is disposition-complete at the
-        # head, not clean. The chain read needs the PR's head branch to scope
-        # its older rounds; a probe miss is an instrument failure, answered
-        # UNANSWERED like the head fetch above rather than silently narrowing
-        # the chain (an under-collected chain is a fail-open).
-        refs = _merge._pr_base_head_refs(pr_number, repo)
-        if refs is None:
-            return UNANSWERED, "", "", "pr head branch fetch failed"
-        chain = attestation_chain(repo, head_branch=refs[1], head=head)
-        refusal, disposition_note = disposition_refusal(chain, cov, repo)
-        if refusal:
-            return REFUSED, refusal, "", recompute_note
+        if disposition_text:
+            # Rounds remain (the exhausted case returned above), so the
+            # refusal teaches the fix-delta remedy AND shows the budget the
+            # next round spends - AC7-HP's "how many rounds remain".
+            remaining = _rounds_remaining_note(rounds, max_rounds)
+            note = "; ".join(x for x in (recompute_note, remaining) if x)
+            return REFUSED, disposition_text, "", note
         if disposition_note and recompute_note:
             return (
                 COVERED,
@@ -476,8 +511,15 @@ def _resolved_categories(repo: str) -> frozenset[str]:
 
 def disposition_refusal(
     chain: list[dict], cov: Optional[dict], repo: str = "."
-) -> Tuple[str, str]:
-    """The refusal when a blocking finding in the chain is non-terminal, else "".
+) -> Tuple[str, str, list]:
+    """The refusal when a blocking finding in the chain is non-terminal.
+
+    Returns ``(refusal, note, named)``: the refusal sentence (empty when
+    everything terminal), the by-class note for a covered answer, and the
+    sorted finding keys that are non-terminal or uncorroborated - the third
+    element is what the IMPOSSIBLE verdict names, because its sentence must
+    NOT carry the fix-delta remedy the REFUSED sentence teaches (that remedy
+    is exactly what an exhausted loop must stop being told).
 
     A finding is terminal when it is fixed (and the chain moved past the round
     that raised it), non-blocking by the gate's own re-derivation, declined
@@ -487,7 +529,7 @@ def disposition_refusal(
     that is the whole difference between this gate and the exploit.
     """
     if not chain:
-        return "", ""
+        return "", "", []
     allow = _resolved_categories(repo)
     # Latest disposition per finding_key across the chain, plus the round
     # each blocking finding was raised in (a fixed finding is terminal only
@@ -515,6 +557,7 @@ def disposition_refusal(
             "truncated remainder is non-terminal, so the gate refuses rather "
             "than trust a count it cannot re-derive",
             "",
+            ["(truncated remainder)"],
         )
 
     # Corroboration for declines: the coverage row's existing predicate, read
@@ -549,20 +592,22 @@ def disposition_refusal(
             nonterminal.append(key)
 
     if nonterminal:
-        named = ", ".join(sorted(nonterminal))
+        keys = sorted(nonterminal)
         return (
-            f"blocking finding(s) not terminal: {named}; a blocking finding is "
-            "cleared by fixing it and letting the next review cover the fix "
-            "delta, nothing else clears it on your own signature",
+            f"blocking finding(s) not terminal: {', '.join(keys)}; a blocking "
+            "finding is cleared by fixing it and letting the next review cover "
+            "the fix delta, nothing else clears it on your own signature",
             "",
+            keys,
         )
     if uncorroborated:
-        named = ", ".join(sorted(uncorroborated))
+        keys = sorted(uncorroborated)
         return (
-            f"declined blocking finding(s) {named} rest on the author's own "
-            "signature alone; corroboration satisfies it two ways: a second "
+            f"declined blocking finding(s) {', '.join(keys)} rest on the author's "
+            "own signature alone; corroboration satisfies it two ways: a second "
             "session's head-pinned attestation, or a non-author GitHub approval",
             "",
+            keys,
         )
     by_class = [
         key
@@ -574,7 +619,96 @@ def disposition_refusal(
         if by_class
         else ""
     )
-    return "", note
+    return "", note, []
+
+
+# --- The round budget and the fourth verdict --------------------------------
+#
+# Locked Decision 4's termination clause: a review loop that declines its
+# blocking findings must terminate in a state whose remedy is NOT another
+# round. The budget is config.review.max_rounds (default 2, at least 1); the
+# round count is re-derived here from the same chain the disposition gate
+# reads, never trusted off the producer's row (Locked Decision 6).
+
+#: The shipped default when config is unreadable or the key absent. Matches
+#: the Rust parse's own ``unwrap_or(2).max(1)`` so the two gates cannot
+#: disagree on the same unreadable config.
+DEFAULT_MAX_ROUNDS = 2
+
+#: The AC7-MARKER literals: the refusal must carry the word ``impossible``
+#: and name BOTH remedies. Never "run the review verb at HEAD" - that is the
+#: instruction that caused the loop this state exists to end.
+IMPOSSIBLE_REMEDIES = (
+    "a non-author GitHub approval on the PR, or the coverage-override label"
+)
+
+
+def rounds_since_last_pass(chain: list[dict]) -> int:
+    """Review rounds since the last pass on the chain, oldest-first.
+
+    A round is a review VERDICT since the last pass; a pass resets the
+    counter. The declared ``review_round`` wins when present (the running max
+    since the reset); every event from before the field existed falls back to
+    counting verdicts. The Rust-side mirror is
+    ``loopcheck::rounds_since_last_pass``; the two are held equal by the
+    shared corpus.
+    """
+    rounds = 0
+    for event in chain:
+        if event.get("verdict") == "pass":
+            rounds = 0
+            continue
+        declared = event.get("review_round")
+        if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
+            rounds = max(rounds, declared)
+        else:
+            rounds += 1
+    return rounds
+
+
+def resolved_max_rounds(repo: str) -> int:
+    """The clamped ``config.review.max_rounds`` for the repo (>= 1)."""
+    try:
+        from fno.config import load_settings_for_repo
+
+        root = Path(_merge._repo_state_dir(repo)).parent
+        value = getattr(load_settings_for_repo(root).review, "max_rounds", None)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            return value
+        return DEFAULT_MAX_ROUNDS
+    except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
+        return DEFAULT_MAX_ROUNDS
+
+
+def _impossible_refusal(
+    rounds: int, max_rounds: int, disposition_refusal_text: str
+) -> str:
+    """The IMPOSSIBLE sentence: rounds spent, findings non-terminal, both
+    remedies, and no instruction that asks for another review."""
+    return (
+        f"review coverage is impossible to satisfy by further review: {rounds} "
+        f"review rounds used (max {max_rounds}) with blocking finding(s) still "
+        f"non-terminal ({disposition_refusal_text}); this cannot be cleared by "
+        f"re-reviewing - the two acts that clear it are {IMPOSSIBLE_REMEDIES}"
+    )
+
+
+def _rounds_remaining_note(rounds: int, max_rounds: int) -> str:
+    """The REFUSED-side note AC7-HP demands: the budget a worker can see
+    before the next round reports impossible. Zero remaining is still worth
+    saying - the next round is the one that trips, and a worker who cannot
+    see the budget cannot choose to stop."""
+    remaining = max_rounds - rounds
+    if remaining <= 0:
+        return (
+            f"{rounds}/{max_rounds} review rounds used; the next round "
+            "reports impossible"
+        )
+    plural = "" if remaining == 1 else "s"
+    return (
+        f"{rounds}/{max_rounds} review rounds used; {remaining} round{plural} "
+        "remain before the gate reports impossible"
+    )
 
 
 def run_coverage_check(
@@ -583,14 +717,16 @@ def run_coverage_check(
     """The verb body: print the refusal, return the state as an exit code.
 
     Exit 0 covered, 3 refused (the guard's sentence on stderr), 4 unanswered
-    (the note naming the dead probe). Callers that cannot import ``fno`` - a
+    (the note naming the dead probe), 5 impossible (rounds spent with
+    blocking findings non-terminal; the sentence names the two remedies, on
+    stderr like every refusal). Callers that cannot import ``fno`` - a
     stdlib-only hook - read the first stderr line and the exit code.
     """
     repo = cwd or os.getcwd()
     state, refusal, _covered_head, note = coverage_verdict(
         pr_number, repo, recompute=recompute
     )
-    if state == REFUSED:
+    if state in (REFUSED, IMPOSSIBLE):
         sys.stderr.write(f"{refusal_line(refusal, note)}\n")
     elif state == UNANSWERED:
         sys.stderr.write(f"{note}\n")

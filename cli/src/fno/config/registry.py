@@ -198,6 +198,9 @@ FIELD_META: dict[str, Meta] = {
     "review.github_approval_satisfies": Meta(
         "advanced", "When true (default), a non-author human GitHub APPROVED review satisfies coverage on its own and the corroboration term - the one producer a stranger's GitHub project emits with no footnote machinery. The approver's login must differ from the PR author's (GitHub refuses an author's approval server-side; the gate asserts it, and an unreadable PR author excludes fail-closed). Set false to keep today's recorded-but-never-counted behavior. Limit: GitHub's refusal is per identity, not per human - a second account with its own token can still self-approve.",
     ),
+    "review.max_rounds": Meta(
+        "advanced", "The review-round budget (default 2) before the gate reports IMPOSSIBLE: more review rounds than this on the branch since the last pass, with blocking findings still non-terminal, means re-reviewing cannot clear it. The refusal names the two acts that can: a non-author GitHub approval, or the coverage-override label - never another round. A round is a review VERDICT since the last pass; CI failures, lint failures and rebases are not rounds, and a pass resets the counter. Validated at parse: at least 1.",
+    ),
     "review.hold_ttl_minutes": Meta(
         "advanced", "How long a registered review hold blocks a merge before it ages out (default 90). A review that starts registers review:branch:<branch>; fno do pr status and fno do pr merge refuse while it is live, so a merge cannot land on the pre-review code. A wedge bound, not an estimate: an expired hold clears with a receipt rather than holding the lane forever.",
     ),

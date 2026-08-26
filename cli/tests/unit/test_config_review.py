@@ -747,3 +747,43 @@ def test_ac6_pre_field_row_stays_excluded_even_with_flag_on() -> None:
         _derive_review_state("covered", [_verdict("bob", None)], set(), True)
         == "unreviewed"
     )
+
+
+# --- AC7: the round budget config ---
+
+
+def test_max_rounds_defaults_to_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(tmp_path, monkeypatch, "schema_version: 1\nconfig:\n  review: {}\n")
+    assert settings.review.max_rounds == 2
+
+
+def test_max_rounds_explicit_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    max_rounds: 3\n",
+    )
+    assert settings.review.max_rounds == 3
+
+
+def test_max_rounds_below_one_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero or negative fails the load, never silently zeroes the budget - a
+    missing cap would fire IMPOSSIBLE on every second round."""
+    with pytest.raises(Exception):
+        _load(
+            tmp_path,
+            monkeypatch,
+            "schema_version: 1\nconfig:\n  review:\n    max_rounds: 0\n",
+        )
+
+
+def test_max_rounds_registry_row_documents_the_key() -> None:
+    from fno.config.registry import FIELD_META
+
+    assert "review.max_rounds" in FIELD_META

@@ -914,3 +914,242 @@ def test_ac5_decline_with_corroboration_is_terminal(monkeypatch, tmp_path):
     )
     assert state == _coverage_gate.COVERED
     assert refusal == ""
+
+
+# ---- the round budget and the fourth verdict (AC7) ----
+#
+# The PR-1170 shape: three fail rounds, the blocking finding declined rather
+# than fixed, no corroboration. Under the cap (max_rounds 2) that chain is
+# IMPOSSIBLE - exit 5, the word "impossible" literal on stderr, both remedies
+# named, and no instruction that asks for another review.
+
+
+def _ac7_round(ts: str, verdict: str, head: str, dispositions=None):
+    data = {
+        "reviewer": "code-review",
+        "head_sha": head,
+        "verdict": verdict,
+        "session_id": "s-ac7",
+        "attester_session_id": "sess-author",
+        "branch": "feature/x-8439",
+        "reviewed_base_sha": "a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3",
+        "reviewed_head_sha": head,
+        "reviewed_file_count": 3,
+        "reviewed_line_count": 40,
+        "findings_blocking": 1,
+        "findings": [
+            {
+                "category": "security",
+                "verdict": None,
+                "blocking": True,
+                "has_required_fields": True,
+                "finding_key": "hooks/git-protection.py:302:security",
+            }
+        ],
+    }
+    if dispositions is not None:
+        data["dispositions"] = dispositions
+    return {"ts": ts, "type": "review_attestation", "source": "hook", "data": data}
+
+
+_AC7_DECLINE = [
+    {
+        "finding_key": "hooks/git-protection.py:302:security",
+        "disposition": "declined",
+        "reason": "not applicable here",
+    }
+]
+
+
+def _ac7_seed(tmp_path, rounds):
+    """A fail-round chain plus the covered self-attested row it tiles to.
+
+    Each round reviews a DIFFERENT head (the loop's non-fix commits move it),
+    which is also what keeps the chain dedup honest: identical data rounds
+    would collapse to one event."""
+    stamps = ["2026-08-25T21:00:00Z", "2026-08-25T21:30:00Z", "2026-08-25T22:00:00Z"]
+    heads = [
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        FIXTURE_HEAD,
+    ]
+    lines = []
+    for i in range(rounds):
+        dispositions = _AC7_DECLINE if i == 1 else None
+        lines.append(_ac7_round(stamps[i], "fail", heads[i], dispositions))
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    with open(tmp_path / ".fno" / "events.jsonl", "w", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(json.dumps(line) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "ts": "2026-08-25T22:01:00Z",
+                    "type": "review_coverage",
+                    "source": "hook",
+                    "data": {
+                        "pr": 42,
+                        "coverage": "covered",
+                        "review_state": "reviewed",
+                        "reviewed_count": 1,
+                        "self_attested_count": 1,
+                        "head_sha": FIXTURE_HEAD,
+                        "verdicts": [
+                            {
+                                "producer": "local_attestation",
+                                "name": "code-review",
+                                "verdict": "reviewed",
+                                "attestation_origin": "self_attested",
+                                "reviewed_sha": FIXTURE_HEAD,
+                                "freshness": "fresh",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+
+def test_ac7_marker_exhausted_decline_exits_impossible(monkeypatch, tmp_path, capsys):
+    """Three fail rounds, decline uncorroborated: exit 5, 'impossible' literal,
+    both remedies named, and no instruction to run another review."""
+    _specimen_gates(monkeypatch)
+    _ac7_seed(tmp_path, rounds=3)
+    rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
+    cap = capsys.readouterr()
+    line = (cap.err.strip().splitlines() or [""])[0]
+    assert rc == _coverage_gate.IMPOSSIBLE == 5
+    assert "impossible" in line
+    assert "non-author GitHub approval" in line
+    assert "coverage-override label" in line
+    assert "run the review verb" not in line
+    assert "hooks/git-protection.py:302:security" in line
+
+
+def test_ac7_hp_two_rounds_refuse_three_say_how_many_remain(
+    monkeypatch, tmp_path, capsys
+):
+    """The same chain at two rounds: exit 3 with the budget named, not 5."""
+    _specimen_gates(monkeypatch)
+    _ac7_seed(tmp_path, rounds=2)
+    rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
+    cap = capsys.readouterr()
+    line = (cap.err.strip().splitlines() or [""])[0]
+    assert rc == _coverage_gate.REFUSED == 3
+    assert "2/2 review rounds used" in line
+    assert "the next round reports impossible" in line
+
+
+def test_ac7_impossible_refuses_the_merge_with_its_own_name(
+    enabled, live_head, monkeypatch, tmp_path, capsys  # noqa: F811
+):
+    """`fno do pr merge` on an IMPOSSIBLE row: refused, and the receipt says
+    'coverage impossible', not 'unreviewed' - the two prescribe opposite
+    next actions."""
+    _specimen_gates(monkeypatch)
+    _ac7_seed(tmp_path, rounds=3)
+    fake = FakeRun(toplevel=str(tmp_path))
+    monkeypatch_run = pytest.MonkeyPatch()
+    monkeypatch_run.setattr(_merge, "run", fake)
+    try:
+        assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+        reason = _last_json(capsys, stream="err")["reason"]
+    finally:
+        monkeypatch_run.undo()
+    assert reason.startswith("merge refused, coverage impossible: ")
+    assert "impossible" in reason
+
+
+def test_ac7_status_names_its_own_blocker(monkeypatch, tmp_path):
+    """`fno do pr status` renders the exhausted budget as
+    review_coverage_impossible, distinct from review_coverage_uncovered."""
+    from fno.pr import _status
+
+    blockers = _status._ready_blockers(
+        True,
+        "green",
+        0,
+        {"coverage": "uncovered", "rounds_exhausted": True},
+        review_lane=True,
+        head="",
+        code_review_required=False,
+        repo=str(tmp_path),
+    )
+    assert "review_coverage_impossible" in blockers
+    assert "review_coverage_uncovered" not in blockers
+
+
+def test_ac7_exhausted_rounds_with_no_blocking_findings_stay_covered(
+    monkeypatch, tmp_path
+):
+    """The budget alone never fires IMPOSSIBLE: rounds exhausted with every
+    finding non-blocking by class is a COVERED answer (the loop was noisy,
+    not stuck). Pins the conjunct the MARKER test needs to be load-bearing."""
+    _specimen_gates(monkeypatch)
+    stamps = ["2026-08-25T21:00:00Z", "2026-08-25T21:30:00Z", "2026-08-25T22:00:00Z"]
+    heads = [
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        FIXTURE_HEAD,
+    ]
+    nit_round = {
+        "reviewer": "code-review",
+        "verdict": "fail",
+        "session_id": "s-ac7",
+        "branch": "feature/x-8439",
+        "reviewed_base_sha": "a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3",
+        "reviewed_file_count": 3,
+        "reviewed_line_count": 40,
+        "findings_blocking": 0,
+        "findings": [
+            {
+                "category": "nit",
+                "verdict": None,
+                "blocking": False,
+                "has_required_fields": True,
+                "finding_key": "a.py:1:nit",
+            }
+        ],
+    }
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    with open(tmp_path / ".fno" / "events.jsonl", "w", encoding="utf-8") as fh:
+        for i in range(3):
+            data = dict(nit_round, head_sha=heads[i], reviewed_head_sha=heads[i])
+            fh.write(
+                json.dumps(
+                    {"ts": stamps[i], "type": "review_attestation", "source": "hook", "data": data}
+                )
+                + "\n"
+            )
+        fh.write(
+            json.dumps(
+                {
+                    "ts": "2026-08-25T22:01:00Z",
+                    "type": "review_coverage",
+                    "source": "hook",
+                    "data": {
+                        "pr": 42,
+                        "coverage": "covered",
+                        "review_state": "reviewed",
+                        "reviewed_count": 1,
+                        "head_sha": FIXTURE_HEAD,
+                        "verdicts": [
+                            {
+                                "producer": "local_attestation",
+                                "name": "code-review",
+                                "verdict": "reviewed",
+                                "reviewed_sha": FIXTURE_HEAD,
+                                "freshness": "fresh",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    state, refusal, _covered_head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED
+    assert refusal == ""
