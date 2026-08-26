@@ -1520,8 +1520,8 @@ struct HeldWorker {
     cwd: String,
 }
 
-fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
-    let mut receipts: HashMap<String, HeldWorker> = HashMap::new();
+fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldWorker> {
+    let mut receipts: HashMap<(String, String), HeldWorker> = HashMap::new();
     for line in raw.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -1537,9 +1537,21 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
             }
             Some("agent_removed") | Some("agent_row_reaped") => {
                 let session_id = data.get("harness_session_id").and_then(|v| v.as_str());
+                let harness = data
+                    .get("harness")
+                    .or_else(|| data.get("provider"))
+                    .and_then(|v| v.as_str());
                 let name = data.get("name").and_then(|v| v.as_str());
-                receipts.retain(|id, facts| {
-                    session_id != Some(id.as_str()) && name != Some(facts.name.as_str())
+                receipts.retain(|(receipt_harness, receipt_session), facts| {
+                    if let (Some(harness), Some(session_id)) = (harness, session_id) {
+                        receipt_harness != harness || receipt_session != session_id
+                    } else if session_id.is_some() {
+                        // A session id without a harness cannot identify one
+                        // cross-harness receipt, so it revokes nothing.
+                        true
+                    } else {
+                        name != Some(facts.name.as_str())
+                    }
                 });
                 continue;
             }
@@ -1574,7 +1586,7 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
             continue;
         };
         receipts.insert(
-            session_id.to_string(),
+            (harness.to_string(), session_id.to_string()),
             HeldWorker {
                 name: name.to_string(),
                 harness: harness.to_string(),
@@ -1590,7 +1602,7 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
     receipts
 }
 
-fn load_spawn_receipts() -> Result<HashMap<String, HeldWorker>, String> {
+fn load_spawn_receipts() -> Result<HashMap<(String, String), HeldWorker>, String> {
     let path = agents_view::registry_path().with_file_name("events.jsonl");
     match std::fs::read_to_string(&path) {
         Ok(raw) => Ok(parse_spawn_receipts(&raw)),
@@ -1600,6 +1612,15 @@ fn load_spawn_receipts() -> Result<HashMap<String, HeldWorker>, String> {
             path.display()
         )),
     }
+}
+
+fn receipt_for_member<'a>(
+    receipts: &'a HashMap<(String, String), HeldWorker>,
+    member: &crate::squad_store::StoredMember,
+) -> Option<&'a HeldWorker> {
+    let harness = member.harness.as_deref()?;
+    let session_id = member.harness_session_id.as_deref()?;
+    receipts.get(&(harness.to_string(), session_id.to_string()))
 }
 
 struct Core {
@@ -2022,7 +2043,7 @@ fn restore_worker_refusal_reason(
     member: &crate::squad_store::StoredMember,
     row: Option<&RegistryAgent>,
     receipt_store_error: Option<&str>,
-    receipts: &HashMap<String, HeldWorker>,
+    receipts: &HashMap<(String, String), HeldWorker>,
 ) -> String {
     if let Some(reason) = row
         .and_then(Core::row_no_pane_reason)
@@ -2039,7 +2060,7 @@ fn restore_worker_refusal_reason(
     if let Some(error) = receipt_store_error {
         return error.to_string();
     }
-    if !receipts.contains_key(session_id) {
+    if receipt_for_member(receipts, member).is_none() {
         return format!("spawn receipt is missing for {harness} session {session_id}");
     }
     format!("{harness} session {session_id} is not resumable")
@@ -6379,14 +6400,7 @@ impl Core {
                             .filter(|agent| Self::row_resumable(agent))
                             .and_then(Self::worker_facts)
                             .or_else(|| {
-                                m.harness_session_id
-                                    .as_deref()
-                                    .and_then(|session_id| spawn_receipts.get(session_id))
-                                    .filter(|facts| {
-                                        m.harness
-                                            .as_deref()
-                                            .is_some_and(|harness| harness == facts.harness)
-                                    })
+                                receipt_for_member(&spawn_receipts, m)
                                     .cloned()
                                     .map(|mut facts| {
                                         facts.name = worker_name.to_string();
@@ -9903,16 +9917,12 @@ impl Core {
                     } else {
                         Self::worker_facts(a).or_else(|| {
                             let member = stored_member.as_ref()?;
-                            let harness = member.harness.as_deref()?;
-                            let session_id = member.harness_session_id.as_deref()?;
-                            fresh_receipts
-                                .get(session_id)
-                                .filter(|receipt| receipt.harness == harness)
-                                .cloned()
-                                .map(|mut receipt| {
+                            receipt_for_member(&fresh_receipts, member).cloned().map(
+                                |mut receipt| {
                                     receipt.name = name.clone();
                                     receipt
-                                })
+                                },
+                            )
                         })
                     }
                 };
@@ -17267,7 +17277,9 @@ mod tests {
     fn spawn_receipt_recovers_the_session_after_the_registry_name_is_gone() {
         let raw = r#"{"type":"agent_spawned","data":{"name":"old-name","provider":"codex","harness_session_id":"full-session","cwd":"/repo","model":"gpt-5.6-sol","substrate":"pane"}}"#;
         let receipts = parse_spawn_receipts(raw);
-        let receipt = &receipts["full-session"];
+        let receipt = receipts
+            .get(&(String::from("codex"), String::from("full-session")))
+            .expect("full receipt");
         assert_eq!(receipt.name, "old-name");
         assert_eq!(receipt.harness, "codex");
         assert_eq!(receipt.cwd, "/repo");
@@ -17282,8 +17294,37 @@ mod tests {
         );
         let receipts = parse_spawn_receipts(raw);
         assert_eq!(receipts.len(), 2);
-        assert_eq!(receipts["thread-session"].harness, "codex");
-        assert_eq!(receipts["legacy-session"].harness, "claude");
+        assert_eq!(
+            receipts
+                .get(&(String::from("codex"), String::from("thread-session")))
+                .map(|receipt| receipt.harness.as_str()),
+            Some("codex")
+        );
+        assert_eq!(
+            receipts
+                .get(&(String::from("claude"), String::from("legacy-session")))
+                .map(|receipt| receipt.harness.as_str()),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn spawn_receipts_keep_same_session_ids_distinct_across_harnesses() {
+        let raw = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"codex-worker","provider":"codex","harness_session_id":"same-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_spawned","data":{"name":"claude-worker","provider":"claude","harness_session_id":"same-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_removed","data":{"name":"codex-worker","provider":"codex","harness_session_id":"same-session"}}"#,
+        );
+        let receipts = parse_spawn_receipts(raw);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts
+                .get(&(String::from("claude"), String::from("same-session")))
+                .map(|receipt| receipt.name.as_str()),
+            Some("claude-worker")
+        );
     }
 
     #[test]
@@ -17298,7 +17339,7 @@ mod tests {
             harness_session_id: Some("full-session".into()),
         };
         let receipts = HashMap::from([(
-            "full-session".into(),
+            (String::from("codex"), String::from("full-session")),
             HeldWorker {
                 name: "worker".into(),
                 harness: "codex".into(),
@@ -17317,18 +17358,18 @@ mod tests {
         let raw = concat!(
             r#"{"type":"agent_spawned","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session","cwd":"/repo","substrate":"pane"}}"#,
             "\n",
-            r#"{"type":"agent_removed","data":{"name":"removed","harness_session_id":"removed-session"}}"#,
+            r#"{"type":"agent_removed","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session"}}"#,
             "\n",
             r#"{"type":"agent_spawned","data":{"name":"reaped","provider":"codex","harness_session_id":"reaped-session","cwd":"/repo","substrate":"pane"}}"#,
             "\n",
-            r#"{"type":"agent_row_reaped","data":{"name":"reaped","harness_session_id":"reaped-session"}}"#,
+            r#"{"type":"agent_row_reaped","data":{"name":"reaped","provider":"codex","harness_session_id":"reaped-session"}}"#,
         );
         assert!(parse_spawn_receipts(raw).is_empty());
 
         let dormant = concat!(
             r#"{"type":"agent_spawned","data":{"name":"dormant","provider":"claude","harness_session_id":"dormant-session","cwd":"/repo","substrate":"pane"}}"#,
             "\n",
-            r#"{"type":"agent_row_reaped","data":{"name":"dormant","harness_session_id":"dormant-session","resumable":true}}"#,
+            r#"{"type":"agent_row_reaped","data":{"name":"dormant","provider":"claude","harness_session_id":"dormant-session","resumable":true}}"#,
         );
         assert_eq!(parse_spawn_receipts(dormant).len(), 1);
     }
