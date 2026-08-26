@@ -6596,6 +6596,105 @@ pub fn classify_coverage_tiled(
         }
     }
 
+    // The spent-budget arm of the local axis (the operator's cap ruling): a
+    // chain of rounds that found things READ the diff every round, but a
+    // declined round emits verdict==fail, and the pass scan above admits
+    // passes only - so at the cap, with findings filed or declined and
+    // nothing hard left, the chain still leaves NO pass anywhere and the
+    // terminal act the receipt names (decline, file, merge) is structurally
+    // unreachable: a clean round would be required, the one round the cap
+    // exists to refuse. Past the budget, when the chain tiles, the newest
+    // in-scope FAIL attestation per reviewer therefore counts as Reviewed
+    // at its chain-member head, exactly as a pass link does. Under the
+    // budget nothing changes: the disposition gate (not coverage) is what
+    // findings must satisfy, and it still withholds there - Locked
+    // Decision 1's terminal half is enforced by blockers_withhold, which
+    // past the cap keeps withholding every HARD finding and, before the
+    // cap, every finding at all.
+    if let Some(t) = tiling {
+        if t.rounds_exhausted && t.tiled {
+            // Newest in-scope fail attestation per reviewer whose head is a
+            // chain link. Append order is recency (same assumption the pass
+            // scan makes), so a later row for a reviewer replaces the earlier.
+            let mut fails: Vec<LocalPass> = Vec::new();
+            for line in events_text.lines() {
+                let Ok(val) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+                    continue;
+                }
+                let Some(verdict) = val.pointer("/data/verdict").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if verdict == "pass" {
+                    continue;
+                }
+                let Some(reviewer) = val.pointer("/data/reviewer").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if line_head.is_empty() {
+                    continue;
+                }
+                let line_branch = val
+                    .pointer("/data/branch")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
+                    continue;
+                }
+                if !t.chain_heads.iter().any(|h| h == line_head) {
+                    continue;
+                }
+                let attester = val
+                    .pointer("/data/attester_session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(existing) = fails.iter_mut().find(|f| f.reviewer == reviewer) {
+                    existing.head = line_head.to_string();
+                    existing.attester = attester;
+                    existing.branch = line_branch.to_string();
+                } else {
+                    fails.push(LocalPass {
+                        reviewer: reviewer.to_string(),
+                        attester,
+                        head: line_head.to_string(),
+                        branch: line_branch.to_string(),
+                        reviewed_base: String::new(),
+                    });
+                }
+            }
+            for lp in &fails {
+                let fresh = freshness(&lp.head);
+                verdicts.push(ReviewerVerdict {
+                    producer: CoverageProducer::LocalAttestation,
+                    name: lp.reviewer.clone(),
+                    // A chain-member head is Reviewed whatever the single-sha
+                    // freshness rule says, because the chain as a whole read
+                    // base..head - the same rescue the pass loop applies.
+                    verdict: CoverageVerdict::Reviewed,
+                    human_approval: false,
+                    author_approval: false,
+                    attestation_origin: classify_attestation_origin(
+                        lp.attester.as_deref(),
+                        author_session,
+                    ),
+                    reviewed_sha: lp.head.clone(),
+                    freshness: Some(fresh),
+                    scope: Some(if lp.branch.is_empty() {
+                        AttestationScope::LegacyHeadMatch
+                    } else {
+                        AttestationScope::AttestedBranch
+                    }),
+                });
+            }
+        }
+    }
+
     // Unknown only when the GitHub read failed AND no local review still
     // describes HEAD. A COUNTING local pass is positive evidence that trumps a
     // bot outage, so coverage is Known(local) in that case, not Unknown. A

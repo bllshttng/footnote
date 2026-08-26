@@ -1047,6 +1047,89 @@ fn round_budget_no_reviews_evidence_keeps_the_events_only_answer() {
 // --- the round cap under the operator's ruling: file the rest, keep the hard ---
 
 #[test]
+fn cap_a_declined_tiling_chain_counts_as_coverage_past_the_budget() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 4);
+    // The declined lane: every round ended with findings (verdict fail),
+    // findings get declined or filed, and no clean pass ever lands. The
+    // chain still READ base..head across its rounds, so it tiles.
+    let events = events_file(
+        repo,
+        &[
+            attestation("code-review", &base, &shas[0], "fail"),
+            attestation("code-review", &shas[0], &shas[2], "fail"),
+            attestation("code-review", &shas[2], &head, "fail"),
+        ],
+    );
+    // Three fail rounds against a budget of 2: exhausted, and tiled.
+    let tiling = tiling_for(repo, &events);
+    assert!(tiling.tiled, "chain must tile: {:?}", tiling.gaps);
+    assert_eq!(tiling.rounds_used, 3);
+    assert!(tiling.rounds_exhausted);
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &|_| Freshness::Stale,
+        BRANCH,
+        &head,
+        Some(&tiling),
+        None,
+        false,
+    );
+    // Past the budget the newest fail link counts as Reviewed at its chain
+    // head (freshness rescued by the chain, the same rule a pass link
+    // gets), so the terminal act the receipt names is reachable: the PR is
+    // covered and the disposition gate alone decides.
+    let local: Vec<_> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .collect();
+    assert_eq!(
+        local.len(),
+        1,
+        "one verdict per reviewer: {:?}",
+        rep.verdicts
+    );
+    assert_eq!(local[0].verdict, CoverageVerdict::Reviewed);
+    assert_eq!(local[0].reviewed_sha, head);
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+
+    // The control: the SAME fail chain under the budget changes nothing -
+    // no pass exists, so no local verdict at all, coverage uncovered. The
+    // spent-budget arm must not leak below the cap.
+    let under = compute_range_tiling("git", repo, "origin/main", &events, BRANCH, &head, 10);
+    assert!(!under.rounds_exhausted);
+    let rep_under = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &|_| Freshness::Stale,
+        BRANCH,
+        &head,
+        Some(&under),
+        None,
+        false,
+    );
+    assert!(
+        !rep_under
+            .verdicts
+            .iter()
+            .any(|v| v.producer == CoverageProducer::LocalAttestation),
+        "under the budget a fail chain still leaves no pass: {:?}",
+        rep_under.verdicts
+    );
+}
+
+#[test]
 fn cap_only_a_confirmed_correctness_or_security_finding_is_hard() {
     use fno_agents::loopcheck::{blockers_impossible, blockers_withhold};
     let events = [dispositions_event(
