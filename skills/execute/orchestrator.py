@@ -997,9 +997,11 @@ def _shell_fno(argv: List[str], what: str) -> bool:
 
 #: Boundary outcomes that release the claim as done.
 _TERMINAL_OUTCOMES = ("SUCCESS", "DONE_WITH_CONCERNS")
-#: Boundary outcomes that give the task back to pending ("" is the
-#: outcome-less `blocked` event shape).
-_GIVEBACK_OUTCOMES = ("FAILED", "BLOCKED", "")
+#: Boundary outcomes that give the task back to pending. NOT "": the `blocked`
+#: branch hardcodes "FAILED", so an empty outcome can only arrive from a
+#: `task_done` whose optional --outcome was omitted - giving a task that just
+#: committed back to pending, for a peer to claim and re-run.
+_GIVEBACK_OUTCOMES = ("FAILED", "BLOCKED")
 
 
 def release_task_claim_at_boundary(node: str, task: str, outcome: str) -> bool:
@@ -1041,7 +1043,10 @@ def manifest_graph_node_id(state_path: str = ".fno/target-state.md") -> str:
     """
     try:
         text = Path(state_path).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
+        # UnicodeDecodeError is a ValueError and escapes a bare OSError catch,
+        # so one non-UTF-8 byte in the manifest would raise out of the
+        # --emit-boundary handler that never fails the run.
         return ""
     for line in text.splitlines():
         stripped = line.strip()

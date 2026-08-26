@@ -542,3 +542,114 @@ def test_overlong_task_key_refused_at_validation(
     assert claim_path(task_key("x-t1", "1.1"), root=claims_root).exists(), (
         "positive control: the same verb creates the healthy key's lockfile"
     )
+
+
+# -- review round 3: plan_path forms, done-row give-back, graph-unreadable exit --
+
+
+def _rebind_plan(graph: Path, node_id: str, plan_path: str) -> None:
+    """Rewrite one node's stored plan_path, leaving the rest of the graph."""
+    data = json.loads(graph.read_text(encoding="utf-8"))
+    for e in data["entries"]:
+        if e.get("id") == node_id:
+            e["plan_path"] = plan_path
+    graph.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+
+def test_tilde_plan_path_resolves(
+    tmp_graph: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A `~`-prefixed plan_path is a form the graph really stores.
+
+    Read raw through Path() it is a relative directory named "~", so the verb
+    refused exit 1 and the caller dispatched unclaimed. The assertion is the
+    materialized row list, a marker only a resolved read produces.
+    """
+    from fno.graph import cli as graph_cli
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "plan.md").write_text(
+        (tmp_path / "plan.md").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    _rebind_plan(tmp_graph, "x-t1", "~/plan.md")
+
+    result = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
+    assert result.exit_code == 0, result.output
+    assert [r["id"] for r in json.loads(result.output)["tasks"]] == ["1.1", "1.2"]
+
+
+def test_unreadable_plan_still_refuses(tmp_graph: Path):
+    """Positive control for the test above: resolution did not turn the
+    unreadable-plan refusal into a silent pass."""
+    from fno.graph import cli as graph_cli
+
+    _rebind_plan(tmp_graph, "x-t1", "~/no-such-plan.md")
+    result = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
+    assert result.exit_code == 1
+    assert "is not readable" in result.output
+
+
+def test_give_back_refuses_a_done_row(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`done` leaves `owner` set, so the holder's own later give-back passed
+    the owner check and reopened shipped work. It is refused by status."""
+    assert _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    ).exit_code == 0
+    assert _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done", "--owner", SID_A
+    ).exit_code == 0
+
+    refused = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "pending",
+        "--owner", SID_A,
+    )
+    assert refused.exit_code == 3
+    assert "is done" in refused.output
+    assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "done"
+
+    ok = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.2", "--status", "in_progress",
+        "--owner", SID_A,
+    )
+    assert ok.exit_code == 0, ok.output
+    given = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.2", "--status", "pending",
+        "--owner", SID_A,
+    )
+    assert given.exit_code == 0, (
+        "positive control: the same verb still gives a live row back"
+    )
+    assert _node_row(tmp_graph, "x-t1", "1.2")["status"] == "pending"
+
+
+def test_unreadable_graph_does_not_collide_with_held(tmp_graph: Path):
+    """A corrupt graph must not exit 3, which waves.md 3e reads as "a peer
+    holds it, skip this round" - that skips every task and names a holder
+    that does not exist."""
+    from fno.graph import cli as graph_cli
+
+    tmp_graph.write_text("{ not json", encoding="utf-8")
+    result = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
+    assert result.exit_code == graph_cli.TASK_GRAPH_UNREADABLE_EXIT
+    assert result.exit_code != 3, "3 means a peer holds the task"
+
+
+def test_duplicate_plan_ids_make_one_row(tmp_path: Path):
+    """Every row writer breaks on the first id match, so a second row for the
+    same id is orphaned at pending forever. Reachable: PyYAML reads
+    `id: 2.10` as the float 2.1, colliding with 2.1."""
+    from fno.graph.tasks import ensure_task_rows
+
+    plan = _plan_with(
+        tmp_path,
+        extra='  - id: "1.1"\n    title: dupe\n    surface: []\n'
+        '    acceptance: ["ac"]',
+    )
+    entry: dict = {"id": "x-t1"}
+    rows = ensure_task_rows(entry, plan)
+    assert [r["id"] for r in rows] == ["1.1", "1.2"]

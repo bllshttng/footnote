@@ -6511,16 +6511,24 @@ def _task_callback() -> None:
     """Keep ``list``/``update`` real subcommands (single-command Typer collapse)."""
 
 
+#: An unreadable graph on a task verb. Distinct from 3, which the wave loop
+#: reads as "a peer holds it, skip this round" (see waves.md 3e).
+TASK_GRAPH_UNREADABLE_EXIT = 5
+
+
 def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
     """Resolve NODE to ``(node_id, plan_path)``; exit 1/2 on the named refusals.
 
     Reads through the CALLER's ``graph_path`` (a redirect seam): the tracker
     guard lives on the tracker-owned task verbs that call this. An unreadable
-    graph is the distinct GRAPH_UNREADABLE_EXIT refusal, never a misread
-    "node does not resolve". A bound plan that is not a readable file is a
-    named refusal, never a traceback: rows derive from the plan, so an
-    unreadable plan is a stop, not an empty list.
+    graph is its own TASK_GRAPH_UNREADABLE_EXIT refusal, never a misread
+    "node does not resolve" and never the 3 that means "a peer holds it, skip
+    this round" - a corrupt graph must stop a wave, not make it skip every
+    task and log each one as peer-held. A bound plan that is not a readable
+    file is a named refusal, never a traceback: rows derive from the plan, so
+    an unreadable plan is a stop, not an empty list.
     """
+    from fno.graph.collision import resolve_plan_path
     from fno.graph.fuzzy import resolve_node
     from fno.graph.store import GraphUnreadableError, read_graph_strict
 
@@ -6532,7 +6540,7 @@ def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
             f"resolved: {e}",
             err=True,
         )
-        raise typer.Exit(code=GRAPH_UNREADABLE_EXIT)
+        raise typer.Exit(code=TASK_GRAPH_UNREADABLE_EXIT)
     match = resolve_node(node_token, entries)
     if match.kind != "exact":
         typer.echo(f"Error: node '{node_token}' does not resolve to a node", err=True)
@@ -6542,10 +6550,14 @@ def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
     if not plan_path:
         typer.echo(f"no plan bound to {entry.get('id')}", err=True)
         raise typer.Exit(code=2)
-    if not Path(plan_path).is_file():
+    # The graph stores plan_path absolute, `~`-prefixed, or repo-relative, so a
+    # raw Path() read refuses two of the three forms and the caller dispatches
+    # unclaimed - the double-dispatch these verbs exist to close.
+    resolved = resolve_plan_path(plan_path)
+    if not resolved.is_file():
         typer.echo(f"plan file for {entry.get('id')} is not readable: {plan_path}", err=True)
         raise typer.Exit(code=1)
-    return entry["id"], plan_path
+    return entry["id"], str(resolved)
 
 
 def _task_ids_or_exit(plan_path: str) -> list[str]:
@@ -6807,9 +6819,13 @@ def cmd_task_update(
 
         row = _set_row(_done_row)
         if done_refused:
+            # The owner check has no liveness test, so a reaped or handed-off
+            # holder would wedge the row at in_progress forever. Name the
+            # escape here, where the caller reads the refusal.
             typer.echo(
                 f"task {task_id} held by {done_refused[0]}; only the holder "
-                "can mark it done",
+                "can mark it done. If that holder is gone, re-run with "
+                f"--owner {done_refused[0]}",
                 err=True,
             )
             raise typer.Exit(code=3)
@@ -6831,8 +6847,15 @@ def cmd_task_update(
         )
         raise typer.Exit(code=4)
     refused_owner: list[str] = []
+    giveback_done_refused: list[str] = []
 
     def _give_back(row) -> None:
+        # `done` leaves `owner` set, so the holder's own later `blocked` emit
+        # passes the owner check and reopens shipped work; an unowned done row
+        # would accept a give-back from anyone. Refuse both, as _claim_row does.
+        if row.get("status") == "done":
+            giveback_done_refused.append(str(row.get("id")))
+            return
         owner_now = row.get("owner")
         if owner_now and owner_now != holder:
             refused_owner.append(str(owner_now))
@@ -6841,10 +6864,17 @@ def cmd_task_update(
         row.pop("claimed_at", None)
 
     row = _set_row(_give_back)
+    if giveback_done_refused:
+        typer.echo(
+            f"task {task_id} is done; giving shipped work back is refused",
+            err=True,
+        )
+        raise typer.Exit(code=3)
     if refused_owner:
         typer.echo(
             f"task {task_id} held by {refused_owner[0]}; "
-            "only the holder can give it back",
+            "only the holder can give it back. If that holder is gone, "
+            f"re-run with --owner {refused_owner[0]}",
             err=True,
         )
         raise typer.Exit(code=3)

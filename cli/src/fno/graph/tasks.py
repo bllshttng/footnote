@@ -56,6 +56,11 @@ def ensure_task_rows(entry: dict, plan_path: Path) -> list[dict]:
     for task_id in derive_task_ids(Path(plan_path)):
         if task_id not in known:
             rows.append({"id": task_id, "status": "pending", "owner": None})
+            # Without this the SAME id twice in one plan yields two rows, and
+            # every writer `break`s on the first - orphaning the second at
+            # pending forever. Reachable: PyYAML reads `id: 2.10` as 2.1, so
+            # 2.1 and 2.10 collide.
+            known.add(task_id)
     entry["tasks"] = rows
     return rows
 
