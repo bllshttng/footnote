@@ -174,10 +174,13 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     assert "advisory self-review by default" not in skill
     assert "optional escalation" not in skill
 
-    # AC12: configured sigma runs once post-ship and the skip reads the same
-    # direction as preship_review_plan (sigma configured -> pre-ship skipped).
-    assert "sigma runs once, post-ship" in ship.lower()
-    assert "skip" in phase.lower() and "sigma" in phase.lower()
+    # AC12, retired: sigma no longer defers anything (a config naming it is
+    # refused at init). The lane is the producer named on every reachable
+    # surface, and cleanup-class material never buys a review round.
+    assert "sigma runs once, post-ship" not in ship.lower()
+    assert "RETIRED" in ship
+    assert "the fno lane" in ship.lower() or "fno review lane" in ship.lower()
+    assert "/fno:review cleanup" in ship
 
     # The phase-routing layer must not short-circuit the decision by routing the
     # review phase to `fno:review` (sigma) unconditionally; it defers to the plan.

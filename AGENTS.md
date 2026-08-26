@@ -70,7 +70,7 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 footnote/
 ├── .claude-plugin/   # Plugin manifest
 ├── skills/           # Skills (advertised set in using-fno)
-├── agents/           # Subagents (target, code-reviewer, sigma-review)
+├── agents/           # Subagents (target, code-reviewer, hunters)
 ├── commands/         # Slash commands
 ├── hooks/            # Stop hooks, session-start, context monitor
 ├── scripts/          # Validation, metrics, orchestration, diagnostics

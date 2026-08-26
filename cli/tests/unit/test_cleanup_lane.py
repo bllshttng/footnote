@@ -111,7 +111,7 @@ def test_cleanup_runs_on_every_harness_no_unavailable_outcome():
         text = path.read_text(encoding="utf-8")
         assert "every harness" in text
     cleanup_text = CLEANUP.read_text(encoding="utf-8")
-    assert '"unavailable on this harness" is not an outcome' in cleanup_text
+    assert '"Unavailable on this harness" is not an outcome' in cleanup_text
 
 
 def test_cleanup_population_is_the_nonblocking_categories():
