@@ -673,8 +673,12 @@ def resolve_owned_identity(
             return OwnedHarnessIdentity(None, None, present, "ambiguous")
         verdict = prove(identity.harness, identity.session_id) if prove else None
         owner = collide(identity.harness, identity.session_id) if collide else None
-        current_agent = (environ.get("FNO_AGENT_SELF") or "").strip()
-        if owner and owner != current_agent:
+        vendor_proves_session = any(
+            harness == identity.harness
+            and session_identity_key(value) == session_identity_key(identity.session_id)
+            for _marker, harness, value in markers
+        )
+        if owner and not vendor_proves_session:
             canonical_rejected = (
                 {
                     "harness": identity.harness,
