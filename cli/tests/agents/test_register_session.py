@@ -522,6 +522,7 @@ def test_restamp_repoints_row_at_the_reminted_id(tmp_path: Path, monkeypatch) ->
     # claude addresses by the 8-hex jobId in short_id, so a restamp that fixed
     # only harness_session_id would leave attach/resume on the dead id.
     assert rows[0].short_id == "08054b1d"
+    assert rows[0].predecessor_session_ids == [BIRTH]
     # Untouched: the restamp corrects identity, not lifecycle.
     assert rows[0].status == "live"
     assert rows[0].name == "target-x-f0c2"

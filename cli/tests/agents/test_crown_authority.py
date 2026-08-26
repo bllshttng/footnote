@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from fno.agents.crown import (
     AGENT_UNREGISTERED,
     REGISTRY_UNREADABLE,
@@ -106,6 +108,22 @@ def test_unregistered_agent_refuses_grant(monkeypatch):
     assert problem is not None
     # The refusal names the heal, not just "registry".
     assert "/fno-me" in problem or "wait for the row" in problem
+
+
+@pytest.mark.parametrize("disposition", ["invalid", "contradiction"])
+def test_malformed_self_identity_refuses_grant(monkeypatch, disposition):
+    """Malformed canonical identity is not an attended-human identity."""
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id=None, harness=None, disposition=disposition
+        ),
+    )
+
+    caller = calling_agent_row()
+
+    assert caller is REGISTRY_UNREADABLE
+    assert grant_error("some-scope", caller) is not None
 
 
 def test_is_caller_row_is_harness_scoped_and_delegates() -> None:

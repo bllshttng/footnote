@@ -1685,6 +1685,8 @@ def restamp_harness_session_id(
             if entry.harness_session_id == session_id:
                 return entries  # already current: no write, no event
             stale = entry.harness_session_id or ""
+            if stale and stale not in entry.predecessor_session_ids:
+                entry.predecessor_session_ids.append(stale)
             entry.harness_session_id = session_id
             # A row parked at `spawning` was waiting for exactly this: an id it
             # could not learn at spawn time. The worker has now named itself, so
