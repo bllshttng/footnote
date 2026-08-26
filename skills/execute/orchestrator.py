@@ -984,6 +984,39 @@ def emit_status_event(
     return True
 
 
+def release_task_claim_at_boundary(node: str, task: str, outcome: str) -> bool:
+    """Settle the task claim at a task boundary (x-09d7 group 3).
+
+    ``done`` after a terminal outcome, ``pending`` (the holder-only give-back)
+    after ``blocked``/``FAILED``, so the next ready worker can pick the task
+    up. Non-fatal by the same contract as the emit itself: one stderr note and
+    False on any failure, never an exception. A give-back by a caller that is
+    not the holder is refused (exit 3) by the verb; that refusal lands here as
+    the same non-fatal note.
+    """
+    if outcome in ("SUCCESS", "DONE_WITH_CONCERNS"):
+        status_verb = "done"
+    else:  # FAILED, BLOCKED, empty (the `blocked` event carries no outcome)
+        status_verb = "pending"
+    argv = ["fno", "backlog", "task", "update", node, task, "--status", status_verb]
+    try:
+        result = subprocess.run(argv, check=False, capture_output=True, timeout=15)
+    except FileNotFoundError:
+        print("orchestrator: note: fno unavailable, skipped task claim settle", file=sys.stderr)
+        return False
+    except Exception as exc:  # noqa: BLE001 - settling must never wedge the run
+        print(f"orchestrator: note: task claim settle failed (non-fatal): {exc}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(
+            "orchestrator: note: task claim settle rejected (non-fatal): "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def get_blocked_tasks_from_state(state_path: str) -> List[str]:
     """Parse blocked tasks from STATE.md"""
     path = Path(state_path)
@@ -1303,6 +1336,15 @@ if __name__ == "__main__":
             outcome=b_opts["--outcome"],
             data=b_data,
         )
+        # The boundary every outcome already passes through is also the one
+        # place the task claim taken at dispatch gets settled (x-09d7 g3):
+        # done releases it, blocked/FAILED gives it back to pending. Only a
+        # node-bound boundary (--node AND --task non-empty) carries a claim.
+        if b_opts["--node"] and b_opts["--task"]:
+            release_task_claim_at_boundary(
+                b_opts["--node"], b_opts["--task"], b_opts["--outcome"]
+                if b_type == "task_done" else "FAILED",
+            )
         sys.exit(0)
 
     # Handle --agent flag first (standalone command, no index needed)

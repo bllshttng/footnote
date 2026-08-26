@@ -76,3 +76,54 @@ def test_emit_status_event_nonfatal_on_reject(monkeypatch) -> None:
     orch = _load_orch()
     monkeypatch.setattr(orch.subprocess, "run", lambda *a, **k: _Result(1))
     assert orch.emit_status_event("task_done", run="R1", outcome="PARTIAL") is False
+
+
+# -- task claim settlement at the boundary (x-09d7 group 3) --
+
+
+def test_boundary_success_outcome_releases_done(monkeypatch) -> None:
+    """task_done + SUCCESS/DONE_WITH_CONCERNS settles the claim to done."""
+    orch = _load_orch()
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        return _Result(0)
+
+    monkeypatch.setattr(orch.subprocess, "run", fake_run)
+    assert orch.release_task_claim_at_boundary("x-t1", "1.1", "SUCCESS") is True
+    assert orch.release_task_claim_at_boundary("x-t1", "1.1", "DONE_WITH_CONCERNS") is True
+    for argv in calls:
+        assert argv[:6] == ["fno", "backlog", "task", "update", "x-t1", "1.1"]
+        assert argv[-2:] == ["--status", "done"]
+
+
+def test_boundary_failed_or_blocked_gives_back_pending(monkeypatch) -> None:
+    """FAILED outcomes (and the outcome-less blocked event shape) give the
+    task back to pending so the next ready worker can claim it."""
+    orch = _load_orch()
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        return _Result(0)
+
+    monkeypatch.setattr(orch.subprocess, "run", fake_run)
+    assert orch.release_task_claim_at_boundary("x-t1", "2.2", "FAILED") is True
+    assert orch.release_task_claim_at_boundary("x-t1", "2.2", "") is True
+    for argv in calls:
+        assert argv[-2:] == ["--status", "pending"]
+
+
+def test_boundary_settlement_is_nonfatal(monkeypatch) -> None:
+    """A refused settle (e.g. give-back by a non-holder, exit 3) logs and
+    returns False; it must never raise into the emit path."""
+    orch = _load_orch()
+    monkeypatch.setattr(orch.subprocess, "run", lambda *a, **k: _Result(3))
+    assert orch.release_task_claim_at_boundary("x-t1", "1.1", "FAILED") is False
+
+    def boom(*a, **k):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(orch.subprocess, "run", boom)
+    assert orch.release_task_claim_at_boundary("x-t1", "1.1", "SUCCESS") is False

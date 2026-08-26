@@ -332,6 +332,40 @@ When constructing a Task tool prompt for archer, the orchestrator MUST:
 
 Load [synthesis-checklist.md](synthesis-checklist.md) for the full anti-delegation rules, pre-dispatch checklist, and constraint injection protocol.
 
+### 3e. Claim the task before dispatch (node-bound runs)
+
+Before spawning the executor for a task, take the task claim THROUGH the
+status transition, never a separate claim call a worker can forget. When the
+run has a bound node (`.fno/target-state.md` `graph_node_id`, read with
+`target_state_field` from `scripts/lib/target-guard.sh`):
+
+```bash
+NODE_ID=$(target_state_field graph_node_id)
+if [[ -n "$NODE_ID" ]]; then
+  fno backlog task update "$NODE_ID" "$TASK_ID" --status in_progress
+  TASK_CLAIM_RC=$?
+fi
+```
+
+- **Exit 0**: the claim is yours (idempotent re-acquire if you already hold
+  it). Dispatch as planned.
+- **Exit 3**: a peer session holds the task. Log
+  `task <id> held by <holder>, skipping this round`, write
+  `- [~] <id>: held by <holder>` to STATE.md, and move to the next task in
+  the wave, the same shape as lane-fill leaving a peer-lane node ready.
+  `get_completed_tasks_from_state` matches only `[x]`, so a `[~]` task is
+  re-offered on a later pass once the peer releases it.
+- **Exit 4**: no provable session id for the holder. A stop, not a skip:
+  emit `<help reason="task claim needs a session id" evidence="task <id> of node <node>">`.
+  Dispatching unclaimed is exactly the double-worker bug this step exists to close.
+- **No bound node** (flat runs, plan-only sessions): skip the call and
+  dispatch as today. There is no task row to guard.
+
+The release rides the boundary emit you already run after each task (3b):
+`task_done` with outcome `SUCCESS` or `DONE_WITH_CONCERNS` releases through
+`--status done`; `blocked` or outcome `FAILED` gives the task back with
+`--status pending` so the next ready worker can pick it up.
+
 **Sequential Wave:**
 ```
 For each task in wave.tasks:
@@ -392,6 +426,14 @@ python3 "${SKILL_DIR:-skills/execute}/orchestrator.py" --emit-boundary blocked \
 
 `--run`/`--node` fall back to the manifest. Never gate on the emit; a failure
 prints one stderr note and the wave continues.
+
+The same emit releases the task claim taken in 3e: when `--node` and `--task`
+are both present, it runs `fno backlog task update <node> <task> --status done`
+after a `task_done` with outcome `SUCCESS` or `DONE_WITH_CONCERNS`, and
+`--status pending` (the holder-only give-back) after `blocked` or a `FAILED`
+outcome, so the next ready worker can pick the task up. Non-fatal like the
+emit itself: the release prints one stderr note on failure and never fails the
+task.
 
 ### 3c. Wave-End Scratchpad Note
 
