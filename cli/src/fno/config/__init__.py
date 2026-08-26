@@ -704,7 +704,12 @@ class ReviewerDescriptor:
         "local-attestation", "github-app", "external-cli", "human", "harness-skill"
     ]
     # The capability the session must have for this reviewer to run at all.
-    requires: Literal["none", "subagent-dispatch", "operator", "skill"]
+    # `retired` is the one-way state: the reviewer no longer exists, every
+    # resolution is a refusal naming its replacement, and no session anywhere
+    # can satisfy it.
+    requires: Literal[
+        "none", "subagent-dispatch", "operator", "skill", "retired"
+    ]
     # The exact non-interactive invocation that satisfies the gate. A reviewer
     # whose only invocation prompts is not autonomy-capable and says so via
     # `requires: operator`.
@@ -740,60 +745,33 @@ class ReviewerDescriptor:
 # AST-parses this literal, so a config-dependent table would turn a build-time
 # CI check into one whose verdict varies per machine.
 _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
+    # RETIRED. The six-agent panel is gone; the fno review lane (bare
+    # /fno:review) is the default reviewer on every harness. A config still
+    # naming sigma fails loud at init with this refusal, and the invocation
+    # field names the replacement so the blocked reason tells a wedged session
+    # what to run instead. The invocation is NOT a hint that sigma runs.
     "sigma": ReviewerDescriptor(
         kind="local-attestation",
-        requires="subagent-dispatch",
-        invocation="/fno:review sigma",
+        requires="retired",
+        invocation="/fno:review",
         asserts="review-evidence",
     ),
-    # `/code-review` is a self-serve local-attestation reviewer: a session that
-    # wrote the diff invokes its own harness's review verb (Skill-tool on
-    # claude, /review on codex) and then the emit helper. `requires="none"`
-    # rather than "operator" is load-bearing - the operator variant made
-    # `blocks_autonomy` true and refused every unattended run at init, which is
-    # the opposite of a gate whose point is that the session serves itself.
+    # `/code-review` is a self-serve local-attestation reviewer: the session
+    # that wrote the diff runs the fno review lane (the skill behind this
+    # invocation) and the lane's emit step records the classified attestation.
+    # `requires="none"` rather than "operator" is load-bearing - the operator
+    # variant made `blocks_autonomy` true and refused every unattended run at
+    # init, which is the opposite of a gate whose point is that the session
+    # serves itself. No per-harness map: the owned lane is the invocation on
+    # every harness, which is the portability the recharter bought. The native
+    # verbs (/code-review on claude, /review on codex) remain the operator's
+    # explicit choice, documented in docs/architecture/review-lanes.md; the
+    # machinery never recommends them, because a recommendation that depends
+    # on a harness transport is the fragile part this table no longer encodes.
     "code-review": ReviewerDescriptor(
         kind="local-attestation",
         requires="none",
-        # The scalar is the harness-portable fallback: an unknown harness gets
-        # this, never claude's verb silently (opencode/agy workers were handed
-        # `/code-review`, a verb their harness cannot run).
         invocation="/fno:review",
-        # The claude value carries the full arg grammar with a `<level>`
-        # placeholder; `self_review_invocation` substitutes a validated level
-        # (never `ultra` - it is billed separately and absent from
-        # ALLOWED_REVIEW_LEVELS). No `--fix` here: this table is what the
-        # machinery hands a worker held at a head-pinned reviewers gate, and
-        # `--fix` writes, which moves HEAD and voids the attestation the round
-        # just earned. A reviewer that writes invalidates its own approval.
-        # `--fix` stays legal for a caller who asks for it directly. Codex
-        # stays bare - prose after the verb flips it to a no-merge-base review
-        # target. opencode stays bare for the same reason: its flag grammar is
-        # unverified against its docs, and an appended guess is the codex trap
-        # in a new coat. agy has no native verb, so it takes the fno do review.
-        #
-        # `--comment` is kept though a measured run ignored it, and the
-        # measurement names where the loss lives so nobody re-derives it
-        # (2026-08-20, PR 994, re-verified 2026-08-25 from the fork's
-        # transcript): the flag survives every transport - the rendered string
-        # carries it, the Skill tool_use input carries
-        # args="high --comment --fix" verbatim, and the forked skill's own
-        # opening prompt contains the expanded sections "The `--comment` flag
-        # was passed" and "The `--fix` flag was passed". What failed is inside
-        # the harness skill's execution: the fork closed with "No `--comment`
-        # or `--fix` flag was indicated" - contradicting its own prompt - and
-        # behaved per the wrong belief (no comments posted). No fno-side layer
-        # drops the flag, so no fno code can fix this; the invocation keeps
-        # asking for it because the flag works whenever the harness honors its
-        # own expansion, and the operator-typed path is unaffected. The
-        # one-line symptom to watch for in a worker's report is the fork
-        # quoting the flag as not indicated.
-        invocations={
-            "claude": "/code-review <level> --comment",
-            "codex": "/review",
-            "opencode": "/review-changes",
-            "agy": "/fno:review",
-        },
         asserts="review-evidence",
     ),
     "declare": ReviewerDescriptor(

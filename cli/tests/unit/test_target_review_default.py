@@ -36,19 +36,20 @@ def test_no_reviewers_runs_native_review_and_dispatches_no_sigma():
     assert "request-self-review" in plan.reason
 
 
-def test_sigma_configured_skips_preship_and_runs_once_post_ship():
-    plan = preship_review_plan(["sigma"])
-    assert plan.kind == "skip"
-    assert "once" in plan.reason
-    assert "post-ship" in plan.reason
-
-
-def test_sigma_presence_not_other_reviewers_decides_the_skip():
-    # `/code-review` is a different local-attestation reviewer; sigma's presence
-    # is what defers the pre-ship step, and a leading slash must not hide it.
+def test_a_retired_reviewer_name_never_changes_the_plan():
+    # A config still naming sigma is refused at init by the retired descriptor
+    # and never reaches this decision; the plan itself no longer branches on
+    # reviewer names, because the fno lane is the review producer on every
+    # harness and there is no post-ship panel run to defer to.
+    assert preship_review_plan(["sigma"]).kind == "native"
     assert preship_review_plan(["/code-review"]).kind == "native"
-    assert preship_review_plan(["/code-review", "sigma"]).kind == "skip"
-    assert preship_review_plan(["sigma", "declare"]).kind == "skip"
+    assert preship_review_plan(["/code-review", "declare"]).kind == "native"
+
+
+def test_the_plan_names_the_lane_as_the_producer():
+    plan = preship_review_plan([])
+    assert "/fno:review" in plan.reason
+    assert "every harness" in plan.reason
 
 
 def test_request_self_review_pins_pr_head_and_uses_the_raw_self_route(
@@ -88,8 +89,11 @@ def test_request_self_review_pins_pr_head_and_uses_the_raw_self_route(
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output)
     assert receipt["outcome"] == "started"
-    assert calls[0]["payload"] == (
-        "/review HEAD abc1234 of PR 123 against origin/main"
+    # One recommendation for every harness: the fno lane, level sized from the
+    # diff, with the explicit PR head pinning. The payload must name the lane.
+    assert calls[0]["payload"].startswith("/fno:review ")
+    assert calls[0]["payload"].endswith(
+        "HEAD abc1234 of PR 123 against origin/main"
     )
     assert calls[0]["harness"] == "codex"
 

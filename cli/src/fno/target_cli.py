@@ -136,20 +136,6 @@ def _refuse_unsatisfiable_reviewers() -> None:
     ]
     for reviewer_verdict in [v for v in verdicts if v.status == "unverifiable"]:
         typer.echo(f"note target init: {reviewer_verdict.line()}", err=True)
-    # A budget downgrade is not a refusal, so it never reaches the block above -
-    # and a receipt that stayed silent about it shows the route the config named
-    # while the session runs a different one (x-c703 LD2). It is a WARN and not
-    # a note: the stop gate matches an attestation against the configured NAME,
-    # so a session whose route was resolved down clears CI and then holds, and
-    # the operator has to learn that at init rather than at the gate.
-    for reviewer_verdict in [v for v in verdicts if v.resolves_to is not None]:
-        typer.echo(f"WARN target init: {reviewer_verdict.line()}", err=True)
-        typer.echo(
-            f"     the ship gate still asks for `{reviewer_verdict.name}` by name. "
-            f"Set config.review.reviewers to [\"{reviewer_verdict.resolves_to}\"] "
-            f"on this project, or run it on an account with a wider budget.",
-            err=True,
-        )
     for peer_verdict in [v for v in peer_verdicts if v.status == "unverifiable"]:
         typer.echo(f"note target init: {peer_verdict.line()}", err=True)
     if messages:
@@ -1051,11 +1037,8 @@ def _self_review_refusal(
 def request_self_review_cmd(
     pr_number: int = typer.Option(..., "--pr-number", "--pr", help="PR number to review."),
 ) -> None:
-    """Request one explicit final-head native review through the raw self lane."""
-    from fno.review_capability import (
-        harness_can_self_review,
-        render_self_review_invocation,
-    )
+    """Request one explicit final-head review through the raw self lane."""
+    from fno.review_capability import render_self_review_invocation
 
     cwd = Path.cwd()
     head_sha = _git_out(cwd, "rev-parse", "HEAD") or ""
@@ -1078,8 +1061,6 @@ def request_self_review_cmd(
         if not base_branch:
             raise RuntimeError("PR baseRefName is unresolved; refusing review")
         harness, session_id = _resolve_self_review_identity()
-        if not harness_can_self_review(harness):
-            raise RuntimeError(f"harness {harness!r} has no native review verb")
         payload = render_self_review_invocation(
             harness=harness,
             project_root=cwd,

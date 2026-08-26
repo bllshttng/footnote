@@ -389,9 +389,10 @@ def whoami_command(
             payload["inherited_identity_env"] = foreign_identity
         payload["model"] = _session_model()
         # Beside the model, because the two answer the same shape of question
-        # about this session. sigma.md's step 0 tells an agent to read the
-        # route before it dispatches, and an agent reading the JSON surface
-        # read nothing and dispatched the panel.
+        # about this session. The retired panel's step 0 used to tell an agent
+        # to read the route before it dispatches; an agent reading the JSON
+        # surface read nothing and dispatched the panel, which is why the
+        # budget travels in this payload itself.
         provider = (os.environ.get("FNO_ROUTE_PROVIDER") or "").strip()
         if provider:
             payload["route_provider"] = provider

@@ -181,13 +181,24 @@ def test_an_unregistered_name_stays_unknown(isolated: Path):
 
 
 def test_builtins_still_resolve_through_the_union(isolated: Path):
-    v = resolve_reviewers(["sigma"], _claude(), REGISTRY)[0]
+    v = resolve_reviewers(["code-review"], _claude(), REGISTRY)[0]
     assert v.status == "satisfiable"
+    assert "/fno:review" in v.reason
+
+
+def test_retired_sigma_refuses_naming_the_default_lane(isolated: Path):
+    """The retired token is a refusal with a replacement in it, never an alias:
+    an exit code alone does not tell a wedged config what to run instead."""
+    v = resolve_reviewers(["sigma"], _claude(), REGISTRY)[0]
+    assert v.status == "unavailable"
+    assert v.blocks_autonomy
+    assert "retired" in v.reason
+    assert "/fno:review" in v.reason
 
 
 def test_a_registry_entry_cannot_shadow_a_builtin_at_resolution(isolated: Path):
-    """Built-ins win, so a project cannot downgrade `sigma` to a witnessed gate."""
-    v = resolve_reviewers(["sigma"], _claude(), {"sigma": SKILL})[0]
+    """Built-ins win, so a project cannot downgrade `code-review` to a witnessed gate."""
+    v = resolve_reviewers(["code-review"], _claude(), {"code-review": SKILL})[0]
     assert v.descriptor is not None
     assert v.descriptor.asserts == "review-evidence"
 
@@ -235,32 +246,19 @@ def test_a_login_with_no_account_stays_unverifiable_not_absent(
     assert not any("users/" in c for c in calls)
 
 
-def test_self_review_invocation_names_the_harness_verb():
+def test_self_review_invocation_is_the_lane_on_every_harness():
     import fno.review_capability as rc
 
-    assert rc.harness_can_self_review("claude") is True
-    assert rc.harness_can_self_review("codex") is True
-    # opencode's verb is recorded, but no lane this code drives can fire it
-    # (daemon lane submits text; mux declares submit unsupported), so the
-    # floor must not demand its attestation.
-    assert rc.harness_can_self_review("opencode") is False
-    assert rc.harness_can_self_review("gemini") is False
-    assert rc.harness_can_self_review("agy") is False
-    assert rc.harness_can_self_review(None) is False
-    # AC5-UI: each harness is told its own verb. Codex and opencode are bare
-    # (prose after the codex verb flips it to a no-merge-base target; opencode's
-    # grammar is unverified); claude carries its arg grammar.
-    assert rc.self_review_invocation("codex") == "/review"
-    assert rc.self_review_invocation("opencode") == "/review-changes"
-    assert rc.self_review_invocation("claude") == "/code-review medium --comment"
-    # An unknown harness gets the portable fno do review, NEVER claude's verb
-    # silently - a wrong answer where no answer was available.
-    assert rc.self_review_invocation("agy") == "/fno:review"
-    assert rc.self_review_invocation(None) == "/fno:review"
-    assert rc.self_review_invocation("unknown") == "/fno:review"
-    # Codex stays bare even though claude carries args - no prose suffix leaks.
-    assert " " not in rc.self_review_invocation("codex")
-    assert " " not in rc.self_review_invocation("opencode")
+    # The owned lane runs wherever the plugin runs, so no harness is floored
+    # off the pre-ship review anymore.
+    for harness in ("claude", "codex", "opencode", "agy", "gemini", None, "unknown"):
+        assert rc.harness_can_self_review(harness) is True, harness
+    # One recommendation for every harness: the fno lane with a level.
+    for harness in ("claude", "codex", "opencode", "agy", "gemini", None, "unknown"):
+        assert rc.self_review_invocation(harness) == "/fno:review medium", harness
+    # No native verb leaks into the recommendation from any harness.
+    assert "/code-review" not in rc.self_review_invocation("claude")
+    assert rc.self_review_invocation("codex") == "/fno:review medium"
 
 
 def test_render_self_review_invocation_sizes_from_the_diff_never_the_default(monkeypatch):
@@ -273,11 +271,11 @@ def test_render_self_review_invocation_sizes_from_the_diff_never_the_default(mon
     sized = rc.level_for_diff(30, 3000)
     monkeypatch.setattr(rc, "diff_review_level", lambda root: sized)
     rendered = rc.render_self_review_invocation("claude", project_root=None)
-    assert rendered == f"/code-review {sized} --comment"
+    assert rendered == f"/fno:review {sized}"
     assert "<level>" not in rendered
 
     monkeypatch.setattr(rc, "diff_review_level", lambda root: None)
-    assert rc.render_self_review_invocation("claude") == "/code-review <level> --comment"
+    assert rc.render_self_review_invocation("claude") == "/fno:review <level>"
 
     # Harness-less invocation resolves the ambient session; sizing still rides
     # the same path. A dead render never raises - it degrades to the placeholder.
@@ -295,7 +293,7 @@ def test_render_self_review_invocation_names_the_final_pr_head_and_base():
         head_sha="abc1234",
         base_branch="main",
     )
-    assert codex == "/review HEAD abc1234 of PR 123 against origin/main"
+    assert codex == "/fno:review <level> HEAD abc1234 of PR 123 against origin/main"
 
     claude = rc.render_self_review_invocation(
         "claude",
@@ -305,7 +303,7 @@ def test_render_self_review_invocation_names_the_final_pr_head_and_base():
         base_branch="main",
     )
     assert claude == (
-        "/code-review <level> --comment HEAD abc1234 of PR 123 against origin/main"
+        "/fno:review <level> HEAD abc1234 of PR 123 against origin/main"
     )
 
 
@@ -344,54 +342,50 @@ def test_ultra_is_structurally_unreachable():
 def test_self_review_invocation_takes_the_level():
     import fno.review_capability as rc
 
-    assert (
-        rc.self_review_invocation("claude", level="high")
-        == "/code-review high --comment"
-    )
+    assert rc.self_review_invocation("claude", level="high") == "/fno:review high"
     # No diff in hand yet: the placeholder survives for a pre-diff surface.
-    assert (
-        rc.self_review_invocation("claude", level=None)
-        == "/code-review <level> --comment"
-    )
-    # Codex never grows args, whatever level is offered.
-    assert rc.self_review_invocation("codex", level="high") == "/review"
+    assert rc.self_review_invocation("claude", level=None) == "/fno:review <level>"
+    # The level travels on every harness alike.
+    assert rc.self_review_invocation("codex", level="high") == "/fno:review high"
+    assert rc.self_review_invocation("agy", level="low") == "/fno:review low"
 
 
-def test_satisfiable_verdict_carries_the_arg_grammar():
+def test_satisfiable_verdict_names_the_lane():
     s = SessionCapability(harness="claude", substrate="pane", attended=True)
     v = resolve_reviewers(["code-review"], s)[0]
     assert v.status == "satisfiable"
-    assert "--comment" in v.reason
-    assert "<level>" in v.reason
+    assert "run `/fno:review`" in v.reason
     codex = SessionCapability(harness="codex", substrate="pane", attended=True)
     cv = resolve_reviewers(["code-review"], codex)[0]
     assert cv.status == "satisfiable"
-    assert "run `/review`" in cv.reason
+    assert "run `/fno:review`" in cv.reason
 
 
-def test_code_review_is_scoped_to_harnesses_with_a_verb():
-    """code-review resolves per its invocations map, mirroring subagent-dispatch:
-    satisfiable on every harness with a recorded verb (claude, codex, opencode
-    natively; agy via the /fno:review fallback), unavailable on a known harness
-    with no verb (gemini), unverifiable on unknown. Resolving it satisfiable on
-    a harness with NO reachable verb would floor the stop gate onto a reviewer
-    whose attestation nothing there produces, wedging the loop."""
+def test_code_review_resolves_on_every_harness():
+    """The owned lane runs wherever the plugin runs, so the reviewer it
+    satisfies resolves on every harness - including the ones the native-verb
+    allowlist used to refuse (gemini) or leave unverifiable (unknown). A
+    harness running fno at all has the skill surface the lane needs."""
     def on(harness: str):
         s = SessionCapability(harness=harness, substrate="pane", attended=True)
         return resolve_reviewers(["code-review"], s)[0]
 
-    assert on("claude").status == "satisfiable"
-    assert on("codex").status == "satisfiable"
-    assert on("opencode").status == "satisfiable"
-    assert "run `/review-changes`" in on("opencode").reason
-    # agy has no native verb; its recorded fallback IS the fno do review, so the
-    # verdict stays satisfiable with a runnable instruction.
-    assert on("agy").status == "satisfiable"
-    assert "run `/fno:review`" in on("agy").reason
-    v = on("gemini")
-    assert v.status == "unavailable", f"gemini: {v.reason}"
-    assert "scoped to" in v.reason
-    assert on("unknown").status == "unverifiable"
+    for harness in ("claude", "codex", "opencode", "agy", "gemini", "unknown"):
+        v = on(harness)
+        assert v.status == "satisfiable", f"{harness}: {v.reason}"
+        assert "run `/fno:review`" in v.reason
+
+
+def test_an_unknown_harness_with_a_skill_reviewer_stays_unverifiable(isolated: Path):
+    """AC3-ERR: what the probe cannot answer proceeds with a note, never a
+    refusal. The unknown-harness policy survives on the requirements that
+    genuinely need a harness answer (a registered skill), while the lane needs
+    none."""
+    _install(isolated / "project", "my-security-skill")
+    session = SessionCapability(harness="unknown", substrate="interactive", attended=True)
+    v = _resolve(session=session)
+    assert v.status == "unverifiable"
+    assert not v.blocks_autonomy
 
 
 def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
@@ -410,12 +404,12 @@ def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
 
     out = CliRunner().invoke(target_app, ["review-invocation", "--harness", "claude"])
     assert out.exit_code == 0, out.output
-    assert out.output.strip() == f"/code-review {sized} --comment"
+    assert out.output.strip() == f"/fno:review {sized}"
 
     bare = CliRunner().invoke(target_app, ["review-invocation", "--harness", "codex"])
     assert bare.exit_code == 0, bare.output
-    assert bare.output.strip() == "/review"
+    assert bare.output.strip() == f"/fno:review {sized}"
 
     portable = CliRunner().invoke(target_app, ["review-invocation", "--harness", "agy"])
     assert portable.exit_code == 0, portable.output
-    assert portable.output.strip() == "/fno:review"
+    assert portable.output.strip() == f"/fno:review {sized}"

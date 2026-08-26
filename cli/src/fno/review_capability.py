@@ -22,40 +22,26 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping, Optional
 
 from fno.config import (
     _coerce_affirmative,
-    provider_subagent_budget,
     resolvable_reviewers,
     ReviewerDescriptor,
 )
 from fno.harness_identity import resolve_harness_identity
 
-# Harnesses that can run the sigma panel to a verdict, and so can produce its
-# attestation. Claude dispatches the six reviewers through the Task/Agent tool;
-# Codex reaches the same panel through project custom agents / `spawn_agent`,
-# and a Codex surface lacking that primitive reports the downgrade and runs the
-# panel SEQUENTIALLY - slower, but it still reaches a verdict and still attests
-# (docs/HARNESSES.md "Parallel subagent dispatch", docs/SKILL-COMPAT-MATRIX.md
-# "CDX"). Refusing codex here would hard-exit `fno do target init` on a
-# configuration the project documents as supported, which is a worse failure
-# than the one this check exists to prevent.
-#
-# Gemini stays out deliberately: its project-agent mode is experimental and
-# opt-in (AGENTS.md), so it resolves `unavailable` rather than being assumed.
+# Harnesses that can dispatch subagents at all, for a REGISTRY reviewer that
+# declares `requires: subagent-dispatch`. No built-in uses the value anymore
+# (the sigma panel that did is retired; the fno review lane runs inline), but a
+# project can register one, and the resolution must answer rather than fall to
+# "unknown capability". Claude dispatches through the Task/Agent tool; codex
+# reaches the same shape through project custom agents / `spawn_agent`. Gemini
+# stays out deliberately: no lane here drives its experimental project-agent
+# mode, so it resolves `unavailable` rather than being assumed.
 _SUBAGENT_DISPATCH_HARNESSES = frozenset({"claude", "codex"})
-
-#: How many subagents the panel dispatches, from the table in
-#: `skills/review/references/sigma.md`. Compared against a provider's subagent
-#: budget, because a budget of 3 is not permission to run a six-wide panel: the
-#: account is spent on what the panel dispatches, not on whether it dispatches
-#: more than one. A narrower panel is not a legal substitute either, since a
-#: fan-out that only reads half the dimensions is a coverage lie wearing the
-#: panel's name.
-_PANEL_WIDTH = 6
 
 Status = Literal["satisfiable", "needs-operator", "unavailable", "unverifiable"]
 
@@ -95,10 +81,6 @@ class ReviewerVerdict:
     descriptor: Optional[ReviewerDescriptor]
     status: Status
     reason: str
-    #: the reviewer that runs INSTEAD, when a provider budget - and only a
-    #: provider budget - made this one undispatchable. None everywhere else:
-    #: an unavailable reviewer with no substitute still refuses the gate.
-    resolves_to: Optional[str] = None
 
     @property
     def blocks_autonomy(self) -> bool:
@@ -116,26 +98,12 @@ class ReviewerVerdict:
         it. The inverse would let an unclassified status run autonomously,
         which is the wrong default for a gate whose whole point is fail-closed.
         """
-        # A substitution is a RESOLUTION, not a refusal: `resolves_to` is only
-        # ever set when a real reviewer with a real attestation takes over, so
-        # blocking here would wedge every worker on a shared account over a
-        # review that is still going to run.
-        if self.resolves_to is not None:
-            return False
         return self.status not in _NON_BLOCKING_STATUSES
 
     def line(self) -> str:
         """One report line. A rung weaker than review-evidence always says so."""
         asserts = self.descriptor.asserts if self.descriptor is not None else None
         note = _RUNG_NOTES.get(asserts, "")
-        if self.resolves_to is not None:
-            # The receipt has to show WHICH route this session got, not which
-            # one the config named. The cause travels with it, so an operator
-            # reading the line learns why without reading the config.
-            return (
-                f"{self.status}: {self.name} - {self.reason}{note}\n"
-                f"    resolved route: {self.resolves_to}"
-            )
         return f"{self.status}: {self.name} - {self.reason}{note}"
 
 
@@ -363,6 +331,18 @@ def _resolve_one(
     def verdict(status: Status, reason: str) -> ReviewerVerdict:
         return ReviewerVerdict(name, descriptor, status, reason)
 
+    if descriptor.requires == "retired":
+        # One-way state, checked FIRST so nothing downstream can rescue it.
+        # The invocation field of a retired descriptor names the REPLACEMENT,
+        # never a hint that the reviewer runs: the refusal must tell a wedged
+        # config what to run instead, which is the whole content of retiring
+        # loudly rather than deleting the name from the table.
+        return verdict(
+            "unavailable",
+            f"{name} is retired; run `{descriptor.invocation}` (the default "
+            f"review lane) or change config.review.reviewers",
+        )
+
     if descriptor.requires == "none":
         # A self-serve verb whose `invocations` map scopes it to specific
         # harnesses (code-review: claude /code-review, codex /review, opencode
@@ -412,19 +392,6 @@ def _resolve_one(
         return verdict(*_resolve_skill(_skill_id(descriptor, name), session))
 
     if descriptor.requires == "subagent-dispatch":
-        # The provider budget is checked BEFORE the harness, because it is the
-        # stricter question. A claude worker CAN dispatch the panel; the point
-        # is that this account cannot afford it. Reversing the order would
-        # answer "yes, satisfiable" on exactly the sessions this exists for.
-        budget = provider_subagent_budget(session.provider)
-        if budget is not None and budget < _PANEL_WIDTH:
-            return verdict(
-                "unavailable",
-                f"needs subagent-dispatch; provider {session.provider} has a "
-                f"subagent budget of {budget} (shared quota) and the panel "
-                f"dispatches {_PANEL_WIDTH}, so it is not dispatched here - "
-                f"resolves to {_BUDGET_SUBSTITUTE}",
-            )
         if session.harness in _SUBAGENT_DISPATCH_HARNESSES:
             return verdict("satisfiable", f"run `{descriptor.invocation}`")
         if session.harness == "unknown":
@@ -443,58 +410,6 @@ def _resolve_one(
         "unavailable",
         f"declares an unknown capability {descriptor.requires!r}",
     )
-
-
-#: The reviewer a budget-blocked panel resolves DOWN to. `code-review` and never
-#: `declare`: the whole point of the downgrade is that a real review still runs
-#: and still produces a head-pinned attestation. Substituting a self-cert would
-#: clear the gate with nothing behind it, which is the move this module's
-#: docstring refuses in every other case.
-_BUDGET_SUBSTITUTE = "code-review"
-
-#: The phrase that marks a verdict as budget-caused. Matched rather than
-#: re-derived so the substitution can never fire on a reason it did not write:
-#: a `sigma` unavailable for any OTHER cause keeps today's refusal verbatim.
-_BUDGET_MARKER = "subagent budget of "
-
-
-def _apply_budget_substitution(
-    v: ReviewerVerdict,
-    session: SessionCapability,
-    known: Mapping[str, ReviewerDescriptor],
-) -> ReviewerVerdict:
-    """Record the downgrade on a verdict the PROVIDER BUDGET made unavailable.
-
-    The budget is the only cause that substitutes. A reviewer unavailable
-    because the harness cannot dispatch subagents is a misconfiguration the
-    operator has to fix, and quietly running something else there would hide it.
-    A budget is not a misconfiguration - it is the account telling the truth
-    about what it can afford - so the gate resolves down instead of refusing.
-
-    The verdict keeps its `unavailable` status and its reason on purpose. The
-    reason is the evidence, and a status flipped to `satisfiable` would claim
-    the panel ran.
-    """
-    if v.status != "unavailable" or _BUDGET_MARKER not in v.reason:
-        return v
-    substitute = known.get(_BUDGET_SUBSTITUTE)
-    if substitute is None:
-        return v
-    resolved = _resolve_one(_BUDGET_SUBSTITUTE, substitute, session)
-    if resolved.blocks_autonomy:
-        # The substitute cannot run here either, so recording it would trade a
-        # refusal at init for a wedge at the stop gate with no reviewer that
-        # can attest. A gemini session under a budget is exactly that shape:
-        # neither the panel nor the self-review verb exists there. Keep the
-        # refusal and say what BOTH routes are missing.
-        return replace(
-            v,
-            reason=(
-                f"{v.reason}, which cannot run here either "
-                f"({resolved.reason})"
-            ),
-        )
-    return replace(v, resolves_to=_BUDGET_SUBSTITUTE)
 
 
 def resolve_reviewers(
@@ -529,11 +444,7 @@ def resolve_reviewers(
                 )
             )
             continue
-        out.append(
-            _apply_budget_substitution(
-                _resolve_one(name, descriptor, sess), sess, known
-            )
-        )
+        out.append(_resolve_one(name, descriptor, sess))
     return out
 
 
@@ -551,16 +462,16 @@ class PreShipReviewPlan:
 
 
 def harness_can_self_review(harness: Optional[str]) -> bool:
-    """Whether a lane THIS code drives can fire the harness's review verb.
+    """Whether this harness can run the review this machinery recommends.
 
-    A recorded verb is not a transport. opencode's `/review-changes` is in the
-    descriptor map, but an opencode session rides a non-keystroke daemon lane
-    (a raw slash reaches the model as text, never a parser) and its mux row
-    declares submit_keys unsupported, so the verb cannot fire from here;
-    flooring on it demanded an attestation no path produces. agy/gemini stay
-    out the same way: no native verb behind the recorded fallback. Re-add a
-    harness only when a lane that actually fires its verb exists."""
-    return harness in {"claude", "codex"}
+    The recommendation is the fno-owned review lane, which runs as ordinary
+    tool calls wherever the plugin runs, so every harness qualifies and the
+    answer is True unconditionally. The native per-harness verbs this used to
+    gate on remain the operator's explicit choice; no machinery depends on
+    them anymore, which is the point of owning the reviewer. Kept as a
+    function rather than inlined at the call sites so the question stays
+    nameable the day a harness appears without a skill mechanism."""
+    return True
 
 
 # The effort levels an autonomous agent may issue. `ultra` is billed
@@ -596,27 +507,24 @@ def level_for_diff(changed_files: int, diff_lines: int) -> str:
 
 
 def self_review_invocation(harness: Optional[str], level: Optional[str] = "medium") -> str:
-    """The recommended self-review invocation for a harness.
+    """The recommended self-review invocation: the fno lane, every harness.
 
-    Codex is `/review` bare for the verb, and an explicit target payload may
-    follow it only in the final-head renderer. Claude is `/code-review <level>
-    --comment`: it takes its own argument grammar, and that form posts comments
-    without writing. `--fix` is absent on purpose. Every caller of this function
-    is machinery telling a worker how to clear a head-pinned gate, and a fix
-    pass moves HEAD, which voids the attestation the round just earned.
-    opencode is `/review-changes` bare (same no-appended-prose caution; its flag
-    grammar is unverified against its docs). The verb AND the arg grammar are
-    read from the `code-review` descriptor's per-harness map (the parity-checked
-    source of truth), so this is not a second copy of either.
+    `/fno:review <level>`, read from the `code-review` descriptor's scalar
+    invocation (the parity-checked table), with the level appended by THIS
+    function. The per-harness native verbs are no longer selected here: a
+    recommendation that depends on a harness transport is the fragile part
+    owning the reviewer deleted. They remain the operator's explicit choice
+    and stay documented in docs/architecture/review-lanes.md.
 
-    An unknown harness gets the descriptor's scalar fallback (`/fno:review`),
-    never claude's verb silently: a confidently wrong answer where no answer
-    was available is the defect family this module exists to delete, and
-    `/fno:review` is runnable on every harness the plugin serves.
+    `--fix` is never appended. Every caller of this function is machinery
+    telling a worker how to clear a head-pinned gate, and a fix pass moves
+    HEAD, which voids the attestation the round just earned.
 
     `level` is validated against `ALLOWED_REVIEW_LEVELS` - anything outside it
     (`ultra` included) raises. `None` leaves the `<level>` placeholder in
-    place for a pre-diff surface that has no diff to size from yet."""
+    place for a pre-diff surface that has no diff to size from yet. `harness`
+    is accepted and deliberately unused: the answer is harness-independent
+    now, and the parameter stays so callers do not have to know that."""
     if level is not None and level not in ALLOWED_REVIEW_LEVELS:
         raise ValueError(
             f"review level {level!r} is not one of {ALLOWED_REVIEW_LEVELS}; "
@@ -625,11 +533,8 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
     from fno.config import _RESOLVABLE_REVIEWERS
 
     desc = _RESOLVABLE_REVIEWERS.get("code-review")
-    invocations = desc.invocations if desc and desc.invocations else {}
-    invocation = invocations.get(harness or "", desc.invocation if desc else "/fno:review")
-    if level is None or "<level>" not in invocation:
-        return invocation
-    return invocation.replace("<level>", level)
+    base = desc.invocation if desc else "/fno:review"
+    return f"{base} <level>" if level is None else f"{base} {level}"
 
 
 def _git_out(cwd: Path, *args: str) -> Optional[str]:
@@ -736,26 +641,20 @@ def render_self_review_invocation(
 def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
     """Decide the target spine's pre-ship review step from `config.review.reviewers`.
 
-    Sigma is opt-in. When it is a configured reviewer it runs exactly once,
-    post-ship, against the final HEAD (the attestation gate in
-    skills/target/references/ship-and-promise.md), so the pre-ship step is
-    skipped to avoid a panel whose attestation any later fix would invalidate.
-    The default - no sigma reviewer - is a native review producer. The ship
-    step requests the harness verb through the explicit-target self-send lane
-    after the PR exists, and does not downgrade to advisory prose. Sigma is
-    opt-in via `reviewers: [sigma]`.
+    The plan is always the same review: the fno lane on the final pushed HEAD,
+    requested through `fno do target request-self-review --pr` once the PR
+    exists, never downgraded to advisory prose. There is no sigma branch to
+    consult anymore: a config still naming sigma is refused at init by the
+    retired descriptor, so it cannot reach this decision. `reviewers` is read
+    for shape only - a registered harness-skill reviewer keeps its own
+    invocation contract at the ship step regardless of this plan.
     """
     names = {str(r).strip().lstrip("/") for r in reviewers}
-    if "sigma" in names:
-        return PreShipReviewPlan(
-            "skip",
-            "sigma is configured; it runs once post-ship on final HEAD, so the "
-            "pre-ship self-review is skipped",
-        )
     return PreShipReviewPlan(
         "native",
-        "no sigma reviewer; run fno do target request-self-review --pr on the "
-        "final pushed HEAD and do not dispatch the sigma panel",
+        f"run fno do target request-self-review --pr on the final pushed HEAD; "
+        f"the fno lane (/fno:review) is the review producer on every harness "
+        f"(reviewers resolved: {sorted(names) or ['none']})",
     )
 
 

@@ -1194,28 +1194,20 @@ const REVIEW_ORDER: &str = "close every finding, commit and push first, then \
 /// human to remember.
 /// The fourth element encodes per-harness verb overrides as
 /// `"harness=verb;harness=verb"`, empty when the scalar invocation is the only
-/// rendering. The self-review verb is the one case: `/code-review <level>
-/// --comment` on claude (the Python builder sizes `<level>` from the
-/// diff; `ultra` is not issuable). No `--fix`: this table is the machinery
-/// hint for a worker held at a head-pinned gate, and a fix pass moves HEAD
-/// and voids the attestation. `/review` bare on codex, `/review-changes`
-/// bare on opencode (its flag grammar is unverified against its docs, and an
-/// appended guess is the codex trap in a new coat). The codex value
-/// must stay bare - prose after the verb flips codex to a no-merge-base review
-/// target - so a no-whitespace check on it is a unit test. The scalar is the
-/// harness-portable fallback an UNKNOWN harness receives: `/fno:review`, never
-/// claude's verb silently (opencode/agy workers were handed `/code-review`, a
-/// verb their harness cannot run). agy has no native verb and takes the fno
-/// review. Kept honest against the Python descriptor's `invocations` map by
-/// check-reviewer-descriptor-parity.sh.
+/// rendering - which is now every row: the machinery recommendation is the
+/// fno-owned review lane, which runs as ordinary tool calls on every harness,
+/// so no native per-harness verb is recommended anymore. The native verbs
+/// (`/code-review` on claude, `/review` on codex) remain the operator's
+/// explicit choice, documented in docs/architecture/review-lanes.md.
+/// `sigma` is RETIRED: its invocation names the replacement (the default
+/// lane), never a hint that the panel runs, and a config still naming sigma
+/// is refused at init by the Python capability check with the same
+/// replacement in the refusal. No `--fix` in any hint: a fix pass moves HEAD
+/// and voids the attestation the round just earned. Kept honest against the
+/// Python descriptor table by check-reviewer-descriptor-parity.sh.
 const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
-    ("sigma", "/fno:review sigma", false, ""),
-    (
-        "code-review",
-        "/fno:review",
-        false,
-        "claude=/code-review <level> --comment;codex=/review;opencode=/review-changes;agy=/fno:review",
-    ),
+    ("sigma", "/fno:review", false, ""),
+    ("code-review", "/fno:review", false, ""),
     ("declare", "/fno:review declare", true, ""),
 ];
 

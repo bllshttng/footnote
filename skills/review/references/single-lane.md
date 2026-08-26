@@ -94,7 +94,23 @@ For every kept finding, open the cited `file:line` and check the finding's verba
 
 ### Carry-forward (prior rounds)
 
-On an incremental round (scope narrowed to the increment since the last reviewed head), read the prior round's report through the existing inspect surface and keep its exit status:
+An incremental round narrows scope only to the increment since the last reviewed head, and the narrowing is earned, never assumed. Resolve the prior head through the existing accessor and verify it before trusting it:
+
+```bash
+PRIOR_HEAD=$(fno do review --sigma-last-head --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" 2>/dev/null || true)
+SCOPE="first-round"
+if [ -n "$PRIOR_HEAD" ] && git merge-base --is-ancestor "$PRIOR_HEAD" HEAD 2>/dev/null; then
+  if git diff --name-only "$PRIOR_HEAD..HEAD" | grep -qE '(^|/)(CLAUDE\.md|AGENTS\.md)$|^\.claude/rules/'; then
+    SCOPE="first-round"    # rules changed: a new rule can condemn cleared code, so full scope
+  else
+    SCOPE="incremental"
+  fi
+fi
+```
+
+A prior head that is not an ancestor of HEAD (rebase, squash, force-push) reads as `first-round`: full scope. An empty increment resets to full scope the same way, so a zero-file round can never pass vacuously. The single changed-files producer is this block; no other diff read in the pass names its own base.
+
+On an incremental round, read the prior round's report through the existing inspect surface and keep its exit status:
 
 ```bash
 if PRIOR_REPORT=$(fno do review --inspect-sigma --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" --sigma-head "$PRIOR_HEAD" --json 2>/dev/null); then
