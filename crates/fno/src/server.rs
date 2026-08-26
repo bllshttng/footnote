@@ -2975,28 +2975,31 @@ impl Core {
             .panes
             .iter()
             .map(|(&pid, entry)| {
-                let (squad_id, tab_id, cwd, tab_name, tab_ordinal) =
+                let (squad_id, squad_name, tab_id, cwd, tab_name, tab_ordinal) =
                     match self.session.find_pane(pid) {
                         Some((sid, ti)) => {
                             let sq = self.session.squad(sid).expect("find_pane live squad");
                             let dict = sq.tab_dict(ti);
                             (
                                 sid,
+                                sq.name.clone(),
                                 sq.tabs[ti].id,
                                 sq.canonical_cwd().to_string(),
                                 dict.as_ref().and_then(|d| d.name.clone()),
                                 dict.map(|d| d.ordinal),
                             )
                         }
-                        None => (0, 0, String::new(), None, None),
+                        None => (0, None, 0, String::new(), None, None),
                     };
                 PaneInfo {
                     pane_id: pid,
                     squad_id,
+                    squad_name,
                     tab_id,
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
+                    pristine_idle_shell: entry.cmd.is_none() && entry.vt.is_pristine_idle_shell(),
                     name: entry.name.clone(),
                     tab_name,
                     tab_ordinal,

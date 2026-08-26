@@ -1439,7 +1439,7 @@ fn squad_store_check() -> Check {
     // pass an empty `live_cwds` and no clock, so the number the operator read
     // could disagree with what a bare `prune` would do. `include_named: false`
     // stays hardcoded on purpose: it is what a bare `prune` uses.
-    let live_cwds = live_pane_cwds();
+    let (_, live_cwds, _) = live_tabs();
     let now = crate::squad_store::now_epoch_secs();
     let orphan = loaded
         .squads
@@ -1752,27 +1752,101 @@ fn live_set_or_unknown() -> Option<std::collections::HashSet<String>> {
     Some(crate::server::live_attach_ids_snapshot())
 }
 
-/// The cwds of every live mux pane, via the read-only `PaneLs` probe (the same
-/// one `doctor` uses). Any miss contributes nothing (fail-safe): the member
-/// liveness set still gates, and a live squad almost always has a live member.
-fn live_pane_cwds() -> Vec<String> {
-    let mut cwds = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveTab {
+    session: String,
+    squad_id: u64,
+    squad_name: Option<String>,
+    tab_id: u64,
+    pane_count: usize,
+    pristine: bool,
+}
+
+/// Read every live tab once. The same snapshot supplies squad liveness cwds
+/// and the empty-tab candidates, so the receipt and the destructive pass cannot
+/// disagree because one probe was newer than the other.
+fn live_tabs() -> (Vec<LiveTab>, Vec<String>, bool) {
     let Ok(names) = session_names() else {
-        return cwds;
+        return (Vec::new(), Vec::new(), false);
     };
+    let mut groups: std::collections::BTreeMap<(String, u64, u64), LiveTab> =
+        std::collections::BTreeMap::new();
+    let mut cwds = Vec::new();
+    let mut reachable = true;
     for name in names {
         let Ok(sock) = proto::socket_path(&name) else {
+            reachable = false;
             continue;
         };
-        if let Ok(ServerMsg::PaneList { panes }) =
-            control_roundtrip(&sock, &name, ControlVerb::PaneLs)
-        {
-            for p in panes {
-                cwds.push(p.cwd);
+        match control_roundtrip(&sock, &name, ControlVerb::PaneLs) {
+            Ok(ServerMsg::PaneList { panes }) => {
+                for pane in panes {
+                    cwds.push(pane.cwd.clone());
+                    let key = (name.clone(), pane.squad_id, pane.tab_id);
+                    let tab = groups.entry(key).or_insert_with(|| LiveTab {
+                        session: name.clone(),
+                        squad_id: pane.squad_id,
+                        squad_name: pane.squad_name.clone(),
+                        tab_id: pane.tab_id,
+                        pane_count: 0,
+                        pristine: true,
+                    });
+                    tab.pane_count += 1;
+                    tab.pristine &= pane.pristine_idle_shell;
+                }
             }
+            _ => reachable = false,
         }
     }
-    cwds
+    (groups.into_values().collect(), cwds, reachable)
+}
+
+#[derive(Debug, Default)]
+struct TabPruneOutcome {
+    closed: usize,
+    would_close: usize,
+    skipped_named: usize,
+    kept: usize,
+}
+
+fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabPruneOutcome {
+    let mut out = TabPruneOutcome::default();
+    for tab in tabs {
+        if tab
+            .squad_name
+            .as_deref()
+            .is_some_and(|name| !name.is_empty())
+            && !include_named
+        {
+            out.skipped_named += 1;
+            continue;
+        }
+        if !tab.pristine || tab.pane_count == 0 {
+            out.kept += 1;
+            continue;
+        }
+        if dry_run {
+            out.would_close += 1;
+            continue;
+        }
+        let Ok(sock) = proto::socket_path(&tab.session) else {
+            out.kept += 1;
+            continue;
+        };
+        match control_roundtrip(
+            &sock,
+            &tab.session,
+            ControlVerb::TabClose {
+                squad: PaneTarget::SquadId(tab.squad_id),
+                tab: TabSel::Id(tab.tab_id),
+                force: false,
+            },
+        ) {
+            Ok(ServerMsg::TabClosed { .. }) => out.closed += 1,
+            Ok(_) | Err(_) => out.kept += 1,
+        }
+    }
+    out
 }
 
 /// `fno mux workspace prune [--dry-run] [--include-named] [--json]`: remove squads
@@ -1802,7 +1876,8 @@ fn squad_prune(args: &[OsString]) -> i32 {
     }
 
     let live = live_set_or_unknown();
-    let live_cwds = live_pane_cwds();
+    let (tabs, live_cwds, server_reachable) = live_tabs();
+    let tab_outcome = prune_live_tabs(&tabs, include_named, dry_run);
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
     let live_ref = live.as_ref();
 
@@ -1821,43 +1896,57 @@ fn squad_prune(args: &[OsString]) -> i32 {
     // Both paths produce the same receipt type. Dry-run builds it from a
     // read-only load (no lock, no write); the real run builds it from the
     // locked closure's actual removals (AC1-UI).
-    let (removed, kept_unknown, skipped_named, kept_protected, members_reaped, applied, notice) =
-        if dry_run {
-            let loaded = crate::squad_store::load();
-            let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
-            let (mut ku, mut sn, mut kp, mut mr) = (0usize, 0usize, 0usize, 0usize);
-            for sq in &loaded.squads {
-                let fate = crate::squad_store::classify_squad(sq, &decide, live_ref);
-                match fate.decision {
-                    crate::squad_store::PruneDecision::Prune => {
-                        removed.push(crate::squad_store::PrunedSquad::from(sq));
-                    }
-                    crate::squad_store::PruneDecision::KeepUnknown => ku += 1,
-                    crate::squad_store::PruneDecision::SkipNamed => sn += 1,
-                    crate::squad_store::PruneDecision::Keep => kp += 1,
+    let (
+        removed,
+        kept_unknown,
+        skipped_named,
+        kept_protected,
+        members_reaped,
+        members_kept_live,
+        members_kept_unknown,
+        applied,
+        notice,
+    ) = if dry_run {
+        let loaded = crate::squad_store::load();
+        let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
+        let (mut ku, mut sn, mut kp, mut mr, mut mkl, mut mku) =
+            (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+        for sq in &loaded.squads {
+            let fate = crate::squad_store::classify_squad(sq, &decide, live_ref);
+            match fate.decision {
+                crate::squad_store::PruneDecision::Prune => {
+                    removed.push(crate::squad_store::PrunedSquad::from(sq));
                 }
-                // Same classification the real run uses, so `--dry-run` can
-                // never undercount what a real run would reap.
-                mr += fate.reaped_if_kept;
+                crate::squad_store::PruneDecision::KeepUnknown => ku += 1,
+                crate::squad_store::PruneDecision::SkipNamed => sn += 1,
+                crate::squad_store::PruneDecision::Keep => kp += 1,
             }
-            (removed, ku, sn, kp, mr, false, loaded.notice)
-        } else {
-            match crate::squad_store::prune(decide, live_ref) {
-                Ok(o) => (
-                    o.removed,
-                    o.kept_unknown,
-                    o.skipped_named,
-                    o.kept_protected,
-                    o.members_reaped,
-                    true,
-                    None,
-                ),
-                Err(e) => {
-                    eprintln!("fno mux workspace prune: {e}");
-                    return EXIT_ERROR;
-                }
+            // Same classification the real run uses, so `--dry-run` can
+            // never undercount what a real run would reap.
+            mr += fate.reaped_if_kept;
+            mkl += fate.kept_live;
+            mku += fate.kept_unknown;
+        }
+        (removed, ku, sn, kp, mr, mkl, mku, false, loaded.notice)
+    } else {
+        match crate::squad_store::prune(decide, live_ref) {
+            Ok(o) => (
+                o.removed,
+                o.kept_unknown,
+                o.skipped_named,
+                o.kept_protected,
+                o.members_reaped,
+                o.members_kept_live,
+                o.members_kept_unknown,
+                true,
+                None,
+            ),
+            Err(e) => {
+                eprintln!("fno mux workspace prune: {e}");
+                return EXIT_ERROR;
             }
-        };
+        }
+    };
 
     // `load()` can quarantine a corrupt store, drop malformed members, or fail
     // to read it at all before we see any of it. Reporting "no changes written"
@@ -1877,6 +1966,13 @@ fn squad_prune(args: &[OsString]) -> i32 {
             skipped_named,
             kept_protected,
             members_reaped,
+            members_kept_live,
+            members_kept_unknown,
+            tab_outcome.closed,
+            tab_outcome.would_close,
+            tab_outcome.skipped_named,
+            tab_outcome.kept,
+            server_reachable,
             notice.as_deref(),
         );
     } else {
@@ -1911,7 +2007,14 @@ fn squad_prune(args: &[OsString]) -> i32 {
             skipped_named,
             kept_protected,
             members_reaped,
+            members_kept_live,
+            members_kept_unknown,
             include_named,
+            tab_outcome.closed,
+            tab_outcome.would_close,
+            tab_outcome.skipped_named,
+            tab_outcome.kept,
+            server_reachable,
         );
     }
     EXIT_OK
@@ -1934,9 +2037,20 @@ fn print_prune_summary(
     skipped_named: usize,
     kept_protected: usize,
     members_reaped: usize,
+    members_kept_live: usize,
+    members_kept_unknown: usize,
     include_named: bool,
+    tabs_closed: usize,
+    tabs_would_close: usize,
+    tabs_skipped_named: usize,
+    tabs_kept: usize,
+    server_reachable: bool,
 ) {
     let mut parts = vec![format!("{verb} {n} squad(s)")];
+    parts.push(format!(
+        "tabs {} (would close {tabs_would_close}, skipped named {tabs_skipped_named}, kept {tabs_kept}, server reachable {server_reachable})",
+        if verb == "pruned" { tabs_closed } else { tabs_would_close }
+    ));
     if kept_protected > 0 {
         parts.push(format!("kept {kept_protected} (live/origin)"));
     }
@@ -1955,8 +2069,14 @@ fn print_prune_summary(
             "would reap"
         };
         parts.push(format!(
-            "{mverb} {members_reaped} tombstoned member(s) from surviving squads"
+            "{mverb} {members_reaped} dead member(s) from surviving squads"
         ));
+    }
+    if members_kept_live > 0 {
+        parts.push(format!("kept {members_kept_live} live member(s)"));
+    }
+    if members_kept_unknown > 0 {
+        parts.push(format!("kept {members_kept_unknown} unknown member(s)"));
     }
     println!("{}", parts.join("; "));
 }
@@ -1968,6 +2088,13 @@ fn render_prune_json(
     skipped_named: usize,
     kept_protected: usize,
     members_reaped: usize,
+    members_kept_live: usize,
+    members_kept_unknown: usize,
+    tabs_closed: usize,
+    tabs_would_close: usize,
+    tabs_skipped_named: usize,
+    tabs_kept: usize,
+    server_reachable: bool,
     notice: Option<&str>,
 ) {
     let pruned: Vec<_> = removed
@@ -1992,6 +2119,13 @@ fn render_prune_json(
             "kept_unknown": kept_unknown,
             "skipped_named": skipped_named,
             "members_reaped": members_reaped,
+            "members_kept_live": members_kept_live,
+            "members_kept_unknown": members_kept_unknown,
+            "tabs_closed": tabs_closed,
+            "tabs_would_close": tabs_would_close,
+            "tabs_skipped_named": tabs_skipped_named,
+            "tabs_kept": tabs_kept,
+            "server_reachable": server_reachable,
             "notice": notice,
         })
     );
@@ -5975,6 +6109,42 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_prune_classifies_pristine_running_and_named_tabs() {
+        let tabs = vec![
+            LiveTab {
+                session: "main".into(),
+                squad_id: 1,
+                squad_name: None,
+                tab_id: 11,
+                pane_count: 1,
+                pristine: true,
+            },
+            LiveTab {
+                session: "main".into(),
+                squad_id: 1,
+                squad_name: None,
+                tab_id: 12,
+                pane_count: 1,
+                pristine: false,
+            },
+            LiveTab {
+                session: "main".into(),
+                squad_id: 2,
+                squad_name: Some("named".into()),
+                tab_id: 21,
+                pane_count: 1,
+                pristine: true,
+            },
+        ];
+
+        let outcome = prune_live_tabs(&tabs, false, true);
+        assert_eq!(outcome.would_close, 1);
+        assert_eq!(outcome.closed, 0);
+        assert_eq!(outcome.skipped_named, 1);
+        assert_eq!(outcome.kept, 1);
+    }
 
     #[test]
     fn squad_target_reads_the_id_spelling_pane_ls_reports() {

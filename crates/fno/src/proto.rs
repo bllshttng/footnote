@@ -2179,10 +2179,18 @@ pub struct TabLayout {
 pub struct PaneInfo {
     pub pane_id: u64,
     pub squad_id: u64,
+    /// The live workspace name, when this pane belongs to a named workspace.
+    /// Additive so workspace maintenance can apply `--include-named` to tabs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squad_name: Option<String>,
     pub tab_id: u64,
     pub cwd: String,
     pub child_pid: Option<u32>,
     pub title: Option<String>,
+    /// Positive shell-integrated evidence that this pane is pristine and idle.
+    /// Missing/false is never treated as empty by a cleanup caller.
+    #[serde(default)]
+    pub pristine_idle_shell: bool,
     /// (v51, x-1499) The pane's tab name and 1-based ordinal, so the human
     /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` for a pane
     /// mid-teardown (not in any tab) or on a pre-v51 reply.
@@ -4449,10 +4457,12 @@ mod tests {
                 panes: vec![PaneInfo {
                     pane_id: 4,
                     squad_id: 1,
+                    squad_name: None,
                     tab_id: 7,
                     cwd: "/code/footnote".into(),
                     child_pid: Some(4242),
                     title: None,
+                    pristine_idle_shell: false,
                     tab_name: None,
                     tab_ordinal: Some(1),
                     fno_id: None,
