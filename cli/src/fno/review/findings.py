@@ -225,7 +225,8 @@ def classify(
         allow = frozenset(nonblocking_categories)
     if record.unmappable or not _has_required_fields(record):
         return BLOCKING
-    if _clean(record.verdict) and _clean(record.verdict).lower() == _CONFIRMED:
+    verdict = _clean(record.verdict)
+    if verdict and verdict.lower() == _CONFIRMED:
         return BLOCKING
     category = _clean(record.category)
     if category and category.lower() in allow:
