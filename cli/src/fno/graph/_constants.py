@@ -329,6 +329,21 @@ def normalize_difficulty(value: str | None) -> str | None:
         )
     return band
 
+
+def append_difficulty_history(
+    row: dict, value: str | None, source: str, ts: str
+) -> None:
+    """Append one attributed band-history entry to a graph row.
+
+    The ONE append shape every difficulty writer uses. `or []`, never
+    setdefault: a hand-edited row can carry ``difficulty_history: null``
+    and setdefault hands that null straight to .append (AttributeError
+    mid-mutator, before the write lands).
+    """
+    history = row.get("difficulty_history") or []
+    history.append({"value": value, "source": source, "ts": ts})
+    row["difficulty_history"] = history
+
 # Tags (x-6c2b wave 1): lowercase-kebab only, so they mirror cleanly into
 # Obsidian frontmatter `tags:` and stay legible as Base/tag-search filters.
 TAG_CHARSET_RE = re.compile(r"^[a-z0-9-]+$")

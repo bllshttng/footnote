@@ -3773,17 +3773,14 @@ def cmd_update(
                 node["difficulty"] = revised_difficulty
                 # Same attributable trail the birth paths keep: a manual
                 # revision is the estimate most likely to have changed hands.
-                # `or []`: a hand-edited row can carry difficulty_history
-                # null, and setdefault would hand that null to .append.
-                history = node.get("difficulty_history") or []
-                history.append(
-                    {
-                        "value": revised_difficulty,
-                        "source": "update",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    }
+                from fno.graph._constants import append_difficulty_history
+
+                append_difficulty_history(
+                    node,
+                    revised_difficulty,
+                    "update",
+                    datetime.now(timezone.utc).isoformat(),
                 )
-                node["difficulty_history"] = history
         if model is not None:
             node["model"] = None if model.lower() == "null" else model
         if type_ is not None:
@@ -9998,21 +9995,22 @@ def cmd_reconcile(
     if _migratable:
         typer.echo(
             f"reconcile: {len(_migratable)} row(s) still carry the retired "
-            "model_tier key and no difficulty ("
+            "model_tier key ("
             + ", ".join(_migratable[:5])
             + ("..." if len(_migratable) > 5 else "")
-            + "); they read as no difficulty band - run `fno backlog "
-            "migrate-difficulty --apply`",
+            + "); run `fno backlog migrate-difficulty --apply` (same-band "
+            "pairs drain, band-less rows gain their band)",
             err=True,
         )
     if _conflicted:
         typer.echo(
-            f"reconcile: {len(_conflicted)} row(s) carry BOTH difficulty and "
-            "the retired model_tier ("
+            f"reconcile: {len(_conflicted)} row(s) carry difficulty AND a "
+            "divergent retired model_tier ("
             + ", ".join(_conflicted[:5])
             + ("..." if len(_conflicted) > 5 else "")
-            + "); migrate-difficulty refuses them - drop the model_tier key "
-            "by hand",
+            + "); migrate-difficulty refuses them - pick the band with "
+            "`fno backlog update <id> --difficulty <band>`, which also "
+            "clears the retired key",
             err=True,
         )
     if pr_number is not None:
@@ -12883,18 +12881,18 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                 typer.echo(f"warning: {exc}; difficulty left unchanged", err=True)
             else:
                 entry["difficulty"] = revised_difficulty
-                # `or []` over setdefault: a null difficulty_history row
-                # must not crash the claim mid-mutator (same hazard the
-                # migration guards against).
-                history = entry.get("difficulty_history") or []
-                history.append(
-                    {
-                        "value": revised_difficulty,
-                        "source": "blueprint",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    }
+                # Same drain cmd_update got: the canonical write supersedes
+                # the retired spelling, or the claim would re-leave a
+                # migration-refusing both-spellings row behind.
+                entry.pop("model_tier", None)
+                from fno.graph._constants import append_difficulty_history
+
+                append_difficulty_history(
+                    entry,
+                    revised_difficulty,
+                    "blueprint",
+                    datetime.now(timezone.utc).isoformat(),
                 )
-                entry["difficulty_history"] = history
         if (
             claimed_type != DEFAULT_NODE_TYPE
             and entry.get("type") != claimed_type

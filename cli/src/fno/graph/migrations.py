@@ -87,45 +87,64 @@ def _retired_band(row: dict) -> str | None:
 
 
 def split_retired_tier_rows(entries: list[dict]) -> tuple[list[str], list[str]]:
-    """(migratable ids, both-spellings ids) for rows still carrying model_tier.
+    """(migratable ids, divergent-band ids) for rows still carrying model_tier.
 
     ONE classifier, shared by the migration verb and the reconcile advisory,
     so the prescription the advisory prints can never drift from the verdict
-    the verb delivers.
+    the verb delivers. A row carrying both spellings with the SAME band is
+    migratable: the retired ``--model-tier`` handler always wrote both keys
+    with equal bands, so same-band rows are what machine-created leftovers
+    actually look like, and only a DIVERGENT pair is a real conflict.
     """
     migratable: list[str] = []
-    conflicted: list[str] = []
+    divergent: list[str] = []
     for row in entries:
         if not isinstance(row, dict) or row.get("model_tier") is None:
             continue
-        if row.get("difficulty") is not None:
-            conflicted.append(str(row.get("id", "?")))
+        rid = str(row.get("id", "?"))
+        band = _retired_band(row)
+        current = row.get("difficulty")
+        if current is not None and band is not None and band != current:
+            divergent.append(rid)
         else:
-            migratable.append(str(row.get("id", "?")))
-    return migratable, conflicted
+            # model_tier-only rows, same-band pairs, and a garbage retired
+            # key under a live difficulty: all drain without a judgment.
+            migratable.append(rid)
+    return migratable, divergent
 
 
 def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
     """Move the retired ``model_tier`` band onto ``difficulty``, once, audibly.
 
-    The compat window closed with zero rows carrying both spellings (measured
-    across the whole graph 2026-08-26), so a row holding both today means a
-    writer re-added the retired key after the tombstone; that row is refused
-    rather than guessed at. Bands run through ``normalize_difficulty`` like
-    every other difficulty writer - a value that does not normalize is
-    refused by id, never migrated verbatim under a success receipt.
+    Same-band both-spellings rows drain (the retired handler wrote both keys
+    with equal bands, so those are the machine-created leftovers); only a
+    DIVERGENT pair is refused rather than guessed at. Bands run through
+    ``normalize_difficulty`` like every other difficulty writer - a
+    model_tier-only value that does not normalize is refused by id, never
+    migrated verbatim under a success receipt.
     """
-    _migratable, conflicted = split_retired_tier_rows(entries)
-    if conflicted:
+    from fno.graph._constants import append_difficulty_history
+
+    _migratable, divergent = split_retired_tier_rows(entries)
+    if divergent:
         raise ValueError(
-            "rows carry both difficulty and model_tier; resolve by hand "
-            "before migrating: " + ", ".join(sorted(conflicted))
+            "rows carry difficulty and a DIVERGENT model_tier; pick the band "
+            "with `fno backlog update <id> --difficulty <band>` (which clears "
+            "the retired key) before migrating: "
+            + ", ".join(
+                f"{row.get('id', '?')} model_tier={row.get('model_tier')!r} "
+                f"difficulty={row.get('difficulty')!r}"
+                for row in entries
+                if isinstance(row, dict)
+                and str(row.get("id", "?")) in set(divergent)
+            )
         )
     invalid = sorted(
         f"{row.get('id', '?')}={row.get('model_tier')!r}"
         for row in entries
         if isinstance(row, dict)
         and row.get("model_tier") is not None
+        and row.get("difficulty") is None
         and _retired_band(row) is None
     )
     if invalid:
@@ -146,15 +165,14 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
         return receipt
 
     now = datetime.now(timezone.utc).isoformat()
+    drained = 0
     for row in pending:
         band = _retired_band(row)
         row.pop("model_tier", None)
-        row["difficulty"] = band
-        # `or []`, not setdefault: a hand-edited row can carry
-        # ``difficulty_history: null`` and setdefault would return that null
-        # to .append (AttributeError) instead of the conflict-free path.
-        history = row.get("difficulty_history") or []
-        history.append({"value": band, "source": "migration", "ts": now})
-        row["difficulty_history"] = history
-    receipt["migrated"] = len(pending)
+        if row.get("difficulty") is None and band is not None:
+            row["difficulty"] = band
+        if band is not None:
+            append_difficulty_history(row, band, "migration", now)
+        drained += 1
+    receipt["migrated"] = drained
     return receipt

@@ -656,6 +656,27 @@ def test_intake_claim_warns_on_retired_model_tier_frontmatter(fixture_graph, tmp
     assert target.get("difficulty") is None
 
 
+def test_intake_claim_drains_retired_model_tier_key(fixture_graph, tmp_path, capsys):
+    """x-baef round-4: the canonical write drains the retired spelling, so a
+    claim onto a both-spellings row cannot re-leave the key behind (the same
+    drain cmd_update got)."""
+    graph_file = fixture_graph
+    entries = json.loads(graph_file.read_text())["entries"]
+    filed = next(e for e in entries if e["id"] == "ab-1dea1234")
+    filed["model_tier"] = "high"
+    filed["difficulty"] = "high"
+    graph_file.write_text(json.dumps({"entries": entries}) + "\n")
+
+    plan = _write_quick_plan(
+        tmp_path, title="Drain on claim", claims="ab-1dea1234", difficulty="high"
+    )
+    _intake_impl(plan_paths=[str(plan)])
+    capsys.readouterr()
+    target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
+    assert target["difficulty"] == "high"
+    assert "model_tier" not in target
+
+
 def test_intake_claim_carries_p0_acknowledgment(fixture_graph, tmp_path, capsys):
     """Claimed intake preserves the plan's validated p0 acknowledgment."""
     plan = tmp_path / "p0-claim.md"

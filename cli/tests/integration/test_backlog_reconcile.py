@@ -664,36 +664,33 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
 def test_reconcile_names_leftover_model_tier_rows(cli_env, monkeypatch):
     """x-baef: leftover model_tier rows read as no difficulty band now, so
     the daily sweep names them and the migration verb until the key is gone;
-    the advisory self-extinguishes once it is. A both-spellings row gets the
-    by-hand prescription, because the migration verb refuses exactly those."""
+    the advisory self-extinguishes once it is. A divergent pair gets the
+    update-verb prescription, because the migration refuses exactly those."""
     graph_path, _sentinel_dir = cli_env
     _make_graph(graph_path, [
         _node("ab-legacy", model_tier="high"),
         _node("ab-current", difficulty="low"),
-        _node("ab-both", model_tier="high", difficulty="low"),
+        _node("ab-divergent", model_tier="high", difficulty="low"),
     ])
 
     result = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "ab-legacy" in result.output
     assert "migrate-difficulty" in result.output
-    assert "ab-both" in result.output
-    assert "by hand" in result.output
+    assert "ab-divergent" in result.output
+    assert "update <id> --difficulty <band>" in result.output
 
-    runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
-    # the verb is all-or-nothing: the both-spellings row makes it refuse the
-    # whole batch, so the sweep's by-hand prescription for that row is the
-    # verdict the verb actually delivers
+    # the verb is all-or-nothing: the divergent row makes it refuse the whole
+    # batch, so the sweep's prescription for that row names the verb that can
+    # actually decide the band
+    r_mig = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r_mig.exit_code == 2, r_mig.output
     rows = {e["id"]: e for e in _read_entries(graph_path)}
     assert rows["ab-legacy"].get("model_tier") == "high"
-    # hand-resolve the conflict the way the advisory says, then migrate
-    _make_graph(graph_path, [
-        _node("ab-legacy", model_tier="high"),
-        _node("ab-current", difficulty="low"),
-        _node("ab-both", difficulty="low"),
-    ])
-    r_mig = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
-    assert r_mig.exit_code == 0, r_mig.output
+    # decide the band with the verb the advisory names (it clears the key), then migrate
+    runner.invoke(app, ["backlog", "update", "ab-divergent", "--difficulty", "high"])
+    r_mig2 = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r_mig2.exit_code == 0, r_mig2.output
     result2 = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
     assert result2.exit_code == 0, result2.output
     assert "model_tier" not in result2.output

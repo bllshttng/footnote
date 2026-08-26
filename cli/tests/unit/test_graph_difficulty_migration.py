@@ -142,3 +142,34 @@ def test_migrate_difficulty_refuses_non_string_band(tmp_graph):
     assert r.exit_code == 2, r.output
     assert "x-0005=3" in r.output
     assert json.loads(tmp_graph.read_text())["entries"][0].get("difficulty") is None
+
+
+def test_migrate_difficulty_drains_machine_leftovers(tmp_graph):
+    """x-baef round-4: the retired --model-tier handler wrote BOTH keys with
+    equal bands, so same-band pairs are what machine-created leftovers look
+    like and the migration drains them; a garbage retired key under a live
+    difficulty drops without a band judgment. Only a divergent pair refuses."""
+    tmp_graph.write_text(json.dumps({"entries": [
+        {"id": "x-0006", "model_tier": "high", "difficulty": "high"},
+        {"id": "x-0007", "model_tier": "high", "difficulty": "low"},
+        {"id": "x-0008", "model_tier": 3, "difficulty": "low"},
+        {"id": "x-0009", "model_tier": "high"},
+    ]}))
+    r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r.exit_code == 2, r.output
+    assert "x-0007" in r.output and "DIVERGENT" in r.output
+    rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+    assert all("model_tier" in e for e in rows.values()), "divergent row refuses the batch"
+
+    _make = [{"id": "x-0006", "model_tier": "high", "difficulty": "high"},
+             {"id": "x-0008", "model_tier": 3, "difficulty": "low"},
+             {"id": "x-0009", "model_tier": "high"}]
+    tmp_graph.write_text(json.dumps({"entries": _make}))
+    r2 = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r2.exit_code == 0, r2.output
+    rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+    assert all("model_tier" not in e for e in rows.values())
+    assert rows["x-0006"]["difficulty"] == "high"  # same-band pair drains
+    assert [h["source"] for h in rows["x-0006"]["difficulty_history"]] == ["migration"]
+    assert rows["x-0008"]["difficulty"] == "low"  # garbage key dropped, band kept
+    assert rows["x-0009"]["difficulty"] == "high"  # band-less row gains its band
