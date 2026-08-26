@@ -1898,7 +1898,11 @@ def test_no_merge_reaches_init_argv_on_codex_native_path(monkeypatch, tmp_path):
 
 
 def _clear_remote_cache():
+    """Both memos, always. `_TIMED_OUT_REMOTES` is process-global like its
+    sibling, so clearing only one leaves a prior test's timeout short-
+    circuiting the next one's fetch."""
     target_cli._REFRESHED_REMOTES.clear()
+    target_cli._TIMED_OUT_REMOTES.clear()
 
 
 def test_refresh_remote_marks_a_timeout_apart_from_a_fetch_error(monkeypatch):
@@ -1952,3 +1956,48 @@ def test_remote_base_ref_survives_a_slow_fetch_but_still_refuses_a_real_error(mo
     with pytest.raises(typer.Exit) as excinfo:
         target_cli._remote_base_ref(Path("/repo"), fetch=True)
     assert excinfo.value.exit_code == 1
+
+
+def test_a_timed_out_remote_is_not_refetched_in_the_same_process(monkeypatch):
+    """One slow link, one 60s bound (x-d401).
+
+    A start resolves the base ref and then measures the distance: two fetches
+    of the same remote. Re-paying the bound to re-learn the network is slow
+    stalled a cold start for two minutes and changed no answer.
+    """
+    _clear_remote_cache()
+    target_cli._TIMED_OUT_REMOTES.clear()
+    calls = []
+
+    def _timeout(*args, **_k):
+        calls.append(args)
+        raise subprocess.TimeoutExpired(cmd="git fetch", timeout=60)
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+    assert target_cli._refresh_remote(Path("/repo"), "origin") == (False, target_cli._TIMED_OUT)
+    assert len(calls) == 1
+    # The narrower per-branch fetch the measurement makes next.
+    assert target_cli._refresh_remote(Path("/repo"), "origin", "main") == (
+        False,
+        target_cli._TIMED_OUT,
+    )
+    assert len(calls) == 1, "the second fetch must not pay the bound again"
+    target_cli._TIMED_OUT_REMOTES.clear()
+
+
+def test_truthful_base_names_a_timeout_apart_from_a_fetch_failure(monkeypatch):
+    """A slow network and a refused remote are different facts (x-d401)."""
+    _clear_remote_cache()
+    monkeypatch.setattr(
+        target_cli, "_refresh_remote", lambda *_a, **_k: (False, target_cli._TIMED_OUT)
+    )
+    assert "behind=unmeasured (fetch timed out)" in target_cli._truthful_base(
+        Path("/repo"), "origin/main"
+    )
+
+    monkeypatch.setattr(
+        target_cli, "_refresh_remote", lambda *_a, **_k: (False, "fatal: repository not found")
+    )
+    assert "behind=unmeasured (fetch failed)" in target_cli._truthful_base(
+        Path("/repo"), "origin/main"
+    )

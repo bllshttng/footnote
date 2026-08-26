@@ -2365,6 +2365,15 @@ _REFRESHED_REMOTES: set = set()
 # must not have to pattern-match a message that a rewording could change.
 _TIMED_OUT = "fetch timed out after 60s"
 
+# Remotes whose fetch already burned the full bound in THIS process, keyed by
+# `(cwd, remote)`. A start resolves the base ref and then measures the
+# distance, two fetches of the same remote; without this the second one pays
+# another 60s to re-learn that the network is slow, so a cold start on a bad
+# link stalls for two minutes before printing an unmeasured base either way.
+# Deliberately NOT folded into `_REFRESHED_REMOTES`: that set means "this ref
+# is fresh", and a timeout proves the opposite.
+_TIMED_OUT_REMOTES: set = set()
+
 
 def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> Tuple[bool, str]:
     """One fetch per (repo, remote, refspec) per process (x-3ae1).
@@ -2381,6 +2390,8 @@ def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> Tuple[bool, str]:
     whole_remote = (str(cwd), remote, ())
     if key in _REFRESHED_REMOTES or whole_remote in _REFRESHED_REMOTES:
         return True, ""
+    if (str(cwd), remote) in _TIMED_OUT_REMOTES:
+        return False, _TIMED_OUT
     try:
         fetched = subprocess.run(
             ["git", "-C", str(cwd), "fetch", "--quiet", remote, *refspec],
@@ -2389,6 +2400,7 @@ def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> Tuple[bool, str]:
             timeout=60,
         )
     except subprocess.TimeoutExpired:
+        _TIMED_OUT_REMOTES.add((str(cwd), remote))
         # A TIMEOUT is not a fetch verdict, and callers must be able to tell it
         # apart. Before this bound existed the fetch simply ran to completion,
         # so treating a slow-but-working network as a hard failure would refuse
@@ -2426,8 +2438,14 @@ def _truthful_base(cwd: Path, base_label: str) -> str:
         # function exists to refuse. Fetching `origin main` and then measuring
         # against a local `main` would print a confident, wrong distance.
         return f"{base_label} behind=unmeasured (base names no remote ref)"
-    if not _refresh_remote(cwd, remote, branch)[0]:
-        return f"{base_label} behind=unmeasured (fetch failed)"
+    ok, err = _refresh_remote(cwd, remote, branch)
+    if not ok:
+        # Name the CAUSE. "fetch failed" over a timeout is the same
+        # absence-as-verdict this receipt exists to delete: a slow network and
+        # a refused remote are different facts, and only one of them means the
+        # base is unreachable.
+        why = "fetch timed out" if err == _TIMED_OUT else "fetch failed"
+        return f"{base_label} behind=unmeasured ({why})"
     count = _git_out(cwd, "rev-list", "--count", f"HEAD..{bare}")
     count = (count or "").strip()
     if not count.isdigit():

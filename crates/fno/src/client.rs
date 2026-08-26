@@ -7949,10 +7949,17 @@ impl View {
                 DisplayRow::IdleFold {
                     hidden, expanded, ..
                 } => {
+                    // (x-d401) `+N more`, not `+N idle`. The fold now covers
+                    // `Unmeasured` rows as well as `Idle` and `Empty` ones, and
+                    // a row with NO reading counted under the word "idle" is
+                    // this branch's own defect: a label asserting a measurement
+                    // nothing took. `more` states only what is true of every
+                    // folded row - that it is hidden - and pairs with the
+                    // `- fewer` the expanded form already prints.
                     let label = if expanded {
                         "    - fewer".to_string()
                     } else {
-                        format!("    +{hidden} idle")
+                        format!("    +{hidden} more")
                     };
                     (label, cell_flags::DIM, Color::Default)
                 }
@@ -8841,11 +8848,16 @@ fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Rev
 /// every bg worker as `attention`, drove `idle_budget` to zero and killed the
 /// fold outright on any real fleet.
 ///
-/// Folding an unmeasured row does NOT re-hide what the split exposed: the
-/// GLYPH still says `?` wherever the row renders. This predicate is display
-/// density, not truth. Attention states (`Blocked`, `Working`, `DoneUnseen`)
-/// are enumerated by exclusion here on purpose - a state added later does not
-/// fold, so a new signal fails VISIBLE rather than silently hidden.
+/// Folding an unmeasured row is safe only because the fold row says `+N more`
+/// rather than `+N idle`. An earlier revision of this comment claimed the `?`
+/// glyph carried the honesty "wherever the row renders", which is exactly
+/// wrong for a row the fold REMOVED: the count would then have stood in for a
+/// measurement nothing took, on the surface this branch exists to fix. The
+/// label carries it instead, and it asserts only that the rows are hidden.
+///
+/// This predicate is display density, not truth. Attention states (`Blocked`,
+/// `Working`, `DoneUnseen`) are enumerated by exclusion on purpose - a state
+/// added later does not fold, so a new signal fails VISIBLE, never hidden.
 fn is_idle_row(a: &AgentRow) -> bool {
     !a.exited
         && matches!(
