@@ -1754,14 +1754,30 @@ fn live_set_or_unknown() -> Option<std::collections::HashSet<String>> {
 
 fn add_agent_evidence(
     agent: &crate::agents_view::RegistryAgent,
-    target: &mut std::collections::HashSet<String>,
+    evidence: &mut crate::squad_store::MemberEvidence,
+    liveness: crate::agents_view::Liveness,
 ) {
-    target.insert(agent.name.clone());
+    let mut add = |identity: &str| match liveness {
+        crate::agents_view::Liveness::Alive => evidence.add_live(identity),
+        crate::agents_view::Liveness::Dead => evidence.add_dead(identity),
+        crate::agents_view::Liveness::Unmeasured => {}
+    };
+    if let (Some(harness), Some(session_id)) =
+        (agent.harness.as_deref(), agent.effective_identity())
+    {
+        match liveness {
+            crate::agents_view::Liveness::Alive => evidence.add_live_pair(harness, session_id),
+            crate::agents_view::Liveness::Dead => evidence.add_dead_pair(harness, session_id),
+            crate::agents_view::Liveness::Unmeasured => {}
+        }
+        return;
+    }
+    add(&agent.name);
     if let Some(id) = agent.attach_id.as_deref() {
-        target.insert(id.to_string());
+        add(id);
     }
     if let Some(id) = agent.effective_identity() {
-        target.insert(id.to_string());
+        add(id);
     }
 }
 
@@ -1779,15 +1795,21 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
             if a.kind() == std::io::ErrorKind::NotFound
                 && b.kind() == std::io::ErrorKind::NotFound
     );
-    let mut live = std::collections::HashSet::new();
-    let mut dead = std::collections::HashSet::new();
+    let mut evidence = crate::squad_store::MemberEvidence::from_sets(
+        std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
+    );
     let now = crate::squad_store::now_epoch_secs().unwrap_or_default() as u64;
     if let Ok(raw) = registry {
         if let Some(rows) = crate::agents_view::derive_rows(&raw, now) {
             for row in rows {
                 match row.liveness {
-                    crate::agents_view::Liveness::Alive => add_agent_evidence(&row, &mut live),
-                    crate::agents_view::Liveness::Dead => add_agent_evidence(&row, &mut dead),
+                    crate::agents_view::Liveness::Alive => {
+                        add_agent_evidence(&row, &mut evidence, row.liveness)
+                    }
+                    crate::agents_view::Liveness::Dead => {
+                        add_agent_evidence(&row, &mut evidence, row.liveness)
+                    }
                     crate::agents_view::Liveness::Unmeasured => {}
                 }
             }
@@ -1796,8 +1818,8 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
     if let Ok(raw) = roster {
         if let Some(rows) = crate::agents_view::parse_roster(&raw) {
             for row in rows {
-                live.insert(row.name);
-                live.insert(row.short_id);
+                evidence.add_live(row.name);
+                evidence.add_live(row.short_id);
             }
         }
     }
@@ -1821,20 +1843,25 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
             // A historical name or short id can be reused by a later worker.
             // Only the full harness session id is an exact terminal identity;
             // an event without it is diagnostic, not sweep authority.
-            if let Some(value) = data
-                .get("harness_session_id")
+            let harness = data
+                .get("harness")
+                .or_else(|| data.get("provider"))
                 .and_then(|v| v.as_str())
-                .filter(|value| !value.is_empty())
-            {
-                dead.insert(value.to_string());
+                .filter(|value| !value.is_empty());
+            if let (Some(harness), Some(value)) = (
+                harness,
+                data.get("harness_session_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|value| !value.is_empty()),
+            ) {
+                evidence.add_dead_pair(harness, value);
             }
         }
     }
     if complete_empty {
-        crate::squad_store::MemberEvidence::from_complete_live_set(live)
-    } else {
-        crate::squad_store::MemberEvidence::from_sets(live, dead)
+        evidence.mark_complete_attach_set();
     }
+    evidence
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2013,7 +2040,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             0,
             0,
             0,
-            !dry_run,
+            false,
             Some(detail),
         )
     } else if dry_run {

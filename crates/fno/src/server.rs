@@ -6055,9 +6055,19 @@ impl Core {
     /// standalone workspace-prune verb consumes. Unknown rows contribute no
     /// verdict; only a positive `Alive` or `Dead` reading enters a set.
     fn member_evidence(&self) -> crate::squad_store::MemberEvidence {
-        let mut live = HashSet::new();
-        let mut dead = HashSet::new();
+        let mut evidence =
+            crate::squad_store::MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         for agent in &self.agents {
+            if let (Some(harness), Some(session_id)) =
+                (agent.harness.as_deref(), agent.effective_identity())
+            {
+                match agent.liveness {
+                    agents_view::Liveness::Alive => evidence.add_live_pair(harness, session_id),
+                    agents_view::Liveness::Dead => evidence.add_dead_pair(harness, session_id),
+                    agents_view::Liveness::Unmeasured => {}
+                }
+                continue;
+            }
             let mut keys = Vec::new();
             keys.push(agent.name.as_str());
             if let Some(id) = agent.attach_id.as_deref() {
@@ -6067,13 +6077,19 @@ impl Core {
                 keys.push(id);
             }
             let target = match agent.liveness {
-                agents_view::Liveness::Alive => &mut live,
-                agents_view::Liveness::Dead => &mut dead,
+                agents_view::Liveness::Alive => true,
+                agents_view::Liveness::Dead => false,
                 agents_view::Liveness::Unmeasured => continue,
             };
-            target.extend(keys.into_iter().map(str::to_string));
+            for key in keys {
+                if target {
+                    evidence.add_live(key);
+                } else {
+                    evidence.add_dead(key);
+                }
+            }
         }
-        crate::squad_store::MemberEvidence::from_sets(live, dead)
+        evidence
     }
 
     fn dead_sweep_count(&self) -> usize {

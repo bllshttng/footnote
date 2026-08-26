@@ -371,9 +371,9 @@ fn prune_reaps_dead_workers_and_keeps_the_live_worker() {
     std::fs::write(
         s.dir.join("events.jsonl"),
         concat!(
-            r#"{"type":"agent_row_reaped","data":{"name":"dead-worker-one","harness_session_id":"01abcdef-dead-one"}}"#,
+            r#"{"type":"agent_row_reaped","data":{"name":"dead-worker-one","provider":"codex","harness_session_id":"01abcdef-dead-one"}}"#,
             "\n",
-            r#"{"type":"agent_removed","data":{"name":"dead-worker-two","harness_session_id":"01abcdef-dead-two"}}"#,
+            r#"{"type":"agent_removed","data":{"name":"dead-worker-two","provider":"claude","harness_session_id":"01abcdef-dead-two"}}"#,
         ),
     )
     .unwrap();

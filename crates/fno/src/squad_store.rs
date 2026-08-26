@@ -724,6 +724,8 @@ pub enum MemberLiveness {
 pub struct MemberEvidence {
     live: std::collections::HashSet<String>,
     dead: std::collections::HashSet<String>,
+    live_pairs: std::collections::HashSet<(String, String)>,
+    dead_pairs: std::collections::HashSet<(String, String)>,
     complete_attach_set: bool,
 }
 
@@ -735,6 +737,8 @@ impl MemberEvidence {
         Self {
             live,
             dead,
+            live_pairs: std::collections::HashSet::new(),
+            dead_pairs: std::collections::HashSet::new(),
             complete_attach_set: false,
         }
     }
@@ -746,6 +750,8 @@ impl MemberEvidence {
         Self {
             live,
             dead: std::collections::HashSet::new(),
+            live_pairs: std::collections::HashSet::new(),
+            dead_pairs: std::collections::HashSet::new(),
             complete_attach_set: true,
         }
     }
@@ -754,7 +760,41 @@ impl MemberEvidence {
         self.dead.insert(identity.into());
     }
 
+    pub fn add_live(&mut self, identity: impl Into<String>) {
+        self.live.insert(identity.into());
+    }
+
+    pub fn mark_complete_attach_set(&mut self) {
+        self.complete_attach_set = true;
+    }
+
+    pub fn add_live_pair(&mut self, harness: impl Into<String>, session_id: impl Into<String>) {
+        self.live_pairs.insert((harness.into(), session_id.into()));
+    }
+
+    pub fn add_dead_pair(&mut self, harness: impl Into<String>, session_id: impl Into<String>) {
+        self.dead_pairs.insert((harness.into(), session_id.into()));
+    }
+
     pub fn verdict(&self, member: &StoredMember) -> MemberLiveness {
+        if member.harness_session_id.is_some() {
+            let Some(harness) = member.harness.as_deref() else {
+                return if member.tombstone {
+                    MemberLiveness::Dead
+                } else {
+                    MemberLiveness::Unknown
+                };
+            };
+            let session_id = member.harness_session_id.as_deref().expect("checked above");
+            let pair = (harness.to_string(), session_id.to_string());
+            if self.live_pairs.contains(&pair) {
+                return MemberLiveness::Live;
+            }
+            if self.dead_pairs.contains(&pair) || member.tombstone {
+                return MemberLiveness::Dead;
+            }
+            return MemberLiveness::Unknown;
+        }
         let keys = [
             (!member.attach_id.is_empty()).then_some(member.attach_id.as_str()),
             member.worker.as_deref(),
@@ -766,9 +806,8 @@ impl MemberEvidence {
             .any(|key| self.live.contains(key))
         {
             MemberLiveness::Live
-        } else if member.tombstone {
-            MemberLiveness::Dead
-        } else if self.complete_attach_set && !member.attach_id.is_empty()
+        } else if member.tombstone
+            || (self.complete_attach_set && !member.attach_id.is_empty())
             || keys
                 .into_iter()
                 .flatten()

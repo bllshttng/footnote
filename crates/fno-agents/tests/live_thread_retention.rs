@@ -39,12 +39,13 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         crown_scope: None,
         liveness: Liveness::Alive,
     };
-    let evidence = MemberEvidence::from_sets(
+    let mut evidence = MemberEvidence::from_sets(
         [worker.to_string(), session_id.to_string()]
             .into_iter()
             .collect(),
         std::collections::HashSet::new(),
     );
+    evidence.add_live_pair(harness, session_id);
     assert_eq!(evidence.verdict(&member), MemberLiveness::Live);
     let sideline = AgentRow {
         squad: Some(7),
