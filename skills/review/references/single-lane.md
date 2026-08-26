@@ -139,6 +139,8 @@ Surface up to 8 additional candidates, each naming a defect not already on the l
 
 The report opens with one scope line and ends with one verdict line. The scope line is `Scope: first-round` on a full review, `Scope: incremental` on a narrowed round, or `Scope: full-scope (prior report unreadable; inspect failed)` after a failed inspection forced the wider scope. The verdict line is `Verdict: pass` or `Verdict: fail`, and it mirrors the classifier: pass only when the blocking count is zero and no carried finding is unresolved.
 
+The resolved route line comes from the one seam: `fno do review resolve-level <level>` prints the full record (level, level_source, band, effort, model, provider, degraded_max), and the report carries it verbatim so a reader never has to reconstruct what ran.
+
 Between them the report carries, in order: the resolved route line (level, band, effort, model, provider), the findings ranked most-severe first, the REFUTED section, the dropped-unverifiable names, and any carried findings with their tags.
 
 Each REFUTED entry is one line in the exact shape:

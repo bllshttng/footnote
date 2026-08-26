@@ -20,22 +20,29 @@ from typing import Optional
 from fno.adapters.providers import benchmarks as bm
 
 # A benchmark row's ``coding_percentile`` decides its band; a tier is a MINIMUM,
-# so a model "clears" it by landing at that floor or above.
-_BAND_FLOOR = {"low": 50, "medium": 70, "high": 90}
+# so a model "clears" it by landing at that floor or above. `max` is the one
+# deliberate asymmetry: its floor sits above high's, and a max request takes
+# the STRONGEST reachable model rather than the cheapest that clears, because
+# max semantics invert the cheapest-clearing rule.
+_BAND_FLOOR = {"low": 50, "medium": 70, "high": 90, "max": 95}
 
 # Static fallback order per tier (no snapshot -> no percentiles to compare):
 # requested band first, then higher bands (they clear the minimum), then lower
-# bands as a last-resort degrade before the provider default.
+# bands as a last-resort degrade before the provider default. `max` never
+# degrades UP (nothing sits above it) and degrades down only inside the same
+# provider; a max answered by the high band is recorded as degraded, never
+# presented as a max (review_level._degraded_max reads the chain for it).
 _STATIC_FALLTHROUGH = {
+    "max": ["max", "high", "medium", "low"],
     "high": ["high", "medium", "low"],
     "medium": ["medium", "high", "low"],
     "low": ["low", "medium", "high"],
 }
 
 _GRID_CANDIDATES = {
-    "high": ["claude-opus-4-8", "gpt-5.5"],
-    "medium": ["claude-sonnet-5", "gpt-5.4", "glm-5.3"],
-    "low": ["glm-4.7", "claude-haiku-4-5"],
+    "high": ["claude-opus-5", "gpt-5.6-sol"],
+    "medium": ["claude-sonnet-5", "glm-5.3[1m]", "gpt-5.6-terra"],
+    "low": ["glm-4.7", "claude-haiku-4-5", "gpt-5.6-luna"],
 }
 
 
@@ -159,6 +166,21 @@ def resolve_tier(
     if snapshot and snapshot.get("models"):
         models = _reachable_models_with_pct(snapshot, provider)
         floor = _BAND_FLOOR[band]
+        if band == "max":
+            # The inversion the max band exists for: strongest reachable, not
+            # cheapest that clears. A strongest pick below the floor degrades
+            # LOUDLY in the chain (review_level reads it as degraded_max).
+            if models:
+                name, pct = max(models, key=lambda t: (t[1], t[0]))
+                if pct >= floor:
+                    chain.append(f"snapshot band(>={floor}) -> {name}")
+                else:
+                    chain.append(
+                        f"snapshot band(>={floor}) degrade -> {name} (best {pct} < {floor})"
+                    )
+                return name, chain
+            chain.append("snapshot has no reachable model -> provider default")
+            return None, chain
         clearing = [(n, p) for (n, p) in models if p >= floor]
         if clearing:
             # cheapest that clears the floor = lowest percentile (a

@@ -113,7 +113,7 @@ def test_difficulty_grid_precedes_defaults_when_capacity_is_known(monkeypatch):
         model="default-model",
     )
     assert "--harness" in result and "codex" in result
-    assert "--model" in result and "gpt-5.5" in result
+    assert "--model" in result and "gpt-5.6-sol" in result
     assert "default-model" not in result
 
 
@@ -156,7 +156,7 @@ def test_pinned_lane_flags_suppress_difficulty_grid(monkeypatch):
         assert "--harness" not in result
         assert "codex" not in result
         assert "default-model" in result
-    assert "gpt-5.5" not in result
+    assert "gpt-5.6-sol" not in result
 
 
 def test_ac3_bare_spawn_inherits_provider_and_model():

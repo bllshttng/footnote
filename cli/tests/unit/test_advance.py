@@ -470,7 +470,7 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
     cmd = captured["cmd"]
     i = cmd.index("--harness")
     assert cmd[i + 1] == "codex"
-    assert "gpt-5.5" in cmd
+    assert "gpt-5.6-sol" in cmd
 
 
 def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
@@ -494,7 +494,7 @@ def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     cmd = captured["cmd"]
     i = cmd.index("--harness")
     assert cmd[i + 1] == "claude"
-    assert "gpt-5.5" not in cmd
+    assert "gpt-5.6-sol" not in cmd
 
 
 def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_path):
