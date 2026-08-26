@@ -9980,20 +9980,42 @@ def cmd_reconcile(
     # x-baef: leftover model_tier rows read as no band everywhere now (the
     # compat read died with the field), so the daily sweep names them until
     # the one-shot migration clears the key. Self-extinguishing: zero rows,
-    # zero lines, and the migrated graph never trips it again.
-    _retired_tier_rows = [
+    # zero lines, and the migrated graph never trips it again. The two row
+    # shapes get different prescriptions because the migration refuses
+    # both-spellings rows - naming the verb for one of those would promise a
+    # verdict the verb cannot deliver.
+    _migratable = sorted(
         str(e.get("id", "?"))
         for e in entries
-        if isinstance(e, dict) and e.get("model_tier") is not None
-    ]
-    if _retired_tier_rows:
+        if isinstance(e, dict)
+        and e.get("model_tier") is not None
+        and e.get("difficulty") is None
+    )
+    _conflicted = sorted(
+        str(e.get("id", "?"))
+        for e in entries
+        if isinstance(e, dict)
+        and e.get("model_tier") is not None
+        and e.get("difficulty") is not None
+    )
+    if _migratable:
         typer.echo(
-            f"reconcile: {len(_retired_tier_rows)} row(s) still carry the retired "
-            "model_tier key ("
-            + ", ".join(_retired_tier_rows[:5])
-            + ("..." if len(_retired_tier_rows) > 5 else "")
+            f"reconcile: {len(_migratable)} row(s) still carry the retired "
+            "model_tier key and no difficulty ("
+            + ", ".join(_migratable[:5])
+            + ("..." if len(_migratable) > 5 else "")
             + "); they read as no difficulty band - run `fno backlog "
             "migrate-difficulty --apply`",
+            err=True,
+        )
+    if _conflicted:
+        typer.echo(
+            f"reconcile: {len(_conflicted)} row(s) carry BOTH difficulty and "
+            "the retired model_tier ("
+            + ", ".join(_conflicted[:5])
+            + ("..." if len(_conflicted) > 5 else "")
+            + "); migrate-difficulty refuses them - drop the model_tier key "
+            "by hand",
             err=True,
         )
     if pr_number is not None:

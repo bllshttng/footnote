@@ -102,3 +102,31 @@ def test_migrate_difficulty_survives_null_history(tmp_graph):
     assert row["difficulty"] == "high"
     assert "model_tier" not in row
     assert [h["source"] for h in row["difficulty_history"]] == ["migration"]
+
+
+def test_migrate_difficulty_normalizes_and_refuses_bad_bands(tmp_graph):
+    """The migration is a difficulty writer, so it runs the same
+    normalize_difficulty every other writer runs: case variants fold, and a
+    value that is not a band is refused by id instead of migrated verbatim
+    under a success receipt."""
+    tmp_graph.write_text(json.dumps({"entries": [
+        {"id": "x-0003", "model_tier": "HIGH"},
+        {"id": "x-0004", "model_tier": "turbo"},
+    ]}))
+    r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r.exit_code == 2, r.output
+    assert "x-0004='turbo'" in r.output
+    rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+    # refused before any write: the good row is untouched too
+    assert rows["x-0003"]["model_tier"] == "HIGH"
+    assert "difficulty" not in rows["x-0003"]
+    assert "difficulty" not in rows["x-0004"]
+
+    tmp_graph.write_text(json.dumps({"entries": [
+        {"id": "x-0003", "model_tier": "HIGH"},
+    ]}))
+    r2 = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r2.exit_code == 0, r2.output
+    row = json.loads(tmp_graph.read_text())["entries"][0]
+    assert row["difficulty"] == "high"
+    assert row["difficulty_history"][-1]["value"] == "high"

@@ -77,8 +77,18 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
     The compat window closed with zero rows carrying both spellings (measured
     across the whole graph 2026-08-26), so a row holding both today means a
     writer re-added the retired key after the tombstone; that row is refused
-    rather than guessed at.
+    rather than guessed at. Bands run through ``normalize_difficulty`` like
+    every other difficulty writer - a value that does not normalize is
+    refused by id, never migrated verbatim under a success receipt.
     """
+    from fno.graph._constants import normalize_difficulty
+
+    def _band_of(row: dict) -> str | None:
+        try:
+            return normalize_difficulty(row.get("model_tier"))
+        except ValueError:
+            return None
+
     conflict_ids = sorted(
         str(row.get("id", "?"))
         for row in entries
@@ -90,6 +100,18 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
         raise ValueError(
             "rows carry both difficulty and model_tier; resolve by hand "
             "before migrating: " + ", ".join(conflict_ids)
+        )
+    invalid = sorted(
+        f"{row.get('id', '?')}={row.get('model_tier')!r}"
+        for row in entries
+        if isinstance(row, dict)
+        and row.get("model_tier") is not None
+        and _band_of(row) is None
+    )
+    if invalid:
+        raise ValueError(
+            "model_tier values that are not a difficulty band; fix or drop "
+            "them by hand before migrating: " + ", ".join(invalid)
         )
     pending = [
         row for row in entries
@@ -105,7 +127,8 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
 
     now = datetime.now(timezone.utc).isoformat()
     for row in pending:
-        band = row.pop("model_tier")
+        band = _band_of(row) or normalize_difficulty(row.pop("model_tier"))
+        row.pop("model_tier", None)
         row["difficulty"] = band
         # `or []`, not setdefault: a hand-edited row can carry
         # ``difficulty_history: null`` and setdefault would return that null

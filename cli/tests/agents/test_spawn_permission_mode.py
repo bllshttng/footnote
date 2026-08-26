@@ -416,7 +416,7 @@ def test_think_worker_scopes_tier_to_resolved_dispatch_harness(monkeypatch):
     monkeypatch.setattr(
         spawn_think._route_resolve,
         "node_model",
-        lambda node, provider: model_scopes.append(provider) or "codex-tier-model",
+        lambda node, provider, **_kw: model_scopes.append(provider) or "codex-tier-model",
     )
 
     spawn_think._spawn_think_worker(

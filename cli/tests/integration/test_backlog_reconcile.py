@@ -664,23 +664,39 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
 def test_reconcile_names_leftover_model_tier_rows(cli_env, monkeypatch):
     """x-baef: leftover model_tier rows read as no difficulty band now, so
     the daily sweep names them and the migration verb until the key is gone;
-    the advisory self-extinguishes once it is."""
+    the advisory self-extinguishes once it is. A both-spellings row gets the
+    by-hand prescription, because the migration verb refuses exactly those."""
     graph_path, _sentinel_dir = cli_env
     _make_graph(graph_path, [
         _node("ab-legacy", model_tier="high"),
         _node("ab-current", difficulty="low"),
+        _node("ab-both", model_tier="high", difficulty="low"),
     ])
 
     result = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "ab-legacy" in result.output
     assert "migrate-difficulty" in result.output
-    assert "ab-current" not in result.output.split("model_tier key (")[-1].split(")")[0]
+    assert "ab-both" in result.output
+    assert "by hand" in result.output
 
     runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    # the verb is all-or-nothing: the both-spellings row makes it refuse the
+    # whole batch, so the sweep's by-hand prescription for that row is the
+    # verdict the verb actually delivers
+    rows = {e["id"]: e for e in _read_entries(graph_path)}
+    assert rows["ab-legacy"].get("model_tier") == "high"
+    # hand-resolve the conflict the way the advisory says, then migrate
+    _make_graph(graph_path, [
+        _node("ab-legacy", model_tier="high"),
+        _node("ab-current", difficulty="low"),
+        _node("ab-both", difficulty="low"),
+    ])
+    r_mig = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r_mig.exit_code == 0, r_mig.output
     result2 = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
     assert result2.exit_code == 0, result2.output
-    assert "migrate-difficulty" not in result2.output
+    assert "model_tier" not in result2.output
 
 
 def test_reconcile_routes_rest_merge_evidence_and_keeps_repo_scope(cli_env, monkeypatch):
