@@ -1269,16 +1269,15 @@ def _refuse_surfaceless_intake(paths: list[str], *, allow_no_surface: bool) -> N
     """Refuse intake of a plan that states no comparable file surface.
 
     A plan whose ``## Files to Modify`` parses to an empty set - which is also
-    what a missing or unreadable plan file parses to - cannot be
-    collision-checked, so lane fill dispatches it fail-open
-    (``unevaluated:no-surface``). This refusal bounds the intake lane: the
-    plan-less ``idea``/``add``/``new`` nodes and a later ``backlog update
-    --plan-path`` bind are other routes onto the board and keep the loud
-    fail-open dispatch. Exits 2 naming the first offending path before any
-    graph write.
+    what an unreadable plan file parses to - cannot be collision-checked, so
+    lane fill dispatches it fail-open (``unevaluated:no-surface``). This
+    refusal bounds the intake lane: the plan-less ``idea``/``add``/``new``
+    nodes and a later ``backlog update --plan-path`` bind are other routes
+    onto the board and keep the loud fail-open dispatch. ``allow_no_surface``
+    admits a surface-less plan; a MISSING plan is refused either way - the
+    flag is an override for empty tables, not a license to bind nothing.
+    Exits 2 naming the first offending path before any graph write.
     """
-    if allow_no_surface:
-        return
     import typer
 
     from fno.graph.collision import has_file_surface
@@ -1290,20 +1289,20 @@ def _refuse_surfaceless_intake(paths: list[str], *, allow_no_surface: bool) -> N
         # expands it at dispatch, so refusing it here would break a plan that
         # works end to end.
         target = Path(p).expanduser()
-        if target.exists():
-            if has_file_surface(target):
-                continue
-            typer.echo(
-                f"Error: {p} states no comparable file surface (## Files to "
-                "Modify parses empty); add rows or pass --allow-no-surface",
-                err=True,
-            )
-        else:
+        if not target.exists():
             typer.echo(
                 f"Error: plan file not found: {p}. Check the path spelling; a "
                 "missing plan has no file table either.",
                 err=True,
             )
+            raise typer.Exit(code=2)
+        if allow_no_surface or has_file_surface(target):
+            continue
+        typer.echo(
+            f"Error: {p} states no comparable file surface (## Files to "
+            "Modify parses empty); add rows or pass --allow-no-surface",
+            err=True,
+        )
         raise typer.Exit(code=2)
 
 

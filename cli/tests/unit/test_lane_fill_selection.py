@@ -141,10 +141,12 @@ def test_skips_node_a_peer_lane_already_holds(tmp_path, monkeypatch):
     assert [n["id"] for n in sel] == ["n-b"]
 
 
-def test_domain_unset_nodes_dispatch_fail_open_together(tmp_path, monkeypatch):
+def test_domain_unset_nodes_dispatch_fail_open_together(tmp_path, monkeypatch, caplog):
     """The one-lane-per-unset-domain-bucket rule left with the domain
     guard. Plan-less, domain-less nodes are unevaluated and dispatch
-    fail-open, so two of them co-dispatch instead of collapsing to one lane."""
+    fail-open, so two of them co-dispatch instead of collapsing to one lane -
+    and the SECOND pick warns, because two unknown surfaces now run
+    concurrently and a plan-less pick never joins inflight to say so."""
     ready = [
         {"id": "n-a", "title": "n-a"},  # no domain, no plan
         {"id": "n-b", "domain": None, "title": "n-b"},  # explicit None
@@ -153,9 +155,17 @@ def test_domain_unset_nodes_dispatch_fail_open_together(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
 
-    sel = advance.select_lane_fill(3, claims_root=tmp_path)
+    with caplog.at_level("WARNING"):
+        sel = advance.select_lane_fill(3, claims_root=tmp_path)
 
     assert [n["id"] for n in sel] == ["n-a", "n-b", "n-c"]
+    # n-a is the lone unevaluated pick (riskless, silent); n-b is the second.
+    assert any(
+        "n-b" in r.message for r in caplog.records if "UNEVALUATED" in r.message
+    )
+    assert not any(
+        "n-a" in r.message for r in caplog.records if "UNEVALUATED" in r.message
+    )
 
 
 def test_preview_mode_holds_no_slots(tmp_path, monkeypatch):

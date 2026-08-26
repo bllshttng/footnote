@@ -737,7 +737,9 @@ def select_lane_fill(
                     if reason.startswith(_HIGH_COLLISION_PREFIX):
                         _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
                     continue  # leave it ready; reversible, retried next round
-                if reason is not None and (inflight or "+same-domain:" in reason):
+                if reason is not None and (
+                    inflight or selected or "+same-domain:" in reason
+                ):
                     # Unevaluated (no comparable file surface): dispatch anyway
                     # (fail-open) but say so LOUDLY - a silent pass would read
                     # as "gate clean" when it never ran.
@@ -746,13 +748,15 @@ def select_lane_fill(
                     # nothing to collide against, an unknown surface risks
                     # nothing, and every plan-less node (which is every
                     # `backlog idea` node) would otherwise warn on every
-                    # candidate of every tick. The exception is the
-                    # held-domain annotation: before the guard reorder a held
-                    # domain excluded this candidate outright, so that
-                    # dispatch is new risk, not standing behavior - and a
-                    # surfaceless PEER is dropped from inflight, which would
-                    # otherwise silence the warning on exactly the riskiest
-                    # case. The annotation on the token keeps it armed.
+                    # candidate of every tick. Two dispatch shapes the guard
+                    # reorder turned from excluded to fail-open stay loud even
+                    # with an empty in-flight set: a held domain (the
+                    # annotation on the token - a surfaceless PEER drops out
+                    # of inflight and would otherwise silence the riskiest
+                    # case) and a second unevaluated pick in THIS fill
+                    # (`selected` - two unknown surfaces now run concurrently,
+                    # and a plan-less pick never joins inflight to warn the
+                    # next one).
                     _LOG.warning(
                         "lane-fill: %s file surface UNEVALUATED (%s) - "
                         "dispatching anyway (fail-open)", nid, reason,
@@ -863,6 +867,11 @@ def _classify_lane_candidate(
     if find_lane_slot(node["id"], root=claims_root) is not None:
         return "peer-lane"
     domain = node.get("domain") or _DOMAIN_UNSET
+    # The domain tiebreak as ONE suffix, appended to either unevaluated token
+    # (an unset domain never annotates, so no bare `+same-domain:` is emitted).
+    domain_suffix = (
+        f"+same-domain:{domain}" if domain and domain in used_domains else ""
+    )
     # Unknown file state is its own verdict, not a silent pass: a node whose plan
     # states no comparable surface cannot be collision-checked, so its safety is
     # unevaluated rather than clean (plan Change 1: "serialize unknown ... state").
@@ -878,19 +887,13 @@ def _classify_lane_candidate(
     # whose overlap was never actually compared.
     try:
         if not plan or not has_file_surface(resolve_plan_path(plan)):
-            token = "unevaluated:no-surface"
-            if domain and domain in used_domains:
-                token += f"+same-domain:{domain}"
-            return token
+            return f"unevaluated:no-surface{domain_suffix}"
         hit = _high_collision(node, inflight)
     except Exception as exc:  # noqa: BLE001 - fail open, but as a stated verdict
         _LOG.warning(
             "collision gate UNEVALUATED for %s: %s", node.get("id"), exc,
         )
-        token = f"{_UNEVALUATED_PREFIX}collision-error"
-        if domain and domain in used_domains:
-            token += f"+same-domain:{domain}"
-        return token
+        return f"{_UNEVALUATED_PREFIX}collision-error{domain_suffix}"
     if hit is not None:
         return f"{_HIGH_COLLISION_PREFIX}{hit.with_node_id}"
     return None

@@ -318,6 +318,51 @@ def test_surface_refusal_expands_tilde_paths(tmp_path, monkeypatch):
     _refuse_surfaceless_intake(["~/vault/plan.md"], allow_no_surface=False)
 
 
+def test_intake_missing_plan_refused_even_with_allow_no_surface(
+    fixture_graph, tmp_path, capsys
+):
+    """The flag overrides EMPTY tables, not a missing file: binding a node to
+    a nonexistent plan is the dangling-node hole the not-found refusal closes."""
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(
+            plan_paths=[str(tmp_path / "typo.md")], allow_no_surface=True
+        )
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) == 2
+    assert "plan file not found" in capsys.readouterr().err
+    assert len(_read_entries(fixture_graph)) == 3
+
+
+def test_intake_non_utf8_plan_refuses_cleanly(fixture_graph, tmp_path, capsys):
+    """A plan with a non-UTF-8 byte refuses cleanly, never a UnicodeDecodeError
+    traceback. The single lane hits _prepare_intake's decode ValueError first
+    (exit 1); the multi lane - where the probe runs first - is the crash path
+    the collision parser's containment closes (exit 2 below)."""
+    plan = tmp_path / "latin1.md"
+    plan.write_bytes(
+        b"# Title\n\nplan body\n\n## Files to Modify\n\n| File |\n|---|\n"
+        b"| `caf\xe9.py` | modify |\n"
+    )
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(plan)])
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
+    assert len(_read_entries(fixture_graph)) == 3
+
+    from types import SimpleNamespace
+
+    (tmp_path / "gooddir").mkdir()
+    good = _write_quick_plan(tmp_path / "gooddir", title="Utf8 batch mate")
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _do_intake_multi(args, [str(good), str(plan)], roadmap_id=None, dry_run=False)
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) == 2
+    err = capsys.readouterr().err
+    assert "no comparable file surface" in err
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert not any("Utf8 batch mate" in (t or "") for t in titles)
+
+
 def test_multi_intake_exempts_already_intaked_surfaceless_plan(
     fixture_graph, tmp_path, capsys
 ):
