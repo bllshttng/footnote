@@ -661,6 +661,28 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
     assert node2["completed_at"] == first_ts
 
 
+def test_reconcile_names_leftover_model_tier_rows(cli_env, monkeypatch):
+    """x-baef: leftover model_tier rows read as no difficulty band now, so
+    the daily sweep names them and the migration verb until the key is gone;
+    the advisory self-extinguishes once it is."""
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [
+        _node("ab-legacy", model_tier="high"),
+        _node("ab-current", difficulty="low"),
+    ])
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "ab-legacy" in result.output
+    assert "migrate-difficulty" in result.output
+    assert "ab-current" not in result.output.split("model_tier key (")[-1].split(")")[0]
+
+    runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    result2 = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
+    assert result2.exit_code == 0, result2.output
+    assert "migrate-difficulty" not in result2.output
+
+
 def test_reconcile_routes_rest_merge_evidence_and_keeps_repo_scope(cli_env, monkeypatch):
     """Merged closure uses REST readers and a wrong stored slug cannot fall back."""
     graph_path, _sentinel = cli_env

@@ -107,8 +107,11 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
     for row in pending:
         band = row.pop("model_tier")
         row["difficulty"] = band
-        row.setdefault("difficulty_history", []).append(
-            {"value": band, "source": "migration", "ts": now}
-        )
+        # `or []`, not setdefault: a hand-edited row can carry
+        # ``difficulty_history: null`` and setdefault would return that null
+        # to .append (AttributeError) instead of the conflict-free path.
+        history = row.get("difficulty_history") or []
+        history.append({"value": band, "source": "migration", "ts": now})
+        row["difficulty_history"] = history
     receipt["migrated"] = len(pending)
     return receipt

@@ -9977,6 +9977,25 @@ def cmd_reconcile(
     closure_refused: Optional[str] = None
     supersession_files_by_pr: dict[int, list[str]] = {}
     entries = read_graph(_graph_path())
+    # x-baef: leftover model_tier rows read as no band everywhere now (the
+    # compat read died with the field), so the daily sweep names them until
+    # the one-shot migration clears the key. Self-extinguishing: zero rows,
+    # zero lines, and the migrated graph never trips it again.
+    _retired_tier_rows = [
+        str(e.get("id", "?"))
+        for e in entries
+        if isinstance(e, dict) and e.get("model_tier") is not None
+    ]
+    if _retired_tier_rows:
+        typer.echo(
+            f"reconcile: {len(_retired_tier_rows)} row(s) still carry the retired "
+            "model_tier key ("
+            + ", ".join(_retired_tier_rows[:5])
+            + ("..." if len(_retired_tier_rows) > 5 else "")
+            + "); they read as no difficulty band - run `fno backlog "
+            "migrate-difficulty --apply`",
+            err=True,
+        )
     if pr_number is not None:
         from fno.pr.closure import (
             ClosureQueryError,
@@ -12824,6 +12843,15 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
     from fno.graph._constants import normalize_difficulty
 
     raw_difficulty = frontmatter.get("difficulty")
+    if raw_difficulty is None and frontmatter.get("model_tier") is not None:
+        # Same loss-signal as the intake lane (x-baef): the claim reads the
+        # canonical key only, so a plan still spelling model_tier must hear
+        # the band was dropped rather than wonder why the node has none.
+        typer.echo(
+            f"warning: {plan_path}: frontmatter model_tier is retired and no "
+            "longer read; set difficulty: low|medium|high to carry the band",
+            err=True,
+        )
     for entry in es:
         if entry.get("id") != claim_id:
             continue

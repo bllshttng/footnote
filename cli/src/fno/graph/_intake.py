@@ -1482,6 +1482,14 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     mission_from_msg_id: Optional[str] = fm.get("mission_from_msg_id") or None
 
     raw_difficulty = fm.get("difficulty")
+    if raw_difficulty is None and fm.get("model_tier") is not None:
+        # The compat read died with the field (x-baef); a plan still spelling
+        # the band as model_tier must hear it lost, not lose it silently.
+        sys.stderr.write(
+            f"warning: {spec['plan_path']}: frontmatter model_tier is retired "
+            "and no longer read; set difficulty: low|medium|high to carry "
+            "the band\n"
+        )
     try:
         difficulty = normalize_difficulty(raw_difficulty)
     except ValueError as exc:

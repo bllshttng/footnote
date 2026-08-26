@@ -88,3 +88,17 @@ def test_migrate_difficulty_refuses_rows_carrying_both_spellings(tmp_graph):
         assert "x-0001" in r.output
     row = json.loads(tmp_graph.read_text())["entries"][0]
     assert row["model_tier"] == "high" and row["difficulty"] == "low"
+
+
+def test_migrate_difficulty_survives_null_history(tmp_graph):
+    """A hand-edited row can carry `difficulty_history: null`; setdefault
+    returns that null and .append dies with AttributeError. `or []` instead."""
+    tmp_graph.write_text(json.dumps({"entries": [
+        {"id": "x-0002", "model_tier": "high", "difficulty_history": None},
+    ]}))
+    r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r.exit_code == 0, r.output
+    row = json.loads(tmp_graph.read_text())["entries"][0]
+    assert row["difficulty"] == "high"
+    assert "model_tier" not in row
+    assert [h["source"] for h in row["difficulty_history"]] == ["migration"]

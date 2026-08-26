@@ -23,4 +23,4 @@ fno workspace|fno agents workspace|d-cf2d6fe1
 fno project|fno config project|d-344fe242
 fno yard|fno agents yard|x-6233
 fno runtime|fno agents workspace (retired outright, tombstoned)|d-cf2d6fe1
---model-tier|fno backlog update --difficulty low|medium|high, the work-difficulty axis|x-baef
+--model-tier|fno backlog update --difficulty <band> - the work-difficulty axis (low, medium, high)|x-baef
