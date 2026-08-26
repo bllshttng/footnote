@@ -24858,6 +24858,7 @@ mod tests {
             .is_some_and(|line| line.text.starts_with('┌')));
 
         v.layout.agents.clear();
+        v.sweep_dead_count = 0;
         assert_eq!(v.dead_sweep_count(), 0);
         confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
         assert!(buf.is_empty(), "zero candidates sends no stale sweep");

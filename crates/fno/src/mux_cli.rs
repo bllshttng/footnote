@@ -1818,12 +1818,15 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
             let Some(data) = value.get("data").and_then(|v| v.as_object()) else {
                 continue;
             };
-            for key in ["name", "short_id", "harness_session_id"] {
-                if let Some(value) = data.get(key).and_then(|v| v.as_str()) {
-                    if !value.is_empty() {
-                        dead.insert(value.to_string());
-                    }
-                }
+            // A historical name or short id can be reused by a later worker.
+            // Only the full harness session id is an exact terminal identity;
+            // an event without it is diagnostic, not sweep authority.
+            if let Some(value) = data
+                .get("harness_session_id")
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.is_empty())
+            {
+                dead.insert(value.to_string());
             }
         }
     }

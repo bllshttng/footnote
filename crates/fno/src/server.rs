@@ -17271,6 +17271,32 @@ mod tests {
     }
 
     #[test]
+    fn restore_refuses_a_receipt_when_the_stored_harness_is_unknown() {
+        let member = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("worker".into()),
+            harness: None,
+            harness_session_id: Some("full-session".into()),
+        };
+        let receipts = HashMap::from([(
+            "full-session".into(),
+            HeldWorker {
+                name: "worker".into(),
+                harness: "codex".into(),
+                harness_session_id: "full-session".into(),
+                cwd: "/repo".into(),
+            },
+        )]);
+        assert_eq!(
+            restore_worker_refusal_reason(&member, None, None, &receipts),
+            "harness is unknown"
+        );
+    }
+
+    #[test]
     fn spawn_receipt_removal_events_revoke_resume_facts() {
         let raw = concat!(
             r#"{"type":"agent_spawned","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session","cwd":"/repo","substrate":"pane"}}"#,
