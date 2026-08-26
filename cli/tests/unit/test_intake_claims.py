@@ -789,9 +789,10 @@ def test_reintake_of_already_intaked_plan_stays_idempotent(
     fixture_graph, tmp_path, capsys,
 ):
     """x-baef round-11: the gate sits AFTER the already-intaked short
-    circuit, so an idempotent re-run on a plan whose file is undatable (79
-    vault files carry no created) still no-ops with exit 0 instead of
-    failing on a file it would not touch."""
+    circuit, so an idempotent re-run on a plan whose file is undatable
+    still no-ops with exit 0 instead of failing on a file it would not
+    touch. (The vault corpus is fully dated as of round-12: 6 filename-
+    datable stragglers backfilled, 1 date-less handoff left to refuse.)"""
     plan = tmp_path / "owned.md"
     plan.write_text(f"---\nclaims: ab-1dea1234\n---\n# Owned\n\n{_SURFACE}\n")
     entries = _read_entries(fixture_graph)

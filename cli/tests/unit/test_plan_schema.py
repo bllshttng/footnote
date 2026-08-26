@@ -64,10 +64,13 @@ def test_gate_refuses_every_undatable_created_except_no_frontmatter():
 def test_gate_reads_created_exactly_not_truncated():
     """Round-11: the old [:10] slice bound '2026-08-27xyz' to 2026-08-27
     while the model refused the same string - exact ISO forms only, so a
-    typo'd date is undatable in both scopes alike."""
+    typo'd date is undatable in both scopes alike. Round-12: the basic form
+    and ISO week dates are undatable too - pydantic coerces them differently
+    (timestamp, refusal), so accepting them dated the plan in one scope and
+    broke it in the other."""
     from fno.plan.schema import difficulty_gate_error
 
-    for junk in ("2026-08-27xyz", "2026-08-271"):
+    for junk in ("2026-08-27xyz", "2026-08-271", "20260827", "2026-W35-4"):
         err = difficulty_gate_error({"created": junk, "difficulty": None})
         assert err is not None and "cannot read created" in err, junk
     # Full timestamp and plain date still bind.

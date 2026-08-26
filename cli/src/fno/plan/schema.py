@@ -17,6 +17,7 @@ terminals, matching `status`'s own split (Locked Decision 2).
 from __future__ import annotations
 
 import enum
+import re
 from datetime import date, datetime
 from typing import Any, Literal, Self
 
@@ -24,6 +25,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from fno.company.contracts import CompanyWorkRefs, validate_company_work_for_node
 from fno.plan._status import STATUS_ALIASES, STATUS_PROGRESSION, TERMINAL_STATUSES
+
+#: The created spellings the raw-scope gate dates: YYYY-MM-DD, optionally
+#: with a timestamp after T or a space. Deliberately narrower than
+#: date.fromisoformat (no basic form, no week dates) because pydantic's own
+#: date union reads those shapes differently, and two scopes that disagree
+#: on one file is the drift this helper exists to prevent.
+_ISO_CREATED = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ].*)?$")
 
 # Str-enum built directly from the status axis + terminals. Functional API so
 # the members are *derived*, never hand-listed here - the drift lint asserts
@@ -63,18 +71,20 @@ def difficulty_gate_error(frontmatter: dict) -> str | None:
     elif isinstance(created, date):
         pass  # a YAML-parsed date object is already the answer
     elif isinstance(created, str):
-        # Exact forms only, no [:10] truncation: a junk suffix
-        # ('2026-08-27xyz', '2026-08-271') truncated to a valid date here
-        # while the model's own date validation refused it, so the intake
-        # gate and the model disagreed on the same file.
+        # Exact extended-calendar forms only (the shapes pydantic accepts
+        # for this union): round 11 removed the [:10] truncation, but a bare
+        # fromisoformat still accepted the basic form ('20260827') and ISO
+        # week dates, which pydantic coerces differently (unix timestamp,
+        # refusal) - dating the plan in one scope and breaking it in the
+        # other. Where the strict side refuses, no bandless mint can follow.
         s = created.strip()
-        try:
-            created = datetime.fromisoformat(s).date()
-        except ValueError:
+        if _ISO_CREATED.match(s):
             try:
-                created = date.fromisoformat(s)
+                created = date.fromisoformat(s[:10])
             except ValueError:
                 created = None
+        else:
+            created = None
     else:
         # int/list/None-ish scalars: an unquoted YAML int (20260827) would
         # otherwise fall through the isinstance(date) test and bypass the

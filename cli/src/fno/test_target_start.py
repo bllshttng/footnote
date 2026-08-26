@@ -1119,6 +1119,34 @@ def test_start_bare_tiered_node_threads_resolved_model(monkeypatch, tmp_path):
     assert "model=claude-sonnet-5 (task-pin)" in result.stdout
 
 
+def test_start_seam_resolves_difficulty_only_when_harness_pinned(monkeypatch, tmp_path):
+    """x-baef round-12: the start seam passes include_difficulty=bool(harness).
+    A pinned --harness reaches the worker's spawn argv and stands the
+    capacity grid down, so the band must resolve statically; unpinned, the
+    band defers to the grid and the resolver must not read it. A regression
+    that flips or drops the kwarg at the seam fails here, not in production.
+    """
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _wire_start(monkeypatch, wt)
+    seen: list[bool] = []
+
+    def fake_resolve(nid, explicit=None, provider=None, include_difficulty=False, **_kw):
+        seen.append(include_difficulty)
+        return ("claude-sonnet-5", "task-pin")
+
+    monkeypatch.setattr(target_cli, "_resolve_node_model", fake_resolve)
+
+    r1 = runner.invoke(target_app, ["start", "x-d7a7"])
+    assert r1.exit_code == 0, r1.stdout
+    assert seen == [False], "bare start defers the band to the capacity grid"
+
+    seen.clear()
+    r2 = runner.invoke(target_app, ["start", "x-d7a7", "--harness", "codex"])
+    assert r2.exit_code == 0, r2.stdout
+    assert seen == [True], "a pinned --harness resolves the band statically"
+
+
 def test_start_explicit_model_wins_over_tier(monkeypatch, tmp_path):
     """AC1-EDGE: an explicit -m wins and the node is never loaded to read a tier."""
     wt = tmp_path / "wt"

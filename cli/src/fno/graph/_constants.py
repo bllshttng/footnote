@@ -347,6 +347,30 @@ def append_difficulty_history(
     history.append({"value": value, "source": source, "ts": ts})
     row["difficulty_history"] = history
 
+
+def write_canonical_difficulty(
+    row: dict, band: str | None, source: str, ts: str, *, history_on: str
+) -> None:
+    """Write the canonical band, drain the retired spelling, attribute.
+
+    The ONE canonical-write shape (x-baef): the drain must ride the write,
+    because leaving ``model_tier`` behind manufactures a both-spellings row
+    the migration refuses batch-wide, with no verb left that can remove the
+    key (its flag is a tombstone). ``history_on``: ``"change"`` (update - a
+    manual revision that keeps the band is a no-op) or ``"always"`` (claim -
+    the filed-versus-revised delta counts confirmations too).
+    """
+    if history_on not in ("change", "always"):
+        raise ValueError(f"history_on must be 'change' or 'always', got {history_on!r}")
+    prior = row.get("difficulty")
+    row.pop("model_tier", None)
+    # A null clear on a bandless row leaves the key ABSENT (the shape the
+    # birth paths and the null-clear tests assert), never writes null.
+    if band is not None or "difficulty" in row:
+        row["difficulty"] = band
+    if history_on == "always" or band != prior:
+        append_difficulty_history(row, band, source, ts)
+
 # Tags (x-6c2b wave 1): lowercase-kebab only, so they mirror cleanly into
 # Obsidian frontmatter `tags:` and stay legible as Base/tag-search filters.
 TAG_CHARSET_RE = re.compile(r"^[a-z0-9-]+$")

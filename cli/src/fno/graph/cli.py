@@ -3773,23 +3773,18 @@ def cmd_update(
             except ValueError as exc:
                 typer.echo(f"fno backlog update: {exc}", err=True)
                 raise typer.Exit(code=2)
-            # The canonical write supersedes the retired spelling: leaving
-            # model_tier behind here would manufacture a both-spellings row
-            # the migration then refuses batch-wide, with no verb left that
-            # can remove the retired key (its own flag is a tombstone now).
-            node.pop("model_tier", None)
-            if revised_difficulty != node.get("difficulty"):
-                node["difficulty"] = revised_difficulty
-                # Same attributable trail the birth paths keep: a manual
-                # revision is the estimate most likely to have changed hands.
-                from fno.graph._constants import append_difficulty_history
+            # The one canonical-write shape, shared with the claim lane: the
+            # drain rides the write, and a manual revision that keeps the
+            # band is a no-op on the history trail.
+            from fno.graph._constants import write_canonical_difficulty
 
-                append_difficulty_history(
-                    node,
-                    revised_difficulty,
-                    "update",
-                    datetime.now(timezone.utc).isoformat(),
-                )
+            write_canonical_difficulty(
+                node,
+                revised_difficulty,
+                "update",
+                datetime.now(timezone.utc).isoformat(),
+                history_on="change",
+            )
         if model is not None:
             node["model"] = None if model.lower() == "null" else model
         if type_ is not None:
@@ -12900,18 +12895,17 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                     err=True,
                 )
             else:
-                entry["difficulty"] = revised_difficulty
-                # Same drain cmd_update got: the canonical write supersedes
-                # the retired spelling, or the claim would re-leave a
-                # migration-refusing both-spellings row behind.
-                entry.pop("model_tier", None)
-                from fno.graph._constants import append_difficulty_history
+                # The one canonical-write shape, shared with cmd_update; the
+                # claim records every canonical write (the filed-versus-
+                # revised delta counts confirmations too).
+                from fno.graph._constants import write_canonical_difficulty
 
-                append_difficulty_history(
+                write_canonical_difficulty(
                     entry,
                     revised_difficulty,
                     "blueprint",
                     datetime.now(timezone.utc).isoformat(),
+                    history_on="always",
                 )
         if (
             claimed_type != DEFAULT_NODE_TYPE
