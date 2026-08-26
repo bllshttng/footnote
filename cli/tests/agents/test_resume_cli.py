@@ -68,11 +68,19 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
     )
     assert res.exit_code == 0
     assert res.exec_argv[0] == "codex"
-    assert res.exec_argv[-2:] == [
-        "resume",
-        "00000000-1111-2222-3333-444444444444",
-    ]
+    # The subcommand and the full session id come from the capability
+    # contract, in that order. Asserted by relative position rather than by
+    # tail slice: modal-clearing flags are appended after the id, which the
+    # codex parser accepts.
+    assert "resume" in res.exec_argv
+    sid = "00000000-1111-2222-3333-444444444444"
+    assert res.exec_argv.index("resume") < res.exec_argv.index(sid)
+    # The -c grant is global, so it must still precede the subcommand.
     assert any("writable_roots=" in arg for arg in res.exec_argv)
+    grant_at = next(
+        i for i, a in enumerate(res.exec_argv) if "writable_roots=" in a
+    )
+    assert grant_at < res.exec_argv.index("resume")
     assert res.exec_cwd == "/path/to/workdir"
 
 
@@ -1446,3 +1454,50 @@ def test_script_wrapped_attach_uses_bsd_form_on_real_bsd_platform_strings(monkey
         monkeypatch.setattr("sys.platform", platform)
         cmd = _script_wrapped_attach("deadbeef")
         assert cmd == "script -q /dev/null claude attach deadbeef", platform
+
+
+def test_codex_resume_argv_clears_both_modals_and_places_the_worktree() -> None:
+    """A codex resume must not stop on a prompt, and must land in the row's tree.
+
+    Both modals were answered by hand during the 2026-08-25 fleet recovery:
+    codex's session-directory-vs-current prompt (whose default is the canonical
+    checkout, never the worktree) and the hooks-trust gate that footnote's own
+    Stop hooks trip. With no human attached each is a hang, and the only other
+    way past one is arrow keystrokes at a TUI.
+    """
+    from fno.agents.resume_cli import _build_resume_argv
+
+    argv = _build_resume_argv("codex", "01a03f51-4704-7f33-942a-e4e773d81cfd",
+                              cwd="/tmp/wt/x-04b0")
+    assert argv is not None
+    # The row's own tree, not the session directory codex would otherwise pick.
+    assert "--cd" in argv
+    assert argv[argv.index("--cd") + 1] == "/tmp/wt/x-04b0"
+    # Declared in the capability contract; this lane used to drop it.
+    assert "--dangerously-bypass-approvals-and-sandbox" in argv
+    assert "--dangerously-bypass-hook-trust" in argv
+    # Identity still comes from the contract, and the -c grant stays global,
+    # so it must precede the subcommand.
+    assert argv[0] == "codex"
+    assert "01a03f51-4704-7f33-942a-e4e773d81cfd" in argv
+    assert argv.index("resume") < argv.index("01a03f51-4704-7f33-942a-e4e773d81cfd")
+
+
+def test_codex_resume_argv_omits_cd_when_no_cwd_is_known() -> None:
+    """No cwd means no --cd: a bare flag would fail parsing, and inventing a
+    directory is the wrong-tree failure this lane exists to prevent."""
+    from fno.agents.resume_cli import _build_resume_argv
+
+    argv = _build_resume_argv("codex", "sid-1")
+    assert argv is not None
+    assert "--cd" not in argv
+    # The modal-clearing flags do not depend on cwd, so they still ride along.
+    assert "--dangerously-bypass-hook-trust" in argv
+
+
+def test_non_codex_resume_argv_is_untouched_by_the_codex_modal_flags() -> None:
+    """The additions are codex-specific; no other harness accepts them."""
+    from fno.agents.resume_cli import _build_resume_argv
+
+    argv = _build_resume_argv("opencode", "ses_1", cwd="/tmp/wt/x")
+    assert argv == ["opencode", "--session", "ses_1"]

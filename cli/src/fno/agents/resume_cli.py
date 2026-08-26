@@ -111,14 +111,38 @@ def _build_resume_argv(
     if provider == "codex":
         # A bounded codex cannot write git metadata without an explicit grant,
         # and in a linked worktree that metadata sits outside the workspace
-        # entirely. `codex resume` takes no --add-dir, so the grant rides -c,
-        # which is global and must precede the subcommand.
+        # entirely. The grant rides -c, which is global and must precede the
+        # subcommand. (`codex resume` does accept --add-dir; -c is kept here
+        # because it is what the headless lane already renders, so one grant
+        # builder serves both. Do not "fix" this to --add-dir without moving
+        # the headless lane too, which cannot take it.)
         from pathlib import Path
 
         from fno.agents.harnesses.codex import git_writable_config_args
 
+        from fno.agents.harness_map import capabilities
+
         grant = git_writable_config_args(Path(cwd)) if cwd else []
-        return [argv[0], *grant, *argv[1:]]
+        # Three modal-clearing additions. A resume that stops on a prompt is a
+        # hang with no human attached, and the only other way past one is
+        # arrow keystrokes at a TUI - the lane that reports `typed`, not
+        # delivered. Every flag below parses after the session id (verified
+        # against codex 0.149.1; a clap rejection prints usage instead).
+        #
+        # --cd: without it codex asks session-directory vs current-directory
+        # and defaults to the SESSION directory, which is the canonical
+        # checkout recorded at spawn rather than the worktree the row works
+        # in. Attended that is a wrong default a human must catch; unattended
+        # it is the wrong tree, which looks like success.
+        place = ["--cd", cwd] if cwd else []
+        # permission_bypass is already declared per harness in the capability
+        # contract; this lane simply never applied it.
+        bypass = list(capabilities("codex")["permission_bypass"])
+        # Hook trust is a separate axis from permissions, so it has no
+        # contract key. footnote's own Stop hooks are what trip it, and the
+        # gate re-arms per codex install, not per pane.
+        return [argv[0], *grant, *argv[1:], *place, *bypass,
+                "--dangerously-bypass-hook-trust"]
     return argv
 
 
